@@ -2,6 +2,7 @@ import {
   assertCanonicalContract,
   type CanonicalContract,
   type CanonicalField,
+  type ContractProvenance,
   type FieldConstraints,
   JSON_SCHEMA_DIALECT,
   LINKED_ISSUE_PATTERN,
@@ -47,6 +48,7 @@ export interface RenderingProjection {
   readonly templateIdentity: CanonicalContract["templateIdentity"];
   readonly nativeMetadata: CanonicalContract["nativeMetadata"];
   readonly sections: CanonicalContract["sections"];
+  readonly provenance?: ContractProvenance;
 }
 
 export interface ContractProjection {
@@ -225,6 +227,7 @@ export function projectContract(input: unknown): ContractProjection {
       templateIdentity: input.templateIdentity,
       nativeMetadata: input.nativeMetadata,
       sections: input.sections,
+      ...(input.provenance === undefined ? {} : { provenance: input.provenance }),
     },
   };
 }

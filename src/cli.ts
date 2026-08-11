@@ -22,6 +22,7 @@ import {
   validateSemanticInput,
 } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
+import { compileRepositoryGovernedContract, rejectGovernedPolicyOverride } from "./governance.js";
 import { compilePullRequestPolicyFile } from "./pr-policy.js";
 import { compilePullRequestTemplate } from "./pull-request-template.js";
 import { discoverTemplates, type TemplateSelector } from "./template-discovery.js";
@@ -130,7 +131,15 @@ async function runArtifactCommand(
   json: boolean,
 ): Promise<number> {
   if (command === "schema") {
-    const contract = await loadContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+    let contract: CanonicalContract;
+    if (typeof parsed.options.repository === "string") {
+      rejectGovernedPolicyOverride(parsed.options.policy);
+      const adapter = createAdapter(dependencies, root, parsed.options.repository);
+      await adapter.resolveRepositoryContext();
+      contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
+    } else {
+      contract = await loadContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+    }
     const projection = projectContract(contract);
     console.log(JSON.stringify({ contract, template: contract.templateIdentity, ...projection }));
     return 0;
@@ -144,17 +153,17 @@ async function runArtifactCommand(
     ) {
       return runExistingValidation(domain, Number(rest[0]), parsed, root, dependencies, json);
     }
-    const contract = await loadContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
-    const document = await readInputDocument(parsed.options.from);
-    const preparedDocument = mergeOptionMetadata(document, parsed.options);
-    if (command === "validate") {
-      const validation = validateSemanticInput(contract, preparedDocument.fields);
-      console.log(
-        JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.values }),
-      );
-      return validation.valid ? 0 : EXIT_VALIDATION;
-    }
-    if (command === "render") {
+    if (command === "validate" || command === "render") {
+      const contract = await loadContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+      const document = await readInputDocument(parsed.options.from);
+      const preparedDocument = mergeOptionMetadata(document, parsed.options);
+      if (command === "validate") {
+        const validation = validateSemanticInput(contract, preparedDocument.fields);
+        console.log(
+          JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.values }),
+        );
+        return validation.valid ? 0 : EXIT_VALIDATION;
+      }
       const body =
         domain === "issue"
           ? renderIssueArtifact(contract, preparedDocument.fields)
@@ -163,15 +172,20 @@ async function runArtifactCommand(
       else process.stdout.write(body);
       return 0;
     }
+
+    rejectGovernedPolicyOverride(parsed.options.policy);
+    const document = await readInputDocument(parsed.options.from);
+    const preparedDocument = mergeOptionMetadata(document, parsed.options);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    await adapter.resolveRepositoryContext();
+    const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
     if (domain === "issue") {
       const prepared = prepareIssueArtifact(contract, preparedDocument);
-      const adapter = createAdapter(dependencies, root, parsed.options.repository);
       const created = await adapter.createIssue(prepared.artifact);
       console.log(JSON.stringify({ ok: true, artifact: created }));
       return 0;
     }
     const prepared = preparePullRequestArtifact(contract, preparedDocument);
-    const adapter = createAdapter(dependencies, root, parsed.options.repository);
     const created = await adapter.createPullRequest(prepared.artifact);
     console.log(JSON.stringify({ ok: true, artifact: created }));
     return 0;
@@ -190,8 +204,10 @@ async function runExistingValidation(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
-  const contract = await loadContract(domain, root, templateSelector(parsed, undefined), parsed.options.policy);
+  rejectGovernedPolicyOverride(parsed.options.policy);
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  await adapter.resolveRepositoryContext();
+  const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, undefined));
   const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
   const result =
     domain === "issue"
@@ -377,6 +393,8 @@ function classifyExitCode(error: unknown): number {
   )
     return EXIT_USAGE;
   if (error instanceof CliError && error.code === "INPUT_INVALID_JSON") return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
 }
@@ -460,8 +478,8 @@ Commands:
 Options:
   --from <path>       JSON input file, or - for stdin
   --template <id>     Repository-native template id, path, or unique name
-  --policy <path>     Versioned PR policy overlay
-  --repository <r>    GitHub repository override for gh
+  --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
+  --repository <r>    GitHub repository override; governed commands use its default-branch governance
   --title <title>     Issue/PR title for create
   --head <branch>     PR head branch for create
   --base <branch>     PR base branch for create

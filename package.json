@@ -26,6 +26,10 @@
     "./pr-policy": {
       "types": "./dist/pr-policy.d.ts",
       "import": "./dist/pr-policy.js"
+    },
+    "./governance": {
+      "types": "./dist/governance.d.ts",
+      "import": "./dist/governance.js"
     }
   },
   "files": [

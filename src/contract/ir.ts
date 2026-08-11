@@ -29,6 +29,31 @@ export interface TemplateIdentity {
   readonly source: TemplateSource;
 }
 
+/** Repository identity and source fingerprints bound to a governed contract. */
+export interface ContractProvenanceRepository {
+  readonly host: string;
+  readonly owner: string;
+  readonly name: string;
+  readonly nameWithOwner: string;
+}
+
+export interface ContractProvenanceSource {
+  readonly path: string;
+  readonly ref: string;
+  /** GitHub blob SHA for the source at the trusted ref. */
+  readonly sha: string;
+  /** SHA-256 digest of the decoded source content. */
+  readonly digest: string;
+}
+
+export interface ContractProvenance {
+  readonly authority: "repository-default-branch";
+  readonly repository: ContractProvenanceRepository;
+  readonly ref: string;
+  readonly template: ContractProvenanceSource;
+  readonly policy?: ContractProvenanceSource;
+}
+
 export interface NativeContractMetadata {
   readonly source: TemplateSource;
   readonly path: string;
@@ -180,6 +205,8 @@ export interface CanonicalContract {
   /** Sections and fields retain source order; their render.order values are checked against those arrays. */
   readonly sections: readonly CanonicalSection[];
   readonly supplementalConstraints: SupplementalConstraints;
+  /** Present when the contract was compiled from a trusted remote repository source. */
+  readonly provenance?: ContractProvenance;
 }
 
 export type CanonicalIrViolationCode =
@@ -205,7 +232,8 @@ export type CanonicalIrViolationCode =
   | "IR_INVALID_CONSTRAINT"
   | "IR_INCONSISTENT_CONSTRAINT"
   | "IR_UNKNOWN_FIELD_REFERENCE"
-  | "IR_CHECKLIST_REQUIRED_MISMATCH";
+  | "IR_CHECKLIST_REQUIRED_MISMATCH"
+  | "IR_INVALID_PROVENANCE";
 
 export interface CanonicalIrViolation {
   readonly code: CanonicalIrViolationCode;
@@ -377,6 +405,102 @@ function requiredRecord(
   if (!isRecord(value)) {
     addViolation(violations, "IR_INVALID_VALUE", `${path}.${key}`, `Property "${key}" must be an object.`);
     return undefined;
+  }
+  return value;
+}
+
+function validateProvenance(
+  value: unknown,
+  path: string,
+  artifactKind: string | undefined,
+  templatePath: string | undefined,
+  violations: CanonicalIrViolation[],
+): void {
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_PROVENANCE", path, "Contract provenance must be an object.");
+    return;
+  }
+  checkUnknownKeys(value, ["authority", "repository", "ref", "template", "policy"], path, violations);
+  const authority = requiredString(value, "authority", path, violations);
+  const ref = requiredString(value, "ref", path, violations);
+  const repository = requiredRecord(value, "repository", path, violations);
+  const template = requiredRecord(value, "template", path, violations);
+  if (authority !== undefined && authority !== "repository-default-branch") {
+    addViolation(
+      violations,
+      "IR_INVALID_PROVENANCE",
+      `${path}.authority`,
+      'Provenance authority must be "repository-default-branch".',
+    );
+  }
+  if (repository !== undefined) {
+    checkUnknownKeys(repository, ["host", "owner", "name", "nameWithOwner"], `${path}.repository`, violations);
+    const host = requiredString(repository, "host", `${path}.repository`, violations);
+    const owner = requiredString(repository, "owner", `${path}.repository`, violations);
+    const name = requiredString(repository, "name", `${path}.repository`, violations);
+    const nameWithOwner = requiredString(repository, "nameWithOwner", `${path}.repository`, violations);
+    if (host !== undefined && /[\s/]/u.test(host)) {
+      addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.repository.host`, "Repository host is invalid.");
+    }
+    if (owner !== undefined && name !== undefined && nameWithOwner !== `${owner}/${name}`) {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.repository.nameWithOwner`,
+        "Repository nameWithOwner must match owner and name.",
+      );
+    }
+  }
+  const templateSource = validateProvenanceSource(template, `${path}.template`, ref, violations);
+  if (templateSource !== undefined && templatePath !== undefined && templateSource.path !== templatePath) {
+    addViolation(
+      violations,
+      "IR_INVALID_PROVENANCE",
+      `${path}.template.path`,
+      "Template provenance path must match templateIdentity.path.",
+    );
+  }
+  if (hasOwn(value, "policy")) {
+    if (artifactKind !== "pull_request") {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.policy`,
+        "Only pull request contracts may contain policy provenance.",
+      );
+    }
+    validateProvenanceSource(value.policy, `${path}.policy`, ref, violations);
+  }
+}
+
+function validateProvenanceSource(
+  value: unknown,
+  path: string,
+  contractRef: string | undefined,
+  violations: CanonicalIrViolation[],
+): UnknownRecord | undefined {
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_PROVENANCE", path, "Provenance source must be an object.");
+    return undefined;
+  }
+  checkUnknownKeys(value, ["path", "ref", "sha", "digest"], path, violations);
+  const sourcePath = requiredString(value, "path", path, violations);
+  const ref = requiredString(value, "ref", path, violations);
+  requiredString(value, "sha", path, violations);
+  requiredString(value, "digest", path, violations);
+  if (
+    sourcePath !== undefined &&
+    (sourcePath.startsWith("/") || sourcePath.includes("\\") || sourcePath.split("/").includes(".."))
+  ) {
+    addViolation(
+      violations,
+      "IR_INVALID_PROVENANCE",
+      `${path}.path`,
+      "Provenance source path is not repository-relative.",
+    );
+  }
+  if (contractRef !== undefined && ref !== undefined && ref !== contractRef) {
+    addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.ref`, "Source ref must match contract provenance ref.");
   }
   return value;
 }
@@ -1460,6 +1584,7 @@ export function validateCanonicalContract(input: unknown): CanonicalIrValidation
       "nativeMetadata",
       "sections",
       "supplementalConstraints",
+      "provenance",
     ],
     "$",
     violations,
@@ -1582,6 +1707,9 @@ export function validateCanonicalContract(input: unknown): CanonicalIrValidation
       "$.templateIdentity.source",
       "Pull request contracts must use pull request template sources.",
     );
+  }
+  if (hasOwn(input, "provenance")) {
+    validateProvenance(input.provenance, "$.provenance", artifactKind, templatePath, violations);
   }
   const sections = requiredArray(input, "sections", "$", violations);
   const fieldIds = new Set<string>();
@@ -1728,6 +1856,27 @@ function canonicalizeSection(section: CanonicalSection): UnknownRecord {
   };
 }
 
+function canonicalizeProvenance(provenance: ContractProvenance): UnknownRecord {
+  const source = (value: ContractProvenanceSource): UnknownRecord => ({
+    path: value.path,
+    ref: value.ref,
+    sha: value.sha,
+    digest: value.digest,
+  });
+  return {
+    authority: provenance.authority,
+    repository: {
+      host: provenance.repository.host,
+      owner: provenance.repository.owner,
+      name: provenance.repository.name,
+      nameWithOwner: provenance.repository.nameWithOwner,
+    },
+    ref: provenance.ref,
+    template: source(provenance.template),
+    ...(provenance.policy === undefined ? {} : { policy: source(provenance.policy) }),
+  };
+}
+
 function canonicalizeContract(contract: CanonicalContract): UnknownRecord {
   return {
     irVersion: contract.irVersion,
@@ -1767,6 +1916,7 @@ function canonicalizeContract(contract: CanonicalContract): UnknownRecord {
           : { checklistRequireComplete: constraint.checklistRequireComplete }),
       })),
     },
+    ...(contract.provenance === undefined ? {} : { provenance: canonicalizeProvenance(contract.provenance) }),
   };
 }
 

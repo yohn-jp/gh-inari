@@ -7,6 +7,7 @@ import { runCli } from "./cli.js";
 export { runCli };
 export * from "./artifact.js";
 export * from "./pr-policy.js";
+export * from "./governance.js";
 export * from "./contract/index.js";
 export * from "./github/index.js";
 export * from "./pull-request-template.js";

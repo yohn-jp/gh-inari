@@ -14,6 +14,7 @@ import {
   type GitHubIssue,
   type GitHubPullRequest,
   type RepositoryContext,
+  type RepositoryTreeEntry,
   type ValidatedRenderedIssueArtifact,
   type ValidatedRenderedPullRequestArtifact,
 } from "./types.js";
@@ -65,6 +66,80 @@ export class GitHubAdapter {
 
   async getRepositoryContext(): Promise<RepositoryContext> {
     return this.resolveRepositoryContext();
+  }
+
+  /** Read the target repository metadata used to select the trusted governance ref. */
+  async getRepositoryDefaultBranch(): Promise<string> {
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runApi(
+      this.apiArguments(context, `repos/${context.nameWithOwner}`, "GET"),
+      "repository.default_branch",
+    );
+    const record = responseRecord(result, "repository.default_branch");
+    const ref = responseString(record.default_branch, "default_branch", "repository.default_branch");
+    assertRepositoryRef(ref);
+    return ref;
+  }
+
+  /** Read the complete Git tree for a trusted repository ref. Truncation is invalid for governance. */
+  async getRepositoryTree(ref: string): Promise<readonly RepositoryTreeEntry[]> {
+    assertRepositoryRef(ref);
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runApi(
+      this.apiArguments(
+        context,
+        `repos/${context.nameWithOwner}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+        "GET",
+      ),
+      "repository.governance.tree",
+    );
+    return parseRepositoryTree(result, "repository.governance.tree");
+  }
+
+  /** Read and decode one blob selected from the trusted repository tree. */
+  async getRepositoryBlob(sha: string): Promise<string> {
+    if (sha.trim().length === 0) throw new ContractViolationError("Repository blob SHA must not be empty.", "sha");
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runApi(
+      this.apiArguments(context, `repos/${context.nameWithOwner}/git/blobs/${encodeURIComponent(sha)}`, "GET"),
+      "repository.governance.blob",
+    );
+    const record = responseRecord(result, "repository.governance.blob");
+    const returnedSha = responseString(record.sha, "sha", "repository.governance.blob");
+    if (returnedSha !== sha) {
+      throw new GitHubApiResponseError(
+        "repository.governance.blob",
+        "GitHub returned a repository blob different from the trusted tree entry.",
+        { path: "sha" },
+      );
+    }
+    const encoding = responseString(record.encoding, "encoding", "repository.governance.blob");
+    const content = responseString(record.content, "content", "repository.governance.blob");
+    if (encoding !== "base64") {
+      throw new GitHubApiResponseError(
+        "repository.governance.blob",
+        "GitHub returned a repository blob with an unsupported encoding.",
+        { path: "encoding" },
+      );
+    }
+    const normalizedContent = content.replace(/\s/gu, "");
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(normalizedContent)) {
+      throw new GitHubApiResponseError(
+        "repository.governance.blob",
+        "GitHub returned an invalid base64 repository blob.",
+        { path: "content" },
+      );
+    }
+    try {
+      return Buffer.from(normalizedContent, "base64").toString("utf8");
+    } catch (error) {
+      throw new GitHubApiResponseError(
+        "repository.governance.blob",
+        "GitHub returned an invalid base64 repository blob.",
+        { path: "content" },
+        error,
+      );
+    }
   }
 
   async getIssue(issueNumber: number): Promise<GitHubIssue> {
@@ -477,6 +552,43 @@ function responseRef(value: unknown, path: string, operation: string): string {
     });
   }
   return responseString(value.ref, `${path}.ref`, operation);
+}
+
+function assertRepositoryRef(value: string): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ContractViolationError("Repository governance ref must be a non-empty string.", "ref");
+  }
+}
+
+function parseRepositoryTree(value: unknown, operation: string): readonly RepositoryTreeEntry[] {
+  const record = responseRecord(value, operation);
+  if (record.truncated !== false) {
+    throw new GitHubApiResponseError(
+      operation,
+      "GitHub returned a truncated repository tree; governance authority cannot be established.",
+      { path: "truncated" },
+    );
+  }
+  if (!Array.isArray(record.tree)) {
+    throw new GitHubApiResponseError(operation, "GitHub repository tree response is missing tree entries.", {
+      path: "tree",
+    });
+  }
+  return record.tree.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new GitHubApiResponseError(operation, `GitHub repository tree entry ${index} is invalid.`, {
+        path: `tree[${index}]`,
+      });
+    }
+    const entryPath = responseString(entry.path, `tree[${index}].path`, operation);
+    const sha = responseString(entry.sha, `tree[${index}].sha`, operation);
+    if (entry.type !== "blob" && entry.type !== "tree") {
+      throw new GitHubApiResponseError(operation, `GitHub repository tree entry ${index} has an invalid type.`, {
+        path: `tree[${index}].type`,
+      });
+    }
+    return { path: entryPath, type: entry.type, sha };
+  });
 }
 
 function parseRepositoryOverride(repository: string, fallbackHostname: string): RepositoryContext {
