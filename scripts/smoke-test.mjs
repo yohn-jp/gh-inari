@@ -225,6 +225,28 @@ function main() {
         fail(validationCase.name + " validation output diverged across execution paths");
     }
 
+    console.log("checking source, packed, and gh inari render parity...");
+    const renderCase = validationCases.find((candidate) => candidate.valid);
+    const renderArgs = ["pr", "render", "--from", renderCase.inputPath, "--json"];
+    const sourceRender = jsonOutput(
+      invoke(process.execPath, [sourceEntry, ...renderArgs], { cwd: fixtureDirectory }),
+      "source pr render",
+    );
+    const packedRender = jsonOutput(
+      invoke(packedLauncher, renderArgs, { cwd: fixtureDirectory }),
+      "packed gh-inari pr render",
+    );
+    const ghRender = jsonOutput(
+      invoke("gh", ["inari", ...renderArgs], { cwd: fixtureDirectory, env: ghExtensionEnvironment }),
+      "gh inari pr render",
+    );
+    if (sourceRender.valid !== true || typeof sourceRender.body !== "string" || sourceRender.body.length === 0)
+      fail("source pr render did not produce a rendered governance body");
+    if (JSON.stringify(packedRender) !== JSON.stringify(sourceRender))
+      fail("packed gh-inari pr render diverged from the source CLI");
+    if (JSON.stringify(ghRender) !== JSON.stringify(sourceRender))
+      fail("gh inari pr render diverged from the source CLI");
+
     for (const [label, command, args, options] of [
       ["source", process.execPath, [sourceEntry, "--version"], { cwd: fixtureDirectory }],
       ["packed gh-inari", packedLauncher, ["--version"], { cwd: fixtureDirectory }],

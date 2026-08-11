@@ -86,9 +86,34 @@ function run(command, args, options = {}) {
   return result;
 }
 
+// Walks every shape the "exports" map can take: a direct string target, an
+// array of fallback targets, or a conditions object whose values may
+// themselves be any of these (nested conditions such as node/import/require).
+function collectExportsTargets(value, targets) {
+  if (typeof value === "string") {
+    targets.push(value.replace(/^\.\//u, ""));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectExportsTargets(entry, targets);
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) collectExportsTargets(entry, targets);
+  }
+}
+
+export function exportsTargetPaths(packageJson) {
+  const targets = [];
+  collectExportsTargets(packageJson.exports, targets);
+  return targets;
+}
+
 function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
+
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
   const packResult = run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"]);
   const [packInfo] = JSON.parse(packResult.stdout);
@@ -99,10 +124,22 @@ function main() {
     throw new Error(`packed file set mismatch:\nexpected:\n${expected.join("\n")}\nactual:\n${actual.join("\n")}`);
   }
 
-  const executableBinPaths = [
-    "gh-inari",
-    ...Object.values(JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).bin ?? {}),
-  ];
+  // Every "exports" map target must ship inside the packed tarball: an entry
+  // pointing at a file the manifest doesn't carry would break consumers at
+  // resolution time even though `npm pack` and `test:package` file-set checks
+  // pass independently of each other.
+  const exportTargets = exportsTargetPaths(packageJson);
+  if (exportTargets.length === 0) throw new Error('package.json "exports" map is empty or missing');
+  for (const target of exportTargets) {
+    if (!packedFiles.includes(target)) {
+      throw new Error(`exports map target "${target}" is not included in the packed tarball`);
+    }
+    if (!fs.existsSync(path.join(repoRoot, target))) {
+      throw new Error(`exports map target "${target}" does not exist in the built dist output`);
+    }
+  }
+
+  const executableBinPaths = ["gh-inari", ...Object.values(packageJson.bin ?? {})];
   for (const binPath of executableBinPaths) {
     if (!packedFiles.includes(binPath)) {
       throw new Error(`bin entry "${binPath}" is not included in the packed tarball`);
@@ -114,9 +151,11 @@ function main() {
     }
   }
 
-  console.log(`package contents verified: ${packedFiles.length} file(s), all bin targets present and executable.`);
+  console.log(
+    `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable.`,
+  );
 
   run(process.execPath, ["scripts/smoke-test.mjs"], { stdio: "inherit" });
 }
 
-main();
+if (process.argv[1]?.endsWith("run-package-suite.mjs")) main();
