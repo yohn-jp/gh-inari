@@ -1,5 +1,5 @@
 export type GitHubAdapterErrorCategory =
-  "environment" | "authentication" | "repository" | "transport" | "api" | "contract";
+  "environment" | "authentication" | "repository" | "transport" | "timeout" | "api" | "contract";
 
 export type GitHubAdapterErrorCode =
   | "GH_NOT_INSTALLED"
@@ -7,6 +7,7 @@ export type GitHubAdapterErrorCode =
   | "REPOSITORY_RESOLUTION_FAILED"
   | "INVALID_REPOSITORY_OVERRIDE"
   | "GITHUB_TRANSPORT_FAILED"
+  | "GITHUB_TIMEOUT"
   | "GITHUB_API_FAILED"
   | "GITHUB_API_RESPONSE_INVALID"
   | "CONTRACT_VIOLATION";
@@ -19,6 +20,7 @@ export interface GitHubAdapterErrorDetails {
   readonly exitCode?: number;
   readonly stderr?: string;
   readonly response?: string;
+  readonly timeoutMs?: number;
   readonly [key: string]: string | number | undefined;
 }
 
@@ -93,6 +95,19 @@ export class GitHubTransportError extends GitHubAdapterError {
   constructor(operation: string, message: string, details: GitHubAdapterErrorDetails = {}, cause?: unknown) {
     super("transport", "GITHUB_TRANSPORT_FAILED", message, { operation, ...details }, { cause });
     this.name = "GitHubTransportError";
+  }
+}
+
+export class GitHubTimeoutError extends GitHubAdapterError {
+  constructor(operation: string, timeoutMs: number, cause?: unknown) {
+    super(
+      "timeout",
+      "GITHUB_TIMEOUT",
+      `gh did not complete ${operation} within the bounded timeout of ${timeoutMs}ms.`,
+      { operation, timeoutMs },
+      { cause },
+    );
+    this.name = "GitHubTimeoutError";
   }
 }
 

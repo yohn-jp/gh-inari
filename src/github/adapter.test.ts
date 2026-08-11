@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ContractViolationError,
+  DEFAULT_GH_TIMEOUTS_MS,
   GhNotInstalledError,
+  GhTransportTimeoutError,
   GhUnauthenticatedError,
   GitHubAdapter,
   GitHubApiError,
+  GitHubTimeoutError,
   GitHubTransportError,
   RepositoryResolutionError,
   markValidatedRenderedIssueArtifact,
@@ -19,6 +22,7 @@ import {
 interface RecordedCall {
   readonly args: readonly string[];
   readonly cwd: string | undefined;
+  readonly timeoutMs: number | undefined;
 }
 
 class StubGhTransport implements GhTransport {
@@ -30,7 +34,7 @@ class StubGhTransport implements GhTransport {
   }
 
   async run(args: readonly string[], options?: GhTransportOptions): Promise<GhCommandResult> {
-    this.calls.push({ args: [...args], cwd: options?.cwd });
+    this.calls.push({ args: [...args], cwd: options?.cwd, timeoutMs: options?.timeoutMs });
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
     if (response instanceof Error) throw response;
@@ -260,5 +264,71 @@ test("keeps API failures and process transport failures distinct from contract f
       error instanceof GitHubTransportError &&
       error.code === "GITHUB_TRANSPORT_FAILED" &&
       error.category === "transport",
+  );
+});
+
+test("applies bounded, operation-class-specific timeouts to every real adapter call", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    command(0, issuePayload()),
+  ]);
+  const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
+
+  await adapter.resolveRepositoryContext();
+  await adapter.getIssue(42);
+
+  const [ghVersion, authStatus, repoView, issueRead] = transport.calls;
+  assert.equal(ghVersion.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
+  assert.equal(authStatus.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
+  assert.equal(repoView.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.repositoryResolution);
+  assert.equal(issueRead.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.read);
+});
+
+test("honors caller-supplied timeout overrides per operation class", async () => {
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({
+    repository: "acme/inari",
+    transport,
+    timeoutsMs: { auth: 1234 },
+  });
+
+  await adapter.resolveRepositoryContext();
+
+  assert.ok(transport.calls.every((call) => call.timeoutMs === 1234));
+});
+
+test("classifies a mutation call's bounded timeout distinctly from read timeouts", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    command(0, issuePayload(44)),
+  ]);
+  const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
+  const issueArtifact = markValidatedRenderedIssueArtifact({
+    kind: "issue",
+    title: "Rendered issue",
+    body: "Rendered issue body",
+  });
+
+  await adapter.createIssue(issueArtifact);
+
+  const mutationCall = transport.calls.at(-1);
+  assert.equal(mutationCall?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.mutation);
+});
+
+test("surfaces a timed-out gh invocation as a distinct, actionable timeout error", async () => {
+  const transport = new StubGhTransport([new GhTransportTimeoutError(10_000)]);
+  const adapter = new GitHubAdapter({ transport });
+
+  await assert.rejects(
+    adapter.checkAuthentication(),
+    (error: unknown) =>
+      error instanceof GitHubTimeoutError &&
+      error.code === "GITHUB_TIMEOUT" &&
+      error.category === "timeout" &&
+      error.details.timeoutMs === 10_000,
   );
 });

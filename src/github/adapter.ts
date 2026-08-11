@@ -4,11 +4,12 @@ import {
   GhUnauthenticatedError,
   GitHubApiError,
   GitHubApiResponseError,
+  GitHubTimeoutError,
   GitHubTransportError,
   InvalidRepositoryOverrideError,
   RepositoryResolutionError,
 } from "./errors.js";
-import { ProcessGhTransport, type GhCommandResult, type GhTransport } from "./transport.js";
+import { GhTransportTimeoutError, ProcessGhTransport, type GhCommandResult, type GhTransport } from "./transport.js";
 import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
@@ -22,6 +23,39 @@ import {
 const DEFAULT_HOSTNAME = "github.com";
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
 
+/** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
+export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
+
+export const DEFAULT_GH_TIMEOUTS_MS: Readonly<Record<GhOperationClass, number>> = Object.freeze({
+  auth: 10_000,
+  repositoryResolution: 15_000,
+  read: 20_000,
+  mutation: 30_000,
+});
+
+const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.freeze({
+  "gh.version": "auth",
+  "auth.status": "auth",
+  "repository.resolve": "repositoryResolution",
+  "repository.default_branch": "read",
+  "repository.governance.tree": "read",
+  "repository.governance.blob": "read",
+  "issue.read": "read",
+  "pull_request.read": "read",
+  "issue.create": "mutation",
+  "issue.update": "mutation",
+  "pull_request.create": "mutation",
+  "pull_request.update": "mutation",
+});
+
+function operationClass(operation: string): GhOperationClass {
+  const operationClassValue = OPERATION_CLASSES[operation];
+  if (operationClassValue === undefined) {
+    throw new Error(`No timeout class registered for gh operation "${operation}".`);
+  }
+  return operationClassValue;
+}
+
 export interface GitHubAdapterOptions {
   /** Working directory used by gh for local repository resolution. */
   readonly cwd?: string;
@@ -31,6 +65,8 @@ export interface GitHubAdapterOptions {
   readonly hostname?: string;
   /** Injectable command transport for tests and alternate local execution. */
   readonly transport?: GhTransport;
+  /** Overrides for the default bounded timeout (ms) per gh operation class. */
+  readonly timeoutsMs?: Partial<Record<GhOperationClass, number>>;
 }
 
 export class GitHubAdapter {
@@ -39,6 +75,7 @@ export class GitHubAdapter {
   private readonly hostname: string | undefined;
   private readonly transport: GhTransport;
   private readonly executable: string;
+  private readonly timeoutsMs: Readonly<Record<GhOperationClass, number>>;
   private availablePromise: Promise<void> | undefined;
   private contextPromise: Promise<RepositoryContext> | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
@@ -50,6 +87,7 @@ export class GitHubAdapter {
     this.hostname = options.hostname;
     this.transport = options.transport ?? new ProcessGhTransport();
     this.executable = this.transport instanceof ProcessGhTransport ? this.transport.executable : "gh";
+    this.timeoutsMs = Object.freeze({ ...DEFAULT_GH_TIMEOUTS_MS, ...options.timeoutsMs });
   }
 
   async checkAuthentication(): Promise<void> {
@@ -348,9 +386,13 @@ export class GitHubAdapter {
   }
 
   private async runCommand(args: readonly string[], operation: string): Promise<GhCommandResult> {
+    const timeoutMs = this.timeoutsMs[operationClass(operation)];
     try {
-      return await this.transport.run(args, { cwd: this.cwd });
+      return await this.transport.run(args, { cwd: this.cwd, timeoutMs });
     } catch (error) {
+      if (error instanceof GhTransportTimeoutError) {
+        throw new GitHubTimeoutError(operation, error.timeoutMs, error);
+      }
       if (isErrno(error, "ENOENT")) throw new GhNotInstalledError(this.executable, error);
       throw new GitHubTransportError(
         operation,
