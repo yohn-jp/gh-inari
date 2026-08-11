@@ -7,10 +7,11 @@ import { fileURLToPath } from "node:url";
 const GITHUB_DIRECTORY = ".github";
 const ISSUE_TEMPLATE_DIRECTORY = "ISSUE_TEMPLATE";
 const PULL_REQUEST_TEMPLATE_DIRECTORY = "PULL_REQUEST_TEMPLATE";
-const DEFAULT_PULL_REQUEST_TEMPLATE = "PULL_REQUEST_TEMPLATE.md";
+const DEFAULT_PULL_REQUEST_TEMPLATE = "pull_request_template";
 const CONFIG_TEMPLATE_NAMES = new Set(["config.yml", "config.yaml"]);
 const ISSUE_TEMPLATE_EXTENSIONS = new Set([".md", ".yml", ".yaml"]);
-const PULL_REQUEST_TEMPLATE_EXTENSIONS = new Set([".md"]);
+const PULL_REQUEST_TEMPLATE_EXTENSIONS = new Set([".md", ".txt"]);
+const PULL_REQUEST_TEMPLATE_LOCATIONS = ["", "docs", GITHUB_DIRECTORY] as const;
 
 export type TemplateType = "issue-form" | "issue-markdown" | "pull-request-default" | "pull-request";
 
@@ -127,7 +128,7 @@ export class InvalidTemplateSelectorError extends TemplateDiscoveryError {
 }
 
 /**
- * Discover only the repository-native paths GitHub uses for the MVP.
+ * Discover the repository-native paths supported by the v1 compiler.
  * Template contents are intentionally not read; parsing belongs to later layers.
  */
 export async function discoverTemplates(
@@ -135,9 +136,6 @@ export async function discoverTemplates(
 ): Promise<TemplateDiscoveryResult> {
   const root = resolveRepositoryRoot(repositoryRoot);
   await assertDirectory(root, "repository root");
-
-  const githubPath = path.join(root, GITHUB_DIRECTORY);
-  if (!(await optionalDirectory(githubPath))) return emptyDiscovery(root);
 
   const [issueTemplates, pullRequestTemplates] = await Promise.all([
     discoverIssueTemplates(root),
@@ -150,9 +148,6 @@ export async function discoverTemplates(
 export function discoverTemplatesSync(repositoryRoot: string | URL = process.cwd()): TemplateDiscoveryResult {
   const root = resolveRepositoryRoot(repositoryRoot);
   assertDirectorySync(root, "repository root");
-
-  const githubPath = path.join(root, GITHUB_DIRECTORY);
-  if (!optionalDirectorySync(githubPath)) return emptyDiscovery(root);
 
   const issueTemplates = discoverIssueTemplatesSync(root);
   const pullRequestTemplates = discoverPullRequestTemplatesSync(root);
@@ -204,35 +199,79 @@ function discoverIssueTemplatesSync(repositoryRoot: string): TemplateIdentity[] 
 }
 
 async function discoverPullRequestTemplates(repositoryRoot: string): Promise<TemplateIdentity[]> {
-  const githubPath = path.join(repositoryRoot, GITHUB_DIRECTORY);
+  const discovered = await Promise.all(
+    PULL_REQUEST_TEMPLATE_LOCATIONS.map((location) => discoverPullRequestTemplatesAtLocation(repositoryRoot, location)),
+  );
+  return discovered.flat();
+}
+
+function discoverPullRequestTemplatesSync(repositoryRoot: string): TemplateIdentity[] {
+  return PULL_REQUEST_TEMPLATE_LOCATIONS.flatMap((location) =>
+    discoverPullRequestTemplatesAtLocationSync(repositoryRoot, location),
+  );
+}
+
+async function discoverPullRequestTemplatesAtLocation(
+  repositoryRoot: string,
+  location: string,
+): Promise<TemplateIdentity[]> {
+  const parent = path.join(repositoryRoot, location);
+  if (!(await optionalDirectory(parent))) return [];
+  const entries = await readDirectory(parent);
   const templates: TemplateIdentity[] = [];
-
-  const defaultPath = path.join(githubPath, DEFAULT_PULL_REQUEST_TEMPLATE);
-  if (await optionalRegularFile(defaultPath)) {
-    templates.push(createIdentity(repositoryRoot, defaultPath, "pull-request-default"));
-  }
-
-  const directory = path.join(githubPath, PULL_REQUEST_TEMPLATE_DIRECTORY);
-  if (await optionalDirectory(directory)) {
-    const entries = await readDirectory(directory);
-    templates.push(...collectDirectoryTemplates(repositoryRoot, directory, entries, "pull-request"));
+  for (const entry of entries) {
+    const entryPath = path.join(parent, entry.name);
+    if (isDefaultPullRequestTemplateFilename(entry.name)) {
+      if (!entry.isFile()) {
+        throw new TemplateFilesystemError(`Expected a regular file at ${entryPath}.`, {
+          path: entryPath,
+          reason: entry.isSymbolicLink() ? "symbolic link" : "not a regular file",
+        });
+      }
+      templates.push(createIdentity(repositoryRoot, entryPath, "pull-request-default"));
+      continue;
+    }
+    if (sameName(entry.name, PULL_REQUEST_TEMPLATE_DIRECTORY)) {
+      if (!entry.isDirectory()) {
+        throw new TemplateFilesystemError(`Expected a directory at ${entryPath}.`, {
+          path: entryPath,
+          reason: entry.isSymbolicLink() ? "symbolic link" : "not a directory",
+        });
+      }
+      const children = await readDirectory(entryPath);
+      templates.push(...collectDirectoryTemplates(repositoryRoot, entryPath, children, "pull-request"));
+    }
   }
   return templates;
 }
 
-function discoverPullRequestTemplatesSync(repositoryRoot: string): TemplateIdentity[] {
-  const githubPath = path.join(repositoryRoot, GITHUB_DIRECTORY);
+function discoverPullRequestTemplatesAtLocationSync(repositoryRoot: string, location: string): TemplateIdentity[] {
+  const parent = path.join(repositoryRoot, location);
+  if (!optionalDirectorySync(parent)) return [];
+  const entries = readDirectorySync(parent);
   const templates: TemplateIdentity[] = [];
-
-  const defaultPath = path.join(githubPath, DEFAULT_PULL_REQUEST_TEMPLATE);
-  if (optionalRegularFileSync(defaultPath)) {
-    templates.push(createIdentity(repositoryRoot, defaultPath, "pull-request-default"));
-  }
-
-  const directory = path.join(githubPath, PULL_REQUEST_TEMPLATE_DIRECTORY);
-  if (optionalDirectorySync(directory)) {
-    const entries = readDirectorySync(directory);
-    templates.push(...collectDirectoryTemplates(repositoryRoot, directory, entries, "pull-request"));
+  for (const entry of entries) {
+    const entryPath = path.join(parent, entry.name);
+    if (isDefaultPullRequestTemplateFilename(entry.name)) {
+      if (!entry.isFile()) {
+        throw new TemplateFilesystemError(`Expected a regular file at ${entryPath}.`, {
+          path: entryPath,
+          reason: entry.isSymbolicLink() ? "symbolic link" : "not a regular file",
+        });
+      }
+      templates.push(createIdentity(repositoryRoot, entryPath, "pull-request-default"));
+      continue;
+    }
+    if (sameName(entry.name, PULL_REQUEST_TEMPLATE_DIRECTORY)) {
+      if (!entry.isDirectory()) {
+        throw new TemplateFilesystemError(`Expected a directory at ${entryPath}.`, {
+          path: entryPath,
+          reason: entry.isSymbolicLink() ? "symbolic link" : "not a directory",
+        });
+      }
+      const children = readDirectorySync(entryPath);
+      templates.push(...collectDirectoryTemplates(repositoryRoot, entryPath, children, "pull-request"));
+    }
   }
   return templates;
 }
@@ -270,7 +309,19 @@ function classifyIssueTemplate(fileName: string): { type: "issue-form" | "issue-
 }
 
 function classifyPullRequestTemplate(fileName: string): { type: "pull-request" } | undefined {
-  return normalizedExtension(fileName) === ".md" ? { type: "pull-request" } : undefined;
+  return hasPullRequestTemplateExtension(fileName) ? { type: "pull-request" } : undefined;
+}
+
+function hasPullRequestTemplateExtension(fileName: string): boolean {
+  return PULL_REQUEST_TEMPLATE_EXTENSIONS.has(normalizedExtension(fileName));
+}
+
+function isDefaultPullRequestTemplateFilename(fileName: string): boolean {
+  const extension = normalizedExtension(fileName);
+  return (
+    hasPullRequestTemplateExtension(fileName) &&
+    sameName(fileName.slice(0, -extension.length), DEFAULT_PULL_REQUEST_TEMPLATE)
+  );
 }
 
 function normalizedExtension(fileName: string): string {

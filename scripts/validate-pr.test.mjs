@@ -8,6 +8,23 @@ test("accepts a title and body with a closing Issue and required sections", () =
   assert.deepEqual(validatePullRequest({ title: "feat: add init command", body: validBody }).errors, []);
 });
 
+test("accepts every GitHub closing-keyword form and cross-repository references", () => {
+  for (const reference of [
+    "close #7",
+    "CLOSED: #7",
+    "fix #7",
+    "FIXED #7",
+    "resolve #7",
+    "Resolved: octo-org/octo-repo#100",
+  ]) {
+    const result = validatePullRequest({
+      title: "feat: add init command",
+      body: `## Summary\n\nDoes a thing.\n\n${reference}\n\n## Validation\n`,
+    });
+    assert.deepEqual(result.errors, [], reference);
+  }
+});
+
 test("rejects a body with no closing Issue reference", () => {
   const errors = validatePullRequest({ title: "feat: add init command", body: "## Summary\n\n## Validation\n" }).errors;
   assert.ok(errors.some((error) => error.includes("closing Issue")));

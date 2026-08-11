@@ -120,6 +120,7 @@ test("compilation uses discovery identities and preserves stable multiple-templa
     asyncContracts.map((contract) => contract.templateIdentity.path),
     [
       ".github/PULL_REQUEST_TEMPLATE.md",
+      ".github/PULL_REQUEST_TEMPLATE/README.txt",
       ".github/PULL_REQUEST_TEMPLATE/maintenance.md",
       ".github/PULL_REQUEST_TEMPLATE/release.md",
     ],

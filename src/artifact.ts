@@ -353,7 +353,9 @@ function parseRenderedBody(
     const section = contract.sections[sectionIndex] as CanonicalContract["sections"][number];
     while (lines[cursor] !== undefined && lines[cursor]?.trim().length === 0) cursor += 1;
     if (section.kind === "documentation") {
-      const expected = trimBlankLines(section.content ?? "");
+      const expected = trimBlankLines(
+        stripComments ? removeHtmlComments(section.content ?? "") : (section.content ?? ""),
+      );
       if (expected !== undefined) {
         const expectedLines = expected.split("\n");
         if (!sameLines(lines.slice(cursor, cursor + expectedLines.length), expectedLines)) {

@@ -9,8 +9,13 @@
 export const CANONICAL_IR_VERSION = "1.0.0" as const;
 export const CONTRACT_SCHEMA_VERSION = "1.0.0" as const;
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema" as const;
-/** The only built-in linked-Issue rule accepted by the v1 PR overlay. */
-export const LINKED_ISSUE_PATTERN = "(?:Closes|Fixes|Resolves)\\s+#\\d+" as const;
+/**
+ * GitHub's syntactic closing-reference language for pull request bodies.
+ * Contextual effects, such as closing only when targeting the default branch,
+ * remain GitHub behavior and are deliberately outside this contract rule.
+ */
+export const LINKED_ISSUE_PATTERN =
+  "(?:^|[^A-Za-z0-9_])(?:[Cc][Ll][Oo][Ss][Ee](?:[Ss]|[Dd])?|[Ff][Ii][Xx](?:[Ee][Ss]|[Ee][Dd])?|[Rr][Ee][Ss][Oo][Ll][Vv][Ee](?:[Ss]|[Dd])?)(?:[ \\t]+|[ \\t]*:[ \\t]*)(?:#[1-9][0-9]*|[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*#[1-9][0-9]*)(?![A-Za-z0-9_])" as const;
 
 export type CanonicalIrVersion = typeof CANONICAL_IR_VERSION;
 export type ContractSchemaVersion = typeof CONTRACT_SCHEMA_VERSION;
@@ -92,7 +97,7 @@ export interface SupplementalFieldConstraint {
   readonly pattern?: string;
   readonly minItems?: number;
   readonly maxItems?: number;
-  /** Require a string-like PR section to contain a conventional linked Issue. */
+  /** Require a string-like PR section to contain a GitHub closing reference. */
   readonly linkedIssue?: boolean;
   /** Minimum number of checked items for a PR checklist. */
   readonly checklistMinCompleted?: number;

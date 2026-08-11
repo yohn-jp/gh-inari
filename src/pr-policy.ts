@@ -6,6 +6,7 @@ import {
   type CanonicalField,
   type SupplementalFieldConstraint,
 } from "./contract/ir.js";
+import type { TemplateIdentity } from "./template-discovery.js";
 
 export const PULL_REQUEST_POLICY_VERSION = 1 as const;
 
@@ -40,13 +41,24 @@ export class PullRequestPolicyError extends Error {
 export interface PullRequestPolicyOverlay {
   readonly version: typeof PULL_REQUEST_POLICY_VERSION;
   readonly template?: string | PullRequestPolicyTemplateSelector;
-  readonly sections: readonly PullRequestPolicySectionRule[];
+  readonly sections?: readonly PullRequestPolicySectionRule[];
+  readonly templates?: readonly PullRequestPolicyTemplateEntry[];
 }
 
 export interface PullRequestPolicyTemplateSelector {
   readonly id?: string;
   readonly path?: string;
   readonly name?: string;
+}
+
+export interface PullRequestPolicyTemplateEntry {
+  readonly template?: string | PullRequestPolicyTemplateSelector;
+  readonly sections: readonly PullRequestPolicySectionRule[];
+}
+
+export interface PullRequestPolicyCompileOptions {
+  /** All native PR templates available in the authoritative repository. */
+  readonly templateIdentities?: readonly Pick<TemplateIdentity, "id" | "path" | "name">[];
 }
 
 export interface PullRequestPolicySectionRule {
@@ -66,6 +78,7 @@ export interface PullRequestPolicySectionRule {
 export function compilePullRequestPolicyOverlay(
   contractInput: unknown,
   source: string | PullRequestPolicyOverlay,
+  options: PullRequestPolicyCompileOptions = {},
 ): CanonicalContract {
   assertCanonicalContract(contractInput);
   const contract = contractInput;
@@ -77,12 +90,12 @@ export function compilePullRequestPolicyOverlay(
   }
   const overlay = typeof source === "string" ? parsePullRequestPolicyOverlay(source) : source;
   assertOverlayVersion(overlay);
-  assertTemplateMatch(overlay.template, contract);
+  const selected = selectPolicyEntry(overlay, contract, options);
 
   const mergedFields = [...contract.supplementalConstraints.fields];
-  overlay.sections.forEach((rule, ruleIndex) => {
+  selected.sections.forEach((rule, ruleIndex) => {
     const field = resolveField(contract, rule.fieldId);
-    const rulePath = `$.sections[${ruleIndex}]`;
+    const rulePath = `${selected.sectionsPath}[${ruleIndex}]`;
     const constraint = ruleToConstraint(rule, field, rulePath);
     const existingIndex = mergedFields.findIndex((entry) => entry.fieldId === field.id);
     if (existingIndex < 0) mergedFields.push(constraint);
@@ -104,7 +117,7 @@ export function compilePullRequestPolicyOverlay(
     assertCanonicalContract(merged);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Compiled PR policy is not a valid canonical contract.";
-    throw new PullRequestPolicyError("PR_POLICY_CONFLICT", message, "$.sections");
+    throw new PullRequestPolicyError("PR_POLICY_CONFLICT", message, selected.sectionsPath);
   }
   return merged;
 }
@@ -155,6 +168,13 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
       "$.template",
     );
   }
+  if (value.templates !== undefined && (value.sections !== undefined || value.fields !== undefined)) {
+    throw new PullRequestPolicyError(
+      "PR_POLICY_CONFLICT",
+      "Cannot specify root sections together with template entries.",
+      "$.templates",
+    );
+  }
   if (value.sections !== undefined && value.fields !== undefined) {
     throw new PullRequestPolicyError(
       "PR_POLICY_CONFLICT",
@@ -172,37 +192,24 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
     );
   }
 
-  if (Array.isArray(value.templates)) {
-    if (value.templates.length !== 1) {
+  if (value.templates !== undefined) {
+    if (!Array.isArray(value.templates) || value.templates.length === 0) {
       throw new PullRequestPolicyError(
-        "PR_POLICY_UNSUPPORTED_CONSTRAINT",
-        "A standalone overlay must contain exactly one template entry; use a repository policy file to hold multiple entries.",
+        "PR_POLICY_INVALID_VALUE",
+        "templates must be a non-empty array.",
         "$.templates",
       );
     }
-    const entry = value.templates[0];
-    if (!isRecord(entry))
+    const templates = value.templates.map((entry, index) => parseTemplateEntry(entry, `$.templates[${index}]`));
+    if (templates.length > 1 && templates.some((entry) => entry.template === undefined)) {
+      const index = templates.findIndex((entry) => entry.template === undefined);
       throw new PullRequestPolicyError(
         "PR_POLICY_INVALID_VALUE",
-        "Template entries must be objects.",
-        "$.templates[0]",
-      );
-    assertKeys(entry, ["template", "sections", "fields"], "$.templates[0]");
-
-    if (entry.sections !== undefined && entry.fields !== undefined) {
-      throw new PullRequestPolicyError(
-        "PR_POLICY_CONFLICT",
-        "Cannot specify both 'sections' and 'fields'.",
-        "$.templates[0].sections",
+        "Every entry in a multi-template PR policy must identify a native template.",
+        `$.templates[${index}].template`,
       );
     }
-
-    const sections = parseRules(entry.sections ?? entry.fields, "$.templates[0].sections");
-    return {
-      version: PULL_REQUEST_POLICY_VERSION,
-      template: parseSelector(entry.template, "$.templates[0].template"),
-      sections,
-    };
+    return { version: PULL_REQUEST_POLICY_VERSION, templates };
   }
 
   return {
@@ -212,7 +219,29 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
   };
 }
 
-export async function compilePullRequestPolicyFile(contract: unknown, filePath: string): Promise<CanonicalContract> {
+function parseTemplateEntry(value: unknown, path: string): PullRequestPolicyTemplateEntry {
+  if (!isRecord(value)) {
+    throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "Template entries must be objects.", path);
+  }
+  assertKeys(value, ["template", "sections", "fields"], path);
+  if (value.sections !== undefined && value.fields !== undefined) {
+    throw new PullRequestPolicyError(
+      "PR_POLICY_CONFLICT",
+      "Cannot specify both 'sections' and 'fields'.",
+      `${path}.sections`,
+    );
+  }
+  return {
+    ...(value.template === undefined ? {} : { template: parseSelector(value.template, `${path}.template`) }),
+    sections: parseRules(value.sections ?? value.fields, `${path}.sections`),
+  };
+}
+
+export async function compilePullRequestPolicyFile(
+  contract: unknown,
+  filePath: string,
+  options: PullRequestPolicyCompileOptions = {},
+): Promise<CanonicalContract> {
   let source: string;
   try {
     source = await readFile(filePath, "utf8");
@@ -221,7 +250,7 @@ export async function compilePullRequestPolicyFile(contract: unknown, filePath: 
     if (cause instanceof Error) error.cause = cause;
     throw error;
   }
-  return compilePullRequestPolicyOverlay(contract, source);
+  return compilePullRequestPolicyOverlay(contract, source, options);
 }
 
 function parseRules(value: unknown, path: string): readonly PullRequestPolicySectionRule[] {
@@ -381,27 +410,166 @@ function assertOverlayVersion(overlay: PullRequestPolicyOverlay): void {
   }
 }
 
-function assertTemplateMatch(
-  selector: string | PullRequestPolicyTemplateSelector | undefined,
+interface SelectedPolicyEntry {
+  readonly template: string | PullRequestPolicyTemplateSelector | undefined;
+  readonly sections: readonly PullRequestPolicySectionRule[];
+  readonly sectionsPath: string;
+}
+
+function selectPolicyEntry(
+  overlay: PullRequestPolicyOverlay,
   contract: CanonicalContract,
+  options: PullRequestPolicyCompileOptions,
+): SelectedPolicyEntry {
+  validatePolicyTemplateBindings(overlay, contract, options.templateIdentities);
+  if (overlay.templates !== undefined) {
+    if (overlay.templates.length === 0) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_INVALID_VALUE",
+        "templates must be a non-empty array.",
+        "$.templates",
+      );
+    }
+    const matches = overlay.templates
+      .map((entry, index) => ({ entry, index }))
+      .filter(
+        ({ entry }) =>
+          entry.template === undefined ||
+          policySelectorMatchesContract(entry.template, contract, options.templateIdentities),
+      );
+    if (matches.length === 0) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_TEMPLATE_MISMATCH",
+        "No PR policy entry targets the selected native template.",
+        "$.templates",
+      );
+    }
+    if (matches.length > 1) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_AMBIGUOUS_REFERENCE",
+        "Multiple PR policy entries target the selected native template.",
+        "$.templates",
+      );
+    }
+    const match = matches[0] as { entry: PullRequestPolicyTemplateEntry; index: number };
+    return {
+      template: match.entry.template,
+      sections: match.entry.sections,
+      sectionsPath: `$.templates[${match.index}].sections`,
+    };
+  }
+  assertTemplateMatch(overlay.template, contract, options.templateIdentities);
+  return {
+    template: overlay.template,
+    sections: overlay.sections ?? [],
+    sectionsPath: "$.sections",
+  };
+}
+
+function validatePolicyTemplateBindings(
+  overlay: PullRequestPolicyOverlay,
+  contract: CanonicalContract,
+  templateIdentities: readonly Pick<TemplateIdentity, "id" | "path" | "name">[] | undefined,
 ): void {
-  if (selector === undefined) return;
-  const matches =
-    typeof selector === "string"
-      ? selector === contract.templateIdentity.id ||
-        selector === contract.templateIdentity.path ||
-        selector.toLocaleLowerCase("en-US") === contract.templateIdentity.name.toLocaleLowerCase("en-US")
-      : (selector.id === undefined || selector.id === contract.templateIdentity.id) &&
-        (selector.path === undefined || selector.path === contract.templateIdentity.path) &&
-        (selector.name === undefined ||
-          selector.name.toLocaleLowerCase("en-US") === contract.templateIdentity.name.toLocaleLowerCase("en-US"));
-  if (!matches) {
+  if (templateIdentities === undefined) return;
+  if (!templateIdentities.some((identity) => identityMatchesContract(identity, contract))) {
     throw new PullRequestPolicyError(
       "PR_POLICY_TEMPLATE_MISMATCH",
-      "PR policy does not target the selected native template.",
+      "PR policy contract is not bound to an available native template.",
       "$.template",
     );
   }
+  const entries =
+    overlay.templates === undefined
+      ? overlay.template === undefined
+        ? []
+        : [{ template: overlay.template, path: "$.template" }]
+      : overlay.templates.map((entry, index) => ({
+          template: entry.template,
+          path: `$.templates[${index}].template`,
+        }));
+  entries.forEach(({ template, path }) => {
+    if (template === undefined) return;
+    const matches = templateIdentities.filter((identity) => templateSelectorMatchesIdentity(template, identity));
+    if (matches.length === 0) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_TEMPLATE_MISMATCH",
+        "PR policy does not target an available native template.",
+        path,
+      );
+    }
+    if (matches.length > 1) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_AMBIGUOUS_REFERENCE",
+        "PR policy template selector matches multiple native templates.",
+        path,
+      );
+    }
+  });
+}
+
+function identityMatchesContract(
+  identity: Pick<TemplateIdentity, "id" | "path" | "name">,
+  contract: CanonicalContract,
+): boolean {
+  return identity.path === contract.templateIdentity.path && identity.name === contract.templateIdentity.name;
+}
+
+function assertTemplateMatch(
+  selector: string | PullRequestPolicyTemplateSelector | undefined,
+  contract: CanonicalContract,
+  templateIdentities?: readonly Pick<TemplateIdentity, "id" | "path" | "name">[],
+  path = "$.template",
+): void {
+  if (selector === undefined) return;
+  if (!policySelectorMatchesContract(selector, contract, templateIdentities)) {
+    throw new PullRequestPolicyError(
+      "PR_POLICY_TEMPLATE_MISMATCH",
+      "PR policy does not target the selected native template.",
+      path,
+    );
+  }
+}
+
+function policySelectorMatchesContract(
+  selector: string | PullRequestPolicyTemplateSelector,
+  contract: CanonicalContract,
+  templateIdentities: readonly Pick<TemplateIdentity, "id" | "path" | "name">[] | undefined,
+): boolean {
+  if (templateSelectorMatches(selector, contract)) return true;
+  return (
+    templateIdentities?.some(
+      (identity) => identityMatchesContract(identity, contract) && templateSelectorMatchesIdentity(selector, identity),
+    ) ?? false
+  );
+}
+
+function templateSelectorMatches(
+  selector: string | PullRequestPolicyTemplateSelector,
+  contract: CanonicalContract,
+): boolean {
+  return typeof selector === "string"
+    ? selector === contract.templateIdentity.id ||
+        selector === contract.templateIdentity.path ||
+        selector.toLocaleLowerCase("en-US") === contract.templateIdentity.name.toLocaleLowerCase("en-US")
+    : (selector.id === undefined || selector.id === contract.templateIdentity.id) &&
+        (selector.path === undefined || selector.path === contract.templateIdentity.path) &&
+        (selector.name === undefined ||
+          selector.name.toLocaleLowerCase("en-US") === contract.templateIdentity.name.toLocaleLowerCase("en-US"));
+}
+
+function templateSelectorMatchesIdentity(
+  selector: string | PullRequestPolicyTemplateSelector,
+  identity: Pick<TemplateIdentity, "id" | "path" | "name">,
+): boolean {
+  return typeof selector === "string"
+    ? selector === identity.id ||
+        selector === identity.path ||
+        selector.toLocaleLowerCase("en-US") === identity.name.toLocaleLowerCase("en-US")
+    : (selector.id === undefined || selector.id === identity.id) &&
+        (selector.path === undefined || selector.path === identity.path) &&
+        (selector.name === undefined ||
+          selector.name.toLocaleLowerCase("en-US") === identity.name.toLocaleLowerCase("en-US"));
 }
 
 function parseSelector(value: unknown, path: string): string | PullRequestPolicyTemplateSelector {
