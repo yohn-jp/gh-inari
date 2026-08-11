@@ -1,0 +1,12 @@
+version: 1
+template: default
+sections:
+  - section: summary
+    required: true
+    minLength: 10
+  - section: linked_issue
+    linkedIssue: true
+  - section: validation
+    required: true
+    checklist:
+      minCompleted: 1
