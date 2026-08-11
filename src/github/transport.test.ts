@@ -40,6 +40,17 @@ test("rejects on timeout even when the killed process still exits with code 0", 
   );
 });
 
+test("rejects non-positive and non-finite timeoutMs instead of arming an unbounded or immediate timer", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  for (const invalidTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      transport.run(["-e", "process.exit(0);"], { timeoutMs: invalidTimeoutMs }),
+      (error: unknown) => error instanceof RangeError,
+    );
+  }
+});
+
 test("force-kills a process that ignores SIGTERM after the timeout", async () => {
   const transport = new ProcessGhTransport(process.execPath);
 

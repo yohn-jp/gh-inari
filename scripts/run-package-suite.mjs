@@ -86,14 +86,26 @@ function run(command, args, options = {}) {
   return result;
 }
 
-function exportsTargetPaths(packageJson) {
-  const targets = [];
-  for (const conditions of Object.values(packageJson.exports ?? {})) {
-    if (typeof conditions !== "object" || conditions === null) continue;
-    for (const target of Object.values(conditions)) {
-      if (typeof target === "string") targets.push(target.replace(/^\.\//u, ""));
-    }
+// Walks every shape the "exports" map can take: a direct string target, an
+// array of fallback targets, or a conditions object whose values may
+// themselves be any of these (nested conditions such as node/import/require).
+function collectExportsTargets(value, targets) {
+  if (typeof value === "string") {
+    targets.push(value.replace(/^\.\//u, ""));
+    return;
   }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectExportsTargets(entry, targets);
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) collectExportsTargets(entry, targets);
+  }
+}
+
+export function exportsTargetPaths(packageJson) {
+  const targets = [];
+  collectExportsTargets(packageJson.exports, targets);
   return targets;
 }
 
@@ -146,4 +158,4 @@ function main() {
   run(process.execPath, ["scripts/smoke-test.mjs"], { stdio: "inherit" });
 }
 
-main();
+if (process.argv[1]?.endsWith("run-package-suite.mjs")) main();

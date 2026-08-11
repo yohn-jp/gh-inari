@@ -368,6 +368,36 @@ test("honors caller-supplied timeout overrides per operation class", async () =>
   assert.ok(transport.calls.every((call) => call.timeoutMs === 1234));
 });
 
+test("rejects non-positive and non-finite timeout overrides instead of silently disabling the bound", async () => {
+  const transport = new StubGhTransport([]);
+
+  for (const invalidTimeoutsMs of [
+    { auth: 0 },
+    { auth: -1 },
+    { auth: Number.NaN },
+    { auth: Number.POSITIVE_INFINITY },
+  ]) {
+    assert.throws(
+      () => new GitHubAdapter({ transport, timeoutsMs: invalidTimeoutsMs }),
+      (error: unknown) => error instanceof ContractViolationError && error.code === "CONTRACT_VIOLATION",
+    );
+  }
+  assert.equal(transport.calls.length, 0);
+});
+
+test("an explicit-undefined timeout override falls back to the default instead of disabling the bound", async () => {
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({
+    repository: "acme/inari",
+    transport,
+    timeoutsMs: { auth: undefined },
+  });
+
+  await adapter.resolveRepositoryContext();
+
+  assert.ok(transport.calls.every((call) => call.timeoutMs === DEFAULT_GH_TIMEOUTS_MS.auth));
+});
+
 test("classifies a mutation call's bounded timeout distinctly from read timeouts", async () => {
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),

@@ -57,6 +57,30 @@ function operationClass(operation: string): GhOperationClass {
   return operationClassValue;
 }
 
+/**
+ * Rejects invalid overrides outright instead of silently disabling a bound: an
+ * explicit `{ auth: undefined }` would otherwise erase the default via spread,
+ * and non-finite or non-positive values would produce an unbounded or
+ * effectively immediate timer.
+ */
+function validatedTimeoutOverrides(
+  overrides: Partial<Record<GhOperationClass, number>> | undefined,
+): Partial<Record<GhOperationClass, number>> {
+  if (overrides === undefined) return {};
+  const validated: Partial<Record<GhOperationClass, number>> = {};
+  for (const [operationClassKey, value] of Object.entries(overrides)) {
+    if (value === undefined) continue;
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new ContractViolationError(
+        `Timeout override for "${operationClassKey}" must be a finite number greater than zero.`,
+        `timeoutsMs.${operationClassKey}`,
+      );
+    }
+    validated[operationClassKey as GhOperationClass] = value;
+  }
+  return validated;
+}
+
 export interface GitHubAdapterOptions {
   /** Working directory used by gh for local repository resolution. */
   readonly cwd?: string;
@@ -88,7 +112,7 @@ export class GitHubAdapter {
     this.hostname = options.hostname;
     this.transport = options.transport ?? new ProcessGhTransport();
     this.executable = this.transport instanceof ProcessGhTransport ? this.transport.executable : "gh";
-    this.timeoutsMs = Object.freeze({ ...DEFAULT_GH_TIMEOUTS_MS, ...options.timeoutsMs });
+    this.timeoutsMs = Object.freeze({ ...DEFAULT_GH_TIMEOUTS_MS, ...validatedTimeoutOverrides(options.timeoutsMs) });
   }
 
   async checkAuthentication(): Promise<void> {

@@ -85,6 +85,12 @@ export class ProcessGhTransport implements GhTransport {
 
       if (options.timeoutMs !== undefined) {
         const timeoutMs = options.timeoutMs;
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+          settled = true;
+          reject(new RangeError(`gh transport timeoutMs must be a finite number greater than zero, got ${timeoutMs}.`));
+          child.kill("SIGKILL");
+          return;
+        }
         timer = setTimeout(() => {
           timedOut = true;
           child.kill("SIGTERM");
