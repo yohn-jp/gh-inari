@@ -58,7 +58,7 @@ Schema and validation output is JSON. `--json` makes render and create output JS
 
 ## Source of truth and supported semantics
 
-`.github/ISSUE_TEMPLATE/**` and `.github/PULL_REQUEST_TEMPLATE*` remain the structural source of truth. Inari discovers and compiles those files; it does not replace them with a proprietary body schema. Supported Issue Form nodes are `input`, `textarea`, single- and multi-select `dropdown`, `checkboxes`, and `markdown`. Browser-only or ambiguous behavior, such as uploads or unsupported textarea rendering modes, fails closed.
+`.github/ISSUE_TEMPLATE/**` remains the Issue source of truth. For pull requests, Inari discovers GitHub's supported repository locations: `pull_request_template` files under the repository root, `docs/`, or `.github/`, plus `PULL_REQUEST_TEMPLATE/` directories under each location. Native PR template filenames and the `.md`/`.txt` extensions supported by Inari are matched case-insensitively. Other PR-template extension surfaces are intentionally unsupported in v1 and fail closed. Inari discovers and compiles those files; it does not replace them with a proprietary body schema. Supported Issue Form nodes are `input`, `textarea` (including native `render` code fences), single- and multi-select `dropdown`, `checkboxes`, and `markdown`. Browser-only or ambiguous behavior, such as uploads or unsupported textarea rendering modes, fails closed. Markdown nodes are retained for contract/schema explainability but never emitted into an Issue body.
 
 Native PR Markdown expresses structure but not policy. A small versioned overlay may add constraints unavailable in Markdown without changing section order or content. The supported v1 form is:
 
@@ -77,9 +77,21 @@ sections:
       requireComplete: false
 ```
 
-References must match native section identities (`id`/`sourceId`); stale, unknown, or ambiguous references fail closed. No overlay rule means no inferred requirement.
+One repository policy file can bind several native PR templates with `templates`; every entry in a multi-template policy must identify one template by stable `id`, `path`, or unique `name`:
 
-Issue Form top-level `labels` are preserved as create defaults. Top-level `assignees`, `projects`, and `type`, upload fields, and textarea code-block rendering are explicitly unsupported in v1 and fail closed rather than being approximated.
+```yaml
+version: 1
+templates:
+  - template: default
+    sections: []
+  - template:
+      path: .github/PULL_REQUEST_TEMPLATE/release.md
+    sections: []
+```
+
+Template and section bindings are deterministic. Stale, unknown, or ambiguous template/section references fail closed. `linkedIssue: true` means that the field contains a GitHub closing reference: `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or `resolved`, followed by `#ISSUE-NUMBER` or `OWNER/REPOSITORY#ISSUE-NUMBER`, with an optional colon and case-insensitive keyword. This validates syntax only; GitHub applies automatic linking/closure only under its own contextual rules, including the target default branch.
+
+Issue Form top-level `title` is the exact default title used when the caller omits a title; an explicit caller title replaces it without inferred prefix concatenation. Top-level `labels` are repository-governed defaults and are always retained; caller-supplied labels are appended in order with duplicates removed. Top-level `assignees`, `projects`, and `type`, and upload fields remain unsupported and fail closed rather than being approximated.
 
 ## Scope
 

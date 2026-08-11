@@ -27,7 +27,10 @@ import {
 type UnknownRecord = Record<string, unknown>;
 type Position = { readonly line: number; readonly column: number };
 
-const identifierPattern = /^[A-Za-z][A-Za-z0-9_-]*$/u;
+// GitHub's native Issue Form schema permits any non-empty identifier made of
+// alphanumeric characters, hyphens, and underscores; it does not require a
+// letter as the first character.
+const identifierPattern = /^[A-Za-z0-9_-]+$/u;
 
 export type IssueFormCompilerErrorCode =
   | "ISSUE_FORM_INVALID_YAML"
@@ -478,13 +481,6 @@ function compileTextField(
       ? ["label", "description", "placeholder", "value", "render"]
       : ["label", "description", "placeholder", "value"];
   checkUnknownKeys(attributes, allowedKeys, `${pathPrefix}.attributes`, diagnostics);
-  if (elementType === "textarea" && hasOwn(attributes, "render")) {
-    diagnostics.add(
-      "ISSUE_FORM_UNSUPPORTED_SEMANTICS",
-      `${pathPrefix}.attributes.render`,
-      "Textarea render/code-block formatting is not representable by the canonical contract.",
-    );
-  }
   const common = parseFieldCommon(id, attributes, validation, index, pathPrefix, diagnostics);
   const placeholder = optionalString(attributes, "placeholder", `${pathPrefix}.attributes`, diagnostics);
   const defaultValue = optionalString(attributes, "value", `${pathPrefix}.attributes`, diagnostics);
@@ -493,6 +489,9 @@ function compileTextField(
     sourceId: id,
     ...(placeholder === undefined ? {} : { placeholder }),
     ...(defaultValue === undefined ? {} : { defaultValue }),
+    ...(elementType !== "textarea" || !hasOwn(attributes, "render")
+      ? {}
+      : { render: optionalString(attributes, "render", `${pathPrefix}.attributes`, diagnostics) }),
   };
   const field: StringField = {
     id: common.id,
@@ -916,7 +915,7 @@ function validateIdentifier(value: string, pathPrefix: string, diagnostics: Diag
     diagnostics.add(
       "ISSUE_FORM_INVALID_VALUE",
       pathPrefix,
-      "Identifiers must start with a letter and contain only letters, numbers, hyphens, or underscores.",
+      "Identifiers must be non-empty and contain only letters, numbers, hyphens, or underscores.",
     );
   }
 }
@@ -929,7 +928,7 @@ function canonicalTemplateIdentifier(template: IssueFormTemplateIdentity): strin
     .replace(/[^A-Za-z0-9_-]+/gu, "-")
     .replace(/^-+|-+$/gu, "");
   if (normalized.length === 0) return "template";
-  return /^[A-Za-z]/u.test(normalized) ? normalized : `template-${normalized}`;
+  return normalized;
 }
 
 function checklistIdentifier(label: string, index: number): string {

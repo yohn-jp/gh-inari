@@ -257,7 +257,11 @@ async function loadContract(
         }
       }
     }
-    if (selectedPolicy !== undefined) contract = await compilePullRequestPolicyFile(contract, selectedPolicy);
+    if (selectedPolicy !== undefined) {
+      contract = await compilePullRequestPolicyFile(contract, selectedPolicy, {
+        templateIdentities: discovery.pullRequestTemplates,
+      });
+    }
   }
   return contract;
 }

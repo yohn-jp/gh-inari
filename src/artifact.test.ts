@@ -12,7 +12,7 @@ import {
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
 } from "./artifact.js";
-import { projectToJsonSchema, LINKED_ISSUE_PATTERN } from "./contract/index.js";
+import { compileIssueFormYaml, projectToJsonSchema, LINKED_ISSUE_PATTERN } from "./contract/index.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 import { compilePullRequestPolicyOverlay } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
@@ -28,7 +28,7 @@ test("Issue validation and rendering are deterministic and reversible", () => {
   const second = renderIssueArtifact(issueContractFixture, input);
   assert.equal(first, second);
   assert.match(first, /\\# heading/);
-  assert.match(first, /Describe the smallest useful outcome\./);
+  assert.doesNotMatch(first, /Describe the smallest useful outcome\./);
 
   const parsed = parseExistingIssueArtifact(issueContractFixture, first);
   assert.equal(parsed.parsed, true);
@@ -40,6 +40,177 @@ test("Issue validation and rendering are deterministic and reversible", () => {
     metadata: { title: "feat: preserve native labels" },
   });
   assert.deepEqual(prepared.artifact.labels, ["enhancement"]);
+});
+
+test("Issue Form native defaults, no-response values, dropdowns, checkboxes, and markdown blocks round-trip", () => {
+  const contract = compileIssueFormYaml(
+    `name: Native form
+description: Native submission fixture
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Before the fields
+  - type: input
+    id: contact
+    attributes:
+      label: Contact
+  - type: markdown
+    attributes:
+      value: Between the fields
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      value: Default details
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: [Low, High]
+      default: 1
+  - type: dropdown
+    id: areas
+    attributes:
+      label: Areas
+      multiple: true
+      options: [frontend, docs]
+  - type: checkboxes
+    id: agreement
+    attributes:
+      label: Agreement
+      options:
+        - label: I agree
+          required: true
+        - label: I read the guide
+  - type: input
+    id: optional
+    attributes:
+      label: Optional
+  - type: markdown
+    attributes:
+      value: After the fields
+`,
+    {
+      id: "issue-form:native.yml",
+      type: "issue-form",
+      kind: "issue",
+      name: "native",
+      path: ".github/ISSUE_TEMPLATE/native.yml",
+    },
+  );
+  const nativeBody = `### Contact
+alice@example.com
+
+### Details
+Observed behavior
+
+### Priority
+High
+
+### Areas
+frontend, docs
+
+### Agreement
+- [x] I agree
+- [ ] I read the guide
+
+### Optional
+_No response_
+`;
+  const parsed = parseExistingIssueArtifact(contract, nativeBody);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, {
+    contact: "alice@example.com",
+    details: "Observed behavior",
+    priority: "High",
+    areas: ["frontend", "docs"],
+    agreement: ["I-agree"],
+  });
+  assert.equal(validateExistingIssueArtifact(contract, nativeBody).valid, true);
+
+  const rendered = renderIssueArtifact(contract, {
+    contact: "alice@example.com",
+    agreement: ["I-agree"],
+  });
+  assert.doesNotMatch(rendered, /Before the fields|Between the fields|After the fields/);
+  assert.match(rendered, /### Priority\n\nHigh/);
+  assert.match(rendered, /### Areas\n\n_No response_/);
+});
+
+test("native textarea render output uses and parses GitHub code fences", () => {
+  const contract = compileIssueFormYaml(
+    `name: Logs
+description: Rendered logs
+body:
+  - type: markdown
+    attributes:
+      value: Guidance is not submitted
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: shell
+`,
+    {
+      id: "issue-form:logs.yml",
+      type: "issue-form",
+      kind: "issue",
+      name: "logs",
+      path: ".github/ISSUE_TEMPLATE/logs.yml",
+    },
+  );
+  const emptyNativeBody = "### Logs\n\n```shell\n\n```\n";
+  assert.equal(validateExistingIssueArtifact(contract, emptyNativeBody).valid, true);
+  assert.equal(renderIssueArtifact(contract, { logs: "echo hello" }), "### Logs\n\n```shell\necho hello\n```\n");
+  const parsed = parseExistingIssueArtifact(contract, "### Logs\n\n```shell\necho hello\n```\n");
+  assert.deepEqual(parsed.values, { logs: "echo hello" });
+  assert.equal(parsed.parsed, true);
+});
+
+test("headings inside a rendered textarea fence do not truncate the field or misparse the next section", () => {
+  const contract = compileIssueFormYaml(
+    `name: Logs
+description: Rendered logs
+body:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: shell
+  - type: input
+    id: priority
+    attributes:
+      label: Priority
+`,
+    {
+      id: "issue-form:logs.yml",
+      type: "issue-form",
+      kind: "issue",
+      name: "logs",
+      path: ".github/ISSUE_TEMPLATE/logs.yml",
+    },
+  );
+  const body = "### Logs\n\n```shell\n### Priority\necho hello\n```\n\n### Priority\n\nhigh\n";
+  const parsed = parseExistingIssueArtifact(contract, body);
+  assert.deepEqual(parsed.values, { logs: "### Priority\necho hello", priority: "high" });
+  assert.equal(parsed.parsed, true);
+});
+
+test("native title defaults and caller labels are deterministic", () => {
+  const prepared = prepareIssueArtifact(issueContractFixture, {
+    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+    metadata: { labels: ["custom", "enhancement"] },
+  });
+  assert.equal(prepared.artifact.title, "Feature");
+  assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
+
+  const explicit = prepareIssueArtifact(issueContractFixture, {
+    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+    metadata: { title: "custom title" },
+  });
+  assert.equal(explicit.artifact.title, "custom title");
 });
 
 test("semantic violations are stable and mutation artifacts cannot be prepared", () => {
@@ -77,6 +248,82 @@ test("PR overlay compiles to the shared contract and schema authority", () => {
   assert.equal(schema.properties.summary?.minLength, 5);
   assert.equal(schema.properties.linked_issue?.pattern, LINKED_ISSUE_PATTERN);
   assert.equal(schema.properties.acceptance?.minItems, 1);
+});
+
+test("linkedIssue follows GitHub closing-keyword and cross-repository syntax", () => {
+  const contract = compilePullRequestPolicyOverlay(
+    pullRequestContractFixture,
+    `version: 1\ntemplate: default\nsections:\n  - section: linked_issue\n    linkedIssue: true\n`,
+  );
+  const validReferences = [
+    "Closes #10",
+    "CLOSES: #10",
+    "closed #10",
+    "Fix #10",
+    "fixed #10",
+    "resolve #10",
+    "Resolved: octo-org/octo-repo#100",
+    "Resolves #10, resolves #123, resolves octo-org/octo-repo#100",
+  ];
+  for (const linked_issue of validReferences) {
+    assert.doesNotThrow(() =>
+      renderPullRequestArtifact(contract, { summary: "A useful summary", linked_issue, acceptance: ["tests"] }),
+    );
+  }
+
+  const invalidReferences = ["see #10", "Closes", "Closes #0", "Closes issue #10", "Closes octo-org/octo-repo/#10"];
+  for (const linked_issue of invalidReferences) {
+    assert.throws(() =>
+      renderPullRequestArtifact(contract, { summary: "A useful summary", linked_issue, acceptance: ["tests"] }),
+    );
+  }
+});
+
+test("one PR policy file binds multiple native templates deterministically", () => {
+  const releaseContract = {
+    ...pullRequestContractFixture,
+    templateIdentity: {
+      ...pullRequestContractFixture.templateIdentity,
+      id: "release",
+      name: "release",
+      path: ".github/PULL_REQUEST_TEMPLATE/release.md",
+    },
+    nativeMetadata: {
+      ...pullRequestContractFixture.nativeMetadata,
+      path: ".github/PULL_REQUEST_TEMPLATE/release.md",
+    },
+  };
+  const source = `version: 1\ntemplates:\n  - template: default\n    sections:\n      - section: summary\n        minLength: 10\n  - template: release\n    sections:\n      - section: summary\n        minLength: 20\n`;
+  const templateIdentities = [pullRequestContractFixture.templateIdentity, releaseContract.templateIdentity];
+
+  const defaultContract = compilePullRequestPolicyOverlay(pullRequestContractFixture, source, { templateIdentities });
+  const selectedReleaseContract = compilePullRequestPolicyOverlay(releaseContract, source, { templateIdentities });
+  assert.equal(
+    defaultContract.supplementalConstraints.fields.find((field) => field.fieldId === "summary")?.minLength,
+    10,
+  );
+  assert.equal(
+    selectedReleaseContract.supplementalConstraints.fields.find((field) => field.fieldId === "summary")?.minLength,
+    20,
+  );
+
+  assert.throws(
+    () =>
+      compilePullRequestPolicyOverlay(
+        pullRequestContractFixture,
+        `version: 1\ntemplates:\n  - template: default\n    sections: []\n  - template: default\n    sections: []\n`,
+      ),
+    (error: unknown) => (error as { code?: string }).code === "PR_POLICY_AMBIGUOUS_REFERENCE",
+  );
+  assert.throws(
+    () =>
+      compilePullRequestPolicyOverlay(
+        pullRequestContractFixture,
+        `version: 1\ntemplates:\n  - template: stale\n    sections: []\n  - template: release\n    sections: []\n`,
+        { templateIdentities },
+      ),
+    (error: unknown) => (error as { code?: string }).code === "PR_POLICY_TEMPLATE_MISMATCH",
+  );
 });
 
 test("PR policy overlay fault paths produce deterministic errors", () => {
@@ -194,6 +441,23 @@ test("PR placeholder-only sections reconstruct as omitted semantic values", asyn
   const parsed = parseExistingPullRequestArtifact(nativeContract, body);
   assert.equal(parsed.parsed, true);
   assert.equal(Object.prototype.hasOwnProperty.call(parsed.values, "breaking_changes"), false);
+});
+
+test("existing PR validation accepts a body filled from a native template with comments", () => {
+  const contract = parsePullRequestTemplate(
+    "<!-- Guidance for reviewers. -->\n\n## Summary\n<!-- Explain the change. -->\n",
+    {
+      id: "pull-request-default:.github/PULL_REQUEST_TEMPLATE.md",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "default",
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+    },
+  );
+  const nativeBody = "<!-- Guidance for reviewers. -->\n\n## Summary\n<!-- Explain the change. -->\nA useful summary\n";
+  const parsed = parseExistingPullRequestArtifact(contract, nativeBody);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, { summary: "A useful summary" });
 });
 
 test("PR checklist placeholders are structural and do not make canonical artifacts unparseable", () => {

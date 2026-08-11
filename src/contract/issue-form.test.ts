@@ -181,7 +181,7 @@ test("projects the compiled Issue Form through the existing JSON Schema projecti
     "agreement",
     "optional",
   ]);
-  assert.deepEqual(schema.required, ["contact", "priority", "agreement"]);
+  assert.deepEqual(schema.required, ["contact", "agreement"]);
   assert.deepEqual(schema.properties.priority?.enum, ["Low", "High"]);
   assert.equal(schema.properties.priority?.default, "High");
   assert.deepEqual(schema.properties.areas?.items?.enum, ["frontend", "backend", "docs"]);
@@ -276,7 +276,7 @@ body:
   );
 });
 
-test("missing or invalid field IDs are reported as ambiguous or invalid source semantics", () => {
+test("missing IDs are ambiguous while native-valid and native-invalid IDs follow GitHub's syntax", () => {
   const missingId = `name: Form
 description: Description
 body:
@@ -291,18 +291,40 @@ body:
       error.violations.some((violation) => violation.code === "ISSUE_FORM_AMBIGUOUS"),
   );
 
-  const invalidId = `name: Form
+  const nativeValidIds = `name: Form
 description: Description
 body:
   - type: input
     id: 123-invalid
+    attributes:
+      label: Numeric start
+  - type: input
+    id: _underscore
+    attributes:
+      label: Underscore start
+  - type: input
+    id: -hyphen
+    attributes:
+      label: Hyphen start
+`;
+  const nativeContract = compileIssueFormYaml(nativeValidIds, TEMPLATE);
+  assert.deepEqual(
+    nativeContract.sections.map((section) => section.id),
+    ["123-invalid", "_underscore", "-hyphen"],
+  );
+
+  const invalidId = `name: Form
+description: Description
+body:
+  - type: input
+    id: invalid.id
     attributes:
       label: Name
 `;
   assertCompilerCode(invalidId, TEMPLATE, "ISSUE_FORM_INVALID_VALUE");
 });
 
-test("unsupported native and browser/API-only semantics fail explicitly", () => {
+test("native textarea rendering is preserved while browser/API-only semantics fail explicitly", () => {
   const unsupportedForms = [
     `name: Form
 description: Description
@@ -321,6 +343,10 @@ body:
     attributes:
       label: Files
 `,
+  ];
+  for (const source of unsupportedForms) assertCompilerCode(source, TEMPLATE, "ISSUE_FORM_UNSUPPORTED");
+
+  const rendered = compileIssueFormYaml(
     `name: Form
 description: Description
 body:
@@ -330,8 +356,9 @@ body:
       label: Logs
       render: shell
 `,
-  ];
-  for (const source of unsupportedForms) assertCompilerCode(source, TEMPLATE, "ISSUE_FORM_UNSUPPORTED");
+    TEMPLATE,
+  );
+  assert.equal(rendered.sections[0]?.fields[0]?.nativeMetadata.render, "shell");
 });
 
 test("required checkbox items promote the field while optional checkbox groups remain optional", () => {

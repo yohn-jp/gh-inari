@@ -9,8 +9,13 @@
 export const CANONICAL_IR_VERSION = "1.0.0" as const;
 export const CONTRACT_SCHEMA_VERSION = "1.0.0" as const;
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema" as const;
-/** The only built-in linked-Issue rule accepted by the v1 PR overlay. */
-export const LINKED_ISSUE_PATTERN = "(?:Closes|Fixes|Resolves)\\s+#\\d+" as const;
+/**
+ * GitHub's syntactic closing-reference language for pull request bodies.
+ * Contextual effects, such as closing only when targeting the default branch,
+ * remain GitHub behavior and are deliberately outside this contract rule.
+ */
+export const LINKED_ISSUE_PATTERN =
+  "(?:^|[^A-Za-z0-9_])(?:[Cc][Ll][Oo][Ss][Ee](?:[Ss]|[Dd])?|[Ff][Ii][Xx](?:[Ee][Ss]|[Ee][Dd])?|[Rr][Ee][Ss][Oo][Ll][Vv][Ee](?:[Ss]|[Dd])?)(?:[ \\t]+|[ \\t]*:[ \\t]*)(?:#[1-9][0-9]*|[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*#[1-9][0-9]*)(?![A-Za-z0-9_])" as const;
 
 export type CanonicalIrVersion = typeof CANONICAL_IR_VERSION;
 export type ContractSchemaVersion = typeof CONTRACT_SCHEMA_VERSION;
@@ -96,6 +101,8 @@ export interface NativeFieldMetadata {
   readonly sourceId?: string;
   readonly placeholder?: string;
   readonly defaultValue?: string | readonly string[];
+  /** GitHub Issue Form textarea render language, which produces a code fence. */
+  readonly render?: string;
   readonly multiple?: boolean;
   readonly options?: readonly NativeOptionMetadata[];
 }
@@ -117,7 +124,7 @@ export interface SupplementalFieldConstraint {
   readonly pattern?: string;
   readonly minItems?: number;
   readonly maxItems?: number;
-  /** Require a string-like PR section to contain a conventional linked Issue. */
+  /** Require a string-like PR section to contain a GitHub closing reference. */
   readonly linkedIssue?: boolean;
   /** Minimum number of checked items for a PR checklist. */
   readonly checklistMinCompleted?: number;
@@ -277,7 +284,7 @@ const nativeSectionElements: readonly NativeSectionElement[] = [
   "markdown",
   "heading",
 ];
-const identifierPattern = /^[A-Za-z][A-Za-z0-9_-]*$/u;
+const identifierPattern = /^[A-Za-z0-9_-]+$/u;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -511,7 +518,7 @@ function validateIdentifier(value: string | undefined, path: string, violations:
       violations,
       "IR_INVALID_IDENTIFIER",
       path,
-      "Identifiers must start with a letter and contain only letters, numbers, hyphens, or underscores.",
+      "Identifiers must be non-empty and contain only letters, numbers, hyphens, or underscores.",
     );
   }
 }
@@ -736,7 +743,7 @@ function validateNativeFieldMetadata(
   const metadata = value;
   checkUnknownKeys(
     metadata,
-    ["elementType", "sourceId", "placeholder", "defaultValue", "multiple", "options"],
+    ["elementType", "sourceId", "placeholder", "defaultValue", "render", "multiple", "options"],
     path,
     violations,
   );
@@ -744,6 +751,15 @@ function validateNativeFieldMetadata(
   const sourceId = optionalString(metadata, "sourceId", path, violations);
   const placeholder = optionalString(metadata, "placeholder", path, violations);
   const defaultValue = hasOwn(metadata, "defaultValue") ? metadata.defaultValue : undefined;
+  const render = optionalString(metadata, "render", path, violations);
+  if (render !== undefined && (source !== "issue_form" || elementType !== "textarea")) {
+    addViolation(
+      violations,
+      "IR_INCONSISTENT_FIELD",
+      `${path}.render`,
+      "The render property is only valid for Issue Form textarea fields.",
+    );
+  }
   const multiple = optionalBoolean(metadata, "multiple", path, violations);
   const options = hasOwn(metadata, "options")
     ? validateNativeOptions(metadata.options, `${path}.options`, violations)
@@ -800,6 +816,7 @@ function validateNativeFieldMetadata(
         ...(sourceId === undefined ? {} : { sourceId }),
         ...(placeholder === undefined ? {} : { placeholder }),
         ...(defaultValue === undefined ? {} : { defaultValue: defaultValue as string | readonly string[] }),
+        ...(render === undefined ? {} : { render }),
         ...(multiple === undefined ? {} : { multiple }),
         ...(options === undefined ? {} : { options }),
       };
@@ -995,10 +1012,10 @@ function validateDefaultString(
     addViolation(violations, "IR_INVALID_DEFAULT", path, "String defaults must be strings.");
     return;
   }
-  if (constraints?.minLength !== undefined && value.length < constraints.minLength) {
+  if (constraints?.minLength !== undefined && Array.from(value).length < constraints.minLength) {
     addViolation(violations, "IR_INVALID_DEFAULT", path, "Default does not satisfy minLength.");
   }
-  if (constraints?.maxLength !== undefined && value.length > constraints.maxLength) {
+  if (constraints?.maxLength !== undefined && Array.from(value).length > constraints.maxLength) {
     addViolation(violations, "IR_INVALID_DEFAULT", path, "Default does not satisfy maxLength.");
   }
   if (constraints?.pattern !== undefined) {
@@ -1770,6 +1787,7 @@ function canonicalizeNativeFieldMetadata(metadata: NativeFieldMetadata): Unknown
     ...(metadata.defaultValue === undefined
       ? {}
       : { defaultValue: Array.isArray(metadata.defaultValue) ? [...metadata.defaultValue] : metadata.defaultValue }),
+    ...(metadata.render === undefined ? {} : { render: metadata.render }),
     ...(metadata.multiple === undefined ? {} : { multiple: metadata.multiple }),
     ...(metadata.options === undefined ? {} : { options: canonicalizeNativeOptions(metadata.options) }),
   };

@@ -3,10 +3,9 @@ import {
   type CanonicalContract,
   type CanonicalField,
   type ContractProvenance,
-  type FieldConstraints,
   JSON_SCHEMA_DIALECT,
-  LINKED_ISSUE_PATTERN,
 } from "./ir.js";
+import { effectiveFieldConstraints, schemaMinItems, schemaStringPatternProjection } from "./constraints.js";
 
 /** JSON Schema values used by the projected public input contract. */
 export type JsonSchemaPrimitive = string | number | boolean | null;
@@ -57,27 +56,6 @@ export interface ContractProjection {
   readonly rendering: RenderingProjection;
 }
 
-function supplementalForField(contract: CanonicalContract, fieldId: string) {
-  return contract.supplementalConstraints.fields.find((constraint) => constraint.fieldId === fieldId);
-}
-
-function effectiveConstraint(
-  field: CanonicalField,
-  contract: CanonicalContract,
-  key: keyof FieldConstraints,
-): number | string | boolean | undefined {
-  const nativeValue = field.constraints?.[key];
-  if (nativeValue !== undefined) return nativeValue;
-  const supplemental = supplementalForField(contract, field.id);
-  if (supplemental === undefined || key === "uniqueItems") return undefined;
-  const supplementalKey = key as Exclude<keyof FieldConstraints, "uniqueItems">;
-  return supplemental[supplementalKey];
-}
-
-function fieldIsRequired(field: CanonicalField, contract: CanonicalContract): boolean {
-  return field.required === "required" || supplementalForField(contract, field.id)?.required === true;
-}
-
 function fieldDescription(field: CanonicalField): Pick<JsonSchema, "title" | "description"> {
   return {
     title: field.label,
@@ -89,23 +67,12 @@ function stringConstraints(
   field: CanonicalField,
   contract: CanonicalContract,
 ): Pick<JsonSchema, "minLength" | "maxLength" | "pattern" | "allOf"> {
-  const minLength = effectiveConstraint(field, contract, "minLength");
-  const maxLength = effectiveConstraint(field, contract, "maxLength");
-  const pattern = effectiveConstraint(field, contract, "pattern");
-  const supplemental = supplementalForField(contract, field.id);
-  const linkedIssue = supplemental?.linkedIssue === true;
-  const hasExplicitPattern = typeof pattern === "string";
+  const constraints = effectiveFieldConstraints(contract, field);
 
   return {
-    ...(typeof minLength === "number" ? { minLength } : {}),
-    ...(typeof maxLength === "number" ? { maxLength } : {}),
-    ...(hasExplicitPattern
-      ? linkedIssue
-        ? { allOf: [{ pattern }, { pattern: LINKED_ISSUE_PATTERN }] }
-        : { pattern }
-      : linkedIssue
-        ? { pattern: LINKED_ISSUE_PATTERN }
-        : {}),
+    ...(constraints.minLength === undefined ? {} : { minLength: constraints.minLength }),
+    ...(constraints.maxLength === undefined ? {} : { maxLength: constraints.maxLength }),
+    ...schemaStringPatternProjection(constraints),
   };
 }
 
@@ -113,27 +80,23 @@ function arrayConstraints(
   field: CanonicalField,
   contract: CanonicalContract,
 ): Pick<JsonSchema, "minItems" | "maxItems"> {
-  const minItems = effectiveConstraint(field, contract, "minItems");
-  const maxItems = effectiveConstraint(field, contract, "maxItems");
-  const supplemental = supplementalForField(contract, field.id);
-  const checklistMinimum = field.type === "checklist" ? (supplemental?.checklistMinCompleted ?? 0) : 0;
-  const checklistComplete = field.type === "checklist" && supplemental?.checklistRequireComplete === true;
-  const completeMinimum = checklistComplete && field.type === "checklist" ? field.items.length : 0;
-  const effectiveMinItems = Math.max(typeof minItems === "number" ? minItems : 0, checklistMinimum, completeMinimum);
+  const constraints = effectiveFieldConstraints(contract, field);
+  const minItems = schemaMinItems(constraints);
   return {
-    ...(effectiveMinItems > 0 ? { minItems: effectiveMinItems } : {}),
-    ...(typeof maxItems === "number" ? { maxItems } : {}),
+    ...(minItems === undefined ? {} : { minItems }),
+    ...(constraints.maxItems === undefined ? {} : { maxItems: constraints.maxItems }),
   };
 }
 
 function projectField(field: CanonicalField, contract: CanonicalContract): JsonSchema {
   const description = fieldDescription(field);
+  const constraints = effectiveFieldConstraints(contract, field);
   if (field.type === "string") {
     return {
       ...description,
       type: "string",
       ...stringConstraints(field, contract),
-      ...(field.defaultValue === undefined ? {} : { default: field.defaultValue }),
+      ...(constraints.hasDefault ? { default: constraints.defaultValue as string } : {}),
     };
   }
   if (field.type === "enum") {
@@ -142,7 +105,7 @@ function projectField(field: CanonicalField, contract: CanonicalContract): JsonS
       type: "string",
       enum: field.options.map((option) => option.value),
       ...stringConstraints(field, contract),
-      ...(field.defaultValue === undefined ? {} : { default: field.defaultValue }),
+      ...(constraints.hasDefault ? { default: constraints.defaultValue as string } : {}),
     };
   }
   if (field.type === "array") {
@@ -154,18 +117,17 @@ function projectField(field: CanonicalField, contract: CanonicalContract): JsonS
         type: "string",
         ...(itemOptions === undefined ? {} : { enum: itemOptions }),
       },
-      uniqueItems: true,
+      uniqueItems: constraints.uniqueItems,
       ...arrayConstraints(field, contract),
-      ...(field.defaultValue === undefined ? {} : { default: [...field.defaultValue] }),
+      ...(constraints.hasDefault ? { default: [...(constraints.defaultValue as readonly string[])] } : {}),
     };
   }
-  const itemIds = field.items.map((item) => item.id);
-  const requiredItems = field.items.filter((item) => item.required).map((item) => item.id);
+  const itemIds = constraints.allowedValues ?? [];
   const itemSchema: JsonSchema = {
     type: "string",
     enum: itemIds,
   };
-  const requiredItemConstraints: readonly JsonSchema[] = requiredItems.map((itemId) => ({
+  const requiredItemConstraints: readonly JsonSchema[] = constraints.requiredItems.map((itemId) => ({
     contains: { const: itemId },
     minContains: 1,
   }));
@@ -173,10 +135,10 @@ function projectField(field: CanonicalField, contract: CanonicalContract): JsonS
     ...description,
     type: "array",
     items: itemSchema,
-    uniqueItems: true,
+    uniqueItems: constraints.uniqueItems,
     ...arrayConstraints(field, contract),
     ...(requiredItemConstraints.length === 0 ? {} : { allOf: requiredItemConstraints }),
-    ...(field.defaultValue === undefined ? {} : { default: [...field.defaultValue] }),
+    ...(constraints.hasDefault ? { default: [...(constraints.defaultValue as readonly string[])] } : {}),
   };
 }
 
@@ -201,7 +163,8 @@ function projectValidatedContractToJsonSchema(contract: CanonicalContract): Json
   for (const section of contract.sections) {
     for (const field of section.fields) {
       properties[field.id] = projectField(field, contract);
-      if (fieldIsRequired(field, contract)) required.push(field.id);
+      const constraints = effectiveFieldConstraints(contract, field);
+      if (constraints.required && !constraints.hasDefault) required.push(field.id);
     }
   }
   return {

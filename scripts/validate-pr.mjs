@@ -4,7 +4,8 @@
 import fs from "node:fs";
 
 const REQUIRED_SECTIONS = ["## Summary", "## Validation"];
-const CLOSING_KEYWORD_PATTERN = /\b(closes|fixes|resolves)\s+#\d+/iu;
+const CLOSING_KEYWORD_PATTERN =
+  /(?:^|[^A-Za-z0-9_])(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)(?:[ \t]+|[ \t]*:[ \t]*)(?:#[1-9]\d*|[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*#[1-9]\d*)(?![A-Za-z0-9_])/iu;
 
 export function validatePullRequest({ title, body }) {
   const errors = [];
