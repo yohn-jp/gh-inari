@@ -628,6 +628,14 @@ function validateNativeFieldMetadata(
   const placeholder = optionalString(metadata, "placeholder", path, violations);
   const defaultValue = hasOwn(metadata, "defaultValue") ? metadata.defaultValue : undefined;
   const render = optionalString(metadata, "render", path, violations);
+  if (render !== undefined && (source !== "issue_form" || elementType !== "textarea")) {
+    addViolation(
+      violations,
+      "IR_INCONSISTENT_FIELD",
+      `${path}.render`,
+      "The render property is only valid for Issue Form textarea fields.",
+    );
+  }
   const multiple = optionalBoolean(metadata, "multiple", path, violations);
   const options = hasOwn(metadata, "options")
     ? validateNativeOptions(metadata.options, `${path}.options`, violations)

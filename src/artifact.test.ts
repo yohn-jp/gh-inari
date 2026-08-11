@@ -169,6 +169,35 @@ body:
   assert.equal(parsed.parsed, true);
 });
 
+test("headings inside a rendered textarea fence do not truncate the field or misparse the next section", () => {
+  const contract = compileIssueFormYaml(
+    `name: Logs
+description: Rendered logs
+body:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: shell
+  - type: input
+    id: priority
+    attributes:
+      label: Priority
+`,
+    {
+      id: "issue-form:logs.yml",
+      type: "issue-form",
+      kind: "issue",
+      name: "logs",
+      path: ".github/ISSUE_TEMPLATE/logs.yml",
+    },
+  );
+  const body = "### Logs\n\n```shell\n### Priority\necho hello\n```\n\n### Priority\n\nhigh\n";
+  const parsed = parseExistingIssueArtifact(contract, body);
+  assert.deepEqual(parsed.values, { logs: "### Priority\necho hello", priority: "high" });
+  assert.equal(parsed.parsed, true);
+});
+
 test("native title defaults and caller labels are deterministic", () => {
   const prepared = prepareIssueArtifact(issueContractFixture, {
     fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },

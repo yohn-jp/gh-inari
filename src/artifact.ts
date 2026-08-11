@@ -402,14 +402,21 @@ function parseRenderedBody(
     cursor += 1;
     const contentStart = cursor;
     const nextIssueHeading = issueHeadingLevel === undefined ? undefined : findNextIssueHeading(contract, sectionIndex);
+    let openFence: string | undefined;
     while (cursor < lines.length) {
       const line = lines[cursor] ?? "";
-      if (
-        nextIssueHeading === undefined
-          ? issueHeadingLevel === undefined && isHeading(line)
-          : line.trim() === nextIssueHeading
-      )
-        break;
+      const fenceMatch = /^(`{3,})/u.exec(line);
+      if (openFence === undefined) {
+        if (
+          nextIssueHeading === undefined
+            ? issueHeadingLevel === undefined && isHeading(line)
+            : line.trim() === nextIssueHeading
+        )
+          break;
+        if (fenceMatch !== null) openFence = fenceMatch[1];
+      } else if (fenceMatch !== null && fenceMatch[1] === openFence) {
+        openFence = undefined;
+      }
       cursor += 1;
     }
     let fieldEnd = cursor;
