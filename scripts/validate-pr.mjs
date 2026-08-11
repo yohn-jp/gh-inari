@@ -1,38 +1,69 @@
 #!/usr/bin/env node
-// Minimal PR contract: body links a closing Issue, and the required
-// template sections are still present (not stripped by the author).
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { validateExistingPullRequestArtifact, validateRequiredMetadataString } from "../src/artifact.ts";
+import { compileLocalGovernedContract } from "../src/governance.ts";
 
-const REQUIRED_SECTIONS = ["## Summary", "## Validation"];
-const CLOSING_KEYWORD_PATTERN =
-  /(?:^|[^A-Za-z0-9_])(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)(?:[ \t]+|[ \t]*:[ \t]*)(?:#[1-9]\d*|[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*#[1-9]\d*)(?![A-Za-z0-9_])/iu;
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-export function validatePullRequest({ title, body }) {
-  const errors = [];
-  if (!title || title.trim().length === 0) errors.push("PR title must not be empty");
-  if (!CLOSING_KEYWORD_PATTERN.test(body ?? "")) {
-    errors.push('PR body must link a closing Issue (e.g. "Closes #123")');
-  }
-  for (const section of REQUIRED_SECTIONS) {
-    if (!(body ?? "").includes(section)) errors.push(`PR body is missing required section: ${section}`);
-  }
-  return { errors };
+/**
+ * Validate a GitHub pull-request event through Inari's compiled contract.
+ *
+ * The workflow adapter owns only event plumbing and diagnostic formatting;
+ * template parsing, policy compilation, body reconstruction, and semantic
+ * validation remain in the product library used by the CLI.
+ */
+export async function validatePullRequest({ title, body, root = REPOSITORY_ROOT, template, contract }) {
+  const compiled = contract ?? (await compileLocalGovernedContract("pr", root, template));
+  const result = validateExistingPullRequestArtifact(compiled, body);
+  const violations = [...result.violations];
+  const titleViolation = validateRequiredMetadataString(title, "title");
+  if (titleViolation !== undefined) violations.unshift(titleViolation);
+  return {
+    valid: violations.length === 0,
+    contract: compiled,
+    result,
+    violations,
+    errors: violations.map((violation) => violation.message),
+  };
 }
 
-function main() {
+async function main() {
   const eventPathArgIndex = process.argv.indexOf("--event");
   if (eventPathArgIndex === -1) throw new Error("--event <path-to-github-event-json> is required");
-  const event = JSON.parse(fs.readFileSync(process.argv[eventPathArgIndex + 1], "utf8"));
+  const eventPath = process.argv[eventPathArgIndex + 1];
+  if (eventPath === undefined) throw new Error("--event requires a path");
+  const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
   const pullRequest = event.pull_request;
   if (!pullRequest) throw new Error("event has no pull_request");
 
-  const { errors } = validatePullRequest({ title: pullRequest.title ?? "", body: pullRequest.body ?? "" });
-  if (errors.length > 0) {
-    for (const error of errors) console.error(error);
-    process.exitCode = 1;
-    return;
-  }
-  console.log("PR contract valid.");
+  const template = optionValue("--template");
+  const report = await validatePullRequest({
+    title: pullRequest.title ?? "",
+    body: pullRequest.body ?? "",
+    root: process.cwd(),
+    ...(template === undefined ? {} : { template }),
+  });
+  console.log(
+    JSON.stringify({
+      valid: report.valid,
+      template: report.contract.templateIdentity,
+      classification: report.result.classification,
+      violations: report.violations,
+    }),
+  );
+  if (!report.valid) process.exitCode = 1;
 }
 
-if (process.argv[1]?.endsWith("validate-pr.mjs")) main();
+function optionValue(name) {
+  const index = process.argv.indexOf(name);
+  return index === -1 ? undefined : process.argv[index + 1];
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

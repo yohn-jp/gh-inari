@@ -16,10 +16,10 @@ jobs:
     name: validate-pr
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout base governance validator
+      - name: Checkout default-branch governance validator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Validate branch name
@@ -28,4 +28,4 @@ jobs:
         run: node scripts/validate-branch-name.mjs --branch "$HEAD_REF"
 
       - name: Validate PR contract
-        run: node scripts/validate-pr.mjs --event "$GITHUB_EVENT_PATH"
+        run: node --import tsx scripts/validate-pr.mjs --event "$GITHUB_EVENT_PATH"
