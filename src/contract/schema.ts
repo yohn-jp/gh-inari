@@ -1,4 +1,10 @@
-import { assertCanonicalContract, type CanonicalContract, type CanonicalField, JSON_SCHEMA_DIALECT } from "./ir.js";
+import {
+  assertCanonicalContract,
+  type CanonicalContract,
+  type CanonicalField,
+  type ContractProvenance,
+  JSON_SCHEMA_DIALECT,
+} from "./ir.js";
 import { effectiveFieldConstraints, schemaMinItems, schemaStringPatternProjection } from "./constraints.js";
 
 /** JSON Schema values used by the projected public input contract. */
@@ -41,6 +47,7 @@ export interface RenderingProjection {
   readonly templateIdentity: CanonicalContract["templateIdentity"];
   readonly nativeMetadata: CanonicalContract["nativeMetadata"];
   readonly sections: CanonicalContract["sections"];
+  readonly provenance?: ContractProvenance;
 }
 
 export interface ContractProjection {
@@ -183,6 +190,7 @@ export function projectContract(input: unknown): ContractProjection {
       templateIdentity: input.templateIdentity,
       nativeMetadata: input.nativeMetadata,
       sections: input.sections,
+      ...(input.provenance === undefined ? {} : { provenance: input.provenance }),
     },
   };
 }

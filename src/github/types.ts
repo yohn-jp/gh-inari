@@ -57,6 +57,13 @@ export interface RepositoryContext {
   readonly url: string;
 }
 
+/** A file entry from the repository Git tree at a trusted ref. */
+export interface RepositoryTreeEntry {
+  readonly path: string;
+  readonly type: "blob" | "tree";
+  readonly sha: string;
+}
+
 export interface GitHubIssue {
   readonly number: number;
   readonly title: string;
