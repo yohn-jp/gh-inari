@@ -62,6 +62,20 @@ test("invalid ordering, field types, and source metadata are rejected", () => {
   assert.ok(codes.includes("IR_INCONSISTENT_SOURCE"));
 });
 
+test("render metadata is rejected outside Issue Form textareas", () => {
+  const invalid = serializedFixture(issueContractFixture) as {
+    sections: Array<{ fields: Array<{ nativeMetadata: { render?: string } }> }>;
+  };
+  invalid.sections[1].fields[0].nativeMetadata.render = "shell";
+  const result = validateCanonicalContract(invalid);
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.violations.some(
+      (violation) => violation.code === "IR_INCONSISTENT_FIELD" && violation.path.endsWith(".render"),
+    ),
+  );
+});
+
 test("required checklist items cannot be represented as optional", () => {
   const invalid = serializedFixture(issueContractFixture) as {
     sections: Array<{ fields: Array<{ required: string }> }>;
