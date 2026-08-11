@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
@@ -183,7 +184,7 @@ test("wrong-template and unparseable existing bodies are distinguished", () => {
 });
 
 test("PR placeholder-only sections reconstruct as omitted semantic values", async () => {
-  const repositoryRoot = new URL("..", import.meta.url).pathname;
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
   const nativeContract = await compilePullRequestTemplate(repositoryRoot, "default");
   const body = renderPullRequestArtifact(nativeContract, {
     summary: "A deterministic summary",

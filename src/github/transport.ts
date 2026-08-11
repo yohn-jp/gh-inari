@@ -4,10 +4,12 @@ export interface GhCommandResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly signal?: NodeJS.Signals;
 }
 
 export interface GhTransportOptions {
   readonly cwd?: string;
+  readonly timeoutMs?: number;
 }
 
 /** The adapter's only credential boundary: execute the user's existing gh CLI. */
@@ -51,11 +53,20 @@ export class ProcessGhTransport implements GhTransport {
         stderr += chunk;
       });
       child.once("error", reject);
-      child.once("close", (exitCode: number | null) => {
+      const timer =
+        options.timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              child.kill("SIGTERM");
+            }, options.timeoutMs);
+      timer?.unref();
+      child.once("close", (exitCode: number | null, signal: NodeJS.Signals | null) => {
+        if (timer !== undefined) clearTimeout(timer);
         resolve({
           exitCode: exitCode ?? 1,
           stdout,
           stderr,
+          ...(signal === null ? {} : { signal }),
         });
       });
     });

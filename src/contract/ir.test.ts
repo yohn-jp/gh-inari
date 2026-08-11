@@ -74,14 +74,22 @@ test("required checklist items cannot be represented as optional", () => {
 
 test("supplemental constraints must reference fields and cannot contradict native constraints", () => {
   const invalid = serializedFixture(pullRequestContractFixture) as {
+    sections: Array<{ fields: Array<Record<string, unknown>> }>;
     supplementalConstraints: { fields: Array<Record<string, unknown>> };
   };
+  invalid.sections[0].fields[0].constraints = { minLength: 10 };
   invalid.supplementalConstraints.fields.push({ fieldId: "missing", required: true });
   invalid.supplementalConstraints.fields.push({ fieldId: "linked_issue", pattern: "[" });
+  invalid.supplementalConstraints.fields.push({ fieldId: "summary", minLength: 5 });
   const result = validateCanonicalContract(invalid);
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((violation) => violation.code === "IR_UNKNOWN_FIELD_REFERENCE"));
   assert.ok(result.violations.some((violation) => violation.code === "IR_INVALID_CONSTRAINT"));
+  assert.ok(
+    result.violations.some(
+      (violation) => violation.code === "IR_INCONSISTENT_CONSTRAINT" && violation.path.endsWith(".minLength"),
+    ),
+  );
 });
 
 test("malformed JSON produces the same structured validation error contract", () => {

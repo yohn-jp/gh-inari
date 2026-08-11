@@ -399,8 +399,17 @@ function selectorLabel(selector: string | TemplateSelector | undefined): string 
   return value === undefined ? "the requested selector" : JSON.stringify(value);
 }
 
+const TEMPLATE_SELECTOR_KEYS = new Set(["id", "type", "kind", "name", "path"]);
+
 function isTemplateSelectorValue(value: unknown): value is TemplateSelector {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entries = Object.entries(value).filter(([, option]) => option !== undefined);
+  return (
+    entries.length > 0 &&
+    entries.every(
+      ([key, option]) => TEMPLATE_SELECTOR_KEYS.has(key) && typeof option === "string" && option.trim().length > 0,
+    )
+  );
 }
 
 function compareStrings(left: string, right: string): number {

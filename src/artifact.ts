@@ -3,6 +3,7 @@ import {
   SemanticValidationError,
   validateSemanticInput,
   type SemanticValidationResult,
+  type SemanticViolation,
 } from "./contract/validation.js";
 import { assertCanonicalContract, type CanonicalContract, type CanonicalField } from "./contract/ir.js";
 import {
@@ -74,8 +75,7 @@ export interface ExistingArtifactValidationResult {
   readonly valid: boolean;
   readonly classification: ExistingArtifactClassification;
   readonly parse: ExistingArtifactParseResult;
-  readonly violations:
-    readonly ExistingArtifactDiagnostic[] | readonly import("./contract/validation.js").SemanticViolation[];
+  readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
 }
 
 export interface ExistingIssueReader {

@@ -16,14 +16,16 @@ export function validateIssue(body) {
 
 function main() {
   const eventPathArgIndex = process.argv.indexOf("--event");
-  if (eventPathArgIndex === -1) throw new Error("--event <path-to-github-event-json> is required");
-  const event = JSON.parse(fs.readFileSync(process.argv[eventPathArgIndex + 1], "utf8"));
+  const eventPath = eventPathArgIndex === -1 ? undefined : process.argv[eventPathArgIndex + 1];
+  if (eventPath === undefined) throw new Error("--event <path-to-github-event-json> is required");
+  const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
   const errors = validateIssue(event.issue?.body ?? "");
 
   const reportPathArgIndex = process.argv.indexOf("--report");
+  const reportPath = reportPathArgIndex === -1 ? undefined : process.argv[reportPathArgIndex + 1];
   if (errors.length > 0) {
     const report = ["Issue governance contract violation:", "", ...errors.map((error) => `- ${error}`)].join("\n");
-    if (reportPathArgIndex !== -1) fs.writeFileSync(process.argv[reportPathArgIndex + 1], `${report}\n`);
+    if (reportPath !== undefined) fs.writeFileSync(reportPath, `${report}\n`);
     console.error(report);
     process.exitCode = 1;
     return;

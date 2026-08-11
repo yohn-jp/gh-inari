@@ -10,9 +10,7 @@
     "declaration": true,
     "sourceMap": true,
     "resolveJsonModule": true,
-    "types": ["node"],
     "incremental": true,
-    "types": ["node"],
     "outDir": "./dist",
     "rootDir": "./src"
   },

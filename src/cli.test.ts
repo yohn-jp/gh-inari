@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
 import { runCli } from "./cli.js";
 
@@ -108,7 +109,7 @@ test("version comes from real package metadata", async () => {
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
   try {
-    const root = new URL("..", import.meta.url).pathname;
+    const root = fileURLToPath(new URL("..", import.meta.url));
     const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
       name?: string;
       version?: string;
@@ -122,7 +123,7 @@ test("version comes from real package metadata", async () => {
 
 test("invalid create input returns before adapter construction", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
-  const repositoryRoot = new URL("..", import.meta.url).pathname;
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
   const inputPath = path.join(directory, "issue.json");
   await writeFile(
     inputPath,
@@ -151,7 +152,7 @@ test("invalid create input returns before adapter construction", async () => {
 
 test("valid Issue create reaches the adapter only after canonical rendering", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
-  const repositoryRoot = new URL("..", import.meta.url).pathname;
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
   const inputPath = path.join(directory, "issue.json");
   await writeFile(
     inputPath,
@@ -206,7 +207,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
 
 test("valid PR create reaches the adapter with a canonical rendered body", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
-  const repositoryRoot = new URL("..", import.meta.url).pathname;
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
   const inputPath = path.join(directory, "pr.json");
   await writeFile(
     inputPath,
@@ -257,7 +258,7 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
 
 test("ambiguous template selection prevents adapter construction", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
-  const repositoryRoot = new URL("..", import.meta.url).pathname;
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
   const inputPath = path.join(directory, "issue.json");
   await writeFile(
     inputPath,
@@ -289,7 +290,7 @@ test("ambiguous template selection prevents adapter construction", async () => {
 
 test("invalid PR policy prevents adapter construction", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
-  const repositoryRoot = new URL("..", import.meta.url).pathname;
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
   const inputPath = path.join(directory, "pr.json");
   const policyPath = path.join(directory, "policy.yml");
   await writeFile(

@@ -47,7 +47,7 @@ test("compiles headings, literal content, comments, and checklists into ordered 
   assert.deepEqual(
     contract.sections.map((section) => ({ id: section.id, kind: section.kind, order: section.render.order })),
     [
-      { id: "content", kind: "documentation", order: 0 },
+      { id: "preamble_content", kind: "documentation", order: 0 },
       { id: "summary", kind: "input", order: 1 },
       { id: "checklist", kind: "input", order: 2 },
       { id: "linked_issue", kind: "input", order: 3 },

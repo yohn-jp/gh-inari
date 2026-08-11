@@ -41,6 +41,7 @@ export class GitHubAdapter {
   private availablePromise: Promise<void> | undefined;
   private contextPromise: Promise<RepositoryContext> | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
+  private readonly authenticationPromises = new Map<string | undefined, Promise<void>>();
 
   constructor(options: GitHubAdapterOptions = {}) {
     this.cwd = options.cwd;
@@ -237,6 +238,20 @@ export class GitHubAdapter {
 
   private async ensureAuthenticated(hostname: string | undefined): Promise<void> {
     if (this.authenticatedHostnames.has(hostname)) return;
+    let pending = this.authenticationPromises.get(hostname);
+    if (pending === undefined) {
+      pending = this.ensureAuthenticatedOnce(hostname);
+      this.authenticationPromises.set(hostname, pending);
+      pending
+        .catch(() => undefined)
+        .finally(() => {
+          this.authenticationPromises.delete(hostname);
+        });
+    }
+    return pending;
+  }
+
+  private async ensureAuthenticatedOnce(hostname: string | undefined): Promise<void> {
     const args = ["auth", "status"];
     if (hostname !== undefined) args.push("--hostname", hostname);
     const result = await this.runCommand(args, "auth.status");
@@ -481,8 +496,12 @@ function parseRepositoryOverride(repository: string, fallbackHostname: string): 
   }
 
   const parts = value.split("/");
-  if (parts.length === 2) return repositoryContext(fallbackHostname, parts[0], parts[1]);
-  if (parts.length === 3) return repositoryContext(parts[0], parts[1], parts[2]);
+  try {
+    if (parts.length === 2) return repositoryContext(fallbackHostname, parts[0], parts[1]);
+    if (parts.length === 3) return repositoryContext(parts[0], parts[1], parts[2]);
+  } catch (error) {
+    throw new InvalidRepositoryOverrideError(repository, error);
+  }
   throw new InvalidRepositoryOverrideError(repository);
 }
 
@@ -532,6 +551,7 @@ function isValidHostname(value: string): boolean {
 }
 
 function isValidRepositorySegment(value: string): boolean {
+  if (value === "." || value === "..") return false;
   return /^[A-Za-z0-9_.-]+$/u.test(value);
 }
 

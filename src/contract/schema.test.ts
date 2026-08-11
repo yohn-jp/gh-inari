@@ -29,7 +29,8 @@ test("checklist projection expresses required items with JSON Schema contains", 
 test("PR projection keeps unknown native required semantics but applies thin supplemental policy", () => {
   const schema = projectToJsonSchema(pullRequestContractFixture);
   assert.deepEqual(schema.required, ["linked_issue", "acceptance"]);
-  assert.equal(schema.properties.summary?.required, undefined);
+  assert.equal(schema.required?.includes("summary"), false);
+  assert.ok(schema.properties.summary !== undefined);
   assert.equal(schema.properties.linked_issue?.pattern, "(?:Closes|Fixes|Resolves)\\s+#\\d+");
   assert.equal(schema.properties.acceptance?.minItems, 1);
 });

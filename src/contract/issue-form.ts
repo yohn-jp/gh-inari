@@ -476,7 +476,7 @@ function compileTextField(
   const allowedKeys =
     elementType === "textarea"
       ? ["label", "description", "placeholder", "value", "render"]
-      : ["label", "description", "placeholder"];
+      : ["label", "description", "placeholder", "value"];
   checkUnknownKeys(attributes, allowedKeys, `${pathPrefix}.attributes`, diagnostics);
   if (elementType === "textarea" && hasOwn(attributes, "render")) {
     diagnostics.add(
@@ -487,10 +487,7 @@ function compileTextField(
   }
   const common = parseFieldCommon(id, attributes, validation, index, pathPrefix, diagnostics);
   const placeholder = optionalString(attributes, "placeholder", `${pathPrefix}.attributes`, diagnostics);
-  const defaultValue =
-    elementType === "textarea"
-      ? optionalString(attributes, "value", `${pathPrefix}.attributes`, diagnostics)
-      : undefined;
+  const defaultValue = optionalString(attributes, "value", `${pathPrefix}.attributes`, diagnostics);
   const nativeMetadata: NativeFieldMetadata = {
     elementType,
     sourceId: id,
@@ -743,7 +740,7 @@ function parseStringList(value: unknown, pathPrefix: string, diagnostics: Diagno
       if (typeof entry !== "string" || entry.trim().length === 0) {
         diagnostics.add("ISSUE_FORM_INVALID_VALUE", `${pathPrefix}[${index}]`, "Labels must be non-empty strings.");
       } else {
-        values.push(entry);
+        values.push(entry.trim());
       }
     });
   } else {

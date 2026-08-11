@@ -62,7 +62,7 @@ the release tag.
    - **Smoke test the packed tarball** on a matrix of OS/Node versions
      (`ubuntu-latest` × Node 22/24): install the exact tarball into an
      isolated directory, run it as `gh-inari` and as a discovered `gh
-     inari` extension.
+inari` extension.
    - **Publish**, only after every smoke-test matrix leg is green.
      Publishing uses npm Trusted Publishing (OIDC) — no long-lived npm
      token is stored in repository secrets. The `npm` GitHub Environment
@@ -72,7 +72,7 @@ the release tag.
      the registry first and skips publishing if so (idempotent re-runs
      do not error).
    - Any `npm warn publish` output is treated as a failure even if `npm
-     publish` itself exits 0.
+publish` itself exits 0.
 
 ## What this buys
 

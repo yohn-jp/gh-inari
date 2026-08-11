@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
@@ -14,7 +15,7 @@ import { compilePullRequestTemplate } from "./pull-request-template.js";
 import { discoverTemplates } from "./template-discovery.js";
 
 test("repository-native Issue and PR fixtures traverse the shared product core", async () => {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fileURLToPath(new URL("..", import.meta.url));
   const discovery = await discoverTemplates(root);
   const issue = await compileIssueFormTemplate(discovery, "feature");
   const issueInput = {
@@ -45,7 +46,7 @@ test("repository-native Issue and PR fixtures traverse the shared product core",
 });
 
 test("release metadata points at the real Inari package and built entrypoint", async () => {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fileURLToPath(new URL("..", import.meta.url));
   const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
     name?: string;
     bin?: Record<string, string>;

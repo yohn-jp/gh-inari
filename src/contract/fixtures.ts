@@ -250,7 +250,7 @@ export const pullRequestContractFixture = {
       {
         fieldId: "linked_issue",
         required: true,
-        pattern: "(?:Closes|Fixes|Resolves)\\s+#\\d+",
+        linkedIssue: true,
       },
       {
         fieldId: "acceptance",

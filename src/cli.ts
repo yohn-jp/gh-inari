@@ -465,6 +465,9 @@ Options:
   --title <title>     Issue/PR title for create
   --head <branch>     PR head branch for create
   --base <branch>     PR base branch for create
+  --draft             Create the PR as a draft
+  --maintainer-can-modify
+                      Allow maintainer edits on the PR
   --json              Emit structured JSON output
   --version           Print package version
   --help              Print this help

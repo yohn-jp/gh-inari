@@ -130,7 +130,8 @@ export function parsePullRequestTemplate(markdown: string, identity: DiscoveredT
     sections.push(createDocumentationSection(content, 0, usedIds));
   } else {
     const preamble = trimBlankLines(lines.slice(0, headings[0]?.start ?? 0).join("\n"));
-    if (preamble !== undefined) sections.push(createDocumentationSection(preamble, sections.length, usedIds));
+    if (preamble !== undefined)
+      sections.push(createDocumentationSection(preamble, sections.length, usedIds, "preamble_content"));
 
     headings.forEach((heading, headingIndex) => {
       const nextHeading = headings[headingIndex + 1];
@@ -366,7 +367,12 @@ function parseChecklistBody(body: readonly LexedLine[]): ChecklistBody | undefin
 
   for (let index = firstTask.sourceIndex + 1; index < lastTask.sourceIndex; index += 1) {
     const line = body[index];
-    if (line !== undefined && line.text.trim().length > 0 && parseListItem(line.text)?.task === undefined) {
+    if (
+      line !== undefined &&
+      !line.protected &&
+      line.text.trim().length > 0 &&
+      parseListItem(line.text)?.task === undefined
+    ) {
       throw new PullRequestTemplateError(
         "PR_TEMPLATE_AMBIGUOUS_STRUCTURE",
         "Checklist items must form one contiguous structural block.",

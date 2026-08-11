@@ -138,6 +138,10 @@ test("missing and ambiguous selections fail closed with typed errors", async () 
     () => selectTemplate(discovery, {}),
     (error: unknown) => error instanceof InvalidTemplateSelectorError && error.code === "INVALID_TEMPLATE_SELECTOR",
   );
+  assert.throws(
+    () => selectTemplate(discovery, { unexpected: "value" } as unknown as Parameters<typeof selectTemplate>[1]),
+    (error: unknown) => error instanceof InvalidTemplateSelectorError && error.code === "INVALID_TEMPLATE_SELECTOR",
+  );
 });
 
 test("duplicate and conflicting names fail closed while exact IDs remain selectable", async () => {

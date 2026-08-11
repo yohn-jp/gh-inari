@@ -86,17 +86,24 @@ function fieldDescription(field: CanonicalField): Pick<JsonSchema, "title" | "de
 function stringConstraints(
   field: CanonicalField,
   contract: CanonicalContract,
-): Pick<JsonSchema, "minLength" | "maxLength" | "pattern"> {
+): Pick<JsonSchema, "minLength" | "maxLength" | "pattern" | "allOf"> {
   const minLength = effectiveConstraint(field, contract, "minLength");
   const maxLength = effectiveConstraint(field, contract, "maxLength");
   const pattern = effectiveConstraint(field, contract, "pattern");
   const supplemental = supplementalForField(contract, field.id);
   const linkedIssue = supplemental?.linkedIssue === true;
+  const hasExplicitPattern = typeof pattern === "string";
 
   return {
     ...(typeof minLength === "number" ? { minLength } : {}),
     ...(typeof maxLength === "number" ? { maxLength } : {}),
-    ...(typeof pattern === "string" ? { pattern } : linkedIssue ? { pattern: LINKED_ISSUE_PATTERN } : {}),
+    ...(hasExplicitPattern
+      ? linkedIssue
+        ? { allOf: [{ pattern }, { pattern: LINKED_ISSUE_PATTERN }] }
+        : { pattern }
+      : linkedIssue
+        ? { pattern: LINKED_ISSUE_PATTERN }
+        : {}),
   };
 }
 
@@ -183,7 +190,10 @@ function schemaIdentifier(contract: CanonicalContract): string {
 
 export function projectToJsonSchema(input: unknown): JsonSchemaDocument {
   assertCanonicalContract(input);
-  const contract = input;
+  return projectValidatedContractToJsonSchema(input);
+}
+
+function projectValidatedContractToJsonSchema(contract: CanonicalContract): JsonSchemaDocument {
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
   for (const section of contract.sections) {
@@ -209,7 +219,7 @@ export const toJsonSchema = projectToJsonSchema;
 export function projectContract(input: unknown): ContractProjection {
   assertCanonicalContract(input);
   return {
-    schema: projectToJsonSchema(input),
+    schema: projectValidatedContractToJsonSchema(input),
     rendering: {
       artifactKind: input.artifactKind,
       templateIdentity: input.templateIdentity,

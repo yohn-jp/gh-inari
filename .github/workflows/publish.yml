@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   build:
@@ -99,6 +98,9 @@ jobs:
     needs: smoke-test
     runs-on: ubuntu-latest
     environment: npm
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout
@@ -137,6 +139,5 @@ jobs:
           set -o pipefail
           npm publish ./*.tgz 2>&1 | tee publish.log
           if grep -q "npm warn publish" publish.log; then
-            echo "npm emitted a publish warning; treating as failure"
-            exit 1
+            echo "::warning::npm emitted a publish warning after the package was already published; see publish.log"
           fi

@@ -82,14 +82,15 @@ export function compilePullRequestPolicyOverlay(
   const mergedFields = [...contract.supplementalConstraints.fields];
   overlay.sections.forEach((rule, ruleIndex) => {
     const field = resolveField(contract, rule.fieldId);
-    const constraint = ruleToConstraint(rule, field);
+    const rulePath = `$.sections[${ruleIndex}]`;
+    const constraint = ruleToConstraint(rule, field, rulePath);
     const existingIndex = mergedFields.findIndex((entry) => entry.fieldId === field.id);
     if (existingIndex < 0) mergedFields.push(constraint);
     else
       mergedFields[existingIndex] = mergeConstraints(
         mergedFields[existingIndex] as SupplementalFieldConstraint,
         constraint,
-        `$.sections[${ruleIndex}]`,
+        rulePath,
       );
   });
 
@@ -307,12 +308,16 @@ function parseRule(value: unknown, path: string): PullRequestPolicySectionRule {
   };
 }
 
-function ruleToConstraint(rule: PullRequestPolicySectionRule, field: CanonicalField): SupplementalFieldConstraint {
+function ruleToConstraint(
+  rule: PullRequestPolicySectionRule,
+  field: CanonicalField,
+  path: string,
+): SupplementalFieldConstraint {
   if (rule.linkedIssue === true && field.type !== "string" && field.type !== "enum") {
     throw new PullRequestPolicyError(
       "PR_POLICY_UNSUPPORTED_CONSTRAINT",
       "linkedIssue requires a string-like section.",
-      rule.fieldId,
+      path,
     );
   }
   if (
@@ -322,26 +327,18 @@ function ruleToConstraint(rule: PullRequestPolicySectionRule, field: CanonicalFi
     throw new PullRequestPolicyError(
       "PR_POLICY_UNSUPPORTED_CONSTRAINT",
       "Checklist constraints require a checklist section.",
-      rule.fieldId,
+      path,
     );
   }
   if (rule.pattern !== undefined) {
     try {
       new RegExp(rule.pattern, "u");
     } catch {
-      throw new PullRequestPolicyError(
-        "PR_POLICY_INVALID_VALUE",
-        "pattern must be a valid regular expression.",
-        rule.fieldId,
-      );
+      throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must be a valid regular expression.", path);
     }
   }
   if (rule.linkedIssue === true && rule.required === false) {
-    throw new PullRequestPolicyError(
-      "PR_POLICY_CONFLICT",
-      "linkedIssue cannot be combined with required=false.",
-      rule.fieldId,
-    );
+    throw new PullRequestPolicyError("PR_POLICY_CONFLICT", "linkedIssue cannot be combined with required=false.", path);
   }
   return {
     fieldId: field.id,

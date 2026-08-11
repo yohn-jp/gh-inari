@@ -16,6 +16,9 @@ const packageName = packageJson.name;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
+  if (result.error) {
+    throw new Error(`${command} ${args.join(" ")} failed to start: ${result.error.message}`);
+  }
   if (result.status !== 0) {
     throw new Error(
       `${command} ${args.join(" ")} failed (status ${result.status}):\n${result.stdout}\n${result.stderr}`,

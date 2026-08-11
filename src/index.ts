@@ -43,7 +43,8 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     .then((exitCode) => {
       process.exitCode = exitCode;
     })
-    .catch(() => {
+    .catch((error: unknown) => {
+      console.error(error instanceof Error ? error.message : String(error));
       if (process.exitCode === undefined || process.exitCode === 0) {
         process.exitCode = 1;
       }

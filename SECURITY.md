@@ -5,9 +5,9 @@
 This project is pre-1.0 (`0.x`). There is no long-term support branch yet —
 security fixes land on `main` and the latest `0.x` release only.
 
-| Version | Supported |
-| ------- | --------- |
-| 0.x     | ✅        |
+| Version    | Supported |
+| ---------- | --------- |
+| latest 0.x | ✅        |
 
 ## Reporting a Vulnerability
 

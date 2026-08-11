@@ -51,8 +51,9 @@ representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainers listed in [SECURITY.md](SECURITY.md) or via a
-private GitHub security advisory on this repository. All complaints will be
+reported privately via the [GitHub Security Advisories](../../security/advisories/new)
+channel described in [SECURITY.md](SECURITY.md) — that channel accepts Code of
+Conduct reports as well as vulnerability reports. All complaints will be
 reviewed and investigated promptly and fairly.
 
 All maintainers are obligated to respect the privacy and security of the

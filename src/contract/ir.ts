@@ -416,12 +416,7 @@ function validateRenderMetadata(
     return;
   }
   checkUnknownKeys(value, allowHeadingLevel ? ["order", "headingLevel"] : ["order"], path, violations);
-  if (
-    !hasOwn(value, "order") ||
-    !Number.isSafeInteger(value.order) ||
-    value.order !== expectedOrder ||
-    value.order < 0
-  ) {
+  if (!hasOwn(value, "order") || !Number.isSafeInteger(value.order) || value.order !== expectedOrder) {
     addViolation(
       violations,
       "IR_INVALID_ORDER",
@@ -506,8 +501,15 @@ function validateNativeSectionMetadata(
   kind: SectionKind,
   violations: CanonicalIrViolation[],
 ): void {
-  const metadata = requiredRecord({ metadata: value }, "metadata", path, violations);
-  if (metadata === undefined) return;
+  if (value === undefined) {
+    addViolation(violations, "IR_MISSING_PROPERTY", path, 'Property "nativeMetadata" is required.');
+    return;
+  }
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_VALUE", path, 'Property "nativeMetadata" must be an object.');
+    return;
+  }
+  const metadata = value;
   checkUnknownKeys(metadata, ["elementType", "sourceId", "headingLevel", "markdown"], path, violations);
   const elementType = requiredString(metadata, "elementType", path, violations);
   const sourceId = optionalString(metadata, "sourceId", path, violations);
@@ -599,8 +601,15 @@ function validateNativeFieldMetadata(
   fieldType: FieldType,
   violations: CanonicalIrViolation[],
 ): NativeFieldMetadata | undefined {
-  const metadata = requiredRecord({ metadata: value }, "metadata", path, violations);
-  if (metadata === undefined) return undefined;
+  if (value === undefined) {
+    addViolation(violations, "IR_MISSING_PROPERTY", path, 'Property "nativeMetadata" is required.');
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_VALUE", path, 'Property "nativeMetadata" must be an object.');
+    return undefined;
+  }
+  const metadata = value;
   checkUnknownKeys(
     metadata,
     ["elementType", "sourceId", "placeholder", "defaultValue", "multiple", "options"],
@@ -870,7 +879,7 @@ function validateDefaultString(
   }
   if (constraints?.pattern !== undefined) {
     try {
-      if (!new RegExp(constraints.pattern).test(value)) {
+      if (!new RegExp(constraints.pattern, "u").test(value)) {
         addViolation(violations, "IR_INVALID_DEFAULT", path, "Default does not satisfy pattern.");
       }
     } catch {
@@ -1246,8 +1255,15 @@ function validateSupplementalConstraints(
   summaries: Map<string, FieldSummary>,
   violations: CanonicalIrViolation[],
 ): void {
-  const record = requiredRecord({ constraints: value }, "constraints", path, violations);
-  if (record === undefined) return;
+  if (value === undefined) {
+    addViolation(violations, "IR_MISSING_PROPERTY", path, 'Property "supplementalConstraints" is required.');
+    return;
+  }
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_VALUE", path, 'Property "supplementalConstraints" must be an object.');
+    return;
+  }
+  const record = value;
   checkUnknownKeys(record, ["fields"], path, violations);
   const fields = requiredArray(record, "fields", path, violations);
   if (fields === undefined) return;
