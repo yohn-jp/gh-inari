@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { compileIssueFormYaml, type IssueFormTemplateIdentity } from "./contract/issue-form.js";
+import { access } from "node:fs/promises";
+import path from "node:path";
+import {
+  compileIssueFormTemplate,
+  compileIssueFormYaml,
+  type IssueFormTemplateIdentity,
+} from "./contract/issue-form.js";
 import {
   assertCanonicalContract,
   type CanonicalContract,
@@ -7,9 +13,10 @@ import {
   type ContractProvenanceSource,
 } from "./contract/ir.js";
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
-import { compilePullRequestPolicyOverlay } from "./pr-policy.js";
-import { parsePullRequestTemplate } from "./pull-request-template.js";
+import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay } from "./pr-policy.js";
+import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
 import {
+  discoverTemplates,
   selectIssueTemplate,
   selectPullRequestTemplate,
   type TemplateDiscoveryResult,
@@ -61,6 +68,59 @@ export function rejectGovernedPolicyOverride(policyPath: string | boolean | unde
     "Governed remote operations cannot use an arbitrary --policy file; policy must come from the target repository.",
     { path: policyPath, reason: "external policy override" },
   );
+}
+
+/**
+ * Compile governance from a checked-out repository source.
+ *
+ * This is the local counterpart to compileRepositoryGovernedContract. CLI
+ * local schema/validate/render commands and repository workflows both call
+ * this function so template, policy, and contract semantics remain owned by
+ * the product compiler rather than by handwritten workflow scripts.
+ */
+export async function compileLocalGovernedContract(
+  domain: GovernedArtifactDomain,
+  root: string,
+  selector?: string | TemplateSelector,
+  policyPath?: string | boolean,
+): Promise<CanonicalContract> {
+  const discovery = await discoverTemplates(root);
+  let contract: CanonicalContract;
+  if (domain === "issue") {
+    contract = await compileIssueFormTemplate(discovery, selector);
+  } else {
+    contract = await compilePullRequestTemplate(root, selector);
+  }
+  if (domain !== "pr") return contract;
+
+  const selectedPolicy = await resolveLocalPolicyPath(root, policyPath);
+  if (selectedPolicy === undefined) return contract;
+  return compilePullRequestPolicyFile(contract, selectedPolicy, {
+    templateIdentities: discovery.pullRequestTemplates,
+  });
+}
+
+/** Compile every repository-native Issue Form with the shared compiler. */
+export async function compileLocalIssueFormContracts(root: string): Promise<readonly CanonicalContract[]> {
+  const discovery = await discoverTemplates(root);
+  return Promise.all(discovery.issueTemplates.map((template) => compileIssueFormTemplate(discovery, template.id)));
+}
+
+async function resolveLocalPolicyPath(
+  root: string,
+  policyPath: string | boolean | undefined,
+): Promise<string | undefined> {
+  if (typeof policyPath === "string") return path.resolve(root, policyPath);
+  const candidates = [path.join(root, ".github", "inari", "pr-policy.yml"), path.join(root, ".inari", "pr-policy.yml")];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Continue to the next repository-native policy location.
+    }
+  }
+  return undefined;
 }
 
 /**

@@ -22,7 +22,7 @@ jobs:
       - name: Validate Issue contract
         id: validate
         continue-on-error: true
-        run: node scripts/validate-issue.mjs --event "$GITHUB_EVENT_PATH" --report /tmp/issue-governance.md
+        run: node --import tsx scripts/validate-issue.mjs --event "$GITHUB_EVENT_PATH" --report /tmp/issue-governance.md
 
       - name: Mark invalid Issue
         if: steps.validate.outcome == 'failure'

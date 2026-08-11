@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  ArtifactPreparationError,
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
   prepareIssueArtifact,
@@ -12,10 +13,37 @@ import {
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
 } from "./artifact.js";
-import { compileIssueFormYaml, projectToJsonSchema, LINKED_ISSUE_PATTERN } from "./contract/index.js";
+import {
+  compileIssueFormYaml,
+  projectToJsonSchema,
+  LINKED_ISSUE_PATTERN,
+  type CanonicalContract,
+} from "./contract/index.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 import { compilePullRequestPolicyOverlay } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
+
+function governedFixture(contract: CanonicalContract): CanonicalContract {
+  return {
+    ...contract,
+    provenance: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+      },
+      ref: "main",
+      template: {
+        path: contract.templateIdentity.path,
+        ref: "main",
+        sha: "fixture-template-sha",
+        digest: "fixture-template-digest",
+      },
+    },
+  };
+}
 
 test("Issue validation and rendering are deterministic and reversible", () => {
   const input = {
@@ -35,11 +63,68 @@ test("Issue validation and rendering are deterministic and reversible", () => {
   assert.deepEqual(parsed.values, input);
   assert.equal(validateExistingIssueArtifact(issueContractFixture, first).classification, "valid");
 
-  const prepared = prepareIssueArtifact(issueContractFixture, {
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
     fields: input,
     metadata: { title: "feat: preserve native labels" },
   });
   assert.deepEqual(prepared.artifact.labels, ["enhancement"]);
+});
+
+test("prepared PR artifacts prove comment, preamble, and checklist-placeholder round trips", () => {
+  const contract = governedFixture(
+    parsePullRequestTemplate(
+      "<!-- Repository guidance -->\n\n## Summary\n<!-- Explain the change. -->\n\n## Validation\n\nSelect completed items:\n\n- [ ] Tests\n- [ ] Build\n",
+      {
+        id: "pull-request-default:.github/PULL_REQUEST_TEMPLATE.md",
+        type: "pull-request-default",
+        kind: "pull-request",
+        name: "default",
+        path: ".github/PULL_REQUEST_TEMPLATE.md",
+      },
+    ),
+  );
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "A complete prepared artifact", validation: ["tests"] },
+    metadata: { title: "fix: round trip", head: "feature", base: "main" },
+  });
+
+  assert.deepEqual(parseExistingPullRequestArtifact(contract, prepared.artifact.body).values, {
+    summary: "A complete prepared artifact",
+    validation: ["tests"],
+  });
+  assert.deepEqual(prepared.artifact.provenance.repository, {
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+  });
+});
+
+test("preparation fails with typed diagnostics when rendering loses a semantic value", () => {
+  const contract = governedFixture(
+    compileIssueFormYaml(
+      "name: Optional\ndescription: Optional\nbody:\n  - type: input\n    id: optional\n    attributes:\n      label: Optional\n",
+      {
+        id: "issue-form:optional.yml",
+        type: "issue-form",
+        kind: "issue",
+        name: "optional",
+        path: ".github/ISSUE_TEMPLATE/optional.yml",
+      },
+    ),
+  );
+
+  assert.throws(
+    () =>
+      prepareIssueArtifact(contract, {
+        fields: { optional: "" },
+        metadata: { title: "fix: invalid round trip" },
+      }),
+    (error: unknown) =>
+      error instanceof ArtifactPreparationError &&
+      error.code === "ARTIFACT_ROUND_TRIP_INVALID" &&
+      error.diagnostics.some((diagnostic) => diagnostic.code === "ROUND_TRIP_MISMATCH"),
+  );
 });
 
 test("Issue Form native defaults, no-response values, dropdowns, checkboxes, and markdown blocks round-trip", () => {
@@ -199,14 +284,14 @@ body:
 });
 
 test("native title defaults and caller labels are deterministic", () => {
-  const prepared = prepareIssueArtifact(issueContractFixture, {
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
     fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
     metadata: { labels: ["custom", "enhancement"] },
   });
   assert.equal(prepared.artifact.title, "Feature");
   assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
 
-  const explicit = prepareIssueArtifact(issueContractFixture, {
+  const explicit = prepareIssueArtifact(governedFixture(issueContractFixture), {
     fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
     metadata: { title: "custom title" },
   });
@@ -216,7 +301,7 @@ test("native title defaults and caller labels are deterministic", () => {
 test("semantic violations are stable and mutation artifacts cannot be prepared", () => {
   assert.throws(
     () =>
-      prepareIssueArtifact(issueContractFixture, {
+      prepareIssueArtifact(governedFixture(issueContractFixture), {
         fields: { problem: "", category: "unknown", affected_areas: ["contracts", "contracts"], acceptance: ["bogus"] },
         metadata: { title: "feat: invalid" },
       }),

@@ -108,7 +108,9 @@ resolve template -> compile contract -> validate semantic JSON
 -> render canonical Markdown -> construct validated-rendered artifact -> call gh
 ```
 
-Schema, validate, and render never call a remote mutation. Invalid, ambiguous, unparseable, or unsupported pre-flight state cannot reach the mutation adapter. Existing Issue and PR validation fetches the artifact through the typed `gh` adapter, reconstructs semantic values, and calls the same compiler-owned validator. Diagnostics distinguish valid artifacts, ordinary semantic violations, wrong-template bodies, and unparseable structure.
+`prepareIssueArtifact` and `preparePullRequestArtifact` are the trusted preparation boundary for library callers. Each reparses the exact rendered body with the same compiled contract, revalidates the reconstructed values, and compares them deterministically with the validated/materialized source values before producing an opaque, frozen capability carrying the target repository/ref provenance. The public `phase: "validated-rendered"` string is informational; a caller-created or spread object is rejected by the mutation adapter, and there is no public marker helper.
+
+Schema, validate, and render never call a remote mutation. Invalid, ambiguous, unparseable, or unsupported pre-flight state cannot reach the mutation adapter. Existing Issue and PR validation fetches the artifact through the typed `gh` adapter, reconstructs semantic values, and calls the same compiler-owned validator. Diagnostics distinguish valid artifacts, ordinary semantic violations, wrong-template bodies, and unparseable structure. Renderer/parser drift fails with the typed `ARTIFACT_ROUND_TRIP_INVALID` preparation error.
 
 The public compiler, contract, validation, rendering, and adapter boundaries are library APIs. Future Actions or App adapters can use them without invoking or scraping CLI output.
 

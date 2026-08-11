@@ -9,6 +9,7 @@ import {
   InvalidRepositoryOverrideError,
   RepositoryResolutionError,
 } from "./errors.js";
+import { isTrustedValidatedRenderedArtifact } from "./capability.js";
 import { GhTransportTimeoutError, ProcessGhTransport, type GhCommandResult, type GhTransport } from "./transport.js";
 import {
   VALIDATED_RENDERED_PHASE,
@@ -211,6 +212,7 @@ export class GitHubAdapter {
   async createIssue(artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue> {
     assertValidatedRenderedIssueArtifact(artifact);
     const context = await this.resolveRepositoryContext();
+    assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues`, "POST");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
@@ -224,6 +226,7 @@ export class GitHubAdapter {
     assertIssueNumber(issueNumber, "issue_number");
     assertValidatedRenderedIssueArtifact(artifact);
     const context = await this.resolveRepositoryContext();
+    assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "PATCH");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
@@ -236,6 +239,7 @@ export class GitHubAdapter {
   async createPullRequest(artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest> {
     assertValidatedRenderedPullRequestArtifact(artifact);
     const context = await this.resolveRepositoryContext();
+    assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
@@ -254,6 +258,7 @@ export class GitHubAdapter {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     assertValidatedRenderedPullRequestArtifact(artifact);
     const context = await this.resolveRepositoryContext();
+    assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`, "PATCH");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
@@ -435,6 +440,12 @@ export function assertValidatedRenderedPullRequestArtifact(
 }
 
 function assertArtifactBase(artifact: unknown, kind: "issue" | "pull_request"): void {
+  if (!isTrustedValidatedRenderedArtifact(artifact)) {
+    throw new ContractViolationError(
+      "Mutation requires an opaque artifact produced by Inari's trusted preparation boundary.",
+      "artifact",
+    );
+  }
   if (!isRecord(artifact)) throw new ContractViolationError("Mutation requires a validated rendered artifact.");
   if (artifact.phase !== VALIDATED_RENDERED_PHASE) {
     throw new ContractViolationError(
@@ -447,6 +458,32 @@ function assertArtifactBase(artifact: unknown, kind: "issue" | "pull_request"): 
   }
   assertString(artifact.title, "title");
   assertString(artifact.body, "body");
+  assertProvenance(artifact.provenance);
+}
+
+function assertArtifactRepository(
+  artifact: ValidatedRenderedIssueArtifact | ValidatedRenderedPullRequestArtifact,
+  context: RepositoryContext,
+): void {
+  const provenance = artifact.provenance;
+  if (
+    provenance.repository.host.toLowerCase() !== context.hostname.toLowerCase() ||
+    provenance.repository.nameWithOwner !== context.nameWithOwner
+  ) {
+    throw new ContractViolationError(
+      "Mutation artifact provenance does not match the target repository.",
+      "provenance.repository",
+    );
+  }
+}
+
+function assertProvenance(value: unknown): void {
+  if (!isRecord(value)) {
+    throw new ContractViolationError("Mutation requires trusted repository/ref provenance.", "provenance");
+  }
+  if (!isRecord(value.repository) || typeof value.repository.nameWithOwner !== "string") {
+    throw new ContractViolationError("Mutation requires trusted repository/ref provenance.", "provenance.repository");
+  }
 }
 
 function assertString(value: unknown, path: string): asserts value is string {
