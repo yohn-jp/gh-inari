@@ -888,10 +888,10 @@ function validateDefaultString(
     addViolation(violations, "IR_INVALID_DEFAULT", path, "String defaults must be strings.");
     return;
   }
-  if (constraints?.minLength !== undefined && value.length < constraints.minLength) {
+  if (constraints?.minLength !== undefined && Array.from(value).length < constraints.minLength) {
     addViolation(violations, "IR_INVALID_DEFAULT", path, "Default does not satisfy minLength.");
   }
-  if (constraints?.maxLength !== undefined && value.length > constraints.maxLength) {
+  if (constraints?.maxLength !== undefined && Array.from(value).length > constraints.maxLength) {
     addViolation(violations, "IR_INVALID_DEFAULT", path, "Default does not satisfy maxLength.");
   }
   if (constraints?.pattern !== undefined) {

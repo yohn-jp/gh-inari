@@ -1,10 +1,5 @@
-import {
-  assertCanonicalContract,
-  LINKED_ISSUE_PATTERN,
-  type CanonicalContract,
-  type CanonicalField,
-  type SupplementalFieldConstraint,
-} from "./ir.js";
+import { assertCanonicalContract, LINKED_ISSUE_PATTERN, type CanonicalContract, type CanonicalField } from "./ir.js";
+import { effectiveFieldConstraints, REQUIRED_STRING_PATTERN, type EffectiveFieldConstraints } from "./constraints.js";
 
 /** Stable machine-readable semantic input diagnostics. */
 export type SemanticViolationCode =
@@ -82,10 +77,11 @@ export function validateSemanticInput(contractInput: unknown, input: unknown): S
   const values: Record<string, unknown> = {};
   for (const field of fields) {
     const path = fieldPath(field.id);
+    const constraints = effectiveFieldConstraints(contract, field);
     const present = Object.prototype.hasOwnProperty.call(input, field.id);
-    const rawValue = present ? input[field.id] : fieldDefault(field);
+    const rawValue = present ? input[field.id] : constraints.defaultValue;
     if (!present && rawValue === undefined) {
-      if (field.required === "required" || supplementalForField(contract, field.id)?.required === true) {
+      if (constraints.required) {
         violations.push({
           code: "INPUT_REQUIRED",
           path,
@@ -94,7 +90,7 @@ export function validateSemanticInput(contractInput: unknown, input: unknown): S
       }
       continue;
     }
-    const fieldViolations = validateField(field, rawValue, path, supplementalForField(contract, field.id));
+    const fieldViolations = validateField(field, rawValue, path, constraints);
     violations.push(...fieldViolations);
     if (fieldViolations.length === 0) values[field.id] = rawValue;
   }
@@ -112,15 +108,11 @@ function flattenFields(contract: CanonicalContract): readonly CanonicalField[] {
   return contract.sections.flatMap((section) => [...section.fields]);
 }
 
-function fieldDefault(field: CanonicalField): unknown {
-  return "defaultValue" in field ? field.defaultValue : undefined;
-}
-
 function validateField(
   field: CanonicalField,
   value: unknown,
   path: string,
-  supplemental: SupplementalFieldConstraint | undefined,
+  constraints: EffectiveFieldConstraints,
 ): readonly SemanticViolation[] {
   const violations: SemanticViolation[] = [];
   if (value === null || value === undefined) {
@@ -133,42 +125,39 @@ function validateField(
       violations.push({ code: "INPUT_TYPE", path, message: `Field "${field.label}" must be a string.` });
       return violations;
     }
-    const required = field.required === "required" || supplemental?.required === true;
-    if (required && value.trim().length === 0) {
+    if (constraints.required && !safeRegExpTest(REQUIRED_STRING_PATTERN, value)) {
       violations.push({ code: "INPUT_REQUIRED", path, message: `Required field "${field.label}" cannot be empty.` });
     }
-    if (field.type === "enum" && !field.options.some((option) => option.value === value)) {
+    if (field.type === "enum" && !constraints.allowedValues?.includes(value)) {
       violations.push({
         code: "INPUT_ENUM",
         path,
-        message: `Field "${field.label}" must be one of: ${field.options.map((option) => option.value).join(", ")}.`,
+        message: `Field "${field.label}" must be one of: ${constraints.allowedValues?.join(", ") ?? ""}.`,
       });
     }
-    const minLength = field.constraints?.minLength ?? supplemental?.minLength;
-    const maxLength = field.constraints?.maxLength ?? supplemental?.maxLength;
-    const pattern = field.constraints?.pattern ?? supplemental?.pattern;
-    if (minLength !== undefined && value.length < minLength) {
+    const length = Array.from(value).length;
+    if (constraints.minLength !== undefined && length < constraints.minLength) {
       violations.push({
         code: "INPUT_MIN_LENGTH",
         path,
-        message: `Field "${field.label}" must contain at least ${minLength} characters.`,
+        message: `Field "${field.label}" must contain at least ${constraints.minLength} characters.`,
       });
     }
-    if (maxLength !== undefined && value.length > maxLength) {
+    if (constraints.maxLength !== undefined && length > constraints.maxLength) {
       violations.push({
         code: "INPUT_MAX_LENGTH",
         path,
-        message: `Field "${field.label}" must contain at most ${maxLength} characters.`,
+        message: `Field "${field.label}" must contain at most ${constraints.maxLength} characters.`,
       });
     }
-    if (pattern !== undefined && !safeRegExpTest(pattern, value)) {
+    if (constraints.pattern !== undefined && !safeRegExpTest(constraints.pattern, value)) {
       violations.push({
         code: "INPUT_PATTERN",
         path,
         message: `Field "${field.label}" does not match the configured pattern.`,
       });
     }
-    if (supplemental?.linkedIssue === true && !safeRegExpTest(LINKED_ISSUE_PATTERN, value)) {
+    if (constraints.linkedIssue && !safeRegExpTest(LINKED_ISSUE_PATTERN, value)) {
       violations.push({
         code: "INPUT_PATTERN",
         path,
@@ -188,12 +177,11 @@ function validateField(
     return violations;
   }
   const strings = values as readonly string[];
-  if (new Set(strings).size !== strings.length) {
+  if (constraints.uniqueItems && new Set(strings).size !== strings.length) {
     violations.push({ code: "INPUT_DUPLICATE", path, message: `Field "${field.label}" must not contain duplicates.` });
   }
 
-  const allowed =
-    field.type === "array" ? field.items.options?.map((option) => option.value) : field.items.map((item) => item.id);
+  const allowed = constraints.allowedValues;
   if (allowed !== undefined) {
     strings.forEach((entry, index) => {
       if (!allowed.includes(entry)) {
@@ -205,35 +193,30 @@ function validateField(
       }
     });
   }
-  if (field.required === "required" || supplemental?.required === true) {
+  if (constraints.required) {
     if (strings.length === 0) {
       violations.push({ code: "INPUT_REQUIRED", path, message: `Required field "${field.label}" cannot be empty.` });
     }
   }
 
-  const minItems = Math.max(
-    field.constraints?.minItems ?? 0,
-    supplemental?.minItems ?? 0,
-    supplemental?.checklistMinCompleted ?? 0,
-  );
-  const maxItems = field.constraints?.maxItems ?? supplemental?.maxItems;
-  if (strings.length < minItems) {
+  if (constraints.minItems !== undefined && strings.length < constraints.minItems) {
     violations.push({
       code: "INPUT_MIN_ITEMS",
       path,
-      message: `Field "${field.label}" must contain at least ${minItems} selected item(s).`,
+      message: `Field "${field.label}" must contain at least ${constraints.minItems} selected item(s).`,
     });
   }
-  if (maxItems !== undefined && strings.length > maxItems) {
+  if (constraints.maxItems !== undefined && strings.length > constraints.maxItems) {
     violations.push({
       code: "INPUT_MAX_ITEMS",
       path,
-      message: `Field "${field.label}" must contain at most ${maxItems} selected item(s).`,
+      message: `Field "${field.label}" must contain at most ${constraints.maxItems} selected item(s).`,
     });
   }
   if (field.type === "checklist") {
-    for (const item of field.items) {
-      if (item.required && !strings.includes(item.id)) {
+    for (const itemId of constraints.requiredItems) {
+      const item = field.items.find((candidate) => candidate.id === itemId);
+      if (item !== undefined && !strings.includes(item.id)) {
         violations.push({
           code: "INPUT_CHECKLIST_REQUIRED",
           path,
@@ -241,7 +224,7 @@ function validateField(
         });
       }
     }
-    if (supplemental?.checklistRequireComplete === true && strings.length !== field.items.length) {
+    if (constraints.checklistRequireComplete && strings.length !== field.items.length) {
       violations.push({
         code: "INPUT_CHECKLIST_INCOMPLETE",
         path,
@@ -250,10 +233,6 @@ function validateField(
     }
   }
   return violations;
-}
-
-function supplementalForField(contract: CanonicalContract, fieldId: string): SupplementalFieldConstraint | undefined {
-  return contract.supplementalConstraints.fields.find((constraint) => constraint.fieldId === fieldId);
 }
 
 function fieldPath(id: string): string {
