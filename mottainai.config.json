@@ -3,18 +3,11 @@
   "mcpServers": {
     "codegraph": {
       "command": "codegraph",
-      "args": [
-        "serve",
-        "--mcp",
-        "--path",
-        "."
-      ]
+      "args": ["serve", "--mcp", "--path", "."]
     },
     "fff-mcp": {
       "command": "fff-mcp",
-      "args": [
-        "."
-      ]
+      "args": ["."]
     }
   },
   "gateway": {
