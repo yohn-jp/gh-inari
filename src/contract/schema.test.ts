@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { projectContract, projectToJsonSchema, serializeJsonSchema } from "./index.js";
+import { LINKED_ISSUE_PATTERN, projectContract, projectToJsonSchema, serializeJsonSchema } from "./index.js";
 import { issueContractFixture, pullRequestContractFixture } from "./fixtures.js";
 
 test("Issue projection is stable and uses standard JSON Schema", () => {
@@ -31,7 +31,7 @@ test("PR projection keeps unknown native required semantics but applies thin sup
   assert.deepEqual(schema.required, ["linked_issue", "acceptance"]);
   assert.equal(schema.required?.includes("summary"), false);
   assert.ok(schema.properties.summary !== undefined);
-  assert.equal(schema.properties.linked_issue?.pattern, "(?:Closes|Fixes|Resolves)\\s+#\\d+");
+  assert.equal(schema.properties.linked_issue?.pattern, LINKED_ISSUE_PATTERN);
   assert.equal(schema.properties.acceptance?.minItems, 1);
 });
 

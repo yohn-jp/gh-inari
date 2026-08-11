@@ -63,6 +63,13 @@ test("discovers all supported GitHub-native locations in deterministic order", a
         path: ".github/PULL_REQUEST_TEMPLATE.md",
       },
       {
+        id: "pull-request:.github/PULL_REQUEST_TEMPLATE/README.txt",
+        type: "pull-request",
+        kind: "pull-request",
+        name: "README",
+        path: ".github/PULL_REQUEST_TEMPLATE/README.txt",
+      },
+      {
         id: "pull-request:.github/PULL_REQUEST_TEMPLATE/maintenance.md",
         type: "pull-request",
         kind: "pull-request",
@@ -86,7 +93,7 @@ test("discovers all supported GitHub-native locations in deterministic order", a
     false,
   );
   assert.equal(
-    discovery.templates.some(({ path: templatePath }) => templatePath.endsWith("README.txt")),
+    discovery.templates.some(({ path: templatePath }) => templatePath.endsWith(".github/ISSUE_TEMPLATE/README.txt")),
     false,
   );
 
@@ -175,6 +182,39 @@ test("a repository without .github has an empty discovery result", async () => {
       () => selectTemplate(discovery),
       (error: unknown) => error instanceof TemplateNotFoundError && error.code === "TEMPLATE_NOT_FOUND",
     );
+  });
+});
+
+test("discovers root, docs, and .github PR locations with native filename casing and extensions", async () => {
+  await withTemporaryRepository(async (repositoryRoot) => {
+    await mkdir(path.join(repositoryRoot, "docs", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await mkdir(path.join(repositoryRoot, ".github", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await mkdir(path.join(repositoryRoot, "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await writeFile(path.join(repositoryRoot, "PULL_REQUEST_TEMPLATE.MD"), "## Root\n");
+    await writeFile(path.join(repositoryRoot, "docs", "pull_request_template.txt"), "## Docs\n");
+    await writeFile(path.join(repositoryRoot, ".github", "PuLl_ReQuEsT_TeMpLaTe.TxT"), "## GitHub\n");
+    await writeFile(path.join(repositoryRoot, "PULL_REQUEST_TEMPLATE", "release.MD"), "## Release\n");
+    await writeFile(path.join(repositoryRoot, "docs", "PULL_REQUEST_TEMPLATE", "docs.txt"), "## Docs\n");
+    await writeFile(path.join(repositoryRoot, ".github", "PULL_REQUEST_TEMPLATE", "security.md"), "## Security\n");
+    await writeFile(path.join(repositoryRoot, "PULL_REQUEST_TEMPLATE", "ignored.yml"), "not a PR template\n");
+
+    const discovery = await discoverTemplates(repositoryRoot);
+    assert.deepEqual(
+      discovery.pullRequestTemplates.map(({ path: templatePath }) => templatePath),
+      [
+        ".github/PuLl_ReQuEsT_TeMpLaTe.TxT",
+        "PULL_REQUEST_TEMPLATE.MD",
+        "docs/pull_request_template.txt",
+        ".github/PULL_REQUEST_TEMPLATE/security.md",
+        "PULL_REQUEST_TEMPLATE/release.MD",
+        "docs/PULL_REQUEST_TEMPLATE/docs.txt",
+      ],
+    );
+    assert.equal(
+      discovery.pullRequestTemplates.some(({ path: templatePath }) => templatePath.endsWith("ignored.yml")),
+      false,
+    );
+    assert.deepEqual(discoverTemplatesSync(repositoryRoot), discovery);
   });
 });
 
