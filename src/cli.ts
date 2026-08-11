@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
@@ -15,16 +15,17 @@ import {
   type ArtifactInputDocument,
 } from "./artifact.js";
 import {
-  compileIssueFormTemplate,
   projectContract,
   type CanonicalContract,
   SemanticValidationError,
   validateSemanticInput,
 } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
-import { compileRepositoryGovernedContract, rejectGovernedPolicyOverride } from "./governance.js";
-import { compilePullRequestPolicyFile } from "./pr-policy.js";
-import { compilePullRequestTemplate } from "./pull-request-template.js";
+import {
+  compileLocalGovernedContract,
+  compileRepositoryGovernedContract,
+  rejectGovernedPolicyOverride,
+} from "./governance.js";
 import { discoverTemplates, type TemplateSelector } from "./template-discovery.js";
 
 const EXIT_USAGE = 1;
@@ -138,7 +139,12 @@ async function runArtifactCommand(
       await adapter.resolveRepositoryContext();
       contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
     } else {
-      contract = await loadContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+      contract = await compileLocalGovernedContract(
+        domain,
+        root,
+        templateSelector(parsed, rest[0]),
+        parsed.options.policy,
+      );
     }
     const projection = projectContract(contract);
     console.log(JSON.stringify({ contract, template: contract.templateIdentity, ...projection }));
@@ -154,7 +160,12 @@ async function runArtifactCommand(
       return runExistingValidation(domain, Number(rest[0]), parsed, root, dependencies, json);
     }
     if (command === "validate" || command === "render") {
-      const contract = await loadContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+      const contract = await compileLocalGovernedContract(
+        domain,
+        root,
+        templateSelector(parsed, rest[0]),
+        parsed.options.policy,
+      );
       const document = await readInputDocument(parsed.options.from);
       const preparedDocument = mergeOptionMetadata(document, parsed.options);
       if (command === "validate") {
@@ -223,47 +234,6 @@ async function runExistingValidation(
   };
   console.log(JSON.stringify(output));
   return result.valid ? 0 : EXIT_VALIDATION;
-}
-
-async function loadContract(
-  domain: "issue" | "pr",
-  root: string,
-  selector: string | TemplateSelector | undefined,
-  policyPath: string | boolean | undefined,
-): Promise<CanonicalContract> {
-  const discovery = await discoverTemplates(root);
-  let contract: CanonicalContract;
-  if (domain === "issue") {
-    contract = await compileIssueFormTemplate(discovery, selector);
-  } else {
-    contract = await compilePullRequestTemplate(root, selector);
-  }
-  if (domain === "pr") {
-    let selectedPolicy: string | undefined;
-    if (typeof policyPath === "string") {
-      selectedPolicy = path.resolve(root, policyPath);
-    } else {
-      const candidates = [
-        path.join(root, ".github", "inari", "pr-policy.yml"),
-        path.join(root, ".inari", "pr-policy.yml"),
-      ];
-      for (const candidate of candidates) {
-        try {
-          await access(candidate);
-          selectedPolicy = candidate;
-          break;
-        } catch {
-          // Continue to next candidate
-        }
-      }
-    }
-    if (selectedPolicy !== undefined) {
-      contract = await compilePullRequestPolicyFile(contract, selectedPolicy, {
-        templateIdentities: discovery.pullRequestTemplates,
-      });
-    }
-  }
-  return contract;
 }
 
 function createAdapter(

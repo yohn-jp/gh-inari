@@ -28,6 +28,12 @@ export interface ArtifactInputDocument {
   readonly metadata: ArtifactInputMetadata;
 }
 
+export interface ArtifactMetadataViolation {
+  readonly code: "INPUT_METADATA_INVALID";
+  readonly path: string;
+  readonly message: string;
+}
+
 export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_INVALID";
 
 export class ArtifactInputError extends Error {
@@ -229,6 +235,16 @@ export function validateExistingPullRequestArtifact(
   assertCanonicalContract(contractInput);
   const parse = parseExistingPullRequestArtifact(contractInput, body);
   return validateParsedArtifact(contractInput, parse);
+}
+
+/** Validate the same required string metadata enforced by mutation preparation. */
+export function validateRequiredMetadataString(value: unknown, key: string): ArtifactMetadataViolation | undefined {
+  if (typeof value === "string" && value.trim().length > 0) return undefined;
+  return {
+    code: "INPUT_METADATA_INVALID",
+    path: `$.${key}`,
+    message: `${key} must be a non-empty string.`,
+  };
 }
 
 export async function validateExistingIssueFromAdapter(
@@ -623,9 +639,9 @@ type MutableArtifactInputMetadata = {
 };
 
 function requiredMetadataString(value: unknown, key: string): string {
-  if (typeof value !== "string" || value.trim().length === 0)
-    throw new ArtifactInputError("INPUT_METADATA_INVALID", `${key} must be a non-empty string.`, `$.${key}`);
-  return value;
+  const violation = validateRequiredMetadataString(value, key);
+  if (violation !== undefined) throw new ArtifactInputError(violation.code, violation.message, violation.path);
+  return value as string;
 }
 
 function stringArray(value: unknown, key: string): readonly string[] {
