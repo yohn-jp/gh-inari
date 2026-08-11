@@ -56,5 +56,5 @@ test("release metadata points at the real Inari package and built entrypoint", a
   assert.equal(packageJson.name, "gh-inari");
   assert.deepEqual(packageJson.bin, { "gh-inari": "dist/index.js" });
   assert.equal(packageJson.main, "dist/index.js");
-  assert.equal(packageJson.repository?.url, "git+https://github.com/yohn-jp/inari.git");
+  assert.equal(packageJson.repository?.url, "git+https://github.com/yohn-jp/gh-inari.git");
 });
