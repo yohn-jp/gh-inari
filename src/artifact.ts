@@ -5,13 +5,17 @@ import {
   type SemanticValidationResult,
   type SemanticViolation,
 } from "./contract/validation.js";
-import { assertCanonicalContract, type CanonicalContract, type CanonicalField } from "./contract/ir.js";
 import {
-  markValidatedRenderedIssueArtifact,
-  markValidatedRenderedPullRequestArtifact,
-  type ValidatedRenderedIssueArtifact,
-  type ValidatedRenderedPullRequestArtifact,
-} from "./github/types.js";
+  assertCanonicalContract,
+  type CanonicalContract,
+  type CanonicalField,
+  type ContractProvenance,
+} from "./contract/ir.js";
+import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
+import {
+  createValidatedRenderedIssueArtifact,
+  createValidatedRenderedPullRequestArtifact,
+} from "./github/capability.js";
 
 export interface ArtifactInputMetadata {
   readonly title?: string;
@@ -45,6 +49,35 @@ export class ArtifactInputError extends Error {
     this.name = "ArtifactInputError";
     this.code = code;
     this.path = path;
+  }
+}
+
+export type ArtifactPreparationErrorCode = "ARTIFACT_PROVENANCE_MISSING" | "ARTIFACT_ROUND_TRIP_INVALID";
+
+export type ArtifactRoundTripDiagnosticCode = "ROUND_TRIP_PARSE" | "ROUND_TRIP_SEMANTIC" | "ROUND_TRIP_MISMATCH";
+
+export interface ArtifactRoundTripDiagnostic {
+  readonly code: ArtifactRoundTripDiagnosticCode;
+  readonly path: string;
+  readonly message: string;
+  readonly expected?: unknown;
+  readonly actual?: unknown;
+}
+
+/** Stable failures raised before a mutation-capable artifact is created. */
+export class ArtifactPreparationError extends Error {
+  readonly code: ArtifactPreparationErrorCode;
+  readonly diagnostics: readonly ArtifactRoundTripDiagnostic[];
+
+  constructor(
+    code: ArtifactPreparationErrorCode,
+    message: string,
+    diagnostics: readonly ArtifactRoundTripDiagnostic[] = [],
+  ) {
+    super(message);
+    this.name = "ArtifactPreparationError";
+    this.code = code;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -157,14 +190,18 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "issue")
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
+  requireTrustedProvenance(contractInput);
   const validation = validateSemanticInput(contractInput, input.fields);
   if (!validation.valid) throw new SemanticValidationError(validation.violations);
   const title = requiredMetadataString(input.metadata.title ?? contractInput.nativeMetadata.title, "title");
   const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
-  const artifact = markValidatedRenderedIssueArtifact({
+  const body = renderIssueBody(contractInput, validation.values);
+  verifyRenderedRoundTrip(contractInput, validation.values, body, "issue");
+  const artifact = createValidatedRenderedIssueArtifact({
     kind: "issue",
     title,
-    body: renderIssueBody(contractInput, validation.values),
+    body,
+    provenance: contractInput.provenance,
     ...(labels === undefined ? {} : { labels }),
     ...(input.metadata.assignees === undefined ? {} : { assignees: input.metadata.assignees }),
   });
@@ -179,15 +216,19 @@ export function preparePullRequestArtifact(
   if (contractInput.artifactKind !== "pull_request") {
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
   }
+  requireTrustedProvenance(contractInput);
   const validation = validateSemanticInput(contractInput, input.fields);
   if (!validation.valid) throw new SemanticValidationError(validation.violations);
   const title = requiredMetadataString(input.metadata.title, "title");
   const head = requiredMetadataString(input.metadata.head, "head");
   const base = requiredMetadataString(input.metadata.base, "base");
-  const artifact = markValidatedRenderedPullRequestArtifact({
+  const body = renderPullRequestBody(contractInput, validation.values);
+  verifyRenderedRoundTrip(contractInput, validation.values, body, "pull_request");
+  const artifact = createValidatedRenderedPullRequestArtifact({
     kind: "pull_request",
     title,
-    body: renderPullRequestBody(contractInput, validation.values),
+    body,
+    provenance: contractInput.provenance,
     head,
     base,
     ...(input.metadata.draft === undefined ? {} : { draft: input.metadata.draft }),
@@ -286,6 +327,111 @@ function validateParsedArtifact(
     parse,
     violations: semantic.violations,
   };
+}
+
+function requireTrustedProvenance(
+  contract: CanonicalContract,
+): asserts contract is CanonicalContract & { readonly provenance: ContractProvenance } {
+  if (contract.provenance === undefined) {
+    throw new ArtifactPreparationError(
+      "ARTIFACT_PROVENANCE_MISSING",
+      "Mutation preparation requires a contract bound to trusted repository governance.",
+      [
+        {
+          code: "ROUND_TRIP_PARSE",
+          path: "$.provenance",
+          message: "The compiled contract has no trusted repository/ref provenance.",
+        },
+      ],
+    );
+  }
+}
+
+function verifyRenderedRoundTrip(
+  contract: CanonicalContract,
+  expectedValues: Readonly<Record<string, unknown>>,
+  body: string,
+  kind: "issue" | "pull_request",
+): void {
+  const parsed =
+    kind === "issue" ? parseExistingIssueArtifact(contract, body) : parseExistingPullRequestArtifact(contract, body);
+  if (!parsed.parsed) {
+    throw new ArtifactPreparationError(
+      "ARTIFACT_ROUND_TRIP_INVALID",
+      `Rendered ${kind} artifact did not reparse under the compiled contract.`,
+      parsed.diagnostics.map((diagnostic) => ({
+        code: "ROUND_TRIP_PARSE" as const,
+        path: diagnostic.path,
+        message: diagnostic.message,
+      })),
+    );
+  }
+
+  const reconstructed = validateSemanticInput(contract, parsed.values);
+  if (!reconstructed.valid) {
+    throw new ArtifactPreparationError(
+      "ARTIFACT_ROUND_TRIP_INVALID",
+      `Rendered ${kind} artifact failed semantic validation after reparsing.`,
+      reconstructed.violations.map((violation) => ({
+        code: "ROUND_TRIP_SEMANTIC" as const,
+        path: violation.path,
+        message: violation.message,
+      })),
+    );
+  }
+
+  const mismatches = compareMaterializedValues(expectedValues, reconstructed.values);
+  if (mismatches.length > 0) {
+    throw new ArtifactPreparationError(
+      "ARTIFACT_ROUND_TRIP_INVALID",
+      `Rendered ${kind} artifact did not preserve its validated semantic values.`,
+      mismatches,
+    );
+  }
+}
+
+function compareMaterializedValues(
+  expected: Readonly<Record<string, unknown>>,
+  actual: Readonly<Record<string, unknown>>,
+): readonly ArtifactRoundTripDiagnostic[] {
+  const keys = [...new Set([...Object.keys(expected), ...Object.keys(actual)])].sort(compareStrings);
+  const diagnostics: ArtifactRoundTripDiagnostic[] = [];
+  for (const key of keys) {
+    const expectedPresent = Object.prototype.hasOwnProperty.call(expected, key);
+    const actualPresent = Object.prototype.hasOwnProperty.call(actual, key);
+    const path = `$.${key}`;
+    if (!expectedPresent || !actualPresent) {
+      diagnostics.push({
+        code: "ROUND_TRIP_MISMATCH",
+        path,
+        message: "Rendered artifact changed whether a semantic field was materialized.",
+        ...(expectedPresent ? { expected: expected[key] } : {}),
+        ...(actualPresent ? { actual: actual[key] } : {}),
+      });
+      continue;
+    }
+    if (stableValue(expected[key]) !== stableValue(actual[key])) {
+      diagnostics.push({
+        code: "ROUND_TRIP_MISMATCH",
+        path,
+        message: "Rendered artifact changed a materialized semantic value.",
+        expected: expected[key],
+        actual: actual[key],
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function stableValue(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? String(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableValue(entry)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort(compareStrings)
+    .map((key) => `${JSON.stringify(key)}:${stableValue(record[key])}`)
+    .join(",")}}`;
 }
 
 function renderIssueBody(contract: CanonicalContract, values: Readonly<Record<string, unknown>>): string {
@@ -481,7 +627,11 @@ function parseFieldLines(
 ): { value: unknown; diagnostics: readonly ExistingArtifactDiagnostic[] } {
   const diagnostics: ExistingArtifactDiagnostic[] = [];
   const filtered = stripComments ? lines.filter((line) => line.trim().length > 0) : lines;
-  if (filtered.length === 1 && filtered[0]?.trim() === GITHUB_NO_RESPONSE) return { value: undefined, diagnostics };
+  if (filtered.length === 1 && filtered[0]?.trim() === GITHUB_NO_RESPONSE) {
+    // GitHub uses the same marker for an empty optional selection. Preserve
+    // the materialized empty array so prepared artifacts remain reversible.
+    return { value: field.type === "array" ? [] : undefined, diagnostics };
+  }
   if (field.type === "string" || field.type === "enum") {
     const value =
       field.nativeMetadata.render === undefined
@@ -729,4 +879,8 @@ function sameLines(actual: readonly string[], expected: readonly string[]): bool
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

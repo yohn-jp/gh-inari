@@ -1,16 +1,23 @@
+import type { ContractProvenance } from "../contract/ir.js";
+
 export const VALIDATED_RENDERED_PHASE = "validated-rendered" as const;
 
 export type ValidatedRenderedPhase = typeof VALIDATED_RENDERED_PHASE;
 
 /**
- * This discriminator is the handoff contract from Inari's compiler/validator.
- * The adapter checks the handoff shape but does not compile, validate, or render it.
+ * Compiler-owned handoff data for the GitHub mutation adapter.
+ *
+ * The runtime capability is intentionally opaque: a structurally matching
+ * object, including one carrying this public phase string, is not accepted by
+ * the adapter. `prepareIssueArtifact` and `preparePullRequestArtifact` are the
+ * trusted preparation boundary.
  */
 export interface ValidatedRenderedIssueArtifact {
   readonly phase: ValidatedRenderedPhase;
   readonly kind: "issue";
   readonly title: string;
   readonly body: string;
+  readonly provenance: ContractProvenance;
   readonly labels?: readonly string[];
   readonly assignees?: readonly string[];
 }
@@ -20,6 +27,7 @@ export interface ValidatedRenderedPullRequestArtifact {
   readonly kind: "pull_request";
   readonly title: string;
   readonly body: string;
+  readonly provenance: ContractProvenance;
   readonly head: string;
   readonly base: string;
   readonly draft?: boolean;
@@ -27,26 +35,6 @@ export interface ValidatedRenderedPullRequestArtifact {
 }
 
 export type ValidatedRenderedArtifact = ValidatedRenderedIssueArtifact | ValidatedRenderedPullRequestArtifact;
-
-/**
- * Creates the explicit compiler-to-adapter handoff marker. Callers must invoke
- * this only after their own contract validation and canonical rendering.
- */
-export function markValidatedRenderedIssueArtifact(
-  artifact: Omit<ValidatedRenderedIssueArtifact, "phase">,
-): ValidatedRenderedIssueArtifact {
-  return { ...artifact, phase: VALIDATED_RENDERED_PHASE };
-}
-
-/**
- * Creates the explicit compiler-to-adapter handoff marker. Callers must invoke
- * this only after their own contract validation and canonical rendering.
- */
-export function markValidatedRenderedPullRequestArtifact(
-  artifact: Omit<ValidatedRenderedPullRequestArtifact, "phase">,
-): ValidatedRenderedPullRequestArtifact {
-  return { ...artifact, phase: VALIDATED_RENDERED_PHASE };
-}
 
 export interface RepositoryContext {
   readonly hostname: string;

@@ -8,13 +8,14 @@ import {
   GitHubApiError,
   GitHubTransportError,
   RepositoryResolutionError,
-  markValidatedRenderedIssueArtifact,
-  markValidatedRenderedPullRequestArtifact,
   type GhCommandResult,
   type GhTransport,
   type GhTransportOptions,
   type ValidatedRenderedIssueArtifact,
 } from "./index.js";
+import { prepareIssueArtifact, preparePullRequestArtifact } from "../artifact.js";
+import { issueContractFixture, pullRequestContractFixture } from "../contract/fixtures.js";
+import type { CanonicalContract } from "../contract/ir.js";
 
 interface RecordedCall {
   readonly args: readonly string[];
@@ -74,6 +75,28 @@ function pullRequestPayload(number = 43): string {
     head: { ref: "feature" },
     base: { ref: "main" },
   });
+}
+
+function governedFixture(contract: CanonicalContract): CanonicalContract {
+  return {
+    ...contract,
+    provenance: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+      },
+      ref: "main",
+      template: {
+        path: contract.templateIdentity.path,
+        ref: "main",
+        sha: "fixture-template-sha",
+        digest: "fixture-template-digest",
+      },
+    },
+  };
 }
 
 test("resolves the current repository deterministically and preserves the gh cwd", async () => {
@@ -174,22 +197,25 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
     command(0, pullRequestPayload(47)),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
-  const issueArtifact = markValidatedRenderedIssueArtifact({
-    kind: "issue",
-    title: "Rendered issue",
-    body: "Rendered issue body",
-    labels: ["bug"],
-    assignees: ["octocat"],
-  });
-  const pullRequestArtifact = markValidatedRenderedPullRequestArtifact({
-    kind: "pull_request",
-    title: "Rendered pull request",
-    body: "Rendered pull request body",
-    head: "feature",
-    base: "main",
-    draft: false,
-    maintainerCanModify: true,
-  });
+  const issueArtifact = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: {
+      problem: "A rendered issue",
+      category: "feature",
+      affected_areas: ["contracts"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "Rendered issue", labels: ["bug"], assignees: ["octocat"] },
+  }).artifact;
+  const pullRequestArtifact = preparePullRequestArtifact(governedFixture(pullRequestContractFixture), {
+    fields: { summary: "A rendered pull request", linked_issue: "Closes #22", acceptance: ["tests"] },
+    metadata: {
+      title: "Rendered pull request",
+      head: "feature",
+      base: "main",
+      draft: false,
+      maintainerCanModify: true,
+    },
+  }).artifact;
 
   assert.equal((await adapter.getIssue(42)).number, 42);
   assert.equal((await adapter.getPullRequest(43)).head, "feature");
@@ -202,7 +228,7 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
     (call) => call.args.includes("repos/acme/inari/issues") && call.args.includes("POST"),
   );
   assert.ok(issueCreate);
-  assert.ok(issueCreate.args.includes("body=Rendered issue body"));
+  assert.ok(issueCreate.args.some((argument) => argument.startsWith("body=### Problem")));
   assert.ok(issueCreate.args.includes("labels[]=bug"));
   assert.ok(issueCreate.args.includes("assignees[]=octocat"));
 
@@ -210,6 +236,7 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
     (call) => call.args.includes("repos/acme/inari/pulls") && call.args.includes("POST"),
   );
   assert.ok(pullRequestCreate);
+  assert.ok(pullRequestCreate.args.some((argument) => argument.startsWith("body=## Summary")));
   assert.ok(pullRequestCreate.args.includes("head=feature"));
   assert.ok(pullRequestCreate.args.includes("base=main"));
   assert.ok(pullRequestCreate.args.includes("maintainer_can_modify=true"));
@@ -219,9 +246,16 @@ test("rejects an unvalidated artifact before invoking any transport or mutation"
   const transport = new StubGhTransport([]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
   const rawArtifact = {
+    phase: "validated-rendered",
     kind: "issue",
     title: "Raw title",
     body: "Raw body",
+    provenance: {
+      authority: "repository-default-branch",
+      repository: { host: "github.com", owner: "acme", name: "inari", nameWithOwner: "acme/inari" },
+      ref: "main",
+      template: { path: ".github/ISSUE_TEMPLATE/feature.yml", ref: "main", sha: "sha", digest: "digest" },
+    },
   } as unknown as ValidatedRenderedIssueArtifact;
 
   await assert.rejects(
@@ -230,6 +264,41 @@ test("rejects an unvalidated artifact before invoking any transport or mutation"
       error instanceof ContractViolationError && error.code === "CONTRACT_VIOLATION" && error.category === "contract",
   );
   assert.equal(transport.calls.length, 0);
+});
+
+test("rejects a prepared artifact bound to a different repository before mutation", async () => {
+  const sourceContract = governedFixture(issueContractFixture);
+  const mismatchedContract = {
+    ...sourceContract,
+    provenance: {
+      ...sourceContract.provenance,
+      repository: {
+        ...sourceContract.provenance?.repository,
+        name: "other",
+        nameWithOwner: "acme/other",
+      },
+    },
+  } as CanonicalContract;
+  const artifact = prepareIssueArtifact(mismatchedContract, {
+    fields: {
+      problem: "A mismatched target",
+      category: "feature",
+      affected_areas: ["contracts"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "mismatch" },
+  }).artifact;
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.createIssue(artifact),
+    (error: unknown) => error instanceof ContractViolationError && error.message.includes("provenance"),
+  );
+  assert.equal(
+    transport.calls.some((call) => call.args.includes("POST")),
+    false,
+  );
 });
 
 test("keeps API failures and process transport failures distinct from contract failures", async () => {
