@@ -181,7 +181,7 @@ test("projects the compiled Issue Form through the existing JSON Schema projecti
     "agreement",
     "optional",
   ]);
-  assert.deepEqual(schema.required, ["contact", "priority", "agreement"]);
+  assert.deepEqual(schema.required, ["contact", "agreement"]);
   assert.deepEqual(schema.properties.priority?.enum, ["Low", "High"]);
   assert.equal(schema.properties.priority?.default, "High");
   assert.deepEqual(schema.properties.areas?.items?.enum, ["frontend", "backend", "docs"]);

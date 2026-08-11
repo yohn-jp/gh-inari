@@ -43,6 +43,23 @@ function packageBinTargets(packageDirectory) {
   }));
 }
 
+function invoke(command, args, options = {}) {
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000, ...options });
+  if (result.error) fail(`${command} ${args.join(" ")} failed to start: ${result.error.message}`);
+  return result;
+}
+
+function jsonOutput(result, label, expectedStatus = 0) {
+  if (result.status !== expectedStatus) {
+    fail(`${label} exited ${result.status}:\n${result.stdout}\n${result.stderr}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    fail(`${label} did not emit JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function parseArgs(argv) {
   const index = argv.indexOf("--tarball");
   return { tarball: index === -1 ? undefined : argv[index + 1] };
@@ -97,19 +114,51 @@ function main() {
       if (!fs.existsSync(launcher)) fail(`npm did not generate a launcher for "${name}" at ${launcher}`);
 
       console.log(`running ${name} --help through its installed launcher...`);
-      const helpResult = spawnSync(launcher, ["--help"], { cwd: installDirectory, encoding: "utf8", timeout: 10_000 });
-      if (helpResult.error) fail(`launcher "${name}" failed to start: ${helpResult.error.message}`);
+      const helpResult = invoke(launcher, ["--help"], { cwd: installDirectory });
       if (helpResult.status !== 0) fail(`launcher "${name}" --help exited ${helpResult.status}, expected 0`);
 
       console.log(`running ${name} --version through its installed launcher...`);
-      const versionResult = spawnSync(launcher, ["--version"], {
-        cwd: installDirectory,
-        encoding: "utf8",
-        timeout: 10_000,
-      });
-      if (versionResult.error) fail(`launcher "${name}" failed to start: ${versionResult.error.message}`);
+      const versionResult = invoke(launcher, ["--version"], { cwd: installDirectory });
       if (versionResult.status !== 0) fail(`launcher "${name}" --version exited ${versionResult.status}, expected 0`);
       if (versionResult.stdout.trim().length === 0) fail(`launcher "${name}" --version printed nothing`);
+    }
+
+    const fixtureDirectory = path.join(installDirectory, "fixture-repository");
+    const policyDirectory = path.join(fixtureDirectory, ".github", "inari");
+    fs.mkdirSync(policyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(fixtureDirectory, ".github", "PULL_REQUEST_TEMPLATE.md"),
+      "## Summary\n\n## Linked issue\n\n## Validation\n\n- [ ] Tests\n- [ ] Build\n",
+    );
+    fs.writeFileSync(
+      path.join(policyDirectory, "pr-policy.yml"),
+      "version: 1\ntemplate: default\nsections:\n  - section: summary\n    required: true\n    minLength: 10\n  - section: linked_issue\n    linkedIssue: true\n  - section: validation\n    required: true\n    checklist:\n      minCompleted: 1\n",
+    );
+    const validationCases = [
+      {
+        name: "linked-issue",
+        fields: { summary: "valid summary", linked_issue: "see issue 999", validation: ["tests"] },
+        valid: false,
+      },
+      {
+        name: "short-string",
+        fields: { summary: "short", linked_issue: "Closes #999", validation: ["tests"] },
+        valid: false,
+      },
+      {
+        name: "empty-checklist",
+        fields: { summary: "valid summary", linked_issue: "Closes #999", validation: [] },
+        valid: false,
+      },
+      {
+        name: "valid",
+        fields: { summary: "valid summary", linked_issue: "Closes #999", validation: ["tests"] },
+        valid: true,
+      },
+    ];
+    for (const validationCase of validationCases) {
+      validationCase.inputPath = path.join(fixtureDirectory, validationCase.name + ".json");
+      fs.writeFileSync(validationCase.inputPath, JSON.stringify({ fields: validationCase.fields }));
     }
 
     const ghConfigDirectory = path.join(installDirectory, "gh-config");
@@ -123,43 +172,68 @@ function main() {
       GH_PROMPT_DISABLED: "1",
       GH_TOKEN: "smoke-test-token",
     };
-
     const ghAvailable = spawnSync("gh", ["--version"], { encoding: "utf8" }).status === 0;
-    if (!ghAvailable) {
-      console.log("GitHub CLI (gh) not available, skipping extension installation tests.");
-    } else {
-      console.log("installing the packed executable as a local GitHub CLI extension...");
-      run("gh", ["extension", "install", "."], { cwd: installedPackageDirectory, env: ghExtensionEnvironment });
-      console.log("running gh inari --help through GitHub CLI extension discovery...");
-      const ghHelpResult = spawnSync("gh", ["inari", "--help"], {
-        cwd: installDirectory,
-        env: ghExtensionEnvironment,
-        encoding: "utf8",
-        timeout: 10_000,
-      });
-      if (ghHelpResult.error) fail(`gh inari failed to start: ${ghHelpResult.error.message}`);
-      if (ghHelpResult.status !== 0) {
-        fail(
-          `gh inari --help exited ${ghHelpResult.status}, expected 0:\n${ghHelpResult.stdout}\n${ghHelpResult.stderr}`,
-        );
-      }
-      if (!ghHelpResult.stdout.includes("Usage: gh-inari")) fail("gh inari did not invoke the gh-inari extension");
+    if (!ghAvailable) fail("GitHub CLI (gh) is required for the packed extension smoke test");
 
-      console.log("running gh inari --version through GitHub CLI extension discovery...");
-      const ghVersionResult = spawnSync("gh", ["inari", "--version"], {
-        cwd: installDirectory,
-        env: ghExtensionEnvironment,
-        encoding: "utf8",
-        timeout: 10_000,
-      });
-      if (ghVersionResult.error) fail(`gh inari version failed to start: ${ghVersionResult.error.message}`);
-      if (ghVersionResult.status !== 0) {
-        fail(
-          `gh inari --version exited ${ghVersionResult.status}, expected 0:\n${ghVersionResult.stdout}\n${ghVersionResult.stderr}`,
-        );
+    console.log("installing the packed executable as a local GitHub CLI extension...");
+    run("gh", ["extension", "install", "."], { cwd: installedPackageDirectory, env: ghExtensionEnvironment });
+    const ghHelpResult = invoke("gh", ["inari", "--help"], {
+      cwd: fixtureDirectory,
+      env: ghExtensionEnvironment,
+    });
+    if (ghHelpResult.status !== 0 || !ghHelpResult.stdout.includes("Usage: gh-inari"))
+      fail(`gh inari --help failed:\n${ghHelpResult.stdout}\n${ghHelpResult.stderr}`);
+    const sourceEntry = path.join(repoRoot, "dist", "index.js");
+    const packedLauncher = path.join(installDirectory, "node_modules", ".bin", "gh-inari");
+    const validationArgs = (inputPath) => ["pr", "validate", "--from", inputPath, "--json"];
+    const sourceSchema = jsonOutput(
+      invoke(process.execPath, [sourceEntry, "pr", "schema"], { cwd: fixtureDirectory }),
+      "source pr schema",
+    );
+    const packedSchema = jsonOutput(
+      invoke(packedLauncher, ["pr", "schema"], { cwd: fixtureDirectory }),
+      "packed gh-inari pr schema",
+    );
+    const ghSchema = jsonOutput(
+      invoke("gh", ["inari", "pr", "schema"], { cwd: fixtureDirectory, env: ghExtensionEnvironment }),
+      "gh inari pr schema",
+    );
+    if (JSON.stringify(packedSchema) !== JSON.stringify(sourceSchema))
+      fail("packed gh-inari pr schema diverged from the source CLI");
+    if (JSON.stringify(ghSchema) !== JSON.stringify(sourceSchema))
+      fail("gh inari pr schema diverged from the source CLI");
+
+    console.log("checking source, packed, and gh inari validation parity...");
+    for (const validationCase of validationCases) {
+      const args = validationArgs(validationCase.inputPath);
+      const sourceResult = invoke(process.execPath, [sourceEntry, ...args], { cwd: fixtureDirectory });
+      const packedResult = invoke(packedLauncher, args, { cwd: fixtureDirectory });
+      const ghResult = invoke("gh", ["inari", ...args], { cwd: fixtureDirectory, env: ghExtensionEnvironment });
+      for (const [label, result] of [
+        ["source", sourceResult],
+        ["packed gh-inari", packedResult],
+        ["gh inari", ghResult],
+      ]) {
+        const expectedStatus = validationCase.valid ? 0 : 2;
+        if (result.status !== expectedStatus)
+          fail(label + " " + validationCase.name + " exited " + result.status + ", expected " + expectedStatus);
+        const output = jsonOutput(result, label + " " + validationCase.name, expectedStatus);
+        if (output.valid !== validationCase.valid || !Array.isArray(output.violations))
+          fail(label + " " + validationCase.name + " returned an unexpected validation result");
       }
-      if (!ghVersionResult.stdout.includes(`${packageName} ${packageJson.version}`))
-        fail("gh inari did not report the installed package version");
+      if (packedResult.stdout !== sourceResult.stdout || ghResult.stdout !== sourceResult.stdout)
+        fail(validationCase.name + " validation output diverged across execution paths");
+    }
+
+    for (const [label, command, args, options] of [
+      ["source", process.execPath, [sourceEntry, "--version"], { cwd: fixtureDirectory }],
+      ["packed gh-inari", packedLauncher, ["--version"], { cwd: fixtureDirectory }],
+      ["gh inari", "gh", ["inari", "--version"], { cwd: fixtureDirectory, env: ghExtensionEnvironment }],
+    ]) {
+      const versionResult = invoke(command, args, options);
+      const expectedVersion = packageName + " " + packageJson.version;
+      if (versionResult.status !== 0 || versionResult.stdout.trim() !== expectedVersion)
+        fail(label + " did not report the package version " + expectedVersion);
     }
 
     console.log("smoke test passed.");
