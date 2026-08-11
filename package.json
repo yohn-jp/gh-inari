@@ -71,11 +71,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yohn-jp/inari.git"
+    "url": "git+https://github.com/yohn-jp/gh-inari.git"
   },
-  "homepage": "https://github.com/yohn-jp/inari#readme",
+  "homepage": "https://github.com/yohn-jp/gh-inari#readme",
   "bugs": {
-    "url": "https://github.com/yohn-jp/inari/issues"
+    "url": "https://github.com/yohn-jp/gh-inari/issues"
   },
   "keywords": [
     "github",
