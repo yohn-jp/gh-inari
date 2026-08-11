@@ -1,0 +1,18 @@
+#!/usr/bin/env node
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const launcherPath = realpathSync(fileURLToPath(import.meta.url));
+const cliPath = path.join(path.dirname(launcherPath), "dist", "index.js");
+try {
+  const { runCli } = await import(pathToFileURL(cliPath).href);
+  process.exitCode = await runCli(process.argv.slice(2));
+} catch (error) {
+  if (error instanceof Error && error.code === "ERR_MODULE_NOT_FOUND") {
+    console.error("gh-inari: module not found. Please build the package (npm run build) or reinstall it.");
+    process.exitCode = 1;
+  } else {
+    throw error;
+  }
+}

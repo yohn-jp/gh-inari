@@ -1,0 +1,7 @@
+name: Question
+description: Ask a question
+body:
+  - type: input
+    id: question
+    attributes:
+      label: Question

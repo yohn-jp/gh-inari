@@ -1,0 +1,92 @@
+{
+  "name": "gh-inari",
+  "version": "0.1.0",
+  "description": "A deterministic GitHub CLI extension for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
+  "type": "module",
+  "bin": {
+    "gh-inari": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./contract": {
+      "types": "./dist/contract/index.d.ts",
+      "import": "./dist/contract/index.js"
+    },
+    "./pull-request-template": {
+      "types": "./dist/pull-request-template.d.ts",
+      "import": "./dist/pull-request-template.js"
+    },
+    "./artifact": {
+      "types": "./dist/artifact.d.ts",
+      "import": "./dist/artifact.js"
+    },
+    "./pr-policy": {
+      "types": "./dist/pr-policy.d.ts",
+      "import": "./dist/pr-policy.js"
+    }
+  },
+  "files": [
+    "gh-inari",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
+    "start": "node dist/index.js",
+    "test": "node --test --import tsx src/*.test.ts src/**/*.test.ts scripts/**/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint 'src/**/*.ts' 'scripts/**/*.mjs' 'eslint.config.mjs'",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "smoke-test": "node scripts/smoke-test.mjs",
+    "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
+    "governance:actions": "node scripts/validate-actions.mjs",
+    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run test:package",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm run typecheck && pnpm test"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "eslint": "10.8.1",
+    "prettier": "3.9.6",
+    "tsx": "^4.19.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "8.66.0"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "packageManager": "pnpm@11.18.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yohn-jp/inari.git"
+  },
+  "homepage": "https://github.com/yohn-jp/inari#readme",
+  "bugs": {
+    "url": "https://github.com/yohn-jp/inari/issues"
+  },
+  "keywords": [
+    "github",
+    "gh",
+    "cli",
+    "issue",
+    "pull-request",
+    "templates",
+    "governance",
+    "repository-governance"
+  ],
+  "main": "dist/index.js",
+  "author": ""
+}

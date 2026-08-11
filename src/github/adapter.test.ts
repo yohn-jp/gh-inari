@@ -1,0 +1,264 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  ContractViolationError,
+  GhNotInstalledError,
+  GhUnauthenticatedError,
+  GitHubAdapter,
+  GitHubApiError,
+  GitHubTransportError,
+  RepositoryResolutionError,
+  markValidatedRenderedIssueArtifact,
+  markValidatedRenderedPullRequestArtifact,
+  type GhCommandResult,
+  type GhTransport,
+  type GhTransportOptions,
+  type ValidatedRenderedIssueArtifact,
+} from "./index.js";
+
+interface RecordedCall {
+  readonly args: readonly string[];
+  readonly cwd: string | undefined;
+}
+
+class StubGhTransport implements GhTransport {
+  readonly calls: RecordedCall[] = [];
+  private readonly responses: Array<GhCommandResult | Error>;
+
+  constructor(responses: Array<GhCommandResult | Error>) {
+    this.responses = [...responses];
+  }
+
+  async run(args: readonly string[], options?: GhTransportOptions): Promise<GhCommandResult> {
+    this.calls.push({ args: [...args], cwd: options?.cwd });
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
+    if (response instanceof Error) throw response;
+    return response;
+  }
+}
+
+class MissingGhError extends Error {
+  readonly code = "ENOENT";
+
+  constructor() {
+    super("gh executable not found");
+    this.name = "MissingGhError";
+  }
+}
+
+function command(exitCode = 0, stdout = "", stderr = ""): GhCommandResult {
+  return { exitCode, stdout, stderr };
+}
+
+function issuePayload(number = 42): string {
+  return JSON.stringify({
+    number,
+    title: "An issue",
+    body: "Rendered issue body",
+    state: "open",
+    html_url: `https://github.com/acme/inari/issues/${number}`,
+    labels: [{ name: "bug" }],
+    assignees: [{ login: "octocat" }],
+  });
+}
+
+function pullRequestPayload(number = 43): string {
+  return JSON.stringify({
+    number,
+    title: "A pull request",
+    body: "Rendered pull request body",
+    state: "open",
+    draft: false,
+    html_url: `https://github.com/acme/inari/pull/${number}`,
+    head: { ref: "feature" },
+    base: { ref: "main" },
+  });
+}
+
+test("resolves the current repository deterministically and preserves the gh cwd", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+  ]);
+  const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
+
+  const context = await adapter.resolveRepositoryContext();
+
+  assert.deepEqual(context, {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+  });
+  assert.deepEqual(
+    transport.calls.map((call) => call.args),
+    [["--version"], ["auth", "status"], ["repo", "view", "--json", "nameWithOwner,url"]],
+  );
+  assert.ok(transport.calls.every((call) => call.cwd === "/workspace/inari"));
+});
+
+test("uses an explicit repository override without asking gh to infer local context", async () => {
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const context = await adapter.resolveRepositoryContext();
+
+  assert.equal(context.nameWithOwner, "acme/inari");
+  assert.equal(context.hostname, "github.com");
+  assert.deepEqual(
+    transport.calls.map((call) => call.args),
+    [["--version"], ["auth", "status", "--hostname", "github.com"]],
+  );
+});
+
+test("returns a typed actionable failure when gh is unavailable", async () => {
+  const transport = new StubGhTransport([new MissingGhError()]);
+  const adapter = new GitHubAdapter({ transport });
+
+  await assert.rejects(
+    adapter.checkAuthentication(),
+    (error: unknown) =>
+      error instanceof GhNotInstalledError &&
+      error.code === "GH_NOT_INSTALLED" &&
+      error.category === "environment" &&
+      error.message.includes("Install gh"),
+  );
+});
+
+test("returns a typed failure when gh is not authenticated", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(1, "", "You are not logged in to any GitHub hosts."),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.resolveRepositoryContext(),
+    (error: unknown) =>
+      error instanceof GhUnauthenticatedError &&
+      error.code === "GH_UNAUTHENTICATED" &&
+      error.category === "authentication",
+  );
+});
+
+test("returns a typed failure when the local repository cannot be resolved", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(1, "", "fatal: not a git repository"),
+  ]);
+  const adapter = new GitHubAdapter({ cwd: "/tmp", transport });
+
+  await assert.rejects(
+    adapter.resolveRepositoryContext(),
+    (error: unknown) =>
+      error instanceof RepositoryResolutionError &&
+      error.code === "REPOSITORY_RESOLUTION_FAILED" &&
+      error.category === "repository",
+  );
+});
+
+test("supports MVP Issue and pull request reads and mutations through a fake transport", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, issuePayload()),
+    command(0, pullRequestPayload()),
+    command(0, issuePayload(44)),
+    command(0, issuePayload(45)),
+    command(0, pullRequestPayload(46)),
+    command(0, pullRequestPayload(47)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const issueArtifact = markValidatedRenderedIssueArtifact({
+    kind: "issue",
+    title: "Rendered issue",
+    body: "Rendered issue body",
+    labels: ["bug"],
+    assignees: ["octocat"],
+  });
+  const pullRequestArtifact = markValidatedRenderedPullRequestArtifact({
+    kind: "pull_request",
+    title: "Rendered pull request",
+    body: "Rendered pull request body",
+    head: "feature",
+    base: "main",
+    draft: false,
+    maintainerCanModify: true,
+  });
+
+  assert.equal((await adapter.getIssue(42)).number, 42);
+  assert.equal((await adapter.getPullRequest(43)).head, "feature");
+  assert.equal((await adapter.createIssue(issueArtifact)).number, 44);
+  assert.equal((await adapter.updateIssue(45, issueArtifact)).number, 45);
+  assert.equal((await adapter.createPullRequest(pullRequestArtifact)).number, 46);
+  assert.equal((await adapter.updatePullRequest(47, pullRequestArtifact)).number, 47);
+
+  const issueCreate = transport.calls.find(
+    (call) => call.args.includes("repos/acme/inari/issues") && call.args.includes("POST"),
+  );
+  assert.ok(issueCreate);
+  assert.ok(issueCreate.args.includes("body=Rendered issue body"));
+  assert.ok(issueCreate.args.includes("labels[]=bug"));
+  assert.ok(issueCreate.args.includes("assignees[]=octocat"));
+
+  const pullRequestCreate = transport.calls.find(
+    (call) => call.args.includes("repos/acme/inari/pulls") && call.args.includes("POST"),
+  );
+  assert.ok(pullRequestCreate);
+  assert.ok(pullRequestCreate.args.includes("head=feature"));
+  assert.ok(pullRequestCreate.args.includes("base=main"));
+  assert.ok(pullRequestCreate.args.includes("maintainer_can_modify=true"));
+});
+
+test("rejects an unvalidated artifact before invoking any transport or mutation", async () => {
+  const transport = new StubGhTransport([]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const rawArtifact = {
+    kind: "issue",
+    title: "Raw title",
+    body: "Raw body",
+  } as unknown as ValidatedRenderedIssueArtifact;
+
+  await assert.rejects(
+    adapter.createIssue(rawArtifact),
+    (error: unknown) =>
+      error instanceof ContractViolationError && error.code === "CONTRACT_VIOLATION" && error.category === "contract",
+  );
+  assert.equal(transport.calls.length, 0);
+});
+
+test("keeps API failures and process transport failures distinct from contract failures", async () => {
+  const apiFailureTransport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(1, "", "HTTP 500: service unavailable"),
+  ]);
+  const apiFailureAdapter = new GitHubAdapter({ repository: "acme/inari", transport: apiFailureTransport });
+  await assert.rejects(
+    apiFailureAdapter.getIssue(42),
+    (error: unknown) =>
+      error instanceof GitHubApiError && error.code === "GITHUB_API_FAILED" && error.category === "api",
+  );
+
+  const transportFailureTransport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    new Error("socket closed"),
+  ]);
+  const transportFailureAdapter = new GitHubAdapter({
+    repository: "acme/inari",
+    transport: transportFailureTransport,
+  });
+  await assert.rejects(
+    transportFailureAdapter.getIssue(42),
+    (error: unknown) =>
+      error instanceof GitHubTransportError &&
+      error.code === "GITHUB_TRANSPORT_FAILED" &&
+      error.category === "transport",
+  );
+});
