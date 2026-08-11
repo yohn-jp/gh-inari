@@ -76,6 +76,8 @@ export interface NativeFieldMetadata {
   readonly sourceId?: string;
   readonly placeholder?: string;
   readonly defaultValue?: string | readonly string[];
+  /** GitHub Issue Form textarea render language, which produces a code fence. */
+  readonly render?: string;
   readonly multiple?: boolean;
   readonly options?: readonly NativeOptionMetadata[];
 }
@@ -254,7 +256,7 @@ const nativeSectionElements: readonly NativeSectionElement[] = [
   "markdown",
   "heading",
 ];
-const identifierPattern = /^[A-Za-z][A-Za-z0-9_-]*$/u;
+const identifierPattern = /^[A-Za-z0-9_-]+$/u;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -392,7 +394,7 @@ function validateIdentifier(value: string | undefined, path: string, violations:
       violations,
       "IR_INVALID_IDENTIFIER",
       path,
-      "Identifiers must start with a letter and contain only letters, numbers, hyphens, or underscores.",
+      "Identifiers must be non-empty and contain only letters, numbers, hyphens, or underscores.",
     );
   }
 }
@@ -617,7 +619,7 @@ function validateNativeFieldMetadata(
   const metadata = value;
   checkUnknownKeys(
     metadata,
-    ["elementType", "sourceId", "placeholder", "defaultValue", "multiple", "options"],
+    ["elementType", "sourceId", "placeholder", "defaultValue", "render", "multiple", "options"],
     path,
     violations,
   );
@@ -625,6 +627,7 @@ function validateNativeFieldMetadata(
   const sourceId = optionalString(metadata, "sourceId", path, violations);
   const placeholder = optionalString(metadata, "placeholder", path, violations);
   const defaultValue = hasOwn(metadata, "defaultValue") ? metadata.defaultValue : undefined;
+  const render = optionalString(metadata, "render", path, violations);
   const multiple = optionalBoolean(metadata, "multiple", path, violations);
   const options = hasOwn(metadata, "options")
     ? validateNativeOptions(metadata.options, `${path}.options`, violations)
@@ -681,6 +684,7 @@ function validateNativeFieldMetadata(
         ...(sourceId === undefined ? {} : { sourceId }),
         ...(placeholder === undefined ? {} : { placeholder }),
         ...(defaultValue === undefined ? {} : { defaultValue: defaultValue as string | readonly string[] }),
+        ...(render === undefined ? {} : { render }),
         ...(multiple === undefined ? {} : { multiple }),
         ...(options === undefined ? {} : { options }),
       };
@@ -1647,6 +1651,7 @@ function canonicalizeNativeFieldMetadata(metadata: NativeFieldMetadata): Unknown
     ...(metadata.defaultValue === undefined
       ? {}
       : { defaultValue: Array.isArray(metadata.defaultValue) ? [...metadata.defaultValue] : metadata.defaultValue }),
+    ...(metadata.render === undefined ? {} : { render: metadata.render }),
     ...(metadata.multiple === undefined ? {} : { multiple: metadata.multiple }),
     ...(metadata.options === undefined ? {} : { options: canonicalizeNativeOptions(metadata.options) }),
   };

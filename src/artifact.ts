@@ -86,6 +86,8 @@ export interface ExistingPullRequestReader {
   getPullRequest(pullRequestNumber: number): Promise<{ readonly body: string | null; readonly url: string }>;
 }
 
+const GITHUB_NO_RESPONSE = "_No response_";
+
 export interface FetchedExistingArtifact {
   readonly number: number;
   readonly url: string;
@@ -151,8 +153,8 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
   const validation = validateSemanticInput(contractInput, input.fields);
   if (!validation.valid) throw new SemanticValidationError(validation.violations);
-  const title = requiredMetadataString(input.metadata.title, "title");
-  const labels = input.metadata.labels ?? contractInput.nativeMetadata.labels;
+  const title = requiredMetadataString(input.metadata.title ?? contractInput.nativeMetadata.title, "title");
+  const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
   const artifact = markValidatedRenderedIssueArtifact({
     kind: "issue",
     title,
@@ -275,8 +277,9 @@ function renderIssueBody(contract: CanonicalContract, values: Readonly<Record<st
   for (let sectionIndex = 0; sectionIndex < contract.sections.length; sectionIndex += 1) {
     const section = contract.sections[sectionIndex] as CanonicalContract["sections"][number];
     if (section.kind === "documentation") {
-      const content = trimBlankLines(section.content ?? "");
-      if (content !== undefined) blocks.push(content);
+      // GitHub renders Issue Form markdown in the form only; it is not part of
+      // the submitted Issue body. The content remains in the contract for
+      // schema/explain and native-source traceability.
       continue;
     }
     const title = section.title ?? section.fields[0]?.label;
@@ -320,11 +323,21 @@ function renderDocumentation(section: CanonicalContract["sections"][number], con
 
 function renderFieldValue(field: CanonicalField, value: unknown, kind: "issue" | "pull_request"): string {
   if (field.type === "string" || field.type === "enum") {
-    if (typeof value === "string") return escapeMarkdownValue(value);
-    return kind === "pull_request" ? (field.nativeMetadata.placeholder ?? "") : "";
+    if (typeof value === "string" && (kind !== "issue" || value.trim().length > 0)) {
+      return field.nativeMetadata.render === undefined
+        ? escapeMarkdownValue(value)
+        : renderCodeBlock(value, field.nativeMetadata.render);
+    }
+    if (kind === "pull_request") return field.nativeMetadata.placeholder ?? "";
+    return field.nativeMetadata.render === undefined
+      ? GITHUB_NO_RESPONSE
+      : renderCodeBlock("", field.nativeMetadata.render);
   }
   if (field.type === "array") {
-    if (!Array.isArray(value)) return "";
+    if (!Array.isArray(value)) return kind === "issue" ? GITHUB_NO_RESPONSE : "";
+    if (value.length === 0) return kind === "issue" ? GITHUB_NO_RESPONSE : "";
+    if (field.nativeMetadata.multiple === true)
+      return value.map((entry) => escapeMarkdownValue(String(entry))).join(", ");
     return value.map((entry) => `- ${escapeMarkdownValue(String(entry))}`).join("\n");
   }
   const selected = new Set(
@@ -353,6 +366,7 @@ function parseRenderedBody(
     const section = contract.sections[sectionIndex] as CanonicalContract["sections"][number];
     while (lines[cursor] !== undefined && lines[cursor]?.trim().length === 0) cursor += 1;
     if (section.kind === "documentation") {
+      if (issueHeadingLevel !== undefined) continue;
       const expected = trimBlankLines(
         stripComments ? removeHtmlComments(section.content ?? "") : (section.content ?? ""),
       );
@@ -387,11 +401,23 @@ function parseRenderedBody(
     }
     cursor += 1;
     const contentStart = cursor;
-    while (cursor < lines.length && !isHeading(lines[cursor] ?? "")) cursor += 1;
+    const nextIssueHeading = issueHeadingLevel === undefined ? undefined : findNextIssueHeading(contract, sectionIndex);
+    while (cursor < lines.length) {
+      const line = lines[cursor] ?? "";
+      if (
+        nextIssueHeading === undefined
+          ? issueHeadingLevel === undefined && isHeading(line)
+          : line.trim() === nextIssueHeading
+      )
+        break;
+      cursor += 1;
+    }
     let fieldEnd = cursor;
     const nextSection = contract.sections[sectionIndex + 1];
     const nextDocumentation =
-      nextSection?.kind === "documentation" ? trimBlankLines(nextSection.content ?? "") : undefined;
+      issueHeadingLevel === undefined && nextSection?.kind === "documentation"
+        ? trimBlankLines(nextSection.content ?? "")
+        : undefined;
     if (nextDocumentation !== undefined) {
       const documentationLines = nextDocumentation.split("\n");
       const rawCandidate = lines.slice(contentStart, fieldEnd);
@@ -432,8 +458,12 @@ function parseFieldLines(
 ): { value: unknown; diagnostics: readonly ExistingArtifactDiagnostic[] } {
   const diagnostics: ExistingArtifactDiagnostic[] = [];
   const filtered = stripComments ? lines.filter((line) => line.trim().length > 0) : lines;
+  if (filtered.length === 1 && filtered[0]?.trim() === GITHUB_NO_RESPONSE) return { value: undefined, diagnostics };
   if (field.type === "string" || field.type === "enum") {
-    const value = trimBlankLines(unescapeMarkdownValue(filtered.join("\n")));
+    const value =
+      field.nativeMetadata.render === undefined
+        ? trimBlankLines(unescapeMarkdownValue(filtered.join("\n")))
+        : parseRenderedCodeBlock(filtered, field.nativeMetadata.render, path, diagnostics);
     const placeholder = stripComments
       ? removeHtmlComments(field.nativeMetadata.placeholder ?? "")
       : (field.nativeMetadata.placeholder ?? "");
@@ -442,6 +472,16 @@ function parseFieldLines(
     return { value, diagnostics };
   }
   if (field.type === "array") {
+    if (field.nativeMetadata.multiple === true) {
+      const value = trimBlankLines(unescapeMarkdownValue(filtered.join("\n")));
+      if (value === undefined) return { value: undefined, diagnostics };
+      const values = value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      if (values.length === 0) return { value: undefined, diagnostics };
+      return { value: values, diagnostics };
+    }
     const values = filtered
       .map((line) => {
         const value = /^[-+*][ \t]+(.+)$/u.exec(line)?.[1]?.trim();
@@ -493,6 +533,63 @@ function removeRenderedPlaceholder(lines: readonly string[], placeholder: string
   return placeholderLines.length > 0 && sameLines(lines.slice(0, placeholderLines.length), placeholderLines)
     ? lines.slice(placeholderLines.length)
     : lines;
+}
+
+function findNextIssueHeading(contract: CanonicalContract, sectionIndex: number): string | undefined {
+  for (let index = sectionIndex + 1; index < contract.sections.length; index += 1) {
+    const section = contract.sections[index] as CanonicalContract["sections"][number];
+    if (section.kind !== "input") continue;
+    const title = section.title ?? section.fields[0]?.label;
+    if (title !== undefined) return `### ${escapeHeading(title)}`;
+  }
+  return undefined;
+}
+
+function parseRenderedCodeBlock(
+  lines: readonly string[],
+  language: string,
+  path: string,
+  diagnostics: ExistingArtifactDiagnostic[],
+): string | undefined {
+  const opening = /^(`{3,})(.*)$/u.exec(lines[0] ?? "");
+  if (opening === null || opening[2] !== language || lines.length < 2) {
+    diagnostics.push({
+      code: "EXISTING_UNPARSEABLE",
+      path,
+      message: `Rendered textarea values must use a fenced ${language} code block.`,
+    });
+    return undefined;
+  }
+  const fence = opening[1];
+  if (lines.at(-1) !== fence) {
+    diagnostics.push({
+      code: "EXISTING_UNPARSEABLE",
+      path,
+      message: "Rendered textarea code blocks must have a matching closing fence.",
+    });
+    return undefined;
+  }
+  const value = lines.slice(1, -1).join("\n");
+  return value.length === 0 ? undefined : value;
+}
+
+function renderCodeBlock(value: string, language: string): string {
+  const normalized = normalizeSource(value);
+  const longestFence = Math.max(0, ...Array.from(normalized.matchAll(/`+/gu), (match) => match[0]?.length ?? 0));
+  const fence = "`".repeat(Math.max(3, longestFence + 1));
+  return `${fence}${language}\n${normalized}\n${fence}`;
+}
+
+function mergeIssueLabels(
+  nativeLabels: readonly string[] | undefined,
+  callerLabels: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (nativeLabels === undefined && callerLabels === undefined) return undefined;
+  const labels: string[] = [];
+  for (const label of [...(nativeLabels ?? []), ...(callerLabels ?? [])]) {
+    if (!labels.includes(label)) labels.push(label);
+  }
+  return labels;
 }
 
 function parseMetadata(input: Record<string, unknown>): ArtifactInputMetadata {
