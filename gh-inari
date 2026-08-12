@@ -8,29 +8,39 @@ const launcherPath = realpathSync(fileURLToPath(import.meta.url));
 const extensionDirectory = path.dirname(launcherPath);
 const cliPath = path.join(extensionDirectory, "dist", "index.js");
 
-async function importCli() {
-  try {
-    return await import(pathToFileURL(cliPath).href);
-  } catch (error) {
-    if (!(error instanceof Error) || error.code !== "ERR_MODULE_NOT_FOUND") throw error;
-    console.error("gh-inari: installing runtime dependencies for the GitHub CLI extension...");
-    const result = spawnSync(
-      "npm",
-      ["install", "--omit=dev", "--ignore-scripts", "--no-package-lock", "--no-audit", "--no-fund"],
-      { cwd: extensionDirectory, stdio: "inherit" },
-    );
-    if (result.error !== undefined || result.status !== 0) {
-      throw new Error("gh-inari: unable to install runtime dependencies for the GitHub CLI extension.", {
-        cause: result.error,
-      });
-    }
-    return import(pathToFileURL(cliPath).href);
+function bootstrapDependencies() {
+  console.error("gh-inari: installing runtime dependencies for the GitHub CLI extension...");
+  const result = spawnSync(
+    "npm",
+    ["install", "--omit=dev", "--ignore-scripts", "--no-package-lock", "--no-audit", "--no-fund"],
+    // npm's own install output must not land on stdout: callers that parse
+    // this launcher's stdout as command output (e.g. `--json` consumers)
+    // would otherwise see npm's log lines mixed in ahead of the real result.
+    { cwd: extensionDirectory, stdio: ["inherit", "ignore", "inherit"] },
+  );
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error("gh-inari: unable to install runtime dependencies for the GitHub CLI extension.", {
+      cause: result.error,
+    });
   }
 }
 
 try {
-  const { runCli } = await importCli();
-  process.exitCode = await runCli(process.argv.slice(2));
+  let cli;
+  try {
+    cli = await import(pathToFileURL(cliPath).href);
+  } catch (error) {
+    if (!(error instanceof Error) || error.code !== "ERR_MODULE_NOT_FOUND") throw error;
+    bootstrapDependencies();
+    // Node's ESM loader caches a failed resolution for the lifetime of the
+    // process, so re-importing the same URL in-process after installing
+    // dependencies would still throw ERR_MODULE_NOT_FOUND. Re-exec the
+    // launcher in a fresh process so the loader resolves against the
+    // now-installed node_modules from a clean state.
+    const result = spawnSync(process.execPath, [launcherPath, ...process.argv.slice(2)], { stdio: "inherit" });
+    process.exit(result.status ?? 1);
+  }
+  process.exitCode = await cli.runCli(process.argv.slice(2));
 } catch (error) {
   if (error instanceof Error && error.code === "ERR_MODULE_NOT_FOUND") {
     console.error("gh-inari: module not found. Please build the package (npm run build) or reinstall it.");

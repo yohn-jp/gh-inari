@@ -290,7 +290,11 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
     const fakeGhPathPrefix = `${fakeGhDirectory}${path.delimiter}${process.env.PATH ?? ""}`;
     const sourceGetEnvironment = { ...sourceExtensionEnvironment, PATH: fakeGhPathPrefix };
     const packedGetEnvironment = { ...ghExtensionEnvironment, PATH: fakeGhPathPrefix };
-    const sourceEntry = path.join(repoRoot, "dist", "index.js");
+    // Goes through the gh-inari launcher rather than dist/index.js directly:
+    // the launcher is what bootstraps production dependencies on first run,
+    // and a bare `node dist/index.js` invocation on a clean checkout (no
+    // node_modules) fails with ERR_MODULE_NOT_FOUND before that logic runs.
+    const sourceEntry = path.join(repoRoot, "gh-inari");
     const packedLauncher = path.join(installDirectory, "node_modules", ".bin", "gh-inari");
     const validationArgs = (inputPath) => ["pr", "validate", "--from", inputPath, "--json"];
     const sourceSchema = jsonOutput(
