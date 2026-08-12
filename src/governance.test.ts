@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { compileRepositoryGovernedContract, GovernanceError, rejectGovernedPolicyOverride } from "./governance.js";
+import {
+  compileRepositoryGovernedContract,
+  discoverRepositoryTemplates,
+  GovernanceError,
+  rejectGovernedPolicyOverride,
+} from "./governance.js";
 import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
 import { deserializeCanonicalContract, serializeCanonicalContract } from "./contract/index.js";
 import { runCli } from "./cli.js";
@@ -115,6 +120,43 @@ test("the same target yields the same governed contract from different nested CW
   );
 
   assert.equal(serializeCanonicalContract(firstContract), serializeCanonicalContract(secondContract));
+});
+
+test("authoritative discovery matches all supported native PR template locations", async () => {
+  const paths = [
+    "PULL_REQUEST_TEMPLATE.MD",
+    "docs/pull_request_template.txt",
+    ".github/PuLl_ReQuEsT_TeMpLaTe.TxT",
+    "PULL_REQUEST_TEMPLATE/release.MD",
+    "docs/PULL_REQUEST_TEMPLATE/docs.txt",
+    ".github/PULL_REQUEST_TEMPLATE/security.md",
+  ];
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        truncated: false,
+        tree: paths.map((path, index) => ({ path, type: "blob", sha: `sha-${index}` })),
+      }),
+    ),
+  ]);
+
+  const discovery = await discoverRepositoryTemplates(
+    new GitHubAdapter({ repository: "acme/repository-b", transport }),
+  );
+  assert.deepEqual(
+    discovery.pullRequestTemplates.map(({ path }) => path),
+    [
+      ".github/PuLl_ReQuEsT_TeMpLaTe.TxT",
+      "PULL_REQUEST_TEMPLATE.MD",
+      "docs/pull_request_template.txt",
+      ".github/PULL_REQUEST_TEMPLATE/security.md",
+      "PULL_REQUEST_TEMPLATE/release.MD",
+      "docs/PULL_REQUEST_TEMPLATE/docs.txt",
+    ],
+  );
 });
 
 test("nested remote governance paths fail closed", async () => {

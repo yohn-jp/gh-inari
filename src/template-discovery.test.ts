@@ -12,6 +12,7 @@ import {
   TemplateNotFoundError,
   TemplateSelectionAmbiguousError,
   discoverTemplates,
+  discoverTemplatesFromPaths,
   discoverTemplatesSync,
   selectIssueTemplate,
   selectPullRequestTemplate,
@@ -215,6 +216,45 @@ test("discovers root, docs, and .github PR locations with native filename casing
       false,
     );
     assert.deepEqual(discoverTemplatesSync(repositoryRoot), discovery);
+  });
+});
+
+test("remote path discovery uses the same PR semantics as local discovery", async () => {
+  await withTemporaryRepository(async (repositoryRoot) => {
+    await mkdir(path.join(repositoryRoot, "docs", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await mkdir(path.join(repositoryRoot, ".github", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await mkdir(path.join(repositoryRoot, "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    const paths = [
+      "PULL_REQUEST_TEMPLATE.MD",
+      "docs/pull_request_template.txt",
+      ".github/PuLl_ReQuEsT_TeMpLaTe.TxT",
+      "PULL_REQUEST_TEMPLATE/release.MD",
+      "docs/PULL_REQUEST_TEMPLATE/docs.txt",
+      ".github/PULL_REQUEST_TEMPLATE/security.md",
+      ".github/PULL_REQUEST_TEMPLATE/ignored.yml",
+    ];
+    for (const templatePath of paths) {
+      await writeFile(path.join(repositoryRoot, ...templatePath.split("/")), "## Template\n");
+    }
+
+    const local = await discoverTemplates(repositoryRoot);
+    const remote = discoverTemplatesFromPaths(paths, "https://github.com/acme/example");
+    assert.deepEqual(
+      remote.pullRequestTemplates.map(({ id, type, kind, name, path: templatePath }) => ({
+        id,
+        type,
+        kind,
+        name,
+        path: templatePath,
+      })),
+      local.pullRequestTemplates.map(({ id, type, kind, name, path: templatePath }) => ({
+        id,
+        type,
+        kind,
+        name,
+        path: templatePath,
+      })),
+    );
   });
 });
 

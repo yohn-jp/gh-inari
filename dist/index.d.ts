@@ -1,0 +1,11 @@
+#!/usr/bin/env node
+import { runCli } from "./cli.js";
+export { runCli };
+export * from "./artifact.js";
+export * from "./pr-policy.js";
+export * from "./governance.js";
+export * from "./contract/index.js";
+export * from "./github/index.js";
+export * from "./pull-request-template.js";
+export { discoverTemplates, discoverTemplatesSync, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, selectTemplate, selectIssueTemplate, selectPullRequestTemplate, TemplateDiscoveryError, TemplateFilesystemError, TemplateNotFoundError, TemplateSelectionAmbiguousError, TemplateNameConflictError, InvalidTemplateSelectorError, } from "./template-discovery.js";
+export type { TemplateDiscoveryResult, TemplateSelector, TemplateType, TemplateKind, TemplateDiscoveryErrorCode, TemplateDiscoveryErrorDetails, } from "./template-discovery.js";

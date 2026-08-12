@@ -22,6 +22,16 @@ To register the installed package as a GitHub CLI extension, pass its package di
 gh inari --help
 ```
 
+A clean checkout is also a supported extension source:
+
+```bash
+gh extension install yohn-jp/gh-inari
+gh inari --help
+```
+
+The repository launcher uses the committed build and installs its production
+dependencies on first use when GitHub CLI installs directly from the repository.
+
 Inari uses the current `gh` authentication and repository context. It does not maintain a second credential store. Use `--repository owner/name` when the target repository is not the current checkout.
 
 ## Commands

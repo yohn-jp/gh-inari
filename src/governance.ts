@@ -19,8 +19,11 @@ import {
   discoverTemplates,
   selectIssueTemplate,
   selectPullRequestTemplate,
+  discoverTemplatesFromPaths,
+  classifyTemplatePath,
+  isTemplateContainerPath,
+  isTemplatePathInNativeDirectory,
   type TemplateDiscoveryResult,
-  type TemplateIdentity,
   type TemplateSelector,
 } from "./template-discovery.js";
 
@@ -132,14 +135,8 @@ export async function compileRepositoryGovernedContract(
   domain: GovernedArtifactDomain,
   selector?: string | TemplateSelector,
 ): Promise<CanonicalContract> {
-  const context = await adapter.resolveRepositoryContext();
-  const ref = await readGovernedValue("repository.default_branch", context, undefined, () =>
-    adapter.getRepositoryDefaultBranch(),
-  );
-  const tree = await readGovernedValue("repository.governance.tree", context, ref, () =>
-    adapter.getRepositoryTree(ref),
-  );
-  const discovery = createRemoteDiscovery(context, tree);
+  const source = await readRepositoryGovernanceSource(adapter);
+  const { context, ref, tree, discovery } = source;
   const selectedTemplate =
     domain === "issue" ? selectIssueTemplate(discovery, selector) : selectPullRequestTemplate(discovery, selector);
   const templateEntry = findBlob(tree, selectedTemplate.path, context, ref);
@@ -161,7 +158,9 @@ export async function compileRepositoryGovernedContract(
     const source = await readGovernedValue("repository.governance.blob", context, ref, () =>
       adapter.getRepositoryBlob(policyEntry.sha),
     );
-    contract = compilePullRequestPolicyOverlay(contract, source);
+    contract = compilePullRequestPolicyOverlay(contract, source, {
+      templateIdentities: discovery.pullRequestTemplates,
+    });
     policySource = sourceIdentity(policyEntry, ref, source);
   }
 
@@ -184,54 +183,63 @@ export async function compileRepositoryGovernedContract(
   return bound;
 }
 
+/** Discover all authoritative templates without compiling or reading a body. */
+export async function discoverRepositoryTemplates(adapter: GitHubAdapter): Promise<TemplateDiscoveryResult> {
+  return (await readRepositoryGovernanceSource(adapter)).discovery;
+}
+
+interface RepositoryGovernanceSource {
+  readonly context: RepositoryContext;
+  readonly ref: string;
+  readonly tree: readonly RepositoryTreeEntry[];
+  readonly discovery: TemplateDiscoveryResult;
+}
+
+async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<RepositoryGovernanceSource> {
+  const context = await adapter.resolveRepositoryContext();
+  const ref = await readGovernedValue("repository.default_branch", context, undefined, () =>
+    adapter.getRepositoryDefaultBranch(),
+  );
+  const tree = await readGovernedValue("repository.governance.tree", context, ref, () =>
+    adapter.getRepositoryTree(ref),
+  );
+  return { context, ref, tree, discovery: createRemoteDiscovery(context, tree) };
+}
+
 function createRemoteDiscovery(
   context: RepositoryContext,
   tree: readonly RepositoryTreeEntry[],
 ): TemplateDiscoveryResult {
-  const issueTemplates = directFiles(tree, ".github/ISSUE_TEMPLATE", context).flatMap((entry) => {
-    const extension = extensionOf(entry.path);
-    const fileName = entry.path.slice(entry.path.lastIndexOf("/") + 1).toLowerCase();
-    if (fileName === "config.yml" || fileName === "config.yaml") return [];
-    if (extension !== ".md" && extension !== ".yml" && extension !== ".yaml") return [];
-    return [createIdentity(entry.path, extension === ".md" ? "issue-markdown" : "issue-form", "issue")];
-  });
-  const pullRequestTemplates: TemplateIdentity[] = [];
-  const defaultPath = ".github/PULL_REQUEST_TEMPLATE.md";
-  const defaultEntry = tree.find((entry) => entry.path === defaultPath);
-  if (defaultEntry !== undefined) {
-    if (defaultEntry.type !== "blob") throw invalidSource(context, defaultPath, "template path is not a file");
-    pullRequestTemplates.push(createIdentity(defaultPath, "pull-request-default", "pull-request"));
+  for (const entry of tree) {
+    const isContainer = isTemplateContainerPath(entry.path);
+    if (entry.type === "tree") {
+      if (isContainer) continue;
+      let classified: string | undefined;
+      try {
+        classified = classifyTemplatePath(entry.path);
+      } catch (error: unknown) {
+        throw invalidSource(context, entry.path, error instanceof Error ? error.message : "invalid template path");
+      }
+      if (isTemplatePathInNativeDirectory(entry.path) || classified !== undefined) {
+        throw invalidSource(context, entry.path, "template path is not a regular file");
+      }
+      continue;
+    }
+    if (isContainer) throw invalidSource(context, entry.path, "template path is not a regular file");
+    try {
+      classifyTemplatePath(entry.path);
+    } catch (error: unknown) {
+      throw invalidSource(context, entry.path, error instanceof Error ? error.message : "invalid template path");
+    }
   }
-  pullRequestTemplates.push(
-    ...directFiles(tree, ".github/PULL_REQUEST_TEMPLATE", context)
-      .filter((entry) => extensionOf(entry.path) === ".md")
-      .map((entry) => createIdentity(entry.path, "pull-request", "pull-request")),
-  );
-  const templates = [...issueTemplates, ...pullRequestTemplates].sort((left, right) =>
-    compareStrings(left.id, right.id),
-  );
-  return {
-    repositoryRoot: context.url,
-    templates,
-    issueTemplates: issueTemplates.sort((left, right) => compareStrings(left.id, right.id)),
-    pullRequestTemplates: pullRequestTemplates.sort((left, right) => compareStrings(left.id, right.id)),
-  };
-}
-
-function directFiles(
-  tree: readonly RepositoryTreeEntry[],
-  directory: string,
-  context: RepositoryContext,
-): readonly RepositoryTreeEntry[] {
-  const prefix = `${directory}/`;
-  const entries = tree.filter((entry) => entry.path.startsWith(prefix));
-  for (const entry of entries) {
-    const relative = entry.path.slice(prefix.length);
-    if (relative.includes("/"))
-      throw invalidSource(context, entry.path, "nested governance directories are unsupported");
-    if (entry.type !== "blob") throw invalidSource(context, entry.path, "governance template path is not a file");
+  try {
+    return discoverTemplatesFromPaths(
+      tree.filter((entry) => entry.type === "blob").map((entry) => entry.path),
+      context.url,
+    );
+  } catch (error: unknown) {
+    throw invalidSource(context, "<template tree>", error instanceof Error ? error.message : "invalid template path");
   }
-  return entries;
 }
 
 function findBlob(
@@ -257,24 +265,6 @@ function findPolicy(tree: readonly RepositoryTreeEntry[]): RepositoryTreeEntry |
   return tree.find((entry) => entry.path === ".inari/pr-policy.yml");
 }
 
-function createIdentity(
-  path: string,
-  type: TemplateIdentity["type"],
-  kind: TemplateIdentity["kind"],
-): TemplateIdentity {
-  const fileName = path.slice(path.lastIndexOf("/") + 1);
-  const extension = extensionOf(path);
-  const name = type === "pull-request-default" ? "default" : fileName.slice(0, -extension.length);
-  if (name.trim().length === 0) throw new Error(`Governance template path has no selectable name: ${path}.`);
-  return {
-    id: `${type}:${path}`,
-    type,
-    kind,
-    name,
-    path,
-  };
-}
-
 function sourceIdentity(entry: RepositoryTreeEntry, ref: string, content: string): ContractProvenanceSource {
   return {
     path: entry.path,
@@ -282,17 +272,6 @@ function sourceIdentity(entry: RepositoryTreeEntry, ref: string, content: string
     sha: entry.sha,
     digest: createHash("sha256").update(content, "utf8").digest("hex"),
   };
-}
-
-function extensionOf(filePath: string): string {
-  const dot = filePath.lastIndexOf(".");
-  return dot < 0 ? "" : filePath.slice(dot).toLowerCase();
-}
-
-function compareStrings(left: string, right: string): number {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
 }
 
 function invalidSource(context: RepositoryContext, path: string, reason: string): GovernanceError {

@@ -137,11 +137,11 @@ export async function discoverTemplates(
   const root = resolveRepositoryRoot(repositoryRoot);
   await assertDirectory(root, "repository root");
 
-  const [issueTemplates, pullRequestTemplates] = await Promise.all([
+  const [issueTemplatePaths, pullRequestTemplatePaths] = await Promise.all([
     discoverIssueTemplates(root),
     discoverPullRequestTemplates(root),
   ]);
-  return createDiscoveryResult(root, [...issueTemplates, ...pullRequestTemplates]);
+  return discoverTemplatesFromPaths([...issueTemplatePaths, ...pullRequestTemplatePaths], root);
 }
 
 /** Synchronous counterpart for callers that already operate synchronously. */
@@ -149,9 +149,99 @@ export function discoverTemplatesSync(repositoryRoot: string | URL = process.cwd
   const root = resolveRepositoryRoot(repositoryRoot);
   assertDirectorySync(root, "repository root");
 
-  const issueTemplates = discoverIssueTemplatesSync(root);
-  const pullRequestTemplates = discoverPullRequestTemplatesSync(root);
-  return createDiscoveryResult(root, [...issueTemplates, ...pullRequestTemplates]);
+  const issueTemplatePaths = discoverIssueTemplatesSync(root);
+  const pullRequestTemplatePaths = discoverPullRequestTemplatesSync(root);
+  return discoverTemplatesFromPaths([...issueTemplatePaths, ...pullRequestTemplatePaths], root);
+}
+
+/**
+ * Apply the same repository-native path semantics to a local filesystem or a
+ * trusted remote Git tree. Contents and filesystem shape are validated by
+ * the caller; this function owns only path classification and identity.
+ */
+export function discoverTemplatesFromPaths(
+  templatePaths: readonly string[],
+  repositoryRoot = "<repository>",
+): TemplateDiscoveryResult {
+  const templates = templatePaths.flatMap((templatePath) => {
+    const normalizedPath = normalizeRepositoryPath(templatePath);
+    const type = classifyTemplatePath(normalizedPath);
+    return type === undefined ? [] : [createIdentityFromRepositoryPath(normalizedPath, type)];
+  });
+  return createDiscoveryResult(repositoryRoot, templates);
+}
+
+/** Classify one supported repository-native template path. */
+export function classifyTemplatePath(templatePath: string): TemplateType | undefined {
+  const parts = normalizeRepositoryPath(templatePath).split("/");
+  if (isTemplatePathNested(parts)) {
+    throw new TemplateFilesystemError(`Nested template directories are unsupported: ${templatePath}.`, {
+      path: templatePath,
+      reason: "nested template directory",
+    });
+  }
+  const fileName = parts.at(-1);
+  if (fileName === undefined) return undefined;
+
+  if (parts.length === 3 && parts[0] === GITHUB_DIRECTORY && parts[1] === ISSUE_TEMPLATE_DIRECTORY) {
+    return classifyIssueTemplate(fileName)?.type;
+  }
+
+  if (parts.length === 1 && isDefaultPullRequestTemplateFilename(fileName)) {
+    return "pull-request-default";
+  }
+  if (parts.length === 2 && isPullRequestLocation(parts[0]) && isDefaultPullRequestTemplateFilename(fileName)) {
+    return "pull-request-default";
+  }
+  if (parts.length === 2 && sameName(parts[0] as string, PULL_REQUEST_TEMPLATE_DIRECTORY)) {
+    return classifyPullRequestTemplate(fileName)?.type;
+  }
+  if (
+    parts.length === 3 &&
+    isPullRequestLocation(parts[0]) &&
+    sameName(parts[1] as string, PULL_REQUEST_TEMPLATE_DIRECTORY)
+  ) {
+    return classifyPullRequestTemplate(fileName)?.type;
+  }
+  return undefined;
+}
+
+/** Whether a path is one of the native template container directories. */
+export function isTemplateContainerPath(templatePath: string): boolean {
+  const parts = normalizeRepositoryPath(templatePath).split("/");
+  return (
+    (parts.length === 2 && parts[0] === GITHUB_DIRECTORY && parts[1] === ISSUE_TEMPLATE_DIRECTORY) ||
+    (parts.length === 1 && sameName(parts[0] as string, PULL_REQUEST_TEMPLATE_DIRECTORY)) ||
+    (parts.length === 2 &&
+      isPullRequestLocation(parts[0]) &&
+      sameName(parts[1] as string, PULL_REQUEST_TEMPLATE_DIRECTORY))
+  );
+}
+
+/** Whether a path is inside a native template directory. */
+export function isTemplatePathInNativeDirectory(templatePath: string): boolean {
+  const parts = normalizeRepositoryPath(templatePath).split("/");
+  return (
+    (parts.length >= 2 && parts[0] === GITHUB_DIRECTORY && parts[1] === ISSUE_TEMPLATE_DIRECTORY) ||
+    (parts.length >= 1 && sameName(parts[0] as string, PULL_REQUEST_TEMPLATE_DIRECTORY)) ||
+    (parts.length >= 2 &&
+      isPullRequestLocation(parts[0]) &&
+      sameName(parts[1] as string, PULL_REQUEST_TEMPLATE_DIRECTORY))
+  );
+}
+
+function isTemplatePathNested(parts: readonly string[]): boolean {
+  return (
+    (parts.length > 3 && parts[0] === GITHUB_DIRECTORY && parts[1] === ISSUE_TEMPLATE_DIRECTORY) ||
+    (parts.length > 2 && sameName(parts[0] as string, PULL_REQUEST_TEMPLATE_DIRECTORY)) ||
+    (parts.length > 3 &&
+      isPullRequestLocation(parts[0]) &&
+      sameName(parts[1] as string, PULL_REQUEST_TEMPLATE_DIRECTORY))
+  );
+}
+
+function isPullRequestLocation(location: string | undefined): boolean {
+  return location === "docs" || location === GITHUB_DIRECTORY;
 }
 
 /**
@@ -184,41 +274,42 @@ function resolveRepositoryRoot(repositoryRoot: string | URL): string {
   return path.resolve(root);
 }
 
-async function discoverIssueTemplates(repositoryRoot: string): Promise<TemplateIdentity[]> {
+async function discoverIssueTemplates(repositoryRoot: string): Promise<string[]> {
   const directory = path.join(repositoryRoot, GITHUB_DIRECTORY, ISSUE_TEMPLATE_DIRECTORY);
   if (!(await optionalDirectory(directory))) return [];
   const entries = await readDirectory(directory);
-  return collectDirectoryTemplates(repositoryRoot, directory, entries, "issue");
+  return collectDirectoryTemplates(directory, entries, "issue").map((entryPath) =>
+    toRepositoryPath(repositoryRoot, entryPath),
+  );
 }
 
-function discoverIssueTemplatesSync(repositoryRoot: string): TemplateIdentity[] {
+function discoverIssueTemplatesSync(repositoryRoot: string): string[] {
   const directory = path.join(repositoryRoot, GITHUB_DIRECTORY, ISSUE_TEMPLATE_DIRECTORY);
   if (!optionalDirectorySync(directory)) return [];
   const entries = readDirectorySync(directory);
-  return collectDirectoryTemplates(repositoryRoot, directory, entries, "issue");
+  return collectDirectoryTemplates(directory, entries, "issue").map((entryPath) =>
+    toRepositoryPath(repositoryRoot, entryPath),
+  );
 }
 
-async function discoverPullRequestTemplates(repositoryRoot: string): Promise<TemplateIdentity[]> {
+async function discoverPullRequestTemplates(repositoryRoot: string): Promise<string[]> {
   const discovered = await Promise.all(
     PULL_REQUEST_TEMPLATE_LOCATIONS.map((location) => discoverPullRequestTemplatesAtLocation(repositoryRoot, location)),
   );
   return discovered.flat();
 }
 
-function discoverPullRequestTemplatesSync(repositoryRoot: string): TemplateIdentity[] {
+function discoverPullRequestTemplatesSync(repositoryRoot: string): string[] {
   return PULL_REQUEST_TEMPLATE_LOCATIONS.flatMap((location) =>
     discoverPullRequestTemplatesAtLocationSync(repositoryRoot, location),
   );
 }
 
-async function discoverPullRequestTemplatesAtLocation(
-  repositoryRoot: string,
-  location: string,
-): Promise<TemplateIdentity[]> {
+async function discoverPullRequestTemplatesAtLocation(repositoryRoot: string, location: string): Promise<string[]> {
   const parent = path.join(repositoryRoot, location);
   if (!(await optionalDirectory(parent))) return [];
   const entries = await readDirectory(parent);
-  const templates: TemplateIdentity[] = [];
+  const templates: string[] = [];
   for (const entry of entries) {
     const entryPath = path.join(parent, entry.name);
     if (isDefaultPullRequestTemplateFilename(entry.name)) {
@@ -228,7 +319,7 @@ async function discoverPullRequestTemplatesAtLocation(
           reason: entry.isSymbolicLink() ? "symbolic link" : "not a regular file",
         });
       }
-      templates.push(createIdentity(repositoryRoot, entryPath, "pull-request-default"));
+      templates.push(toRepositoryPath(repositoryRoot, entryPath));
       continue;
     }
     if (sameName(entry.name, PULL_REQUEST_TEMPLATE_DIRECTORY)) {
@@ -239,17 +330,21 @@ async function discoverPullRequestTemplatesAtLocation(
         });
       }
       const children = await readDirectory(entryPath);
-      templates.push(...collectDirectoryTemplates(repositoryRoot, entryPath, children, "pull-request"));
+      templates.push(
+        ...collectDirectoryTemplates(entryPath, children, "pull-request").map((childPath) =>
+          toRepositoryPath(repositoryRoot, childPath),
+        ),
+      );
     }
   }
   return templates;
 }
 
-function discoverPullRequestTemplatesAtLocationSync(repositoryRoot: string, location: string): TemplateIdentity[] {
+function discoverPullRequestTemplatesAtLocationSync(repositoryRoot: string, location: string): string[] {
   const parent = path.join(repositoryRoot, location);
   if (!optionalDirectorySync(parent)) return [];
   const entries = readDirectorySync(parent);
-  const templates: TemplateIdentity[] = [];
+  const templates: string[] = [];
   for (const entry of entries) {
     const entryPath = path.join(parent, entry.name);
     if (isDefaultPullRequestTemplateFilename(entry.name)) {
@@ -259,7 +354,7 @@ function discoverPullRequestTemplatesAtLocationSync(repositoryRoot: string, loca
           reason: entry.isSymbolicLink() ? "symbolic link" : "not a regular file",
         });
       }
-      templates.push(createIdentity(repositoryRoot, entryPath, "pull-request-default"));
+      templates.push(toRepositoryPath(repositoryRoot, entryPath));
       continue;
     }
     if (sameName(entry.name, PULL_REQUEST_TEMPLATE_DIRECTORY)) {
@@ -270,19 +365,22 @@ function discoverPullRequestTemplatesAtLocationSync(repositoryRoot: string, loca
         });
       }
       const children = readDirectorySync(entryPath);
-      templates.push(...collectDirectoryTemplates(repositoryRoot, entryPath, children, "pull-request"));
+      templates.push(
+        ...collectDirectoryTemplates(entryPath, children, "pull-request").map((childPath) =>
+          toRepositoryPath(repositoryRoot, childPath),
+        ),
+      );
     }
   }
   return templates;
 }
 
 function collectDirectoryTemplates(
-  repositoryRoot: string,
   directory: string,
   entries: readonly Dirent[],
   kind: "issue" | "pull-request",
-): TemplateIdentity[] {
-  const templates: TemplateIdentity[] = [];
+): string[] {
+  const templates: string[] = [];
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (!entry.isFile()) {
@@ -294,7 +392,7 @@ function collectDirectoryTemplates(
 
     const candidate = kind === "issue" ? classifyIssueTemplate(entry.name) : classifyPullRequestTemplate(entry.name);
     if (candidate === undefined) continue;
-    templates.push(createIdentity(repositoryRoot, entryPath, candidate.type));
+    templates.push(entryPath);
   }
   return templates;
 }
@@ -328,14 +426,13 @@ function normalizedExtension(fileName: string): string {
   return path.extname(fileName).toLowerCase();
 }
 
-function createIdentity(repositoryRoot: string, absolutePath: string, type: TemplateType): TemplateIdentity {
-  const relativePath = toRepositoryPath(repositoryRoot, absolutePath);
-  const fileName = path.basename(absolutePath);
+function createIdentityFromRepositoryPath(relativePath: string, type: TemplateType): TemplateIdentity {
+  const fileName = relativePath.slice(relativePath.lastIndexOf("/") + 1);
   const extension = path.extname(fileName);
   const name = type === "pull-request-default" ? "default" : fileName.slice(0, -extension.length);
   if (name.trim().length === 0) {
-    throw new TemplateFilesystemError(`Template filename has no selectable name: ${absolutePath}.`, {
-      path: absolutePath,
+    throw new TemplateFilesystemError(`Template filename has no selectable name: ${relativePath}.`, {
+      path: relativePath,
       reason: "empty template name",
     });
   }
@@ -348,6 +445,22 @@ function createIdentity(repositoryRoot: string, absolutePath: string, type: Temp
     path: relativePath,
   };
   return Object.freeze(identity);
+}
+
+function normalizeRepositoryPath(templatePath: string): string {
+  const normalized = templatePath.replaceAll("\\", "/");
+  const parts = normalized.split("/");
+  if (
+    normalized.length === 0 ||
+    normalized.startsWith("/") ||
+    parts.some((part) => part.length === 0 || part === "." || part === "..")
+  ) {
+    throw new TemplateFilesystemError(`Template path is not a normalized repository-relative path: ${templatePath}.`, {
+      path: templatePath,
+      reason: "invalid repository-relative path",
+    });
+  }
+  return normalized;
 }
 
 function toRepositoryPath(repositoryRoot: string, absolutePath: string): string {
