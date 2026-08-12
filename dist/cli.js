@@ -72,13 +72,15 @@ class CliError extends Error {
     }
 }
 async function runTemplateList(root, repository, dependencies) {
-    const discovery = typeof repository === "string"
-        ? await (async () => {
-            const adapter = createAdapter(dependencies, root, repository);
-            await adapter.resolveRepositoryContext();
-            return discoverRepositoryTemplates(adapter);
-        })()
-        : await discoverTemplates(root);
+    let discovery;
+    if (typeof repository === "string") {
+        const adapter = createAdapter(dependencies, root, repository);
+        await adapter.resolveRepositoryContext();
+        discovery = await discoverRepositoryTemplates(adapter);
+    }
+    else {
+        discovery = await discoverTemplates(root);
+    }
     console.log(JSON.stringify({ templates: discovery.templates }));
     return 0;
 }
