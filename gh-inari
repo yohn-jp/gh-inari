@@ -1,12 +1,35 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const launcherPath = realpathSync(fileURLToPath(import.meta.url));
-const cliPath = path.join(path.dirname(launcherPath), "dist", "index.js");
+const extensionDirectory = path.dirname(launcherPath);
+const cliPath = path.join(extensionDirectory, "dist", "index.js");
+
+async function importCli() {
+  try {
+    return await import(pathToFileURL(cliPath).href);
+  } catch (error) {
+    if (!(error instanceof Error) || error.code !== "ERR_MODULE_NOT_FOUND") throw error;
+    console.error("gh-inari: installing runtime dependencies for the GitHub CLI extension...");
+    const result = spawnSync(
+      "npm",
+      ["install", "--omit=dev", "--ignore-scripts", "--no-package-lock", "--no-audit", "--no-fund"],
+      { cwd: extensionDirectory, stdio: "inherit" },
+    );
+    if (result.error !== undefined || result.status !== 0) {
+      throw new Error("gh-inari: unable to install runtime dependencies for the GitHub CLI extension.", {
+        cause: result.error,
+      });
+    }
+    return import(pathToFileURL(cliPath).href);
+  }
+}
+
 try {
-  const { runCli } = await import(pathToFileURL(cliPath).href);
+  const { runCli } = await importCli();
   process.exitCode = await runCli(process.argv.slice(2));
 } catch (error) {
   if (error instanceof Error && error.code === "ERR_MODULE_NOT_FOUND") {

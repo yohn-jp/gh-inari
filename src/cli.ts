@@ -24,6 +24,7 @@ import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
   compileLocalGovernedContract,
   compileRepositoryGovernedContract,
+  discoverRepositoryTemplates,
   rejectGovernedPolicyOverride,
 } from "./governance.js";
 import { discoverTemplates, type TemplateSelector } from "./template-discovery.js";
@@ -88,7 +89,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   try {
     const [domain, command, ...rest] = parsed.positionals;
     if (domain === "template" && command === "list") {
-      return await runTemplateList(root);
+      return await runTemplateList(root, parsed.options.repository, dependencies);
     }
     if (domain === "issue" || domain === "pr") {
       return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
@@ -116,8 +117,19 @@ class CliError extends Error {
   }
 }
 
-async function runTemplateList(root: string): Promise<number> {
-  const discovery = await discoverTemplates(root);
+async function runTemplateList(
+  root: string,
+  repository: string | boolean | undefined,
+  dependencies: CliDependencies,
+): Promise<number> {
+  let discovery;
+  if (typeof repository === "string") {
+    const adapter = createAdapter(dependencies, root, repository);
+    await adapter.resolveRepositoryContext();
+    discovery = await discoverRepositoryTemplates(adapter);
+  } else {
+    discovery = await discoverTemplates(root);
+  }
   console.log(JSON.stringify({ templates: discovery.templates }));
   return 0;
 }
@@ -160,12 +172,20 @@ async function runArtifactCommand(
       return runExistingValidation(domain, Number(rest[0]), parsed, root, dependencies, json);
     }
     if (command === "validate" || command === "render") {
-      const contract = await compileLocalGovernedContract(
-        domain,
-        root,
-        templateSelector(parsed, rest[0]),
-        parsed.options.policy,
-      );
+      let contract: CanonicalContract;
+      if (typeof parsed.options.repository === "string") {
+        rejectGovernedPolicyOverride(parsed.options.policy);
+        const adapter = createAdapter(dependencies, root, parsed.options.repository);
+        await adapter.resolveRepositoryContext();
+        contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
+      } else {
+        contract = await compileLocalGovernedContract(
+          domain,
+          root,
+          templateSelector(parsed, rest[0]),
+          parsed.options.policy,
+        );
+      }
       const document = await readInputDocument(parsed.options.from);
       const preparedDocument = mergeOptionMetadata(document, parsed.options);
       if (command === "validate") {

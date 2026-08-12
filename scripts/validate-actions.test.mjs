@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateActionText, validateRepositoryActions } from "./validate-actions.mjs";
+import { validateActionText, validateIssueGovernanceWorkflow, validateRepositoryActions } from "./validate-actions.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha = "a".repeat(40);
@@ -39,4 +39,19 @@ test("all repository-owned workflow and composite-action refs are pinned", () =>
   assert.deepEqual(result.errors, []);
   assert.ok(result.files.length > 0);
   assert.ok(result.references.some((reference) => !reference.local));
+});
+
+test("Issue Governance requires a clean-runner dependency bootstrap and fallback report", () => {
+  const valid = [
+    "uses: pnpm/action-setup@" + sha,
+    "uses: actions/setup-node@" + sha,
+    "run: pnpm install --frozen-lockfile",
+    ': > "$report"',
+    'node --import tsx scripts/validate-issue.mjs --report "$report"',
+    "GOVERNANCE_VALIDATION_FAILED",
+  ].join("\n");
+  assert.deepEqual(validateIssueGovernanceWorkflow(valid).errors, []);
+  assert.ok(
+    validateIssueGovernanceWorkflow(valid.replace("pnpm install --frozen-lockfile", "pnpm install")).errors.length > 0,
+  );
 });

@@ -311,6 +311,79 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
   }
 });
 
+test("structured validate and render use authoritative governance for --repository", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "issue.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({ fields: { problem: "problem", proposal: "proposal", non_goals: "none", acceptance: "done" } }),
+  );
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const validateTransport = new CliStubTransport(
+      remoteGovernanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", REMOTE_ISSUE_TEMPLATE),
+    );
+    const validateExitCode = await runCli(
+      ["issue", "validate", "--template", "remote", "--from", inputPath, "--repository", "acme/inari", "--json"],
+      {
+        repositoryRoot,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: validateTransport }),
+      },
+    );
+    assert.equal(validateExitCode, 0);
+    assert.equal(JSON.parse(lines.at(-1) ?? "{}").valid, true);
+
+    const renderTransport = new CliStubTransport(
+      remoteGovernanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", REMOTE_ISSUE_TEMPLATE),
+    );
+    const renderExitCode = await runCli(
+      ["issue", "render", "--template", "remote", "--from", inputPath, "--repository", "acme/inari", "--json"],
+      {
+        repositoryRoot,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: renderTransport }),
+      },
+    );
+    assert.equal(renderExitCode, 0);
+    assert.match(JSON.parse(lines.at(-1) ?? "{}").body, /### Problem/u);
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("template list --repository reports authoritative remote templates", async () => {
+  const transport = new CliStubTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        truncated: false,
+        tree: [{ path: "docs/pull_request_template.txt", type: "blob", sha: "docs-sha" }],
+      }),
+    ),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["template", "list", "--repository", "acme/inari"], {
+      repositoryRoot: "/tmp/stale-local-copy",
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(
+      JSON.parse(lines[0] ?? "{}").templates.map((template: { path: string }) => template.path),
+      ["docs/pull_request_template.txt"],
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("valid PR create reaches the adapter with a canonical rendered body", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
   const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));

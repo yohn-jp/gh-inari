@@ -14,6 +14,10 @@ export * from "./pull-request-template.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,
+  discoverTemplatesFromPaths,
+  classifyTemplatePath,
+  isTemplateContainerPath,
+  isTemplatePathInNativeDirectory,
   selectTemplate,
   selectIssueTemplate,
   selectPullRequestTemplate,

@@ -175,6 +175,29 @@ function main() {
     const ghAvailable = spawnSync("gh", ["--version"], { encoding: "utf8" }).status === 0;
     if (!ghAvailable) fail("GitHub CLI (gh) is required for the packed extension smoke test");
 
+    const sourceGhConfigDirectory = path.join(installDirectory, "source-gh-config");
+    const sourceExtensionEnvironment = {
+      ...ghExtensionEnvironment,
+      GH_CONFIG_DIR: sourceGhConfigDirectory,
+      XDG_DATA_HOME: path.join(installDirectory, "source-gh-data"),
+    };
+    const sourceExtensionDirectory = path.join(installDirectory, "gh-inari");
+    fs.mkdirSync(sourceExtensionDirectory, { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, "gh-inari"), path.join(sourceExtensionDirectory, "gh-inari"));
+    fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(sourceExtensionDirectory, "package.json"));
+    fs.cpSync(path.join(repoRoot, "dist"), path.join(sourceExtensionDirectory, "dist"), { recursive: true });
+    console.log("installing the checked-out executable as a GitHub CLI extension...");
+    run("gh", ["extension", "install", "."], {
+      cwd: sourceExtensionDirectory,
+      env: sourceExtensionEnvironment,
+    });
+    const sourceGhHelpResult = invoke("gh", ["inari", "--help"], {
+      cwd: fixtureDirectory,
+      env: sourceExtensionEnvironment,
+    });
+    if (sourceGhHelpResult.status !== 0 || !sourceGhHelpResult.stdout.includes("Usage: gh-inari"))
+      fail(`checked-out gh inari --help failed:\n${sourceGhHelpResult.stdout}\n${sourceGhHelpResult.stderr}`);
+
     console.log("installing the packed executable as a local GitHub CLI extension...");
     run("gh", ["extension", "install", "."], { cwd: installedPackageDirectory, env: ghExtensionEnvironment });
     const ghHelpResult = invoke("gh", ["inari", "--help"], {
@@ -190,6 +213,10 @@ function main() {
       invoke(process.execPath, [sourceEntry, "pr", "schema"], { cwd: fixtureDirectory }),
       "source pr schema",
     );
+    const sourceGhSchema = jsonOutput(
+      invoke("gh", ["inari", "pr", "schema"], { cwd: fixtureDirectory, env: sourceExtensionEnvironment }),
+      "checked-out gh inari pr schema",
+    );
     const packedSchema = jsonOutput(
       invoke(packedLauncher, ["pr", "schema"], { cwd: fixtureDirectory }),
       "packed gh-inari pr schema",
@@ -198,6 +225,8 @@ function main() {
       invoke("gh", ["inari", "pr", "schema"], { cwd: fixtureDirectory, env: ghExtensionEnvironment }),
       "gh inari pr schema",
     );
+    if (JSON.stringify(sourceGhSchema) !== JSON.stringify(sourceSchema))
+      fail("checked-out gh inari schema diverged from the source CLI");
     if (JSON.stringify(packedSchema) !== JSON.stringify(sourceSchema))
       fail("packed gh-inari pr schema diverged from the source CLI");
     if (JSON.stringify(ghSchema) !== JSON.stringify(sourceSchema))
@@ -207,10 +236,15 @@ function main() {
     for (const validationCase of validationCases) {
       const args = validationArgs(validationCase.inputPath);
       const sourceResult = invoke(process.execPath, [sourceEntry, ...args], { cwd: fixtureDirectory });
+      const sourceGhResult = invoke("gh", ["inari", ...args], {
+        cwd: fixtureDirectory,
+        env: sourceExtensionEnvironment,
+      });
       const packedResult = invoke(packedLauncher, args, { cwd: fixtureDirectory });
       const ghResult = invoke("gh", ["inari", ...args], { cwd: fixtureDirectory, env: ghExtensionEnvironment });
       for (const [label, result] of [
         ["source", sourceResult],
+        ["checked-out gh inari", sourceGhResult],
         ["packed gh-inari", packedResult],
         ["gh inari", ghResult],
       ]) {
@@ -221,7 +255,11 @@ function main() {
         if (output.valid !== validationCase.valid || !Array.isArray(output.violations))
           fail(label + " " + validationCase.name + " returned an unexpected validation result");
       }
-      if (packedResult.stdout !== sourceResult.stdout || ghResult.stdout !== sourceResult.stdout)
+      if (
+        sourceGhResult.stdout !== sourceResult.stdout ||
+        packedResult.stdout !== sourceResult.stdout ||
+        ghResult.stdout !== sourceResult.stdout
+      )
         fail(validationCase.name + " validation output diverged across execution paths");
     }
 
@@ -231,6 +269,10 @@ function main() {
     const sourceRender = jsonOutput(
       invoke(process.execPath, [sourceEntry, ...renderArgs], { cwd: fixtureDirectory }),
       "source pr render",
+    );
+    const sourceGhRender = jsonOutput(
+      invoke("gh", ["inari", ...renderArgs], { cwd: fixtureDirectory, env: sourceExtensionEnvironment }),
+      "checked-out gh inari pr render",
     );
     const packedRender = jsonOutput(
       invoke(packedLauncher, renderArgs, { cwd: fixtureDirectory }),
@@ -242,6 +284,8 @@ function main() {
     );
     if (sourceRender.valid !== true || typeof sourceRender.body !== "string" || sourceRender.body.length === 0)
       fail("source pr render did not produce a rendered governance body");
+    if (JSON.stringify(sourceGhRender) !== JSON.stringify(sourceRender))
+      fail("checked-out gh inari render diverged from the source CLI");
     if (JSON.stringify(packedRender) !== JSON.stringify(sourceRender))
       fail("packed gh-inari pr render diverged from the source CLI");
     if (JSON.stringify(ghRender) !== JSON.stringify(sourceRender))
@@ -249,6 +293,12 @@ function main() {
 
     for (const [label, command, args, options] of [
       ["source", process.execPath, [sourceEntry, "--version"], { cwd: fixtureDirectory }],
+      [
+        "checked-out gh inari",
+        "gh",
+        ["inari", "--version"],
+        { cwd: fixtureDirectory, env: sourceExtensionEnvironment },
+      ],
       ["packed gh-inari", packedLauncher, ["--version"], { cwd: fixtureDirectory }],
       ["gh inari", "gh", ["inari", "--version"], { cwd: fixtureDirectory, env: ghExtensionEnvironment }],
     ]) {
