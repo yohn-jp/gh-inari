@@ -55,6 +55,14 @@ export interface ContractProvenance {
   readonly authority: "repository-default-branch";
   readonly repository: ContractProvenanceRepository;
   readonly ref: string;
+  /**
+   * SHA of the repository's root Git tree at `ref` when governance was
+   * compiled. An immutable generation identity: unlike `ref` (a mutable
+   * branch name), this value changes whenever any file in the repository
+   * changes, so it can be compared against the tree read immediately before
+   * mutation to detect a stale governance generation.
+   */
+  readonly treeSha: string;
   readonly template: ContractProvenanceSource;
   readonly policy?: ContractProvenanceSource;
 }
@@ -427,9 +435,10 @@ function validateProvenance(
     addViolation(violations, "IR_INVALID_PROVENANCE", path, "Contract provenance must be an object.");
     return;
   }
-  checkUnknownKeys(value, ["authority", "repository", "ref", "template", "policy"], path, violations);
+  checkUnknownKeys(value, ["authority", "repository", "ref", "treeSha", "template", "policy"], path, violations);
   const authority = requiredString(value, "authority", path, violations);
   const ref = requiredString(value, "ref", path, violations);
+  requiredString(value, "treeSha", path, violations);
   const repository = requiredRecord(value, "repository", path, violations);
   const template = requiredRecord(value, "template", path, violations);
   if (authority !== undefined && authority !== "repository-default-branch") {
@@ -1890,6 +1899,7 @@ function canonicalizeProvenance(provenance: ContractProvenance): UnknownRecord {
       nameWithOwner: provenance.repository.nameWithOwner,
     },
     ref: provenance.ref,
+    treeSha: provenance.treeSha,
     template: source(provenance.template),
     ...(provenance.policy === undefined ? {} : { policy: source(provenance.policy) }),
   };

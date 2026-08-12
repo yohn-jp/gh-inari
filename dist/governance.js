@@ -131,6 +131,7 @@ async function compileRepositoryGovernedContractFromSource(adapter, source, doma
                 nameWithOwner: context.nameWithOwner,
             },
             ref,
+            treeSha: source.treeSha,
             template: sourceIdentity(templateEntry, ref, templateSource),
             ...(policySource === undefined ? {} : { policy: policySource }),
         },
@@ -160,11 +161,80 @@ async function readRepositoryPolicySource(adapter, source) {
 export async function discoverRepositoryTemplates(adapter) {
     return (await readRepositoryGovernanceSource(adapter)).discovery;
 }
+/**
+ * Verify, immediately before a governed mutation, that the artifact's
+ * repository governance generation is still acceptable.
+ *
+ * A generation match (`treeSha` equality) is the fast path: nothing under
+ * governance changed since compilation. A generation mismatch means the
+ * target repository's default branch advanced, but is not itself
+ * disqualifying: it is content-equivalent, and therefore still acceptable,
+ * only when every governance input the contract was compiled from (its
+ * template, and its policy if one was used) is still present with the exact
+ * same blob SHA. Any other outcome — a changed or removed template, a
+ * changed, removed, or newly introduced policy — fails closed with a stable
+ * GOVERNANCE_GENERATION_STALE error; the caller must recompile and
+ * revalidate against the new generation before mutating.
+ */
+export async function verifyGovernedMutationFreshness(adapter, provenance) {
+    const source = await readRepositoryGovernanceSource(adapter);
+    if (source.context.nameWithOwner !== provenance.repository.nameWithOwner) {
+        throw staleGenerationError(source, provenance, "target repository does not match validated provenance");
+    }
+    if (source.treeSha === provenance.treeSha)
+        return;
+    const templateEntry = source.tree.find((entry) => entry.path === provenance.template.path);
+    if (templateEntry === undefined || templateEntry.type !== "blob" || templateEntry.sha !== provenance.template.sha) {
+        throw staleGenerationError(source, provenance, "template governance input changed");
+    }
+    const currentPolicyEntry = findPolicy(source.tree);
+    if (provenance.policy === undefined) {
+        if (currentPolicyEntry !== undefined) {
+            throw staleGenerationError(source, provenance, "a policy governance input was introduced");
+        }
+        return;
+    }
+    if (currentPolicyEntry === undefined ||
+        currentPolicyEntry.type !== "blob" ||
+        currentPolicyEntry.sha !== provenance.policy.sha) {
+        throw staleGenerationError(source, provenance, "policy governance input changed");
+    }
+}
+function staleGenerationError(source, provenance, reason) {
+    return new GovernanceError("GOVERNANCE_GENERATION_STALE", "The target repository governance changed since this artifact was validated and rendered; recompile and revalidate before mutating.", {
+        repository: source.context.nameWithOwner,
+        ref: source.ref,
+        reason,
+        validatedRef: provenance.ref,
+        validatedTreeSha: provenance.treeSha,
+        currentTreeSha: source.treeSha,
+    });
+}
+/** Create an Issue only after verifying its governance generation is still fresh. */
+export async function createGovernedIssue(adapter, artifact) {
+    await verifyGovernedMutationFreshness(adapter, artifact.provenance);
+    return adapter.createIssue(artifact);
+}
+/** Update an Issue only after verifying its governance generation is still fresh. */
+export async function updateGovernedIssue(adapter, issueNumber, artifact) {
+    await verifyGovernedMutationFreshness(adapter, artifact.provenance);
+    return adapter.updateIssue(issueNumber, artifact);
+}
+/** Create a pull request only after verifying its governance generation is still fresh. */
+export async function createGovernedPullRequest(adapter, artifact) {
+    await verifyGovernedMutationFreshness(adapter, artifact.provenance);
+    return adapter.createPullRequest(artifact);
+}
+/** Update a pull request only after verifying its governance generation is still fresh. */
+export async function updateGovernedPullRequest(adapter, pullRequestNumber, artifact) {
+    await verifyGovernedMutationFreshness(adapter, artifact.provenance);
+    return adapter.updatePullRequest(pullRequestNumber, artifact);
+}
 async function readRepositoryGovernanceSource(adapter) {
     const context = await adapter.resolveRepositoryContext();
     const ref = await readGovernedValue("repository.default_branch", context, undefined, () => adapter.getRepositoryDefaultBranch());
-    const tree = await readGovernedValue("repository.governance.tree", context, ref, () => adapter.getRepositoryTree(ref));
-    return { context, ref, tree, discovery: createRemoteDiscovery(context, tree) };
+    const { sha: treeSha, entries: tree } = await readGovernedValue("repository.governance.tree", context, ref, () => adapter.getRepositoryTree(ref));
+    return { context, ref, treeSha, tree, discovery: createRemoteDiscovery(context, tree) };
 }
 function createRemoteDiscovery(context, tree) {
     for (const entry of tree) {

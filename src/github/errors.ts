@@ -10,6 +10,7 @@ export type GitHubAdapterErrorCode =
   | "GITHUB_TIMEOUT"
   | "GITHUB_API_FAILED"
   | "GITHUB_API_RESPONSE_INVALID"
+  | "GITHUB_RESOURCE_KIND_MISMATCH"
   | "CONTRACT_VIOLATION";
 
 export interface GitHubAdapterErrorDetails {
@@ -122,6 +123,25 @@ export class GitHubApiResponseError extends GitHubAdapterError {
   constructor(operation: string, message: string, details: GitHubAdapterErrorDetails = {}, cause?: unknown) {
     super("api", "GITHUB_API_RESPONSE_INVALID", message, { operation, ...details }, { cause });
     this.name = "GitHubApiResponseError";
+  }
+}
+
+/**
+ * GitHub's issue resource family can represent pull requests. Raised when a
+ * caller addressed the Issue path but the numbered resource is actually a
+ * pull request, so it fails closed instead of silently accepting a
+ * PR-shaped resource as an Issue artifact.
+ */
+export class GitHubResourceKindMismatchError extends GitHubAdapterError {
+  constructor(operation: string, issueNumber: number, cause?: unknown) {
+    super(
+      "api",
+      "GITHUB_RESOURCE_KIND_MISMATCH",
+      `Resource #${issueNumber} is a pull request, not an Issue; refusing to treat it as an Issue artifact.`,
+      { operation, path: "pull_request" },
+      { cause },
+    );
+    this.name = "GitHubResourceKindMismatchError";
   }
 }
 

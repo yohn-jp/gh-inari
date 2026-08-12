@@ -47,6 +47,14 @@ export interface ContractProvenance {
     readonly authority: "repository-default-branch";
     readonly repository: ContractProvenanceRepository;
     readonly ref: string;
+    /**
+     * SHA of the repository's root Git tree at `ref` when governance was
+     * compiled. An immutable generation identity: unlike `ref` (a mutable
+     * branch name), this value changes whenever any file in the repository
+     * changes, so it can be compared against the tree read immediately before
+     * mutation to detect a stale governance generation.
+     */
+    readonly treeSha: string;
     readonly template: ContractProvenanceSource;
     readonly policy?: ContractProvenanceSource;
 }

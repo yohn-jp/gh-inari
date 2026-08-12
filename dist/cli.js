@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ArtifactInputError, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { projectContract, SemanticValidationError, validateSemanticInput, } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
-import { compileLocalGovernedContract, compileRepositoryGovernedContract, compileRepositoryGovernedContracts, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
+import { compileLocalGovernedContract, compileRepositoryGovernedContract, compileRepositoryGovernedContracts, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -142,12 +142,12 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
         if (domain === "issue") {
             const prepared = prepareIssueArtifact(contract, preparedDocument);
-            const created = await adapter.createIssue(prepared.artifact);
+            const created = await createGovernedIssue(adapter, prepared.artifact);
             console.log(JSON.stringify({ ok: true, artifact: created }));
             return 0;
         }
         const prepared = preparePullRequestArtifact(contract, preparedDocument);
-        const created = await adapter.createPullRequest(prepared.artifact);
+        const created = await createGovernedPullRequest(adapter, prepared.artifact);
         console.log(JSON.stringify({ ok: true, artifact: created }));
         return 0;
     }

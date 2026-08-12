@@ -1,5 +1,5 @@
 export type GitHubAdapterErrorCategory = "environment" | "authentication" | "repository" | "transport" | "timeout" | "api" | "contract";
-export type GitHubAdapterErrorCode = "GH_NOT_INSTALLED" | "GH_UNAUTHENTICATED" | "REPOSITORY_RESOLUTION_FAILED" | "INVALID_REPOSITORY_OVERRIDE" | "GITHUB_TRANSPORT_FAILED" | "GITHUB_TIMEOUT" | "GITHUB_API_FAILED" | "GITHUB_API_RESPONSE_INVALID" | "CONTRACT_VIOLATION";
+export type GitHubAdapterErrorCode = "GH_NOT_INSTALLED" | "GH_UNAUTHENTICATED" | "REPOSITORY_RESOLUTION_FAILED" | "INVALID_REPOSITORY_OVERRIDE" | "GITHUB_TRANSPORT_FAILED" | "GITHUB_TIMEOUT" | "GITHUB_API_FAILED" | "GITHUB_API_RESPONSE_INVALID" | "GITHUB_RESOURCE_KIND_MISMATCH" | "CONTRACT_VIOLATION";
 export interface GitHubAdapterErrorDetails {
     readonly operation?: string;
     readonly path?: string;
@@ -40,6 +40,15 @@ export declare class GitHubApiError extends GitHubAdapterError {
 }
 export declare class GitHubApiResponseError extends GitHubAdapterError {
     constructor(operation: string, message: string, details?: GitHubAdapterErrorDetails, cause?: unknown);
+}
+/**
+ * GitHub's issue resource family can represent pull requests. Raised when a
+ * caller addressed the Issue path but the numbered resource is actually a
+ * pull request, so it fails closed instead of silently accepting a
+ * PR-shaped resource as an Issue artifact.
+ */
+export declare class GitHubResourceKindMismatchError extends GitHubAdapterError {
+    constructor(operation: string, issueNumber: number, cause?: unknown);
 }
 export declare class ContractViolationError extends GitHubAdapterError {
     constructor(message: string, path?: string, cause?: unknown);

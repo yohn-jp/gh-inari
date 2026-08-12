@@ -1,8 +1,8 @@
-import { type CanonicalContract } from "./contract/ir.js";
-import { GitHubAdapter } from "./github/index.js";
+import { type CanonicalContract, type ContractProvenance } from "./contract/ir.js";
+import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
 export type GovernedArtifactDomain = "issue" | "pr";
-export type GovernanceErrorCode = "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN" | "GOVERNANCE_SOURCE_UNAVAILABLE" | "GOVERNANCE_SOURCE_INVALID";
+export type GovernanceErrorCode = "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN" | "GOVERNANCE_SOURCE_UNAVAILABLE" | "GOVERNANCE_SOURCE_INVALID" | "GOVERNANCE_GENERATION_STALE";
 export interface GovernanceErrorDetails {
     readonly operation?: string;
     readonly repository?: string;
@@ -48,3 +48,27 @@ export declare function compileRepositoryGovernedContract(adapter: GitHubAdapter
 export declare function compileRepositoryGovernedContracts(adapter: GitHubAdapter, domain: GovernedArtifactDomain): Promise<readonly CanonicalContract[]>;
 /** Discover all authoritative templates without compiling or reading a body. */
 export declare function discoverRepositoryTemplates(adapter: GitHubAdapter): Promise<TemplateDiscoveryResult>;
+/**
+ * Verify, immediately before a governed mutation, that the artifact's
+ * repository governance generation is still acceptable.
+ *
+ * A generation match (`treeSha` equality) is the fast path: nothing under
+ * governance changed since compilation. A generation mismatch means the
+ * target repository's default branch advanced, but is not itself
+ * disqualifying: it is content-equivalent, and therefore still acceptable,
+ * only when every governance input the contract was compiled from (its
+ * template, and its policy if one was used) is still present with the exact
+ * same blob SHA. Any other outcome — a changed or removed template, a
+ * changed, removed, or newly introduced policy — fails closed with a stable
+ * GOVERNANCE_GENERATION_STALE error; the caller must recompile and
+ * revalidate against the new generation before mutating.
+ */
+export declare function verifyGovernedMutationFreshness(adapter: GitHubAdapter, provenance: ContractProvenance): Promise<void>;
+/** Create an Issue only after verifying its governance generation is still fresh. */
+export declare function createGovernedIssue(adapter: GitHubAdapter, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
+/** Update an Issue only after verifying its governance generation is still fresh. */
+export declare function updateGovernedIssue(adapter: GitHubAdapter, issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
+/** Create a pull request only after verifying its governance generation is still fresh. */
+export declare function createGovernedPullRequest(adapter: GitHubAdapter, artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
+/** Update a pull request only after verifying its governance generation is still fresh. */
+export declare function updateGovernedPullRequest(adapter: GitHubAdapter, pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;

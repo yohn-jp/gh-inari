@@ -4,6 +4,7 @@ import {
   GhUnauthenticatedError,
   GitHubApiError,
   GitHubApiResponseError,
+  GitHubResourceKindMismatchError,
   GitHubTimeoutError,
   GitHubTransportError,
   InvalidRepositoryOverrideError,
@@ -16,6 +17,7 @@ import {
   type GitHubIssue,
   type GitHubPullRequest,
   type RepositoryContext,
+  type RepositoryTree,
   type RepositoryTreeEntry,
   type ValidatedRenderedIssueArtifact,
   type ValidatedRenderedPullRequestArtifact,
@@ -145,7 +147,7 @@ export class GitHubAdapter {
   }
 
   /** Read the complete Git tree for a trusted repository ref. Truncation is invalid for governance. */
-  async getRepositoryTree(ref: string): Promise<readonly RepositoryTreeEntry[]> {
+  async getRepositoryTree(ref: string): Promise<RepositoryTree> {
     assertRepositoryRef(ref);
     const context = await this.resolveRepositoryContext();
     const result = await this.runApi(
@@ -251,6 +253,9 @@ export class GitHubAdapter {
     assertValidatedRenderedIssueArtifact(artifact);
     const context = await this.resolveRepositoryContext();
     assertArtifactRepository(artifact, context);
+    // GitHub's issues API also accepts pull request numbers; read first so a
+    // pull request is never silently overwritten with Issue Form content.
+    await this.getIssue(issueNumber);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "PATCH");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
@@ -556,6 +561,7 @@ function parseJson(value: string, operation: string): unknown {
 function parseIssue(value: unknown, operation: string): GitHubIssue {
   const record = responseRecord(value, operation);
   const number = responseNumber(record.number, "number", operation);
+  if (record.pull_request !== undefined) throw new GitHubResourceKindMismatchError(operation, number);
   const title = responseString(record.title, "title", operation);
   const state = responseState(record.state, operation);
   const url = responseUrl(record, operation);
@@ -663,7 +669,7 @@ function assertRepositoryRef(value: string): asserts value is string {
   }
 }
 
-function parseRepositoryTree(value: unknown, operation: string): readonly RepositoryTreeEntry[] {
+function parseRepositoryTree(value: unknown, operation: string): RepositoryTree {
   const record = responseRecord(value, operation);
   if (record.truncated !== false) {
     throw new GitHubApiResponseError(
@@ -672,26 +678,28 @@ function parseRepositoryTree(value: unknown, operation: string): readonly Reposi
       { path: "truncated" },
     );
   }
+  const sha = responseString(record.sha, "sha", operation);
   if (!Array.isArray(record.tree)) {
     throw new GitHubApiResponseError(operation, "GitHub repository tree response is missing tree entries.", {
       path: "tree",
     });
   }
-  return record.tree.map((entry, index) => {
+  const entries: RepositoryTreeEntry[] = record.tree.map((entry, index) => {
     if (!isRecord(entry)) {
       throw new GitHubApiResponseError(operation, `GitHub repository tree entry ${index} is invalid.`, {
         path: `tree[${index}]`,
       });
     }
     const entryPath = responseString(entry.path, `tree[${index}].path`, operation);
-    const sha = responseString(entry.sha, `tree[${index}].sha`, operation);
+    const entrySha = responseString(entry.sha, `tree[${index}].sha`, operation);
     if (entry.type !== "blob" && entry.type !== "tree") {
       throw new GitHubApiResponseError(operation, `GitHub repository tree entry ${index} has an invalid type.`, {
         path: `tree[${index}].type`,
       });
     }
-    return { path: entryPath, type: entry.type, sha };
+    return { path: entryPath, type: entry.type, sha: entrySha };
   });
+  return { sha, entries };
 }
 
 function parseRepositoryOverride(repository: string, fallbackHostname: string): RepositoryContext {

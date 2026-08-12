@@ -28,6 +28,8 @@ import {
   compileLocalGovernedContract,
   compileRepositoryGovernedContract,
   compileRepositoryGovernedContracts,
+  createGovernedIssue,
+  createGovernedPullRequest,
   discoverRepositoryTemplates,
   rejectGovernedPolicyOverride,
 } from "./governance.js";
@@ -217,12 +219,12 @@ async function runArtifactCommand(
     const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
     if (domain === "issue") {
       const prepared = prepareIssueArtifact(contract, preparedDocument);
-      const created = await adapter.createIssue(prepared.artifact);
+      const created = await createGovernedIssue(adapter, prepared.artifact);
       console.log(JSON.stringify({ ok: true, artifact: created }));
       return 0;
     }
     const prepared = preparePullRequestArtifact(contract, preparedDocument);
-    const created = await adapter.createPullRequest(prepared.artifact);
+    const created = await createGovernedPullRequest(adapter, prepared.artifact);
     console.log(JSON.stringify({ ok: true, artifact: created }));
     return 0;
   }

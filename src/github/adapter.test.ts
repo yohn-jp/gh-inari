@@ -8,6 +8,7 @@ import {
   GhUnauthenticatedError,
   GitHubAdapter,
   GitHubApiError,
+  GitHubResourceKindMismatchError,
   GitHubTimeoutError,
   GitHubTransportError,
   RepositoryResolutionError,
@@ -93,6 +94,7 @@ function governedFixture(contract: CanonicalContract): CanonicalContract {
         nameWithOwner: "acme/inari",
       },
       ref: "main",
+      treeSha: "fixture-tree-sha",
       template: {
         path: contract.templateIdentity.path,
         ref: "main",
@@ -196,6 +198,7 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
     command(0, issuePayload()),
     command(0, pullRequestPayload()),
     command(0, issuePayload(44)),
+    command(0, issuePayload(45)),
     command(0, issuePayload(45)),
     command(0, pullRequestPayload(46)),
     command(0, pullRequestPayload(47)),
@@ -333,6 +336,52 @@ test("keeps API failures and process transport failures distinct from contract f
       error instanceof GitHubTransportError &&
       error.code === "GITHUB_TRANSPORT_FAILED" &&
       error.category === "transport",
+  );
+});
+
+test("getIssue fails closed when GitHub returns a pull-request-shaped resource", async () => {
+  const prShapedIssue = { ...JSON.parse(issuePayload(48)), pull_request: { url: "https://api.github.com/pulls/48" } };
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify(prShapedIssue)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.getIssue(48),
+    (error: unknown) =>
+      error instanceof GitHubResourceKindMismatchError &&
+      error.code === "GITHUB_RESOURCE_KIND_MISMATCH" &&
+      error.category === "api",
+  );
+});
+
+test("updateIssue fails closed before mutating a pull-request-shaped resource", async () => {
+  const prShapedIssue = { ...JSON.parse(issuePayload(49)), pull_request: { url: "https://api.github.com/pulls/49" } };
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify(prShapedIssue)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const issueArtifact = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: {
+      problem: "A rendered issue",
+      category: "feature",
+      affected_areas: ["contracts"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "Rendered issue" },
+  }).artifact;
+
+  await assert.rejects(
+    adapter.updateIssue(49, issueArtifact),
+    (error: unknown) => error instanceof GitHubResourceKindMismatchError,
+  );
+  assert.equal(
+    transport.calls.some((call) => call.args.includes("PATCH")),
+    false,
   );
 });
 
