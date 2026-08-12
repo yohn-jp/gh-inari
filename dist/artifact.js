@@ -140,6 +140,57 @@ export function validateExistingPullRequestArtifact(contractInput, body) {
     const parse = parseExistingPullRequestArtifact(contractInput, body);
     return validateParsedArtifact(contractInput, parse);
 }
+/** Project only validated semantic values; invalid artifacts never expose parsed fields. */
+export function projectExistingArtifact(result) {
+    return {
+        valid: result.valid,
+        projection: result.valid ? "canonical" : "unavailable",
+        classification: result.classification,
+        ...(result.valid ? { fields: result.parse.values } : {}),
+        diagnostics: result.parse.diagnostics,
+        violations: result.violations,
+    };
+}
+/** Select a uniquely parsed governed artifact, failing closed on ambiguity. */
+export function selectExistingArtifactCandidate(candidates) {
+    const parsed = candidates.filter((candidate) => candidate.result.parse.parsed);
+    if (parsed.length === 1) {
+        const selected = parsed[0];
+        return selected;
+    }
+    if (parsed.length > 1) {
+        const paths = parsed.map((candidate) => candidate.contract.templateIdentity.path).sort(compareStrings);
+        const diagnostic = {
+            code: "EXISTING_AMBIGUOUS_TEMPLATE",
+            path: "$.template",
+            message: `Artifact structure matches multiple repository-native templates: ${paths.join(", ")}.`,
+        };
+        return {
+            result: {
+                valid: false,
+                classification: "ambiguous",
+                parse: { parsed: false, values: {}, diagnostics: [diagnostic] },
+                violations: [diagnostic],
+            },
+        };
+    }
+    const diagnostics = candidates.flatMap((candidate) => candidate.result.parse.diagnostics.map((diagnostic) => ({
+        ...diagnostic,
+        path: `${candidate.contract.templateIdentity.path}${diagnostic.path}`,
+        message: `[${candidate.contract.templateIdentity.path}] ${diagnostic.message}`,
+    })));
+    const classification = candidates.some((candidate) => candidate.result.parse.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_WRONG_TEMPLATE"))
+        ? "wrong-template"
+        : "unparseable";
+    return {
+        result: {
+            valid: false,
+            classification,
+            parse: { parsed: false, values: {}, diagnostics },
+            violations: diagnostics,
+        },
+    };
+}
 /** Validate the same required string metadata enforced by mutation preparation. */
 export function validateRequiredMetadataString(value, key) {
     if (typeof value === "string" && value.trim().length > 0)

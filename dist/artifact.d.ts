@@ -1,4 +1,5 @@
 import { type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
+import { type CanonicalContract } from "./contract/ir.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
     readonly title?: string;
@@ -49,8 +50,8 @@ export interface PreparedPullRequestArtifact {
     readonly validation: SemanticValidationResult;
     readonly artifact: ValidatedRenderedPullRequestArtifact;
 }
-export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable";
-export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM";
+export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable" | "ambiguous";
+export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE";
 export interface ExistingArtifactDiagnostic {
     readonly code: ExistingArtifactDiagnosticCode;
     readonly path: string;
@@ -95,6 +96,26 @@ export declare function parseExistingIssueArtifact(contractInput: unknown, body:
 export declare function parseExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
 export declare function validateExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
 export declare function validateExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
+export interface ExistingArtifactCandidate {
+    readonly contract: CanonicalContract;
+    readonly result: ExistingArtifactValidationResult;
+}
+export interface ExistingArtifactSelection {
+    readonly contract?: CanonicalContract;
+    readonly result: ExistingArtifactValidationResult;
+}
+export interface ExistingArtifactProjection {
+    readonly valid: boolean;
+    readonly projection: "canonical" | "unavailable";
+    readonly classification: ExistingArtifactClassification;
+    readonly fields?: Readonly<Record<string, unknown>>;
+    readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+    readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+}
+/** Project only validated semantic values; invalid artifacts never expose parsed fields. */
+export declare function projectExistingArtifact(result: ExistingArtifactValidationResult): ExistingArtifactProjection;
+/** Select a uniquely parsed governed artifact, failing closed on ambiguity. */
+export declare function selectExistingArtifactCandidate(candidates: readonly ExistingArtifactCandidate[]): ExistingArtifactSelection;
 /** Validate the same required string metadata enforced by mutation preparation. */
 export declare function validateRequiredMetadataString(value: unknown, key: string): ArtifactMetadataViolation | undefined;
 export declare function validateExistingIssueFromAdapter(reader: ExistingIssueReader, contract: unknown, issueNumber: number): Promise<FetchedExistingArtifact>;

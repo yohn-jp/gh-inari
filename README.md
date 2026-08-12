@@ -50,6 +50,8 @@ gh inari issue validate <number> --template <template> --json
 gh inari pr validate <number> --template <template> --json
 gh inari issue explain <number> --template <template> --json
 gh inari pr explain <number> --template <template> --json
+gh inari issue get <number> [--template <template>] --json
+gh inari pr get <number> [--template <template>] --json
 ```
 
 `--from -` reads JSON from stdin. Create input uses an envelope when mutation metadata is needed:
@@ -65,6 +67,17 @@ gh inari pr explain <number> --template <template> --json
 The `fields` object is the semantic input contract shown by `schema`. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. `--title`, `--head`, and `--base` override envelope metadata.
 
 Schema and validation output is JSON. `--json` makes render and create output JSON as well. Validation failures return exit status `2`; usage errors return `1`; GitHub/transport failures return `3`. Error objects contain stable `code`, `path` where applicable, and ordered `violations`.
+
+`issue get` and `pr get` are canonical-only v1 reads. They resolve the target
+repository's default-branch governance, select the supported native template,
+parse the existing artifact with the same parser and semantic validator as
+`validate`/`explain`, and emit only canonical `fields` plus minimal artifact
+metadata. Successful reads report `projection: "canonical"`; wrong-template,
+unparseable, ambiguous, and semantically invalid artifacts report structured
+diagnostics with `projection: "unavailable"` and never return guessed fields.
+When `--template` is omitted, all supported candidates are evaluated
+deterministically; multiple structural matches fail closed. Native template
+boilerplate and raw Markdown are intentionally absent from successful output.
 
 ## Source of truth and supported semantics
 
@@ -107,7 +120,7 @@ Issue Form top-level `title` is the exact default title used when the caller omi
 
 Inari owns repository-governed GitHub mutations: it reads repository-native governance, exposes it as machine-readable contracts, validates structured input against that governance, renders the canonical artifact, and performs the corresponding `gh` operation — or rejects it with actionable feedback.
 
-Inari is not a general GitHub CLI wrapper. Generic read/query operations such as `pr view`, `issue view`, diff/search summarization, or token-efficient GitHub inspection are out of scope.
+Inari is not a general GitHub CLI wrapper. Generic read/query operations such as `pr view`, `issue view`, diff/search summarization, or token-efficient GitHub inspection remain out of scope; `get` only reconstructs artifacts that match the repository-governed canonical contract.
 
 ## Safety and existing artifacts
 
