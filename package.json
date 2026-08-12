@@ -1,6 +1,6 @@
 {
   "name": "gh-inari",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A deterministic GitHub CLI extension for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
   "type": "module",
   "bin": {
