@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArtifactInputError, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, renderIssueArtifact, renderPullRequestArtifact, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
+import { ArtifactInputError, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { projectContract, SemanticValidationError, validateSemanticInput, } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
-import { compileLocalGovernedContract, compileRepositoryGovernedContract, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
+import { compileLocalGovernedContract, compileRepositoryGovernedContract, compileRepositoryGovernedContracts, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -151,30 +151,90 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         console.log(JSON.stringify({ ok: true, artifact: created }));
         return 0;
     }
-    if (command === "explain" && rest[0] !== undefined && isPositiveInteger(rest[0])) {
+    if ((command === "validate" || command === "explain") &&
+        rest[0] !== undefined &&
+        isPositiveInteger(rest[0]) &&
+        parsed.options.from === undefined) {
         return runExistingValidation(domain, Number(rest[0]), parsed, root, dependencies, true);
+    }
+    if (command === "get" && rest[0] !== undefined && isPositiveInteger(rest[0])) {
+        return runExistingGet(domain, Number(rest[0]), parsed, root, dependencies);
     }
     throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
 async function runExistingValidation(domain, number, parsed, root, dependencies, json) {
     rejectGovernedPolicyOverride(parsed.options.policy);
-    const adapter = createAdapter(dependencies, root, parsed.options.repository);
-    await adapter.resolveRepositoryContext();
-    const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, undefined));
-    const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
-    const result = domain === "issue"
-        ? validateExistingIssueArtifact(contract, remote.body)
-        : validateExistingPullRequestArtifact(contract, remote.body);
+    const read = await readExistingArtifact(domain, number, parsed, root, dependencies);
+    const { remote, result } = read;
+    const projection = projectExistingArtifact(result);
     const output = {
-        valid: result.valid,
-        classification: result.classification,
+        valid: projection.valid,
+        classification: projection.classification,
         number,
         url: remote.url,
-        diagnostics: result.parse.diagnostics,
-        violations: result.violations,
+        diagnostics: projection.diagnostics,
+        violations: projection.violations,
     };
     console.log(JSON.stringify(output));
     return result.valid ? 0 : EXIT_VALIDATION;
+}
+async function runExistingGet(domain, number, parsed, root, dependencies) {
+    rejectGovernedPolicyOverride(parsed.options.policy);
+    const { remote, contract, result } = await readExistingArtifact(domain, number, parsed, root, dependencies);
+    const projection = projectExistingArtifact(result);
+    const output = {
+        valid: projection.valid,
+        projection: projection.projection,
+        classification: projection.classification,
+        kind: domain === "issue" ? "issue" : "pull_request",
+        number: remote.number,
+        url: remote.url,
+        ...(contract === undefined ? {} : { template: contract.templateIdentity }),
+        metadata: existingArtifactMetadata(domain, remote),
+        ...(projection.fields === undefined ? {} : { fields: projection.fields }),
+        diagnostics: projection.diagnostics,
+        violations: projection.violations,
+    };
+    console.log(JSON.stringify(output));
+    return result.valid ? 0 : EXIT_VALIDATION;
+}
+function existingArtifactMetadata(domain, remote) {
+    if (domain === "issue") {
+        if (!("labels" in remote) || !("assignees" in remote))
+            throw new Error("Issue metadata response is invalid.");
+        return {
+            title: remote.title,
+            state: remote.state,
+            labels: remote.labels,
+            assignees: remote.assignees,
+        };
+    }
+    if (!("draft" in remote) || !("head" in remote) || !("base" in remote))
+        throw new Error("Pull request metadata response is invalid.");
+    return {
+        title: remote.title,
+        state: remote.state,
+        draft: remote.draft,
+        head: remote.head,
+        base: remote.base,
+    };
+}
+async function readExistingArtifact(domain, number, parsed, root, dependencies) {
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    await adapter.resolveRepositoryContext();
+    const selector = templateSelector(parsed, undefined);
+    const contracts = selector === undefined
+        ? await compileRepositoryGovernedContracts(adapter, domain)
+        : [await compileRepositoryGovernedContract(adapter, domain, selector)];
+    const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
+    const candidates = contracts.map((contract) => ({
+        contract,
+        result: domain === "issue"
+            ? validateExistingIssueArtifact(contract, remote.body)
+            : validateExistingPullRequestArtifact(contract, remote.body),
+    }));
+    const selected = selectExistingArtifactCandidate(candidates);
+    return { remote, contract: selected.contract, result: selected.result };
 }
 function createAdapter(dependencies, root, repository) {
     const factory = dependencies.createAdapter ?? ((options) => new GitHubAdapter(options));
@@ -316,7 +376,8 @@ function isMachineCommand(positionals) {
             positionals[1] === "validate" ||
             positionals[1] === "render" ||
             positionals[1] === "create" ||
-            positionals[1] === "explain"));
+            positionals[1] === "explain" ||
+            positionals[1] === "get"));
 }
 function isMachineCommandTokens(argv) {
     const domainIndex = argv.findIndex((token) => token === "issue" || token === "pr");
@@ -327,7 +388,8 @@ function isMachineCommandTokens(argv) {
         command === "validate" ||
         command === "render" ||
         command === "create" ||
-        command === "explain");
+        command === "explain" ||
+        command === "get");
 }
 function isPositiveInteger(value) {
     return /^[1-9]\d*$/u.test(value);
@@ -368,12 +430,14 @@ Commands:
   issue create --template <template> --from <file.json>
   issue validate <number> [--template <template>]
   issue explain <number> [--template <template>]
+  issue get <number> [--template <template>] --json
   pr schema [template]
   pr validate --template <template> --from <file.json>
   pr render --template <template> --from <file.json>
   pr create --template <template> --from <file.json>
   pr validate <number> [--template <template>]
   pr explain <number> [--template <template>]
+  pr get <number> [--template <template>] --json
 
 Options:
   --from <path>       JSON input file, or - for stdin

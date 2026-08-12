@@ -5,7 +5,7 @@ import { compileIssueFormTemplate, compileIssueFormYaml, } from "./contract/issu
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
-import { discoverTemplates, selectIssueTemplate, selectPullRequestTemplate, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, } from "./template-discovery.js";
+import { discoverTemplates, selectIssueTemplate, selectPullRequestTemplate, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, TemplateNotFoundError, } from "./template-discovery.js";
 /** Stable, machine-readable failures for repository governance acquisition. */
 export class GovernanceError extends Error {
     code;
@@ -78,8 +78,31 @@ async function resolveLocalPolicyPath(root, policyPath) {
  */
 export async function compileRepositoryGovernedContract(adapter, domain, selector) {
     const source = await readRepositoryGovernanceSource(adapter);
-    const { context, ref, tree, discovery } = source;
+    const { discovery } = source;
     const selectedTemplate = domain === "issue" ? selectIssueTemplate(discovery, selector) : selectPullRequestTemplate(discovery, selector);
+    return compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, createRepositoryPolicySourceLoader(adapter, source));
+}
+/**
+ * Compile every supported native template from the target repository's
+ * trusted default-branch governance. Read commands use this candidate set to
+ * identify an existing artifact without inventing a second template grammar.
+ */
+export async function compileRepositoryGovernedContracts(adapter, domain) {
+    const source = await readRepositoryGovernanceSource(adapter);
+    const templates = domain === "issue"
+        ? source.discovery.issueTemplates.filter((template) => template.type === "issue-form")
+        : source.discovery.pullRequestTemplates;
+    if (templates.length === 0)
+        throw new TemplateNotFoundError(undefined, templates);
+    const policySourceLoader = createRepositoryPolicySourceLoader(adapter, source);
+    const contracts = [];
+    for (const template of templates) {
+        contracts.push(await compileRepositoryGovernedContractFromSource(adapter, source, domain, template, policySourceLoader));
+    }
+    return contracts;
+}
+async function compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, policySourceLoader) {
+    const { context, ref, tree, discovery } = source;
     const templateEntry = findBlob(tree, selectedTemplate.path, context, ref);
     const templateSource = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(templateEntry.sha));
     let contract;
@@ -89,16 +112,13 @@ export async function compileRepositoryGovernedContract(adapter, domain, selecto
     else {
         contract = parsePullRequestTemplate(templateSource, selectedTemplate);
     }
-    const policyEntry = domain === "pr" ? findPolicy(tree) : undefined;
     let policySource;
-    if (policyEntry !== undefined) {
-        if (policyEntry.type !== "blob")
-            throw invalidSource(context, policyEntry.path, "policy path is not a file");
-        const source = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(policyEntry.sha));
-        contract = compilePullRequestPolicyOverlay(contract, source, {
+    const repositoryPolicy = domain === "pr" ? await policySourceLoader() : undefined;
+    if (repositoryPolicy !== undefined) {
+        contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
             templateIdentities: discovery.pullRequestTemplates,
         });
-        policySource = sourceIdentity(policyEntry, ref, source);
+        policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
     }
     const bound = {
         ...contract,
@@ -117,6 +137,24 @@ export async function compileRepositoryGovernedContract(adapter, domain, selecto
     };
     assertCanonicalContract(bound);
     return bound;
+}
+function createRepositoryPolicySourceLoader(adapter, source) {
+    let pending;
+    return () => {
+        if (pending === undefined) {
+            pending = readRepositoryPolicySource(adapter, source);
+        }
+        return pending;
+    };
+}
+async function readRepositoryPolicySource(adapter, source) {
+    const policyEntry = findPolicy(source.tree);
+    if (policyEntry === undefined)
+        return undefined;
+    if (policyEntry.type !== "blob")
+        throw invalidSource(source.context, policyEntry.path, "policy path is not a file");
+    const policySource = await readGovernedValue("repository.governance.blob", source.context, source.ref, () => adapter.getRepositoryBlob(policyEntry.sha));
+    return { entry: policyEntry, source: policySource };
 }
 /** Discover all authoritative templates without compiling or reading a body. */
 export async function discoverRepositoryTemplates(adapter) {

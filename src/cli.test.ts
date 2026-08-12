@@ -101,6 +101,68 @@ const REMOTE_PR_POLICY = [
   "",
 ].join("\n");
 
+const REMOTE_BUG_TEMPLATE = [
+  "name: Bug",
+  "description: Remote bug",
+  "body:",
+  "  - type: textarea",
+  "    id: summary",
+  "    attributes: { label: Summary }",
+  "    validations: { required: true }",
+  "",
+].join("\n");
+
+const REMOTE_ISSUE_BODY = [
+  "### Problem",
+  "",
+  "A reproducible problem",
+  "",
+  "### Proposal",
+  "",
+  "A deterministic proposal",
+  "",
+  "### Non-goals",
+  "",
+  "No unrelated scope",
+  "",
+  "### Acceptance criteria",
+  "",
+  "- [ ] The behavior is covered",
+  "",
+].join("\n");
+
+const REMOTE_PR_BODY = [
+  "## Summary",
+  "",
+  "A deterministic pull request summary",
+  "",
+  "## Linked issue",
+  "",
+  "Closes #21",
+  "",
+  "## Scope",
+  "",
+  "### Included",
+  "",
+  "Implemented scope.",
+  "",
+  "### Excluded",
+  "",
+  "Excluded scope.",
+  "",
+  "## Validation",
+  "",
+  "- [x] Tests",
+  "- [ ] Build",
+  "- [ ] Typecheck",
+  "- [ ] Package check",
+  "",
+  "## Breaking changes",
+  "",
+  "No.",
+  "",
+].join("\n");
+
 function blobResponse(sha: string, content: string): GhCommandResult {
   return command(JSON.stringify({ sha, encoding: "base64", content: Buffer.from(content, "utf8").toString("base64") }));
 }
@@ -122,6 +184,30 @@ function remoteGovernanceResponses(
     command(JSON.stringify({ truncated: false, tree })),
     blobResponse(templateSha, templateSource),
     ...(policy === undefined ? [] : [blobResponse(policy.sha, policy.source)]),
+  ];
+}
+
+function remoteArtifactResponses(
+  templates: readonly { readonly path: string; readonly sha: string; readonly source: string }[],
+  artifact: Record<string, unknown>,
+  policy?: { readonly sha: string; readonly source: string },
+): GhCommandResult[] {
+  return [
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        truncated: false,
+        tree: [
+          ...templates.map((template) => ({ path: template.path, type: "blob", sha: template.sha })),
+          ...(policy === undefined ? [] : [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: policy.sha }]),
+        ],
+      }),
+    ),
+    ...templates.map((template) => blobResponse(template.sha, template.source)),
+    ...(policy === undefined ? [] : [blobResponse(policy.sha, policy.source)]),
+    command(JSON.stringify(artifact)),
   ];
 }
 
@@ -568,5 +654,204 @@ test("unsupported remote Issue Form semantics fail closed before mutation", asyn
   } finally {
     console.log = originalLog;
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("issue get auto-selects the matching governed Issue Form and omits raw Markdown", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "bug-sha", source: REMOTE_BUG_TEMPLATE },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
+      ],
+      {
+        number: 21,
+        title: "feat: canonical retrieval",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/21",
+        labels: [{ name: "enhancement" }],
+        assignees: [{ login: "octocat" }],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/tmp/stale-local-copy",
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.valid, true);
+    assert.equal(output.projection, "canonical");
+    assert.equal(output.classification, "valid");
+    assert.equal(output.kind, "issue");
+    assert.equal((output.template as Record<string, unknown>).path, ".github/ISSUE_TEMPLATE/feature.yml");
+    assert.deepEqual(output.fields, {
+      problem: "A reproducible problem",
+      proposal: "A deterministic proposal",
+      non_goals: "No unrelated scope",
+      acceptance: "- [ ] The behavior is covered",
+    });
+    assert.deepEqual(output.metadata, {
+      title: "feat: canonical retrieval",
+      state: "open",
+      labels: ["enhancement"],
+      assignees: ["octocat"],
+    });
+    assert.equal("body" in output, false);
+    assert.ok(transport.calls.some((args) => args.includes("repos/acme/inari/issues/21")));
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("pr get returns canonical fields and minimal pull request metadata", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 43,
+        title: "feat: canonical retrieval",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/43",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "get", "43", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/tmp/stale-local-copy",
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.valid, true);
+    assert.equal(output.projection, "canonical");
+    assert.equal(output.classification, "valid");
+    assert.equal(output.kind, "pull_request");
+    const fields = output.fields as Record<string, unknown>;
+    assert.equal(fields.summary, "A deterministic pull request summary");
+    assert.equal(fields.linked_issue, "Closes #21");
+    assert.deepEqual(fields.validation, ["tests"]);
+    assert.deepEqual(output.metadata, {
+      title: "feat: canonical retrieval",
+      state: "open",
+      draft: false,
+      head: "feature",
+      base: "main",
+    });
+    assert.equal("body" in output, false);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("get returns deterministic diagnostics and never guesses fields for invalid artifacts", async () => {
+  const cases = [
+    {
+      name: "wrong-template",
+      domain: "issue" as const,
+      number: "44",
+      body: "### Other\n\nvalue\n",
+      templates: [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      expectedClassification: "wrong-template",
+      expectedDiagnostic: "EXISTING_WRONG_TEMPLATE",
+    },
+    {
+      name: "unparseable",
+      domain: "issue" as const,
+      number: "45",
+      body: "not a canonical artifact\n",
+      templates: [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      expectedClassification: "unparseable",
+      expectedDiagnostic: "EXISTING_UNPARSEABLE",
+    },
+    {
+      name: "ambiguous",
+      domain: "issue" as const,
+      number: "46",
+      body: REMOTE_ISSUE_BODY,
+      templates: [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "bug-sha", source: REMOTE_ISSUE_TEMPLATE },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
+      ],
+      expectedClassification: "ambiguous",
+      expectedDiagnostic: "EXISTING_AMBIGUOUS_TEMPLATE",
+    },
+    {
+      name: "semantic",
+      domain: "pr" as const,
+      number: "47",
+      body: REMOTE_PR_BODY.replace("Closes #21", "No linked issue"),
+      templates: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      policy: { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+      expectedClassification: "semantic",
+      expectedDiagnostic: "INPUT_PATTERN",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const transport = new CliStubTransport(
+      remoteArtifactResponses(
+        testCase.templates,
+        testCase.domain === "issue"
+          ? {
+              number: Number(testCase.number),
+              title: "Existing artifact",
+              body: testCase.body,
+              state: "open",
+              html_url: `https://github.com/acme/inari/issues/${testCase.number}`,
+              labels: [],
+              assignees: [],
+            }
+          : {
+              number: Number(testCase.number),
+              title: "Existing artifact",
+              body: testCase.body,
+              state: "open",
+              html_url: `https://github.com/acme/inari/pull/${testCase.number}`,
+              draft: false,
+              head: { ref: "feature" },
+              base: { ref: "main" },
+            },
+        testCase.policy,
+      ),
+    );
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (line: string) => lines.push(line);
+    try {
+      const exitCode = await runCli([testCase.domain, "get", testCase.number, "--repository", "acme/inari", "--json"], {
+        repositoryRoot: "/tmp/stale-local-copy",
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      });
+      assert.equal(exitCode, 2, testCase.name);
+      const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+      assert.equal(output.valid, false, testCase.name);
+      assert.equal(output.projection, "unavailable", testCase.name);
+      assert.equal(output.classification, testCase.expectedClassification, testCase.name);
+      assert.equal("fields" in output, false, testCase.name);
+      const diagnostics = [
+        ...((output.diagnostics as readonly { code: string }[] | undefined) ?? []),
+        ...((output.violations as readonly { code: string }[] | undefined) ?? []),
+      ];
+      assert.ok(
+        diagnostics.some((diagnostic: { code: string }) => diagnostic.code === testCase.expectedDiagnostic),
+        testCase.name,
+      );
+    } finally {
+      console.log = originalLog;
+    }
   }
 });

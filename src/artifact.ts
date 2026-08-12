@@ -93,10 +93,14 @@ export interface PreparedPullRequestArtifact {
   readonly artifact: ValidatedRenderedPullRequestArtifact;
 }
 
-export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable";
+export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable" | "ambiguous";
 
 export type ExistingArtifactDiagnosticCode =
-  "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM";
+  | "EXISTING_WRONG_TEMPLATE"
+  | "EXISTING_UNPARSEABLE"
+  | "EXISTING_EXTRA_CONTENT"
+  | "EXISTING_UNKNOWN_CHECKLIST_ITEM"
+  | "EXISTING_AMBIGUOUS_TEMPLATE";
 
 export interface ExistingArtifactDiagnostic {
   readonly code: ExistingArtifactDiagnosticCode;
@@ -276,6 +280,85 @@ export function validateExistingPullRequestArtifact(
   assertCanonicalContract(contractInput);
   const parse = parseExistingPullRequestArtifact(contractInput, body);
   return validateParsedArtifact(contractInput, parse);
+}
+
+export interface ExistingArtifactCandidate {
+  readonly contract: CanonicalContract;
+  readonly result: ExistingArtifactValidationResult;
+}
+
+export interface ExistingArtifactSelection {
+  readonly contract?: CanonicalContract;
+  readonly result: ExistingArtifactValidationResult;
+}
+
+export interface ExistingArtifactProjection {
+  readonly valid: boolean;
+  readonly projection: "canonical" | "unavailable";
+  readonly classification: ExistingArtifactClassification;
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+  readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+}
+
+/** Project only validated semantic values; invalid artifacts never expose parsed fields. */
+export function projectExistingArtifact(result: ExistingArtifactValidationResult): ExistingArtifactProjection {
+  return {
+    valid: result.valid,
+    projection: result.valid ? "canonical" : "unavailable",
+    classification: result.classification,
+    ...(result.valid ? { fields: result.parse.values } : {}),
+    diagnostics: result.parse.diagnostics,
+    violations: result.violations,
+  };
+}
+
+/** Select a uniquely parsed governed artifact, failing closed on ambiguity. */
+export function selectExistingArtifactCandidate(
+  candidates: readonly ExistingArtifactCandidate[],
+): ExistingArtifactSelection {
+  const parsed = candidates.filter((candidate) => candidate.result.parse.parsed);
+  if (parsed.length === 1) {
+    const selected = parsed[0] as ExistingArtifactCandidate;
+    return selected;
+  }
+  if (parsed.length > 1) {
+    const paths = parsed.map((candidate) => candidate.contract.templateIdentity.path).sort(compareStrings);
+    const diagnostic: ExistingArtifactDiagnostic = {
+      code: "EXISTING_AMBIGUOUS_TEMPLATE",
+      path: "$.template",
+      message: `Artifact structure matches multiple repository-native templates: ${paths.join(", ")}.`,
+    };
+    return {
+      result: {
+        valid: false,
+        classification: "ambiguous",
+        parse: { parsed: false, values: {}, diagnostics: [diagnostic] },
+        violations: [diagnostic],
+      },
+    };
+  }
+
+  const diagnostics = candidates.flatMap((candidate) =>
+    candidate.result.parse.diagnostics.map((diagnostic) => ({
+      ...diagnostic,
+      path: `${candidate.contract.templateIdentity.path}${diagnostic.path}`,
+      message: `[${candidate.contract.templateIdentity.path}] ${diagnostic.message}`,
+    })),
+  );
+  const classification = candidates.some((candidate) =>
+    candidate.result.parse.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_WRONG_TEMPLATE"),
+  )
+    ? "wrong-template"
+    : "unparseable";
+  return {
+    result: {
+      valid: false,
+      classification,
+      parse: { parsed: false, values: {}, diagnostics },
+      violations: diagnostics,
+    },
+  };
 }
 
 /** Validate the same required string metadata enforced by mutation preparation. */

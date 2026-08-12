@@ -174,6 +174,9 @@ function main() {
     };
     const ghAvailable = spawnSync("gh", ["--version"], { encoding: "utf8" }).status === 0;
     if (!ghAvailable) fail("GitHub CLI (gh) is required for the packed extension smoke test");
+    const ghPathResult = spawnSync("which", ["gh"], { encoding: "utf8" });
+    const ghExecutable = ghPathResult.status === 0 ? ghPathResult.stdout.trim() : "";
+    if (ghExecutable.length === 0) fail("unable to resolve the GitHub CLI executable path");
 
     const sourceGhConfigDirectory = path.join(installDirectory, "source-gh-config");
     const sourceExtensionEnvironment = {
@@ -206,6 +209,87 @@ function main() {
     });
     if (ghHelpResult.status !== 0 || !ghHelpResult.stdout.includes("Usage: gh-inari"))
       fail(`gh inari --help failed:\n${ghHelpResult.stdout}\n${ghHelpResult.stderr}`);
+
+    const smokeIssueTemplate =
+      "name: Feature\ndescription: Smoke feature\nbody:\n  - type: textarea\n    id: problem\n    attributes: { label: Problem }\n    validations: { required: true }\n";
+    const smokePrTemplate = "## Summary\n\n## Linked issue\n\n## Validation\n\n- [ ] Tests\n- [ ] Build\n";
+    const smokePrPolicy =
+      "version: 1\ntemplate: default\nsections:\n  - section: summary\n    required: true\n    minLength: 10\n  - section: linked_issue\n    linkedIssue: true\n  - section: validation\n    required: true\n    checklist:\n      minCompleted: 1\n";
+    const fakeGhDirectory = path.join(installDirectory, "fake-gh");
+    fs.mkdirSync(fakeGhDirectory, { recursive: true });
+    const fakeGhPath = path.join(fakeGhDirectory, "gh");
+    const fakeGhResponses = {
+      "repos/smoke/repository": { default_branch: "main" },
+      "repos/smoke/repository/git/trees/main?recursive=1": {
+        truncated: false,
+        tree: [
+          { path: ".github/ISSUE_TEMPLATE/feature.yml", type: "blob", sha: "issue-template-sha" },
+          { path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob", sha: "pr-template-sha" },
+          { path: ".github/inari/pr-policy.yml", type: "blob", sha: "pr-policy-sha" },
+        ],
+      },
+      "repos/smoke/repository/git/blobs/issue-template-sha": {
+        sha: "issue-template-sha",
+        encoding: "base64",
+        content: Buffer.from(smokeIssueTemplate, "utf8").toString("base64"),
+      },
+      "repos/smoke/repository/git/blobs/pr-template-sha": {
+        sha: "pr-template-sha",
+        encoding: "base64",
+        content: Buffer.from(smokePrTemplate, "utf8").toString("base64"),
+      },
+      "repos/smoke/repository/git/blobs/pr-policy-sha": {
+        sha: "pr-policy-sha",
+        encoding: "base64",
+        content: Buffer.from(smokePrPolicy, "utf8").toString("base64"),
+      },
+      "repos/smoke/repository/issues/21": {
+        number: 21,
+        title: "feat: smoke get",
+        body: "### Problem\n\nA smoke-test problem\n",
+        state: "open",
+        html_url: "https://github.com/smoke/repository/issues/21",
+        labels: [],
+        assignees: [],
+      },
+      "repos/smoke/repository/pulls/43": {
+        number: 43,
+        title: "feat: smoke get",
+        body: "## Summary\n\nA smoke-test summary\n\n## Linked issue\n\nCloses #21\n\n## Validation\n\n- [x] Tests\n- [ ] Build\n",
+        state: "open",
+        html_url: "https://github.com/smoke/repository/pull/43",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+    };
+    fs.writeFileSync(
+      fakeGhPath,
+      `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("gh version smoke\\n");
+  process.exit(0);
+}
+if (args[0] === "auth" && args[1] === "status") process.exit(0);
+if (args[0] !== "api") {
+  process.stderr.write("unsupported fake gh command\\n");
+  process.exit(1);
+}
+const endpoint = args[1];
+const responses = ${JSON.stringify(fakeGhResponses)};
+if (!(endpoint in responses)) {
+  process.stderr.write("unsupported fake gh endpoint: " + endpoint + "\\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify(responses[endpoint]));
+`,
+      "utf8",
+    );
+    fs.chmodSync(fakeGhPath, 0o755);
+    const fakeGhPathPrefix = `${fakeGhDirectory}${path.delimiter}${process.env.PATH ?? ""}`;
+    const sourceGetEnvironment = { ...sourceExtensionEnvironment, PATH: fakeGhPathPrefix };
+    const packedGetEnvironment = { ...ghExtensionEnvironment, PATH: fakeGhPathPrefix };
     const sourceEntry = path.join(repoRoot, "dist", "index.js");
     const packedLauncher = path.join(installDirectory, "node_modules", ".bin", "gh-inari");
     const validationArgs = (inputPath) => ["pr", "validate", "--from", inputPath, "--json"];
@@ -290,6 +374,59 @@ function main() {
       fail("packed gh-inari pr render diverged from the source CLI");
     if (JSON.stringify(ghRender) !== JSON.stringify(sourceRender))
       fail("gh inari pr render diverged from the source CLI");
+
+    console.log("checking source, packed, and gh inari canonical get parity...");
+    const getCases = [
+      {
+        name: "issue get",
+        args: ["issue", "get", "21", "--template", "feature", "--repository", "smoke/repository", "--json"],
+        environment: sourceGetEnvironment,
+        packedEnvironment: packedGetEnvironment,
+      },
+      {
+        name: "pr get",
+        args: ["pr", "get", "43", "--repository", "smoke/repository", "--json"],
+        environment: sourceGetEnvironment,
+        packedEnvironment: packedGetEnvironment,
+      },
+    ];
+    for (const getCase of getCases) {
+      const sourceGet = invoke(process.execPath, [sourceEntry, ...getCase.args], {
+        cwd: fixtureDirectory,
+        env: getCase.environment,
+      });
+      const sourceGhGet = invoke(ghExecutable, ["inari", ...getCase.args], {
+        cwd: fixtureDirectory,
+        env: getCase.environment,
+      });
+      const packedGet = invoke(packedLauncher, getCase.args, {
+        cwd: fixtureDirectory,
+        env: getCase.packedEnvironment,
+      });
+      const ghGet = invoke(ghExecutable, ["inari", ...getCase.args], {
+        cwd: fixtureDirectory,
+        env: getCase.packedEnvironment,
+      });
+      const outputs = [
+        ["source", sourceGet],
+        ["checked-out gh inari", sourceGhGet],
+        ["packed gh-inari", packedGet],
+        ["gh inari", ghGet],
+      ];
+      for (const [label, result] of outputs) {
+        const output = jsonOutput(result, label + " " + getCase.name);
+        if (output.valid !== true || output.projection !== "canonical" || !output.fields)
+          fail(label + " " + getCase.name + " did not return canonical fields");
+        if (Object.prototype.hasOwnProperty.call(output, "body"))
+          fail(label + " " + getCase.name + " returned raw Markdown");
+      }
+      if (
+        sourceGhGet.stdout !== sourceGet.stdout ||
+        packedGet.stdout !== sourceGet.stdout ||
+        ghGet.stdout !== sourceGet.stdout
+      )
+        fail(getCase.name + " output diverged across execution paths");
+    }
 
     for (const [label, command, args, options] of [
       ["source", process.execPath, [sourceEntry, "--version"], { cwd: fixtureDirectory }],

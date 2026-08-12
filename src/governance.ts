@@ -23,6 +23,7 @@ import {
   classifyTemplatePath,
   isTemplateContainerPath,
   isTemplatePathInNativeDirectory,
+  TemplateNotFoundError,
   type TemplateDiscoveryResult,
   type TemplateSelector,
 } from "./template-discovery.js";
@@ -136,9 +137,51 @@ export async function compileRepositoryGovernedContract(
   selector?: string | TemplateSelector,
 ): Promise<CanonicalContract> {
   const source = await readRepositoryGovernanceSource(adapter);
-  const { context, ref, tree, discovery } = source;
+  const { discovery } = source;
   const selectedTemplate =
     domain === "issue" ? selectIssueTemplate(discovery, selector) : selectPullRequestTemplate(discovery, selector);
+  return compileRepositoryGovernedContractFromSource(
+    adapter,
+    source,
+    domain,
+    selectedTemplate,
+    createRepositoryPolicySourceLoader(adapter, source),
+  );
+}
+
+/**
+ * Compile every supported native template from the target repository's
+ * trusted default-branch governance. Read commands use this candidate set to
+ * identify an existing artifact without inventing a second template grammar.
+ */
+export async function compileRepositoryGovernedContracts(
+  adapter: GitHubAdapter,
+  domain: GovernedArtifactDomain,
+): Promise<readonly CanonicalContract[]> {
+  const source = await readRepositoryGovernanceSource(adapter);
+  const templates =
+    domain === "issue"
+      ? source.discovery.issueTemplates.filter((template) => template.type === "issue-form")
+      : source.discovery.pullRequestTemplates;
+  if (templates.length === 0) throw new TemplateNotFoundError(undefined, templates);
+  const policySourceLoader = createRepositoryPolicySourceLoader(adapter, source);
+  const contracts: CanonicalContract[] = [];
+  for (const template of templates) {
+    contracts.push(
+      await compileRepositoryGovernedContractFromSource(adapter, source, domain, template, policySourceLoader),
+    );
+  }
+  return contracts;
+}
+
+async function compileRepositoryGovernedContractFromSource(
+  adapter: GitHubAdapter,
+  source: RepositoryGovernanceSource,
+  domain: GovernedArtifactDomain,
+  selectedTemplate: TemplateDiscoveryResult["templates"][number],
+  policySourceLoader: () => Promise<RepositoryPolicySource | undefined>,
+): Promise<CanonicalContract> {
+  const { context, ref, tree, discovery } = source;
   const templateEntry = findBlob(tree, selectedTemplate.path, context, ref);
   const templateSource = await readGovernedValue("repository.governance.blob", context, ref, () =>
     adapter.getRepositoryBlob(templateEntry.sha),
@@ -151,17 +194,13 @@ export async function compileRepositoryGovernedContract(
     contract = parsePullRequestTemplate(templateSource, selectedTemplate);
   }
 
-  const policyEntry = domain === "pr" ? findPolicy(tree) : undefined;
   let policySource: ContractProvenanceSource | undefined;
-  if (policyEntry !== undefined) {
-    if (policyEntry.type !== "blob") throw invalidSource(context, policyEntry.path, "policy path is not a file");
-    const source = await readGovernedValue("repository.governance.blob", context, ref, () =>
-      adapter.getRepositoryBlob(policyEntry.sha),
-    );
-    contract = compilePullRequestPolicyOverlay(contract, source, {
+  const repositoryPolicy = domain === "pr" ? await policySourceLoader() : undefined;
+  if (repositoryPolicy !== undefined) {
+    contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
       templateIdentities: discovery.pullRequestTemplates,
     });
-    policySource = sourceIdentity(policyEntry, ref, source);
+    policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
   }
 
   const bound: CanonicalContract = {
@@ -181,6 +220,37 @@ export async function compileRepositoryGovernedContract(
   };
   assertCanonicalContract(bound);
   return bound;
+}
+
+interface RepositoryPolicySource {
+  readonly entry: RepositoryTreeEntry;
+  readonly source: string;
+}
+
+function createRepositoryPolicySourceLoader(
+  adapter: GitHubAdapter,
+  source: RepositoryGovernanceSource,
+): () => Promise<RepositoryPolicySource | undefined> {
+  let pending: Promise<RepositoryPolicySource | undefined> | undefined;
+  return () => {
+    if (pending === undefined) {
+      pending = readRepositoryPolicySource(adapter, source);
+    }
+    return pending;
+  };
+}
+
+async function readRepositoryPolicySource(
+  adapter: GitHubAdapter,
+  source: RepositoryGovernanceSource,
+): Promise<RepositoryPolicySource | undefined> {
+  const policyEntry = findPolicy(source.tree);
+  if (policyEntry === undefined) return undefined;
+  if (policyEntry.type !== "blob") throw invalidSource(source.context, policyEntry.path, "policy path is not a file");
+  const policySource = await readGovernedValue("repository.governance.blob", source.context, source.ref, () =>
+    adapter.getRepositoryBlob(policyEntry.sha),
+  );
+  return { entry: policyEntry, source: policySource };
 }
 
 /** Discover all authoritative templates without compiling or reading a body. */
