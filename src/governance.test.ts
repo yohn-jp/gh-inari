@@ -3,12 +3,15 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   compileRepositoryGovernedContract,
+  createGovernedIssue,
+  createGovernedPullRequest,
   discoverRepositoryTemplates,
   GovernanceError,
   rejectGovernedPolicyOverride,
 } from "./governance.js";
 import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
 import { deserializeCanonicalContract, serializeCanonicalContract } from "./contract/index.js";
+import { prepareIssueArtifact, preparePullRequestArtifact } from "./artifact.js";
 import { runCli } from "./cli.js";
 
 class StubGovernanceTransport implements GhTransport {
@@ -53,6 +56,7 @@ function governanceResponses(
   templateSha: string,
   templateSource: string,
   extraTreeEntries: readonly Record<string, string>[] = [],
+  treeSha = "tree-sha-a",
 ): GhCommandResult[] {
   return [
     command("gh version 2.0"),
@@ -60,6 +64,7 @@ function governanceResponses(
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
+        sha: treeSha,
         truncated: false,
         tree: [
           { path: templatePath, type: "blob", sha: templateSha },
@@ -94,6 +99,7 @@ test("governance is bound to the repository override, not the CWD repository", a
     nameWithOwner: "acme/repository-b",
   });
   assert.equal(contract.provenance?.ref, "main");
+  assert.equal(contract.provenance?.treeSha, "tree-sha-a");
   assert.equal(contract.provenance?.template.path, ".github/ISSUE_TEMPLATE/remote.yml");
   assert.equal(contract.provenance?.template.sha, "remote-sha");
   assert.equal(contract.provenance?.template.digest, createHash("sha256").update(source).digest("hex"));
@@ -137,6 +143,7 @@ test("authoritative discovery matches all supported native PR template locations
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
+        sha: "tree-sha-a",
         truncated: false,
         tree: paths.map((path, index) => ({ path, type: "blob", sha: `sha-${index}` })),
       }),
@@ -226,6 +233,117 @@ test("remote schema output exposes repository and trusted source provenance", as
   } finally {
     console.log = originalLog;
   }
+});
+
+test("createGovernedIssue mutates when the default branch advances without changing governance content", async () => {
+  const source = issueTemplate("remote_field");
+  const transport = new StubGovernanceTransport([
+    ...governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source, [], "tree-sha-a"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-b",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha" }],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 50,
+        title: "Remote issue",
+        body: "### Remote field\n\nvalue\n",
+        state: "open",
+        html_url: "https://github.com/acme/repository-b/issues/50",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
+  assert.equal(contract.provenance?.treeSha, "tree-sha-a");
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { remote_field: "value" },
+    metadata: { title: "Remote issue" },
+  }).artifact;
+
+  const created = await createGovernedIssue(adapter, prepared);
+  assert.equal(created.number, 50);
+});
+
+test("createGovernedIssue fails closed when the template changed at a new governance generation", async () => {
+  const source = issueTemplate("remote_field");
+  const transport = new StubGovernanceTransport([
+    ...governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source, [], "tree-sha-a"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-c",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha-changed" }],
+      }),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { remote_field: "value" },
+    metadata: { title: "Remote issue" },
+  }).artifact;
+
+  await assert.rejects(
+    createGovernedIssue(adapter, prepared),
+    (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_GENERATION_STALE",
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("createGovernedPullRequest fails closed when a policy governance input is newly introduced", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const templateSource = "## Summary\n\nSummary text.\n";
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [{ path: templatePath, type: "blob", sha: "pr-template-sha" }],
+      }),
+    ),
+    blobResponse("pr-template-sha", templateSource),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-b",
+        truncated: false,
+        tree: [
+          { path: templatePath, type: "blob", sha: "pr-template-sha" },
+          { path: ".github/inari/pr-policy.yml", type: "blob", sha: "policy-sha" },
+        ],
+      }),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
+  assert.equal(contract.provenance?.policy, undefined);
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "A summary" },
+    metadata: { title: "PR title", head: "feature", base: "main" },
+  }).artifact;
+
+  await assert.rejects(
+    createGovernedPullRequest(adapter, prepared),
+    (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_GENERATION_STALE",
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
 });
 
 test("arbitrary policy overrides are rejected for governed operations", () => {

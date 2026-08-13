@@ -167,6 +167,8 @@ function blobResponse(sha: string, content: string): GhCommandResult {
   return command(JSON.stringify({ sha, encoding: "base64", content: Buffer.from(content, "utf8").toString("base64") }));
 }
 
+const GOVERNANCE_TREE_SHA = "tree-sha-fixture";
+
 function remoteGovernanceResponses(
   templatePath: string,
   templateSha: string,
@@ -181,9 +183,25 @@ function remoteGovernanceResponses(
     command("gh version 2.0"),
     command(),
     command(JSON.stringify({ default_branch: "main" })),
-    command(JSON.stringify({ truncated: false, tree })),
+    command(JSON.stringify({ sha: GOVERNANCE_TREE_SHA, truncated: false, tree })),
     blobResponse(templateSha, templateSource),
     ...(policy === undefined ? [] : [blobResponse(policy.sha, policy.source)]),
+  ];
+}
+
+/** The freshness re-check a governed mutation performs immediately before create/update. */
+function governanceFreshnessRecheckResponses(
+  templatePath: string,
+  templateSha: string,
+  policy?: { readonly sha: string },
+): GhCommandResult[] {
+  const tree = [
+    { path: templatePath, type: "blob", sha: templateSha },
+    ...(policy === undefined ? [] : [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: policy.sha }]),
+  ];
+  return [
+    command(JSON.stringify({ default_branch: "main" })),
+    command(JSON.stringify({ sha: GOVERNANCE_TREE_SHA, truncated: false, tree })),
   ];
 }
 
@@ -198,6 +216,7 @@ function remoteArtifactResponses(
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
+        sha: GOVERNANCE_TREE_SHA,
         truncated: false,
         tree: [
           ...templates.map((template) => ({ path: template.path, type: "blob", sha: template.sha })),
@@ -356,6 +375,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
   );
   const transport = new CliStubTransport([
     ...remoteGovernanceResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha", REMOTE_ISSUE_TEMPLATE),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
     command(
       JSON.stringify({
         number: 22,
@@ -380,8 +400,8 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       },
     );
     assert.equal(exitCode, 0);
-    assert.equal(transport.calls.length, 6);
-    assert.deepEqual(transport.calls[5]?.slice(0, 6), [
+    assert.equal(transport.calls.length, 8);
+    assert.deepEqual(transport.calls[7]?.slice(0, 6), [
       "api",
       "repos/acme/inari/issues",
       "--hostname",
@@ -389,7 +409,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       "--method",
       "POST",
     ]);
-    assert.match(transport.calls[5]?.join(" ") ?? "", /### Problem/);
+    assert.match(transport.calls[7]?.join(" ") ?? "", /### Problem/);
     assert.equal(JSON.parse(lines[0] ?? "{}").ok, true);
   } finally {
     console.log = originalLog;
@@ -447,6 +467,7 @@ test("template list --repository reports authoritative remote templates", async 
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
+        sha: GOVERNANCE_TREE_SHA,
         truncated: false,
         tree: [{ path: "docs/pull_request_template.txt", type: "blob", sha: "docs-sha" }],
       }),
@@ -488,6 +509,9 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       sha: "pr-policy-sha",
       source: REMOTE_PR_POLICY,
     }),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
     command(
       JSON.stringify({
         number: 23,
@@ -513,9 +537,9 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       },
     );
     assert.equal(exitCode, 0);
-    assert.equal(transport.calls.length, 7);
-    assert.match(transport.calls[6]?.join(" ") ?? "", /## Summary/);
-    assert.match(transport.calls[6]?.join(" ") ?? "", /## Linked issue/);
+    assert.equal(transport.calls.length, 9);
+    assert.match(transport.calls[8]?.join(" ") ?? "", /## Summary/);
+    assert.match(transport.calls[8]?.join(" ") ?? "", /## Linked issue/);
     assert.equal(JSON.parse(lines[0] ?? "{}").ok, true);
   } finally {
     console.log = originalLog;
@@ -544,6 +568,7 @@ test("ambiguous remote template selection fails after target resolution", async 
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
+        sha: GOVERNANCE_TREE_SHA,
         truncated: false,
         tree: [
           { path: ".github/ISSUE_TEMPLATE/bug.yml", type: "blob", sha: "bug-sha" },

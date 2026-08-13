@@ -35,6 +35,7 @@ function governedFixture(contract: CanonicalContract): CanonicalContract {
         nameWithOwner: "acme/inari",
       },
       ref: "main",
+      treeSha: "fixture-tree-sha",
       template: {
         path: contract.templateIdentity.path,
         ref: "main",

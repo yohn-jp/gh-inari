@@ -59,6 +59,18 @@ export class GitHubApiResponseError extends GitHubAdapterError {
         this.name = "GitHubApiResponseError";
     }
 }
+/**
+ * GitHub's issue resource family can represent pull requests. Raised when a
+ * caller addressed the Issue path but the numbered resource is actually a
+ * pull request, so it fails closed instead of silently accepting a
+ * PR-shaped resource as an Issue artifact.
+ */
+export class GitHubResourceKindMismatchError extends GitHubAdapterError {
+    constructor(operation, issueNumber, cause) {
+        super("api", "GITHUB_RESOURCE_KIND_MISMATCH", `Resource #${issueNumber} is a pull request, not an Issue; refusing to treat it as an Issue artifact.`, { operation, path: "pull_request" }, { cause });
+        this.name = "GitHubResourceKindMismatchError";
+    }
+}
 export class ContractViolationError extends GitHubAdapterError {
     constructor(message, path, cause) {
         super("contract", "CONTRACT_VIOLATION", message, { path }, { cause });

@@ -1,5 +1,5 @@
 import { type GhTransport } from "./transport.js";
-import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTreeEntry, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./types.js";
+import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./types.js";
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
 export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
 export declare const DEFAULT_GH_TIMEOUTS_MS: Readonly<Record<GhOperationClass, number>>;
@@ -33,7 +33,7 @@ export declare class GitHubAdapter {
     /** Read the target repository metadata used to select the trusted governance ref. */
     getRepositoryDefaultBranch(): Promise<string>;
     /** Read the complete Git tree for a trusted repository ref. Truncation is invalid for governance. */
-    getRepositoryTree(ref: string): Promise<readonly RepositoryTreeEntry[]>;
+    getRepositoryTree(ref: string): Promise<RepositoryTree>;
     /** Read and decode one blob selected from the trusted repository tree. */
     getRepositoryBlob(sha: string): Promise<string>;
     getIssue(issueNumber: number): Promise<GitHubIssue>;

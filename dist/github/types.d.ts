@@ -44,6 +44,12 @@ export interface RepositoryTreeEntry {
     readonly type: "blob" | "tree";
     readonly sha: string;
 }
+/** A repository Git tree read at a trusted ref, with its own immutable, content-addressed identity. */
+export interface RepositoryTree {
+    /** SHA of the tree object itself; changes whenever any entry under it changes. */
+    readonly sha: string;
+    readonly entries: readonly RepositoryTreeEntry[];
+}
 export interface GitHubIssue {
     readonly number: number;
     readonly title: string;
