@@ -7,6 +7,7 @@ export type GitHubAdapterErrorCode =
   | "REPOSITORY_RESOLUTION_FAILED"
   | "INVALID_REPOSITORY_OVERRIDE"
   | "GITHUB_TRANSPORT_FAILED"
+  | "GITHUB_OUTPUT_LIMIT_EXCEEDED"
   | "GITHUB_TIMEOUT"
   | "GITHUB_API_FAILED"
   | "GITHUB_API_RESPONSE_INVALID"
@@ -22,6 +23,9 @@ export interface GitHubAdapterErrorDetails {
   readonly stderr?: string;
   readonly response?: string;
   readonly timeoutMs?: number;
+  readonly stream?: string;
+  readonly limitBytes?: number;
+  readonly outputBytes?: number;
   readonly [key: string]: string | number | undefined;
 }
 
@@ -96,6 +100,25 @@ export class GitHubTransportError extends GitHubAdapterError {
   constructor(operation: string, message: string, details: GitHubAdapterErrorDetails = {}, cause?: unknown) {
     super("transport", "GITHUB_TRANSPORT_FAILED", message, { operation, ...details }, { cause });
     this.name = "GitHubTransportError";
+  }
+}
+
+export class GitHubOutputLimitError extends GitHubAdapterError {
+  constructor(
+    operation: string,
+    stream: "stdout" | "stderr",
+    limitBytes: number,
+    outputBytes: number,
+    cause?: unknown,
+  ) {
+    super(
+      "transport",
+      "GITHUB_OUTPUT_LIMIT_EXCEEDED",
+      `gh ${stream} output exceeded its bounded limit of ${limitBytes} bytes during ${operation}.`,
+      { operation, stream, limitBytes, outputBytes },
+      { cause },
+    );
+    this.name = "GitHubOutputLimitError";
   }
 }
 

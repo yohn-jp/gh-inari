@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GhTransportTimeoutError, ProcessGhTransport } from "./index.js";
+import { GhTransportOutputLimitError, GhTransportTimeoutError, ProcessGhTransport } from "./index.js";
 
 test("resolves stdout, stderr, and exit code for a real completed process", async () => {
   const transport = new ProcessGhTransport(process.execPath);
@@ -18,6 +18,92 @@ test("resolves a non-zero exit code without a timeout configured", async () => {
   const result = await transport.run(["-e", "process.exit(3);"]);
 
   assert.equal(result.exitCode, 3);
+});
+
+test("resolves output that stays within the configured per-stream byte bounds", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  const result = await transport.run(["-e", "process.stdout.write('out'); process.stderr.write('err');"], {
+    maxStdoutBytes: 3,
+    maxStderrBytes: 3,
+  });
+
+  assert.equal(result.stdout, "out");
+  assert.equal(result.stderr, "err");
+});
+
+test("rejects and terminates a process that exceeds the stdout byte bound", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  await assert.rejects(
+    transport.run(["-e", "process.stdout.write('12345'); setTimeout(() => {}, 60000);"], {
+      maxStdoutBytes: 4,
+      maxStderrBytes: 0,
+    }),
+    (error: unknown) =>
+      error instanceof GhTransportOutputLimitError &&
+      error.code === "GH_OUTPUT_LIMIT_EXCEEDED" &&
+      error.stream === "stdout" &&
+      error.limitBytes === 4 &&
+      error.outputBytes === 5,
+  );
+});
+
+test("rejects and terminates a process that exceeds the stderr byte bound", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  await assert.rejects(
+    transport.run(["-e", "process.stderr.write('12345'); setTimeout(() => {}, 60000);"], {
+      maxStdoutBytes: 0,
+      maxStderrBytes: 4,
+    }),
+    (error: unknown) =>
+      error instanceof GhTransportOutputLimitError &&
+      error.stream === "stderr" &&
+      error.limitBytes === 4 &&
+      error.outputBytes === 5,
+  );
+});
+
+test("counts UTF-8 bytes across multibyte chunk boundaries", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  const result = await transport.run(
+    [
+      "-e",
+      "const bytes = Buffer.from('😀', 'utf8'); process.stdout.write(bytes.subarray(0, 1)); setImmediate(() => process.stdout.write(bytes.subarray(1)));",
+    ],
+    { maxStdoutBytes: 4, maxStderrBytes: 0 },
+  );
+
+  assert.equal(result.stdout, "😀");
+});
+
+test("counts a multibyte character by bytes when enforcing the bound", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  await assert.rejects(
+    transport.run(["-e", "process.stdout.write(Buffer.from('😀', 'utf8')); setTimeout(() => {}, 60000);"], {
+      maxStdoutBytes: 3,
+      maxStderrBytes: 0,
+    }),
+    (error: unknown) =>
+      error instanceof GhTransportOutputLimitError &&
+      error.stream === "stdout" &&
+      error.limitBytes === 3 &&
+      error.outputBytes === 4,
+  );
+});
+
+test("rejects invalid output byte bounds", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+
+  for (const maxStdoutBytes of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      transport.run(["-e", "process.exit(0);"], { maxStdoutBytes }),
+      (error: unknown) => error instanceof RangeError,
+    );
+  }
 });
 
 test("rejects with a distinct timeout error and terminates a process that exceeds timeoutMs", async () => {

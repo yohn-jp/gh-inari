@@ -1,4 +1,4 @@
-import { type GhTransport } from "./transport.js";
+import { type GhTransport, type GhTransportOutputLimits } from "./transport.js";
 import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./types.js";
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
 export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
@@ -14,6 +14,8 @@ export interface GitHubAdapterOptions {
     readonly transport?: GhTransport;
     /** Overrides for the default bounded timeout (ms) per gh operation class. */
     readonly timeoutsMs?: Partial<Record<GhOperationClass, number>>;
+    /** Overrides for the default bounded stdout/stderr byte limits for every gh operation. */
+    readonly outputLimitsBytes?: Partial<GhTransportOutputLimits>;
 }
 export declare class GitHubAdapter {
     private readonly cwd;
@@ -22,6 +24,7 @@ export declare class GitHubAdapter {
     private readonly transport;
     private readonly executable;
     private readonly timeoutsMs;
+    private readonly outputLimitsBytes;
     private availablePromise;
     private contextPromise;
     private readonly authenticatedHostnames;

@@ -4,6 +4,7 @@ import {
   GhUnauthenticatedError,
   GitHubApiError,
   GitHubApiResponseError,
+  GitHubOutputLimitError,
   GitHubResourceKindMismatchError,
   GitHubTimeoutError,
   GitHubTransportError,
@@ -11,7 +12,15 @@ import {
   RepositoryResolutionError,
 } from "./errors.js";
 import { isTrustedValidatedRenderedArtifact } from "./capability.js";
-import { GhTransportTimeoutError, ProcessGhTransport, type GhCommandResult, type GhTransport } from "./transport.js";
+import {
+  DEFAULT_GH_OUTPUT_LIMITS_BYTES,
+  GhTransportOutputLimitError,
+  GhTransportTimeoutError,
+  ProcessGhTransport,
+  type GhCommandResult,
+  type GhTransport,
+  type GhTransportOutputLimits,
+} from "./transport.js";
 import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
@@ -83,6 +92,24 @@ function validatedTimeoutOverrides(
   return validated;
 }
 
+function validatedOutputLimitOverrides(
+  overrides: Partial<GhTransportOutputLimits> | undefined,
+): Partial<GhTransportOutputLimits> {
+  if (overrides === undefined) return {};
+  const validated: Partial<Record<keyof GhTransportOutputLimits, number>> = {};
+  for (const [stream, value] of Object.entries(overrides)) {
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new ContractViolationError(
+        `Output limit for "${stream}" must be a finite non-negative integer.`,
+        `outputLimitsBytes.${stream}`,
+      );
+    }
+    validated[stream as keyof GhTransportOutputLimits] = value;
+  }
+  return validated;
+}
+
 export interface GitHubAdapterOptions {
   /** Working directory used by gh for local repository resolution. */
   readonly cwd?: string;
@@ -94,6 +121,8 @@ export interface GitHubAdapterOptions {
   readonly transport?: GhTransport;
   /** Overrides for the default bounded timeout (ms) per gh operation class. */
   readonly timeoutsMs?: Partial<Record<GhOperationClass, number>>;
+  /** Overrides for the default bounded stdout/stderr byte limits for every gh operation. */
+  readonly outputLimitsBytes?: Partial<GhTransportOutputLimits>;
 }
 
 export class GitHubAdapter {
@@ -103,6 +132,7 @@ export class GitHubAdapter {
   private readonly transport: GhTransport;
   private readonly executable: string;
   private readonly timeoutsMs: Readonly<Record<GhOperationClass, number>>;
+  private readonly outputLimitsBytes: Readonly<GhTransportOutputLimits>;
   private availablePromise: Promise<void> | undefined;
   private contextPromise: Promise<RepositoryContext> | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
@@ -115,6 +145,10 @@ export class GitHubAdapter {
     this.transport = options.transport ?? new ProcessGhTransport();
     this.executable = this.transport instanceof ProcessGhTransport ? this.transport.executable : "gh";
     this.timeoutsMs = Object.freeze({ ...DEFAULT_GH_TIMEOUTS_MS, ...validatedTimeoutOverrides(options.timeoutsMs) });
+    this.outputLimitsBytes = Object.freeze({
+      ...DEFAULT_GH_OUTPUT_LIMITS_BYTES,
+      ...validatedOutputLimitOverrides(options.outputLimitsBytes),
+    });
   }
 
   async checkAuthentication(): Promise<void> {
@@ -422,8 +456,16 @@ export class GitHubAdapter {
   private async runCommand(args: readonly string[], operation: string): Promise<GhCommandResult> {
     const timeoutMs = this.timeoutsMs[operationClass(operation)];
     try {
-      return await this.transport.run(args, { cwd: this.cwd, timeoutMs });
+      return await this.transport.run(args, {
+        cwd: this.cwd,
+        timeoutMs,
+        maxStdoutBytes: this.outputLimitsBytes.stdout,
+        maxStderrBytes: this.outputLimitsBytes.stderr,
+      });
     } catch (error) {
+      if (error instanceof GhTransportOutputLimitError) {
+        throw new GitHubOutputLimitError(operation, error.stream, error.limitBytes, error.outputBytes, error);
+      }
       if (error instanceof GhTransportTimeoutError) {
         throw new GitHubTimeoutError(operation, error.timeoutMs, error);
       }
