@@ -1,5 +1,5 @@
 export type GitHubAdapterErrorCategory = "environment" | "authentication" | "repository" | "transport" | "timeout" | "api" | "contract";
-export type GitHubAdapterErrorCode = "GH_NOT_INSTALLED" | "GH_UNAUTHENTICATED" | "REPOSITORY_RESOLUTION_FAILED" | "INVALID_REPOSITORY_OVERRIDE" | "GITHUB_TRANSPORT_FAILED" | "GITHUB_TIMEOUT" | "GITHUB_API_FAILED" | "GITHUB_API_RESPONSE_INVALID" | "GITHUB_RESOURCE_KIND_MISMATCH" | "CONTRACT_VIOLATION";
+export type GitHubAdapterErrorCode = "GH_NOT_INSTALLED" | "GH_UNAUTHENTICATED" | "REPOSITORY_RESOLUTION_FAILED" | "INVALID_REPOSITORY_OVERRIDE" | "GITHUB_TRANSPORT_FAILED" | "GITHUB_OUTPUT_LIMIT_EXCEEDED" | "GITHUB_TIMEOUT" | "GITHUB_API_FAILED" | "GITHUB_API_RESPONSE_INVALID" | "GITHUB_RESOURCE_KIND_MISMATCH" | "CONTRACT_VIOLATION";
 export interface GitHubAdapterErrorDetails {
     readonly operation?: string;
     readonly path?: string;
@@ -9,6 +9,9 @@ export interface GitHubAdapterErrorDetails {
     readonly stderr?: string;
     readonly response?: string;
     readonly timeoutMs?: number;
+    readonly stream?: string;
+    readonly limitBytes?: number;
+    readonly outputBytes?: number;
     readonly [key: string]: string | number | undefined;
 }
 export declare class GitHubAdapterError extends Error {
@@ -31,6 +34,9 @@ export declare class InvalidRepositoryOverrideError extends GitHubAdapterError {
 }
 export declare class GitHubTransportError extends GitHubAdapterError {
     constructor(operation: string, message: string, details?: GitHubAdapterErrorDetails, cause?: unknown);
+}
+export declare class GitHubOutputLimitError extends GitHubAdapterError {
+    constructor(operation: string, stream: "stdout" | "stderr", limitBytes: number, outputBytes: number, cause?: unknown);
 }
 export declare class GitHubTimeoutError extends GitHubAdapterError {
     constructor(operation: string, timeoutMs: number, cause?: unknown);

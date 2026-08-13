@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ContractViolationError,
+  DEFAULT_GH_OUTPUT_LIMITS_BYTES,
   DEFAULT_GH_TIMEOUTS_MS,
   GhNotInstalledError,
+  GhTransportOutputLimitError,
   GhTransportTimeoutError,
   GhUnauthenticatedError,
   GitHubAdapter,
   GitHubApiError,
+  GitHubApiResponseError,
+  GitHubOutputLimitError,
   GitHubResourceKindMismatchError,
   GitHubTimeoutError,
   GitHubTransportError,
@@ -25,6 +29,8 @@ interface RecordedCall {
   readonly args: readonly string[];
   readonly cwd: string | undefined;
   readonly timeoutMs: number | undefined;
+  readonly maxStdoutBytes: number | undefined;
+  readonly maxStderrBytes: number | undefined;
 }
 
 class StubGhTransport implements GhTransport {
@@ -36,7 +42,13 @@ class StubGhTransport implements GhTransport {
   }
 
   async run(args: readonly string[], options?: GhTransportOptions): Promise<GhCommandResult> {
-    this.calls.push({ args: [...args], cwd: options?.cwd, timeoutMs: options?.timeoutMs });
+    this.calls.push({
+      args: [...args],
+      cwd: options?.cwd,
+      timeoutMs: options?.timeoutMs,
+      maxStdoutBytes: options?.maxStdoutBytes,
+      maxStderrBytes: options?.maxStderrBytes,
+    });
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
     if (response instanceof Error) throw response;
@@ -339,6 +351,33 @@ test("keeps API failures and process transport failures distinct from contract f
   );
 });
 
+test("surfaces an output-limit transport failure with a stable machine-readable code", async () => {
+  const transport = new StubGhTransport([new GhTransportOutputLimitError("stdout", 128, 129)]);
+  const adapter = new GitHubAdapter({ transport });
+
+  await assert.rejects(
+    adapter.checkAuthentication(),
+    (error: unknown) =>
+      error instanceof GitHubOutputLimitError &&
+      error.code === "GITHUB_OUTPUT_LIMIT_EXCEEDED" &&
+      error.category === "transport" &&
+      error.details.operation === "gh.version" &&
+      error.details.stream === "stdout" &&
+      error.details.limitBytes === 128 &&
+      error.details.outputBytes === 129,
+  );
+});
+
+test("rejects partial JSON from a zero-exit API response", async () => {
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), command(0, '{"number":42')]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.getIssue(42),
+    (error: unknown) => error instanceof GitHubApiResponseError && error.code === "GITHUB_API_RESPONSE_INVALID",
+  );
+});
+
 test("getIssue fails closed when GitHub returns a pull-request-shaped resource", async () => {
   const prShapedIssue = { ...JSON.parse(issuePayload(48)), pull_request: { url: "https://api.github.com/pulls/48" } };
   const transport = new StubGhTransport([
@@ -402,6 +441,8 @@ test("applies bounded, operation-class-specific timeouts to every real adapter c
   assert.equal(authStatus.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
   assert.equal(repoView.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.repositoryResolution);
   assert.equal(issueRead.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.read);
+  assert.ok(transport.calls.every((call) => call.maxStdoutBytes === DEFAULT_GH_OUTPUT_LIMITS_BYTES.stdout));
+  assert.ok(transport.calls.every((call) => call.maxStderrBytes === DEFAULT_GH_OUTPUT_LIMITS_BYTES.stderr));
 });
 
 test("honors caller-supplied timeout overrides per operation class", async () => {
@@ -417,6 +458,20 @@ test("honors caller-supplied timeout overrides per operation class", async () =>
   assert.ok(transport.calls.every((call) => call.timeoutMs === 1234));
 });
 
+test("honors caller-supplied stdout and stderr output limits for every operation", async () => {
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({
+    repository: "acme/inari",
+    transport,
+    outputLimitsBytes: { stdout: 128, stderr: 64 },
+  });
+
+  await adapter.checkAuthentication();
+
+  assert.ok(transport.calls.every((call) => call.maxStdoutBytes === 128));
+  assert.ok(transport.calls.every((call) => call.maxStderrBytes === 64));
+});
+
 test("rejects non-positive and non-finite timeout overrides instead of silently disabling the bound", async () => {
   const transport = new StubGhTransport([]);
 
@@ -428,6 +483,23 @@ test("rejects non-positive and non-finite timeout overrides instead of silently 
   ]) {
     assert.throws(
       () => new GitHubAdapter({ transport, timeoutsMs: invalidTimeoutsMs }),
+      (error: unknown) => error instanceof ContractViolationError && error.code === "CONTRACT_VIOLATION",
+    );
+  }
+  assert.equal(transport.calls.length, 0);
+});
+
+test("rejects invalid output limit overrides instead of disabling the bound", async () => {
+  const transport = new StubGhTransport([]);
+
+  for (const outputLimitsBytes of [
+    { stdout: -1 },
+    { stderr: 1.5 },
+    { stdout: Number.NaN },
+    { stderr: Number.POSITIVE_INFINITY },
+  ]) {
+    assert.throws(
+      () => new GitHubAdapter({ transport, outputLimitsBytes }),
       (error: unknown) => error instanceof ContractViolationError && error.code === "CONTRACT_VIOLATION",
     );
   }

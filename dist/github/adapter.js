@@ -1,6 +1,6 @@
-import { ContractViolationError, GhNotInstalledError, GhUnauthenticatedError, GitHubApiError, GitHubApiResponseError, GitHubResourceKindMismatchError, GitHubTimeoutError, GitHubTransportError, InvalidRepositoryOverrideError, RepositoryResolutionError, } from "./errors.js";
+import { ContractViolationError, GhNotInstalledError, GhUnauthenticatedError, GitHubApiError, GitHubApiResponseError, GitHubOutputLimitError, GitHubResourceKindMismatchError, GitHubTimeoutError, GitHubTransportError, InvalidRepositoryOverrideError, RepositoryResolutionError, } from "./errors.js";
 import { isTrustedValidatedRenderedArtifact } from "./capability.js";
-import { GhTransportTimeoutError, ProcessGhTransport } from "./transport.js";
+import { DEFAULT_GH_OUTPUT_LIMITS_BYTES, GhTransportOutputLimitError, GhTransportTimeoutError, ProcessGhTransport, } from "./transport.js";
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
 const DEFAULT_HOSTNAME = "github.com";
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
@@ -51,6 +51,20 @@ function validatedTimeoutOverrides(overrides) {
     }
     return validated;
 }
+function validatedOutputLimitOverrides(overrides) {
+    if (overrides === undefined)
+        return {};
+    const validated = {};
+    for (const [stream, value] of Object.entries(overrides)) {
+        if (value === undefined)
+            continue;
+        if (!Number.isSafeInteger(value) || value < 0) {
+            throw new ContractViolationError(`Output limit for "${stream}" must be a finite non-negative integer.`, `outputLimitsBytes.${stream}`);
+        }
+        validated[stream] = value;
+    }
+    return validated;
+}
 export class GitHubAdapter {
     cwd;
     repository;
@@ -58,6 +72,7 @@ export class GitHubAdapter {
     transport;
     executable;
     timeoutsMs;
+    outputLimitsBytes;
     availablePromise;
     contextPromise;
     authenticatedHostnames = new Set();
@@ -69,6 +84,10 @@ export class GitHubAdapter {
         this.transport = options.transport ?? new ProcessGhTransport();
         this.executable = this.transport instanceof ProcessGhTransport ? this.transport.executable : "gh";
         this.timeoutsMs = Object.freeze({ ...DEFAULT_GH_TIMEOUTS_MS, ...validatedTimeoutOverrides(options.timeoutsMs) });
+        this.outputLimitsBytes = Object.freeze({
+            ...DEFAULT_GH_OUTPUT_LIMITS_BYTES,
+            ...validatedOutputLimitOverrides(options.outputLimitsBytes),
+        });
     }
     async checkAuthentication() {
         await this.ensureGhAvailable();
@@ -303,9 +322,17 @@ export class GitHubAdapter {
     async runCommand(args, operation) {
         const timeoutMs = this.timeoutsMs[operationClass(operation)];
         try {
-            return await this.transport.run(args, { cwd: this.cwd, timeoutMs });
+            return await this.transport.run(args, {
+                cwd: this.cwd,
+                timeoutMs,
+                maxStdoutBytes: this.outputLimitsBytes.stdout,
+                maxStderrBytes: this.outputLimitsBytes.stderr,
+            });
         }
         catch (error) {
+            if (error instanceof GhTransportOutputLimitError) {
+                throw new GitHubOutputLimitError(operation, error.stream, error.limitBytes, error.outputBytes, error);
+            }
             if (error instanceof GhTransportTimeoutError) {
                 throw new GitHubTimeoutError(operation, error.timeoutMs, error);
             }
