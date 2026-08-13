@@ -7,10 +7,27 @@ export interface GhCommandResult {
   readonly signal?: NodeJS.Signals;
 }
 
+export type GhOutputStream = "stdout" | "stderr";
+
+export interface GhTransportOutputLimits {
+  readonly stdout: number;
+  readonly stderr: number;
+}
+
 export interface GhTransportOptions {
   readonly cwd?: string;
   readonly timeoutMs?: number;
+  /** Maximum UTF-8 byte count captured from stdout for this invocation. */
+  readonly maxStdoutBytes?: number;
+  /** Maximum UTF-8 byte count captured from stderr for this invocation. */
+  readonly maxStderrBytes?: number;
 }
+
+/** Every ProcessGhTransport invocation is bounded, including calls without explicit options. */
+export const DEFAULT_GH_OUTPUT_LIMITS_BYTES: Readonly<GhTransportOutputLimits> = Object.freeze({
+  stdout: 1_048_576,
+  stderr: 1_048_576,
+});
 
 /** Raised when a gh invocation is killed for exceeding its bounded timeout. Never resolves as a command result. */
 export class GhTransportTimeoutError extends Error {
@@ -23,6 +40,22 @@ export class GhTransportTimeoutError extends Error {
   }
 }
 
+/** Raised when a gh invocation is killed after exceeding a per-stream byte bound. */
+export class GhTransportOutputLimitError extends Error {
+  readonly code = "GH_OUTPUT_LIMIT_EXCEEDED";
+  readonly stream: GhOutputStream;
+  readonly limitBytes: number;
+  readonly outputBytes: number;
+
+  constructor(stream: GhOutputStream, limitBytes: number, outputBytes: number) {
+    super(`gh transport exceeded its ${stream} output limit of ${limitBytes} bytes.`);
+    this.name = "GhTransportOutputLimitError";
+    this.stream = stream;
+    this.limitBytes = limitBytes;
+    this.outputBytes = outputBytes;
+  }
+}
+
 /** The adapter's only credential boundary: execute the user's existing gh CLI. */
 export interface GhTransport {
   run(args: readonly string[], options?: GhTransportOptions): Promise<GhCommandResult>;
@@ -30,6 +63,13 @@ export interface GhTransport {
 
 /** Grace period after SIGTERM before escalating to SIGKILL for an unresponsive child process. */
 const FORCE_KILL_GRACE_MS = 2000;
+
+function validateByteLimit(value: number, optionName: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${optionName} must be a finite non-negative integer, got ${value}.`);
+  }
+  return value;
+}
 
 export class ProcessGhTransport implements GhTransport {
   readonly executable: string;
@@ -40,6 +80,15 @@ export class ProcessGhTransport implements GhTransport {
 
   run(args: readonly string[], options: GhTransportOptions = {}): Promise<GhCommandResult> {
     return new Promise((resolve, reject) => {
+      const maxStdoutBytes = validateByteLimit(
+        options.maxStdoutBytes ?? DEFAULT_GH_OUTPUT_LIMITS_BYTES.stdout,
+        "maxStdoutBytes",
+      );
+      const maxStderrBytes = validateByteLimit(
+        options.maxStderrBytes ?? DEFAULT_GH_OUTPUT_LIMITS_BYTES.stderr,
+        "maxStderrBytes",
+      );
+
       let child: ReturnType<typeof spawn>;
       try {
         child = spawn(this.executable, [...args], {
@@ -56,9 +105,14 @@ export class ProcessGhTransport implements GhTransport {
         return;
       }
 
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let termination:
+        | { readonly kind: "timeout"; readonly timeoutMs: number }
+        | { readonly kind: "output-limit"; readonly error: GhTransportOutputLimitError }
+        | undefined;
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
       let killTimer: NodeJS.Timeout | undefined;
@@ -68,16 +122,46 @@ export class ProcessGhTransport implements GhTransport {
         if (killTimer !== undefined) clearTimeout(killTimer);
       };
 
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
+      const terminate = (): void => {
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, FORCE_KILL_GRACE_MS);
+        killTimer.unref();
+      };
+
+      const capture = (stream: GhOutputStream, chunk: Buffer): void => {
+        if (settled || termination !== undefined) return;
+
+        const outputBytes = stream === "stdout" ? stdoutBytes + chunk.byteLength : stderrBytes + chunk.byteLength;
+        const limitBytes = stream === "stdout" ? maxStdoutBytes : maxStderrBytes;
+        if (outputBytes > limitBytes) {
+          termination = {
+            kind: "output-limit",
+            error: new GhTransportOutputLimitError(stream, limitBytes, outputBytes),
+          };
+          terminate();
+          return;
+        }
+
+        if (stream === "stdout") {
+          stdoutBytes = outputBytes;
+          stdoutChunks.push(chunk);
+        } else {
+          stderrBytes = outputBytes;
+          stderrChunks.push(chunk);
+        }
+      };
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        capture("stdout", chunk);
       });
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
+      child.stderr.on("data", (chunk: Buffer) => {
+        capture("stderr", chunk);
       });
       child.once("error", (error) => {
         if (settled) return;
+        if (termination !== undefined) return;
         settled = true;
         clearTimers();
         reject(error);
@@ -92,12 +176,9 @@ export class ProcessGhTransport implements GhTransport {
           return;
         }
         timer = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGTERM");
-          killTimer = setTimeout(() => {
-            child.kill("SIGKILL");
-          }, FORCE_KILL_GRACE_MS);
-          killTimer.unref();
+          if (termination !== undefined) return;
+          termination = { kind: "timeout", timeoutMs };
+          terminate();
         }, timeoutMs);
         timer.unref();
       }
@@ -106,14 +187,18 @@ export class ProcessGhTransport implements GhTransport {
         if (settled) return;
         settled = true;
         clearTimers();
-        if (timedOut) {
-          reject(new GhTransportTimeoutError(options.timeoutMs as number));
+        if (termination?.kind === "output-limit") {
+          reject(termination.error);
+          return;
+        }
+        if (termination?.kind === "timeout") {
+          reject(new GhTransportTimeoutError(termination.timeoutMs));
           return;
         }
         resolve({
           exitCode: exitCode ?? 1,
-          stdout,
-          stderr,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8"),
           ...(signal === null ? {} : { signal }),
         });
       });

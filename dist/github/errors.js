@@ -41,6 +41,12 @@ export class GitHubTransportError extends GitHubAdapterError {
         this.name = "GitHubTransportError";
     }
 }
+export class GitHubOutputLimitError extends GitHubAdapterError {
+    constructor(operation, stream, limitBytes, outputBytes, cause) {
+        super("transport", "GITHUB_OUTPUT_LIMIT_EXCEEDED", `gh ${stream} output exceeded its bounded limit of ${limitBytes} bytes during ${operation}.`, { operation, stream, limitBytes, outputBytes }, { cause });
+        this.name = "GitHubOutputLimitError";
+    }
+}
 export class GitHubTimeoutError extends GitHubAdapterError {
     constructor(operation, timeoutMs, cause) {
         super("timeout", "GITHUB_TIMEOUT", `gh did not complete ${operation} within the bounded timeout of ${timeoutMs}ms.`, { operation, timeoutMs }, { cause });
