@@ -93,7 +93,7 @@ try {
     if (isPackagedDistributionError(error)) {
       throw new LauncherError(distributionErrorMessage(error), { cause: error });
     }
-    if (process.env[bootstrapAttemptEnvironmentVariable] !== undefined) {
+    if (process.env[bootstrapAttemptEnvironmentVariable] === "1") {
       throw new LauncherError(
         "gh-inari: a runtime dependency is still missing after one bootstrap attempt. Reinstall the extension and try again.",
         { cause: error },
