@@ -8,6 +8,7 @@ import {
   GhUnauthenticatedError,
   GitHubAdapter,
   GitHubApiError,
+  GitHubApiResponseError,
   GitHubResourceKindMismatchError,
   GitHubTimeoutError,
   GitHubTransportError,
@@ -80,6 +81,13 @@ function pullRequestPayload(number = 43): string {
     head: { ref: "feature" },
     base: { ref: "main" },
   });
+}
+
+function pullRequestPayloadWithDraft(number: number, draft: unknown): string {
+  const payload = JSON.parse(pullRequestPayload(number)) as Record<string, unknown>;
+  if (draft === undefined) delete payload.draft;
+  else payload.draft = draft;
+  return JSON.stringify(payload);
 }
 
 function governedFixture(contract: CanonicalContract): CanonicalContract {
@@ -225,7 +233,9 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   }).artifact;
 
   assert.equal((await adapter.getIssue(42)).number, 42);
-  assert.equal((await adapter.getPullRequest(43)).head, "feature");
+  const pullRequest = await adapter.getPullRequest(43);
+  assert.equal(pullRequest.head, "feature");
+  assert.equal(pullRequest.draft, false);
   assert.equal((await adapter.createIssue(issueArtifact)).number, 44);
   assert.equal((await adapter.updateIssue(45, issueArtifact)).number, 45);
   assert.equal((await adapter.createPullRequest(pullRequestArtifact)).number, 46);
@@ -247,6 +257,43 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   assert.ok(pullRequestCreate.args.includes("head=feature"));
   assert.ok(pullRequestCreate.args.includes("base=main"));
   assert.ok(pullRequestCreate.args.includes("maintainer_can_modify=true"));
+});
+
+test("rejects missing and non-boolean pull request draft response fields", async () => {
+  for (const draft of [undefined, null, "false", 0]) {
+    const transport = new StubGhTransport([
+      command(0, "gh version 2.0"),
+      command(),
+      command(0, pullRequestPayloadWithDraft(50, draft)),
+    ]);
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    await assert.rejects(
+      adapter.getPullRequest(50),
+      (error: unknown) =>
+        error instanceof GitHubApiResponseError &&
+        error.code === "GITHUB_API_RESPONSE_INVALID" &&
+        error.category === "api" &&
+        error.details.operation === "pull_request.read" &&
+        error.details.path === "draft",
+    );
+  }
+});
+
+test("preserves valid pull request draft boolean response fields", async () => {
+  for (const [number, draft] of [
+    [51, false],
+    [52, true],
+  ] as const) {
+    const transport = new StubGhTransport([
+      command(0, "gh version 2.0"),
+      command(),
+      command(0, pullRequestPayloadWithDraft(number, draft)),
+    ]);
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    assert.equal((await adapter.getPullRequest(number)).draft, draft);
+  }
 });
 
 test("rejects an unvalidated artifact before invoking any transport or mutation", async () => {

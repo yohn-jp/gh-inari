@@ -584,6 +584,7 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
   const state = responseState(record.state, operation);
   const url = responseUrl(record, operation);
   const body = record.body === null ? null : responseString(record.body, "body", operation);
+  const draft = responseBoolean(record.draft, "draft", operation);
   const head = responseRef(record.head, "head", operation);
   const base = responseRef(record.base, "base", operation);
   return {
@@ -592,7 +593,7 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
     body,
     state,
     url,
-    draft: record.draft === true,
+    draft,
     head,
     base,
   };
@@ -616,6 +617,15 @@ function responseNumber(value: unknown, path: string, operation: string): number
 
 function responseString(value: unknown, path: string, operation: string): string {
   if (typeof value !== "string") {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value;
+}
+
+function responseBoolean(value: unknown, path: string, operation: string): boolean {
+  if (typeof value !== "boolean") {
     throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
       path,
     });
