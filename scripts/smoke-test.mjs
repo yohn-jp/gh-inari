@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Installs the packed tarball into an isolated directory and runs the
-// installed bin through its real npm-generated launcher. `npm pack --dry-run`
+// installed bin through its real npm-generated launcher. The checked-out
+// extension path is kept in a separate temporary tree so its first run cannot
+// resolve dependencies from the repository's node_modules. `npm pack --dry-run`
 // only lists file contents — it never proves install or execution actually
 // work, which is the failure mode this guards against.
 import { spawnSync } from "node:child_process";
@@ -83,7 +85,9 @@ function main() {
     ownsTarball = true;
   }
 
-  const installDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-"));
+  const smokeRootDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "gh-inari-smoke-"));
+  const installDirectory = path.join(smokeRootDirectory, "consumer");
+  fs.mkdirSync(installDirectory);
   try {
     fs.writeFileSync(
       path.join(installDirectory, "package.json"),
@@ -168,7 +172,8 @@ function main() {
     const ghExtensionEnvironment = {
       ...process.env,
       GH_CONFIG_DIR: ghConfigDirectory,
-      XDG_DATA_HOME: path.join(installDirectory, "gh-data"),
+      XDG_DATA_HOME: path.join(smokeRootDirectory, "gh-data"),
+      XDG_STATE_HOME: path.join(smokeRootDirectory, "gh-state"),
       GH_PROMPT_DISABLED: "1",
       GH_TOKEN: "smoke-test-token",
     };
@@ -178,13 +183,17 @@ function main() {
     const ghExecutable = ghPathResult.status === 0 ? ghPathResult.stdout.trim() : "";
     if (ghExecutable.length === 0) fail("unable to resolve the GitHub CLI executable path");
 
-    const sourceGhConfigDirectory = path.join(installDirectory, "source-gh-config");
+    const sourceGhConfigDirectory = path.join(smokeRootDirectory, "source-gh-config");
     const sourceExtensionEnvironment = {
       ...ghExtensionEnvironment,
       GH_CONFIG_DIR: sourceGhConfigDirectory,
-      XDG_DATA_HOME: path.join(installDirectory, "source-gh-data"),
+      XDG_DATA_HOME: path.join(smokeRootDirectory, "source-gh-data"),
+      XDG_STATE_HOME: path.join(smokeRootDirectory, "source-gh-state"),
     };
-    const sourceExtensionDirectory = path.join(installDirectory, "gh-inari");
+    // Keep the checked-out extension outside the packed consumer tree. The
+    // sibling layout leaves no ancestor node_modules directory that npm's
+    // first-run bootstrap could accidentally reuse.
+    const sourceExtensionDirectory = path.join(smokeRootDirectory, "checked-out", "gh-inari");
     fs.mkdirSync(sourceExtensionDirectory, { recursive: true });
     fs.copyFileSync(path.join(repoRoot, "gh-inari"), path.join(sourceExtensionDirectory, "gh-inari"));
     fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(sourceExtensionDirectory, "package.json"));
@@ -222,6 +231,7 @@ function main() {
       "repos/smoke/repository": { default_branch: "main" },
       "repos/smoke/repository/git/trees/main?recursive=1": {
         truncated: false,
+        sha: "tree-sha",
         tree: [
           { path: ".github/ISSUE_TEMPLATE/feature.yml", type: "blob", sha: "issue-template-sha" },
           { path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob", sha: "pr-template-sha" },
@@ -294,9 +304,10 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
     // the launcher is what bootstraps production dependencies on first run,
     // and a bare `node dist/index.js` invocation on a clean checkout (no
     // node_modules) fails with ERR_MODULE_NOT_FOUND before that logic runs.
-    const sourceEntry = path.join(repoRoot, "gh-inari");
+    const sourceEntry = path.join(sourceExtensionDirectory, "gh-inari");
     const packedLauncher = path.join(installDirectory, "node_modules", ".bin", "gh-inari");
     const validationArgs = (inputPath) => ["pr", "validate", "--from", inputPath, "--json"];
+    console.log("checking isolated clean-install extension, packed gh-inari, and gh inari parity...");
     const sourceSchema = jsonOutput(
       invoke(process.execPath, [sourceEntry, "pr", "schema"], { cwd: fixtureDirectory }),
       "source pr schema",
@@ -320,7 +331,7 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
     if (JSON.stringify(ghSchema) !== JSON.stringify(sourceSchema))
       fail("gh inari pr schema diverged from the source CLI");
 
-    console.log("checking source, packed, and gh inari validation parity...");
+    console.log("checking isolated clean-install, packed gh-inari, and gh inari validation parity...");
     for (const validationCase of validationCases) {
       const args = validationArgs(validationCase.inputPath);
       const sourceResult = invoke(process.execPath, [sourceEntry, ...args], { cwd: fixtureDirectory });
@@ -351,7 +362,7 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
         fail(validationCase.name + " validation output diverged across execution paths");
     }
 
-    console.log("checking source, packed, and gh inari render parity...");
+    console.log("checking isolated clean-install, packed gh-inari, and gh inari render parity...");
     const renderCase = validationCases.find((candidate) => candidate.valid);
     const renderArgs = ["pr", "render", "--from", renderCase.inputPath, "--json"];
     const sourceRender = jsonOutput(
@@ -379,7 +390,7 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
     if (JSON.stringify(ghRender) !== JSON.stringify(sourceRender))
       fail("gh inari pr render diverged from the source CLI");
 
-    console.log("checking source, packed, and gh inari canonical get parity...");
+    console.log("checking isolated clean-install, packed gh-inari, and gh inari canonical get parity...");
     const getCases = [
       {
         name: "issue get",
@@ -451,7 +462,7 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
 
     console.log("smoke test passed.");
   } finally {
-    fs.rmSync(installDirectory, { recursive: true, force: true });
+    fs.rmSync(smokeRootDirectory, { recursive: true, force: true });
     if (ownsTarball) fs.rmSync(tarballPath, { force: true });
   }
 }

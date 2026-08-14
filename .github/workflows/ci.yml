@@ -101,5 +101,9 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Check committed dist matches the clean build
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git ls-files --others --exclude-standard -- dist)"
       - name: Package contents and smoke test
         run: node scripts/run-package-suite.mjs
