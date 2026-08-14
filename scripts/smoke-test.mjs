@@ -172,7 +172,8 @@ function main() {
     const ghExtensionEnvironment = {
       ...process.env,
       GH_CONFIG_DIR: ghConfigDirectory,
-      XDG_DATA_HOME: path.join(installDirectory, "gh-data"),
+      XDG_DATA_HOME: path.join(smokeRootDirectory, "gh-data"),
+      XDG_STATE_HOME: path.join(smokeRootDirectory, "gh-state"),
       GH_PROMPT_DISABLED: "1",
       GH_TOKEN: "smoke-test-token",
     };
@@ -187,6 +188,7 @@ function main() {
       ...ghExtensionEnvironment,
       GH_CONFIG_DIR: sourceGhConfigDirectory,
       XDG_DATA_HOME: path.join(smokeRootDirectory, "source-gh-data"),
+      XDG_STATE_HOME: path.join(smokeRootDirectory, "source-gh-state"),
     };
     // Keep the checked-out extension outside the packed consumer tree. The
     // sibling layout leaves no ancestor node_modules directory that npm's
