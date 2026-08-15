@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -339,7 +339,7 @@ export async function syncSemanticTemplates(repositoryRoot = process.cwd(), chec
             drift.push(relativePath);
             if (!check) {
                 await mkdir(path.dirname(absolutePath), { recursive: true });
-                await writeFile(absolutePath, content, "utf8");
+                await writeRepositoryFile(absolutePath, content);
                 written.push(relativePath);
             }
         }
@@ -349,7 +349,7 @@ export async function syncSemanticTemplates(repositoryRoot = process.cwd(), chec
         for (const relativePath of staleGenerated) {
             const absolutePath = safeRepositoryPath(root, relativePath);
             const current = await readFile(absolutePath, "utf8");
-            await writeFile(absolutePath, current, "utf8");
+            await writeRepositoryFile(absolutePath, current);
         }
     }
     return {
@@ -382,7 +382,7 @@ export async function importNativeTemplate(repositoryRoot, nativePath, destinati
     const outputPath = destinationPath ?? defaultImportPath(root, source, base);
     const absoluteOutput = safeRepositoryPath(root, outputPath);
     await mkdir(path.dirname(absoluteOutput), { recursive: true });
-    await writeFile(absoluteOutput, `${JSON.stringify(source, null, 2)}\n`, "utf8");
+    await writeRepositoryFile(absoluteOutput, `${JSON.stringify(source, null, 2)}\n`);
     return { path: toRepositoryPath(root, absoluteOutput), source };
 }
 export function semanticSourceFromContract(contractInput) {
@@ -1084,6 +1084,23 @@ function safeRepositoryPath(root, relativePath) {
             },
         ]);
     return absolute;
+}
+async function writeRepositoryFile(absolutePath, content) {
+    try {
+        if ((await lstat(absolutePath)).isSymbolicLink())
+            throw new SemanticTemplateError([
+                {
+                    code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+                    path: absolutePath,
+                    message: "Refusing to write through a symbolic link.",
+                },
+            ]);
+    }
+    catch (cause) {
+        if (cause instanceof SemanticTemplateError)
+            throw cause;
+    }
+    await writeFile(absolutePath, content, "utf8");
 }
 async function optionalDirectory(directory) {
     try {
