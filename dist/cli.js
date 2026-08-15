@@ -466,12 +466,12 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         if (domain === "issue") {
             const prepared = prepareIssueArtifact(contract, preparedDocument);
             const created = await createGovernedIssue(adapter, prepared.artifact);
-            console.log(JSON.stringify({ ok: true, artifact: created }));
+            console.log(JSON.stringify({ ok: true, artifact: created.artifact, governance: created.governance }));
             return 0;
         }
         const prepared = preparePullRequestArtifact(contract, preparedDocument);
         const created = await createGovernedPullRequest(adapter, prepared.artifact);
-        console.log(JSON.stringify({ ok: true, artifact: created }));
+        console.log(JSON.stringify({ ok: true, artifact: created.artifact, governance: created.governance }));
         return 0;
     }
     if ((command === "validate" || command === "explain") &&
