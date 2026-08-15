@@ -321,6 +321,10 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 if (args[0] === "auth" && args[1] === "status") process.exit(0);
+if (args[0] === "repo" && args[1] === "view") {
+  process.stdout.write(JSON.stringify({ nameWithOwner: "smoke/repository", url: "https://github.com/smoke/repository" }));
+  process.exit(0);
+}
 if (args[0] !== "api") {
   process.stderr.write("unsupported fake gh command\\n");
   process.exit(1);
@@ -480,6 +484,62 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
         ghGet.stdout !== sourceGet.stdout
       )
         fail(getCase.name + " output diverged across execution paths");
+    }
+
+    console.log("checking isolated clean-install, packed gh-inari, and gh inari remediation parity...");
+    const remediationCases = [
+      {
+        name: "issue check",
+        args: ["issue", "check", "21", "--template", "feature", "--repository", "smoke/repository"],
+      },
+      {
+        name: "pr normalize dry-run",
+        args: ["pr", "normalize", "43", "--dry-run", "--repository", "smoke/repository"],
+      },
+    ];
+    for (const remediationCase of remediationCases) {
+      const sourceRemediation = invoke(process.execPath, [sourceEntry, ...remediationCase.args], {
+        cwd: fixtureDirectory,
+        env: sourceGetEnvironment,
+      });
+      const sourceGhRemediation = invoke(ghExecutable, ["inari", ...remediationCase.args], {
+        cwd: fixtureDirectory,
+        env: sourceGetEnvironment,
+      });
+      const packedRemediation = invoke(packedLauncher, remediationCase.args, {
+        cwd: fixtureDirectory,
+        env: packedGetEnvironment,
+      });
+      const ghRemediation = invoke(ghExecutable, ["inari", ...remediationCase.args], {
+        cwd: fixtureDirectory,
+        env: packedGetEnvironment,
+      });
+      const outputs = [
+        ["source", sourceRemediation],
+        ["checked-out gh inari", sourceGhRemediation],
+        ["packed gh-inari", packedRemediation],
+        ["gh inari", ghRemediation],
+      ];
+      for (const [label, result] of outputs) jsonOutput(result, label + " " + remediationCase.name);
+      for (const [label, result] of outputs) jsonOutput(result, label + " " + remediationCase.name);
+      for (const [label, result] of outputs) {
+        if (result.status !== sourceRemediation.status)
+          fail(
+            label +
+              " " +
+              remediationCase.name +
+              " exited " +
+              result.status +
+              ", expected " +
+              sourceRemediation.status,
+          );
+      }
+      if (
+        sourceGhRemediation.stdout !== sourceRemediation.stdout ||
+        packedRemediation.stdout !== sourceRemediation.stdout ||
+        ghRemediation.stdout !== sourceRemediation.stdout
+      )
+        fail(remediationCase.name + " output diverged across execution paths");
     }
 
     for (const [label, command, args, options] of [

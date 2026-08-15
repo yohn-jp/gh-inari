@@ -117,6 +117,14 @@ gh inari issue explain <number> --template <template> --json
 gh inari pr explain <number> --template <template> --json
 gh inari issue get <number> [--template <template>] --json
 gh inari pr get <number> [--template <template>] --json
+gh inari issue check <number> [--template <template>]
+gh inari pr check <number> [--template <template>]
+gh inari issue edit <number> --from patch.json [--dry-run]
+gh inari pr edit <number> --from patch.json [--dry-run]
+gh inari issue normalize <number> [--dry-run]
+gh inari pr normalize <number> [--dry-run]
+gh inari issue sync <number> --from desired.json [--dry-run]
+gh inari pr sync <number> --from desired.json [--dry-run]
 ```
 
 `--from -` reads JSON from stdin. Create input uses an envelope when mutation metadata is needed:
@@ -143,6 +151,17 @@ diagnostics with `projection: "unavailable"` and never return guessed fields.
 When `--template` is omitted, all supported candidates are evaluated
 deterministically; multiple structural matches fail closed. Native template
 boilerplate and raw Markdown are intentionally absent from successful output.
+
+Existing artifact remediation uses one semantic pipeline for both Issues and
+pull requests. `check` is read-only and classifies an artifact as
+`valid-current`, `non-canonical`, `semantically-invalid`, `unsupported`, or
+`ambiguous`. `edit` applies only an explicit semantic patch from JSON; it never
+accepts raw Markdown as the mutation contract. `normalize` re-renders a
+parseable, semantically valid artifact and fails closed when preservation is
+not proven. `sync` treats its input as the complete desired semantic state and
+reconciles the canonical projection deterministically. A successful no-op is
+reported explicitly, and `--dry-run` returns a bounded semantic/rendered diff
+without calling a GitHub mutation.
 
 ## Source of truth and supported semantics
 
@@ -198,7 +217,7 @@ resolve template -> compile contract -> validate semantic JSON
 
 `prepareIssueArtifact` and `preparePullRequestArtifact` are the trusted preparation boundary for library callers. Each reparses the exact rendered body with the same compiled contract, revalidates the reconstructed values, and compares them deterministically with the validated/materialized source values before producing an opaque, frozen capability carrying the target repository/ref provenance. The public `phase: "validated-rendered"` string is informational; a caller-created or spread object is rejected by the mutation adapter, and there is no public marker helper.
 
-Schema, validate, and render never call a remote mutation. Invalid, ambiguous, unparseable, or unsupported pre-flight state cannot reach the mutation adapter. Existing Issue and PR validation fetches the artifact through the typed `gh` adapter, reconstructs semantic values, and calls the same compiler-owned validator. Diagnostics distinguish valid artifacts, ordinary semantic violations, wrong-template bodies, and unparseable structure. Renderer/parser drift fails with the typed `ARTIFACT_ROUND_TRIP_INVALID` preparation error.
+Schema, validate, render, check, and every `--dry-run` remediation path never call a remote mutation. Invalid, ambiguous, unparseable, or unsupported pre-flight state cannot reach the mutation adapter. Existing Issue and PR validation and remediation fetch artifacts through the typed `gh` adapter, reconstruct semantic values, and call the same compiler-owned parser, validator, renderer, and freshness/reconciliation boundary. Renderer/parser drift fails with the typed `ARTIFACT_ROUND_TRIP_INVALID` preparation error; normalization never invents missing intent.
 
 The public compiler, contract, validation, rendering, and adapter boundaries are library APIs. Future Actions or App adapters can use them without invoking or scraping CLI output.
 
