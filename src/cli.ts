@@ -487,6 +487,14 @@ function inputTooLargeError(observedBytes: number): CliError {
   );
 }
 
+function invalidArtifactNumberError(domain: "issue" | "pr", value: string | undefined): CliError {
+  const message =
+    value === undefined
+      ? `A ${domain} number is required.`
+      : `"${value}" is not a valid ${domain} number. Use a positive integer.`;
+  return new CliError("INVALID_ARTIFACT_NUMBER", message, "$argv[0]", { domain, value });
+}
+
 async function runTemplateList(
   root: string,
   repository: string | boolean | undefined,
@@ -641,8 +649,14 @@ async function runArtifactCommand(
   ) {
     return runExistingValidation(domain, Number(rest[0]), parsed, root, dependencies, true);
   }
-  if (command === "get" && rest[0] !== undefined && isPositiveInteger(rest[0])) {
-    return runExistingGet(domain, Number(rest[0]), parsed, root, dependencies);
+  if (command === "explain" && (rest[0] === undefined || !isPositiveInteger(rest[0]))) {
+    throw invalidArtifactNumberError(domain, rest[0]);
+  }
+  if (command === "get") {
+    if (rest[0] !== undefined && isPositiveInteger(rest[0])) {
+      return runExistingGet(domain, Number(rest[0]), parsed, root, dependencies);
+    }
+    throw invalidArtifactNumberError(domain, rest[0]);
   }
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
@@ -889,7 +903,12 @@ function classifyExitCode(error: unknown): number {
       error.code === "INPUT_READ_FAILED")
   )
     return EXIT_USAGE;
-  if (error instanceof CliError && (error.code === "INPUT_INVALID_JSON" || error.code === "INPUT_TOO_LARGE"))
+  if (
+    error instanceof CliError &&
+    (error.code === "INPUT_INVALID_JSON" ||
+      error.code === "INPUT_TOO_LARGE" ||
+      error.code === "INVALID_ARTIFACT_NUMBER")
+  )
     return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
