@@ -22,6 +22,8 @@ gh inari template import --from .github/PULL_REQUEST_TEMPLATE.md
 
 Import uses the supported native parser and fails closed for unsupported or ambiguous constructs. After import, the semantic source is authoritative; native files must be regenerated.
 
+Governed `issue create`/`pr create` against a repository using `.github/inari/` requires the committed native projection to be current: the contract's provenance is bound to the generated native file (matching `templateIdentity.path`), not the semantic JSON, so `gh inari template sync` must be run and pushed before governed mutations pick up a semantic source change.
+
 For machine input, use the compact semantic view:
 
 ```sh
