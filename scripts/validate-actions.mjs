@@ -9,6 +9,8 @@ const ISSUE_GOVERNANCE_WORKFLOW = ".github/workflows/issue-governance.yml";
 const USES_LINE_PATTERN = /^\s*(?:-\s+)?uses:\s*(.*)$/u;
 const VALUE_PATTERN = /^(\S+)(?:\s+#.*)?$/u;
 const IMMUTABLE_EXTERNAL_ACTION_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/u;
+const ORGANIZATION_WORKFLOW_PREFIX = "yohn-jp/.github/.github/workflows/";
+const SHARED_ISSUE_GOVERNANCE_REFERENCE = "yohn-jp/.github/.github/workflows/issue-governance.yml@main";
 
 export function validateActionText(source, filePath = "<text>") {
   const references = [];
@@ -34,7 +36,16 @@ export function validateActionText(source, filePath = "<text>") {
     const reference = valueMatch[1];
     const local = reference.startsWith("./");
     references.push({ file: filePath, line: lineNumber, reference, local });
-    if (!local && !IMMUTABLE_EXTERNAL_ACTION_PATTERN.test(reference)) {
+    const organizationWorkflow = reference.startsWith(ORGANIZATION_WORKFLOW_PREFIX);
+    if (organizationWorkflow && !reference.endsWith("@main")) {
+      errors.push(
+        filePath +
+          ":" +
+          lineNumber +
+          ": organization-owned reusable workflows under yohn-jp/.github must use @main: " +
+          reference,
+      );
+    } else if (!local && !organizationWorkflow && !IMMUTABLE_EXTERNAL_ACTION_PATTERN.test(reference)) {
       errors.push(
         filePath + ":" + lineNumber + ": external GitHub Action must use a full 40-character commit SHA: " + reference,
       );
@@ -54,23 +65,14 @@ export function repositoryActionFiles(root) {
 
 export function validateIssueGovernanceWorkflow(source, filePath = ISSUE_GOVERNANCE_WORKFLOW) {
   const errors = [];
-  const required = [
-    [/uses:\s*pnpm\/action-setup@/u, "pinned pnpm setup"],
-    [/uses:\s*actions\/setup-node@/u, "pinned Node.js setup"],
-    [/pnpm install --frozen-lockfile/u, "frozen dependency installation"],
-    [/node --import tsx scripts\/validate-issue\.mjs/u, "shared Issue validator invocation"],
-    [/[\s]--report\s+['"]?\$?\{?report/u, "diagnostic report path"],
-    [/:\s*>\s*['"]?\$report/u, "report initialization"],
-    [/GOVERNANCE_VALIDATION_FAILED/u, "deterministic fallback diagnostic"],
-  ];
-  for (const [pattern, label] of required) {
-    if (!pattern.test(source)) errors.push(`${filePath}: missing ${label}`);
+  if (!/^\s+issues:\s*(?:\[|$)/mu.test(source)) {
+    errors.push(filePath + ": missing issues event trigger");
   }
-
-  const installIndex = source.indexOf("pnpm install --frozen-lockfile");
-  const validatorIndex = source.indexOf("node --import tsx scripts/validate-issue.mjs");
-  if (installIndex < 0 || validatorIndex < 0 || installIndex > validatorIndex) {
-    errors.push(`${filePath}: dependencies must be installed before the Issue validator runs`);
+  if (!source.includes("uses: " + SHARED_ISSUE_GOVERNANCE_REFERENCE)) {
+    errors.push(filePath + ": must delegate Issue governance to " + SHARED_ISSUE_GOVERNANCE_REFERENCE);
+  }
+  if (/scripts\/validate-issue\.mjs/u.test(source)) {
+    errors.push(filePath + ": must not duplicate gh-inari Issue semantic validation locally");
   }
   return { errors };
 }
