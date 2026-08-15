@@ -642,3 +642,57 @@ test("surfaces a timed-out gh invocation as a distinct, actionable timeout error
       error.details.timeoutMs === 10_000,
   );
 });
+
+function blobPayload(sha: string, contentBase64: string): string {
+  return JSON.stringify({ sha, encoding: "base64", content: contentBase64 });
+}
+
+test("decodes a governed repository blob with exact valid multibyte UTF-8 text", async () => {
+  const sha = "a".repeat(40);
+  const text = "こんにちは 😀";
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, blobPayload(sha, Buffer.from(text, "utf8").toString("base64"))),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const decoded = await adapter.getRepositoryBlob(sha);
+
+  assert.equal(decoded, text);
+});
+
+test("rejects a governed repository blob containing invalid UTF-8 byte sequences instead of lossily decoding it", async () => {
+  const sha = "a".repeat(40);
+  const invalidUtf8 = Buffer.from([0xff, 0xfe, 0x00, 0x41]);
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, blobPayload(sha, invalidUtf8.toString("base64"))),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.getRepositoryBlob(sha),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.message.includes("invalid UTF-8"),
+  );
+});
+
+test("rejects a base64-valid but UTF-8-invalid governed repository blob", async () => {
+  const sha = "a".repeat(40);
+  const truncatedMultibyte = Buffer.from([0xe3, 0x81]);
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, blobPayload(sha, truncatedMultibyte.toString("base64"))),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.getRepositoryBlob(sha),
+    (error: unknown) => error instanceof GitHubApiResponseError && error.code === "GITHUB_API_RESPONSE_INVALID",
+  );
+});
