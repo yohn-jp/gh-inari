@@ -46,7 +46,7 @@ function isPackagedDistributionError(error) {
 function distributionErrorMessage(error) {
   const missingPath = missingModulePath(error) ?? cliPath;
   const displayPath = path.relative(extensionDirectory, missingPath) || missingPath;
-  return `gh-inari: packaged distribution is missing or corrupt (${displayPath}). Reinstall the extension or run \"npm run build\".`;
+  return `gh-inari: packaged distribution is missing or corrupt (${displayPath}). Install/update with \"gh extension install yohn-jp/gh-inari\".`;
 }
 
 function bootstrapDependencies() {
@@ -62,9 +62,10 @@ function bootstrapDependencies() {
   if (result.error !== undefined || result.status !== 0) {
     const detail =
       result.error instanceof Error ? ` ${result.error.message}` : ` npm exited with status ${String(result.status)}.`;
-    throw new LauncherError(`gh-inari: unable to install runtime dependencies for the GitHub CLI extension.${detail}`, {
-      cause: result.error,
-    });
+    throw new LauncherError(
+      `gh-inari: unable to install runtime dependencies for the GitHub CLI extension.${detail} Update with "gh extension upgrade inari".`,
+      { cause: result.error },
+    );
   }
 }
 
@@ -95,7 +96,7 @@ try {
     }
     if (process.env[bootstrapAttemptEnvironmentVariable] === "1") {
       throw new LauncherError(
-        "gh-inari: a runtime dependency is still missing after one bootstrap attempt. Reinstall the extension and try again.",
+        'gh-inari: a runtime dependency is still missing after one bootstrap attempt. Update with "gh extension upgrade inari".',
         { cause: error },
       );
     }
@@ -108,7 +109,7 @@ try {
     console.error(error.message);
     process.exitCode = 1;
   } else if (isModuleNotFoundError(error)) {
-    console.error("gh-inari: module not found. Please build the package (npm run build) or reinstall it.");
+    console.error('gh-inari: module not found. Install/update with "gh extension install yohn-jp/gh-inari".');
     process.exitCode = 1;
   } else {
     throw error;
