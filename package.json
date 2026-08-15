@@ -30,6 +30,10 @@
     "./governance": {
       "types": "./dist/governance.d.ts",
       "import": "./dist/governance.js"
+    },
+    "./semantic-template": {
+      "types": "./dist/semantic-template.d.ts",
+      "import": "./dist/semantic-template.js"
     }
   },
   "files": [
@@ -47,9 +51,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "smoke-test": "node scripts/smoke-test.mjs",
+    "templates:check": "node --import tsx src/index.ts template sync --check",
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "governance:actions": "node scripts/validate-actions.mjs",
-    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run test:package",
+    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run templates:check && pnpm run test:package",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test"
   },

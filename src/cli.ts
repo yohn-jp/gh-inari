@@ -36,6 +36,12 @@ import {
 } from "./governance.js";
 import { discoverTemplates, type TemplateSelector } from "./template-discovery.js";
 import type { GitHubIssue, GitHubPullRequest } from "./github/types.js";
+import {
+  discoverSemanticTemplates,
+  importNativeTemplate,
+  renderSemanticCompactSchema,
+  syncSemanticTemplates,
+} from "./semantic-template.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -95,7 +101,17 @@ export interface CliDependencies {
   readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
 }
 
-const BOOLEAN_OPTIONS = new Set(["help", "json", "version", "diagnose", "doctor", "draft", "maintainerCanModify"]);
+const BOOLEAN_OPTIONS = new Set([
+  "help",
+  "json",
+  "version",
+  "diagnose",
+  "doctor",
+  "draft",
+  "maintainerCanModify",
+  "compact",
+  "check",
+]);
 const VALUE_OPTIONS = new Set([
   "from",
   "template",
@@ -104,6 +120,7 @@ const VALUE_OPTIONS = new Set([
   "title",
   "head",
   "base",
+  "to",
   "requireCapability",
   "minimumVersion",
 ]);
@@ -153,6 +170,12 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const [domain, command, ...rest] = parsed.positionals;
     if (domain === "template" && command === "list") {
       return await runTemplateList(root, parsed.options.repository, dependencies);
+    }
+    if (domain === "template" && command === "sync") {
+      return await runTemplateSync(root, parsed.options.check === true);
+    }
+    if (domain === "template" && command === "import") {
+      return await runTemplateImport(root, rest, parsed, json);
     }
     if (domain === "issue" || domain === "pr") {
       return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
@@ -463,7 +486,33 @@ async function runTemplateList(
   } else {
     discovery = await discoverTemplates(root);
   }
-  console.log(JSON.stringify({ templates: discovery.templates }));
+  const semanticTemplates = typeof repository === "string" ? [] : await discoverSemanticTemplates(root);
+  console.log(JSON.stringify({ templates: discovery.templates, semanticTemplates }));
+  return 0;
+}
+
+async function runTemplateSync(root: string, check: boolean): Promise<number> {
+  const result = await syncSemanticTemplates(root, check);
+  console.log(JSON.stringify(result));
+  return check && result.changed ? EXIT_VALIDATION : 0;
+}
+
+async function runTemplateImport(
+  root: string,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  json: boolean,
+): Promise<number> {
+  const nativePath = typeof parsed.options.from === "string" ? parsed.options.from : rest[0];
+  if (nativePath === undefined)
+    throw new CliError("INPUT_REQUIRED", "Use template import --from <native-template>.", "--from");
+  const imported = await importNativeTemplate(
+    root,
+    nativePath,
+    typeof parsed.options.to === "string" ? parsed.options.to : undefined,
+  );
+  if (json) console.log(JSON.stringify({ ok: true, ...imported }));
+  else console.log(imported.path);
   return 0;
 }
 
@@ -492,7 +541,8 @@ async function runArtifactCommand(
       );
     }
     const projection = projectContract(contract);
-    console.log(JSON.stringify({ contract, template: contract.templateIdentity, ...projection }));
+    if (parsed.options.compact === true) console.log(JSON.stringify({ schema: renderSemanticCompactSchema(contract) }));
+    else console.log(JSON.stringify({ contract, template: contract.templateIdentity, ...projection }));
     return 0;
   }
   if (command === "validate" || command === "render" || command === "create") {
@@ -883,6 +933,8 @@ function printHelp(): void {
 
 Commands:
   template list
+  template sync [--check]
+  template import --from <native-template> [--to <semantic-file>]
   issue schema [template]
   issue validate --template <template> --from <file.json>
   issue render --template <template> --from <file.json>
@@ -906,6 +958,8 @@ Options:
   --title <title>     Issue/PR title for create
   --head <branch>     PR head branch for create
   --base <branch>     PR base branch for create
+  --compact            Emit only semantic fields and constraints for schema
+  --check              Check generated native projections without writing
   --draft             Create the PR as a draft
   --maintainer-can-modify
                       Allow maintainer edits on the PR
