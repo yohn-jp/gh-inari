@@ -285,6 +285,67 @@ test("malformed options return a structured usage error", async () => {
   }
 });
 
+test("invalid issue/pr numbers on get and explain are classified as INVALID_ARTIFACT_NUMBER, not UNKNOWN_COMMAND", async () => {
+  const invalidNumbers = ["0", "-5", "1.5", "abc"];
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    for (const domain of ["issue", "pr"] as const) {
+      for (const command of ["get", "explain"] as const) {
+        for (const value of invalidNumbers) {
+          lines.length = 0;
+          const exitCode = await runCli([domain, command, value, "--repository", "acme/inari", "--json"]);
+          assert.equal(exitCode, 2, `${domain} ${command} "${value}" should exit 2`);
+          const error = JSON.parse(lines[0] ?? "{}").error as { code?: string };
+          assert.equal(
+            error.code,
+            "INVALID_ARTIFACT_NUMBER",
+            `${domain} ${command} "${value}" should be INVALID_ARTIFACT_NUMBER, got ${error.code}`,
+          );
+        }
+        lines.length = 0;
+        const exitCode = await runCli([domain, command, "--repository", "acme/inari", "--json"]);
+        assert.equal(exitCode, 2, `${domain} ${command} with a missing number should exit 2`);
+        const error = JSON.parse(lines[0] ?? "{}").error as { code?: string };
+        assert.equal(error.code, "INVALID_ARTIFACT_NUMBER");
+      }
+    }
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("positive integer issue/pr numbers on get and explain still dispatch normally instead of being rejected", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 21,
+        title: "feat: canonical retrieval",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/21",
+        labels: [{ name: "enhancement" }],
+        assignees: [{ login: "octocat" }],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.notEqual((output as { error?: { code?: string } }).error?.code, "INVALID_ARTIFACT_NUMBER");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("malformed JSON is a validation error without opaque cause details", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
   const inputPath = path.join(directory, "invalid.json");
