@@ -1,6 +1,5 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as stringifyYaml } from "yaml";
@@ -1368,19 +1367,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function resolveRoot(repositoryRoot: string | URL): string {
-  const root = path.resolve(typeof repositoryRoot === "string" ? repositoryRoot : fileURLToPath(repositoryRoot));
-  const tempRoot = path.resolve(os.tmpdir());
-  const relativeToTemp = path.relative(tempRoot, root);
-  if (relativeToTemp.length === 0 || (!relativeToTemp.startsWith("..") && !path.isAbsolute(relativeToTemp))) {
-    throw new SemanticTemplateError([
-      {
-        code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
-        path: "repositoryRoot",
-        message: "Repository root must not be located in the operating system temporary directory.",
-      },
-    ]);
-  }
-  return root;
+  return path.resolve(typeof repositoryRoot === "string" ? repositoryRoot : fileURLToPath(repositoryRoot));
 }
 
 function toRepositoryPath(root: string, absolutePath: string): string {
