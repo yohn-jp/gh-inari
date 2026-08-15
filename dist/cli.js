@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -12,8 +13,29 @@ const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
 const EXIT_INTERNAL = 4;
-const BOOLEAN_OPTIONS = new Set(["help", "json", "version", "draft", "maintainerCanModify"]);
-const VALUE_OPTIONS = new Set(["from", "template", "policy", "repository", "title", "head", "base"]);
+const DIAGNOSTIC_PROTOCOL_VERSION = 1;
+const RUNTIME_CAPABILITIES = [
+    "canonical-invocation",
+    "machine-readable-version",
+    "capability-diagnostics",
+    "extension-bootstrap",
+];
+const CANONICAL_INVOCATION = "gh inari";
+const INSTALL_COMMAND = "gh extension install yohn-jp/gh-inari";
+const UPDATE_COMMAND = "gh extension upgrade inari";
+const FALLBACK_COMMAND = "npx --yes gh-inari";
+const BOOLEAN_OPTIONS = new Set(["help", "json", "version", "diagnose", "doctor", "draft", "maintainerCanModify"]);
+const VALUE_OPTIONS = new Set([
+    "from",
+    "template",
+    "policy",
+    "repository",
+    "title",
+    "head",
+    "base",
+    "requireCapability",
+    "minimumVersion",
+]);
 /** The installed gh-inari executable entrypoint. */
 export async function runCli(argv, dependencies = {}) {
     const metadata = dependencies.packageMetadata ?? readPackageMetadata();
@@ -30,17 +52,22 @@ export async function runCli(argv, dependencies = {}) {
             console.error(`${shape.code}: ${shape.message}`);
         return classifyExitCode(error);
     }
-    if (parsed.options.help === true || (parsed.positionals.length === 0 && parsed.options.version !== true)) {
+    const diagnosticRequested = parsed.options.diagnose === true ||
+        parsed.options.doctor === true ||
+        parsed.positionals[0] === "diagnose" ||
+        parsed.positionals[0] === "doctor";
+    const versionRequested = parsed.options.version === true || parsed.positionals[0] === "version";
+    if (parsed.options.help === true || (parsed.positionals.length === 0 && !versionRequested && !diagnosticRequested)) {
         printHelp();
         return parsed.positionals.length === 0 && parsed.options.help !== true ? EXIT_USAGE : 0;
     }
-    if (parsed.options.version === true) {
-        console.log(`${metadata.name} ${metadata.version}`);
-        return 0;
-    }
-    const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
     const json = parsed.options.json === true;
     try {
+        if (versionRequested)
+            return runVersion(metadata, parsed.options, json);
+        if (diagnosticRequested)
+            return runDiagnostic(metadata, parsed.options, json, dependencies);
+        const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
         const [domain, command, ...rest] = parsed.positionals;
         if (domain === "template" && command === "list") {
             return await runTemplateList(root, parsed.options.repository, dependencies);
@@ -58,6 +85,242 @@ export async function runCli(argv, dependencies = {}) {
             console.error(`${shape.code}: ${shape.message}`);
         return classifyExitCode(error);
     }
+}
+function runVersion(metadata, options, json) {
+    const info = runtimeInfo(metadata);
+    const requirements = runtimeRequirements(options, false);
+    const missingCapabilities = requirements.capabilities.filter((capability) => !info.capabilities.includes(capability));
+    const versionSupported = requirements.minimumVersion === undefined || versionAtLeast(info.version, requirements.minimumVersion);
+    const ok = missingCapabilities.length === 0 && versionSupported;
+    if (json) {
+        console.log(JSON.stringify({
+            ok,
+            ...info,
+            ...(ok
+                ? {}
+                : {
+                    error: {
+                        code: "RUNTIME_REQUIREMENT_UNMET",
+                        message: runtimeRequirementMessage(info, missingCapabilities, requirements.minimumVersion),
+                        ...(missingCapabilities.length === 0 ? {} : { missingCapabilities }),
+                        ...(requirements.minimumVersion === undefined ? {} : { minimumVersion: requirements.minimumVersion }),
+                        recovery: FALLBACK_COMMAND,
+                    },
+                }),
+        }));
+    }
+    else {
+        console.log(`${metadata.name} ${metadata.version}`);
+        if (!ok)
+            console.error(`gh-inari: ${runtimeRequirementMessage(info, missingCapabilities, requirements.minimumVersion)}`);
+    }
+    return ok ? 0 : EXIT_VALIDATION;
+}
+function runDiagnostic(metadata, options, json, dependencies) {
+    const info = runtimeInfo(metadata);
+    const requirements = runtimeRequirements(options, true);
+    const canonical = probeCanonicalExtension(requirements, dependencies.runDiagnosticCommand);
+    const ok = canonical.status === "ready";
+    const output = {
+        ok,
+        ...info,
+        requiredCapabilities: requirements.capabilities,
+        ...(requirements.minimumVersion === undefined ? {} : { minimumVersion: requirements.minimumVersion }),
+        canonical: {
+            invocation: CANONICAL_INVOCATION,
+            status: canonical.status,
+            ...(canonical.version === undefined ? {} : { version: canonical.version }),
+            ...(canonical.capabilities === undefined ? {} : { capabilities: canonical.capabilities }),
+            ...(canonical.missingCapabilities === undefined ? {} : { missingCapabilities: canonical.missingCapabilities }),
+            ...(canonical.detail === undefined ? {} : { detail: canonical.detail }),
+            recovery: canonical.recovery,
+        },
+    };
+    if (json)
+        console.log(JSON.stringify(output));
+    else {
+        console.log(`${metadata.name} ${metadata.version}`);
+        if (ok)
+            console.log(`${CANONICAL_INVOCATION}: ready (${canonical.version ?? "unknown version"})`);
+        else {
+            console.error(`gh-inari: ${canonicalDiagnosticMessage(canonical)}`);
+            console.error(`Action: ${canonical.recovery}`);
+        }
+    }
+    return ok ? 0 : EXIT_VALIDATION;
+}
+function runtimeInfo(metadata) {
+    return {
+        name: metadata.name,
+        version: metadata.version,
+        protocol: DIAGNOSTIC_PROTOCOL_VERSION,
+        capabilities: [...RUNTIME_CAPABILITIES],
+        invocation: {
+            canonical: CANONICAL_INVOCATION,
+            direct: "gh-inari",
+            fallback: FALLBACK_COMMAND,
+        },
+    };
+}
+function runtimeRequirements(options, defaultCapabilities) {
+    const requestedCapability = options.requireCapability;
+    const capabilities = typeof requestedCapability === "string"
+        ? [requestedCapability]
+        : defaultCapabilities
+            ? [...RUNTIME_CAPABILITIES]
+            : [];
+    const requestedMinimum = options.minimumVersion;
+    if (requestedMinimum !== undefined && typeof requestedMinimum !== "string")
+        throw new CliError("INVALID_OPTION", "Option --minimum-version requires a version value.", "--minimum-version");
+    if (typeof requestedMinimum === "string" && parseVersion(requestedMinimum) === undefined)
+        throw new CliError("INVALID_OPTION", `Option --minimum-version must be a semantic version (received "${requestedMinimum}").`, "--minimum-version");
+    return {
+        capabilities,
+        ...(typeof requestedMinimum === "string" ? { minimumVersion: requestedMinimum } : {}),
+    };
+}
+function probeCanonicalExtension(requirements, runCommand) {
+    const execute = runCommand ?? runGhDiagnosticCommand;
+    const list = execute(["extension", "list"]);
+    if (list.status !== 0) {
+        return {
+            status: "unavailable",
+            detail: diagnosticProcessDetail(list),
+            recovery: FALLBACK_COMMAND,
+        };
+    }
+    if (!hasInariExtension(list.stdout))
+        return { status: "missing", recovery: INSTALL_COMMAND };
+    const version = execute(["inari", "--version", "--json"]);
+    if (version.status !== 0) {
+        return {
+            status: "stale",
+            detail: diagnosticProcessDetail(version),
+            recovery: UPDATE_COMMAND,
+        };
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(version.stdout.trim());
+    }
+    catch {
+        return {
+            status: "stale",
+            detail: "the installed extension does not support machine-readable version output",
+            recovery: UPDATE_COMMAND,
+        };
+    }
+    if (!isRuntimeInfo(parsed)) {
+        return {
+            status: "stale",
+            detail: "the installed extension returned an incompatible version contract",
+            recovery: UPDATE_COMMAND,
+        };
+    }
+    if (parsed.protocol !== DIAGNOSTIC_PROTOCOL_VERSION) {
+        return {
+            status: "stale",
+            version: parsed.version,
+            capabilities: parsed.capabilities,
+            detail: `the installed extension uses diagnostic protocol ${parsed.protocol}; expected ${DIAGNOSTIC_PROTOCOL_VERSION}`,
+            recovery: UPDATE_COMMAND,
+        };
+    }
+    const missingCapabilities = requirements.capabilities.filter((capability) => !parsed.capabilities.includes(capability));
+    if (missingCapabilities.length > 0 ||
+        (requirements.minimumVersion !== undefined && !versionAtLeast(parsed.version, requirements.minimumVersion))) {
+        return {
+            status: "stale",
+            version: parsed.version,
+            capabilities: parsed.capabilities,
+            ...(missingCapabilities.length === 0 ? {} : { missingCapabilities }),
+            detail: runtimeRequirementMessage(parsed, missingCapabilities, requirements.minimumVersion),
+            recovery: UPDATE_COMMAND,
+        };
+    }
+    return { status: "ready", version: parsed.version, capabilities: parsed.capabilities, recovery: UPDATE_COMMAND };
+}
+function runGhDiagnosticCommand(args) {
+    try {
+        const result = spawnSync("gh", [...args], {
+            encoding: "utf8",
+            maxBuffer: 64 * 1024,
+            timeout: 3_000,
+        });
+        return {
+            status: result.status,
+            stdout: result.stdout ?? "",
+            stderr: result.stderr ?? "",
+            ...(result.error === undefined ? {} : { error: result.error.message }),
+        };
+    }
+    catch (error) {
+        return {
+            status: null,
+            stdout: "",
+            stderr: "",
+            error: error instanceof Error ? error.message : "unable to execute gh",
+        };
+    }
+}
+function hasInariExtension(output) {
+    return output.split(/\r?\n/u).some((line) => /^\s*gh\s+inari(?:\s|$)/u.test(line));
+}
+function isRuntimeInfo(value) {
+    if (typeof value !== "object" || value === null)
+        return false;
+    const candidate = value;
+    const invocation = candidate.invocation;
+    return (candidate.ok !== false &&
+        typeof candidate.name === "string" &&
+        candidate.name === "gh-inari" &&
+        typeof candidate.version === "string" &&
+        typeof candidate.protocol === "number" &&
+        Array.isArray(candidate.capabilities) &&
+        candidate.capabilities.every((capability) => typeof capability === "string") &&
+        typeof invocation === "object" &&
+        invocation !== null &&
+        typeof invocation.canonical === "string" &&
+        typeof invocation.direct === "string" &&
+        typeof invocation.fallback === "string");
+}
+function runtimeRequirementMessage(info, missingCapabilities, minimumVersion) {
+    const requirements = [];
+    if (missingCapabilities.length > 0)
+        requirements.push(`missing capability ${missingCapabilities.map((value) => `"${value}"`).join(", ")}`);
+    if (minimumVersion !== undefined && !versionAtLeast(info.version, minimumVersion))
+        requirements.push(`version ${info.version} is older than required ${minimumVersion}`);
+    return requirements.length === 0 ? "runtime requirements are not satisfied" : requirements.join("; ");
+}
+function canonicalDiagnosticMessage(diagnostic) {
+    if (diagnostic.status === "missing")
+        return "the canonical gh extension is not installed";
+    if (diagnostic.status === "unavailable")
+        return diagnostic.detail ?? "the GitHub CLI could not be executed";
+    if (diagnostic.status === "stale")
+        return diagnostic.detail ?? "the installed gh extension is stale";
+    return "the canonical gh extension is ready";
+}
+function diagnosticProcessDetail(result) {
+    const detail = (result.error ?? result.stderr ?? "").trim().split(/\r?\n/u)[0];
+    return detail === "" ? "the GitHub CLI command failed" : detail.slice(0, 240);
+}
+function parseVersion(value) {
+    const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(value);
+    if (match === null)
+        return undefined;
+    return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+function versionAtLeast(actual, minimum) {
+    const actualParts = parseVersion(actual);
+    const minimumParts = parseVersion(minimum);
+    if (actualParts === undefined || minimumParts === undefined)
+        return false;
+    for (let index = 0; index < actualParts.length; index += 1) {
+        if (actualParts[index] !== minimumParts[index])
+            return actualParts[index] > minimumParts[index];
+    }
+    return true;
 }
 class CliError extends Error {
     code;
@@ -371,15 +634,22 @@ function classifyExitCode(error) {
     return EXIT_INTERNAL;
 }
 function isMachineCommand(positionals) {
-    return (positionals.length >= 2 &&
+    return ((positionals.length >= 2 &&
         (positionals[1] === "schema" ||
             positionals[1] === "validate" ||
             positionals[1] === "render" ||
             positionals[1] === "create" ||
             positionals[1] === "explain" ||
-            positionals[1] === "get"));
+            positionals[1] === "get")) ||
+        positionals[0] === "diagnose" ||
+        positionals[0] === "doctor" ||
+        positionals[0] === "version");
 }
 function isMachineCommandTokens(argv) {
+    if (argv.includes("--diagnose") || argv.includes("--doctor") || argv.includes("diagnose") || argv.includes("doctor"))
+        return true;
+    if (argv.includes("--version") || argv.includes("version"))
+        return argv.includes("--json");
     const domainIndex = argv.findIndex((token) => token === "issue" || token === "pr");
     if (domainIndex < 0)
         return false;
@@ -452,8 +722,16 @@ Options:
                       Allow maintainer edits on the PR
   --json              Emit structured JSON output
   --version           Print package version
+  --diagnose          Check the canonical gh extension and recovery path
+  --require-capability <id>
+                      Require a capability in --version/--diagnose checks
+  --minimum-version <v>
+                      Require a minimum semantic version in checks
   --help              Print this help
 
-Create always validates and renders before invoking gh. Schema, validate, and render never mutate GitHub.`);
+Create always validates and renders before invoking gh. Schema, validate, and render never mutate GitHub.
+
+Canonical installation: gh extension install yohn-jp/gh-inari
+PATH-independent fallback: npx --yes gh-inari`);
 }
 //# sourceMappingURL=cli.js.map

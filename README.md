@@ -2,35 +2,98 @@
 
 Inari (`gh-inari`) is a GitHub CLI extension focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation.
 
-## Install
+## Install and invoke
 
-```bash
-npm install --global gh-inari
-```
-
-The standalone executable is named `gh-inari`:
-
-```bash
-gh-inari --help
-gh-inari --version
-```
-
-To register the installed package as a GitHub CLI extension, pass its package directory to `gh extension install`:
-
-```bash
-(cd "$(npm root --global)/gh-inari" && gh extension install .)
-gh inari --help
-```
-
-A clean checkout is also a supported extension source:
+The canonical human and agent surface is the GitHub CLI extension. Install it
+with one command, then use `gh inari ...`:
 
 ```bash
 gh extension install yohn-jp/gh-inari
-gh inari --help
+gh inari --version --json
 ```
 
-The repository launcher uses the committed build and installs its production
-dependencies on first use when GitHub CLI installs directly from the repository.
+The package name is `gh-inari`; the npm executable is `gh-inari`; the GitHub
+CLI extension command is `gh inari`. The extension launcher bootstraps only
+production dependencies inside its own installation directory and never
+changes the consumer repository.
+
+For an ephemeral or PATH-independent session, use the published npm package
+directly. This is the deterministic fallback when the extension is missing or
+the global npm bin directory is not on `PATH`:
+
+```bash
+npx --yes gh-inari --version --json
+```
+
+`pnpm dlx gh-inari ...` is equivalent when pnpm is the session's package
+runner. A global install remains supported for users who want a persistent
+direct executable:
+
+```bash
+npm install --global gh-inari
+gh-inari --help
+```
+
+Update or remove that optional global executable with:
+
+```bash
+npm install --global gh-inari@latest
+npm uninstall --global gh-inari
+```
+
+Global npm bin directories are environment-specific; use `npx --yes gh-inari`
+instead of repairing shell startup files when `gh-inari` is not found.
+
+## Update, uninstall, and diagnostics
+
+Use the matching command for the canonical surface:
+
+```bash
+gh extension upgrade inari
+gh extension remove inari
+```
+
+The bounded diagnostic path checks the installed extension without touching
+repository files. It reports a short, actionable recovery command for a
+missing or stale extension:
+
+```bash
+gh inari --diagnose --json
+npx --yes gh-inari --diagnose --json
+```
+
+`--version --json` is the machine-readable self-check. Its stable fields are
+`name`, `version`, `protocol`, `capabilities`, and `invocation`; use
+`--require-capability <id>` and `--minimum-version <version>` for a
+mutation-sensitive preflight. A failed check exits `2` and includes one
+recovery command. The current capability identifiers are
+`canonical-invocation`, `machine-readable-version`, `capability-diagnostics`,
+and `extension-bootstrap`.
+
+The direct executable and extension paths are behaviorally identical:
+
+```bash
+gh-inari issue schema feature --json
+gh inari issue schema feature --json
+```
+
+The repository launcher also supports a clean checkout as a local extension:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build
+gh extension install . --force
+gh inari --version --json
+```
+
+For a prerelease or local packed artifact, select the package explicitly
+without adding it to a consumer manifest:
+
+```bash
+npx --yes gh-inari@next --version --json
+npm pack
+npx --yes --package=./gh-inari-&lt;version&gt;.tgz gh-inari --version --json
+```
 
 Inari uses the current `gh` authentication and repository context. It does not maintain a second credential store. Use `--repository owner/name` when the target repository is not the current checkout.
 

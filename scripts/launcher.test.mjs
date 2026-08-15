@@ -115,6 +115,7 @@ test("fails closed for a missing dist entry without bootstrapping", () => {
     assert.equal(result.stdout, "");
     assert.match(result.stderr, /packaged distribution is missing or corrupt/);
     assert.match(result.stderr, /dist[\\/]index\.js/);
+    assert.match(result.stderr, /gh extension install yohn-jp\/gh-inari/);
     assert.equal(invocationCount(fixture), 0);
   });
 });
@@ -155,6 +156,7 @@ export async function runCli() {
       assert.equal(result.status, 1);
       assert.equal(result.stdout, "");
       assert.match(result.stderr, /unable to install runtime dependencies/);
+      assert.match(result.stderr, /gh extension upgrade inari/);
       assert.equal(invocationCount(fixture), 1);
     },
   );
@@ -175,6 +177,7 @@ export async function runCli() {
       assert.equal(result.status, 1);
       assert.equal(result.stdout, "");
       assert.match(result.stderr, /still missing after one bootstrap attempt/);
+      assert.match(result.stderr, /gh extension upgrade inari/);
       assert.equal(invocationCount(fixture), 1);
     },
   );
