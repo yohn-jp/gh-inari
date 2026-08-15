@@ -102,16 +102,34 @@ export async function compileRepositoryGovernedContract(adapter, domain, selecto
  * Compile every supported native template from the target repository's
  * trusted default-branch governance. Read commands use this candidate set to
  * identify an existing artifact without inventing a second template grammar.
+ *
+ * A template that fails to compile does not abort its siblings: it is
+ * reported as a bounded "failed" outcome so an unrelated malformed template
+ * cannot make every existing-artifact read in the repository fail. Callers
+ * that need fail-closed behavior for a single selected template should use
+ * compileRepositoryGovernedContract instead.
  */
 export async function compileRepositoryGovernedContracts(adapter, domain) {
     const source = await readRepositoryGovernanceSource(adapter);
     const semanticTemplates = source.semanticTemplates.filter((template) => template.kind === (domain === "issue" ? "issue" : "pull_request"));
     if (semanticTemplates.length > 0) {
-        const contracts = [];
+        const outcomes = [];
         for (const identity of semanticTemplates) {
-            contracts.push(await compileRepositorySemanticContractFromSource(adapter, source, identity));
+            try {
+                outcomes.push({
+                    status: "compiled",
+                    contract: await compileRepositorySemanticContractFromSource(adapter, source, identity),
+                });
+            }
+            catch (error) {
+                outcomes.push({
+                    status: "failed",
+                    path: identity.sourcePath,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            }
         }
-        return contracts;
+        return outcomes;
     }
     const templates = domain === "issue"
         ? source.discovery.issueTemplates.filter((template) => template.type === "issue-form")
@@ -119,11 +137,23 @@ export async function compileRepositoryGovernedContracts(adapter, domain) {
     if (templates.length === 0)
         throw new TemplateNotFoundError(undefined, templates);
     const policySourceLoader = createRepositoryPolicySourceLoader(adapter, source);
-    const contracts = [];
+    const outcomes = [];
     for (const template of templates) {
-        contracts.push(await compileRepositoryGovernedContractFromSource(adapter, source, domain, template, policySourceLoader));
+        try {
+            outcomes.push({
+                status: "compiled",
+                contract: await compileRepositoryGovernedContractFromSource(adapter, source, domain, template, policySourceLoader),
+            });
+        }
+        catch (error) {
+            outcomes.push({
+                status: "failed",
+                path: template.path,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
     }
-    return contracts;
+    return outcomes;
 }
 async function compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, policySourceLoader) {
     const { context, ref, tree, discovery } = source;

@@ -40,12 +40,27 @@ export declare function compileLocalIssueFormContracts(root: string): Promise<re
  * No local repository files are consulted by this path.
  */
 export declare function compileRepositoryGovernedContract(adapter: GitHubAdapter, domain: GovernedArtifactDomain, selector?: string | TemplateSelector): Promise<CanonicalContract>;
+/** One repository-native template's compilation outcome: either a usable contract or a bounded diagnostic. */
+export type CompiledTemplateOutcome = {
+    readonly status: "compiled";
+    readonly contract: CanonicalContract;
+} | {
+    readonly status: "failed";
+    readonly path: string;
+    readonly message: string;
+};
 /**
  * Compile every supported native template from the target repository's
  * trusted default-branch governance. Read commands use this candidate set to
  * identify an existing artifact without inventing a second template grammar.
+ *
+ * A template that fails to compile does not abort its siblings: it is
+ * reported as a bounded "failed" outcome so an unrelated malformed template
+ * cannot make every existing-artifact read in the repository fail. Callers
+ * that need fail-closed behavior for a single selected template should use
+ * compileRepositoryGovernedContract instead.
  */
-export declare function compileRepositoryGovernedContracts(adapter: GitHubAdapter, domain: GovernedArtifactDomain): Promise<readonly CanonicalContract[]>;
+export declare function compileRepositoryGovernedContracts(adapter: GitHubAdapter, domain: GovernedArtifactDomain): Promise<readonly CompiledTemplateOutcome[]>;
 /** Discover all authoritative templates without compiling or reading a body. */
 export declare function discoverRepositoryTemplates(adapter: GitHubAdapter): Promise<TemplateDiscoveryResult>;
 /**
