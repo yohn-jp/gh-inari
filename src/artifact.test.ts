@@ -101,6 +101,50 @@ test("prepared PR artifacts prove comment, preamble, and checklist-placeholder r
   });
 });
 
+test("prepared PR artifacts preserve checklist values before commented trailing documentation", () => {
+  const contract = governedFixture(
+    parsePullRequestTemplate(
+      [
+        "## Validation",
+        "",
+        "- [ ] Typecheck",
+        "- [ ] Tests",
+        "",
+        "<!-- explanatory template comment -->",
+        "",
+        "Test layers:",
+        "",
+        "- Fast / unit: `pnpm test`",
+        "- Integration: `pnpm run test:integration`",
+        "",
+        "## Test contract",
+        "",
+      ].join("\n"),
+      {
+        id: "pull-request-default:.github/PULL_REQUEST_TEMPLATE.md",
+        type: "pull-request-default",
+        kind: "pull-request",
+        name: "default",
+        path: ".github/PULL_REQUEST_TEMPLATE.md",
+      },
+    ),
+  );
+  const fields = { validation: ["typecheck", "tests"], test_contract: "The test contract is explicit." };
+  const prepared = preparePullRequestArtifact(contract, {
+    fields,
+    metadata: { title: "fix: preserve trailing documentation", head: "feature", base: "main" },
+  });
+
+  assert.deepEqual(parseExistingPullRequestArtifact(contract, prepared.artifact.body).values, fields);
+
+  const malformed = parseExistingPullRequestArtifact(
+    contract,
+    prepared.artifact.body.replace("Test layers:", "Unexpected checklist content\n\nTest layers:"),
+  );
+  assert.equal(malformed.parsed, false);
+  assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_UNPARSEABLE"));
+});
+
 test("preparation fails with typed diagnostics when rendering loses a semantic value", () => {
   const contract = governedFixture(
     compileIssueFormYaml(

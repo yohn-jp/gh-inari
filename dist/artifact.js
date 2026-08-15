@@ -445,7 +445,7 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
         let fieldEnd = cursor;
         const nextSection = contract.sections[sectionIndex + 1];
         const nextDocumentation = issueHeadingLevel === undefined && nextSection?.kind === "documentation"
-            ? trimBlankLines(nextSection.content ?? "")
+            ? trimBlankLines(stripComments ? removeHtmlComments(nextSection.content ?? "") : (nextSection.content ?? ""))
             : undefined;
         if (nextDocumentation !== undefined) {
             const documentationLines = nextDocumentation.split("\n");
