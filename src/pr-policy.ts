@@ -337,6 +337,122 @@ function parseRule(value: unknown, path: string): PullRequestPolicySectionRule {
   };
 }
 
+const QUANTIFIER_PATTERN = /^(?:[*+?]|\{\d*,?\d*\})/u;
+
+interface RegexGroup {
+  /** True once this group's own body contains a nested group that is itself quantified. */
+  hasQuantifiedChild: boolean;
+  /** Literal text of each top-level alternative seen so far in this group's body. */
+  alternatives: string[];
+  /** Start index (in the source pattern) of the alternative currently being scanned. */
+  currentAlternativeStart: number;
+}
+
+/**
+ * Rejects the structural shapes that cause catastrophic backtracking in a
+ * backtracking regex engine: a quantified group nested inside another
+ * quantified group, and a quantified group whose top-level alternatives can
+ * match overlapping text (e.g. "(a|a)+" or "(a|ab)+"). Overlap is judged by
+ * literal prefix comparison, which only inspects alternatives with no
+ * metacharacters; alternatives containing metacharacters are treated as
+ * potentially safe rather than guessed at. This is a conservative syntactic
+ * check, not a full NFA ambiguity analysis: it may reject some safe nested
+ * patterns but never a pattern the compiler previously accepted, and it does
+ * not claim to catch every possible ambiguous alternation.
+ */
+function hasCatastrophicBacktrackingRisk(pattern: string): boolean {
+  const stack: RegexGroup[] = [];
+  let inCharClass = false;
+
+  const pushGroup = (startIndex: number): void => {
+    stack.push({ hasQuantifiedChild: false, alternatives: [], currentAlternativeStart: startIndex });
+  };
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+
+    if (inCharClass) {
+      if (char === "\\") {
+        index += 1;
+      } else if (char === "]") {
+        inCharClass = false;
+        markIfQuantifiedAtom(stack, pattern, index + 1);
+      }
+      continue;
+    }
+
+    if (char === "\\") {
+      index += 1;
+      markIfQuantifiedAtom(stack, pattern, index + 1);
+      continue;
+    }
+
+    if (char === "[") {
+      inCharClass = true;
+      continue;
+    }
+
+    if (char === "(") {
+      pushGroup(index + 1);
+      continue;
+    }
+
+    if (char === "|") {
+      const current = stack.at(-1);
+      if (current !== undefined) {
+        current.alternatives.push(pattern.slice(current.currentAlternativeStart, index));
+        current.currentAlternativeStart = index + 1;
+      }
+      continue;
+    }
+
+    if (char === ")") {
+      const closed = stack.pop();
+      if (closed === undefined) continue;
+      closed.alternatives.push(pattern.slice(closed.currentAlternativeStart, index));
+      const rest = pattern.slice(index + 1);
+      const quantifierMatch = QUANTIFIER_PATTERN.exec(rest);
+      const isQuantified = quantifierMatch !== null;
+      if (isQuantified) {
+        if (closed.hasQuantifiedChild) return true;
+        if (closed.alternatives.length > 1 && alternativesOverlap(closed.alternatives)) return true;
+      }
+      const parent = stack.at(-1);
+      if (parent !== undefined && isQuantified) parent.hasQuantifiedChild = true;
+      continue;
+    }
+
+    if (QUANTIFIER_PATTERN.test(char)) continue;
+
+    // An ordinary literal atom: a quantifier immediately following it (e.g. "a+")
+    // still contributes unbounded repetition inside whatever group contains it.
+    markIfQuantifiedAtom(stack, pattern, index + 1);
+  }
+
+  return false;
+}
+
+function markIfQuantifiedAtom(stack: RegexGroup[], pattern: string, fromIndex: number): void {
+  const current = stack.at(-1);
+  if (current === undefined) return;
+  if (QUANTIFIER_PATTERN.test(pattern.slice(fromIndex))) current.hasQuantifiedChild = true;
+}
+
+const LITERAL_ALTERNATIVE_PATTERN = /^[^\\^$.*+?()[\]{}|]*$/u;
+
+/** True if any two alternatives are literal text where one is a prefix of (or equal to) the other. */
+function alternativesOverlap(alternatives: readonly string[]): boolean {
+  const literals = alternatives.filter((alternative) => LITERAL_ALTERNATIVE_PATTERN.test(alternative));
+  for (let i = 0; i < literals.length; i += 1) {
+    for (let j = i + 1; j < literals.length; j += 1) {
+      const [shorter, longer] =
+        literals[i].length <= literals[j].length ? [literals[i], literals[j]] : [literals[j], literals[i]];
+      if (shorter.length > 0 && longer.startsWith(shorter)) return true;
+    }
+  }
+  return false;
+}
+
 function ruleToConstraint(
   rule: PullRequestPolicySectionRule,
   field: CanonicalField,
@@ -364,6 +480,16 @@ function ruleToConstraint(
       new RegExp(rule.pattern, "u");
     } catch {
       throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must be a valid regular expression.", path);
+    }
+    if (rule.pattern.includes("\\1") || /\\[1-9]/u.test(rule.pattern)) {
+      throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not use backreferences.", path);
+    }
+    if (hasCatastrophicBacktrackingRisk(rule.pattern)) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_INVALID_VALUE",
+        "pattern must not nest quantified groups or repeat overlapping alternatives, which can cause unbounded regex evaluation.",
+        path,
+      );
     }
   }
   if (rule.linkedIssue === true && rule.required === false) {
