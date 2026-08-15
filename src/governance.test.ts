@@ -13,6 +13,7 @@ import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHub
 import { deserializeCanonicalContract, serializeCanonicalContract } from "./contract/index.js";
 import { prepareIssueArtifact, preparePullRequestArtifact } from "./artifact.js";
 import { runCli } from "./cli.js";
+import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 
 class StubGovernanceTransport implements GhTransport {
   readonly calls: readonly string[][];
@@ -344,6 +345,46 @@ test("createGovernedPullRequest fails closed when a policy governance input is n
     transport.calls.some((args) => args.includes("POST")),
     false,
   );
+});
+
+test("compileRepositoryGovernedContract succeeds for a repository governed by .github/inari/ semantic sources", async () => {
+  const semanticSource = {
+    version: 1,
+    kind: "issue",
+    id: "bug",
+    name: "Bug",
+    description: "Reproducible defect",
+    sections: [{ id: "summary", type: "textarea", label: "Summary", required: true }],
+  };
+  const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
+  const nativeSource = renderSemanticNative(
+    normalizeSemanticTemplate(semanticSource, ".github/inari/issues/bug.json"),
+    generatedPath,
+  );
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [
+          { path: ".github/inari/issues/bug.json", type: "blob", sha: "semantic-sha" },
+          { path: generatedPath, type: "blob", sha: "native-sha" },
+        ],
+      }),
+    ),
+    blobResponse("semantic-sha", JSON.stringify(semanticSource)),
+    blobResponse("native-sha", nativeSource),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "bug");
+
+  assert.equal(contract.templateIdentity.path, generatedPath);
+  assert.equal(contract.provenance?.template.path, generatedPath);
+  assert.equal(contract.provenance?.template.sha, "native-sha");
+  assert.doesNotThrow(() => deserializeCanonicalContract(serializeCanonicalContract(contract)));
 });
 
 test("arbitrary policy overrides are rejected for governed operations", () => {
