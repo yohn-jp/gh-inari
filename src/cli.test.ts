@@ -305,6 +305,60 @@ test("malformed JSON is a validation error without opaque cause details", async 
   }
 });
 
+test("template list on a repository without semantic templates includes a discovery hint", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["template", "list"], { repositoryRoot: directory });
+    assert.equal(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as { semanticTemplates: unknown[]; semanticTemplatesHint?: string };
+    assert.deepEqual(output.semanticTemplates, []);
+    assert.match(output.semanticTemplatesHint ?? "", /no semantic templates found/);
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("template import warns on the CLI when --to writes outside discoverable semantic paths", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  await mkdir(path.join(directory, ".github/ISSUE_TEMPLATE"), { recursive: true });
+  await writeFile(
+    path.join(directory, ".github/ISSUE_TEMPLATE/bug.yml"),
+    [
+      "name: Bug",
+      "description: Bug report",
+      "body:",
+      "  - type: textarea",
+      "    id: repro",
+      "    attributes:",
+      "      label: Repro",
+      "",
+    ].join("\n"),
+  );
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (line: string) => logs.push(line);
+  console.error = (line: string) => errors.push(line);
+  try {
+    const exitCode = await runCli(
+      ["template", "import", "--from", ".github/ISSUE_TEMPLATE/bug.yml", "--to", ".github/inari/issue/bug.json"],
+      { repositoryRoot: directory },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(logs[0], ".github/inari/issue/bug.json");
+    assert.match(errors[0] ?? "", /no semantic template will be discovered/);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("version comes from real package metadata", async () => {
   const lines: string[] = [];
   const originalLog = console.log;

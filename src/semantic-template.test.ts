@@ -150,6 +150,7 @@ test("native import creates semantic JSON and rejects unsupported semantic sourc
     );
     const imported = await importNativeTemplate(root, ".github/ISSUE_TEMPLATE/legacy.yml");
     assert.equal(imported.path, ".github/inari/issues/legacy.json");
+    assert.equal(imported.warning, undefined);
     const serialized = JSON.parse(await readFile(path.join(root, imported.path), "utf8")) as {
       sections: readonly { id: string }[];
     };
@@ -170,4 +171,46 @@ test("native import creates semantic JSON and rejects unsupported semantic sourc
       ),
     (error: unknown) => error instanceof SemanticTemplateError && error.code === "SEMANTIC_TEMPLATE_UNSUPPORTED_FIELD",
   );
+});
+
+test("native import with an undiscoverable --to destination writes the file but warns", async () => {
+  await withRepository(async (root) => {
+    await mkdir(path.join(root, ".github/ISSUE_TEMPLATE"), { recursive: true });
+    await writeFile(
+      path.join(root, ".github/ISSUE_TEMPLATE/bug.yml"),
+      [
+        "name: Bug",
+        "description: Bug report",
+        "body:",
+        "  - type: textarea",
+        "    id: repro",
+        "    attributes:",
+        "      label: Repro",
+        "",
+      ].join("\n"),
+    );
+    const imported = await importNativeTemplate(root, ".github/ISSUE_TEMPLATE/bug.yml", ".github/inari/issue/bug.json");
+    assert.equal(imported.path, ".github/inari/issue/bug.json");
+    assert.match(imported.warning ?? "", /no semantic template will be discovered/);
+    assert.deepEqual(await discoverSemanticTemplates(root), []);
+  });
+});
+
+test("native import with an explicit but discoverable --to destination has no warning", async () => {
+  await withRepository(async (root) => {
+    await mkdir(path.join(root, ".github/PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await writeFile(path.join(root, ".github/PULL_REQUEST_TEMPLATE/release.md"), "## Release\n\nChecklist\n");
+    const imported = await importNativeTemplate(
+      root,
+      ".github/PULL_REQUEST_TEMPLATE/release.md",
+      ".github/inari/pull-requests/release.json",
+    );
+    assert.equal(imported.path, ".github/inari/pull-requests/release.json");
+    assert.equal(imported.warning, undefined);
+    const identities = await discoverSemanticTemplates(root);
+    assert.equal(
+      identities.some((identity) => identity.id === "release" && identity.kind === "pull_request"),
+      true,
+    );
+  });
 });

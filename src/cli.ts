@@ -41,6 +41,9 @@ import {
   importNativeTemplate,
   renderSemanticCompactSchema,
   syncSemanticTemplates,
+  SEMANTIC_ISSUE_DIRECTORY,
+  SEMANTIC_PULL_REQUEST_FILE,
+  SEMANTIC_TEMPLATE_DIRECTORY,
 } from "./semantic-template.js";
 
 const EXIT_USAGE = 1;
@@ -487,7 +490,19 @@ async function runTemplateList(
     discovery = await discoverTemplates(root);
   }
   const semanticTemplates = typeof repository === "string" ? [] : await discoverSemanticTemplates(root);
-  console.log(JSON.stringify({ templates: discovery.templates, semanticTemplates }));
+  const hint =
+    semanticTemplates.length === 0 && typeof repository !== "string"
+      ? `no semantic templates found under ${SEMANTIC_TEMPLATE_DIRECTORY}/; ` +
+        `expected ${SEMANTIC_ISSUE_DIRECTORY}/<id>.json, ${SEMANTIC_PULL_REQUEST_FILE}, ` +
+        `or ${SEMANTIC_TEMPLATE_DIRECTORY}/pull-requests/<id>.json`
+      : undefined;
+  console.log(
+    JSON.stringify({
+      templates: discovery.templates,
+      semanticTemplates,
+      ...(hint === undefined ? {} : { semanticTemplatesHint: hint }),
+    }),
+  );
   return 0;
 }
 
@@ -512,7 +527,10 @@ async function runTemplateImport(
     typeof parsed.options.to === "string" ? parsed.options.to : undefined,
   );
   if (json) console.log(JSON.stringify({ ok: true, ...imported }));
-  else console.log(imported.path);
+  else {
+    console.log(imported.path);
+    if (imported.warning !== undefined) console.error(`warning: ${imported.warning}`);
+  }
   return 0;
 }
 
@@ -935,6 +953,10 @@ Commands:
   template list
   template sync [--check]
   template import --from <native-template> [--to <semantic-file>]
+                      Discovered semantic paths: .github/inari/issues/<id>.json,
+                      .github/inari/pull-request.json (single PR template), or
+                      .github/inari/pull-requests/<id>.json (multiple PR templates).
+                      Other --to paths write successfully but are never discovered.
   issue schema [template]
   issue validate --template <template> --from <file.json>
   issue render --template <template> --from <file.json>
