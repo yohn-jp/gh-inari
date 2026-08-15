@@ -521,6 +521,19 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
         ["gh inari", ghRemediation],
       ];
       for (const [label, result] of outputs) jsonOutput(result, label + " " + remediationCase.name);
+      for (const [label, result] of outputs) jsonOutput(result, label + " " + remediationCase.name);
+      for (const [label, result] of outputs) {
+        if (result.status !== sourceRemediation.status)
+          fail(
+            label +
+              " " +
+              remediationCase.name +
+              " exited " +
+              result.status +
+              ", expected " +
+              sourceRemediation.status,
+          );
+      }
       if (
         sourceGhRemediation.stdout !== sourceRemediation.stdout ||
         packedRemediation.stdout !== sourceRemediation.stdout ||
