@@ -185,6 +185,8 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
             policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
         }
     }
+    const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
+    const nativeSource = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(nativeEntry.sha));
     const bound = {
         ...contract,
         provenance: {
@@ -197,7 +199,7 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
             },
             ref,
             treeSha: source.treeSha,
-            template: sourceIdentity(sourceEntry, ref, serialized),
+            template: sourceIdentity(nativeEntry, ref, nativeSource),
             ...(policySource === undefined ? {} : { policy: policySource }),
         },
     };

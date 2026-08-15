@@ -100,6 +100,7 @@ export declare function syncSemanticTemplates(repositoryRoot?: string | URL, che
 export declare function importNativeTemplate(repositoryRoot: string | URL, nativePath: string, destinationPath?: string): Promise<{
     readonly path: string;
     readonly source: SemanticTemplateSource;
+    readonly warning?: string;
 }>;
 export declare function semanticSourceFromContract(contractInput: unknown): SemanticTemplateSource;
 export declare function selectSemanticTemplate(identities: readonly SemanticTemplateIdentity[], kind: SemanticTemplateKind, selector?: string | TemplateSelector): SemanticTemplateIdentity;

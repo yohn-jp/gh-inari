@@ -71,6 +71,14 @@ function validateByteLimit(value: number, optionName: string): number {
   return value;
 }
 
+function validateTimeoutMs(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`gh transport timeoutMs must be a finite number greater than zero, got ${value}.`);
+  }
+  return value;
+}
+
 export class ProcessGhTransport implements GhTransport {
   readonly executable: string;
 
@@ -88,6 +96,7 @@ export class ProcessGhTransport implements GhTransport {
         options.maxStderrBytes ?? DEFAULT_GH_OUTPUT_LIMITS_BYTES.stderr,
         "maxStderrBytes",
       );
+      const timeoutMs = validateTimeoutMs(options.timeoutMs);
 
       let child: ReturnType<typeof spawn>;
       try {
@@ -167,14 +176,7 @@ export class ProcessGhTransport implements GhTransport {
         reject(error);
       });
 
-      if (options.timeoutMs !== undefined) {
-        const timeoutMs = options.timeoutMs;
-        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-          settled = true;
-          reject(new RangeError(`gh transport timeoutMs must be a finite number greater than zero, got ${timeoutMs}.`));
-          child.kill("SIGKILL");
-          return;
-        }
+      if (timeoutMs !== undefined) {
         timer = setTimeout(() => {
           if (termination !== undefined) return;
           termination = { kind: "timeout", timeoutMs };
