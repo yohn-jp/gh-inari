@@ -100,7 +100,8 @@ export type ExistingArtifactDiagnosticCode =
   | "EXISTING_UNPARSEABLE"
   | "EXISTING_EXTRA_CONTENT"
   | "EXISTING_UNKNOWN_CHECKLIST_ITEM"
-  | "EXISTING_AMBIGUOUS_TEMPLATE";
+  | "EXISTING_AMBIGUOUS_TEMPLATE"
+  | "EXISTING_TEMPLATE_COMPILE_FAILED";
 
 export interface ExistingArtifactDiagnostic {
   readonly code: ExistingArtifactDiagnosticCode;
