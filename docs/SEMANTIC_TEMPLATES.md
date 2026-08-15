@@ -2,7 +2,7 @@
 
 Migrated repositories keep editable template contracts under `.github/inari/`. GitHub-native files under `.github/ISSUE_TEMPLATE/` and `.github/PULL_REQUEST_TEMPLATE.md` are generated projections and must not be edited directly.
 
-The canonical machine format is JSON. An Issue Form is stored under `.github/inari/issues/<id>.json`; the default pull-request contract is `.github/inari/pull-request.json`. A contract contains `version`, `kind`, `id`, `name`, optional native metadata, and ordered semantic `sections`. Input sections declare an `id`, type (`string`, `enum`, `array`, or `checklist`), label, requiredness, choices, and constraints. Pull-request headings and fixed documentation are represented only by bounded `headingLevel`, `placeholder`, and documentation section values.
+The canonical machine format is JSON. An Issue Form is stored under `.github/inari/issues/<id>.json`. A repository with a single pull-request template uses `.github/inari/pull-request.json`; a repository with multiple pull-request templates uses `.github/inari/pull-requests/<id>.json` instead (plural directory, one file per template). Only files at these exact paths are discovered by `template list`/`template sync`; any other location is written but silently ignored. A contract contains `version`, `kind`, `id`, `name`, optional native metadata, and ordered semantic `sections`. Input sections declare an `id`, type (`string`, `enum`, `array`, or `checklist`), label, requiredness, choices, and constraints. Pull-request headings and fixed documentation are represented only by bounded `headingLevel`, `placeholder`, and documentation section values.
 
 Generate projections after editing a semantic source:
 
@@ -23,6 +23,8 @@ gh inari template import --from .github/PULL_REQUEST_TEMPLATE.md
 Import uses the supported native parser and fails closed for unsupported or ambiguous constructs. After import, the semantic source is authoritative; native files must be regenerated.
 
 Governed `issue create`/`pr create` against a repository using `.github/inari/` requires the committed native projection to be current: the contract's provenance is bound to the generated native file (matching `templateIdentity.path`), not the semantic JSON, so `gh inari template sync` must be run and pushed before governed mutations pick up a semantic source change.
+
+Omitting `--to` writes to the correct discoverable default. An explicit `--to` outside the discoverable paths above still succeeds but prints a warning, since `template list`'s `semanticTemplates` will not include it.
 
 For machine input, use the compact semantic view:
 
