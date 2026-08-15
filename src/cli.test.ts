@@ -1289,3 +1289,543 @@ test("get returns deterministic diagnostics and never guesses fields for invalid
     }
   }
 });
+
+test("issue check is read-only and classifies a canonical artifact as current", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY.replace("- [ ] The behavior", "\\- [ ] The behavior"),
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "80", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.status, "valid-current");
+    assert.equal(output.normalizable, false);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("issue edit dry-run emits a bounded diff and performs no mutation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(root, "patch.json");
+  await writeFile(inputPath, JSON.stringify({ fields: { problem: "A changed problem" } }), "utf8");
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["issue", "edit", "80", "--from", inputPath, "--dry-run", "--repository", "acme/inari"],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.dryRun, true);
+    assert.equal(output.changed, true);
+    assert.equal((output.diff as Record<string, unknown>).changed, true);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pull request normalize dry-run reports representation drift without mutation", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "normalize", "81", "--dry-run", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.dryRun, true);
+    assert.equal(output.changed, true);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("check classifies ambiguous, unsupported, and semantically-invalid existing artifacts without mutating", async () => {
+  const cases = [
+    {
+      name: "unsupported (unparseable)",
+      domain: "issue" as const,
+      number: "45",
+      body: "not a canonical artifact\n",
+      templates: [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      expectedStatus: "unsupported",
+    },
+    {
+      name: "ambiguous",
+      domain: "issue" as const,
+      number: "46",
+      body: REMOTE_ISSUE_BODY,
+      templates: [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "bug-sha", source: REMOTE_ISSUE_TEMPLATE },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
+      ],
+      expectedStatus: "ambiguous",
+    },
+    {
+      name: "semantically-invalid",
+      domain: "pr" as const,
+      number: "47",
+      body: REMOTE_PR_BODY.replace("Closes #21", "No linked issue"),
+      templates: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      policy: { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+      expectedStatus: "semantically-invalid",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const transport = new CliStubTransport(
+      remoteArtifactResponses(
+        testCase.templates,
+        testCase.domain === "issue"
+          ? {
+              number: Number(testCase.number),
+              title: "Existing artifact",
+              body: testCase.body,
+              state: "open",
+              html_url: `https://github.com/acme/inari/issues/${testCase.number}`,
+              labels: [],
+              assignees: [],
+            }
+          : {
+              number: Number(testCase.number),
+              title: "Existing artifact",
+              body: testCase.body,
+              state: "open",
+              html_url: `https://github.com/acme/inari/pull/${testCase.number}`,
+              draft: false,
+              head: { ref: "feature" },
+              base: { ref: "main" },
+            },
+        testCase.policy,
+      ),
+    );
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (line: string) => lines.push(line);
+    try {
+      const exitCode = await runCli([testCase.domain, "check", testCase.number, "--repository", "acme/inari"], {
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      });
+      assert.equal(exitCode, 2, testCase.name);
+      const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+      assert.equal(output.status, testCase.expectedStatus, testCase.name);
+      assert.equal(output.valid, false, testCase.name);
+      assert.equal(
+        transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+        false,
+        testCase.name,
+      );
+    } finally {
+      console.log = originalLog;
+    }
+  }
+});
+
+test("issue edit performs the mutation, reaches the adapter, and reports reconciled governance", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: "Rendered body",
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+  ]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "patch.json");
+  await writeFile(inputPath, JSON.stringify({ fields: { problem: "A changed problem" } }), "utf8");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "edit", "80", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.mutation, "applied");
+    assert.equal((output.governance as { reconciled?: boolean }).reconciled, true);
+    assert.ok(transport.calls.some((args) => args.includes("PATCH")));
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pr edit rejects a head-branch change before mutation, since PRs cannot change head through this model", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "patch.json");
+  await writeFile(inputPath, JSON.stringify({ fields: {}, head: "other-branch" }), "utf8");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "edit", "81", "--from", inputPath, "--repository", "acme/inari", "--json"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as { error?: { code?: string } };
+    assert.equal(output.error?.code, "PR_HEAD_CHANGE_UNSUPPORTED");
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue sync mutates once to converge, then a repeated sync against the converged artifact is an idempotent no-op", async () => {
+  const desiredFields = {
+    problem: "A reproducible problem",
+    proposal: "A deterministic proposal",
+    non_goals: "No unrelated scope",
+    acceptance: "- [ ] The behavior is covered",
+  };
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "desired.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({ fields: { ...desiredFields, problem: "A converged problem" }, title: "feat: remediation" }),
+    "utf8",
+  );
+  const convergedBody = REMOTE_ISSUE_BODY.replace("A reproducible problem", "A converged problem").replace(
+    "- [ ] The behavior is covered",
+    "\\- [ ] The behavior is covered",
+  );
+
+  const firstTransport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: convergedBody,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const firstExitCode = await runCli(["issue", "sync", "80", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: firstTransport }),
+    });
+    assert.equal(firstExitCode, 0, lines[0]);
+    const firstOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(firstOutput.mutation, "applied");
+    assert.ok(firstTransport.calls.some((args) => args.includes("PATCH")));
+
+    lines.length = 0;
+    const secondTransport = new CliStubTransport(
+      remoteArtifactResponses(
+        [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+        {
+          number: 80,
+          title: "feat: remediation",
+          body: convergedBody,
+          state: "open",
+          html_url: "https://github.com/acme/inari/issues/80",
+          labels: [],
+          assignees: [],
+        },
+      ),
+    );
+    const secondExitCode = await runCli(["issue", "sync", "80", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: secondTransport }),
+    });
+    assert.equal(secondExitCode, 0, lines[0]);
+    const secondOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(secondOutput.noOp, true);
+    assert.equal(
+      secondTransport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pr sync reaches the adapter with a converged canonical body", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "desired.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: {
+        summary: "A converged pull request summary",
+        linked_issue: "Closes #21",
+        included: "Implemented scope.",
+        excluded: "Excluded scope.",
+        validation: ["tests"],
+        breaking_changes: "Yes, this changes behavior.",
+      },
+      title: "feat: remediation",
+      head: "feature",
+      base: "main",
+    }),
+    "utf8",
+  );
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+    command(
+      JSON.stringify({
+        number: 81,
+        title: "feat: remediation",
+        body: "Rendered body",
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "sync", "81", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.mutation, "applied");
+    assert.ok(transport.calls.some((args) => args.includes("PATCH")));
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("edit surfaces governance-generation reconciliation instead of hiding a crossed-generation success", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: GOVERNANCE_TREE_SHA,
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/feature.yml", type: "blob", sha: "feature-sha" }],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: "Rendered body",
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-after-mutation",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/feature.yml", type: "blob", sha: "feature-sha-changed" }],
+      }),
+    ),
+  ]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "patch.json");
+  await writeFile(inputPath, JSON.stringify({ fields: { problem: "A changed problem" } }), "utf8");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "edit", "80", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.mutation, "applied");
+    const governance = output.governance as { reconciled?: boolean; currentGeneration?: string };
+    assert.equal(governance.reconciled, false);
+    assert.equal(governance.currentGeneration, "tree-sha-after-mutation");
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});

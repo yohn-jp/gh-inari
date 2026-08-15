@@ -8,6 +8,8 @@ import {
   discoverRepositoryTemplates,
   GovernanceError,
   rejectGovernedPolicyOverride,
+  updateGovernedIssue,
+  updateGovernedPullRequest,
 } from "./governance.js";
 import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
 import { deserializeCanonicalContract, serializeCanonicalContract } from "./contract/index.js";
@@ -480,4 +482,97 @@ test("existing-artifact validation acquires the contract from the artifact targe
   } finally {
     console.log = originalLog;
   }
+});
+
+test("successful Issue update keeps identity when post-effect governance crosses generations", async () => {
+  const source = issueTemplate("remote_field");
+  const updatedIssue = {
+    number: 52,
+    title: "Remote issue updated",
+    body: "### Remote field\n\nupdated\n",
+    state: "open",
+    html_url: "https://github.com/acme/repository-b/issues/52",
+    labels: [],
+    assignees: [],
+  };
+  const transport = new StubGovernanceTransport([
+    ...governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source, [], "tree-sha-a"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha" }],
+      }),
+    ),
+    command(JSON.stringify({ ...updatedIssue, body: "### Remote field\n\nold\n" })),
+    command(JSON.stringify(updatedIssue)),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-d",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha-changed" }],
+      }),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { remote_field: "updated" },
+    metadata: { title: "Remote issue updated" },
+  }).artifact;
+
+  const result = await updateGovernedIssue(adapter, 52, prepared);
+  assert.equal(result.artifact.number, 52);
+  assert.equal(result.artifact.url, updatedIssue.html_url);
+  assert.equal(result.governance.reconciled, false);
+  assert.equal(result.governance.currentGeneration, "tree-sha-d");
+});
+
+test("successful pull-request update keeps identity when post-effect governance crosses generations", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const source = "## Summary\n\nSummary text.\n";
+  const updatedPullRequest = {
+    number: 53,
+    title: "feat: updated",
+    body: "## Summary\n\nUpdated summary.\n",
+    state: "open",
+    html_url: "https://github.com/acme/repository-b/pull/53",
+    draft: false,
+    head: { ref: "feature" },
+    base: { ref: "main" },
+  };
+  const transport = new StubGovernanceTransport([
+    ...governanceResponses(templatePath, "pr-sha", source, [], "tree-sha-a"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [{ path: templatePath, type: "blob", sha: "pr-sha" }],
+      }),
+    ),
+    command(JSON.stringify(updatedPullRequest)),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-d",
+        truncated: false,
+        tree: [{ path: templatePath, type: "blob", sha: "pr-sha-changed" }],
+      }),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "Updated summary" },
+    metadata: { title: "feat: updated", head: "feature", base: "main" },
+  }).artifact;
+
+  const result = await updateGovernedPullRequest(adapter, 53, prepared);
+  assert.equal(result.artifact.number, 53);
+  assert.equal(result.artifact.url, updatedPullRequest.html_url);
+  assert.equal(result.governance.reconciled, false);
+  assert.equal(result.governance.currentGeneration, "tree-sha-d");
 });

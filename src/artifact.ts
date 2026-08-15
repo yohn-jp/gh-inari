@@ -101,6 +101,7 @@ export type ExistingArtifactDiagnosticCode =
   | "EXISTING_EXTRA_CONTENT"
   | "EXISTING_UNKNOWN_CHECKLIST_ITEM"
   | "EXISTING_AMBIGUOUS_TEMPLATE"
+  | "EXISTING_NON_CANONICAL"
   | "EXISTING_TEMPLATE_COMPILE_FAILED";
 
 export interface ExistingArtifactDiagnostic {

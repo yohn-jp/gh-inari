@@ -3,11 +3,12 @@ import { readFile, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArtifactInputError, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
+import { ArtifactInputError, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
 import { projectContract, SemanticValidationError, validateSemanticInput, } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
-import { compileLocalGovernedContract, compileRepositoryGovernedContract, compileRepositoryGovernedContracts, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
+import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
+import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, readGovernedExistingArtifact, RemediationError, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -34,6 +35,7 @@ const BOOLEAN_OPTIONS = new Set([
     "maintainerCanModify",
     "compact",
     "check",
+    "dryRun",
 ]);
 const VALUE_OPTIONS = new Set([
     "from",
@@ -474,6 +476,12 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         console.log(JSON.stringify({ ok: true, artifact: created.artifact, governance: created.governance }));
         return 0;
     }
+    if (command === "check" || command === "edit" || command === "normalize" || command === "sync") {
+        if (rest[0] === undefined || !isPositiveInteger(rest[0])) {
+            throw invalidArtifactNumberError(domain, rest[0]);
+        }
+        return runExistingRemediation(domain, command, Number(rest[0]), parsed, root, dependencies, json);
+    }
     if ((command === "validate" || command === "explain") &&
         rest[0] !== undefined &&
         isPositiveInteger(rest[0]) &&
@@ -493,7 +501,9 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
 }
 async function runExistingValidation(domain, number, parsed, root, dependencies, json) {
     rejectGovernedPolicyOverride(parsed.options.policy);
-    const read = await readExistingArtifact(domain, number, parsed, root, dependencies);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    await adapter.resolveRepositoryContext();
+    const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
     const { remote, result } = read;
     const projection = projectExistingArtifact(result);
     const output = {
@@ -509,7 +519,9 @@ async function runExistingValidation(domain, number, parsed, root, dependencies,
 }
 async function runExistingGet(domain, number, parsed, root, dependencies) {
     rejectGovernedPolicyOverride(parsed.options.policy);
-    const { remote, contract, result } = await readExistingArtifact(domain, number, parsed, root, dependencies);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    await adapter.resolveRepositoryContext();
+    const { remote, contract, result } = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
     const projection = projectExistingArtifact(result);
     const output = {
         valid: projection.valid,
@@ -526,6 +538,74 @@ async function runExistingGet(domain, number, parsed, root, dependencies) {
     };
     console.log(JSON.stringify(output));
     return result.valid ? 0 : EXIT_VALIDATION;
+}
+async function runExistingRemediation(domain, operation, number, parsed, root, dependencies, json) {
+    void json;
+    rejectGovernedPolicyOverride(parsed.options.policy);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    await adapter.resolveRepositoryContext();
+    const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
+    const assessment = assessExistingArtifact(domain, read);
+    const base = {
+        operation,
+        kind: domain === "issue" ? "issue" : "pull_request",
+        number: read.remote.number,
+        url: read.remote.url,
+        ...(read.contract === undefined ? {} : { template: read.contract.templateIdentity }),
+    };
+    if (operation === "check") {
+        console.log(JSON.stringify({
+            ok: assessment.status === "valid-current",
+            ...base,
+            status: assessment.status,
+            classification: read.result.classification,
+            valid: assessment.status === "valid-current",
+            normalizable: assessment.normalizable,
+            diagnostics: assessment.diagnostics,
+            violations: assessment.status === "non-canonical" ? assessment.diagnostics : read.result.violations,
+        }));
+        return assessment.status === "valid-current" ? 0 : EXIT_VALIDATION;
+    }
+    if (read.contract === undefined) {
+        throw new RemediationError(operation === "normalize" ? "NORMALIZATION_UNSAFE" : "SYNC_CURRENT_UNSUPPORTED", "No authoritative template could be selected for the existing artifact.", "$.template");
+    }
+    let desiredInput;
+    if (operation === "normalize") {
+        if (!read.result.valid || !read.result.parse.parsed) {
+            throw new RemediationError("NORMALIZATION_UNSAFE", "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.", "$.artifact");
+        }
+        desiredInput = currentArtifactInput(domain, read);
+    }
+    else {
+        const input = await readInputDocument(parsed.options.from);
+        desiredInput =
+            operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
+    }
+    const desired = prepareRemediationArtifact(domain, read.contract, desiredInput);
+    const diff = diffArtifact(domain, read, desired);
+    const resultBase = {
+        ...base,
+        changed: diff.changed,
+        noOp: !diff.changed,
+        diff,
+    };
+    if (!diff.changed || parsed.options.dryRun === true) {
+        console.log(JSON.stringify({
+            ok: true,
+            ...resultBase,
+            ...(parsed.options.dryRun === true ? { dryRun: true, mutation: "not-performed" } : {}),
+        }));
+        return 0;
+    }
+    const mutated = await updateGovernedExistingArtifact(adapter, domain, number, desired);
+    console.log(JSON.stringify({
+        ok: true,
+        ...resultBase,
+        mutation: "applied",
+        artifact: { number: mutated.artifact.number, url: mutated.artifact.url },
+        governance: mutated.governance,
+    }));
+    return 0;
 }
 function existingArtifactMetadata(domain, remote) {
     if (domain === "issue") {
@@ -546,58 +626,6 @@ function existingArtifactMetadata(domain, remote) {
         draft: remote.draft,
         head: remote.head,
         base: remote.base,
-    };
-}
-async function readExistingArtifact(domain, number, parsed, root, dependencies) {
-    const adapter = createAdapter(dependencies, root, parsed.options.repository);
-    await adapter.resolveRepositoryContext();
-    const selector = templateSelector(parsed, undefined);
-    let contracts;
-    let failedTemplates;
-    if (selector === undefined) {
-        const outcomes = await compileRepositoryGovernedContracts(adapter, domain);
-        contracts = outcomes.filter((outcome) => outcome.status === "compiled").map((outcome) => outcome.contract);
-        failedTemplates = outcomes.filter((outcome) => outcome.status === "failed");
-    }
-    else {
-        contracts = [await compileRepositoryGovernedContract(adapter, domain, selector)];
-        failedTemplates = [];
-    }
-    const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
-    const candidates = contracts.map((contract) => ({
-        contract,
-        result: domain === "issue"
-            ? validateExistingIssueArtifact(contract, remote.body)
-            : validateExistingPullRequestArtifact(contract, remote.body),
-    }));
-    const selected = selectExistingArtifactCandidate(candidates);
-    if (selected.contract !== undefined || failedTemplates.length === 0) {
-        return { remote, contract: selected.contract, result: selected.result };
-    }
-    // No compiled template matched, and at least one sibling template failed to
-    // compile: fail closed, since the malformed template could be the one that
-    // actually owns this artifact. Surface it as a bounded diagnostic rather
-    // than an opaque compile error.
-    const compileDiagnostics = failedTemplates.map((failed) => ({
-        code: "EXISTING_TEMPLATE_COMPILE_FAILED",
-        path: failed.path,
-        message: `[${failed.path}] Template failed to compile: ${failed.message}`,
-    }));
-    // selected.contract is undefined here, so selectExistingArtifactCandidate resolved this
-    // as an unmatched candidate set: its violations are always ExistingArtifactDiagnostic[].
-    const existingViolations = selected.result.violations;
-    return {
-        remote,
-        result: {
-            valid: false,
-            classification: selected.result.classification,
-            parse: {
-                parsed: false,
-                values: {},
-                diagnostics: [...selected.result.parse.diagnostics, ...compileDiagnostics],
-            },
-            violations: [...existingViolations, ...compileDiagnostics],
-        },
     };
 }
 function createAdapter(dependencies, root, repository) {
@@ -717,7 +745,9 @@ function toErrorShape(error) {
     return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
 }
 function classifyExitCode(error) {
-    if (error instanceof SemanticValidationError || error instanceof ArtifactInputError)
+    if (error instanceof SemanticValidationError ||
+        error instanceof ArtifactInputError ||
+        error instanceof RemediationError)
         return EXIT_VALIDATION;
     if (isGitHubAdapterError(error))
         return EXIT_REMOTE;
@@ -751,7 +781,11 @@ function isMachineCommand(positionals) {
             positionals[1] === "render" ||
             positionals[1] === "create" ||
             positionals[1] === "explain" ||
-            positionals[1] === "get")) ||
+            positionals[1] === "get" ||
+            positionals[1] === "check" ||
+            positionals[1] === "edit" ||
+            positionals[1] === "normalize" ||
+            positionals[1] === "sync")) ||
         positionals[0] === "diagnose" ||
         positionals[0] === "doctor" ||
         positionals[0] === "version");
@@ -770,7 +804,11 @@ function isMachineCommandTokens(argv) {
         command === "render" ||
         command === "create" ||
         command === "explain" ||
-        command === "get");
+        command === "get" ||
+        command === "check" ||
+        command === "edit" ||
+        command === "normalize" ||
+        command === "sync");
 }
 function isPositiveInteger(value) {
     return /^[1-9]\d*$/u.test(value);
@@ -823,6 +861,10 @@ Commands:
   issue validate <number> [--template <template>]
   issue explain <number> [--template <template>]
   issue get <number> [--template <template>] --json
+  issue check <number> [--template <template>]
+  issue edit <number> --from <file.json> [--dry-run]
+  issue normalize <number> [--dry-run]
+  issue sync <number> --from <file.json> [--dry-run]
   pr schema [template]
   pr validate --template <template> --from <file.json>
   pr render --template <template> --from <file.json>
@@ -830,6 +872,10 @@ Commands:
   pr validate <number> [--template <template>]
   pr explain <number> [--template <template>]
   pr get <number> [--template <template>] --json
+  pr check <number> [--template <template>]
+  pr edit <number> --from <file.json> [--dry-run]
+  pr normalize <number> [--dry-run]
+  pr sync <number> --from <file.json> [--dry-run]
 
 Options:
   --from <path>       JSON input file, or - for stdin
@@ -841,6 +887,7 @@ Options:
   --base <branch>     PR base branch for create
   --compact            Emit only semantic fields and constraints for schema
   --check              Check generated native projections without writing
+  --dry-run            Show a bounded remediation diff without mutating GitHub
   --draft             Create the PR as a draft
   --maintainer-can-modify
                       Allow maintainer edits on the PR
@@ -853,7 +900,8 @@ Options:
                       Require a minimum semantic version in checks
   --help              Print this help
 
-Create always validates and renders before invoking gh. Schema, validate, and render never mutate GitHub.
+Create always validates and renders before invoking gh. Schema, validate, render, check, and --dry-run remediation never mutate GitHub.
+Edit applies an explicit semantic patch; normalize preserves existing semantic values; sync reconciles a complete desired semantic state.
 
 Canonical installation: gh extension install yohn-jp/gh-inari
 PATH-independent fallback: npx --yes gh-inari`);
