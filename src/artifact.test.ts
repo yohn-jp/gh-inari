@@ -533,6 +533,54 @@ test("PR policy overlay fault paths produce deterministic errors", () => {
   );
 });
 
+test("rejects PR policy patterns with catastrophic-backtracking-prone structure", () => {
+  const catastrophicPatterns = ["(a+)+$", "(a*)*$", "(a+)*b", "(a|a)+$", "(a|ab)*c", "([a-zA-Z]+)*$"];
+
+  for (const pattern of catastrophicPatterns) {
+    assert.throws(
+      () =>
+        compilePullRequestPolicyOverlay(
+          pullRequestContractFixture,
+          `version: 1\ntemplate: default\nsections:\n  - section: summary\n    pattern: "${pattern.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"\n`,
+        ),
+      (error: unknown) => {
+        const err = error as { code: string };
+        assert.equal(err.code, "PR_POLICY_INVALID_VALUE");
+        return true;
+      },
+      `expected pattern to be rejected: ${pattern}`,
+    );
+  }
+});
+
+test("rejects PR policy patterns using backreferences", () => {
+  assert.throws(
+    () =>
+      compilePullRequestPolicyOverlay(
+        pullRequestContractFixture,
+        `version: 1\ntemplate: default\nsections:\n  - section: summary\n    pattern: "(a)\\\\1"\n`,
+      ),
+    (error: unknown) => {
+      const err = error as { code: string };
+      assert.equal(err.code, "PR_POLICY_INVALID_VALUE");
+      return true;
+    },
+  );
+});
+
+test("accepts ordinary PR policy patterns without nested quantifiers or backreferences", () => {
+  const safePatterns = ["^Closes #\\d+$", ".*", "[a-z]+-[0-9]+", "^(feat|fix|chore): .+$", "\\w{3,20}"];
+
+  for (const pattern of safePatterns) {
+    assert.doesNotThrow(() =>
+      compilePullRequestPolicyOverlay(
+        pullRequestContractFixture,
+        `version: 1\ntemplate: default\nsections:\n  - section: summary\n    pattern: "${pattern.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"\n`,
+      ),
+    );
+  }
+});
+
 test("PR rendering and existing-artifact validation share semantic rules", () => {
   const input = { summary: "A useful summary", linked_issue: "Closes #22", acceptance: ["tests"] };
   const body = renderPullRequestArtifact(pullRequestContractFixture, input);
