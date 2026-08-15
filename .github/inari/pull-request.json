@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "kind": "pull_request",
+  "id": "pull-request",
+  "name": "Default",
+  "sections": [
+    {
+      "id": "summary",
+      "type": "string",
+      "label": "Summary",
+      "placeholder": "<!-- Concisely describe the delivered result. -->",
+      "required": true,
+      "minLength": 10,
+      "headingLevel": 2
+    },
+    {
+      "id": "linked_issue",
+      "type": "string",
+      "label": "Linked issue",
+      "placeholder": "Closes #",
+      "required": true,
+      "headingLevel": 2
+    },
+    {
+      "id": "scope",
+      "type": "string",
+      "label": "Scope",
+      "headingLevel": 2
+    },
+    {
+      "id": "included",
+      "type": "string",
+      "label": "Included",
+      "placeholder": "<!-- Implemented scope. -->",
+      "headingLevel": 3
+    },
+    {
+      "id": "excluded",
+      "type": "string",
+      "label": "Excluded",
+      "placeholder": "<!-- Explicitly excluded scope. -->",
+      "headingLevel": 3
+    },
+    {
+      "id": "validation",
+      "type": "checklist",
+      "label": "Validation",
+      "headingLevel": 2,
+      "options": [
+        { "id": "typecheck", "label": "Typecheck" },
+        { "id": "tests", "label": "Tests" },
+        { "id": "build", "label": "Build" },
+        { "id": "package_check", "label": "Package check" }
+      ]
+    },
+    {
+      "id": "breaking_changes",
+      "type": "string",
+      "label": "Breaking changes",
+      "placeholder": "No. <!-- If Yes, describe impact and migration. -->",
+      "headingLevel": 2
+    }
+  ]
+}

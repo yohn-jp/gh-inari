@@ -43,3 +43,16 @@ jobs:
 
       - name: Validate PR contract
         run: node --import tsx scripts/validate-pr.mjs --event "$GITHUB_EVENT_PATH"
+
+      - name: Checkout pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          path: pr-head
+
+      - name: Check semantic template projections
+        working-directory: pr-head
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run templates:check

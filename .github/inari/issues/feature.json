@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "kind": "issue",
+  "id": "feature",
+  "name": "Feature",
+  "description": "New capability or enhancement",
+  "title": "feat: ",
+  "sections": [
+    {
+      "id": "problem",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Problem",
+      "description": "What is currently not possible, and why it matters",
+      "required": true
+    },
+    {
+      "id": "proposal",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Proposal",
+      "description": "Proposed behavior or API",
+      "required": true
+    },
+    {
+      "id": "non_goals",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Non-goals",
+      "description": "Explicitly excluded scope"
+    },
+    {
+      "id": "acceptance",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Acceptance criteria",
+      "description": "Completion criteria",
+      "defaultValue": "- [ ] ",
+      "required": true
+    }
+  ]
+}
