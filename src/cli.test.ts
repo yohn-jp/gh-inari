@@ -711,6 +711,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
         assignees: [],
       }),
     ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
   ]);
   const lines: string[] = [];
   const originalLog = console.log;
@@ -724,7 +725,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       },
     );
     assert.equal(exitCode, 0);
-    assert.equal(transport.calls.length, 8);
+    assert.equal(transport.calls.length, 10);
     assert.deepEqual(transport.calls[7]?.slice(0, 6), [
       "api",
       "repos/acme/inari/issues",
@@ -734,7 +735,9 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       "POST",
     ]);
     assert.match(transport.calls[7]?.join(" ") ?? "", /### Problem/);
-    assert.equal(JSON.parse(lines[0] ?? "{}").ok, true);
+    const output = JSON.parse(lines[0] ?? "{}") as { ok: boolean; governance?: { reconciled?: boolean } };
+    assert.equal(output.ok, true);
+    assert.equal(output.governance?.reconciled, true);
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });
@@ -848,6 +851,9 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
         base: { ref: "main" },
       }),
     ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
   ]);
   const lines: string[] = [];
   const originalLog = console.log;
@@ -861,10 +867,12 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       },
     );
     assert.equal(exitCode, 0);
-    assert.equal(transport.calls.length, 9);
+    assert.equal(transport.calls.length, 11);
     assert.match(transport.calls[8]?.join(" ") ?? "", /## Summary/);
     assert.match(transport.calls[8]?.join(" ") ?? "", /## Linked issue/);
-    assert.equal(JSON.parse(lines[0] ?? "{}").ok, true);
+    const output = JSON.parse(lines[0] ?? "{}") as { ok: boolean; governance?: { reconciled?: boolean } };
+    assert.equal(output.ok, true);
+    assert.equal(output.governance?.reconciled, true);
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });

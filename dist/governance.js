@@ -275,27 +275,39 @@ export async function discoverRepositoryTemplates(adapter) {
  */
 export async function verifyGovernedMutationFreshness(adapter, provenance) {
     const source = await readRepositoryGovernanceSource(adapter);
+    const assessment = assessGovernanceFreshness(source, provenance);
+    if (!assessment.fresh)
+        throw staleGenerationError(source, provenance, assessment.reason);
+}
+/**
+ * Judge whether a previously validated contract's governance inputs are
+ * still content-equivalent to the currently observed repository governance.
+ * Shared by the pre-mutation freshness gate and post-mutation reconciliation
+ * so both use identical stale-generation semantics.
+ */
+function assessGovernanceFreshness(source, provenance) {
     if (source.context.nameWithOwner !== provenance.repository.nameWithOwner) {
-        throw staleGenerationError(source, provenance, "target repository does not match validated provenance");
+        return { fresh: false, reason: "target repository does not match validated provenance" };
     }
     if (source.treeSha === provenance.treeSha)
-        return;
+        return { fresh: true };
     const templateEntry = source.tree.find((entry) => entry.path === provenance.template.path);
     if (templateEntry === undefined || templateEntry.type !== "blob" || templateEntry.sha !== provenance.template.sha) {
-        throw staleGenerationError(source, provenance, "template governance input changed");
+        return { fresh: false, reason: "template governance input changed" };
     }
     const currentPolicyEntry = findPolicy(source.tree);
     if (provenance.policy === undefined) {
         if (currentPolicyEntry !== undefined) {
-            throw staleGenerationError(source, provenance, "a policy governance input was introduced");
+            return { fresh: false, reason: "a policy governance input was introduced" };
         }
-        return;
+        return { fresh: true };
     }
     if (currentPolicyEntry === undefined ||
         currentPolicyEntry.type !== "blob" ||
         currentPolicyEntry.sha !== provenance.policy.sha) {
-        throw staleGenerationError(source, provenance, "policy governance input changed");
+        return { fresh: false, reason: "policy governance input changed" };
     }
+    return { fresh: true };
 }
 function staleGenerationError(source, provenance, reason) {
     return new GovernanceError("GOVERNANCE_GENERATION_STALE", "The target repository governance changed since this artifact was validated and rendered; recompile and revalidate before mutating.", {
@@ -307,25 +319,43 @@ function staleGenerationError(source, provenance, reason) {
         currentTreeSha: source.treeSha,
     });
 }
+async function reconcileGovernanceAfterMutation(adapter, provenance) {
+    const source = await readRepositoryGovernanceSource(adapter);
+    const assessment = assessGovernanceFreshness(source, provenance);
+    return {
+        validatedGeneration: provenance.treeSha,
+        currentGeneration: source.treeSha,
+        reconciled: assessment.fresh,
+        ...(assessment.fresh ? {} : { reason: assessment.reason }),
+    };
+}
 /** Create an Issue only after verifying its governance generation is still fresh. */
 export async function createGovernedIssue(adapter, artifact) {
     await verifyGovernedMutationFreshness(adapter, artifact.provenance);
-    return adapter.createIssue(artifact);
+    const created = await adapter.createIssue(artifact);
+    const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
+    return { artifact: created, governance };
 }
 /** Update an Issue only after verifying its governance generation is still fresh. */
 export async function updateGovernedIssue(adapter, issueNumber, artifact) {
     await verifyGovernedMutationFreshness(adapter, artifact.provenance);
-    return adapter.updateIssue(issueNumber, artifact);
+    const updated = await adapter.updateIssue(issueNumber, artifact);
+    const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
+    return { artifact: updated, governance };
 }
 /** Create a pull request only after verifying its governance generation is still fresh. */
 export async function createGovernedPullRequest(adapter, artifact) {
     await verifyGovernedMutationFreshness(adapter, artifact.provenance);
-    return adapter.createPullRequest(artifact);
+    const created = await adapter.createPullRequest(artifact);
+    const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
+    return { artifact: created, governance };
 }
 /** Update a pull request only after verifying its governance generation is still fresh. */
 export async function updateGovernedPullRequest(adapter, pullRequestNumber, artifact) {
     await verifyGovernedMutationFreshness(adapter, artifact.provenance);
-    return adapter.updatePullRequest(pullRequestNumber, artifact);
+    const updated = await adapter.updatePullRequest(pullRequestNumber, artifact);
+    const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
+    return { artifact: updated, governance };
 }
 async function readRepositoryGovernanceSource(adapter) {
     const context = await adapter.resolveRepositoryContext();

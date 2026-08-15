@@ -79,11 +79,32 @@ export declare function discoverRepositoryTemplates(adapter: GitHubAdapter): Pro
  * revalidate against the new generation before mutating.
  */
 export declare function verifyGovernedMutationFreshness(adapter: GitHubAdapter, provenance: ContractProvenance): Promise<void>;
+/**
+ * Evidence of whether repository governance was still at the validated
+ * generation immediately after a governed mutation's external effect
+ * completed. The pre-mutation freshness check cannot close the TOCTOU gap
+ * between itself and the GitHub API call it guards, so this reconciles
+ * after the fact rather than hiding the remaining uncertainty.
+ */
+export interface GovernanceReconciliation {
+    /** Root tree SHA the mutated artifact's contract was validated against. */
+    readonly validatedGeneration: string;
+    /** Root tree SHA observed immediately after the mutation completed. */
+    readonly currentGeneration: string;
+    /** True when currentGeneration is still content-equivalent to validatedGeneration. */
+    readonly reconciled: boolean;
+    /** Present only when reconciled is false: why the generations diverged. */
+    readonly reason?: string;
+}
+export interface GovernedMutationResult<T> {
+    readonly artifact: T;
+    readonly governance: GovernanceReconciliation;
+}
 /** Create an Issue only after verifying its governance generation is still fresh. */
-export declare function createGovernedIssue(adapter: GitHubAdapter, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
+export declare function createGovernedIssue(adapter: GitHubAdapter, artifact: ValidatedRenderedIssueArtifact): Promise<GovernedMutationResult<GitHubIssue>>;
 /** Update an Issue only after verifying its governance generation is still fresh. */
-export declare function updateGovernedIssue(adapter: GitHubAdapter, issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
+export declare function updateGovernedIssue(adapter: GitHubAdapter, issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GovernedMutationResult<GitHubIssue>>;
 /** Create a pull request only after verifying its governance generation is still fresh. */
-export declare function createGovernedPullRequest(adapter: GitHubAdapter, artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
+export declare function createGovernedPullRequest(adapter: GitHubAdapter, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;
 /** Update a pull request only after verifying its governance generation is still fresh. */
-export declare function updateGovernedPullRequest(adapter: GitHubAdapter, pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
+export declare function updateGovernedPullRequest(adapter: GitHubAdapter, pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;

@@ -238,16 +238,17 @@ test("remote schema output exposes repository and trusted source provenance", as
 
 test("createGovernedIssue mutates when the default branch advances without changing governance content", async () => {
   const source = issueTemplate("remote_field");
+  const unchangedTree = command(
+    JSON.stringify({
+      sha: "tree-sha-b",
+      truncated: false,
+      tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha" }],
+    }),
+  );
   const transport = new StubGovernanceTransport([
     ...governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source, [], "tree-sha-a"),
     command(JSON.stringify({ default_branch: "main" })),
-    command(
-      JSON.stringify({
-        sha: "tree-sha-b",
-        truncated: false,
-        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha" }],
-      }),
-    ),
+    unchangedTree,
     command(
       JSON.stringify({
         number: 50,
@@ -259,6 +260,8 @@ test("createGovernedIssue mutates when the default branch advances without chang
         assignees: [],
       }),
     ),
+    command(JSON.stringify({ default_branch: "main" })),
+    unchangedTree,
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
@@ -269,7 +272,10 @@ test("createGovernedIssue mutates when the default branch advances without chang
   }).artifact;
 
   const created = await createGovernedIssue(adapter, prepared);
-  assert.equal(created.number, 50);
+  assert.equal(created.artifact.number, 50);
+  assert.equal(created.governance.reconciled, true);
+  assert.equal(created.governance.validatedGeneration, "tree-sha-a");
+  assert.equal(created.governance.currentGeneration, "tree-sha-b");
 });
 
 test("createGovernedIssue fails closed when the template changed at a new governance generation", async () => {
@@ -300,6 +306,54 @@ test("createGovernedIssue fails closed when the template changed at a new govern
     transport.calls.some((args) => args.includes("POST")),
     false,
   );
+});
+
+test("createGovernedIssue reports a reconciliation mismatch without losing the created issue identity", async () => {
+  const source = issueTemplate("remote_field");
+  const transport = new StubGovernanceTransport([
+    ...governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source, [], "tree-sha-a"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha" }],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 51,
+        title: "Remote issue",
+        body: "### Remote field\n\nvalue\n",
+        state: "open",
+        html_url: "https://github.com/acme/repository-b/issues/51",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-d",
+        truncated: false,
+        tree: [{ path: ".github/ISSUE_TEMPLATE/remote.yml", type: "blob", sha: "remote-sha-changed-after-mutation" }],
+      }),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { remote_field: "value" },
+    metadata: { title: "Remote issue" },
+  }).artifact;
+
+  const created = await createGovernedIssue(adapter, prepared);
+
+  assert.equal(created.artifact.number, 51);
+  assert.equal(created.governance.reconciled, false);
+  assert.equal(created.governance.validatedGeneration, "tree-sha-a");
+  assert.equal(created.governance.currentGeneration, "tree-sha-d");
+  assert.equal(created.governance.reason, "template governance input changed");
 });
 
 test("createGovernedPullRequest fails closed when a policy governance input is newly introduced", async () => {
