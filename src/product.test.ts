@@ -19,9 +19,20 @@ test("repository-native Issue and PR fixtures traverse the shared product core",
   const discovery = await discoverTemplates(root);
   const issue = await compileIssueFormTemplate(discovery, "feature");
   const issueInput = {
+    summary: "Make the current behavior explicit",
     problem: "The current behavior is surprising",
-    proposal: "Make the behavior explicit",
+    failing_scenario: "A caller relying on the implicit behavior observes an unexpected result",
+    goal: "The behavior is explicit and documented",
+    expected_contract: "Callers observe the documented, explicit behavior",
+    non_goals: "No unrelated behavior changes",
     acceptance: "- [ ] verify",
+    affected: "The core behavior module",
+    test_layer: "unit: the new explicit behavior is directly assertable",
+    risks: "No backward-incompatible change expected",
+    release_impact: "No release-impacting change",
+    security_impact: "No security boundary impact",
+    dependencies: "None",
+    implementation: "Make the implicit branch explicit and documented",
   };
   const issueValidation = validateSemanticInput(issue, issueInput);
   assert.equal(issueValidation.valid, true);

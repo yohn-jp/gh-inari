@@ -90,7 +90,7 @@ test("CLI and workflow adapters return the same semantic violation code", async 
   };
   const invalidValue = "see issue 10";
   const body = renderPullRequestArtifact(contract, fields).replace("Closes #10", invalidValue);
-  const workflowReport = await validatePullRequest({ title: "fix: governance", body, root });
+  const workflowReport = await validatePullRequest({ title: "fix: governance", body, root, template: "default" });
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-governance-"));
   const inputPath = path.join(directory, "pr.json");
   await writeFile(inputPath, JSON.stringify({ ...fields, linked_issue: invalidValue }));
