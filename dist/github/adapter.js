@@ -95,7 +95,12 @@ export class GitHubAdapter {
     }
     async resolveRepositoryContext() {
         if (this.contextPromise === undefined) {
-            this.contextPromise = this.resolveRepositoryContextOnce();
+            const pending = this.resolveRepositoryContextOnce();
+            this.contextPromise = pending;
+            pending.catch(() => {
+                if (this.contextPromise === pending)
+                    this.contextPromise = undefined;
+            });
         }
         return this.contextPromise;
     }
@@ -274,7 +279,12 @@ export class GitHubAdapter {
     }
     async ensureGhAvailable() {
         if (this.availablePromise === undefined) {
-            this.availablePromise = this.ensureGhAvailableOnce();
+            const pending = this.ensureGhAvailableOnce();
+            this.availablePromise = pending;
+            pending.catch(() => {
+                if (this.availablePromise === pending)
+                    this.availablePromise = undefined;
+            });
         }
         return this.availablePromise;
     }

@@ -383,7 +383,21 @@ export async function importNativeTemplate(repositoryRoot, nativePath, destinati
     const absoluteOutput = safeRepositoryPath(root, outputPath);
     await mkdir(path.dirname(absoluteOutput), { recursive: true });
     await writeRepositoryFile(absoluteOutput, `${JSON.stringify(source, null, 2)}\n`);
-    return { path: toRepositoryPath(root, absoluteOutput), source };
+    const writtenPath = toRepositoryPath(root, absoluteOutput);
+    const warning = destinationPath === undefined ? undefined : discoverableWarning(source.kind, writtenPath);
+    return warning === undefined ? { path: writtenPath, source } : { path: writtenPath, source, warning };
+}
+function discoverableWarning(kind, writtenPath) {
+    const discoverable = kind === "issue"
+        ? writtenPath.startsWith(`${SEMANTIC_ISSUE_DIRECTORY}/`) && writtenPath.endsWith(JSON_EXTENSION)
+        : writtenPath === SEMANTIC_PULL_REQUEST_FILE ||
+            (writtenPath.startsWith(`${SEMANTIC_TEMPLATE_DIRECTORY}/pull-requests/`) &&
+                writtenPath.endsWith(JSON_EXTENSION));
+    if (discoverable)
+        return undefined;
+    return (`wrote ${writtenPath}, but no semantic template will be discovered there; ` +
+        `expected ${SEMANTIC_ISSUE_DIRECTORY}/<id>.json, ${SEMANTIC_PULL_REQUEST_FILE}, ` +
+        `or ${SEMANTIC_TEMPLATE_DIRECTORY}/pull-requests/<id>.json`);
 }
 export function semanticSourceFromContract(contractInput) {
     assertCanonicalContract(contractInput);
