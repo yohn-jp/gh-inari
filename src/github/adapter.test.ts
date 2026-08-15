@@ -177,6 +177,46 @@ test("returns a typed actionable failure when gh is unavailable", async () => {
   );
 });
 
+test("retries gh availability after a transient failure instead of replaying a stale rejection", async () => {
+  const transport = new StubGhTransport([new MissingGhError(), command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(adapter.checkAuthentication(), (error: unknown) => error instanceof GhNotInstalledError);
+
+  const context = await adapter.resolveRepositoryContext();
+  assert.equal(context.nameWithOwner, "acme/inari");
+});
+
+test("coalesces concurrent gh availability checks onto one in-flight call", async () => {
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await Promise.all([adapter.resolveRepositoryContext(), adapter.resolveRepositoryContext()]);
+
+  assert.deepEqual(
+    transport.calls.map((call) => call.args[0]),
+    ["--version", "auth"],
+  );
+});
+
+test("retries repository context resolution after a transient failure instead of replaying a stale rejection", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(1, "", "Unable to resolve repository"),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+  ]);
+  const adapter = new GitHubAdapter({ transport });
+
+  await assert.rejects(
+    adapter.resolveRepositoryContext(),
+    (error: unknown) => error instanceof RepositoryResolutionError,
+  );
+
+  const context = await adapter.resolveRepositoryContext();
+  assert.equal(context.nameWithOwner, "acme/inari");
+});
+
 test("returns a typed failure when gh is not authenticated", async () => {
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
