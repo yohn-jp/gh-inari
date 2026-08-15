@@ -92,7 +92,7 @@ without adding it to a consumer manifest:
 ```bash
 npx --yes gh-inari@next --version --json
 npm pack
-npx --yes --package=./gh-inari-0.3.0.tgz gh-inari --version --json
+npx --yes --package=./gh-inari-&lt;version&gt;.tgz gh-inari --version --json
 ```
 
 Inari uses the current `gh` authentication and repository context. It does not maintain a second credential store. Use `--repository owner/name` when the target repository is not the current checkout.
