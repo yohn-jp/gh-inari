@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -476,6 +475,18 @@ class CliError extends Error {
   }
 }
 
+/** Bound for local --from <file> and stdin artifact input, independent of semantic field constraints. */
+const MAX_INPUT_BYTES = 1_048_576;
+
+function inputTooLargeError(observedBytes: number): CliError {
+  return new CliError(
+    "INPUT_TOO_LARGE",
+    `Input exceeds the maximum allowed size of ${MAX_INPUT_BYTES} bytes.`,
+    "--from",
+    { limitBytes: MAX_INPUT_BYTES, observedBytes },
+  );
+}
+
 async function runTemplateList(
   root: string,
   repository: string | boolean | undefined,
@@ -759,8 +770,13 @@ async function readInputDocument(value: string | boolean | undefined): Promise<A
   if (value === "-") source = await readStdin();
   else {
     try {
+      const stats = await stat(value);
+      if (stats.size > MAX_INPUT_BYTES) throw inputTooLargeError(stats.size);
       source = await readFile(value, "utf8");
+      if (Buffer.byteLength(source, "utf8") > MAX_INPUT_BYTES)
+        throw inputTooLargeError(Buffer.byteLength(source, "utf8"));
     } catch (cause: unknown) {
+      if (cause instanceof CliError) throw cause;
       const error = new CliError("INPUT_READ_FAILED", `Cannot read input file "${value}".`, "--from");
       if (cause instanceof Error) error.cause = cause;
       throw error;
@@ -873,7 +889,8 @@ function classifyExitCode(error: unknown): number {
       error.code === "INPUT_READ_FAILED")
   )
     return EXIT_USAGE;
-  if (error instanceof CliError && error.code === "INPUT_INVALID_JSON") return EXIT_VALIDATION;
+  if (error instanceof CliError && (error.code === "INPUT_INVALID_JSON" || error.code === "INPUT_TOO_LARGE"))
+    return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
@@ -940,10 +957,15 @@ function requireFile(filePath: string): string {
 }
 
 async function readStdin(): Promise<string> {
-  const chunks: string[] = [];
-  const reader = createInterface({ input: process.stdin });
-  for await (const line of reader) chunks.push(line);
-  return chunks.join("\n");
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of process.stdin) {
+    const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_INPUT_BYTES) throw inputTooLargeError(totalBytes);
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function printHelp(): void {
