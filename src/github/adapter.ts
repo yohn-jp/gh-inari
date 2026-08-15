@@ -233,12 +233,13 @@ export class GitHubAdapter {
         { path: "content" },
       );
     }
+    const bytes = Buffer.from(normalizedContent, "base64");
     try {
-      return Buffer.from(normalizedContent, "base64").toString("utf8");
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch (error) {
       throw new GitHubApiResponseError(
         "repository.governance.blob",
-        "GitHub returned an invalid base64 repository blob.",
+        "GitHub returned a repository blob containing invalid UTF-8 byte sequences.",
         { path: "content" },
         error,
       );
