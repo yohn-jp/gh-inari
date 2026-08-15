@@ -322,6 +322,101 @@ test("version comes from real package metadata", async () => {
   }
 });
 
+test("machine-readable version reports the invocation contract and capabilities", async () => {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    assert.equal(
+      await runCli(["--version", "--json"], {
+        packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      }),
+      0,
+    );
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.ok, true);
+    assert.equal(output.name, "gh-inari");
+    assert.equal(output.version, "0.3.0");
+    assert.equal(output.protocol, 1);
+    assert.deepEqual(output.invocation, {
+      canonical: "gh inari",
+      direct: "gh-inari",
+      fallback: "npx --yes gh-inari",
+    });
+    assert.deepEqual(output.capabilities, [
+      "canonical-invocation",
+      "machine-readable-version",
+      "capability-diagnostics",
+      "extension-bootstrap",
+    ]);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("diagnose reports a missing canonical extension with one install command", async () => {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["diagnose", "--json"], {
+      packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runDiagnosticCommand: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      ok?: boolean;
+      canonical?: { status?: string; recovery?: string };
+    };
+    assert.equal(output.ok, false);
+    assert.equal(output.canonical?.status, "missing");
+    assert.equal(output.canonical?.recovery, "gh extension install yohn-jp/gh-inari");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("diagnose rejects a stale extension when its capability contract is incomplete", async () => {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["--diagnose", "--json"], {
+      packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runDiagnosticCommand: (args) =>
+        args[0] === "extension"
+          ? { status: 0, stdout: "gh inari\tyohn-jp/gh-inari\told\n", stderr: "" }
+          : {
+              status: 0,
+              stdout: JSON.stringify({
+                ok: true,
+                name: "gh-inari",
+                version: "0.2.0",
+                protocol: 1,
+                capabilities: ["canonical-invocation"],
+                invocation: { canonical: "gh inari", direct: "gh-inari", fallback: "npx --yes gh-inari" },
+              }),
+              stderr: "",
+            },
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      ok?: boolean;
+      canonical?: { status?: string; recovery?: string; missingCapabilities?: string[] };
+    };
+    assert.equal(output.ok, false);
+    assert.equal(output.canonical?.status, "stale");
+    assert.equal(output.canonical?.recovery, "gh extension upgrade inari");
+    assert.deepEqual(output.canonical?.missingCapabilities, [
+      "machine-readable-version",
+      "capability-diagnostics",
+      "extension-bootstrap",
+    ]);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("invalid create input is rejected after target governance is resolved and before mutation", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
   const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));

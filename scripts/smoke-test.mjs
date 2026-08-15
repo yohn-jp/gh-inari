@@ -89,13 +89,14 @@ function main() {
   const installDirectory = path.join(smokeRootDirectory, "consumer");
   fs.mkdirSync(installDirectory);
   try {
-    fs.writeFileSync(
-      path.join(installDirectory, "package.json"),
-      JSON.stringify({ name: "smoke-consumer", private: true, version: "1.0.0" }, null, 2),
-    );
+    const consumerPackageJsonPath = path.join(installDirectory, "package.json");
+    const consumerPackageJson = JSON.stringify({ name: "smoke-consumer", private: true, version: "1.0.0" }, null, 2);
+    fs.writeFileSync(consumerPackageJsonPath, consumerPackageJson);
 
     console.log("installing packed tarball into isolated directory...");
     run("npm", ["install", "--no-save", tarballPath], { cwd: installDirectory });
+    if (fs.readFileSync(consumerPackageJsonPath, "utf8") !== consumerPackageJson)
+      fail("installing gh-inari modified the consumer package.json");
 
     const scope = packageName.startsWith("@") ? packageName.split("/")[0] : undefined;
     const installedPackageDirectory = scope
@@ -125,7 +126,31 @@ function main() {
       const versionResult = invoke(launcher, ["--version"], { cwd: installDirectory });
       if (versionResult.status !== 0) fail(`launcher "${name}" --version exited ${versionResult.status}, expected 0`);
       if (versionResult.stdout.trim().length === 0) fail(`launcher "${name}" --version printed nothing`);
+
+      const versionJson = jsonOutput(
+        invoke(launcher, ["--version", "--json"], { cwd: installDirectory }),
+        `${name} --version --json`,
+      );
+      if (
+        versionJson.ok !== true ||
+        versionJson.name !== packageName ||
+        versionJson.version !== packageJson.version ||
+        !Array.isArray(versionJson.capabilities)
+      )
+        fail(`${name} --version --json returned an invalid runtime contract`);
     }
+
+    console.log("checking one-command npx bootstrap without consumer manifest mutation...");
+    const npxVersion = jsonOutput(
+      invoke("npx", ["--yes", `--package=${tarballPath}`, "gh-inari", "--version", "--json"], {
+        cwd: installDirectory,
+      }),
+      "npx gh-inari --version --json",
+    );
+    if (npxVersion.ok !== true || npxVersion.name !== packageName || npxVersion.version !== packageJson.version)
+      fail("npx gh-inari did not execute the packed artifact");
+    if (fs.readFileSync(consumerPackageJsonPath, "utf8") !== consumerPackageJson)
+      fail("npx gh-inari modified the consumer package.json");
 
     const fixtureDirectory = path.join(installDirectory, "fixture-repository");
     const policyDirectory = path.join(fixtureDirectory, ".github", "inari");
@@ -218,6 +243,20 @@ function main() {
     });
     if (ghHelpResult.status !== 0 || !ghHelpResult.stdout.includes("Usage: gh-inari"))
       fail(`gh inari --help failed:\n${ghHelpResult.stdout}\n${ghHelpResult.stderr}`);
+
+    for (const [label, command, args, options] of [
+      [
+        "checked-out gh inari",
+        "gh",
+        ["inari", "--diagnose", "--json"],
+        { cwd: fixtureDirectory, env: sourceExtensionEnvironment },
+      ],
+      ["gh inari", "gh", ["inari", "--diagnose", "--json"], { cwd: fixtureDirectory, env: ghExtensionEnvironment }],
+    ]) {
+      const diagnostic = jsonOutput(invoke(command, args, options), label + " --diagnose --json");
+      if (diagnostic.ok !== true || diagnostic.canonical?.status !== "ready")
+        fail(label + " did not report a ready canonical extension");
+    }
 
     const smokeIssueTemplate =
       "name: Feature\ndescription: Smoke feature\nbody:\n  - type: textarea\n    id: problem\n    attributes: { label: Problem }\n    validations: { required: true }\n";
@@ -458,6 +497,10 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
       const expectedVersion = packageName + " " + packageJson.version;
       if (versionResult.status !== 0 || versionResult.stdout.trim() !== expectedVersion)
         fail(label + " did not report the package version " + expectedVersion);
+
+      const versionJson = jsonOutput(invoke(command, [...args, "--json"], options), label + " --version --json");
+      if (versionJson.ok !== true || versionJson.name !== packageName || versionJson.version !== packageJson.version)
+        fail(label + " did not report the machine-readable package version");
     }
 
     console.log("smoke test passed.");
