@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -303,6 +304,119 @@ test("malformed JSON is a validation error without opaque cause details", async 
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("an oversized --from file is rejected before JSON parsing, with the configured bound and observed size", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const inputPath = path.join(directory, "oversized.json");
+  const oversizedPayload = JSON.stringify({ padding: "x".repeat(1_048_577) });
+  await writeFile(inputPath, oversizedPayload);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "validate", "--template", "feature", "--from", inputPath, "--json"]);
+    assert.equal(exitCode, 2);
+    const error = JSON.parse(lines[0] ?? "{}").error as {
+      code: string;
+      message: string;
+      path: string;
+      details?: { limitBytes?: number; observedBytes?: number };
+    };
+    assert.equal(error.code, "INPUT_TOO_LARGE");
+    assert.equal(error.path, "--from");
+    assert.equal(error.details?.limitBytes, 1_048_576);
+    assert.equal(error.details?.observedBytes, Buffer.byteLength(oversizedPayload, "utf8"));
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a --from file exactly at the byte bound is not rejected as too large (rejection is strictly greater-than)", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const inputPath = path.join(directory, "boundary.json");
+  const padded = JSON.stringify({ problem: "boundary case" });
+  const padding = "x".repeat(1_048_576 - Buffer.byteLength(padded, "utf8"));
+  const exactPayload = JSON.stringify({ problem: `boundary case${padding}` });
+  assert.equal(Buffer.byteLength(exactPayload, "utf8"), 1_048_576);
+  await writeFile(inputPath, exactPayload);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    await runCli(["issue", "validate", "--template", "feature", "--from", inputPath, "--json"]);
+    const parsed = JSON.parse(lines[0] ?? "{}") as { error?: { code: string } };
+    assert.notEqual(parsed.error?.code, "INPUT_TOO_LARGE");
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a small multibyte UTF-8 --from file is unaffected by the byte bound", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const inputPath = path.join(directory, "multibyte.json");
+  await writeFile(inputPath, JSON.stringify({ problem: "こんにちは 😀" }));
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    await runCli(["issue", "validate", "--template", "feature", "--from", inputPath, "--json"]);
+    const parsed = JSON.parse(lines[0] ?? "{}") as { error?: { code: string } };
+    assert.notEqual(parsed.error?.code, "INPUT_TOO_LARGE");
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an oversized stdin payload is rejected early instead of being buffered without limit", async () => {
+  const cliEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", cliEntry, "issue", "validate", "--template", "feature", "--from", "-", "--json"],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  let stdout = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.stdin.on("error", () => undefined);
+  let closed = false;
+  const exitPromise = new Promise<number | null>((resolve) => {
+    child.once("close", (code) => {
+      closed = true;
+      resolve(code);
+    });
+  });
+
+  const oversizedChunk = Buffer.alloc(1_048_577, "x".charCodeAt(0));
+  const writeUntilRejectedOrClosed = (async () => {
+    for (let written = 0; written < 8 * oversizedChunk.byteLength; written += oversizedChunk.byteLength) {
+      if (closed || child.stdin.destroyed) return;
+      try {
+        const canContinue = child.stdin.write(oversizedChunk);
+        if (!canContinue) {
+          await Promise.race([new Promise((resolve) => child.stdin.once("drain", resolve)), exitPromise]);
+        }
+      } catch {
+        return;
+      }
+    }
+    if (!closed && !child.stdin.destroyed) child.stdin.end();
+  })();
+
+  const exitCode = await exitPromise;
+  await writeUntilRejectedOrClosed;
+
+  assert.equal(exitCode, 2);
+  const parsed = JSON.parse(stdout.trim() || "{}") as { error?: { code: string; details?: { limitBytes?: number } } };
+  assert.equal(parsed.error?.code, "INPUT_TOO_LARGE");
+  assert.equal(parsed.error?.details?.limitBytes, 1_048_576);
 });
 
 test("template list on a repository without semantic templates includes a discovery hint", async () => {
