@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { GhTransportOutputLimitError, GhTransportTimeoutError, ProcessGhTransport } from "./index.js";
 
@@ -134,6 +137,24 @@ test("rejects non-positive and non-finite timeoutMs instead of arming an unbound
       transport.run(["-e", "process.exit(0);"], { timeoutMs: invalidTimeoutMs }),
       (error: unknown) => error instanceof RangeError,
     );
+  }
+});
+
+test("rejects invalid timeoutMs before spawning any child process, including for mutation-shaped commands", async () => {
+  const markerPath = path.join(os.tmpdir(), `gh-inari-transport-spawn-marker-${process.pid}-${Date.now()}`);
+  const markerScript = `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'spawned');`;
+  const transport = new ProcessGhTransport(process.execPath);
+
+  try {
+    for (const invalidTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(
+        transport.run(["-e", markerScript, "--", "issue", "create", "--title", "x"], { timeoutMs: invalidTimeoutMs }),
+        (error: unknown) => error instanceof RangeError,
+      );
+      assert.equal(existsSync(markerPath), false, "no child process must be spawned for an invalid timeoutMs");
+    }
+  } finally {
+    if (existsSync(markerPath)) rmSync(markerPath);
   }
 });
 
