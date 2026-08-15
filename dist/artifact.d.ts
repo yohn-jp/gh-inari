@@ -51,7 +51,7 @@ export interface PreparedPullRequestArtifact {
     readonly artifact: ValidatedRenderedPullRequestArtifact;
 }
 export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable" | "ambiguous";
-export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE";
+export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE" | "EXISTING_TEMPLATE_COMPILE_FAILED";
 export interface ExistingArtifactDiagnostic {
     readonly code: ExistingArtifactDiagnosticCode;
     readonly path: string;

@@ -199,25 +199,47 @@ export async function compileRepositoryGovernedContract(
   );
 }
 
+/** One repository-native template's compilation outcome: either a usable contract or a bounded diagnostic. */
+export type CompiledTemplateOutcome =
+  | { readonly status: "compiled"; readonly contract: CanonicalContract }
+  | { readonly status: "failed"; readonly path: string; readonly message: string };
+
 /**
  * Compile every supported native template from the target repository's
  * trusted default-branch governance. Read commands use this candidate set to
  * identify an existing artifact without inventing a second template grammar.
+ *
+ * A template that fails to compile does not abort its siblings: it is
+ * reported as a bounded "failed" outcome so an unrelated malformed template
+ * cannot make every existing-artifact read in the repository fail. Callers
+ * that need fail-closed behavior for a single selected template should use
+ * compileRepositoryGovernedContract instead.
  */
 export async function compileRepositoryGovernedContracts(
   adapter: GitHubAdapter,
   domain: GovernedArtifactDomain,
-): Promise<readonly CanonicalContract[]> {
+): Promise<readonly CompiledTemplateOutcome[]> {
   const source = await readRepositoryGovernanceSource(adapter);
   const semanticTemplates = source.semanticTemplates.filter(
     (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
   );
   if (semanticTemplates.length > 0) {
-    const contracts: CanonicalContract[] = [];
+    const outcomes: CompiledTemplateOutcome[] = [];
     for (const identity of semanticTemplates) {
-      contracts.push(await compileRepositorySemanticContractFromSource(adapter, source, identity));
+      try {
+        outcomes.push({
+          status: "compiled",
+          contract: await compileRepositorySemanticContractFromSource(adapter, source, identity),
+        });
+      } catch (error: unknown) {
+        outcomes.push({
+          status: "failed",
+          path: identity.sourcePath,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
-    return contracts;
+    return outcomes;
   }
   const templates =
     domain === "issue"
@@ -225,13 +247,28 @@ export async function compileRepositoryGovernedContracts(
       : source.discovery.pullRequestTemplates;
   if (templates.length === 0) throw new TemplateNotFoundError(undefined, templates);
   const policySourceLoader = createRepositoryPolicySourceLoader(adapter, source);
-  const contracts: CanonicalContract[] = [];
+  const outcomes: CompiledTemplateOutcome[] = [];
   for (const template of templates) {
-    contracts.push(
-      await compileRepositoryGovernedContractFromSource(adapter, source, domain, template, policySourceLoader),
-    );
+    try {
+      outcomes.push({
+        status: "compiled",
+        contract: await compileRepositoryGovernedContractFromSource(
+          adapter,
+          source,
+          domain,
+          template,
+          policySourceLoader,
+        ),
+      });
+    } catch (error: unknown) {
+      outcomes.push({
+        status: "failed",
+        path: template.path,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
-  return contracts;
+  return outcomes;
 }
 
 async function compileRepositoryGovernedContractFromSource(

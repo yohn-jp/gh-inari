@@ -552,9 +552,17 @@ async function readExistingArtifact(domain, number, parsed, root, dependencies) 
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
     await adapter.resolveRepositoryContext();
     const selector = templateSelector(parsed, undefined);
-    const contracts = selector === undefined
-        ? await compileRepositoryGovernedContracts(adapter, domain)
-        : [await compileRepositoryGovernedContract(adapter, domain, selector)];
+    let contracts;
+    let failedTemplates;
+    if (selector === undefined) {
+        const outcomes = await compileRepositoryGovernedContracts(adapter, domain);
+        contracts = outcomes.filter((outcome) => outcome.status === "compiled").map((outcome) => outcome.contract);
+        failedTemplates = outcomes.filter((outcome) => outcome.status === "failed");
+    }
+    else {
+        contracts = [await compileRepositoryGovernedContract(adapter, domain, selector)];
+        failedTemplates = [];
+    }
     const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
     const candidates = contracts.map((contract) => ({
         contract,
@@ -563,7 +571,34 @@ async function readExistingArtifact(domain, number, parsed, root, dependencies) 
             : validateExistingPullRequestArtifact(contract, remote.body),
     }));
     const selected = selectExistingArtifactCandidate(candidates);
-    return { remote, contract: selected.contract, result: selected.result };
+    if (selected.contract !== undefined || failedTemplates.length === 0) {
+        return { remote, contract: selected.contract, result: selected.result };
+    }
+    // No compiled template matched, and at least one sibling template failed to
+    // compile: fail closed, since the malformed template could be the one that
+    // actually owns this artifact. Surface it as a bounded diagnostic rather
+    // than an opaque compile error.
+    const compileDiagnostics = failedTemplates.map((failed) => ({
+        code: "EXISTING_TEMPLATE_COMPILE_FAILED",
+        path: failed.path,
+        message: `[${failed.path}] Template failed to compile: ${failed.message}`,
+    }));
+    // selected.contract is undefined here, so selectExistingArtifactCandidate resolved this
+    // as an unmatched candidate set: its violations are always ExistingArtifactDiagnostic[].
+    const existingViolations = selected.result.violations;
+    return {
+        remote,
+        result: {
+            valid: false,
+            classification: selected.result.classification,
+            parse: {
+                parsed: false,
+                values: {},
+                diagnostics: [...selected.result.parse.diagnostics, ...compileDiagnostics],
+            },
+            violations: [...existingViolations, ...compileDiagnostics],
+        },
+    };
 }
 function createAdapter(dependencies, root, repository) {
     const factory = dependencies.createAdapter ?? ((options) => new GitHubAdapter(options));

@@ -1058,6 +1058,83 @@ test("issue get auto-selects the matching governed Issue Form and omits raw Mark
   }
 });
 
+test("issue get succeeds for a valid-template issue even when an unrelated sibling Issue Form is malformed", async () => {
+  const MALFORMED_ISSUE_TEMPLATE = "name: [this is not valid\n  yaml: at all: :::\n";
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [
+        { path: ".github/ISSUE_TEMPLATE/architecture.yml", sha: "architecture-sha", source: MALFORMED_ISSUE_TEMPLATE },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
+      ],
+      {
+        number: 21,
+        title: "feat: canonical retrieval",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/21",
+        labels: [{ name: "enhancement" }],
+        assignees: [{ login: "octocat" }],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/tmp/stale-local-copy",
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.valid, true);
+    assert.equal(output.classification, "valid");
+    assert.equal((output.template as Record<string, unknown>).path, ".github/ISSUE_TEMPLATE/feature.yml");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("issue get fails closed with a bounded diagnostic when every candidate Issue Form fails to compile", async () => {
+  const MALFORMED_ISSUE_TEMPLATE = "name: [this is not valid\n  yaml: at all: :::\n";
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/architecture.yml", sha: "architecture-sha", source: MALFORMED_ISSUE_TEMPLATE }],
+      {
+        number: 21,
+        title: "feat: canonical retrieval",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/21",
+        labels: [{ name: "enhancement" }],
+        assignees: [{ login: "octocat" }],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/tmp/stale-local-copy",
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.valid, false);
+    const diagnostics = output.diagnostics as readonly { readonly code: string; readonly path: string }[];
+    assert.ok(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "EXISTING_TEMPLATE_COMPILE_FAILED" &&
+          diagnostic.path === ".github/ISSUE_TEMPLATE/architecture.yml",
+      ),
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("pr get returns canonical fields and minimal pull request metadata", async () => {
   const transport = new CliStubTransport(
     remoteArtifactResponses(
