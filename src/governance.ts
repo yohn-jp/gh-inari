@@ -24,6 +24,15 @@ import {
 import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
 import {
+  compileSemanticTemplate,
+  compileSemanticTemplateSource,
+  discoverSemanticTemplates,
+  readSemanticTemplate,
+  selectSemanticTemplate,
+  normalizeSemanticTemplate,
+  type SemanticTemplateIdentity,
+} from "./semantic-template.js";
+import {
   discoverTemplates,
   selectIssueTemplate,
   selectPullRequestTemplate,
@@ -100,8 +109,19 @@ export async function compileLocalGovernedContract(
   policyPath?: string | boolean,
 ): Promise<CanonicalContract> {
   const discovery = await discoverTemplates(root);
+  const semanticTemplates = await discoverSemanticTemplates(root);
+  const semanticCandidates = semanticTemplates.filter(
+    (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
+  );
   let contract: CanonicalContract;
-  if (domain === "issue") {
+  if (semanticCandidates.length > 0) {
+    const semanticIdentity = selectSemanticTemplate(
+      semanticTemplates,
+      domain === "issue" ? "issue" : "pull_request",
+      selector,
+    );
+    contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, semanticIdentity));
+  } else if (domain === "issue") {
     contract = await compileIssueFormTemplate(discovery, selector);
   } else {
     contract = await compilePullRequestTemplate(root, selector);
@@ -117,6 +137,14 @@ export async function compileLocalGovernedContract(
 
 /** Compile every repository-native Issue Form with the shared compiler. */
 export async function compileLocalIssueFormContracts(root: string): Promise<readonly CanonicalContract[]> {
+  const semanticTemplates = (await discoverSemanticTemplates(root)).filter((template) => template.kind === "issue");
+  if (semanticTemplates.length > 0) {
+    return Promise.all(
+      semanticTemplates.map(async (identity) =>
+        compileSemanticTemplate(root, await readSemanticTemplate(root, identity)),
+      ),
+    );
+  }
   const discovery = await discoverTemplates(root);
   return Promise.all(discovery.issueTemplates.map((template) => compileIssueFormTemplate(discovery, template.id)));
 }
@@ -148,6 +176,17 @@ export async function compileRepositoryGovernedContract(
   selector?: string | TemplateSelector,
 ): Promise<CanonicalContract> {
   const source = await readRepositoryGovernanceSource(adapter);
+  const semanticCandidates = source.semanticTemplates.filter(
+    (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
+  );
+  if (semanticCandidates.length > 0) {
+    const semanticIdentity = selectSemanticTemplate(
+      source.semanticTemplates,
+      domain === "issue" ? "issue" : "pull_request",
+      selector,
+    );
+    return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity);
+  }
   const { discovery } = source;
   const selectedTemplate =
     domain === "issue" ? selectIssueTemplate(discovery, selector) : selectPullRequestTemplate(discovery, selector);
@@ -170,6 +209,16 @@ export async function compileRepositoryGovernedContracts(
   domain: GovernedArtifactDomain,
 ): Promise<readonly CanonicalContract[]> {
   const source = await readRepositoryGovernanceSource(adapter);
+  const semanticTemplates = source.semanticTemplates.filter(
+    (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
+  );
+  if (semanticTemplates.length > 0) {
+    const contracts: CanonicalContract[] = [];
+    for (const identity of semanticTemplates) {
+      contracts.push(await compileRepositorySemanticContractFromSource(adapter, source, identity));
+    }
+    return contracts;
+  }
   const templates =
     domain === "issue"
       ? source.discovery.issueTemplates.filter((template) => template.type === "issue-form")
@@ -227,6 +276,57 @@ async function compileRepositoryGovernedContractFromSource(
       ref,
       treeSha: source.treeSha,
       template: sourceIdentity(templateEntry, ref, templateSource),
+      ...(policySource === undefined ? {} : { policy: policySource }),
+    },
+  };
+  assertCanonicalContract(bound);
+  return bound;
+}
+
+async function compileRepositorySemanticContractFromSource(
+  adapter: GitHubAdapter,
+  source: RepositoryGovernanceSource,
+  identity: SemanticTemplateIdentity,
+): Promise<CanonicalContract> {
+  const { context, ref, tree, discovery } = source;
+  const sourceEntry = findBlob(tree, identity.sourcePath, context, ref);
+  const serialized = await readGovernedValue("repository.governance.blob", context, ref, () =>
+    adapter.getRepositoryBlob(sourceEntry.sha),
+  );
+  let semanticSource;
+  try {
+    semanticSource = normalizeSemanticTemplate(JSON.parse(serialized) as unknown, identity.sourcePath);
+  } catch (error: unknown) {
+    throw invalidSource(
+      context,
+      identity.sourcePath,
+      error instanceof Error ? error.message : "semantic source is invalid",
+    );
+  }
+  let contract = compileSemanticTemplateSource(semanticSource, identity.generatedPath);
+  let policySource: ContractProvenanceSource | undefined;
+  if (semanticSource.kind === "pull_request") {
+    const repositoryPolicy = await createRepositoryPolicySourceLoader(adapter, source)();
+    if (repositoryPolicy !== undefined) {
+      contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
+        templateIdentities: discovery.pullRequestTemplates,
+      });
+      policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
+    }
+  }
+  const bound: CanonicalContract = {
+    ...contract,
+    provenance: {
+      authority: "repository-default-branch",
+      repository: {
+        host: context.hostname,
+        owner: context.owner,
+        name: context.name,
+        nameWithOwner: context.nameWithOwner,
+      },
+      ref,
+      treeSha: source.treeSha,
+      template: sourceIdentity(sourceEntry, ref, serialized),
       ...(policySource === undefined ? {} : { policy: policySource }),
     },
   };
@@ -379,6 +479,7 @@ interface RepositoryGovernanceSource {
   readonly treeSha: string;
   readonly tree: readonly RepositoryTreeEntry[];
   readonly discovery: TemplateDiscoveryResult;
+  readonly semanticTemplates: readonly SemanticTemplateIdentity[];
 }
 
 async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<RepositoryGovernanceSource> {
@@ -389,7 +490,53 @@ async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<R
   const { sha: treeSha, entries: tree } = await readGovernedValue("repository.governance.tree", context, ref, () =>
     adapter.getRepositoryTree(ref),
   );
-  return { context, ref, treeSha, tree, discovery: createRemoteDiscovery(context, tree) };
+  return {
+    context,
+    ref,
+    treeSha,
+    tree,
+    discovery: createRemoteDiscovery(context, tree),
+    semanticTemplates: createRemoteSemanticIdentities(tree),
+  };
+}
+
+function createRemoteSemanticIdentities(tree: readonly RepositoryTreeEntry[]): readonly SemanticTemplateIdentity[] {
+  const identities: SemanticTemplateIdentity[] = [];
+  for (const entry of tree) {
+    if (entry.type !== "blob" || !entry.path.endsWith(".json")) continue;
+    if (entry.path.startsWith(".github/inari/issues/") && entry.path.split("/").length === 4) {
+      const id = entry.path.slice(".github/inari/issues/".length, -".json".length);
+      if (id.length > 0) {
+        identities.push({
+          id,
+          kind: "issue",
+          name: id,
+          sourcePath: entry.path,
+          generatedPath: `.github/ISSUE_TEMPLATE/${id}.yml`,
+        });
+      }
+    } else if (entry.path === ".github/inari/pull-request.json") {
+      identities.push({
+        id: "pull-request",
+        kind: "pull_request",
+        name: "Pull request",
+        sourcePath: entry.path,
+        generatedPath: ".github/PULL_REQUEST_TEMPLATE.md",
+      });
+    } else if (entry.path.startsWith(".github/inari/pull-requests/") && entry.path.split("/").length === 4) {
+      const id = entry.path.slice(".github/inari/pull-requests/".length, -".json".length);
+      if (id.length > 0) {
+        identities.push({
+          id,
+          kind: "pull_request",
+          name: id,
+          sourcePath: entry.path,
+          generatedPath: `.github/PULL_REQUEST_TEMPLATE/${id}.md`,
+        });
+      }
+    }
+  }
+  return identities.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath, "en-US"));
 }
 
 function createRemoteDiscovery(

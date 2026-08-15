@@ -2,6 +2,8 @@
 
 Inari (`gh-inari`) is a GitHub CLI extension focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation.
 
+Migrated repositories can author semantic template contracts under `.github/inari/` and regenerate the committed GitHub-native projections with `gh inari template sync`; see [Semantic template authority](docs/SEMANTIC_TEMPLATES.md).
+
 ## Install
 
 ```bash

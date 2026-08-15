@@ -41,5 +41,8 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
         run: node scripts/validate-branch-name.mjs --branch "$HEAD_REF"
 
+      - name: Check semantic template projections
+        run: pnpm run templates:check
+
       - name: Validate PR contract
         run: node --import tsx scripts/validate-pr.mjs --event "$GITHUB_EVENT_PATH"

@@ -314,7 +314,10 @@ function validatePolicyTemplateBindings(overlay, contract, templateIdentities) {
     });
 }
 function identityMatchesContract(identity, contract) {
-    return identity.path === contract.templateIdentity.path && identity.name === contract.templateIdentity.name;
+    // A semantic source may provide the display name while the generated native
+    // identity derives its name from the committed path. The repository path is
+    // the stable authority boundary; it must remain an exact match.
+    return identity.path === contract.templateIdentity.path;
 }
 function assertTemplateMatch(selector, contract, templateIdentities, path = "$.template") {
     if (selector === undefined)

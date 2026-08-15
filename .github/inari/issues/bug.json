@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "kind": "issue",
+  "id": "bug",
+  "name": "Bug",
+  "description": "Reproducible defect",
+  "title": "fix: ",
+  "sections": [
+    {
+      "id": "summary",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Summary",
+      "description": "Concise defect description",
+      "required": true
+    },
+    {
+      "id": "reproduction",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Reproduction",
+      "description": "Minimal steps, observed result, expected result, and environment",
+      "required": true
+    },
+    {
+      "id": "acceptance",
+      "type": "textarea",
+      "element": "textarea",
+      "label": "Acceptance criteria",
+      "description": "Completion criteria",
+      "defaultValue": "- [ ] ",
+      "required": true
+    }
+  ]
+}
