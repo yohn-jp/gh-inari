@@ -41,7 +41,9 @@
     "gh-inari",
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    ".codex-plugin",
+    "skills"
   ],
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
