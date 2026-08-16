@@ -181,9 +181,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     parsed.positionals[0] === "diagnose" ||
     parsed.positionals[0] === "doctor";
   const versionRequested = parsed.options.version === true || parsed.positionals[0] === "version";
-  if (parsed.options.help === true || (parsed.positionals.length === 0 && !versionRequested && !diagnosticRequested)) {
-    printHelp();
-    return parsed.positionals.length === 0 && parsed.options.help !== true ? EXIT_USAGE : 0;
+  const helpRequested = parsed.options.help !== undefined && parsed.options.help !== false;
+  if (helpRequested || (parsed.positionals.length === 0 && !versionRequested && !diagnosticRequested)) {
+    printHelpFor(parsed.positionals, parsed.options.help);
+    return parsed.positionals.length === 0 && !helpRequested ? EXIT_USAGE : 0;
   }
   const json = parsed.options.json === true;
   try {
@@ -960,10 +961,14 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
         options[key] = true;
         continue;
       }
-      const booleanValue = token.slice(equalIndex + 1);
-      if (booleanValue !== "true" && booleanValue !== "false")
+      const rawValue = token.slice(equalIndex + 1);
+      if (key === "help" && rawValue === "full") {
+        options[key] = rawValue;
+        continue;
+      }
+      if (rawValue !== "true" && rawValue !== "false")
         throw new CliError("INVALID_OPTION", `Option --${rawKey} must be true or false.`);
-      options[key] = booleanValue === "true";
+      options[key] = rawValue === "true";
       continue;
     }
     if (!VALUE_OPTIONS.has(key)) throw new CliError("INVALID_OPTION", `Unknown option --${rawKey}.`);
@@ -1033,19 +1038,25 @@ function classifyExitCode(error: unknown): number {
   return EXIT_INTERNAL;
 }
 
-/** True when argv targets a command gh-inari implements; false means it must fall back to the real `gh` binary. */
+/**
+ * True when argv targets a command gh-inari implements; false means it must fall back to the real `gh` binary.
+ * `--help` on an unowned domain or subcommand (e.g. `repo view --help`, `pr list --help`) is not claimed here so
+ * that help delegates to real `gh` the same way execution does -- Inari does not reproduce upstream help text.
+ */
 function isOwnedInvocation(argv: readonly string[]): boolean {
   const first = argv.find((token) => !token.startsWith("--"));
   if (first === undefined) return true;
   if (first === "diagnose" || first === "doctor" || first === "version" || first === "help") return true;
-  if (argv.includes("--help") || argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor"))
-    return true;
+  if (argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor")) return true;
+  const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
   if (first === "template") {
     const second = argv.slice(argv.indexOf(first) + 1).find((token) => !token.startsWith("--"));
+    if (helpRequested && second === undefined) return true;
     return second !== undefined && KNOWN_TEMPLATE_COMMANDS.has(second);
   }
   if (first === "issue" || first === "pr") {
     const second = argv.slice(argv.indexOf(first) + 1).find((token) => !token.startsWith("--"));
+    if (helpRequested && second === undefined) return true;
     return second !== undefined && KNOWN_ARTIFACT_COMMANDS.has(second);
   }
   return false;
@@ -1109,8 +1120,180 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function printHelp(): void {
-  console.log(`Usage: gh-inari <command> [options]
+interface LeafHelp {
+  readonly usage: string;
+  readonly summary: string;
+  readonly example: string;
+}
+
+const TEMPLATE_LEAVES: Readonly<Record<string, LeafHelp>> = {
+  list: {
+    usage: "template list",
+    summary: "List discovered repository-native and semantic templates.",
+    example: "inari template list",
+  },
+  sync: {
+    usage: "template sync [--check]",
+    summary: "Regenerate native GitHub templates from semantic template contracts under .github/inari/.",
+    example: "inari template sync --check",
+  },
+  import: {
+    usage: "template import --from <native-template> [--to <semantic-file>]",
+    summary:
+      "Import a native GitHub template into a semantic template contract. Discovered semantic paths: " +
+      ".github/inari/issues/<id>.json, .github/inari/pull-request.json (single PR template), or " +
+      ".github/inari/pull-requests/<id>.json (multiple PR templates). Other --to paths write successfully " +
+      "but are never discovered.",
+    example: "inari template import --from .github/ISSUE_TEMPLATE/feature.yml",
+  },
+};
+
+function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHelp>> {
+  const noun = domain === "issue" ? "issue" : "pull request";
+  return {
+    schema: {
+      usage: `${domain} schema [template]`,
+      summary: `Print the semantic field schema for a ${noun} template.`,
+      example: `inari ${domain} schema feature --compact`,
+    },
+    validate: {
+      usage: `${domain} validate --template <template> --from <file.json>`,
+      summary:
+        `Validate local JSON input against a template's schema. ` +
+        `To validate an existing ${noun} instead, use \`${domain} validate <number> [--template <template>]\`.`,
+      example: `inari ${domain} validate --template feature --from ${domain}.json`,
+    },
+    render: {
+      usage: `${domain} render --template <template> --from <file.json>`,
+      summary: `Render validated JSON input into canonical Markdown without mutating GitHub.`,
+      example: `inari ${domain} render --template feature --from ${domain}.json`,
+    },
+    create: {
+      usage: `${domain} create --template <template> --from <file.json>`,
+      summary: `Validate, render, and create a governed ${noun} on GitHub.`,
+      example: `inari ${domain} create --template feature --from ${domain}.json`,
+    },
+    explain: {
+      usage: `${domain} explain <number> [--template <template>]`,
+      summary: `Explain why an existing ${noun} does or does not satisfy its governed contract.`,
+      example: `inari ${domain} explain 123`,
+    },
+    get: {
+      usage: `${domain} get <number> [--template <template>] --json`,
+      summary: `Project an existing ${noun} as its canonical semantic JSON.`,
+      example: `inari ${domain} get 123 --json`,
+    },
+    check: {
+      usage: `${domain} check <number> [--template <template>]`,
+      summary: `Check whether an existing ${noun} is normalizable without mutating GitHub.`,
+      example: `inari ${domain} check 123`,
+    },
+    edit: {
+      usage: `${domain} edit <number> --from <file.json> [--dry-run]`,
+      summary: `Apply an explicit semantic patch to an existing ${noun}.`,
+      example: `inari ${domain} edit 123 --from patch.json --dry-run`,
+    },
+    normalize: {
+      usage: `${domain} normalize <number> [--dry-run]`,
+      summary: `Repair an existing ${noun}'s native projection while preserving its existing semantic values.`,
+      example: `inari ${domain} normalize 123 --dry-run`,
+    },
+    sync: {
+      usage: `${domain} sync <number> --from <file.json> [--dry-run]`,
+      summary: `Reconcile an existing ${noun} to a complete desired semantic state.`,
+      example: `inari ${domain} sync 123 --from desired.json --dry-run`,
+    },
+  };
+}
+
+const GLOBAL_OPTIONS = `  --from <path>       JSON input file, or - for stdin
+  --template <id>     Repository-native template id, path, or unique name
+  --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
+  --repository <r>    GitHub repository override; governed commands use its default-branch governance
+  --title <title>     Issue/PR title for create
+  --head <branch>     PR head branch for create
+  --base <branch>     PR base branch for create
+  --compact            Emit only semantic fields and constraints for schema
+  --check              Check generated native projections without writing
+  --dry-run            Show a bounded remediation diff without mutating GitHub
+  --draft             Create the PR as a draft
+  --maintainer-can-modify
+                      Allow maintainer edits on the PR
+  --json              Emit structured JSON output
+  --version           Print package version
+  --diagnose          Check the canonical gh extension and recovery path
+  --require-capability <id>
+                      Require a capability in --version/--diagnose checks
+  --minimum-version <v>
+                      Require a minimum semantic version in checks
+  --help              Print this help (--help=full for the complete reference)`;
+
+const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<Record<"issue" | "pr" | "template", string>> = {
+  issue: "issue list",
+  pr: "pr checks",
+  template: "template view",
+};
+
+/** Dispatches to root, domain, or leaf help by command depth; positionals are pre-parse-error tokens, so any --help value routes here. */
+function printHelpFor(positionals: readonly string[], helpValue: string | boolean | undefined): void {
+  if (helpValue === "full") return printFullHelp();
+  const [domain, command] = positionals;
+  if (domain === "issue" || domain === "pr") {
+    if (command !== undefined && command in artifactLeaves(domain))
+      return printLeafHelp(artifactLeaves(domain)[command]!);
+    return printDomainHelp(domain, artifactLeaves(domain));
+  }
+  if (domain === "template") {
+    if (command !== undefined && command in TEMPLATE_LEAVES) return printLeafHelp(TEMPLATE_LEAVES[command]!);
+    return printDomainHelp("template", TEMPLATE_LEAVES);
+  }
+  printRootHelp();
+}
+
+function printRootHelp(): void {
+  console.log(`Usage: inari <command> [...]
+
+A governed GitHub CLI. Issue and PR commands under governed templates run
+through Inari; every other command passes through to the real gh binary
+with the original argv and exit status.
+
+Domains:
+  issue      Governed Issue schema, validation, rendering, and lifecycle
+  pr         Governed pull request schema, validation, rendering, and lifecycle
+  template   Semantic template authoring and native template sync
+
+All other commands (e.g. repo, auth, pr list, issue view) are passed through to gh.
+
+Run \`inari <domain> --help\` for that domain's operations.
+Run \`inari --help=full\` for the complete command and option reference.
+Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime checks.`);
+}
+
+function printDomainHelp(domain: "issue" | "pr" | "template", leaves: Readonly<Record<string, LeafHelp>>): void {
+  const lines = Object.values(leaves).map((leaf) => `  ${leaf.usage}`);
+  console.log(`Usage: inari ${domain} <command> [...]
+
+Operations:
+${lines.join("\n")}
+
+Commands outside this list under "${domain}" (e.g. \`${DOMAIN_PASSTHROUGH_EXAMPLE[domain]}\`) pass through to gh.
+
+Run \`inari ${domain} <command> --help\` for that command's inputs and an example.`);
+}
+
+function printLeafHelp(leaf: LeafHelp): void {
+  console.log(`Usage: inari ${leaf.usage}
+
+${leaf.summary}
+
+Example:
+  ${leaf.example}
+
+Run \`inari --help=full\` for the complete option reference.`);
+}
+
+function printFullHelp(): void {
+  console.log(`Usage: inari <command> [options]
 
 Commands:
   template list
@@ -1144,31 +1327,14 @@ Commands:
   pr sync <number> --from <file.json> [--dry-run]
 
 Options:
-  --from <path>       JSON input file, or - for stdin
-  --template <id>     Repository-native template id, path, or unique name
-  --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
-  --repository <r>    GitHub repository override; governed commands use its default-branch governance
-  --title <title>     Issue/PR title for create
-  --head <branch>     PR head branch for create
-  --base <branch>     PR base branch for create
-  --compact            Emit only semantic fields and constraints for schema
-  --check              Check generated native projections without writing
-  --dry-run            Show a bounded remediation diff without mutating GitHub
-  --draft             Create the PR as a draft
-  --maintainer-can-modify
-                      Allow maintainer edits on the PR
-  --json              Emit structured JSON output
-  --version           Print package version
-  --diagnose          Check the canonical gh extension and recovery path
-  --require-capability <id>
-                      Require a capability in --version/--diagnose checks
-  --minimum-version <v>
-                      Require a minimum semantic version in checks
-  --help              Print this help
+${GLOBAL_OPTIONS}
 
 Create always validates and renders before invoking gh. Schema, validate, render, check, and --dry-run remediation never mutate GitHub.
 Edit applies an explicit semantic patch; normalize preserves existing semantic values; sync reconciles a complete desired semantic state.
 
-Canonical installation: gh extension install yohn-jp/gh-inari
-PATH-independent fallback: npx --yes gh-inari`);
+All other commands pass through to the real gh binary unchanged.
+
+Canonical install: npm install --global gh-inari
+PATH-independent fallback: npx --yes gh-inari
+Extension compatibility path: gh extension install yohn-jp/gh-inari`);
 }

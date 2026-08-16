@@ -231,17 +231,63 @@ function remoteArtifactResponses(
   ];
 }
 
-test("--help exits 0 and prints usage", async () => {
+async function captureHelp(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli(["--help"]);
-    assert.equal(exitCode, 0);
-    assert.match(lines.join("\n"), /Usage:/);
+    const exitCode = await runCli([...argv]);
+    return { exitCode, output: lines.join("\n") };
   } finally {
     console.log = originalLog;
   }
+}
+
+test("--help exits 0 and prints root usage naming the governed domains", async () => {
+  const { exitCode, output } = await captureHelp(["--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari <command>/);
+  assert.match(output, /issue/);
+  assert.match(output, /\bpr\b/);
+  assert.match(output, /template/);
+  assert.match(output, /passed through to gh/);
+});
+
+test("no arguments prints root usage matching --help", async () => {
+  const { exitCode, output } = await captureHelp([]);
+  assert.equal(exitCode, 1);
+  assert.match(output, /Usage: inari <command>/);
+});
+
+test("issue --help prints only issue operations, not pr's", async () => {
+  const { exitCode, output } = await captureHelp(["issue", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari issue <command>/);
+  assert.match(output, /issue create/);
+  assert.doesNotMatch(output, /pr create/);
+});
+
+test("issue create --help prints that leaf's usage and an example, not the full command tree", async () => {
+  const { exitCode, output } = await captureHelp(["issue", "create", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari issue create --template/);
+  assert.match(output, /Example:/);
+  assert.doesNotMatch(output, /pr create/);
+  assert.doesNotMatch(output, /issue normalize/);
+});
+
+test("template import --help prints that leaf's usage", async () => {
+  const { exitCode, output } = await captureHelp(["template", "import", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari template import --from/);
+});
+
+test("--help=full prints the complete command and option reference", async () => {
+  const { exitCode, output } = await captureHelp(["--help=full"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /issue normalize <number>/);
+  assert.match(output, /pr normalize <number>/);
+  assert.match(output, /--require-capability/);
 });
 
 test("no arguments exits 1", async () => {
@@ -307,6 +353,30 @@ test("an unrecognized issue/pr subcommand falls back to the real gh binary and p
   });
   assert.equal(exitCode, 7);
   assert.deepEqual(calls, [["pr", "list", "--state", "open"]]);
+});
+
+test("--help on an unowned domain falls back to real gh --help instead of printing Inari's own help", async () => {
+  const calls: (readonly string[])[] = [];
+  const exitCode = await runCli(["repo", "view", "--help"], {
+    runGhFallback: (argv) => {
+      calls.push(argv);
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, [["repo", "view", "--help"]]);
+});
+
+test("--help on an unowned issue/pr subcommand falls back to real gh --help", async () => {
+  const calls: (readonly string[])[] = [];
+  const exitCode = await runCli(["pr", "list", "--help"], {
+    runGhFallback: (argv) => {
+      calls.push(argv);
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, [["pr", "list", "--help"]]);
 });
 
 test("invalid issue/pr numbers on get and explain are classified as INVALID_ARTIFACT_NUMBER, not UNKNOWN_COMMAND", async () => {
