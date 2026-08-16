@@ -4,7 +4,8 @@
   "description": "A deterministic GitHub CLI extension for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
   "type": "module",
   "bin": {
-    "gh-inari": "dist/index.js"
+    "gh-inari": "dist/index.js",
+    "inari": "dist/index.js"
   },
   "exports": {
     ".": {
