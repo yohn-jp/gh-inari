@@ -2022,6 +2022,125 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
   }
 });
 
+test("issue sync with an explicit --template replaces a current body that does not parse under any repository-native template", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "desired.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: {
+        problem: "A reproducible problem",
+        proposal: "A deterministic proposal",
+        non_goals: "No unrelated scope",
+        acceptance: "- [ ] The behavior is covered",
+      },
+      title: "feat: remediation",
+    }),
+    "utf8",
+  );
+  const wrongTemplateBody = "### Summary\n\nFree-form body never created from a repository template\n";
+
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 97,
+        title: "feat: pre-existing",
+        body: wrongTemplateBody,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/97",
+        labels: [],
+        assignees: [],
+      },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+    command(
+      JSON.stringify({
+        number: 97,
+        title: "feat: pre-existing",
+        body: wrongTemplateBody,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/97",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 97,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/97",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["issue", "sync", "97", "--template", "feature", "--from", inputPath, "--repository", "acme/inari"],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.mutation, "applied");
+    assert.ok(transport.calls.some((args) => args.includes("PATCH")));
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue sync without an explicit --template still refuses to replace a current body that does not parse under any repository-native template", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "desired.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: {
+        problem: "A reproducible problem",
+        proposal: "A deterministic proposal",
+        non_goals: "No unrelated scope",
+        acceptance: "- [ ] The behavior is covered",
+      },
+      title: "feat: remediation",
+    }),
+    "utf8",
+  );
+
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 97,
+        title: "feat: pre-existing",
+        body: "### Summary\n\nFree-form body never created from a repository template\n",
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/97",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "sync", "97", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2, lines[0]);
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("edit surfaces governance-generation reconciliation instead of hiding a crossed-generation success", async () => {
   const transport = new CliStubTransport([
     ...remoteArtifactResponses(

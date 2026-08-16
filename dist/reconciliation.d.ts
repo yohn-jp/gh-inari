@@ -57,7 +57,16 @@ export declare function currentArtifactInput(domain: GovernedArtifactDomain, rea
 export declare function applySemanticPatch(domain: GovernedArtifactDomain, read: ExistingArtifactRead, patch: ArtifactInputDocument): ArtifactInputDocument;
 /** Validate and prepare the complete desired state through the existing artifact boundary. */
 export declare function prepareRemediationArtifact(domain: GovernedArtifactDomain, contract: CanonicalContract, input: ArtifactInputDocument): PreparedRemediationArtifact;
-/** Ensure a declarative sync only names fields in the authoritative contract. */
+/**
+ * Ensure a declarative sync only names fields in the authoritative contract.
+ *
+ * Sync declares a complete desired state, so unlike `edit` it does not need the
+ * current body to parse: an unparseable/non-matching current body is treated as
+ * an empty current state and fully replaced. `read.contract` is only present
+ * here when the caller named an explicit `--template` (see
+ * `readGovernedExistingArtifact`); auto-discovery still fails closed on an
+ * unparseable current body.
+ */
 export declare function prepareSyncInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: ArtifactInputDocument): ArtifactInputDocument;
 /** Compare the current semantic/rendered artifact with a prepared canonical projection. */
 export declare function diffArtifact(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: PreparedRemediationArtifact): SemanticArtifactDiff;
