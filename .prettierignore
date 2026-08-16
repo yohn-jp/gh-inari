@@ -1,2 +1,7 @@
 pnpm-lock.yaml
 dist/
+
+# Organization-managed governance sources and synchronized tooling retain
+# their upstream canonical formatting.
+.github/inari/
+scripts/validate-action-pins.mjs
