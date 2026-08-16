@@ -722,7 +722,8 @@ async function runExistingValidation(
     number,
     url: remote.url,
     diagnostics: projection.diagnostics,
-    violations: projection.violations,
+    ...(projection.violations === undefined ? {} : { violations: projection.violations }),
+    ...(projection.attemptedTemplates === undefined ? {} : { attemptedTemplates: projection.attemptedTemplates }),
   };
   console.log(JSON.stringify(output));
   return result.valid ? 0 : EXIT_VALIDATION;
@@ -756,7 +757,8 @@ async function runExistingGet(
     metadata: existingArtifactMetadata(domain, remote),
     ...(projection.fields === undefined ? {} : { fields: projection.fields }),
     diagnostics: projection.diagnostics,
-    violations: projection.violations,
+    ...(projection.violations === undefined ? {} : { violations: projection.violations }),
+    ...(projection.attemptedTemplates === undefined ? {} : { attemptedTemplates: projection.attemptedTemplates }),
   };
   console.log(JSON.stringify(output));
   return result.valid ? 0 : EXIT_VALIDATION;
@@ -795,7 +797,10 @@ async function runExistingRemediation(
         valid: assessment.status === "valid-current",
         normalizable: assessment.normalizable,
         diagnostics: assessment.diagnostics,
-        violations: assessment.status === "non-canonical" ? assessment.diagnostics : read.result.violations,
+        ...(read.result.classification === "semantic" ? { violations: read.result.violations } : {}),
+        ...(read.result.attemptedTemplates === undefined
+          ? {}
+          : { attemptedTemplates: read.result.attemptedTemplates }),
       }),
     );
     return assessment.status === "valid-current" ? 0 : EXIT_VALIDATION;

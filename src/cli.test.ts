@@ -1616,6 +1616,48 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
   }
 });
 
+test("issue check on a multi-template wrong-template match emits diagnostics once and a compact attempted-templates summary", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "bug-sha", source: REMOTE_BUG_TEMPLATE },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
+      ],
+      {
+        number: 74,
+        title: "Existing artifact",
+        body: "### Other\n\nvalue\n",
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/74",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "74", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.classification, "wrong-template");
+    assert.equal(output.valid, false);
+    const diagnostics = output.diagnostics as readonly { code: string }[];
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]?.code, "EXISTING_WRONG_TEMPLATE");
+    assert.equal("violations" in output, false);
+    assert.deepEqual(output.attemptedTemplates, [
+      ".github/ISSUE_TEMPLATE/bug.yml",
+      ".github/ISSUE_TEMPLATE/feature.yml",
+    ]);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("issue edit performs the mutation, reaches the adapter, and reports reconciled governance", async () => {
   const transport = new CliStubTransport([
     ...remoteArtifactResponses(
