@@ -440,6 +440,44 @@ test("positive integer issue/pr numbers on get and explain still dispatch normal
   }
 });
 
+test("--repo and -R behave as aliases for --repository on governed commands", async () => {
+  const remoteResponse = () =>
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 21,
+        title: "feat: canonical retrieval",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/21",
+        labels: [{ name: "enhancement" }],
+        assignees: [{ login: "octocat" }],
+      },
+    );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const invocations: string[][] = [
+      ["issue", "get", "21", "--repository", "acme/inari", "--json"],
+      ["issue", "get", "21", "--repo", "acme/inari", "--json"],
+      ["issue", "get", "21", "-R", "acme/inari", "--json"],
+    ];
+    const outputs: unknown[] = [];
+    for (const argv of invocations) {
+      lines.length = 0;
+      const transport = new CliStubTransport(remoteResponse());
+      const exitCode = await runCli(argv, { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) });
+      assert.equal(exitCode, 0, `${argv.join(" ")} should exit 0`);
+      outputs.push(JSON.parse(lines[0] ?? "{}"));
+    }
+    assert.deepEqual(outputs[1], outputs[0]);
+    assert.deepEqual(outputs[2], outputs[0]);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("malformed JSON is a validation error without opaque cause details", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
   const inputPath = path.join(directory, "invalid.json");
