@@ -121,6 +121,8 @@ export interface ExistingArtifactValidationResult {
   readonly classification: ExistingArtifactClassification;
   readonly parse: ExistingArtifactParseResult;
   readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+  /** Template paths tried against a multi-candidate match that produced no single parse. */
+  readonly attemptedTemplates?: readonly string[];
 }
 
 export interface ExistingIssueReader {
@@ -300,7 +302,8 @@ export interface ExistingArtifactProjection {
   readonly classification: ExistingArtifactClassification;
   readonly fields?: Readonly<Record<string, unknown>>;
   readonly diagnostics: readonly ExistingArtifactDiagnostic[];
-  readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+  readonly violations?: readonly SemanticViolation[];
+  readonly attemptedTemplates?: readonly string[];
 }
 
 /** Project only validated semantic values; invalid artifacts never expose parsed fields. */
@@ -311,7 +314,8 @@ export function projectExistingArtifact(result: ExistingArtifactValidationResult
     classification: result.classification,
     ...(result.valid ? { fields: result.parse.values } : {}),
     diagnostics: result.parse.diagnostics,
-    violations: result.violations,
+    ...(result.classification === "semantic" ? { violations: result.violations as readonly SemanticViolation[] } : {}),
+    ...(result.attemptedTemplates === undefined ? {} : { attemptedTemplates: result.attemptedTemplates }),
   };
 }
 
@@ -341,24 +345,29 @@ export function selectExistingArtifactCandidate(
     };
   }
 
-  const diagnostics = candidates.flatMap((candidate) =>
-    candidate.result.parse.diagnostics.map((diagnostic) => ({
-      ...diagnostic,
-      path: `${candidate.contract.templateIdentity.path}${diagnostic.path}`,
-      message: `[${candidate.contract.templateIdentity.path}] ${diagnostic.message}`,
-    })),
-  );
+  const attemptedTemplates = candidates
+    .map((candidate) => candidate.contract.templateIdentity.path)
+    .sort(compareStrings);
   const classification = candidates.some((candidate) =>
     candidate.result.parse.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_WRONG_TEMPLATE"),
   )
     ? "wrong-template"
     : "unparseable";
+  const diagnostic: ExistingArtifactDiagnostic = {
+    code: classification === "wrong-template" ? "EXISTING_WRONG_TEMPLATE" : "EXISTING_UNPARSEABLE",
+    path: "$.template",
+    message:
+      classification === "wrong-template"
+        ? `Artifact structure does not match any repository-native template. Tried: ${attemptedTemplates.join(", ")}.`
+        : `Artifact could not be parsed against any repository-native template. Tried: ${attemptedTemplates.join(", ")}.`,
+  };
   return {
     result: {
       valid: false,
       classification,
-      parse: { parsed: false, values: {}, diagnostics },
-      violations: diagnostics,
+      parse: { parsed: false, values: {}, diagnostics: [diagnostic] },
+      violations: [diagnostic],
+      attemptedTemplates,
     },
   };
 }
