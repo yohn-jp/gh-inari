@@ -109,13 +109,12 @@ function main() {
     if (!fs.existsSync(installedManifestPath))
       fail(`installed package did not expose .codex-plugin/plugin.json at ${installedManifestPath}`);
     const installedManifest = JSON.parse(fs.readFileSync(installedManifestPath, "utf8"));
-    if (!Array.isArray(installedManifest.skills) || installedManifest.skills.length === 0)
+    if (typeof installedManifest.skills !== "string" || installedManifest.skills.length === 0)
       fail("installed .codex-plugin/plugin.json has no skills declared");
-    for (const skill of installedManifest.skills) {
-      const installedSkillFile = path.join(installedPackageDirectory, skill.path, "SKILL.md");
-      if (!fs.existsSync(installedSkillFile))
-        fail(`installed plugin skill "${skill.path}" does not resolve to a SKILL.md at ${installedSkillFile}`);
-    }
+    const skillPath = installedManifest.skills;
+    const installedSkillFile = path.join(installedPackageDirectory, skillPath, "SKILL.md");
+    if (!fs.existsSync(installedSkillFile))
+      fail(`installed plugin skill "${skillPath}" does not resolve to a SKILL.md at ${installedSkillFile}`);
 
     const binTargets = packageBinTargets(installedPackageDirectory);
     if (binTargets.length === 0) fail("package.json defines no bin entries to smoke test");

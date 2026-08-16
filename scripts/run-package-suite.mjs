@@ -140,35 +140,34 @@ export async function validateCodexPlugin(packageJson, packedFiles) {
       `.codex-plugin/plugin.json version "${manifest.version}" does not match package.json version "${packageJson.version}"`,
     );
   }
-  if (!Array.isArray(manifest.skills) || manifest.skills.length === 0) {
-    throw new Error('.codex-plugin/plugin.json "skills" must be a non-empty array');
+  if (typeof manifest.skills !== "string" || manifest.skills.length === 0) {
+    throw new Error('.codex-plugin/plugin.json "skills" must be a non-empty string path');
   }
 
   const { SKILL_SCENARIOS } = await import(path.join(repoRoot, "dist", "skill.js"));
 
-  for (const skill of manifest.skills) {
-    if (typeof skill.path !== "string" || skill.path.length === 0) {
-      throw new Error('.codex-plugin/plugin.json skill entry is missing a "path"');
-    }
-    const skillFile = path.join(repoRoot, skill.path, "SKILL.md");
-    if (!fs.existsSync(skillFile)) {
-      throw new Error(`Codex plugin skill path "${skill.path}" does not resolve to a SKILL.md`);
-    }
-    const skillPackedPath = path.relative(repoRoot, skillFile).split(path.sep).join("/");
-    if (!packedFiles.includes(skillPackedPath)) {
-      throw new Error(`"${skillPackedPath}" is declared by the plugin manifest but not packed in the tarball`);
-    }
+  const skillPath = manifest.skills;
+  const skillFile = path.join(repoRoot, skillPath, "SKILL.md");
+  if (!fs.existsSync(skillFile)) {
+    throw new Error(`Codex plugin skill path "${skillPath}" does not resolve to a SKILL.md`);
+  }
+  const skillPackedPath = path.relative(repoRoot, skillFile).split(path.sep).join("/");
+  if (!packedFiles.includes(skillPackedPath)) {
+    throw new Error(`"${skillPackedPath}" is declared by the plugin manifest but not packed in the tarball`);
+  }
 
-    const body = fs.readFileSync(skillFile, "utf8");
-    if (!body.includes("inari skill")) {
-      throw new Error(`${skill.path}/SKILL.md must route agents to \`inari skill\` instead of duplicating playbooks`);
-    }
-    for (const scenario of SKILL_SCENARIOS) {
-      if (body.includes(`\`inari skill ${scenario.id}\``)) {
-        throw new Error(
-          `${skill.path}/SKILL.md must not hard-code scenario "${scenario.id}"; route via \`inari skill\` only`,
-        );
-      }
+  const body = fs.readFileSync(skillFile, "utf8");
+  if (!body.includes("inari skill")) {
+    throw new Error(`${skillPath}/SKILL.md must route agents to \`inari skill\` instead of duplicating playbooks`);
+  }
+  for (const scenario of SKILL_SCENARIOS) {
+    // Match `inari skill <scenario-id>` regardless of Markdown formatting (backticks, code fences, plain text).
+    // Use word boundaries to avoid partial-word false matches.
+    const pattern = new RegExp(`\\binari\\s+skill\\s+${scenario.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    if (pattern.test(body)) {
+      throw new Error(
+        `${skillPath}/SKILL.md must not hard-code scenario "${scenario.id}"; route via \`inari skill\` only`,
+      );
     }
   }
 }

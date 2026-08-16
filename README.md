@@ -124,10 +124,10 @@ Inari uses the current `gh` authentication and repository context. It does not m
 The same published `gh-inari` package is also a valid Codex Plugin — no
 second install artifact is needed. Installing or unpacking `gh-inari` (any
 of the paths above) ships `.codex-plugin/plugin.json` and
-`skills/inari/SKILL.md` alongside the CLI. A Codex Plugin-aware agent
-discovers the plugin automatically once the package is present; nothing
-beyond the normal `npm install --global gh-inari` (or `npx`) step is
-required.
+`skills/inari/SKILL.md` alongside the CLI. Codex requires explicit
+marketplace registration and installation via Codex plugin commands to
+activate the skill; standard `npm install` alone does not automatically
+surface the plugin to Codex-aware agents.
 
 The Skill is deliberately thin: it identifies governed GitHub Issue/PR/
 template workflows as Inari-owned and routes agents to `inari skill` /
