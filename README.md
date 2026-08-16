@@ -129,6 +129,16 @@ marketplace registration and installation via Codex plugin commands to
 activate the skill; standard `npm install` alone does not automatically
 surface the plugin to Codex-aware agents.
 
+To discover and install it from this repository's marketplace:
+
+```bash
+codex plugin marketplace add .
+```
+
+In Codex, run `/plugins`, select the `gh-inari` marketplace, and install
+`inari`. Start a new Codex session after installation so the bundled Skill
+is available.
+
 The Skill is deliberately thin: it identifies governed GitHub Issue/PR/
 template workflows as Inari-owned and routes agents to `inari skill` /
 `inari skill <scenario>` for the actual operational playbooks, and to
