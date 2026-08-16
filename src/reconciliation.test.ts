@@ -6,6 +6,8 @@ import {
   assessExistingArtifact,
   diffArtifact,
   prepareRemediationArtifact,
+  prepareSyncInput,
+  RemediationError,
   type ExistingArtifactRead,
 } from "./reconciliation.js";
 import { compileIssueFormYaml, type IssueFormTemplateIdentity } from "./contract/issue-form.js";
@@ -123,5 +125,70 @@ test("pull-request semantic remediation preserves resource-specific metadata and
   assert.throws(
     () => applySemanticPatch("pr", read, { fields: {}, metadata: { head: "other" } }),
     (error: unknown) => error instanceof Error && error.name === "RemediationError",
+  );
+});
+
+test("sync with an explicitly named contract replaces a current body that fails to parse under it", () => {
+  const identity: IssueFormTemplateIdentity = {
+    id: "feature",
+    name: "Feature",
+    path: ".github/ISSUE_TEMPLATE/feature.yml",
+    type: "issue-form",
+    kind: "issue",
+  };
+  const contract = trusted(compileIssueFormYaml(ISSUE_SOURCE, identity), identity.path, ISSUE_SOURCE);
+  const wrongTemplateBody = "### Other\n\nAn artifact that was never created from this template\n";
+  // Mirrors what readGovernedExistingArtifact returns when a caller names an
+  // explicit --template: the contract is known, but the current body does not
+  // parse under it (parse.parsed stays false).
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 82,
+      title: "feat: pre-existing",
+      body: wrongTemplateBody,
+      state: "open",
+      url: "https://github.com/acme/inari/issues/82",
+      labels: [],
+      assignees: [],
+    },
+    contract,
+    result: validateExistingIssueArtifact(contract, wrongTemplateBody),
+  };
+  assert.equal(read.result.parse.parsed, false);
+
+  const desiredInput = prepareSyncInput("issue", read, {
+    fields: { summary: "Replacement summary" },
+    metadata: { title: "feat: replacement", labels: [], assignees: [] },
+  });
+  const desired = prepareRemediationArtifact("issue", contract, desiredInput);
+  const diff = diffArtifact("issue", read, desired);
+  assert.equal(diff.changed, true);
+  assert.equal(
+    diff.semantic.some((change) => change.path === "$.fields.summary" && change.before === undefined),
+    true,
+  );
+});
+
+test("sync without a resolvable contract still refuses to replace an unparseable current body", () => {
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 83,
+      title: "Existing artifact",
+      body: "### Other\n\nvalue\n",
+      state: "open",
+      url: "https://github.com/acme/inari/issues/83",
+      labels: [],
+      assignees: [],
+    },
+    result: {
+      valid: false,
+      classification: "wrong-template",
+      parse: { parsed: false, values: {}, diagnostics: [] },
+      violations: [],
+    },
+  };
+  assert.throws(
+    () => prepareSyncInput("issue", read, { fields: {}, metadata: {} }),
+    (error: unknown) => error instanceof RemediationError && error.code === "SYNC_CURRENT_UNSUPPORTED",
   );
 });

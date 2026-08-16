@@ -41,7 +41,12 @@ export async function readGovernedExistingArtifact(adapter, domain, number, sele
     }));
     const selected = selectExistingArtifactCandidate(candidates);
     if (selected.contract !== undefined || failedTemplates.length === 0) {
-        return { remote, contract: selected.contract, result: selected.result };
+        // An explicit selector names exactly one contract. Surface it even when the
+        // current body does not parse under it, so callers that only need the
+        // contract identity (e.g. a full-replacement sync) are not forced through
+        // the auto-discovery ambiguity/failure path.
+        const explicitContract = selector !== undefined ? candidates[0]?.contract : undefined;
+        return { remote, contract: selected.contract ?? explicitContract, result: selected.result };
     }
     const compileDiagnostics = failedTemplates.map((failed) => ({
         code: "EXISTING_TEMPLATE_COMPILE_FAILED",
@@ -131,9 +136,18 @@ export function prepareRemediationArtifact(domain, contract, input) {
         return prepareIssueArtifact(contract, input).artifact;
     return preparePullRequestArtifact(contract, input).artifact;
 }
-/** Ensure a declarative sync only names fields in the authoritative contract. */
+/**
+ * Ensure a declarative sync only names fields in the authoritative contract.
+ *
+ * Sync declares a complete desired state, so unlike `edit` it does not need the
+ * current body to parse: an unparseable/non-matching current body is treated as
+ * an empty current state and fully replaced. `read.contract` is only present
+ * here when the caller named an explicit `--template` (see
+ * `readGovernedExistingArtifact`); auto-discovery still fails closed on an
+ * unparseable current body.
+ */
 export function prepareSyncInput(domain, read, desired) {
-    if (read.contract === undefined || !read.result.parse.parsed) {
+    if (read.contract === undefined) {
         throw new RemediationError("SYNC_CURRENT_UNSUPPORTED", "Sync refuses to replace an unsupported or unparseable existing artifact.", "$.artifact");
     }
     assertKnownFields(read.contract, desired.fields, "SYNC_INPUT_INCOMPLETE");
