@@ -1,5 +1,9 @@
 name: Governance
 
+# Canonical wrapper distributed via .github/sync.yml (SKIP_PR: true, direct
+# push) — do not hand-edit in a consumer repository; edit this file in
+# yohn-jp/.github instead.
+
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
@@ -14,7 +18,5 @@ permissions:
 jobs:
   validate-pr:
     uses: yohn-jp/.github/.github/workflows/pr-governance.yml@main
-    with:
-      gh-inari-version: "0.6.1"
     permissions:
       contents: read
