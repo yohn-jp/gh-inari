@@ -15,6 +15,7 @@ export interface CliDependencies {
     readonly createAdapter?: (options: ConstructorParameters<typeof GitHubAdapter>[0]) => GitHubAdapter;
     readonly packageMetadata?: PackageMetadata;
     readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
+    readonly runGhFallback?: (argv: readonly string[]) => number;
 }
 /** The installed gh-inari executable entrypoint. */
 export declare function runCli(argv: string[], dependencies?: CliDependencies): Promise<number>;

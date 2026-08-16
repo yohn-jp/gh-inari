@@ -285,6 +285,30 @@ test("malformed options return a structured usage error", async () => {
   }
 });
 
+test("an unrecognized top-level domain falls back to the real gh binary with the original argv", async () => {
+  const calls: (readonly string[])[] = [];
+  const exitCode = await runCli(["repo", "view", "--json", "name"], {
+    runGhFallback: (argv) => {
+      calls.push(argv);
+      return 0;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, [["repo", "view", "--json", "name"]]);
+});
+
+test("an unrecognized issue/pr subcommand falls back to the real gh binary and propagates its exit code", async () => {
+  const calls: (readonly string[])[] = [];
+  const exitCode = await runCli(["pr", "list", "--state", "open"], {
+    runGhFallback: (argv) => {
+      calls.push(argv);
+      return 7;
+    },
+  });
+  assert.equal(exitCode, 7);
+  assert.deepEqual(calls, [["pr", "list", "--state", "open"]]);
+});
+
 test("invalid issue/pr numbers on get and explain are classified as INVALID_ARTIFACT_NUMBER, not UNKNOWN_COMMAND", async () => {
   const invalidNumbers = ["0", "-5", "1.5", "abc"];
   const lines: string[] = [];

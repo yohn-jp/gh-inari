@@ -70,6 +70,19 @@ const RUNTIME_CAPABILITIES = [
   "extension-bootstrap",
 ] as const;
 const CANONICAL_INVOCATION = "gh inari";
+const KNOWN_ARTIFACT_COMMANDS = new Set([
+  "schema",
+  "validate",
+  "render",
+  "create",
+  "explain",
+  "get",
+  "check",
+  "edit",
+  "normalize",
+  "sync",
+]);
+const KNOWN_TEMPLATE_COMMANDS = new Set(["list", "sync", "import"]);
 const INSTALL_COMMAND = "gh extension install yohn-jp/gh-inari";
 const UPDATE_COMMAND = "gh extension upgrade inari";
 const FALLBACK_COMMAND = "npx --yes gh-inari";
@@ -107,6 +120,7 @@ export interface CliDependencies {
   readonly createAdapter?: (options: ConstructorParameters<typeof GitHubAdapter>[0]) => GitHubAdapter;
   readonly packageMetadata?: PackageMetadata;
   readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
+  readonly runGhFallback?: (argv: readonly string[]) => number;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -150,6 +164,7 @@ interface CliErrorShape {
 /** The installed gh-inari executable entrypoint. */
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<number> {
   const metadata = dependencies.packageMetadata ?? readPackageMetadata();
+  if (!isOwnedInvocation(argv)) return runGhFallback(argv, dependencies);
   let parsed: ParsedArgs;
   try {
     parsed = parseArguments(argv);
@@ -401,6 +416,18 @@ function runGhDiagnosticCommand(args: readonly string[]): DiagnosticCommandResul
       error: error instanceof Error ? error.message : "unable to execute gh",
     };
   }
+}
+
+/** Delegates argv gh-inari does not own to the real `gh` binary, so `gh inari` is a strict superset of `gh`. */
+function runGhFallback(argv: readonly string[], dependencies: CliDependencies): number {
+  const execute = dependencies.runGhFallback ?? runGhPassthroughCommand;
+  return execute(argv);
+}
+
+function runGhPassthroughCommand(argv: readonly string[]): number {
+  const result = spawnSync("gh", [...argv], { stdio: "inherit" });
+  if (result.error) throw new CliError("GH_FALLBACK_FAILED", `Cannot execute gh: ${result.error.message}.`);
+  return result.status ?? EXIT_INTERNAL;
 }
 
 function hasInariExtension(output: string): boolean {
@@ -1006,19 +1033,27 @@ function classifyExitCode(error: unknown): number {
   return EXIT_INTERNAL;
 }
 
+/** True when argv targets a command gh-inari implements; false means it must fall back to the real `gh` binary. */
+function isOwnedInvocation(argv: readonly string[]): boolean {
+  const first = argv.find((token) => !token.startsWith("--"));
+  if (first === undefined) return true;
+  if (first === "diagnose" || first === "doctor" || first === "version" || first === "help") return true;
+  if (argv.includes("--help") || argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor"))
+    return true;
+  if (first === "template") {
+    const second = argv.slice(argv.indexOf(first) + 1).find((token) => !token.startsWith("--"));
+    return second !== undefined && KNOWN_TEMPLATE_COMMANDS.has(second);
+  }
+  if (first === "issue" || first === "pr") {
+    const second = argv.slice(argv.indexOf(first) + 1).find((token) => !token.startsWith("--"));
+    return second !== undefined && KNOWN_ARTIFACT_COMMANDS.has(second);
+  }
+  return false;
+}
+
 function isMachineCommand(positionals: readonly string[]): boolean {
   return (
-    (positionals.length >= 2 &&
-      (positionals[1] === "schema" ||
-        positionals[1] === "validate" ||
-        positionals[1] === "render" ||
-        positionals[1] === "create" ||
-        positionals[1] === "explain" ||
-        positionals[1] === "get" ||
-        positionals[1] === "check" ||
-        positionals[1] === "edit" ||
-        positionals[1] === "normalize" ||
-        positionals[1] === "sync")) ||
+    (positionals.length >= 2 && KNOWN_ARTIFACT_COMMANDS.has(positionals[1] ?? "")) ||
     positionals[0] === "diagnose" ||
     positionals[0] === "doctor" ||
     positionals[0] === "version"
@@ -1032,18 +1067,7 @@ function isMachineCommandTokens(argv: readonly string[]): boolean {
   const domainIndex = argv.findIndex((token) => token === "issue" || token === "pr");
   if (domainIndex < 0) return false;
   const command = argv[domainIndex + 1];
-  return (
-    command === "schema" ||
-    command === "validate" ||
-    command === "render" ||
-    command === "create" ||
-    command === "explain" ||
-    command === "get" ||
-    command === "check" ||
-    command === "edit" ||
-    command === "normalize" ||
-    command === "sync"
-  );
+  return command !== undefined && KNOWN_ARTIFACT_COMMANDS.has(command);
 }
 
 function isPositiveInteger(value: string): boolean {
