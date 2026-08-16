@@ -138,6 +138,26 @@ function main() {
         !Array.isArray(versionJson.capabilities)
       )
         fail(`${name} --version --json returned an invalid runtime contract`);
+
+      console.log(`running ${name} skill --json through its installed launcher...`);
+      const skillIndexJson = jsonOutput(
+        invoke(launcher, ["skill", "--json"], { cwd: installDirectory }),
+        `${name} skill --json`,
+      );
+      if (
+        typeof skillIndexJson.version !== "string" ||
+        !Array.isArray(skillIndexJson.scenarios) ||
+        skillIndexJson.scenarios.length === 0
+      )
+        fail(`${name} skill --json returned an invalid scenario index`);
+
+      const firstScenarioId = skillIndexJson.scenarios[0].id;
+      const skillScenarioJson = jsonOutput(
+        invoke(launcher, ["skill", firstScenarioId, "--json"], { cwd: installDirectory }),
+        `${name} skill ${firstScenarioId} --json`,
+      );
+      if (skillScenarioJson.id !== firstScenarioId || !Array.isArray(skillScenarioJson.workflow))
+        fail(`${name} skill ${firstScenarioId} --json returned an invalid scenario playbook`);
     }
 
     console.log("checking one-command npx bootstrap without consumer manifest mutation...");
