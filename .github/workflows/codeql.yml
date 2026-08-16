@@ -1,5 +1,10 @@
 name: CodeQL
 
+# Canonical wrapper distributed via .github/sync.yml (SKIP_PR: true, direct
+# push) — do not hand-edit in a consumer repository; edit this file in
+# yohn-jp/.github instead. Requires a CodeQL config at
+# ./.github/codeql/codeql-config.yml in the consuming repository.
+
 on:
   push:
     branches: [main]
