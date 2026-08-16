@@ -94,7 +94,7 @@ function main() {
     fs.writeFileSync(consumerPackageJsonPath, consumerPackageJson);
 
     console.log("installing packed tarball into isolated directory...");
-    run("npm", ["install", "--no-save", tarballPath], { cwd: installDirectory });
+    run("npm", ["install", "--no-save", "--ignore-scripts", tarballPath], { cwd: installDirectory });
     if (fs.readFileSync(consumerPackageJsonPath, "utf8") !== consumerPackageJson)
       fail("installing gh-inari modified the consumer package.json");
 
@@ -108,9 +108,18 @@ function main() {
     const installedManifestPath = path.join(installedPackageDirectory, ".codex-plugin", "plugin.json");
     if (!fs.existsSync(installedManifestPath))
       fail(`installed package did not expose .codex-plugin/plugin.json at ${installedManifestPath}`);
+    const installedPackageJson = JSON.parse(
+      fs.readFileSync(path.join(installedPackageDirectory, "package.json"), "utf8"),
+    );
     const installedManifest = JSON.parse(fs.readFileSync(installedManifestPath, "utf8"));
+    if (installedManifest.name !== "inari")
+      fail(`installed plugin name was "${installedManifest.name}", expected "inari"`);
+    if (installedManifest.version !== installedPackageJson.version)
+      fail("installed plugin manifest version does not match installed package version");
     if (typeof installedManifest.skills !== "string" || installedManifest.skills.length === 0)
       fail("installed .codex-plugin/plugin.json has no skills declared");
+    if (installedManifest.skills !== "skills/inari")
+      fail(`installed plugin Skill path was "${installedManifest.skills}", expected "skills/inari"`);
     const skillPath = installedManifest.skills;
     const installedSkillFile = path.join(installedPackageDirectory, skillPath, "SKILL.md");
     if (!fs.existsSync(installedSkillFile))

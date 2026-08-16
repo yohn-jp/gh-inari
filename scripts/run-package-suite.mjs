@@ -90,6 +90,11 @@ const EXPECTED_PACKED_FILES = [
   "dist/template-discovery.js.map",
 ];
 
+const CODEX_MARKETPLACE_NAME = "gh-inari";
+const CODEX_PLUGIN_NAME = "inari";
+const CODEX_PLUGIN_SKILL_PATH = "skills/inari";
+const NPM_REGISTRY = "https://registry.npmjs.org";
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: repoRoot, encoding: "utf8", ...options });
   if (result.error) throw result.error;
@@ -120,29 +125,80 @@ export function exportsTargetPaths(packageJson) {
   return targets;
 }
 
-// Validates the Codex Plugin manifest shape, confirms its declared Skill
-// path resolves inside the package and is included in the packed tarball,
-// confirms the manifest version tracks the package version (a silent drift
-// would ship a plugin claiming a stale version), and confirms the Skill
-// routes to `inari skill` rather than duplicating the scenario playbooks it
-// must stay thin against. Imports `dist/skill.js` (not `src/skill.ts`) so
-// this check runs against the same build the tarball actually ships.
-export async function validateCodexPlugin(packageJson, packedFiles) {
-  const manifestPath = path.join(repoRoot, ".codex-plugin", "plugin.json");
-  if (!fs.existsSync(manifestPath)) throw new Error(".codex-plugin/plugin.json is missing");
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-
-  if (typeof manifest.name !== "string" || manifest.name.length === 0) {
-    throw new Error('.codex-plugin/plugin.json is missing a non-empty "name"');
+export function validateCodexPluginMetadata(packageJson, manifest, marketplace) {
+  if (packageJson.name !== "gh-inari") {
+    throw new Error(`package.json name must be "gh-inari", got "${packageJson.name}"`);
+  }
+  if (manifest.name !== CODEX_PLUGIN_NAME) {
+    throw new Error(`.codex-plugin/plugin.json name must be "${CODEX_PLUGIN_NAME}", got "${manifest.name}"`);
   }
   if (manifest.version !== packageJson.version) {
     throw new Error(
       `.codex-plugin/plugin.json version "${manifest.version}" does not match package.json version "${packageJson.version}"`,
     );
   }
-  if (typeof manifest.skills !== "string" || manifest.skills.length === 0) {
-    throw new Error('.codex-plugin/plugin.json "skills" must be a non-empty string path');
+  if (manifest.skills !== CODEX_PLUGIN_SKILL_PATH) {
+    throw new Error(
+      `.codex-plugin/plugin.json skills path must be "${CODEX_PLUGIN_SKILL_PATH}", got "${manifest.skills}"`,
+    );
   }
+
+  if (marketplace.name !== CODEX_MARKETPLACE_NAME) {
+    throw new Error(`marketplace name must be "${CODEX_MARKETPLACE_NAME}", got "${marketplace.name}"`);
+  }
+  if (marketplace.interface?.displayName !== "Inari") {
+    throw new Error('marketplace interface.displayName must be "Inari"');
+  }
+  if (!Array.isArray(marketplace.plugins) || marketplace.plugins.length !== 1) {
+    throw new Error("marketplace must contain exactly one plugin entry");
+  }
+
+  const [plugin] = marketplace.plugins;
+  if (plugin.name !== manifest.name) {
+    throw new Error(`marketplace plugin name "${plugin.name}" does not match manifest name "${manifest.name}"`);
+  }
+  if (plugin.source?.source !== "npm") {
+    throw new Error('marketplace plugin source.source must be "npm"');
+  }
+  if (plugin.source.package !== packageJson.name) {
+    throw new Error(
+      `marketplace npm package "${plugin.source.package}" does not match package.json name "${packageJson.name}"`,
+    );
+  }
+  if (plugin.source.version !== `^${packageJson.version}`) {
+    throw new Error(
+      `marketplace npm version "${plugin.source.version}" must explicitly target compatible ${packageJson.version} releases`,
+    );
+  }
+  if (plugin.source.registry !== NPM_REGISTRY) {
+    throw new Error(`marketplace npm registry must be "${NPM_REGISTRY}"`);
+  }
+  if (plugin.policy?.installation !== "AVAILABLE") {
+    throw new Error('marketplace policy.installation must be "AVAILABLE"');
+  }
+  if (plugin.policy?.authentication !== "ON_INSTALL") {
+    throw new Error('marketplace policy.authentication must be "ON_INSTALL"');
+  }
+  if (typeof plugin.category !== "string" || plugin.category.length === 0) {
+    throw new Error("marketplace plugin category must be a non-empty string");
+  }
+}
+
+// Validates the repo marketplace -> npm package -> Codex Plugin manifest ->
+// Skill distribution contract, confirms the declared Skill path resolves
+// inside the package and is included in the packed tarball, and confirms the
+// Skill routes to `inari skill` rather than duplicating the scenario
+// playbooks it must stay thin against. Imports `dist/skill.js` (not
+// `src/skill.ts`) so this check runs against the same build the tarball ships.
+export async function validateCodexPlugin(packageJson, packedFiles) {
+  const manifestPath = path.join(repoRoot, ".codex-plugin", "plugin.json");
+  if (!fs.existsSync(manifestPath)) throw new Error(".codex-plugin/plugin.json is missing");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+  const marketplacePath = path.join(repoRoot, ".agents", "plugins", "marketplace.json");
+  if (!fs.existsSync(marketplacePath)) throw new Error(".agents/plugins/marketplace.json is missing");
+  const marketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
+  validateCodexPluginMetadata(packageJson, manifest, marketplace);
 
   const { SKILL_SCENARIOS } = await import(path.join(repoRoot, "dist", "skill.js"));
 

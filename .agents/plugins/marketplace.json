@@ -1,0 +1,22 @@
+{
+  "name": "gh-inari",
+  "interface": {
+    "displayName": "Inari"
+  },
+  "plugins": [
+    {
+      "name": "inari",
+      "source": {
+        "source": "npm",
+        "package": "gh-inari",
+        "version": "^0.7.0",
+        "registry": "https://registry.npmjs.org"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
