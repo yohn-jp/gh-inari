@@ -1,0 +1,6 @@
+{
+  "name": "inari",
+  "version": "0.6.1",
+  "description": "Governed GitHub Issue/PR/template workflows via the inari CLI. Prefer inari over raw gh for operations it owns; use inari skill for operational playbooks.",
+  "skills": "skills/inari"
+}

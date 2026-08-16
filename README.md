@@ -119,6 +119,23 @@ npx --yes --package=./gh-inari-&lt;version&gt;.tgz gh-inari --version --json
 
 Inari uses the current `gh` authentication and repository context. It does not maintain a second credential store. Use `--repository owner/name` when the target repository is not the current checkout.
 
+## Codex Plugin
+
+The same published `gh-inari` package is also a valid Codex Plugin — no
+second install artifact is needed. Installing or unpacking `gh-inari` (any
+of the paths above) ships `.codex-plugin/plugin.json` and
+`skills/inari/SKILL.md` alongside the CLI. Codex requires explicit
+marketplace registration and installation via Codex plugin commands to
+activate the skill; standard `npm install` alone does not automatically
+surface the plugin to Codex-aware agents.
+
+The Skill is deliberately thin: it identifies governed GitHub Issue/PR/
+template workflows as Inari-owned and routes agents to `inari skill` /
+`inari skill <scenario>` for the actual operational playbooks, and to
+`inari <domain> --help` for exact command syntax. It does not duplicate
+scenario content, so it stays correct as `inari skill` evolves. Raw `gh`
+remains available for anything outside Inari's governed surface.
+
 ## Commands
 
 ```bash

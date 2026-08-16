@@ -17,6 +17,8 @@ const EXPECTED_PACKED_FILES = [
   "LICENSE",
   "README.md",
   "package.json",
+  ".codex-plugin/plugin.json",
+  "skills/inari/SKILL.md",
   "dist/artifact.d.ts",
   "dist/artifact.js",
   "dist/artifact.js.map",
@@ -80,6 +82,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/semantic-template.d.ts",
   "dist/semantic-template.js",
   "dist/semantic-template.js.map",
+  "dist/skill.d.ts",
+  "dist/skill.js",
+  "dist/skill.js.map",
   "dist/template-discovery.d.ts",
   "dist/template-discovery.js",
   "dist/template-discovery.js.map",
@@ -115,7 +120,59 @@ export function exportsTargetPaths(packageJson) {
   return targets;
 }
 
-function main() {
+// Validates the Codex Plugin manifest shape, confirms its declared Skill
+// path resolves inside the package and is included in the packed tarball,
+// confirms the manifest version tracks the package version (a silent drift
+// would ship a plugin claiming a stale version), and confirms the Skill
+// routes to `inari skill` rather than duplicating the scenario playbooks it
+// must stay thin against. Imports `dist/skill.js` (not `src/skill.ts`) so
+// this check runs against the same build the tarball actually ships.
+export async function validateCodexPlugin(packageJson, packedFiles) {
+  const manifestPath = path.join(repoRoot, ".codex-plugin", "plugin.json");
+  if (!fs.existsSync(manifestPath)) throw new Error(".codex-plugin/plugin.json is missing");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+  if (typeof manifest.name !== "string" || manifest.name.length === 0) {
+    throw new Error('.codex-plugin/plugin.json is missing a non-empty "name"');
+  }
+  if (manifest.version !== packageJson.version) {
+    throw new Error(
+      `.codex-plugin/plugin.json version "${manifest.version}" does not match package.json version "${packageJson.version}"`,
+    );
+  }
+  if (typeof manifest.skills !== "string" || manifest.skills.length === 0) {
+    throw new Error('.codex-plugin/plugin.json "skills" must be a non-empty string path');
+  }
+
+  const { SKILL_SCENARIOS } = await import(path.join(repoRoot, "dist", "skill.js"));
+
+  const skillPath = manifest.skills;
+  const skillFile = path.join(repoRoot, skillPath, "SKILL.md");
+  if (!fs.existsSync(skillFile)) {
+    throw new Error(`Codex plugin skill path "${skillPath}" does not resolve to a SKILL.md`);
+  }
+  const skillPackedPath = path.relative(repoRoot, skillFile).split(path.sep).join("/");
+  if (!packedFiles.includes(skillPackedPath)) {
+    throw new Error(`"${skillPackedPath}" is declared by the plugin manifest but not packed in the tarball`);
+  }
+
+  const body = fs.readFileSync(skillFile, "utf8");
+  if (!body.includes("inari skill")) {
+    throw new Error(`${skillPath}/SKILL.md must route agents to \`inari skill\` instead of duplicating playbooks`);
+  }
+  for (const scenario of SKILL_SCENARIOS) {
+    // Match `inari skill <scenario-id>` regardless of Markdown formatting (backticks, code fences, plain text).
+    // Use word boundaries to avoid partial-word false matches.
+    const pattern = new RegExp(`\\binari\\s+skill\\s+${scenario.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    if (pattern.test(body)) {
+      throw new Error(
+        `${skillPath}/SKILL.md must not hard-code scenario "${scenario.id}"; route via \`inari skill\` only`,
+      );
+    }
+  }
+}
+
+async function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
 
@@ -156,6 +213,8 @@ function main() {
       throw new Error(`bin entry "${binPath}" is not executable (chmod +x it, or check build step file perms)`);
     }
   }
+
+  await validateCodexPlugin(packageJson, packedFiles);
 
   console.log(
     `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable.`,

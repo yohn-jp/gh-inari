@@ -104,6 +104,18 @@ function main() {
       : path.join(installDirectory, "node_modules", packageName);
     if (!fs.existsSync(installedPackageDirectory)) fail(`${packageName} was not installed under node_modules`);
 
+    console.log("checking Codex Plugin manifest and Skill resolve from the installed package...");
+    const installedManifestPath = path.join(installedPackageDirectory, ".codex-plugin", "plugin.json");
+    if (!fs.existsSync(installedManifestPath))
+      fail(`installed package did not expose .codex-plugin/plugin.json at ${installedManifestPath}`);
+    const installedManifest = JSON.parse(fs.readFileSync(installedManifestPath, "utf8"));
+    if (typeof installedManifest.skills !== "string" || installedManifest.skills.length === 0)
+      fail("installed .codex-plugin/plugin.json has no skills declared");
+    const skillPath = installedManifest.skills;
+    const installedSkillFile = path.join(installedPackageDirectory, skillPath, "SKILL.md");
+    if (!fs.existsSync(installedSkillFile))
+      fail(`installed plugin skill "${skillPath}" does not resolve to a SKILL.md at ${installedSkillFile}`);
+
     const binTargets = packageBinTargets(installedPackageDirectory);
     if (binTargets.length === 0) fail("package.json defines no bin entries to smoke test");
 
