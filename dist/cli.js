@@ -539,7 +539,8 @@ async function runExistingValidation(domain, number, parsed, root, dependencies,
         number,
         url: remote.url,
         diagnostics: projection.diagnostics,
-        violations: projection.violations,
+        ...(projection.violations === undefined ? {} : { violations: projection.violations }),
+        ...(projection.attemptedTemplates === undefined ? {} : { attemptedTemplates: projection.attemptedTemplates }),
     };
     console.log(JSON.stringify(output));
     return result.valid ? 0 : EXIT_VALIDATION;
@@ -561,7 +562,8 @@ async function runExistingGet(domain, number, parsed, root, dependencies) {
         metadata: existingArtifactMetadata(domain, remote),
         ...(projection.fields === undefined ? {} : { fields: projection.fields }),
         diagnostics: projection.diagnostics,
-        violations: projection.violations,
+        ...(projection.violations === undefined ? {} : { violations: projection.violations }),
+        ...(projection.attemptedTemplates === undefined ? {} : { attemptedTemplates: projection.attemptedTemplates }),
     };
     console.log(JSON.stringify(output));
     return result.valid ? 0 : EXIT_VALIDATION;
@@ -589,7 +591,10 @@ async function runExistingRemediation(domain, operation, number, parsed, root, d
             valid: assessment.status === "valid-current",
             normalizable: assessment.normalizable,
             diagnostics: assessment.diagnostics,
-            violations: assessment.status === "non-canonical" ? assessment.diagnostics : read.result.violations,
+            ...(read.result.classification === "semantic" ? { violations: read.result.violations } : {}),
+            ...(read.result.attemptedTemplates === undefined
+                ? {}
+                : { attemptedTemplates: read.result.attemptedTemplates }),
         }));
         return assessment.status === "valid-current" ? 0 : EXIT_VALIDATION;
     }
@@ -720,13 +725,21 @@ function parseArguments(argv) {
             positionals.push(...argv.slice(index + 1));
             break;
         }
+        if (token === "-R") {
+            const value = argv[++index];
+            if (value === undefined || value.startsWith("--"))
+                throw new CliError("INVALID_OPTION", "Option -R requires a value.");
+            options.repository = value;
+            continue;
+        }
         if (!token.startsWith("--")) {
             positionals.push(token);
             continue;
         }
         const equalIndex = token.indexOf("=");
         const rawKey = equalIndex >= 0 ? token.slice(2, equalIndex) : token.slice(2);
-        const key = rawKey.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+        const normalizedKey = rawKey === "repo" ? "repository" : rawKey;
+        const key = normalizedKey.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
         if (BOOLEAN_OPTIONS.has(key)) {
             if (equalIndex < 0) {
                 options[key] = true;
@@ -810,8 +823,13 @@ function classifyExitCode(error) {
  * `--help` on an unowned domain or subcommand (e.g. `repo view --help`, `pr list --help`) is not claimed here so
  * that help delegates to real `gh` the same way execution does -- Inari does not reproduce upstream help text.
  */
+function isPositionalToken(token, previous) {
+    if (previous === "-R")
+        return false;
+    return token !== "-R" && !token.startsWith("--");
+}
 function isOwnedInvocation(argv) {
-    const first = argv.find((token) => !token.startsWith("--"));
+    const first = findPositional(argv);
     if (first === undefined)
         return true;
     if (first === "diagnose" || first === "doctor" || first === "version" || first === "help")
@@ -820,18 +838,26 @@ function isOwnedInvocation(argv) {
         return true;
     const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
     if (first === "template") {
-        const second = argv.slice(argv.indexOf(first) + 1).find((token) => !token.startsWith("--"));
+        const second = findPositional(argv, argv.indexOf(first) + 1);
         if (helpRequested && second === undefined)
             return true;
         return second !== undefined && KNOWN_TEMPLATE_COMMANDS.has(second);
     }
     if (first === "issue" || first === "pr") {
-        const second = argv.slice(argv.indexOf(first) + 1).find((token) => !token.startsWith("--"));
+        const second = findPositional(argv, argv.indexOf(first) + 1);
         if (helpRequested && second === undefined)
             return true;
         return second !== undefined && KNOWN_ARTIFACT_COMMANDS.has(second);
     }
     return false;
+}
+function findPositional(argv, fromIndex = 0) {
+    for (let index = fromIndex; index < argv.length; index += 1) {
+        const token = argv[index];
+        if (token !== undefined && isPositionalToken(token, index > 0 ? argv[index - 1] : undefined))
+            return token;
+    }
+    return undefined;
 }
 function isMachineCommand(positionals) {
     return ((positionals.length >= 2 && KNOWN_ARTIFACT_COMMANDS.has(positionals[1] ?? "")) ||
@@ -963,6 +989,7 @@ const GLOBAL_OPTIONS = `  --from <path>       JSON input file, or - for stdin
   --template <id>     Repository-native template id, path, or unique name
   --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
   --repository <r>    GitHub repository override; governed commands use its default-branch governance
+  --repo <r>, -R <r>  Alias for --repository
   --title <title>     Issue/PR title for create
   --head <branch>     PR head branch for create
   --base <branch>     PR base branch for create
