@@ -48,18 +48,15 @@ export async function readGovernedExistingArtifact(adapter, domain, number, sele
         path: failed.path,
         message: `[${failed.path}] Template failed to compile: ${failed.message}`,
     }));
-    const existingViolations = selected.result.violations;
+    const diagnostics = [...selected.result.parse.diagnostics, ...compileDiagnostics];
     return {
         remote,
         result: {
             valid: false,
             classification: selected.result.classification,
-            parse: {
-                parsed: false,
-                values: {},
-                diagnostics: [...selected.result.parse.diagnostics, ...compileDiagnostics],
-            },
-            violations: [...existingViolations, ...compileDiagnostics],
+            parse: { parsed: false, values: {}, diagnostics },
+            violations: diagnostics,
+            attemptedTemplates: selected.result.attemptedTemplates,
         },
     };
 }

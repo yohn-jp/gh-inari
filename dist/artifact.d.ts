@@ -67,6 +67,8 @@ export interface ExistingArtifactValidationResult {
     readonly classification: ExistingArtifactClassification;
     readonly parse: ExistingArtifactParseResult;
     readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+    /** Template paths tried against a multi-candidate match that produced no single parse. */
+    readonly attemptedTemplates?: readonly string[];
 }
 export interface ExistingIssueReader {
     getIssue(issueNumber: number): Promise<{
@@ -110,7 +112,8 @@ export interface ExistingArtifactProjection {
     readonly classification: ExistingArtifactClassification;
     readonly fields?: Readonly<Record<string, unknown>>;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
-    readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+    readonly violations?: readonly SemanticViolation[];
+    readonly attemptedTemplates?: readonly string[];
 }
 /** Project only validated semantic values; invalid artifacts never expose parsed fields. */
 export declare function projectExistingArtifact(result: ExistingArtifactValidationResult): ExistingArtifactProjection;

@@ -15,6 +15,6 @@ jobs:
   validate-pr:
     uses: yohn-jp/.github/.github/workflows/pr-governance.yml@main
     with:
-      gh-inari-version: "0.6.0"
+      gh-inari-version: "0.6.1"
     permissions:
       contents: read
