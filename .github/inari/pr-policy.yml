@@ -8,5 +8,3 @@ sections:
     linkedIssue: true
   - section: validation
     required: true
-    checklist:
-      minCompleted: 1

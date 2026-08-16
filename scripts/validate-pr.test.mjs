@@ -82,11 +82,8 @@ test("CLI and workflow adapters return the same semantic violation code", async 
   const fields = {
     summary: "A sufficiently long summary",
     linked_issue: "Closes #10",
-    scope: "The exact requested scope",
-    included: "The governed implementation",
-    excluded: "Unrelated changes",
-    validation: ["tests"],
-    breaking_changes: "No.",
+    changes: "The governed implementation and behavioral changes",
+    validation: "pnpm test",
   };
   const invalidValue = "see issue 10";
   const body = renderPullRequestArtifact(contract, fields).replace("Closes #10", invalidValue);

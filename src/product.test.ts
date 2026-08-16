@@ -19,20 +19,12 @@ test("repository-native Issue and PR fixtures traverse the shared product core",
   const discovery = await discoverTemplates(root);
   const issue = await compileIssueFormTemplate(discovery, "feature");
   const issueInput = {
-    summary: "Make the current behavior explicit",
     problem: "The current behavior is surprising",
-    failing_scenario: "A caller relying on the implicit behavior observes an unexpected result",
-    goal: "The behavior is explicit and documented",
-    expected_contract: "Callers observe the documented, explicit behavior",
-    non_goals: "No unrelated behavior changes",
+    capability: "Make the current behavior explicit",
+    contract: "Callers observe the documented, explicit behavior",
     acceptance: "- [ ] verify",
-    affected: "The core behavior module",
-    test_layer: "unit: the new explicit behavior is directly assertable",
-    risks: "No backward-incompatible change expected",
-    release_impact: "No release-impacting change",
-    security_impact: "No security boundary impact",
-    dependencies: "None",
-    implementation: "Make the implicit branch explicit and documented",
+    non_goals: "No unrelated behavior changes",
+    constraints: "None",
   };
   const issueValidation = validateSemanticInput(issue, issueInput);
   assert.equal(issueValidation.valid, true);
@@ -47,7 +39,7 @@ test("repository-native Issue and PR fixtures traverse the shared product core",
   const prInput = {
     summary: "A deterministic end-to-end product proof",
     linked_issue: "Closes #22",
-    validation: ["tests", "build"],
+    validation: "pnpm test; pnpm run build",
   };
   assert.equal(validateSemanticInput(pr, prInput).valid, true);
   const prBody = renderPullRequestArtifact(pr, prInput);

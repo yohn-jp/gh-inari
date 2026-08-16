@@ -614,7 +614,7 @@ test("PR placeholder-only sections reconstruct as omitted semantic values", asyn
   const body = renderPullRequestArtifact(nativeContract, {
     summary: "A deterministic summary",
     linked_issue: "Closes #22",
-    validation: ["tests"],
+    validation: "pnpm test",
   });
   const parsed = parseExistingPullRequestArtifact(nativeContract, body);
   assert.equal(parsed.parsed, true);
