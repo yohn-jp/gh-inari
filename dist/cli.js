@@ -10,6 +10,7 @@ import { compileLocalGovernedContract, compileRepositoryGovernedContract, create
 import { discoverTemplates } from "./template-discovery.js";
 import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, readGovernedExistingArtifact, RemediationError, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
+import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
@@ -109,6 +110,9 @@ export async function runCli(argv, dependencies = {}) {
         }
         if (domain === "issue" || domain === "pr") {
             return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
+        }
+        if (domain === "skill") {
+            return runSkillCommand(command, json);
         }
         throw new CliError("UNKNOWN_COMMAND", `Unknown command "${parsed.positionals.join(" ")}".`);
     }
@@ -385,6 +389,32 @@ const MAX_INPUT_BYTES = 1_048_576;
 function inputTooLargeError(observedBytes) {
     return new CliError("INPUT_TOO_LARGE", `Input exceeds the maximum allowed size of ${MAX_INPUT_BYTES} bytes.`, "--from", { limitBytes: MAX_INPUT_BYTES, observedBytes });
 }
+function skillOutputExceedsBudgetError(scenarioId, observedBytes) {
+    return new CliError("SKILL_OUTPUT_EXCEEDS_BUDGET", `Skill output exceeds the maximum allowed size of ${MAX_SKILL_OUTPUT_BYTES} bytes.`, "skill", { limitBytes: MAX_SKILL_OUTPUT_BYTES, observedBytes, scenarioId });
+}
+function unknownSkillScenarioError(scenarioId) {
+    return new CliError("UNKNOWN_SKILL_SCENARIO", `Unknown skill scenario "${scenarioId}".`, "$argv[1]", {
+        scenarioId,
+        knownScenarios: SKILL_SCENARIOS.map((scenario) => scenario.id),
+    });
+}
+function runSkillCommand(scenarioId, json) {
+    const output = scenarioId === undefined
+        ? json
+            ? JSON.stringify(projectSkillIndexToJson())
+            : projectSkillIndexToText()
+        : (() => {
+            const scenario = findSkillScenario(scenarioId);
+            if (scenario === undefined)
+                throw unknownSkillScenarioError(scenarioId);
+            return json ? JSON.stringify(projectSkillScenarioToJson(scenario)) : projectSkillScenarioToText(scenario);
+        })();
+    const observedBytes = Buffer.byteLength(output, "utf8");
+    if (observedBytes > MAX_SKILL_OUTPUT_BYTES)
+        throw skillOutputExceedsBudgetError(scenarioId, observedBytes);
+    console.log(output);
+    return 0;
+}
 function invalidArtifactNumberError(domain, value) {
     const message = value === undefined
         ? `A ${domain} number is required.`
@@ -592,9 +622,7 @@ async function runExistingRemediation(domain, operation, number, parsed, root, d
             normalizable: assessment.normalizable,
             diagnostics: assessment.diagnostics,
             ...(read.result.classification === "semantic" ? { violations: read.result.violations } : {}),
-            ...(read.result.attemptedTemplates === undefined
-                ? {}
-                : { attemptedTemplates: read.result.attemptedTemplates }),
+            ...(read.result.attemptedTemplates === undefined ? {} : { attemptedTemplates: read.result.attemptedTemplates }),
         }));
         return assessment.status === "valid-current" ? 0 : EXIT_VALIDATION;
     }
@@ -808,7 +836,9 @@ function classifyExitCode(error) {
     if (error instanceof CliError &&
         (error.code === "INPUT_INVALID_JSON" ||
             error.code === "INPUT_TOO_LARGE" ||
-            error.code === "INVALID_ARTIFACT_NUMBER"))
+            error.code === "INVALID_ARTIFACT_NUMBER" ||
+            error.code === "UNKNOWN_SKILL_SCENARIO" ||
+            error.code === "SKILL_OUTPUT_EXCEEDS_BUDGET"))
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN")
         return EXIT_VALIDATION;
@@ -833,6 +863,8 @@ function isOwnedInvocation(argv) {
     if (first === undefined)
         return true;
     if (first === "diagnose" || first === "doctor" || first === "version" || first === "help")
+        return true;
+    if (first === "skill")
         return true;
     if (argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor"))
         return true;
@@ -863,13 +895,16 @@ function isMachineCommand(positionals) {
     return ((positionals.length >= 2 && KNOWN_ARTIFACT_COMMANDS.has(positionals[1] ?? "")) ||
         positionals[0] === "diagnose" ||
         positionals[0] === "doctor" ||
-        positionals[0] === "version");
+        positionals[0] === "version" ||
+        positionals[0] === "skill");
 }
 function isMachineCommandTokens(argv) {
     if (argv.includes("--diagnose") || argv.includes("--doctor") || argv.includes("diagnose") || argv.includes("doctor"))
         return true;
     if (argv.includes("--version") || argv.includes("version"))
         return argv.includes("--json");
+    if (argv.includes("skill"))
+        return true;
     const domainIndex = argv.findIndex((token) => token === "issue" || token === "pr");
     if (domainIndex < 0)
         return false;
@@ -1027,6 +1062,8 @@ function printHelpFor(positionals, helpValue) {
             return printLeafHelp(TEMPLATE_LEAVES[command]);
         return printDomainHelp("template", TEMPLATE_LEAVES);
     }
+    if (domain === "skill")
+        return printSkillHelp(command);
     printRootHelp();
 }
 function printRootHelp() {
@@ -1040,6 +1077,7 @@ Domains:
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
   template   Semantic template authoring and native template sync
+  skill      Bounded operational playbooks for common governed workflows
 
 All other commands (e.g. repo, auth, pr list, issue view) are passed through to gh.
 
@@ -1057,6 +1095,29 @@ ${lines.join("\n")}
 Commands outside this list under "${domain}" (e.g. \`${DOMAIN_PASSTHROUGH_EXAMPLE[domain]}\`) pass through to gh.
 
 Run \`inari ${domain} <command> --help\` for that command's inputs and an example.`);
+}
+function printSkillHelp(scenarioId) {
+    if (scenarioId !== undefined) {
+        const scenario = findSkillScenario(scenarioId);
+        if (scenario === undefined)
+            return printSkillHelp(undefined);
+        return printLeafHelp({
+            usage: `skill ${scenario.id} [--json]`,
+            summary: scenario.title,
+            example: `inari skill ${scenario.id}`,
+        });
+    }
+    const lines = SKILL_SCENARIOS.map((scenario) => `  skill ${scenario.id} [--json]  - ${scenario.title}`);
+    console.log(`Usage: inari skill [scenario] [--json]
+
+Bounded operational playbooks for common governed workflows. \`inari skill\`
+lists scenarios; \`inari skill <scenario>\` prints that scenario's playbook.
+
+Scenarios:
+${lines.join("\n")}
+
+Run \`inari skill <scenario> --help\` for that scenario's summary.
+Run \`inari <domain> --help\` for exact command syntax used by a playbook.`);
 }
 function printLeafHelp(leaf) {
     console.log(`Usage: inari ${leaf.usage}
@@ -1101,6 +1162,7 @@ Commands:
   pr edit <number> --from <file.json> [--dry-run]
   pr normalize <number> [--dry-run]
   pr sync <number> --from <file.json> [--dry-run]
+  skill [scenario] [--json]
 
 Options:
 ${GLOBAL_OPTIONS}

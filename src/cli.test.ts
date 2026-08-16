@@ -288,6 +288,99 @@ test("--help=full prints the complete command and option reference", async () =>
   assert.match(output, /issue normalize <number>/);
   assert.match(output, /pr normalize <number>/);
   assert.match(output, /--require-capability/);
+  assert.match(output, /skill \[scenario\]/);
+});
+
+async function captureOutput(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli([...argv]);
+    return { exitCode, output: lines.join("\n") };
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+test("skill lists a bounded, deterministic set of scenarios as text", async () => {
+  const { exitCode, output } = await captureOutput(["skill"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /author-issue/);
+  assert.match(output, /author-pr/);
+  assert.match(output, /inspect-governance/);
+  assert.match(output, /repair-invalid-artifact/);
+});
+
+test("skill --json lists the same scenarios as a versioned JSON projection", async () => {
+  const { exitCode, output } = await captureOutput(["skill", "--json"]);
+  assert.equal(exitCode, 0);
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.version, "1.0.0");
+  assert.deepEqual(
+    parsed.scenarios.map((entry: { id: string }) => entry.id),
+    ["author-issue", "author-pr", "inspect-governance", "repair-invalid-artifact"],
+  );
+});
+
+test("skill <scenario> prints a bounded playbook as text", async () => {
+  const { exitCode, output } = await captureOutput(["skill", "author-issue"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Author a governed Issue/);
+  assert.match(output, /inari issue create/);
+  assert.match(output, /Invariants:/);
+});
+
+test("skill <scenario> --json prints the same playbook as a versioned JSON projection", async () => {
+  const { exitCode, output } = await captureOutput(["skill", "author-issue", "--json"]);
+  assert.equal(exitCode, 0);
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.version, "1.0.0");
+  assert.equal(parsed.id, "author-issue");
+  assert.ok(Array.isArray(parsed.workflow) && parsed.workflow.length > 0);
+  assert.ok(Array.isArray(parsed.invariants) && parsed.invariants.length > 0);
+});
+
+test("skill with an unknown scenario returns a stable machine-readable error", async () => {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill", "bogus-scenario"]);
+    assert.equal(exitCode, 2);
+    assert.deepEqual(JSON.parse(lines[0] ?? "{}").error.code, "UNKNOWN_SKILL_SCENARIO");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill --help prints a scenario index without full playbook content", async () => {
+  const { exitCode, output } = await captureHelp(["skill", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari skill \[scenario\]/);
+  assert.match(output, /author-issue/);
+  assert.doesNotMatch(output, /Invariants:/);
+});
+
+test("skill <scenario> --help prints that scenario's summary, not the full playbook", async () => {
+  const { exitCode, output } = await captureHelp(["skill", "author-issue", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari skill author-issue/);
+  assert.doesNotMatch(output, /Invariants:/);
+});
+
+test("skill never falls through to the real gh binary", async () => {
+  const calls: (readonly string[])[] = [];
+  const dependencies = {
+    runGhFallback: (argv: readonly string[]) => {
+      calls.push(argv);
+      return 0;
+    },
+  };
+  await runCli(["skill"], dependencies);
+  await runCli(["skill", "author-issue"], dependencies);
+  await runCli(["skill", "bogus-scenario"], dependencies);
+  assert.deepEqual(calls, []);
 });
 
 test("no arguments exits 1", async () => {
