@@ -12,7 +12,7 @@ jobs:
   validate-issue:
     uses: yohn-jp/.github/.github/workflows/issue-governance.yml@main
     with:
-      gh-inari-version: "0.5.3"
+      gh-inari-version: "0.6.0"
       invalid-label: "status:invalid"
     permissions:
       contents: read

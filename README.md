@@ -1,66 +1,84 @@
 # Inari
 
-Inari (`gh-inari`) is a GitHub CLI extension focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation.
+Inari (`inari`, packaged as `gh-inari`) is a governed GitHub CLI focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation. Every command Inari does not govern passes through to the real `gh` binary unchanged.
 
-Migrated repositories can author semantic template contracts under `.github/inari/` and regenerate the committed GitHub-native projections with `gh inari template sync`; see [Semantic template authority](docs/SEMANTIC_TEMPLATES.md).
+Migrated repositories can author semantic template contracts under `.github/inari/` and regenerate the committed GitHub-native projections with `inari template sync`; see [Semantic template authority](docs/SEMANTIC_TEMPLATES.md).
 
 ## Install and invoke
 
-The canonical human and agent surface is the GitHub CLI extension. Install it
-with one command, then use `gh inari ...`:
+The canonical agent- and human-facing surface is the `inari` executable from
+the `gh-inari` npm package. It is a strict superset of `gh`: commands Inari
+governs (Issue and PR schema/validate/render/create/explain/get/check/edit/
+normalize/sync) run under governance, and every other command falls through
+to the real `gh` binary with the original argv and exit status preserved.
 
 ```bash
-gh extension install yohn-jp/gh-inari
-gh inari --version --json
+npm install --global gh-inari
+inari --version --json
 ```
 
-The package name is `gh-inari`; the npm executable is `gh-inari`; the GitHub
-CLI extension command is `gh inari`. The extension launcher bootstraps only
-production dependencies inside its own installation directory and never
-changes the consumer repository.
-
-For an ephemeral or PATH-independent session, use the published npm package
-directly. This is the deterministic fallback when the extension is missing or
-the global npm bin directory is not on `PATH`:
+For an ephemeral or PATH-independent session, use `npx` directly — the
+deterministic fallback when no global install is present or the npm bin
+directory is not on `PATH`:
 
 ```bash
 npx --yes gh-inari --version --json
 ```
 
 `pnpm dlx gh-inari ...` is equivalent when pnpm is the session's package
-runner. A global install remains supported for users who want a persistent
-direct executable:
+runner.
 
-```bash
-npm install --global gh-inari
-gh-inari --help
+Agent execution hooks (Codex, Claude Code, Mottainai-style) that rewrite
+outbound `gh` invocations should normalize only the executable name:
+
+```text
+argv[0] == "gh"  ->  argv[0] = "inari"
 ```
 
-Update or remove that optional global executable with:
+The hook must not maintain its own table of which subcommands are governed
+(e.g. `gh pr create -> inari`, `gh issue edit -> inari`) — Inari is the sole
+authority for that routing decision, and every unowned command already
+delegates to real `gh` unchanged. The hook's only job is the executable
+boundary, not the command tree.
+
+The `gh inari ...` extension form remains supported as a compatibility path:
+
+```bash
+gh extension install yohn-jp/gh-inari
+gh inari --version --json
+```
+
+The package name is `gh-inari`; its npm executables are `gh-inari` and
+`inari`, both resolving to the same entrypoint. The GitHub CLI extension
+command is `gh inari`. The extension launcher bootstraps only production
+dependencies inside its own installation directory and never changes the
+consumer repository.
+
+Global npm bin directories are environment-specific; use `npx --yes gh-inari`
+instead of repairing shell startup files when `inari` is not found.
+
+## Update, uninstall, and diagnostics
+
+For a global npm install:
 
 ```bash
 npm install --global gh-inari@latest
 npm uninstall --global gh-inari
 ```
 
-Global npm bin directories are environment-specific; use `npx --yes gh-inari`
-instead of repairing shell startup files when `gh-inari` is not found.
-
-## Update, uninstall, and diagnostics
-
-Use the matching command for the canonical surface:
+For the `gh inari` extension form:
 
 ```bash
 gh extension upgrade inari
 gh extension remove inari
 ```
 
-The bounded diagnostic path checks the installed extension without touching
-repository files. It reports a short, actionable recovery command for a
-missing or stale extension:
+The bounded diagnostic path checks the install without touching repository
+files. It reports a short, actionable recovery command for a missing or
+stale install:
 
 ```bash
-gh inari --diagnose --json
+inari --diagnose --json
 npx --yes gh-inari --diagnose --json
 ```
 
@@ -72,9 +90,11 @@ recovery command. The current capability identifiers are
 `canonical-invocation`, `machine-readable-version`, `capability-diagnostics`,
 and `extension-bootstrap`.
 
-The direct executable and extension paths are behaviorally identical:
+The `inari`, `gh-inari`, and `gh inari` invocation forms are behaviorally
+identical:
 
 ```bash
+inari issue schema feature --json
 gh-inari issue schema feature --json
 gh inari issue schema feature --json
 ```
@@ -102,29 +122,29 @@ Inari uses the current `gh` authentication and repository context. It does not m
 ## Commands
 
 ```bash
-gh inari template list
-gh inari issue schema <template> --json
-gh inari issue validate --template <template> --from issue.json
-gh inari issue render --template <template> --from issue.json
-gh inari issue create --template <template> --from issue.json
-gh inari pr schema <template> --json
-gh inari pr validate --template <template> --from pr.json
-gh inari pr render --template <template> --from pr.json
-gh inari pr create --template <template> --from pr.json
-gh inari issue validate <number> --template <template> --json
-gh inari pr validate <number> --template <template> --json
-gh inari issue explain <number> --template <template> --json
-gh inari pr explain <number> --template <template> --json
-gh inari issue get <number> [--template <template>] --json
-gh inari pr get <number> [--template <template>] --json
-gh inari issue check <number> [--template <template>]
-gh inari pr check <number> [--template <template>]
-gh inari issue edit <number> --from patch.json [--dry-run]
-gh inari pr edit <number> --from patch.json [--dry-run]
-gh inari issue normalize <number> [--dry-run]
-gh inari pr normalize <number> [--dry-run]
-gh inari issue sync <number> --from desired.json [--dry-run]
-gh inari pr sync <number> --from desired.json [--dry-run]
+inari template list
+inari issue schema <template> --json
+inari issue validate --template <template> --from issue.json
+inari issue render --template <template> --from issue.json
+inari issue create --template <template> --from issue.json
+inari pr schema <template> --json
+inari pr validate --template <template> --from pr.json
+inari pr render --template <template> --from pr.json
+inari pr create --template <template> --from pr.json
+inari issue validate <number> --template <template> --json
+inari pr validate <number> --template <template> --json
+inari issue explain <number> --template <template> --json
+inari pr explain <number> --template <template> --json
+inari issue get <number> [--template <template>] --json
+inari pr get <number> [--template <template>] --json
+inari issue check <number> [--template <template>]
+inari pr check <number> [--template <template>]
+inari issue edit <number> --from patch.json [--dry-run]
+inari pr edit <number> --from patch.json [--dry-run]
+inari issue normalize <number> [--dry-run]
+inari pr normalize <number> [--dry-run]
+inari issue sync <number> --from desired.json [--dry-run]
+inari pr sync <number> --from desired.json [--dry-run]
 ```
 
 `--from -` reads JSON from stdin. Create input uses an envelope when mutation metadata is needed:

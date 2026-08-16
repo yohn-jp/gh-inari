@@ -232,7 +232,7 @@ function main() {
       cwd: fixtureDirectory,
       env: sourceExtensionEnvironment,
     });
-    if (sourceGhHelpResult.status !== 0 || !sourceGhHelpResult.stdout.includes("Usage: gh-inari"))
+    if (sourceGhHelpResult.status !== 0 || !sourceGhHelpResult.stdout.includes("Usage: inari"))
       fail(`checked-out gh inari --help failed:\n${sourceGhHelpResult.stdout}\n${sourceGhHelpResult.stderr}`);
 
     console.log("installing the packed executable as a local GitHub CLI extension...");
@@ -241,7 +241,7 @@ function main() {
       cwd: fixtureDirectory,
       env: ghExtensionEnvironment,
     });
-    if (ghHelpResult.status !== 0 || !ghHelpResult.stdout.includes("Usage: gh-inari"))
+    if (ghHelpResult.status !== 0 || !ghHelpResult.stdout.includes("Usage: inari"))
       fail(`gh inari --help failed:\n${ghHelpResult.stdout}\n${ghHelpResult.stderr}`);
 
     for (const [label, command, args, options] of [
@@ -525,13 +525,7 @@ process.stdout.write(JSON.stringify(responses[endpoint]));
       for (const [label, result] of outputs) {
         if (result.status !== sourceRemediation.status)
           fail(
-            label +
-              " " +
-              remediationCase.name +
-              " exited " +
-              result.status +
-              ", expected " +
-              sourceRemediation.status,
+            label + " " + remediationCase.name + " exited " + result.status + ", expected " + sourceRemediation.status,
           );
       }
       if (

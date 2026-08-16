@@ -1,10 +1,11 @@
 {
   "name": "gh-inari",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "A deterministic GitHub CLI extension for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
   "type": "module",
   "bin": {
-    "gh-inari": "dist/index.js"
+    "gh-inari": "dist/index.js",
+    "inari": "dist/index.js"
   },
   "exports": {
     ".": {
@@ -101,5 +102,9 @@
     "repository-governance"
   ],
   "main": "dist/index.js",
-  "author": ""
+  "author": "",
+  "types": "./dist/index.d.ts",
+  "directories": {
+    "doc": "docs"
+  }
 }
