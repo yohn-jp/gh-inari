@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -348,8 +348,7 @@ export async function syncSemanticTemplates(repositoryRoot = process.cwd(), chec
     if (!check) {
         for (const relativePath of staleGenerated) {
             const absolutePath = safeRepositoryPath(root, relativePath);
-            const current = await readFile(absolutePath, "utf8");
-            await writeRepositoryFile(absolutePath, current);
+            await removeRepositoryFile(absolutePath);
         }
     }
     return {
@@ -1115,6 +1114,17 @@ async function writeRepositoryFile(absolutePath, content) {
             throw cause;
     }
     await writeFile(absolutePath, content, "utf8");
+}
+async function removeRepositoryFile(absolutePath) {
+    if (!(await lstat(absolutePath)).isFile())
+        throw new SemanticTemplateError([
+            {
+                code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+                path: absolutePath,
+                message: "Refusing to remove a non-regular generated file.",
+            },
+        ]);
+    await unlink(absolutePath);
 }
 async function optionalDirectory(directory) {
     try {

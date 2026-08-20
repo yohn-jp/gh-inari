@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
   compileSemanticTemplate,
   discoverSemanticTemplates,
+  GENERATED_TEMPLATE_NOTICE,
   importNativeTemplate,
   normalizeSemanticTemplate,
   parseSemanticTemplate,
@@ -95,6 +96,35 @@ test("sync writes projections, --check detects drift, and unchanged generation i
     assert.deepEqual(check.drift, [".github/ISSUE_TEMPLATE/feature.yml"]);
     assert.equal(check.written.length, 0);
     assert.match(await readFile(path.join(root, ".github/ISSUE_TEMPLATE/feature.yml"), "utf8"), /# drift\n/u);
+  });
+});
+
+test("sync removes stale generated projections after a semantic layout change", async () => {
+  await withRepository(async (root) => {
+    await mkdir(path.join(root, ".github/inari/pull-requests"), { recursive: true });
+    await writeFile(
+      path.join(root, ".github/inari/pull-requests/default.json"),
+      `${JSON.stringify({
+        version: 1,
+        kind: "pull_request",
+        id: "default",
+        name: "Default",
+        sections: [{ id: "summary", type: "string", label: "Summary" }],
+      })}\n`,
+    );
+    await syncSemanticTemplates(root);
+    const stalePath = path.join(root, ".github/PULL_REQUEST_TEMPLATE.md");
+    await writeFile(stalePath, `${GENERATED_TEMPLATE_NOTICE}\n`);
+
+    const check = await syncSemanticTemplates(root, true);
+    assert.deepEqual(check.drift, []);
+    assert.deepEqual(check.staleGenerated, [".github/PULL_REQUEST_TEMPLATE.md"]);
+    await stat(stalePath);
+
+    const synced = await syncSemanticTemplates(root);
+    assert.deepEqual(synced.staleGenerated, [".github/PULL_REQUEST_TEMPLATE.md"]);
+    await assert.rejects(stat(stalePath), { code: "ENOENT" });
+    assert.equal((await syncSemanticTemplates(root)).changed, false);
   });
 });
 
