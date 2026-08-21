@@ -43,6 +43,15 @@ export interface ContractProvenanceSource {
     /** SHA-256 digest of the decoded source content. */
     readonly digest: string;
 }
+/**
+ * Repository-declared constraint on the actual pull-request head branch
+ * name, sourced from the same PR policy overlay that supplies section
+ * constraints. Presence is optional: a repository that declares no branch
+ * rule has no branch precondition to preflight.
+ */
+export interface PullRequestBranchGovernance {
+    readonly pattern: string;
+}
 export interface ContractProvenance {
     readonly authority: "repository-default-branch";
     readonly repository: ContractProvenanceRepository;
@@ -57,6 +66,8 @@ export interface ContractProvenance {
     readonly treeSha: string;
     readonly template: ContractProvenanceSource;
     readonly policy?: ContractProvenanceSource;
+    /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
+    readonly branchGovernance?: PullRequestBranchGovernance;
 }
 export interface NativeContractMetadata {
     readonly source: TemplateSource;

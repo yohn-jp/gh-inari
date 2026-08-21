@@ -11,6 +11,7 @@ import {
   type CanonicalContract,
   type ContractProvenance,
   type ContractProvenanceSource,
+  type PullRequestBranchGovernance,
 } from "./contract/ir.js";
 import {
   GitHubAdapter,
@@ -21,7 +22,11 @@ import {
   type ValidatedRenderedIssueArtifact,
   type ValidatedRenderedPullRequestArtifact,
 } from "./github/index.js";
-import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay } from "./pr-policy.js";
+import {
+  compilePullRequestPolicyFile,
+  compilePullRequestPolicyOverlay,
+  parsePullRequestPolicyOverlay,
+} from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
 import {
   compileSemanticTemplate,
@@ -51,12 +56,15 @@ export type GovernanceErrorCode =
   | "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN"
   | "GOVERNANCE_SOURCE_UNAVAILABLE"
   | "GOVERNANCE_SOURCE_INVALID"
-  | "GOVERNANCE_GENERATION_STALE";
+  | "GOVERNANCE_GENERATION_STALE"
+  | "GOVERNANCE_BRANCH_INVALID";
 
 export interface GovernanceErrorDetails {
   readonly operation?: string;
   readonly repository?: string;
   readonly ref?: string;
+  readonly head?: string;
+  readonly pattern?: string;
   readonly path?: string;
   readonly reason?: string;
   readonly [key: string]: string | undefined;
@@ -292,12 +300,15 @@ async function compileRepositoryGovernedContractFromSource(
   }
 
   let policySource: ContractProvenanceSource | undefined;
+  let branchGovernance: PullRequestBranchGovernance | undefined;
   const repositoryPolicy = domain === "pr" ? await policySourceLoader() : undefined;
   if (repositoryPolicy !== undefined) {
-    contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
+    const overlay = parsePullRequestPolicyOverlay(repositoryPolicy.source);
+    contract = compilePullRequestPolicyOverlay(contract, overlay, {
       templateIdentities: discovery.pullRequestTemplates,
     });
     policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
+    branchGovernance = overlay.branch;
   }
 
   const bound: CanonicalContract = {
@@ -314,6 +325,7 @@ async function compileRepositoryGovernedContractFromSource(
       treeSha: source.treeSha,
       template: sourceIdentity(templateEntry, ref, templateSource),
       ...(policySource === undefined ? {} : { policy: policySource }),
+      ...(branchGovernance === undefined ? {} : { branchGovernance }),
     },
   };
   assertCanonicalContract(bound);
@@ -342,13 +354,16 @@ async function compileRepositorySemanticContractFromSource(
   }
   let contract = compileSemanticTemplateSource(semanticSource, identity.generatedPath);
   let policySource: ContractProvenanceSource | undefined;
+  let branchGovernance: PullRequestBranchGovernance | undefined;
   if (semanticSource.kind === "pull_request") {
     const repositoryPolicy = await createRepositoryPolicySourceLoader(adapter, source)();
     if (repositoryPolicy !== undefined) {
-      contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
+      const overlay = parsePullRequestPolicyOverlay(repositoryPolicy.source);
+      contract = compilePullRequestPolicyOverlay(contract, overlay, {
         templateIdentities: discovery.pullRequestTemplates,
       });
       policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
+      branchGovernance = overlay.branch;
     }
   }
   const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
@@ -369,6 +384,7 @@ async function compileRepositorySemanticContractFromSource(
       treeSha: source.treeSha,
       template: sourceIdentity(nativeEntry, ref, nativeSource),
       ...(policySource === undefined ? {} : { policy: policySource }),
+      ...(branchGovernance === undefined ? {} : { branchGovernance }),
     },
   };
   assertCanonicalContract(bound);
@@ -552,11 +568,60 @@ export async function updateGovernedIssue(
   return { artifact: updated, governance };
 }
 
-/** Create a pull request only after verifying its governance generation is still fresh. */
+/**
+ * Preflight the actual pull-request head branch against the target
+ * repository's authoritative branch governance, if the repository's PR
+ * policy declares one.
+ *
+ * `artifact.head` is read directly from the same validated artifact that
+ * `adapter.createPullRequest` mutates with moments later, so the branch this
+ * function judges and the branch GitHub receives are structurally the same
+ * value — there is no separate, potentially divergent caller-supplied name
+ * to validate instead. A repository that declares no branch rule has
+ * nothing to preflight, so this is a no-op for the common case and the
+ * existing valid-branch mutation path is unchanged.
+ */
+function assertBranchGovernance(artifact: ValidatedRenderedPullRequestArtifact): void {
+  const branchGovernance = artifact.provenance.branchGovernance;
+  if (branchGovernance === undefined) return;
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(branchGovernance.pattern, "u");
+  } catch (cause: unknown) {
+    throw new GovernanceError(
+      "GOVERNANCE_SOURCE_INVALID",
+      "The target repository's branch governance pattern is not a valid regular expression.",
+      {
+        repository: artifact.provenance.repository.nameWithOwner,
+        pattern: branchGovernance.pattern,
+        reason: "invalid branch governance pattern",
+      },
+      { cause },
+    );
+  }
+  if (pattern.test(artifact.head)) return;
+  throw new GovernanceError(
+    "GOVERNANCE_BRANCH_INVALID",
+    `Pull request head branch "${artifact.head}" does not satisfy the target repository's branch governance.`,
+    {
+      repository: artifact.provenance.repository.nameWithOwner,
+      head: artifact.head,
+      pattern: branchGovernance.pattern,
+      reason: "head branch does not match required pattern",
+    },
+  );
+}
+
+/**
+ * Create a pull request only after preflighting its actual head branch
+ * against repository branch governance and verifying its governance
+ * generation is still fresh.
+ */
 export async function createGovernedPullRequest(
   adapter: GitHubAdapter,
   artifact: ValidatedRenderedPullRequestArtifact,
 ): Promise<GovernedMutationResult<GitHubPullRequest>> {
+  assertBranchGovernance(artifact);
   await verifyGovernedMutationFreshness(adapter, artifact.provenance);
   const created = await adapter.createPullRequest(artifact);
   const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);

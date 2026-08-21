@@ -51,6 +51,16 @@ export interface ContractProvenanceSource {
   readonly digest: string;
 }
 
+/**
+ * Repository-declared constraint on the actual pull-request head branch
+ * name, sourced from the same PR policy overlay that supplies section
+ * constraints. Presence is optional: a repository that declares no branch
+ * rule has no branch precondition to preflight.
+ */
+export interface PullRequestBranchGovernance {
+  readonly pattern: string;
+}
+
 export interface ContractProvenance {
   readonly authority: "repository-default-branch";
   readonly repository: ContractProvenanceRepository;
@@ -65,6 +75,8 @@ export interface ContractProvenance {
   readonly treeSha: string;
   readonly template: ContractProvenanceSource;
   readonly policy?: ContractProvenanceSource;
+  /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
+  readonly branchGovernance?: PullRequestBranchGovernance;
 }
 
 export interface NativeContractMetadata {
@@ -435,7 +447,12 @@ function validateProvenance(
     addViolation(violations, "IR_INVALID_PROVENANCE", path, "Contract provenance must be an object.");
     return;
   }
-  checkUnknownKeys(value, ["authority", "repository", "ref", "treeSha", "template", "policy"], path, violations);
+  checkUnknownKeys(
+    value,
+    ["authority", "repository", "ref", "treeSha", "template", "policy", "branchGovernance"],
+    path,
+    violations,
+  );
   const authority = requiredString(value, "authority", path, violations);
   const ref = requiredString(value, "ref", path, violations);
   requiredString(value, "treeSha", path, violations);
@@ -486,6 +503,38 @@ function validateProvenance(
       );
     }
     validateProvenanceSource(value.policy, `${path}.policy`, ref, violations);
+  }
+  if (hasOwn(value, "branchGovernance")) {
+    if (artifactKind !== "pull_request") {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.branchGovernance`,
+        "Only pull request contracts may contain branch governance provenance.",
+      );
+    }
+    validateBranchGovernance(value.branchGovernance, `${path}.branchGovernance`, violations);
+  }
+}
+
+function validateBranchGovernance(value: unknown, path: string, violations: CanonicalIrViolation[]): void {
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_PROVENANCE", path, "Branch governance must be an object.");
+    return;
+  }
+  checkUnknownKeys(value, ["pattern"], path, violations);
+  const pattern = requiredString(value, "pattern", path, violations);
+  if (pattern !== undefined) {
+    try {
+      new RegExp(pattern, "u");
+    } catch {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.pattern`,
+        "Pattern must be a valid regular expression.",
+      );
+    }
   }
 }
 

@@ -124,7 +124,7 @@ function validateProvenance(value, path, artifactKind, templatePath, violations)
         addViolation(violations, "IR_INVALID_PROVENANCE", path, "Contract provenance must be an object.");
         return;
     }
-    checkUnknownKeys(value, ["authority", "repository", "ref", "treeSha", "template", "policy"], path, violations);
+    checkUnknownKeys(value, ["authority", "repository", "ref", "treeSha", "template", "policy", "branchGovernance"], path, violations);
     const authority = requiredString(value, "authority", path, violations);
     const ref = requiredString(value, "ref", path, violations);
     requiredString(value, "treeSha", path, violations);
@@ -155,6 +155,28 @@ function validateProvenance(value, path, artifactKind, templatePath, violations)
             addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.policy`, "Only pull request contracts may contain policy provenance.");
         }
         validateProvenanceSource(value.policy, `${path}.policy`, ref, violations);
+    }
+    if (hasOwn(value, "branchGovernance")) {
+        if (artifactKind !== "pull_request") {
+            addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.branchGovernance`, "Only pull request contracts may contain branch governance provenance.");
+        }
+        validateBranchGovernance(value.branchGovernance, `${path}.branchGovernance`, violations);
+    }
+}
+function validateBranchGovernance(value, path, violations) {
+    if (!isRecord(value)) {
+        addViolation(violations, "IR_INVALID_PROVENANCE", path, "Branch governance must be an object.");
+        return;
+    }
+    checkUnknownKeys(value, ["pattern"], path, violations);
+    const pattern = requiredString(value, "pattern", path, violations);
+    if (pattern !== undefined) {
+        try {
+            new RegExp(pattern, "u");
+        }
+        catch {
+            addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.pattern`, "Pattern must be a valid regular expression.");
+        }
     }
 }
 function validateProvenanceSource(value, path, contractRef, violations) {

@@ -81,7 +81,7 @@ export function parsePullRequestPolicyOverlay(source) {
     }
     if (!isRecord(value))
         throw new PullRequestPolicyError("PR_POLICY_INVALID_ROOT", "PR policy must be a mapping.");
-    assertKeys(value, ["version", "template", "templates", "sections", "fields"], "$");
+    assertKeys(value, ["version", "template", "templates", "sections", "fields", "branch"], "$");
     if (value.template !== undefined && value.templates !== undefined) {
         throw new PullRequestPolicyError("PR_POLICY_CONFLICT", "Cannot specify both 'template' and 'templates'.", "$.template");
     }
@@ -95,6 +95,7 @@ export function parsePullRequestPolicyOverlay(source) {
     if (version !== PULL_REQUEST_POLICY_VERSION) {
         throw new PullRequestPolicyError("PR_POLICY_UNSUPPORTED_VERSION", `Only PR policy version ${PULL_REQUEST_POLICY_VERSION} is supported.`, "$.version");
     }
+    const branch = value.branch === undefined ? undefined : parseBranchRule(value.branch, "$.branch");
     if (value.templates !== undefined) {
         if (!Array.isArray(value.templates) || value.templates.length === 0) {
             throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "templates must be a non-empty array.", "$.templates");
@@ -104,13 +105,25 @@ export function parsePullRequestPolicyOverlay(source) {
             const index = templates.findIndex((entry) => entry.template === undefined);
             throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "Every entry in a multi-template PR policy must identify a native template.", `$.templates[${index}].template`);
         }
-        return { version: PULL_REQUEST_POLICY_VERSION, templates };
+        return { version: PULL_REQUEST_POLICY_VERSION, templates, ...(branch === undefined ? {} : { branch }) };
     }
     return {
         version: PULL_REQUEST_POLICY_VERSION,
         ...(value.template === undefined ? {} : { template: parseSelector(value.template, "$.template") }),
         sections: parseRules(value.sections ?? value.fields, "$.sections"),
+        ...(branch === undefined ? {} : { branch }),
     };
+}
+function parseBranchRule(value, path) {
+    if (!isRecord(value))
+        throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch must be an object.", path);
+    assertKeys(value, ["pattern"], path);
+    const pattern = optionalString(value, "pattern", path);
+    if (pattern === undefined || pattern.trim().length === 0) {
+        throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch.pattern must be a non-empty string.", `${path}.pattern`);
+    }
+    validatePatternSafety(pattern, `${path}.pattern`);
+    return { pattern };
 }
 function parseTemplateEntry(value, path) {
     if (!isRecord(value)) {
@@ -307,6 +320,25 @@ function alternativesOverlap(alternatives) {
     }
     return false;
 }
+/**
+ * Shared regex-safety gate for every user-supplied pattern in a PR policy
+ * overlay (section constraints and the branch rule alike), so branch
+ * governance does not grow its own copy of these checks.
+ */
+function validatePatternSafety(pattern, path) {
+    try {
+        new RegExp(pattern, "u");
+    }
+    catch {
+        throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must be a valid regular expression.", path);
+    }
+    if (pattern.includes("\\1") || /\\[1-9]/u.test(pattern)) {
+        throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not use backreferences.", path);
+    }
+    if (hasCatastrophicBacktrackingRisk(pattern)) {
+        throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not nest quantified groups or repeat overlapping alternatives, which can cause unbounded regex evaluation.", path);
+    }
+}
 function ruleToConstraint(rule, field, path) {
     if (rule.linkedIssue === true && field.type !== "string" && field.type !== "enum") {
         throw new PullRequestPolicyError("PR_POLICY_UNSUPPORTED_CONSTRAINT", "linkedIssue requires a string-like section.", path);
@@ -315,20 +347,8 @@ function ruleToConstraint(rule, field, path) {
         field.type !== "checklist") {
         throw new PullRequestPolicyError("PR_POLICY_UNSUPPORTED_CONSTRAINT", "Checklist constraints require a checklist section.", path);
     }
-    if (rule.pattern !== undefined) {
-        try {
-            new RegExp(rule.pattern, "u");
-        }
-        catch {
-            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must be a valid regular expression.", path);
-        }
-        if (rule.pattern.includes("\\1") || /\\[1-9]/u.test(rule.pattern)) {
-            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not use backreferences.", path);
-        }
-        if (hasCatastrophicBacktrackingRisk(rule.pattern)) {
-            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not nest quantified groups or repeat overlapping alternatives, which can cause unbounded regex evaluation.", path);
-        }
-    }
+    if (rule.pattern !== undefined)
+        validatePatternSafety(rule.pattern, path);
     if (rule.linkedIssue === true && rule.required === false) {
         throw new PullRequestPolicyError("PR_POLICY_CONFLICT", "linkedIssue cannot be combined with required=false.", path);
     }

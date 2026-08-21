@@ -43,6 +43,16 @@ export interface PullRequestPolicyOverlay {
   readonly template?: string | PullRequestPolicyTemplateSelector;
   readonly sections?: readonly PullRequestPolicySectionRule[];
   readonly templates?: readonly PullRequestPolicyTemplateEntry[];
+  /**
+   * Repository-declared constraint on the actual pull-request head branch
+   * name. Applies regardless of which native PR template is selected, since
+   * branch naming is a property of the branch, not the body template.
+   */
+  readonly branch?: PullRequestPolicyBranchRule;
+}
+
+export interface PullRequestPolicyBranchRule {
+  readonly pattern: string;
 }
 
 export interface PullRequestPolicyTemplateSelector {
@@ -159,7 +169,7 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
     throw new PullRequestPolicyError("PR_POLICY_INVALID_YAML", message);
   }
   if (!isRecord(value)) throw new PullRequestPolicyError("PR_POLICY_INVALID_ROOT", "PR policy must be a mapping.");
-  assertKeys(value, ["version", "template", "templates", "sections", "fields"], "$");
+  assertKeys(value, ["version", "template", "templates", "sections", "fields", "branch"], "$");
 
   if (value.template !== undefined && value.templates !== undefined) {
     throw new PullRequestPolicyError(
@@ -192,6 +202,8 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
     );
   }
 
+  const branch = value.branch === undefined ? undefined : parseBranchRule(value.branch, "$.branch");
+
   if (value.templates !== undefined) {
     if (!Array.isArray(value.templates) || value.templates.length === 0) {
       throw new PullRequestPolicyError(
@@ -209,14 +221,30 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
         `$.templates[${index}].template`,
       );
     }
-    return { version: PULL_REQUEST_POLICY_VERSION, templates };
+    return { version: PULL_REQUEST_POLICY_VERSION, templates, ...(branch === undefined ? {} : { branch }) };
   }
 
   return {
     version: PULL_REQUEST_POLICY_VERSION,
     ...(value.template === undefined ? {} : { template: parseSelector(value.template, "$.template") }),
     sections: parseRules(value.sections ?? value.fields, "$.sections"),
+    ...(branch === undefined ? {} : { branch }),
   };
+}
+
+function parseBranchRule(value: unknown, path: string): PullRequestPolicyBranchRule {
+  if (!isRecord(value)) throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch must be an object.", path);
+  assertKeys(value, ["pattern"], path);
+  const pattern = optionalString(value, "pattern", path);
+  if (pattern === undefined || pattern.trim().length === 0) {
+    throw new PullRequestPolicyError(
+      "PR_POLICY_INVALID_VALUE",
+      "branch.pattern must be a non-empty string.",
+      `${path}.pattern`,
+    );
+  }
+  validatePatternSafety(pattern, `${path}.pattern`);
+  return { pattern };
 }
 
 function parseTemplateEntry(value: unknown, path: string): PullRequestPolicyTemplateEntry {
@@ -453,6 +481,29 @@ function alternativesOverlap(alternatives: readonly string[]): boolean {
   return false;
 }
 
+/**
+ * Shared regex-safety gate for every user-supplied pattern in a PR policy
+ * overlay (section constraints and the branch rule alike), so branch
+ * governance does not grow its own copy of these checks.
+ */
+function validatePatternSafety(pattern: string, path: string): void {
+  try {
+    new RegExp(pattern, "u");
+  } catch {
+    throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must be a valid regular expression.", path);
+  }
+  if (pattern.includes("\\1") || /\\[1-9]/u.test(pattern)) {
+    throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not use backreferences.", path);
+  }
+  if (hasCatastrophicBacktrackingRisk(pattern)) {
+    throw new PullRequestPolicyError(
+      "PR_POLICY_INVALID_VALUE",
+      "pattern must not nest quantified groups or repeat overlapping alternatives, which can cause unbounded regex evaluation.",
+      path,
+    );
+  }
+}
+
 function ruleToConstraint(
   rule: PullRequestPolicySectionRule,
   field: CanonicalField,
@@ -475,23 +526,7 @@ function ruleToConstraint(
       path,
     );
   }
-  if (rule.pattern !== undefined) {
-    try {
-      new RegExp(rule.pattern, "u");
-    } catch {
-      throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must be a valid regular expression.", path);
-    }
-    if (rule.pattern.includes("\\1") || /\\[1-9]/u.test(rule.pattern)) {
-      throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "pattern must not use backreferences.", path);
-    }
-    if (hasCatastrophicBacktrackingRisk(rule.pattern)) {
-      throw new PullRequestPolicyError(
-        "PR_POLICY_INVALID_VALUE",
-        "pattern must not nest quantified groups or repeat overlapping alternatives, which can cause unbounded regex evaluation.",
-        path,
-      );
-    }
-  }
+  if (rule.pattern !== undefined) validatePatternSafety(rule.pattern, path);
   if (rule.linkedIssue === true && rule.required === false) {
     throw new PullRequestPolicyError("PR_POLICY_CONFLICT", "linkedIssue cannot be combined with required=false.", path);
   }

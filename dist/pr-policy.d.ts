@@ -17,6 +17,15 @@ export interface PullRequestPolicyOverlay {
     readonly template?: string | PullRequestPolicyTemplateSelector;
     readonly sections?: readonly PullRequestPolicySectionRule[];
     readonly templates?: readonly PullRequestPolicyTemplateEntry[];
+    /**
+     * Repository-declared constraint on the actual pull-request head branch
+     * name. Applies regardless of which native PR template is selected, since
+     * branch naming is a property of the branch, not the body template.
+     */
+    readonly branch?: PullRequestPolicyBranchRule;
+}
+export interface PullRequestPolicyBranchRule {
+    readonly pattern: string;
 }
 export interface PullRequestPolicyTemplateSelector {
     readonly id?: string;

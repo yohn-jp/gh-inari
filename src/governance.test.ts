@@ -16,6 +16,7 @@ import { deserializeCanonicalContract, serializeCanonicalContract } from "./cont
 import { prepareIssueArtifact, preparePullRequestArtifact } from "./artifact.js";
 import { runCli } from "./cli.js";
 import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
+import { PullRequestPolicyError } from "./pr-policy.js";
 
 class StubGovernanceTransport implements GhTransport {
   readonly calls: readonly string[][];
@@ -401,6 +402,215 @@ test("createGovernedPullRequest fails closed when a policy governance input is n
     transport.calls.some((args) => args.includes("POST")),
     false,
   );
+});
+
+test("createGovernedPullRequest proceeds through the existing mutation path when the actual head branch satisfies repository branch governance", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const templateSource = "## Summary\n\nSummary text.\n";
+  const policySource = 'version: 1\nsections: []\nbranch:\n  pattern: "^feat/[0-9]+-[a-z0-9-]+$"\n';
+  const tree = command(
+    JSON.stringify({
+      sha: "tree-sha-a",
+      truncated: false,
+      tree: [
+        { path: templatePath, type: "blob", sha: "pr-template-sha" },
+        { path: ".github/inari/pr-policy.yml", type: "blob", sha: "policy-sha" },
+      ],
+    }),
+  );
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree,
+    blobResponse("pr-template-sha", templateSource),
+    blobResponse("policy-sha", policySource),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree,
+    command(
+      JSON.stringify({
+        number: 60,
+        title: "PR title",
+        body: "## Summary\n\nA summary\n",
+        state: "open",
+        html_url: "https://github.com/acme/repository-b/pull/60",
+        draft: false,
+        head: { ref: "feat/42-add-branch-preflight" },
+        base: { ref: "main" },
+      }),
+    ),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree,
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
+  assert.deepEqual(contract.provenance?.branchGovernance, { pattern: "^feat/[0-9]+-[a-z0-9-]+$" });
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "A summary" },
+    metadata: { title: "PR title", head: "feat/42-add-branch-preflight", base: "main" },
+  }).artifact;
+
+  const created = await createGovernedPullRequest(adapter, prepared);
+  assert.equal(created.artifact.number, 60);
+  const postCall = transport.calls.find((args) => args.includes("POST"));
+  assert.ok(postCall?.includes("head=feat/42-add-branch-preflight"));
+});
+
+test("createGovernedPullRequest rejects a head branch that violates repository branch governance before any GitHub mutation, with a bounded stable diagnostic", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const templateSource = "## Summary\n\nSummary text.\n";
+  const policySource = 'version: 1\nsections: []\nbranch:\n  pattern: "^feat/[0-9]+-[a-z0-9-]+$"\n';
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [
+          { path: templatePath, type: "blob", sha: "pr-template-sha" },
+          { path: ".github/inari/pr-policy.yml", type: "blob", sha: "policy-sha" },
+        ],
+      }),
+    ),
+    blobResponse("pr-template-sha", templateSource),
+    blobResponse("policy-sha", policySource),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "A summary" },
+    metadata: { title: "PR title", head: "not-governance-compliant", base: "main" },
+  }).artifact;
+
+  await assert.rejects(createGovernedPullRequest(adapter, prepared), (error: unknown) => {
+    assert.ok(error instanceof GovernanceError);
+    assert.equal(error.code, "GOVERNANCE_BRANCH_INVALID");
+    assert.equal(error.details.head, "not-governance-compliant");
+    assert.equal(error.details.pattern, "^feat/[0-9]+-[a-z0-9-]+$");
+    return true;
+  });
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+  assert.equal(transport.calls.length, 6);
+});
+
+test("a malformed repository branch governance declaration fails closed while compiling the contract, before any PR mutation is reachable", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const templateSource = "## Summary\n\nSummary text.\n";
+  const policySource = 'version: 1\nsections: []\nbranch:\n  pattern: "(a+)+$"\n';
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [
+          { path: templatePath, type: "blob", sha: "pr-template-sha" },
+          { path: ".github/inari/pr-policy.yml", type: "blob", sha: "policy-sha" },
+        ],
+      }),
+    ),
+    blobResponse("pr-template-sha", templateSource),
+    blobResponse("policy-sha", policySource),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+
+  await assert.rejects(
+    compileRepositoryGovernedContract(adapter, "pr", "default"),
+    (error: unknown) => error instanceof PullRequestPolicyError && error.code === "PR_POLICY_INVALID_VALUE",
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("unavailable repository branch governance fails closed before any PR mutation is reachable", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const templateSource = "## Summary\n\nSummary text.\n";
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [
+          { path: templatePath, type: "blob", sha: "pr-template-sha" },
+          { path: ".github/inari/pr-policy.yml", type: "blob", sha: "policy-sha" },
+        ],
+      }),
+    ),
+    blobResponse("pr-template-sha", templateSource),
+    command("", 1, "offline"),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+
+  await assert.rejects(
+    compileRepositoryGovernedContract(adapter, "pr", "default"),
+    (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_UNAVAILABLE",
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("a repository PR policy with no branch rule leaves the existing valid-branch mutation path unchanged", async () => {
+  const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const templateSource = "## Summary\n\nSummary text.\n";
+  const policySource = "version: 1\nsections: []\n";
+  const tree = command(
+    JSON.stringify({
+      sha: "tree-sha-a",
+      truncated: false,
+      tree: [
+        { path: templatePath, type: "blob", sha: "pr-template-sha" },
+        { path: ".github/inari/pr-policy.yml", type: "blob", sha: "policy-sha" },
+      ],
+    }),
+  );
+  const transport = new StubGovernanceTransport([
+    command("gh version 2.0"),
+    command(),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree,
+    blobResponse("pr-template-sha", templateSource),
+    blobResponse("policy-sha", policySource),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree,
+    command(
+      JSON.stringify({
+        number: 61,
+        title: "PR title",
+        body: "## Summary\n\nA summary\n",
+        state: "open",
+        html_url: "https://github.com/acme/repository-b/pull/61",
+        draft: false,
+        head: { ref: "anything-goes" },
+        base: { ref: "main" },
+      }),
+    ),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree,
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
+  assert.equal(contract.provenance?.branchGovernance, undefined);
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "A summary" },
+    metadata: { title: "PR title", head: "anything-goes", base: "main" },
+  }).artifact;
+
+  const created = await createGovernedPullRequest(adapter, prepared);
+  assert.equal(created.artifact.number, 61);
 });
 
 test("compileRepositoryGovernedContract succeeds for a repository governed by .github/inari/ semantic sources", async () => {
