@@ -44,6 +44,7 @@ function cloneProvenance(provenance) {
         treeSha: provenance.treeSha,
         template: { ...provenance.template },
         ...(provenance.policy === undefined ? {} : { policy: { ...provenance.policy } }),
+        ...(provenance.branchGovernance === undefined ? {} : { branchGovernance: { ...provenance.branchGovernance } }),
     };
 }
 function deepFreeze(value) {

@@ -3,7 +3,7 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { compileIssueFormTemplate, compileIssueFormYaml, } from "./contract/issue-form.js";
 import { assertCanonicalContract, } from "./contract/ir.js";
-import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay } from "./pr-policy.js";
+import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay, parsePullRequestPolicyOverlay, } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
 import { compileSemanticTemplate, compileSemanticTemplateSource, discoverSemanticTemplates, readSemanticTemplate, selectSemanticTemplate, normalizeSemanticTemplate, } from "./semantic-template.js";
 import { discoverTemplates, selectIssueTemplate, selectPullRequestTemplate, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, TemplateNotFoundError, } from "./template-discovery.js";
@@ -167,12 +167,15 @@ async function compileRepositoryGovernedContractFromSource(adapter, source, doma
         contract = parsePullRequestTemplate(templateSource, selectedTemplate);
     }
     let policySource;
+    let branchGovernance;
     const repositoryPolicy = domain === "pr" ? await policySourceLoader() : undefined;
     if (repositoryPolicy !== undefined) {
-        contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
+        const overlay = parsePullRequestPolicyOverlay(repositoryPolicy.source);
+        contract = compilePullRequestPolicyOverlay(contract, overlay, {
             templateIdentities: discovery.pullRequestTemplates,
         });
         policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
+        branchGovernance = overlay.branch;
     }
     const bound = {
         ...contract,
@@ -188,6 +191,7 @@ async function compileRepositoryGovernedContractFromSource(adapter, source, doma
             treeSha: source.treeSha,
             template: sourceIdentity(templateEntry, ref, templateSource),
             ...(policySource === undefined ? {} : { policy: policySource }),
+            ...(branchGovernance === undefined ? {} : { branchGovernance }),
         },
     };
     assertCanonicalContract(bound);
@@ -206,13 +210,16 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
     }
     let contract = compileSemanticTemplateSource(semanticSource, identity.generatedPath);
     let policySource;
+    let branchGovernance;
     if (semanticSource.kind === "pull_request") {
         const repositoryPolicy = await createRepositoryPolicySourceLoader(adapter, source)();
         if (repositoryPolicy !== undefined) {
-            contract = compilePullRequestPolicyOverlay(contract, repositoryPolicy.source, {
+            const overlay = parsePullRequestPolicyOverlay(repositoryPolicy.source);
+            contract = compilePullRequestPolicyOverlay(contract, overlay, {
                 templateIdentities: discovery.pullRequestTemplates,
             });
             policySource = sourceIdentity(repositoryPolicy.entry, ref, repositoryPolicy.source);
+            branchGovernance = overlay.branch;
         }
     }
     const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
@@ -231,6 +238,7 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
             treeSha: source.treeSha,
             template: sourceIdentity(nativeEntry, ref, nativeSource),
             ...(policySource === undefined ? {} : { policy: policySource }),
+            ...(branchGovernance === undefined ? {} : { branchGovernance }),
         },
     };
     assertCanonicalContract(bound);
@@ -343,8 +351,50 @@ export async function updateGovernedIssue(adapter, issueNumber, artifact) {
     const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
     return { artifact: updated, governance };
 }
-/** Create a pull request only after verifying its governance generation is still fresh. */
+/**
+ * Preflight the actual pull-request head branch against the target
+ * repository's authoritative branch governance, if the repository's PR
+ * policy declares one.
+ *
+ * `artifact.head` is read directly from the same validated artifact that
+ * `adapter.createPullRequest` mutates with moments later, so the branch this
+ * function judges and the branch GitHub receives are structurally the same
+ * value — there is no separate, potentially divergent caller-supplied name
+ * to validate instead. A repository that declares no branch rule has
+ * nothing to preflight, so this is a no-op for the common case and the
+ * existing valid-branch mutation path is unchanged.
+ */
+function assertBranchGovernance(artifact) {
+    const branchGovernance = artifact.provenance.branchGovernance;
+    if (branchGovernance === undefined)
+        return;
+    let pattern;
+    try {
+        pattern = new RegExp(branchGovernance.pattern, "u");
+    }
+    catch (cause) {
+        throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "The target repository's branch governance pattern is not a valid regular expression.", {
+            repository: artifact.provenance.repository.nameWithOwner,
+            pattern: branchGovernance.pattern,
+            reason: "invalid branch governance pattern",
+        }, { cause });
+    }
+    if (pattern.test(artifact.head))
+        return;
+    throw new GovernanceError("GOVERNANCE_BRANCH_INVALID", `Pull request head branch "${artifact.head}" does not satisfy the target repository's branch governance.`, {
+        repository: artifact.provenance.repository.nameWithOwner,
+        head: artifact.head,
+        pattern: branchGovernance.pattern,
+        reason: "head branch does not match required pattern",
+    });
+}
+/**
+ * Create a pull request only after preflighting its actual head branch
+ * against repository branch governance and verifying its governance
+ * generation is still fresh.
+ */
 export async function createGovernedPullRequest(adapter, artifact) {
+    assertBranchGovernance(artifact);
     await verifyGovernedMutationFreshness(adapter, artifact.provenance);
     const created = await adapter.createPullRequest(artifact);
     const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);

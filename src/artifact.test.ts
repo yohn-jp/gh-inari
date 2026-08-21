@@ -20,7 +20,7 @@ import {
   type CanonicalContract,
 } from "./contract/index.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
-import { compilePullRequestPolicyOverlay } from "./pr-policy.js";
+import { compilePullRequestPolicyOverlay, parsePullRequestPolicyOverlay } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
 
 function governedFixture(contract: CanonicalContract): CanonicalContract {
@@ -579,6 +579,73 @@ test("accepts ordinary PR policy patterns without nested quantifiers or backrefe
       ),
     );
   }
+});
+
+test("PR policy overlay parses an optional repository branch rule alongside section rules", () => {
+  const overlay = parsePullRequestPolicyOverlay(
+    `version: 1\ntemplate: default\nsections: []\nbranch:\n  pattern: "^(feat|fix)/\\\\d+-[a-z0-9-]+$"\n`,
+  );
+  assert.deepEqual(overlay.branch, { pattern: "^(feat|fix)/\\d+-[a-z0-9-]+$" });
+});
+
+test("a repository PR policy with no branch key declares no branch governance", () => {
+  const overlay = parsePullRequestPolicyOverlay(`version: 1\ntemplate: default\nsections: []\n`);
+  assert.equal(overlay.branch, undefined);
+});
+
+test("PR policy branch rule fails closed on a malformed declaration", () => {
+  assert.throws(
+    () => parsePullRequestPolicyOverlay(`version: 1\ntemplate: default\nsections: []\nbranch: "feat/*"\n`),
+    (error: unknown) => {
+      const err = error as { code: string };
+      assert.equal(err.code, "PR_POLICY_INVALID_VALUE");
+      return true;
+    },
+  );
+  assert.throws(
+    () => parsePullRequestPolicyOverlay(`version: 1\ntemplate: default\nsections: []\nbranch: {}\n`),
+    (error: unknown) => {
+      const err = error as { code: string };
+      assert.equal(err.code, "PR_POLICY_INVALID_VALUE");
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      parsePullRequestPolicyOverlay(
+        `version: 1\ntemplate: default\nsections: []\nbranch:\n  pattern: "^x"\n  extra: true\n`,
+      ),
+    (error: unknown) => {
+      const err = error as { code: string };
+      assert.equal(err.code, "PR_POLICY_UNKNOWN_PROPERTY");
+      return true;
+    },
+  );
+});
+
+test("PR policy branch rule reuses the shared regex-safety gate", () => {
+  assert.throws(
+    () => parsePullRequestPolicyOverlay(`version: 1\ntemplate: default\nsections: []\nbranch:\n  pattern: "(a+)+$"\n`),
+    (error: unknown) => {
+      const err = error as { code: string };
+      assert.equal(err.code, "PR_POLICY_INVALID_VALUE");
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      parsePullRequestPolicyOverlay(`version: 1\ntemplate: default\nsections: []\nbranch:\n  pattern: "(a)\\\\1"\n`),
+    (error: unknown) => {
+      const err = error as { code: string };
+      assert.equal(err.code, "PR_POLICY_INVALID_VALUE");
+      return true;
+    },
+  );
+  assert.doesNotThrow(() =>
+    parsePullRequestPolicyOverlay(
+      `version: 1\ntemplate: default\nsections: []\nbranch:\n  pattern: "^feat/\\\\d+-.+$"\n`,
+    ),
+  );
 });
 
 test("PR rendering and existing-artifact validation share semantic rules", () => {

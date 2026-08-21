@@ -102,6 +102,25 @@ const REMOTE_PR_POLICY = [
   "",
 ].join("\n");
 
+/** Same PR body policy as REMOTE_PR_POLICY, plus a repository branch governance rule. */
+const REMOTE_PR_POLICY_WITH_BRANCH = [
+  "version: 1",
+  "template: default",
+  "sections:",
+  "  - section: summary",
+  "    required: true",
+  "    minLength: 10",
+  "  - section: linked_issue",
+  "    linkedIssue: true",
+  "  - section: validation",
+  "    required: true",
+  "    checklist:",
+  "      minCompleted: 1",
+  "branch:",
+  '  pattern: "^feat/[0-9]+-[a-z0-9-]+$"',
+  "",
+].join("\n");
+
 const REMOTE_BUG_TEMPLATE = [
   "name: Bug",
   "description: Remote bug",
@@ -1098,6 +1117,138 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
     const output = JSON.parse(lines[0] ?? "{}") as { ok: boolean; governance?: { reconciled?: boolean } };
     assert.equal(output.ok, true);
     assert.equal(output.governance?.reconciled, true);
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("PR create preflights the actual resolved head branch, not the --from document's original value", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "pr.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: { summary: "A deterministic summary", linked_issue: "Closes #22", validation: ["tests"] },
+      title: "feat: create through Inari",
+      head: "not-governance-compliant",
+      base: "main",
+    }),
+  );
+  const transport = new CliStubTransport([
+    ...remoteGovernanceResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", REMOTE_PR_TEMPLATE, {
+      sha: "pr-policy-sha",
+      source: REMOTE_PR_POLICY_WITH_BRANCH,
+    }),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+    command(
+      JSON.stringify({
+        number: 24,
+        title: "feat: create through Inari",
+        body: "Rendered body",
+        state: "open",
+        html_url: "https://github.com/acme/inari/pulls/24",
+        draft: false,
+        head: { ref: "feat/42-add-branch-preflight" },
+        base: { ref: "main" },
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      [
+        "pr",
+        "create",
+        "--template",
+        "default",
+        "--from",
+        inputPath,
+        "--head",
+        "feat/42-add-branch-preflight",
+        "--repository",
+        "acme/inari",
+        "--json",
+      ],
+      {
+        repositoryRoot,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      },
+    );
+    assert.equal(exitCode, 0);
+    const postCall = transport.calls.find((args) => args.includes("POST"));
+    assert.ok(postCall?.includes("head=feat/42-add-branch-preflight"));
+    assert.ok(!transport.calls.some((args) => args.some((token) => token.includes("not-governance-compliant"))));
+    const output = JSON.parse(lines[0] ?? "{}") as { ok: boolean };
+    assert.equal(output.ok, true);
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("PR create fails closed before mutation when the actual resolved head branch violates repository branch governance", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "pr.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: { summary: "A deterministic summary", linked_issue: "Closes #22", validation: ["tests"] },
+      title: "feat: create through Inari",
+      head: "feat/42-this-document-value-is-not-what-mutates",
+      base: "main",
+    }),
+  );
+  const transport = new CliStubTransport([
+    ...remoteGovernanceResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", REMOTE_PR_TEMPLATE, {
+      sha: "pr-policy-sha",
+      source: REMOTE_PR_POLICY_WITH_BRANCH,
+    }),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      [
+        "pr",
+        "create",
+        "--template",
+        "default",
+        "--from",
+        inputPath,
+        "--head",
+        "not-governance-compliant",
+        "--repository",
+        "acme/inari",
+        "--json",
+      ],
+      {
+        repositoryRoot,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      },
+    );
+    assert.equal(exitCode, 3);
+    assert.equal(transport.calls.length, 6);
+    assert.equal(
+      transport.calls.some((args) => args.includes("POST")),
+      false,
+    );
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error: { code: string; details?: { head?: string; pattern?: string } };
+    };
+    assert.equal(output.error.code, "GOVERNANCE_BRANCH_INVALID");
+    assert.equal(output.error.details?.head, "not-governance-compliant");
+    assert.equal(output.error.details?.pattern, "^feat/[0-9]+-[a-z0-9-]+$");
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });

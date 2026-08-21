@@ -61,6 +61,7 @@ function cloneProvenance(provenance: ContractProvenance): ContractProvenance {
     treeSha: provenance.treeSha,
     template: { ...provenance.template },
     ...(provenance.policy === undefined ? {} : { policy: { ...provenance.policy } }),
+    ...(provenance.branchGovernance === undefined ? {} : { branchGovernance: { ...provenance.branchGovernance } }),
   };
 }
 

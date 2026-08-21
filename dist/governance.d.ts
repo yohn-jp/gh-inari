@@ -2,11 +2,13 @@ import { type CanonicalContract, type ContractProvenance } from "./contract/ir.j
 import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
 export type GovernedArtifactDomain = "issue" | "pr";
-export type GovernanceErrorCode = "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN" | "GOVERNANCE_SOURCE_UNAVAILABLE" | "GOVERNANCE_SOURCE_INVALID" | "GOVERNANCE_GENERATION_STALE";
+export type GovernanceErrorCode = "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN" | "GOVERNANCE_SOURCE_UNAVAILABLE" | "GOVERNANCE_SOURCE_INVALID" | "GOVERNANCE_GENERATION_STALE" | "GOVERNANCE_BRANCH_INVALID";
 export interface GovernanceErrorDetails {
     readonly operation?: string;
     readonly repository?: string;
     readonly ref?: string;
+    readonly head?: string;
+    readonly pattern?: string;
     readonly path?: string;
     readonly reason?: string;
     readonly [key: string]: string | undefined;
@@ -104,7 +106,11 @@ export interface GovernedMutationResult<T> {
 export declare function createGovernedIssue(adapter: GitHubAdapter, artifact: ValidatedRenderedIssueArtifact): Promise<GovernedMutationResult<GitHubIssue>>;
 /** Update an Issue only after verifying its governance generation is still fresh. */
 export declare function updateGovernedIssue(adapter: GitHubAdapter, issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GovernedMutationResult<GitHubIssue>>;
-/** Create a pull request only after verifying its governance generation is still fresh. */
+/**
+ * Create a pull request only after preflighting its actual head branch
+ * against repository branch governance and verifying its governance
+ * generation is still fresh.
+ */
 export declare function createGovernedPullRequest(adapter: GitHubAdapter, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;
 /** Update a pull request only after verifying its governance generation is still fresh. */
 export declare function updateGovernedPullRequest(adapter: GitHubAdapter, pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;
