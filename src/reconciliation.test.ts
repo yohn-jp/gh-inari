@@ -22,6 +22,7 @@ import {
   validateExistingPullRequestArtifact,
 } from "./artifact.js";
 import type { CanonicalContract } from "./contract/index.js";
+import { compileSemanticTemplateSource, normalizeSemanticTemplate } from "./semantic-template.js";
 
 const ISSUE_SOURCE = [
   "name: Feature",
@@ -94,6 +95,73 @@ test("Issue semantic remediation is deterministic and idempotent", () => {
     result: validateExistingIssueArtifact(contract, patched.body),
   };
   assert.equal(diffArtifact("issue", convergedRead, patched).changed, false);
+});
+
+test("Issue normalization preserves semantic option values while canonicalizing native labels", () => {
+  const source = normalizeSemanticTemplate({
+    version: 1,
+    kind: "issue",
+    id: "mapped-options",
+    name: "Mapped options",
+    description: "Issue Form option mapping fixture",
+    sections: [
+      {
+        id: "priority",
+        kind: "input",
+        type: "enum",
+        label: "Priority",
+        required: true,
+        options: [
+          { id: "critical", value: "p-critical", label: "Critical" },
+          { id: "normal", value: "p-normal", label: "Normal" },
+        ],
+      },
+      {
+        id: "areas",
+        kind: "input",
+        type: "array",
+        label: "Areas",
+        multiple: true,
+        options: [
+          { id: "frontend", value: "area-frontend", label: "Frontend" },
+          { id: "backend", value: "area-backend", label: "Backend" },
+        ],
+      },
+    ],
+  });
+  const path = ".github/ISSUE_TEMPLATE/mapped-options.yml";
+  const contract = trusted(compileSemanticTemplateSource(source, path), path, JSON.stringify(source));
+  const fields = { priority: "p-critical", areas: ["area-backend", "area-frontend"] };
+  const canonical = prepareRemediationArtifact("issue", contract, {
+    fields,
+    metadata: { title: "feat: mapped options", labels: [], assignees: [] },
+  });
+  const driftedBody = canonical.body.replace("Backend, Frontend", "Backend,Frontend");
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 84,
+      title: "feat: mapped options",
+      body: driftedBody,
+      state: "open",
+      url: "https://github.com/acme/inari/issues/84",
+      labels: [],
+      assignees: [],
+    },
+    contract,
+    result: validateExistingIssueArtifact(contract, driftedBody),
+  };
+
+  assert.equal(read.result.valid, true);
+  assert.deepEqual(read.result.parse.values, fields);
+  const assessment = assessExistingArtifact("issue", read);
+  assert.equal(assessment.status, "non-canonical");
+  assert.equal(assessment.canonicalBody, canonical.body);
+  const normalized = prepareRemediationArtifact("issue", contract, {
+    fields: read.result.parse.values,
+    metadata: { title: read.remote.title, labels: [], assignees: [] },
+  });
+  assert.equal(diffArtifact("issue", read, normalized).changed, true);
+  assert.equal(validateExistingIssueArtifact(contract, normalized.body).valid, true);
 });
 
 test("pull-request semantic remediation preserves resource-specific metadata and is idempotent", () => {

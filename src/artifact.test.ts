@@ -120,6 +120,12 @@ test("Issue rendering uses governed option labels while preserving semantic valu
   const parsed = parseExistingIssueArtifact(contract, body);
   assert.equal(parsed.parsed, true);
   assert.deepEqual(parsed.values, fields);
+
+  const prepared = prepareIssueArtifact(governedFixture(contract), {
+    fields,
+    metadata: { title: "feat: mapped options" },
+  });
+  assert.deepEqual(parseExistingIssueArtifact(contract, prepared.artifact.body).values, fields);
 });
 
 test("prepared PR artifacts prove comment, preamble, and checklist-placeholder round trips", () => {
