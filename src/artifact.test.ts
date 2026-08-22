@@ -21,7 +21,11 @@ import {
 } from "./contract/index.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 import { compilePullRequestPolicyOverlay, parsePullRequestPolicyOverlay } from "./pr-policy.js";
-import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
+import {
+  compilePullRequestTemplate,
+  compilePullRequestTemplatesSync,
+  parsePullRequestTemplate,
+} from "./pull-request-template.js";
 
 function governedFixture(contract: CanonicalContract): CanonicalContract {
   return {
@@ -666,6 +670,34 @@ test("PR rendering and existing-artifact validation share semantic rules", () =>
     drift.violations.map((violation) => `${violation.code}:${violation.path}`),
     ["INPUT_PATTERN:$.linked_issue"],
   );
+});
+
+test("all native PR templates render and parse canonical values in contract order", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const contracts = compilePullRequestTemplatesSync(root);
+  assert.ok(contracts.length >= 2);
+
+  for (const contract of contracts) {
+    const input: Record<string, unknown> = {};
+    for (const section of contract.sections) {
+      for (const field of section.fields) {
+        if (field.type === "checklist") {
+          input[field.id] = field.items.length === 0 ? [] : [field.items[0]?.id];
+        } else if (field.type === "array") {
+          input[field.id] = [`value for ${field.id}`];
+        } else {
+          input[field.id] = `value for ${field.id}\nsecond line`;
+        }
+      }
+    }
+
+    const body = renderPullRequestArtifact(contract, input);
+    const reversedInput = Object.fromEntries(Object.entries(input).reverse());
+    assert.equal(renderPullRequestArtifact(contract, reversedInput), body, contract.templateIdentity.path);
+    const parsed = parseExistingPullRequestArtifact(contract, body);
+    assert.equal(parsed.parsed, true, contract.templateIdentity.path);
+    assert.deepEqual(parsed.values, input, contract.templateIdentity.path);
+  }
 });
 
 test("wrong-template and unparseable existing bodies are distinguished", () => {
