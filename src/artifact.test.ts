@@ -27,6 +27,7 @@ import {
   compilePullRequestTemplatesSync,
   parsePullRequestTemplate,
 } from "./pull-request-template.js";
+import { compileSemanticTemplateSource, normalizeSemanticTemplate } from "./semantic-template.js";
 
 function governedFixture(contract: CanonicalContract): CanonicalContract {
   return {
@@ -74,6 +75,51 @@ test("Issue validation and rendering are deterministic and reversible", () => {
     metadata: { title: "feat: preserve native labels" },
   });
   assert.deepEqual(prepared.artifact.labels, ["enhancement"]);
+});
+
+test("Issue rendering uses governed option labels while preserving semantic values", () => {
+  const source = normalizeSemanticTemplate({
+    version: 1,
+    kind: "issue",
+    id: "mapped-options",
+    name: "Mapped options",
+    description: "Issue Form option mapping fixture",
+    sections: [
+      {
+        id: "priority",
+        kind: "input",
+        type: "enum",
+        label: "Priority",
+        required: true,
+        options: [
+          { id: "critical", value: "p-critical", label: "Critical" },
+          { id: "normal", value: "p-normal", label: "Normal" },
+        ],
+      },
+      {
+        id: "areas",
+        kind: "input",
+        type: "array",
+        label: "Areas",
+        multiple: true,
+        options: [
+          { id: "frontend", value: "area-frontend", label: "Frontend" },
+          { id: "backend", value: "area-backend", label: "Backend" },
+        ],
+      },
+    ],
+  });
+  const contract = compileSemanticTemplateSource(source, ".github/ISSUE_TEMPLATE/mapped-options.yml");
+  const fields = { priority: "p-critical", areas: ["area-backend", "area-frontend"] };
+
+  const body = renderIssueArtifact(contract, fields);
+  assert.match(body, /### Priority\n\nCritical\n/u);
+  assert.match(body, /### Areas\n\nBackend, Frontend\n/u);
+  assert.doesNotMatch(body, /p-critical|area-backend|area-frontend/u);
+
+  const parsed = parseExistingIssueArtifact(contract, body);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, fields);
 });
 
 test("prepared PR artifacts prove comment, preamble, and checklist-placeholder round trips", () => {
