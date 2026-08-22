@@ -30,6 +30,7 @@ test("repairs one missing field using only the targeted patch and renders one-pa
     acceptance: ["tests"],
   });
   assert.deepEqual(repaired.changedFields, ["acceptance"]);
+  assert.deepEqual(repaired.diagnostics.diagnostics, []);
   assert.equal(
     renderIssueArtifact(issueContractFixture, repaired.values),
     renderIssueArtifact(issueContractFixture, {
@@ -38,6 +39,23 @@ test("repairs one missing field using only the targeted patch and renders one-pa
       acceptance: ["tests"],
     }),
   );
+});
+
+test("repairs an invalid field without resending other accepted fields", () => {
+  const partial = validatePartialArtifactInput(issueContractFixture, {
+    fields: { problem: "A useful problem", category: "not-declared", acceptance: ["tests"] },
+  });
+  const repaired = repairPartialArtifactInput(issueContractFixture, partial, {
+    identity: partial.identity,
+    fields: { category: "feature" },
+  });
+
+  assert.equal(repaired.valid, true);
+  assert.deepEqual(repaired.values, {
+    problem: "A useful problem",
+    category: "feature",
+    acceptance: ["tests"],
+  });
 });
 
 test("repeated repairs use returned context and preserve accepted fields", () => {

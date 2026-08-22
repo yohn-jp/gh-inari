@@ -415,7 +415,14 @@ export function repairPartialSemanticInput(
   const completeValidation = validateSemanticInput(contract, accepted);
   const patchInvalid = validatedPatch.invalidFields.length > 0 || !patchResult.valid;
   const diagnostics = createArtifactDiagnosticReport(
-    [...contextDiagnostics, ...validatedPatch.diagnostics.diagnostics, ...partial.diagnostics.diagnostics],
+    [
+      ...contextDiagnostics,
+      // A patch is intentionally sparse: fields omitted from it are not
+      // missing repair values.  Carry only patch-local invalid diagnostics;
+      // unresolved candidate fields are reported by `partial` below.
+      ...validatedPatch.diagnostics.diagnostics.filter((diagnostic) => diagnostic.state === "invalid"),
+      ...partial.diagnostics.diagnostics,
+    ],
     partial.acceptedFields,
   );
   const valid = contextValid && patchResult.valid && !patchInvalid && completeValidation.valid;
