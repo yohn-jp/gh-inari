@@ -1,7 +1,7 @@
 import { type CanonicalContract, type CanonicalField } from "./ir.js";
 import { type ArtifactDiagnosticReport, type ArtifactDiagnosticReason } from "../diagnostics.js";
 /** Stable machine-readable semantic input diagnostics. */
-export type SemanticViolationCode = "INPUT_NOT_OBJECT" | "INPUT_UNKNOWN_FIELD" | "INPUT_REQUIRED" | "INPUT_TYPE" | "INPUT_ENUM" | "INPUT_OPTION" | "INPUT_DUPLICATE" | "INPUT_MIN_LENGTH" | "INPUT_MAX_LENGTH" | "INPUT_PATTERN" | "INPUT_MIN_ITEMS" | "INPUT_MAX_ITEMS" | "INPUT_CHECKLIST_REQUIRED" | "INPUT_CHECKLIST_INCOMPLETE";
+export type SemanticViolationCode = "INPUT_NOT_OBJECT" | "INPUT_UNKNOWN_FIELD" | "INPUT_REQUIRED" | "INPUT_TYPE" | "INPUT_ENUM" | "INPUT_OPTION" | "INPUT_DUPLICATE" | "INPUT_MIN_LENGTH" | "INPUT_MAX_LENGTH" | "INPUT_PATTERN" | "INPUT_MIN_ITEMS" | "INPUT_MAX_ITEMS" | "INPUT_CHECKLIST_REQUIRED" | "INPUT_CHECKLIST_INCOMPLETE" | "INPUT_UNSAFE_CONTENT";
 export interface SemanticViolation {
     readonly code: SemanticViolationCode;
     readonly path: string;
