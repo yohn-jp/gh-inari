@@ -124,6 +124,17 @@ export async function readGovernedExistingArtifact(
   }
 
   const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
+
+  if (selector === undefined) {
+    const marker = extractTemplateIdentityMarker(remote.body ?? "");
+    if (marker.status !== "absent") {
+      // A marker is the primary selection signal: resolve and validate only
+      // the one contract it names, without structurally probing every other
+      // compiled candidate first.
+      return resolveExistingArtifactByMarker(domain, remote, contracts, failedTemplates, marker.status, marker.marker);
+    }
+  }
+
   const candidates = contracts.map((contract) => ({
     contract,
     result:
@@ -131,14 +142,6 @@ export async function readGovernedExistingArtifact(
         ? validateExistingIssueArtifact(contract, remote.body)
         : validateExistingPullRequestArtifact(contract, remote.body),
   }));
-
-  if (selector === undefined) {
-    const marker = extractTemplateIdentityMarker(remote.body ?? "");
-    if (marker.status !== "absent") {
-      return resolveExistingArtifactByMarker(domain, remote, candidates, failedTemplates, marker.status, marker.marker);
-    }
-  }
-
   const selected = selectExistingArtifactCandidate(candidates);
   if (selected.contract !== undefined || failedTemplates.length === 0) {
     // An explicit selector names exactly one contract. Surface it even when the
@@ -169,17 +172,18 @@ export async function readGovernedExistingArtifact(
 
 /**
  * Resolve a marker-tagged existing artifact directly against the one
- * already-compiled repository template it names, instead of structurally
- * matching the body against every candidate. The marker only selects among
- * contracts freshly compiled from current trusted repository governance, so
- * it can never override that authoritative provenance. An unknown, stale,
- * wrong-kind, or otherwise untrustworthy marker fails explicitly rather than
- * falling back to a different template or to structural matching.
+ * already-compiled repository template it names, without structurally
+ * parsing the body against any other candidate. The marker only selects
+ * among contracts freshly compiled from current trusted repository
+ * governance, so it can never override that authoritative provenance. An
+ * unknown, stale, wrong-kind, or otherwise untrustworthy marker fails
+ * explicitly rather than falling back to a different template or to
+ * structural matching.
  */
 function resolveExistingArtifactByMarker(
   domain: GovernedArtifactDomain,
   remote: GitHubIssue | GitHubPullRequest,
-  candidates: readonly { readonly contract: CanonicalContract; readonly result: ExistingArtifactValidationResult }[],
+  contracts: readonly CanonicalContract[],
   failedTemplates: readonly { readonly path: string; readonly message: string }[],
   status: "valid" | "malformed" | "unsupported-version",
   marker: TemplateIdentityMarker | undefined,
@@ -214,8 +218,8 @@ function resolveExistingArtifactByMarker(
     );
   }
 
-  const match = candidates.find((candidate) => candidate.contract.templateIdentity.path === marker.path);
-  if (match === undefined) {
+  const contract = contracts.find((candidate) => candidate.templateIdentity.path === marker.path);
+  if (contract === undefined) {
     const failed = failedTemplates.find((failedTemplate) => failedTemplate.path === marker.path);
     return invalid(
       failed === undefined
@@ -223,7 +227,11 @@ function resolveExistingArtifactByMarker(
         : `[${failed.path}] Artifact template identity marker names a template that failed to compile: ${failed.message}`,
     );
   }
-  return { remote, contract: match.contract, result: match.result };
+  const result =
+    domain === "issue"
+      ? validateExistingIssueArtifact(contract, remote.body)
+      : validateExistingPullRequestArtifact(contract, remote.body);
+  return { remote, contract, result };
 }
 
 /** Classify the current artifact and prove whether a canonical body can preserve its semantics. */

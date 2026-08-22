@@ -47,10 +47,13 @@ function renderTemplateIdentityMarker(contract) {
 }
 /**
  * Recognize and remove a trailing template identity marker line without
- * applying semantic parsing. Only a line matching the exact reserved marker
- * envelope is treated as a marker; ordinary trailing HTML comments (e.g. PR
- * template scaffolding) are left untouched here and handled by the existing
- * comment-stripping path.
+ * applying semantic parsing. Only a line starting with the exact reserved
+ * marker prefix is treated as a marker attempt at all; ordinary trailing
+ * HTML comments (e.g. PR template scaffolding) are left untouched here and
+ * handled by the existing comment-stripping path. Once the reserved prefix
+ * is detected, the line is never silently ignored as "absent" again: an
+ * oversized, truncated, or otherwise broken marker attempt fails closed as
+ * "malformed" instead of falling through to structural matching.
  */
 export function extractTemplateIdentityMarker(body) {
     const source = normalizeSource(body);
@@ -59,16 +62,16 @@ export function extractTemplateIdentityMarker(body) {
     while (end > 0 && (lines[end - 1] ?? "").trim().length === 0)
         end -= 1;
     const candidate = end > 0 ? (lines[end - 1] ?? "").trim() : undefined;
-    if (candidate === undefined ||
-        candidate.length > TEMPLATE_IDENTITY_MARKER_MAX_LENGTH ||
-        !candidate.startsWith(TEMPLATE_IDENTITY_MARKER_PREFIX) ||
-        !candidate.endsWith(TEMPLATE_IDENTITY_MARKER_SUFFIX)) {
+    if (candidate === undefined || !candidate.startsWith(TEMPLATE_IDENTITY_MARKER_PREFIX)) {
         return { status: "absent", body: source };
     }
     const remaining = lines.slice(0, end - 1);
     while (remaining.at(-1) !== undefined && (remaining.at(-1) ?? "").trim().length === 0)
         remaining.pop();
     const strippedBody = remaining.length === 0 ? "" : `${remaining.join("\n")}\n`;
+    if (candidate.length > TEMPLATE_IDENTITY_MARKER_MAX_LENGTH || !candidate.endsWith(TEMPLATE_IDENTITY_MARKER_SUFFIX)) {
+        return { status: "malformed", body: strippedBody };
+    }
     const match = TEMPLATE_IDENTITY_MARKER_LINE_PATTERN.exec(candidate);
     if (match === null)
         return { status: "malformed", body: strippedBody };

@@ -1998,6 +1998,54 @@ test("a template identity marker naming an unknown template fails closed instead
   }
 });
 
+test("an oversized template identity marker fails closed instead of being ignored as absent", async () => {
+  const alphaTemplate = [
+    "name: Alpha",
+    "description: Alpha template",
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes: { label: Summary }",
+    "    validations: { required: true }",
+    "",
+  ].join("\n");
+  const oversizedPath = `.github/ISSUE_TEMPLATE/${"a".repeat(600)}.yml`;
+  const transport = new CliStubTransport(
+    remoteArtifactResponses([{ path: ".github/ISSUE_TEMPLATE/alpha.yml", sha: "alpha-sha", source: alphaTemplate }], {
+      number: 93,
+      title: "Marker-tagged issue",
+      // The body otherwise parses cleanly under alpha.yml; only the marker is
+      // corrupted. A naive implementation could silently ignore the oversized
+      // marker line as "absent" and fall back to a structural match that
+      // happens to succeed, hiding the corrupted marker instead of failing
+      // closed on it.
+      body: `### Summary\n\nHello\n\n<!-- inari:template {"version":"1","kind":"issue","path":"${oversizedPath}"} -->\n`,
+      state: "open",
+      html_url: "https://github.com/acme/inari/issues/93",
+      labels: [],
+      assignees: [],
+    }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "93", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.classification, "wrong-template");
+    assert.equal(output.valid, false);
+    assert.equal("template" in output, false);
+    const diagnostics = output.diagnostics as readonly { code: string }[];
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]?.code, "EXISTING_TEMPLATE_MARKER_INVALID");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("issue edit performs the mutation, reaches the adapter, and reports reconciled governance", async () => {
   const transport = new CliStubTransport([
     ...remoteArtifactResponses(

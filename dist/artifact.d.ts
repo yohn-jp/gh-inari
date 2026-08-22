@@ -140,10 +140,13 @@ export interface TemplateIdentityMarkerExtraction {
 }
 /**
  * Recognize and remove a trailing template identity marker line without
- * applying semantic parsing. Only a line matching the exact reserved marker
- * envelope is treated as a marker; ordinary trailing HTML comments (e.g. PR
- * template scaffolding) are left untouched here and handled by the existing
- * comment-stripping path.
+ * applying semantic parsing. Only a line starting with the exact reserved
+ * marker prefix is treated as a marker attempt at all; ordinary trailing
+ * HTML comments (e.g. PR template scaffolding) are left untouched here and
+ * handled by the existing comment-stripping path. Once the reserved prefix
+ * is detected, the line is never silently ignored as "absent" again: an
+ * oversized, truncated, or otherwise broken marker attempt fails closed as
+ * "malformed" instead of falling through to structural matching.
  */
 export declare function extractTemplateIdentityMarker(body: string): TemplateIdentityMarkerExtraction;
 export interface FetchedExistingArtifact {

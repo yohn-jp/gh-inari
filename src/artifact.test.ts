@@ -926,6 +926,25 @@ test("template identity marker extraction fails closed on malformed and unsuppor
   );
   assert.equal(valid.status, "valid");
   assert.equal(valid.body, "### Problem\n\nvalue\n");
+
+  // A line clearly starting with the reserved marker prefix must never be
+  // silently ignored as "absent" once detected, even if it is oversized or
+  // never properly closed: falling back to structural matching for a
+  // corrupted/adversarial marker attempt would defeat the marker's
+  // fail-closed contract.
+  const oversizedPath = `.github/ISSUE_TEMPLATE/${"a".repeat(600)}.yml`;
+  const oversized = extractTemplateIdentityMarker(
+    `### Problem\n\nvalue\n\n<!-- inari:template {"version":"1","kind":"issue","path":"${oversizedPath}"} -->\n`,
+  );
+  assert.equal(oversized.status, "malformed");
+  assert.equal(oversized.marker, undefined);
+  assert.equal(oversized.body, "### Problem\n\nvalue\n");
+
+  const unterminated = extractTemplateIdentityMarker(
+    '### Problem\n\nvalue\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"}\n',
+  );
+  assert.equal(unterminated.status, "malformed");
+  assert.equal(unterminated.body, "### Problem\n\nvalue\n");
 });
 
 test("legacy artifacts without a template identity marker still validate through structural matching", () => {
