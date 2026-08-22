@@ -123,10 +123,22 @@ test("evidence is field-local and never retains direct strings, raw bodies, or s
     "$.accessToken",
     "$.privateKey",
     "$.sessionSecret",
-    "$.fields.token",
+    "$.metadata.password",
+    "$.artifact.fields.token",
   ]) {
     assert.throws(() => createFieldEvidence(field, "secret"), /non-sensitive semantic field/);
   }
+
+  for (const field of ["$.fields.token", "$.fields.body", "$.fields.password", "token"]) {
+    assert.deepEqual(createFieldEvidence(field, "secret"), {
+      field,
+      type: "string",
+      length: "secret".length,
+      truncated: false,
+    });
+  }
+  const accepted = createArtifactDiagnosticReport([], ["$.fields.token", "$.fields.body", "$.fields.password"]);
+  assert.deepEqual(accepted.acceptedFields, ["$.fields.body", "$.fields.password", "$.fields.token"]);
 
   assert.throws(
     () =>

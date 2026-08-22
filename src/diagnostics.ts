@@ -503,7 +503,22 @@ function assertFieldPath(value: string): string {
     .replace(/^\$\.?/, "")
     .split(/[.[\]]/u)
     .filter(Boolean);
-  if (segments.length === 0 || segments.some((segment) => PROHIBITED_FIELD_SEGMENT.test(segment))) {
+  if (segments.length === 0) {
+    throw new TypeError("Diagnostic evidence must identify one non-sensitive semantic field.");
+  }
+  const fieldsIndex = segments.findIndex((segment) => segment.toLowerCase() === "fields");
+  // Under the contract-owned semantic `fields` namespace, field IDs are
+  // opaque and may legitimately be named token/body/password. The namespace
+  // itself is not a field, so `$.fields` remains invalid.
+  if (fieldsIndex === 0) {
+    if (segments.length === 1) throw new TypeError("Diagnostic evidence must identify one semantic field.");
+    return bounded;
+  }
+  // A bare field identity (for example `token`) is already semantic. For
+  // dotted JSON paths, reject artifact/raw containers and non-semantic secret
+  // locations before accepting the path.
+  if (!bounded.startsWith("$.") && segments.length === 1) return bounded;
+  if (segments.some((segment) => PROHIBITED_FIELD_SEGMENT.test(segment))) {
     throw new TypeError("Diagnostic evidence must identify one non-sensitive semantic field.");
   }
   return bounded;
