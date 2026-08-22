@@ -1,5 +1,13 @@
 import { assertCanonicalContract, LINKED_ISSUE_PATTERN, type CanonicalContract, type CanonicalField } from "./ir.js";
 import { effectiveFieldConstraints, REQUIRED_STRING_PATTERN, type EffectiveFieldConstraints } from "./constraints.js";
+import {
+  createArtifactDiagnostic,
+  createArtifactDiagnosticReport,
+  createFieldEvidence,
+  serializeArtifactDiagnosticReport,
+  type ArtifactDiagnosticReport,
+  type ArtifactDiagnosticReason,
+} from "../diagnostics.js";
 
 /** Stable machine-readable semantic input diagnostics. */
 export type SemanticViolationCode =
@@ -29,6 +37,61 @@ export interface SemanticValidationResult {
   readonly violations: readonly SemanticViolation[];
   /** Defaults are materialized here only after all input values are validated. */
   readonly values: Readonly<Record<string, unknown>>;
+}
+
+/** Compact identity retained by a partial result for a later repair merge. */
+export interface PartialArtifactIdentity {
+  readonly artifactKind: CanonicalContract["artifactKind"];
+  readonly irVersion: CanonicalContract["irVersion"];
+  readonly schemaVersion: CanonicalContract["schemaVersion"];
+  readonly templateIdentity: CanonicalContract["templateIdentity"];
+}
+
+/** Field-local constraints projected without defaults or the complete schema. */
+export interface PartialFieldConstraintProjection {
+  readonly field: string;
+  readonly path: string;
+  readonly type: CanonicalField["type"];
+  readonly required: boolean;
+  readonly minLength?: number;
+  readonly maxLength?: number;
+  readonly pattern?: string;
+  readonly linkedIssue?: true;
+  readonly minItems?: number;
+  readonly maxItems?: number;
+  readonly uniqueItems?: boolean;
+  readonly allowedValues?: readonly string[];
+  readonly requiredItems?: readonly string[];
+  readonly checklistRequireComplete?: true;
+}
+
+export interface PartialFieldIssue {
+  readonly field: string;
+  readonly path: string;
+  readonly reason: ArtifactDiagnosticReason;
+  readonly message: string;
+  /** Only unresolved fields carry projected constraints. */
+  readonly constraints?: PartialFieldConstraintProjection;
+}
+
+/**
+ * Stateless classification of a supplied field map. `values` contains only
+ * supplied values that passed validation; defaults are deliberately excluded.
+ */
+export interface PartialSemanticValidationResult {
+  readonly valid: boolean;
+  /** True only when every declared field was supplied and accepted. */
+  readonly complete: boolean;
+  readonly artifactKind: CanonicalContract["artifactKind"];
+  readonly templateIdentity: CanonicalContract["templateIdentity"];
+  readonly identity: PartialArtifactIdentity;
+  readonly acceptedFields: readonly string[];
+  readonly missingFields: readonly PartialFieldIssue[];
+  readonly invalidFields: readonly PartialFieldIssue[];
+  readonly values: Readonly<Record<string, unknown>>;
+  /** Projections are present only for fields in missingFields/invalidFields. */
+  readonly projectedConstraints: readonly PartialFieldConstraintProjection[];
+  readonly diagnostics: ArtifactDiagnosticReport;
 }
 
 export class SemanticValidationError extends Error {
@@ -98,6 +161,183 @@ export function validateSemanticInput(contractInput: unknown, input: unknown): S
   return { valid: violations.length === 0, violations, values };
 }
 
+/**
+ * Classify a partial semantic field map without applying contract defaults.
+ * This is intentionally stateless: the returned identity and accepted values
+ * are sufficient for a caller to merge a later repair patch locally.
+ */
+export function validatePartialSemanticInput(contractInput: unknown, input: unknown): PartialSemanticValidationResult {
+  assertCanonicalContract(contractInput);
+  const contract = contractInput;
+  const fields = flattenFields(contract);
+  const fieldById = new Map(fields.map((field) => [field.id, field]));
+  const supplied = isRecord(input) ? input : undefined;
+  const acceptedFields: string[] = [];
+  const missingFields: PartialFieldIssue[] = [];
+  const invalidFields: PartialFieldIssue[] = [];
+  const unresolved = new Map<string, PartialFieldConstraintProjection>();
+  const values: Record<string, unknown> = {};
+  const diagnostics = [];
+
+  if (supplied === undefined) {
+    const diagnostic = createArtifactDiagnostic({
+      state: "invalid",
+      code: "FIELD_INVALID",
+      detailCode: "FIELD_INVALID",
+      reason: "constraint",
+      message: "Partial semantic input must be a JSON object.",
+      recovery: [{ action: "replace", hint: "Provide a JSON object containing semantic fields." }],
+    });
+    diagnostics.push(diagnostic);
+  } else {
+    for (const key of Object.keys(supplied).sort(compareStrings)) {
+      if (fieldById.has(key)) continue;
+      diagnostics.push(
+        createArtifactDiagnostic({
+          state: "invalid",
+          code: "FIELD_INVALID",
+          detailCode: "FIELD_INVALID",
+          reason: "constraint",
+          path: partialFieldPath(key),
+          message: "Field is not declared by the compiled contract.",
+          actual: createFieldEvidence(partialFieldPath(key), supplied[key]),
+          recovery: [{ action: "replace", path: partialFieldPath(key), hint: "Remove the undeclared field." }],
+        }),
+      );
+      invalidFields.push({
+        field: key,
+        path: partialFieldPath(key),
+        reason: "constraint",
+        message: "Field is not declared by the compiled contract.",
+      });
+    }
+
+    for (const field of fields) {
+      const path = partialFieldPath(field.id);
+      const constraints = projectPartialFieldConstraints(contract, field);
+      const present = Object.prototype.hasOwnProperty.call(supplied, field.id);
+      if (!present) {
+        // Defaults are a complete-input concern. A repair loop must receive
+        // an explicit value even when the full validator could materialize one.
+        if (constraints.required) {
+          const message = "A required field is missing.";
+          const issue: PartialFieldIssue = {
+            field: field.id,
+            path,
+            reason: "required",
+            message,
+            constraints,
+          };
+          missingFields.push(issue);
+          unresolved.set(field.id, constraints);
+          diagnostics.push(
+            createArtifactDiagnostic({
+              state: "missing",
+              code: "FIELD_MISSING",
+              detailCode: "FIELD_REQUIRED",
+              path,
+              message,
+              recovery: [{ action: "provide", path, hint: "Provide a value for this field." }],
+            }),
+          );
+        }
+        continue;
+      }
+
+      const rawValue = supplied[field.id];
+      const violations = validateField(field, rawValue, path, effectiveFieldConstraints(contract, field));
+      if (violations.length === 0) {
+        acceptedFields.push(path);
+        values[field.id] = rawValue;
+        continue;
+      }
+
+      const first = violations[0] as SemanticViolation;
+      const reason = violationReason(first.code);
+      const message = partialViolationMessage(first.code);
+      const issue: PartialFieldIssue = {
+        field: field.id,
+        path,
+        reason,
+        message,
+        constraints,
+      };
+      invalidFields.push(issue);
+      unresolved.set(field.id, constraints);
+      for (const violation of violations) {
+        const detailCode = violation.code === "INPUT_TYPE" ? "FIELD_TYPE_MISMATCH" : "FIELD_CONSTRAINT_VIOLATION";
+        diagnostics.push(
+          createArtifactDiagnostic({
+            state: "invalid",
+            code: "FIELD_INVALID",
+            detailCode,
+            reason: violationReason(violation.code),
+            path: pathFromSemanticViolation(violation.path, field.id),
+            message: partialViolationMessage(violation.code),
+            actual: createFieldEvidence(path, rawValue),
+            recovery: [{ action: "replace", path, hint: "Provide a valid value for this field." }],
+          }),
+        );
+      }
+    }
+  }
+
+  const accepted = acceptedFields.sort(compareStrings);
+  const missing = missingFields.sort(comparePartialIssues);
+  const invalid = invalidFields.sort(comparePartialIssues);
+  const projectedConstraints = [...unresolved.values()].sort(compareConstraints);
+  const report = createArtifactDiagnosticReport(diagnostics, accepted);
+  const complete =
+    supplied !== undefined &&
+    accepted.length === fields.length &&
+    missing.length === 0 &&
+    invalid.length === 0 &&
+    Object.keys(supplied).length === fields.length;
+  return {
+    valid: missing.length === 0 && invalid.length === 0 && supplied !== undefined,
+    complete,
+    artifactKind: contract.artifactKind,
+    templateIdentity: contract.templateIdentity,
+    identity: {
+      artifactKind: contract.artifactKind,
+      irVersion: contract.irVersion,
+      schemaVersion: contract.schemaVersion,
+      templateIdentity: contract.templateIdentity,
+    },
+    acceptedFields: accepted,
+    missingFields: missing,
+    invalidFields: invalid,
+    values,
+    projectedConstraints,
+    diagnostics: report,
+  };
+}
+
+/** Compact, canonical JSON projection for transport between repair attempts. */
+export function serializePartialSemanticValidationResult(result: PartialSemanticValidationResult): string {
+  const normalized = validatePartialResultShape(result);
+  return JSON.stringify({
+    valid: normalized.valid,
+    complete: normalized.complete,
+    artifactKind: normalized.artifactKind,
+    templateIdentity: normalized.templateIdentity,
+    identity: normalized.identity,
+    acceptedFields: normalized.acceptedFields,
+    missingFields: normalized.missingFields,
+    invalidFields: normalized.invalidFields,
+    values: Object.fromEntries(
+      Object.keys(normalized.values)
+        .sort(compareStrings)
+        .map((key) => [key, normalized.values[key]]),
+    ),
+    projectedConstraints: normalized.projectedConstraints,
+    diagnostics: JSON.parse(serializeArtifactDiagnosticReport(normalized.diagnostics)),
+  });
+}
+
+/** Terminology aliases for callers that treat validation as classification. */
+export const classifyPartialSemanticInput = validatePartialSemanticInput;
+
 export function assertSemanticInput(contractInput: unknown, input: unknown): Readonly<Record<string, unknown>> {
   const result = validateSemanticInput(contractInput, input);
   if (!result.valid) throw new SemanticValidationError(result.violations);
@@ -106,6 +346,68 @@ export function assertSemanticInput(contractInput: unknown, input: unknown): Rea
 
 function flattenFields(contract: CanonicalContract): readonly CanonicalField[] {
   return contract.sections.flatMap((section) => [...section.fields]);
+}
+
+function projectPartialFieldConstraints(
+  contract: CanonicalContract,
+  field: CanonicalField,
+): PartialFieldConstraintProjection {
+  const constraints = effectiveFieldConstraints(contract, field);
+  return {
+    field: field.id,
+    path: partialFieldPath(field.id),
+    type: field.type,
+    required: constraints.required,
+    ...(constraints.minLength === undefined ? {} : { minLength: constraints.minLength }),
+    ...(constraints.maxLength === undefined ? {} : { maxLength: constraints.maxLength }),
+    ...(constraints.pattern === undefined ? {} : { pattern: constraints.pattern }),
+    ...(constraints.linkedIssue ? { linkedIssue: true as const } : {}),
+    ...(constraints.minItems === undefined ? {} : { minItems: constraints.minItems }),
+    ...(constraints.maxItems === undefined ? {} : { maxItems: constraints.maxItems }),
+    uniqueItems: constraints.uniqueItems,
+    ...(constraints.allowedValues === undefined ? {} : { allowedValues: [...constraints.allowedValues] }),
+    ...(constraints.requiredItems.length === 0 ? {} : { requiredItems: [...constraints.requiredItems] }),
+    ...(constraints.checklistRequireComplete ? { checklistRequireComplete: true as const } : {}),
+  };
+}
+
+function partialFieldPath(field: string): string {
+  return `$.fields.${field}`;
+}
+
+function pathFromSemanticViolation(path: string, field: string): string {
+  if (path === `$.${field}`) return partialFieldPath(field);
+  if (path.startsWith(`$.${field}`)) return `$.fields.${field}${path.slice(`$.${field}`.length)}`;
+  return partialFieldPath(field);
+}
+
+function violationReason(code: SemanticViolationCode): ArtifactDiagnosticReason {
+  return code === "INPUT_TYPE" ? "type" : "constraint";
+}
+
+/** SemanticViolation messages may echo user values; diagnostics must not. */
+function partialViolationMessage(code: SemanticViolationCode): string {
+  return code === "INPUT_TYPE" ? "Field value has an unsupported type." : "Field value violates a compiled constraint.";
+}
+
+function comparePartialIssues(left: PartialFieldIssue, right: PartialFieldIssue): number {
+  return compareStrings(left.path, right.path);
+}
+
+function compareConstraints(left: PartialFieldConstraintProjection, right: PartialFieldConstraintProjection): number {
+  return compareStrings(left.path, right.path);
+}
+
+function validatePartialResultShape(result: PartialSemanticValidationResult): PartialSemanticValidationResult {
+  const diagnostics = createArtifactDiagnosticReport(result.diagnostics.diagnostics, result.acceptedFields);
+  return {
+    ...result,
+    acceptedFields: [...new Set(result.acceptedFields)].sort(compareStrings),
+    missingFields: [...result.missingFields].sort(comparePartialIssues),
+    invalidFields: [...result.invalidFields].sort(comparePartialIssues),
+    projectedConstraints: [...result.projectedConstraints].sort(compareConstraints),
+    diagnostics,
+  };
 }
 
 function validateField(

@@ -1,4 +1,4 @@
-import { SemanticValidationError, validateSemanticInput, } from "./contract/validation.js";
+import { SemanticValidationError, validatePartialSemanticInput, validateSemanticInput, } from "./contract/validation.js";
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
 export class ArtifactInputError extends Error {
@@ -47,6 +47,13 @@ export function parseArtifactInputDocument(input) {
     }
     return { fields: input, metadata: {} };
 }
+/** Classify an artifact input envelope without applying semantic defaults. */
+export function validatePartialArtifactInput(contractInput, input) {
+    assertCanonicalContract(contractInput);
+    return validatePartialSemanticInput(contractInput, parseArtifactInputDocument(input).fields);
+}
+/** Terminology alias for callers that treat validation as classification. */
+export const classifyPartialArtifactInput = validatePartialArtifactInput;
 export function renderIssueArtifact(contractInput, input) {
     assertCanonicalContract(contractInput);
     if (contractInput.artifactKind !== "issue")
