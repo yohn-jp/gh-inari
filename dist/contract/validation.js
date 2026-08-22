@@ -1,5 +1,6 @@
 import { assertCanonicalContract, LINKED_ISSUE_PATTERN } from "./ir.js";
 import { effectiveFieldConstraints, REQUIRED_STRING_PATTERN } from "./constraints.js";
+import { normalizeFieldValue } from "./normalization.js";
 import { createArtifactDiagnostic, createArtifactDiagnosticReport, createFieldEvidence, serializeArtifactDiagnosticReport, } from "../diagnostics.js";
 export class SemanticValidationError extends Error {
     violations;
@@ -52,10 +53,16 @@ export function validateSemanticInput(contractInput, input) {
             }
             continue;
         }
-        const fieldViolations = validateField(field, rawValue, path, constraints);
+        const normalization = present ? normalizeFieldValue(field, rawValue) : { ok: true, value: rawValue };
+        if (!normalization.ok) {
+            violations.push({ code: normalization.violation.code, path, message: normalization.violation.message });
+            continue;
+        }
+        const value = normalization.value;
+        const fieldViolations = validateField(field, value, path, constraints);
         violations.push(...fieldViolations);
         if (fieldViolations.length === 0)
-            values[field.id] = rawValue;
+            values[field.id] = value;
     }
     return { valid: violations.length === 0, violations, values };
 }
@@ -138,10 +145,33 @@ export function validatePartialSemanticInput(contractInput, input) {
                 continue;
             }
             const rawValue = supplied[field.id];
-            const violations = validateField(field, rawValue, path, effectiveFieldConstraints(contract, field));
+            const normalization = normalizeFieldValue(field, rawValue);
+            if (!normalization.ok) {
+                // A normalization rejection is a parse-boundary failure, not a
+                // semantic constraint violation: it must stay distinguishable in the
+                // #118 diagnostics contract (state/code/reason "unsupported") from
+                // the FIELD_INVALID/"constraint" shape validateField produces below.
+                const message = normalization.violation.message;
+                const issue = { field: field.id, path, reason: "unsupported", message, constraints };
+                invalidFields.push(issue);
+                unresolved.set(field.id, constraints);
+                diagnostics.push(createArtifactDiagnostic({
+                    state: "unsupported",
+                    code: "FIELD_UNSUPPORTED",
+                    detailCode: "FIELD_UNSUPPORTED",
+                    reason: "unsupported",
+                    path,
+                    message,
+                    actual: createFieldEvidence(path, rawValue),
+                    recovery: [{ action: "retry", path, hint: "Resubmit the field with supported content." }],
+                }));
+                continue;
+            }
+            const normalizedValue = normalization.value;
+            const violations = validateField(field, normalizedValue, path, effectiveFieldConstraints(contract, field));
             if (violations.length === 0) {
                 acceptedFields.push(path);
-                values[field.id] = rawValue;
+                values[field.id] = normalizedValue;
                 continue;
             }
             const first = violations[0];
