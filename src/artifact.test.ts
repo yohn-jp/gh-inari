@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -698,6 +699,27 @@ test("all native PR templates render and parse canonical values in contract orde
     assert.equal(parsed.parsed, true, contract.templateIdentity.path);
     assert.deepEqual(parsed.values, input, contract.templateIdentity.path);
   }
+});
+
+test("governed default PR rendering preserves policy-constrained values", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const native = await compilePullRequestTemplate(root, "default");
+  const policy = readFileSync(new URL("../.github/inari/pr-policy.yml", import.meta.url), "utf8");
+  const contract = compilePullRequestPolicyOverlay(native, policy);
+  const schema = projectToJsonSchema(contract);
+  assert.equal(schema.properties.summary?.minLength, 10);
+  assert.equal(schema.properties.linked_issue?.pattern, LINKED_ISSUE_PATTERN);
+  assert.equal(schema.required?.includes("validation"), true);
+
+  const input = {
+    summary: "A governed summary",
+    linked_issue: "Closes #125",
+    validation: "pnpm test",
+  };
+  const body = renderPullRequestArtifact(contract, input);
+  const parsed = parseExistingPullRequestArtifact(contract, body);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, input);
 });
 
 test("wrong-template and unparseable existing bodies are distinguished", () => {
