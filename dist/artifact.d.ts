@@ -1,4 +1,4 @@
-import { type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
+import { type PartialSemanticValidationResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
 import { type CanonicalContract } from "./contract/ir.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
@@ -89,6 +89,10 @@ export interface FetchedExistingArtifact {
 }
 /** Parse the documented JSON input envelope while keeping field semantics adapter-independent. */
 export declare function parseArtifactInputDocument(input: unknown): ArtifactInputDocument;
+/** Classify an artifact input envelope without applying semantic defaults. */
+export declare function validatePartialArtifactInput(contractInput: unknown, input: unknown): PartialSemanticValidationResult;
+/** Terminology alias for callers that treat validation as classification. */
+export declare const classifyPartialArtifactInput: typeof validatePartialArtifactInput;
 export declare function renderIssueArtifact(contractInput: unknown, input: unknown): string;
 export declare function renderPullRequestArtifact(contractInput: unknown, input: unknown): string;
 /** Construct the only values accepted by the GitHub mutation adapter. */
