@@ -13,7 +13,7 @@ export type ArtifactDiagnosticVersion = typeof ARTIFACT_DIAGNOSTIC_VERSION;
 export type ArtifactDiagnosticState =
   "accepted" | "missing" | "invalid" | "conflicting" | "unsupported" | "unrecoverable";
 
-/** Stable reason discriminants shared by all convergence command adapters. */
+/** Stable state-level machine code. */
 export type ArtifactDiagnosticCode =
   | "FIELD_ACCEPTED"
   | "FIELD_MISSING"
@@ -21,6 +21,20 @@ export type ArtifactDiagnosticCode =
   | "FIELD_CONFLICT"
   | "FIELD_UNSUPPORTED"
   | "ARTIFACT_UNRECOVERABLE";
+
+/** Stable machine reason, more precise than the state-level code. */
+export type ArtifactDiagnosticReason =
+  "accepted" | "required" | "type" | "constraint" | "conflict" | "unsupported" | "unrecoverable";
+
+/** Stable detail code for field-level and template-level projections. */
+export type ArtifactDiagnosticDetailCode =
+  | ArtifactDiagnosticCode
+  | "FIELD_REQUIRED"
+  | "FIELD_TYPE_MISMATCH"
+  | "FIELD_CONSTRAINT_VIOLATION"
+  | "FIELD_VALUE_CONFLICT"
+  | "TEMPLATE_AMBIGUOUS"
+  | "TEMPLATE_UNPARSEABLE";
 
 export type ArtifactDiagnosticRecoveryAction =
   "provide" | "replace" | "resolve-conflict" | "select-template" | "repair" | "retry";
@@ -33,47 +47,102 @@ export interface ArtifactDiagnosticRecovery {
   readonly hint?: string;
 }
 
-export interface ArtifactDiagnosticInput {
-  readonly state: ArtifactDiagnosticState;
-  readonly code: ArtifactDiagnosticCode;
-  /** Field identity or JSON path. Keep this field-local where possible. */
-  readonly path?: string;
-  /** Human-readable projection; state and code remain authoritative. */
-  readonly message: string;
-  readonly expected?: unknown;
-  readonly actual?: unknown;
-  readonly recovery?: readonly ArtifactDiagnosticRecoveryInput[];
-}
-
 export interface ArtifactDiagnosticRecoveryInput {
   readonly action: ArtifactDiagnosticRecoveryAction;
   readonly path?: string;
   readonly hint?: string;
 }
 
+export type ArtifactEvidenceType = "string" | "number" | "boolean" | "null" | "undefined" | "array" | "object";
+
+interface FieldEvidenceBase {
+  /** Field identity or JSON path; raw artifact locations are rejected. */
+  readonly field: string;
+  readonly type: ArtifactEvidenceType;
+}
+
+export interface StringFieldEvidence extends FieldEvidenceBase {
+  readonly type: "string";
+  readonly length: number;
+  readonly truncated: boolean;
+}
+
+export interface NumberFieldEvidence extends FieldEvidenceBase {
+  readonly type: "number";
+  readonly value: number;
+}
+
+export interface BooleanFieldEvidence extends FieldEvidenceBase {
+  readonly type: "boolean";
+  readonly value: boolean;
+}
+
+export interface NullFieldEvidence extends FieldEvidenceBase {
+  readonly type: "null";
+}
+
+export interface UndefinedFieldEvidence extends FieldEvidenceBase {
+  readonly type: "undefined";
+}
+
+export interface ArrayFieldEvidence extends FieldEvidenceBase {
+  readonly type: "array";
+  readonly itemCount: number;
+  readonly itemTypes: readonly ArtifactEvidenceType[];
+  readonly truncated: boolean;
+}
+
+export interface ObjectFieldEvidence extends FieldEvidenceBase {
+  readonly type: "object";
+  readonly keyCount: number;
+  readonly truncated: boolean;
+}
+
+/**
+ * Field-local, typed evidence. It intentionally has no arbitrary string or
+ * object value member: even a short direct string can be a credential.
+ */
+export type ArtifactDiagnosticEvidence =
+  | StringFieldEvidence
+  | NumberFieldEvidence
+  | BooleanFieldEvidence
+  | NullFieldEvidence
+  | UndefinedFieldEvidence
+  | ArrayFieldEvidence
+  | ObjectFieldEvidence;
+
+/** Backward-compatible name for the bounded evidence contract. */
+export type BoundedDiagnosticValue = ArtifactDiagnosticEvidence;
+
+export interface ArtifactDiagnosticInput {
+  readonly state: ArtifactDiagnosticState;
+  readonly code: ArtifactDiagnosticCode;
+  /** Optional; defaults to the reason implied by code/detailCode. */
+  readonly reason?: ArtifactDiagnosticReason;
+  /** Optional; defaults to code. */
+  readonly detailCode?: ArtifactDiagnosticDetailCode;
+  /** Field identity or JSON path. Keep this field-local where possible. */
+  readonly path?: string;
+  /** Human-readable projection; state/code/reason remain authoritative. */
+  readonly message: string;
+  /** Use createFieldEvidence; raw values are rejected at this boundary. */
+  readonly expected?: ArtifactDiagnosticEvidence;
+  readonly actual?: ArtifactDiagnosticEvidence;
+  readonly recovery?: readonly ArtifactDiagnosticRecoveryInput[];
+}
+
 export interface ArtifactDiagnostic {
   readonly version: ArtifactDiagnosticVersion;
   readonly state: ArtifactDiagnosticState;
   readonly code: ArtifactDiagnosticCode;
+  readonly reason: ArtifactDiagnosticReason;
+  readonly detailCode: ArtifactDiagnosticDetailCode;
   readonly path?: string;
   readonly message: string;
-  readonly expected?: BoundedDiagnosticValue;
-  readonly actual?: BoundedDiagnosticValue;
+  readonly expected?: ArtifactDiagnosticEvidence;
+  readonly actual?: ArtifactDiagnosticEvidence;
   readonly recovery?: readonly ArtifactDiagnosticRecovery[];
 }
-
-/**
- * A recursively bounded value suitable for expected/actual evidence.
- * Truncation is explicit so consumers never mistake evidence for a complete
- * artifact or complete field payload.
- */
-export type BoundedDiagnosticValue =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly BoundedDiagnosticValue[]
-  | { readonly [key: string]: BoundedDiagnosticValue };
 
 export interface ArtifactDiagnosticReport {
   readonly version: ArtifactDiagnosticVersion;
@@ -88,47 +157,145 @@ export const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 240 as const;
 export const MAX_DIAGNOSTIC_PATH_LENGTH = 160 as const;
 export const MAX_RECOVERY_ACTIONS = 4 as const;
 export const MAX_RECOVERY_HINT_LENGTH = 240 as const;
-export const MAX_EVIDENCE_DEPTH = 3 as const;
+export const MAX_EVIDENCE_LENGTH = 240 as const;
 export const MAX_EVIDENCE_ITEMS = 8 as const;
-export const MAX_EVIDENCE_KEYS = 12 as const;
-export const MAX_EVIDENCE_STRING_LENGTH = 240 as const;
+export const MAX_EVIDENCE_COLLECTION_LENGTH = 128 as const;
 
-const SENSITIVE_KEY = /(?:^|[_-])(api[-_]?key|authorization|cookie|credential|password|secret|token)(?:$|[_-])/i;
-const PRIVATE_ARTIFACT_KEY = /^(?:artifact|body|document|fields|metadata|payload)$/i;
 const REPORT_KEYS = new Set(["version", "diagnostics", "acceptedFields"]);
-const DIAGNOSTIC_KEYS = new Set(["version", "state", "code", "path", "message", "expected", "actual", "recovery"]);
+const DIAGNOSTIC_KEYS = new Set([
+  "version",
+  "state",
+  "code",
+  "reason",
+  "detailCode",
+  "path",
+  "message",
+  "expected",
+  "actual",
+  "recovery",
+]);
 const RECOVERY_KEYS = new Set(["action", "path", "hint"]);
+const FIELD_EVIDENCE_KEYS = new Set([
+  "field",
+  "type",
+  "length",
+  "truncated",
+  "value",
+  "itemCount",
+  "itemTypes",
+  "keyCount",
+]);
+const RECOVERY_ACTIONS: readonly ArtifactDiagnosticRecoveryAction[] = [
+  "provide",
+  "replace",
+  "resolve-conflict",
+  "select-template",
+  "repair",
+  "retry",
+];
+const EVIDENCE_TYPES: readonly ArtifactEvidenceType[] = [
+  "string",
+  "number",
+  "boolean",
+  "null",
+  "undefined",
+  "array",
+  "object",
+];
+const PROHIBITED_FIELD_SEGMENT =
+  /^(?:rawbody|renderedbody|fullartifact|artifact|body|payload|document|accesstoken|privatekey|sessionsecret|authorization|cookie|credential|password|secret|token)$/i;
 
-const CODE_STATE: Readonly<Record<ArtifactDiagnosticCode, ArtifactDiagnosticState>> = {
-  FIELD_ACCEPTED: "accepted",
-  FIELD_MISSING: "missing",
-  FIELD_INVALID: "invalid",
-  FIELD_CONFLICT: "conflicting",
-  FIELD_UNSUPPORTED: "unsupported",
-  ARTIFACT_UNRECOVERABLE: "unrecoverable",
+interface DiagnosticDefinition {
+  readonly state: ArtifactDiagnosticState;
+  readonly reason: ArtifactDiagnosticReason;
+  readonly code: ArtifactDiagnosticCode;
+}
+
+const DETAIL_DEFINITIONS: Readonly<Record<ArtifactDiagnosticDetailCode, DiagnosticDefinition>> = {
+  FIELD_ACCEPTED: { state: "accepted", reason: "accepted", code: "FIELD_ACCEPTED" },
+  FIELD_MISSING: { state: "missing", reason: "required", code: "FIELD_MISSING" },
+  FIELD_REQUIRED: { state: "missing", reason: "required", code: "FIELD_MISSING" },
+  FIELD_INVALID: { state: "invalid", reason: "constraint", code: "FIELD_INVALID" },
+  FIELD_TYPE_MISMATCH: { state: "invalid", reason: "type", code: "FIELD_INVALID" },
+  FIELD_CONSTRAINT_VIOLATION: { state: "invalid", reason: "constraint", code: "FIELD_INVALID" },
+  FIELD_CONFLICT: { state: "conflicting", reason: "conflict", code: "FIELD_CONFLICT" },
+  FIELD_VALUE_CONFLICT: { state: "conflicting", reason: "conflict", code: "FIELD_CONFLICT" },
+  FIELD_UNSUPPORTED: { state: "unsupported", reason: "unsupported", code: "FIELD_UNSUPPORTED" },
+  TEMPLATE_AMBIGUOUS: { state: "conflicting", reason: "conflict", code: "FIELD_CONFLICT" },
+  TEMPLATE_UNPARSEABLE: { state: "unsupported", reason: "unsupported", code: "FIELD_UNSUPPORTED" },
+  ARTIFACT_UNRECOVERABLE: { state: "unrecoverable", reason: "unrecoverable", code: "ARTIFACT_UNRECOVERABLE" },
 };
 
 /**
- * Create one contract-valid diagnostic and sanitize all evidence at the
- * boundary. Sanitization is intentionally lossy: diagnostics must never be a
- * transport for a complete artifact, secret, or unbounded parser payload.
+ * Convert an untrusted semantic value to field-local type/size evidence. No
+ * caller value is retained, including short strings and nested object keys.
  */
+export function createFieldEvidence(field: string, value: unknown): ArtifactDiagnosticEvidence {
+  const normalizedField = assertFieldPath(field);
+  if (value === null) return { field: normalizedField, type: "null" };
+  if (value === undefined) return { field: normalizedField, type: "undefined" };
+  if (typeof value === "string") {
+    return {
+      field: normalizedField,
+      type: "string",
+      length: Math.min(value.length, MAX_EVIDENCE_LENGTH),
+      truncated: value.length > MAX_EVIDENCE_LENGTH,
+    };
+  }
+  if (typeof value === "boolean") return { field: normalizedField, type: "boolean", value };
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("Non-finite numbers are not valid diagnostic evidence.");
+    return { field: normalizedField, type: "number", value };
+  }
+  if (Array.isArray(value)) {
+    const itemTypes = [...new Set(value.map((entry) => valueType(entry)))].sort(compareText);
+    return {
+      field: normalizedField,
+      type: "array",
+      itemCount: Math.min(value.length, MAX_EVIDENCE_COLLECTION_LENGTH),
+      itemTypes,
+      truncated: value.length > MAX_EVIDENCE_COLLECTION_LENGTH,
+    };
+  }
+  if (typeof value === "object") {
+    const keyCount = Object.keys(value).length;
+    return {
+      field: normalizedField,
+      type: "object",
+      keyCount: Math.min(keyCount, MAX_EVIDENCE_COLLECTION_LENGTH),
+      truncated: keyCount > MAX_EVIDENCE_COLLECTION_LENGTH,
+    };
+  }
+  throw new TypeError("Unsupported diagnostic evidence value.");
+}
+
+/** Create one contract-valid diagnostic and validate all evidence at the boundary. */
 export function createArtifactDiagnostic(input: ArtifactDiagnosticInput): ArtifactDiagnostic {
-  assertStateCode(input.state, input.code);
+  const detailCode = input.detailCode ?? input.code;
+  const definition = DETAIL_DEFINITIONS[detailCode];
+  if (definition === undefined) throw new TypeError(`Unsupported artifact diagnostic detail code: ${detailCode}.`);
+  if (input.state !== definition.state || input.code !== definition.code) {
+    throw new TypeError(`Diagnostic detail code ${detailCode} is incompatible with state/code.`);
+  }
+  if (input.reason !== undefined && input.reason !== definition.reason) {
+    throw new TypeError(`Diagnostic detail code ${detailCode} is incompatible with reason ${input.reason}.`);
+  }
   const diagnostic: ArtifactDiagnostic = {
     version: ARTIFACT_DIAGNOSTIC_VERSION,
-    state: input.state,
-    code: input.code,
+    state: definition.state,
+    code: definition.code,
+    reason: definition.reason,
+    detailCode,
     ...(input.path === undefined ? {} : { path: boundedText(input.path, MAX_DIAGNOSTIC_PATH_LENGTH) }),
     message: boundedText(input.message, MAX_DIAGNOSTIC_MESSAGE_LENGTH),
-    ...(input.expected === undefined ? {} : { expected: sanitizeEvidence(input.expected) }),
-    ...(input.actual === undefined ? {} : { actual: sanitizeEvidence(input.actual) }),
+    ...(input.expected === undefined ? {} : { expected: normalizeEvidence(input.expected) }),
+    ...(input.actual === undefined ? {} : { actual: normalizeEvidence(input.actual) }),
     ...(input.recovery === undefined ? {} : { recovery: normalizeRecovery(input.recovery) }),
   };
   return diagnostic;
 }
 
-/** Create a stable report, sorting field identities and diagnostics by contract keys. */
+/** Create a stable report, sorting all set-like members by contract keys. */
 export function createArtifactDiagnosticReport(
   diagnostics: readonly ArtifactDiagnostic[],
   acceptedFields: readonly string[] = [],
@@ -140,7 +307,7 @@ export function createArtifactDiagnosticReport(
     throw new RangeError(`At most ${MAX_ACCEPTED_FIELDS} accepted fields are supported.`);
   }
   const normalized = diagnostics.map(canonicalizeDiagnostic).sort(compareDiagnostics);
-  const accepted = [...new Set(acceptedFields.map((field) => boundedText(field, MAX_DIAGNOSTIC_PATH_LENGTH)))].sort();
+  const accepted = [...new Set(acceptedFields.map(assertFieldPath))].sort(compareText);
   return {
     version: ARTIFACT_DIAGNOSTIC_VERSION,
     diagnostics: normalized,
@@ -148,7 +315,7 @@ export function createArtifactDiagnosticReport(
   };
 }
 
-/** Serialize a report with stable key ordering and stable diagnostic ordering. */
+/** Serialize a report with canonical ordering of diagnostics/evidence/actions. */
 export function serializeArtifactDiagnosticReport(report: ArtifactDiagnosticReport): string {
   if (report.version !== ARTIFACT_DIAGNOSTIC_VERSION) {
     throw new TypeError("Artifact diagnostics report has an unsupported version.");
@@ -161,9 +328,10 @@ export function formatArtifactDiagnostic(diagnostic: ArtifactDiagnostic): string
   const normalized = canonicalizeDiagnostic(diagnostic);
   const location = normalized.path === undefined ? "artifact" : normalized.path;
   const recovery = normalized.recovery?.find((action) => action.hint !== undefined)?.hint;
+  const prefix = `[${normalized.code}/${normalized.detailCode}/${normalized.reason}]`;
   return recovery === undefined
-    ? `[${normalized.code}] ${location}: ${normalized.message}`
-    : `[${normalized.code}] ${location}: ${normalized.message} Next: ${recovery}`;
+    ? `${prefix} ${location}: ${normalized.message}`
+    : `${prefix} ${location}: ${normalized.message} Next: ${recovery}`;
 }
 
 /** Project all report diagnostics without introducing a command-specific shape. */
@@ -200,94 +368,145 @@ export function deserializeArtifactDiagnosticReport(serialized: string): Artifac
   return createArtifactDiagnosticReport(parsed.diagnostics, parsed.acceptedFields);
 }
 
-function assertStateCode(state: ArtifactDiagnosticState, code: ArtifactDiagnosticCode): void {
-  if (CODE_STATE[code] !== state) {
-    throw new TypeError(`Diagnostic code ${code} is incompatible with state ${state}.`);
-  }
-}
-
-function assertDiagnostic(diagnostic: ArtifactDiagnostic): ArtifactDiagnostic {
-  if (diagnostic.version !== ARTIFACT_DIAGNOSTIC_VERSION) {
-    throw new TypeError("Artifact diagnostic has an unsupported version.");
-  }
-  assertStateCode(diagnostic.state, diagnostic.code);
-  if (diagnostic.message.length > MAX_DIAGNOSTIC_MESSAGE_LENGTH) {
-    throw new RangeError("Artifact diagnostic message exceeds its bound.");
-  }
-  if (diagnostic.path !== undefined && diagnostic.path.length > MAX_DIAGNOSTIC_PATH_LENGTH) {
-    throw new RangeError("Artifact diagnostic path exceeds its bound.");
-  }
-  if (diagnostic.recovery !== undefined && diagnostic.recovery.length > MAX_RECOVERY_ACTIONS) {
-    throw new RangeError("Artifact diagnostic recovery actions exceed their bound.");
-  }
-  return diagnostic;
-}
-
 function canonicalizeDiagnostic(diagnostic: ArtifactDiagnostic): ArtifactDiagnostic {
-  assertDiagnostic(diagnostic);
+  const definition = DETAIL_DEFINITIONS[diagnostic.detailCode];
+  if (definition === undefined || definition.state !== diagnostic.state || definition.code !== diagnostic.code) {
+    throw new TypeError("Artifact diagnostic has an invalid state/code/detail combination.");
+  }
+  if (definition.reason !== diagnostic.reason) throw new TypeError("Artifact diagnostic has an invalid reason.");
   return {
     version: ARTIFACT_DIAGNOSTIC_VERSION,
-    state: diagnostic.state,
-    code: diagnostic.code,
+    state: definition.state,
+    code: definition.code,
+    reason: definition.reason,
+    detailCode: diagnostic.detailCode,
     ...(diagnostic.path === undefined ? {} : { path: boundedText(diagnostic.path, MAX_DIAGNOSTIC_PATH_LENGTH) }),
     message: boundedText(diagnostic.message, MAX_DIAGNOSTIC_MESSAGE_LENGTH),
-    ...(diagnostic.expected === undefined ? {} : { expected: sanitizeEvidence(diagnostic.expected) }),
-    ...(diagnostic.actual === undefined ? {} : { actual: sanitizeEvidence(diagnostic.actual) }),
+    ...(diagnostic.expected === undefined ? {} : { expected: normalizeEvidence(diagnostic.expected) }),
+    ...(diagnostic.actual === undefined ? {} : { actual: normalizeEvidence(diagnostic.actual) }),
     ...(diagnostic.recovery === undefined ? {} : { recovery: normalizeRecovery(diagnostic.recovery) }),
   };
+}
+
+function normalizeEvidence(value: unknown): ArtifactDiagnosticEvidence {
+  if (!isRecord(value)) {
+    throw new TypeError("Diagnostic evidence must be field-local typed evidence; raw values are not accepted.");
+  }
+  if (Object.keys(value).some((key) => !FIELD_EVIDENCE_KEYS.has(key))) {
+    throw new TypeError("Diagnostic evidence contains an unknown property.");
+  }
+  if (typeof value.field !== "string") throw new TypeError("Diagnostic evidence requires a field identity.");
+  const field = assertFieldPath(value.field);
+  if (typeof value.type !== "string" || !EVIDENCE_TYPES.includes(value.type as ArtifactEvidenceType)) {
+    throw new TypeError("Diagnostic evidence has an unsupported type.");
+  }
+  switch (value.type as ArtifactEvidenceType) {
+    case "string":
+      if (!isBoundedInteger(value.length, MAX_EVIDENCE_LENGTH) || typeof value.truncated !== "boolean") {
+        throw new TypeError("String evidence has invalid bounds.");
+      }
+      return { field, type: "string", length: value.length, truncated: value.truncated };
+    case "number":
+      if (typeof value.value !== "number" || !Number.isFinite(value.value)) {
+        throw new TypeError("Number evidence has an invalid value.");
+      }
+      return { field, type: "number", value: value.value };
+    case "boolean":
+      if (typeof value.value !== "boolean") throw new TypeError("Boolean evidence has an invalid value.");
+      return { field, type: "boolean", value: value.value };
+    case "null":
+      return { field, type: "null" };
+    case "undefined":
+      return { field, type: "undefined" };
+    case "array": {
+      if (!isBoundedInteger(value.itemCount, MAX_EVIDENCE_COLLECTION_LENGTH) || typeof value.truncated !== "boolean") {
+        throw new TypeError("Array evidence has invalid bounds.");
+      }
+      if (
+        !Array.isArray(value.itemTypes) ||
+        value.itemTypes.length > MAX_EVIDENCE_ITEMS ||
+        !value.itemTypes.every(
+          (type) => typeof type === "string" && EVIDENCE_TYPES.includes(type as ArtifactEvidenceType),
+        )
+      ) {
+        throw new TypeError("Array evidence has invalid item types.");
+      }
+      return {
+        field,
+        type: "array",
+        itemCount: value.itemCount,
+        itemTypes: [...new Set(value.itemTypes as ArtifactEvidenceType[])].sort(compareText),
+        truncated: value.truncated,
+      };
+    }
+    case "object":
+      if (!isBoundedInteger(value.keyCount, MAX_EVIDENCE_COLLECTION_LENGTH) || typeof value.truncated !== "boolean") {
+        throw new TypeError("Object evidence has invalid bounds.");
+      }
+      return { field, type: "object", keyCount: value.keyCount, truncated: value.truncated };
+  }
 }
 
 function normalizeRecovery(input: readonly ArtifactDiagnosticRecoveryInput[]): readonly ArtifactDiagnosticRecovery[] {
   if (input.length > MAX_RECOVERY_ACTIONS) {
     throw new RangeError(`At most ${MAX_RECOVERY_ACTIONS} recovery actions are supported.`);
   }
-  return input.map((recovery) => ({
-    action: assertRecoveryAction(recovery.action),
-    ...(recovery.path === undefined ? {} : { path: boundedText(recovery.path, MAX_DIAGNOSTIC_PATH_LENGTH) }),
-    ...(recovery.hint === undefined ? {} : { hint: boundedText(recovery.hint, MAX_RECOVERY_HINT_LENGTH) }),
-  }));
+  return input
+    .map((recovery) => {
+      if (!RECOVERY_ACTIONS.includes(recovery.action))
+        throw new TypeError(`Unsupported recovery action: ${recovery.action}.`);
+      return {
+        action: recovery.action,
+        ...(recovery.path === undefined ? {} : { path: boundedText(recovery.path, MAX_DIAGNOSTIC_PATH_LENGTH) }),
+        ...(recovery.hint === undefined ? {} : { hint: boundedText(recovery.hint, MAX_RECOVERY_HINT_LENGTH) }),
+      };
+    })
+    .sort(compareRecovery);
 }
 
-function assertRecoveryAction(action: string): ArtifactDiagnosticRecoveryAction {
-  const actions: readonly ArtifactDiagnosticRecoveryAction[] = [
-    "provide",
-    "replace",
-    "resolve-conflict",
-    "select-template",
-    "repair",
-    "retry",
-  ];
-  if (!actions.includes(action as ArtifactDiagnosticRecoveryAction)) {
-    throw new TypeError(`Unsupported artifact diagnostic recovery action: ${action}.`);
-  }
-  return action as ArtifactDiagnosticRecoveryAction;
+function compareRecovery(left: ArtifactDiagnosticRecovery, right: ArtifactDiagnosticRecovery): number {
+  return compareText(
+    [left.action, left.path ?? "", left.hint ?? ""].join("\u0000"),
+    [right.action, right.path ?? "", right.hint ?? ""].join("\u0000"),
+  );
 }
 
-function sanitizeEvidence(value: unknown, depth = 0, key?: string): BoundedDiagnosticValue {
-  if (key !== undefined && (SENSITIVE_KEY.test(key) || PRIVATE_ARTIFACT_KEY.test(key))) {
-    return "[redacted]";
-  }
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return typeof value === "string" ? boundedEvidenceText(value) : value;
-  }
-  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
-  if (depth >= MAX_EVIDENCE_DEPTH) return "[truncated]";
-  if (Array.isArray(value)) {
-    const bounded = value.slice(0, MAX_EVIDENCE_ITEMS).map((entry) => sanitizeEvidence(entry, depth + 1));
-    return value.length > MAX_EVIDENCE_ITEMS ? [...bounded, "[truncated]"] : bounded;
-  }
-  if (isRecord(value)) {
-    const keys = Object.keys(value).sort().slice(0, MAX_EVIDENCE_KEYS);
-    const bounded: Record<string, BoundedDiagnosticValue> = {};
-    for (const entry of keys) bounded[entry] = sanitizeEvidence(value[entry], depth + 1, entry);
-    if (Object.keys(value).length > MAX_EVIDENCE_KEYS) bounded._truncated = "[truncated]";
-    return bounded;
-  }
-  return "[unsupported]";
+function compareDiagnostics(left: ArtifactDiagnostic, right: ArtifactDiagnostic): number {
+  const leftKey = JSON.stringify({
+    path: left.path ?? "",
+    state: left.state,
+    code: left.code,
+    reason: left.reason,
+    detailCode: left.detailCode,
+    message: left.message,
+    expected: left.expected ?? null,
+    actual: left.actual ?? null,
+    recovery: left.recovery ?? [],
+  });
+  const rightKey = JSON.stringify({
+    path: right.path ?? "",
+    state: right.state,
+    code: right.code,
+    reason: right.reason,
+    detailCode: right.detailCode,
+    message: right.message,
+    expected: right.expected ?? null,
+    actual: right.actual ?? null,
+    recovery: right.recovery ?? [],
+  });
+  return compareText(leftKey, rightKey);
 }
 
-function boundedEvidenceText(value: string): string {
-  return value.length <= MAX_EVIDENCE_STRING_LENGTH ? value : `${value.slice(0, MAX_EVIDENCE_STRING_LENGTH)}…`;
+function assertFieldPath(value: string): string {
+  const bounded = boundedText(value, MAX_DIAGNOSTIC_PATH_LENGTH);
+  const segments = bounded
+    .replace(/^\$\.?/, "")
+    .split(/[.[\]]/u)
+    .filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => PROHIBITED_FIELD_SEGMENT.test(segment))) {
+    throw new TypeError("Diagnostic evidence must identify one non-sensitive semantic field.");
+  }
+  return bounded;
 }
 
 function boundedText(value: string, maxLength: number): string {
@@ -295,10 +514,23 @@ function boundedText(value: string, maxLength: number): string {
   return value;
 }
 
-function compareDiagnostics(left: ArtifactDiagnostic, right: ArtifactDiagnostic): number {
-  const leftKey = [left.path ?? "", left.code, left.state, left.message].join("\u0000");
-  const rightKey = [right.path ?? "", right.code, right.state, right.message].join("\u0000");
-  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+function isBoundedInteger(value: unknown, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max;
+}
+
+function valueType(value: unknown): ArtifactEvidenceType {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "object") return "object";
+  if (typeof value === "string") return "string";
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "undefined") return "undefined";
+  throw new TypeError("Unsupported diagnostic evidence value.");
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isDiagnostic(value: unknown): value is ArtifactDiagnostic {
@@ -308,9 +540,12 @@ function isDiagnostic(value: unknown): value is ArtifactDiagnostic {
     value.version === ARTIFACT_DIAGNOSTIC_VERSION &&
     typeof value.state === "string" &&
     typeof value.code === "string" &&
-    CODE_STATE[value.code as ArtifactDiagnosticCode] === value.state &&
+    typeof value.reason === "string" &&
+    typeof value.detailCode === "string" &&
     typeof value.message === "string" &&
     (value.path === undefined || typeof value.path === "string") &&
+    (value.expected === undefined || isEvidence(value.expected)) &&
+    (value.actual === undefined || isEvidence(value.actual)) &&
     (value.recovery === undefined ||
       (Array.isArray(value.recovery) &&
         value.recovery.every(
@@ -318,10 +553,19 @@ function isDiagnostic(value: unknown): value is ArtifactDiagnostic {
             isRecord(entry) &&
             [...Object.keys(entry)].every((key) => RECOVERY_KEYS.has(key)) &&
             typeof entry.action === "string" &&
-            ["provide", "replace", "resolve-conflict", "select-template", "repair", "retry"].includes(entry.action) &&
+            RECOVERY_ACTIONS.includes(entry.action as ArtifactDiagnosticRecoveryAction) &&
             (entry.path === undefined || typeof entry.path === "string") &&
             (entry.hint === undefined || typeof entry.hint === "string"),
         )))
+  );
+}
+
+function isEvidence(value: unknown): value is ArtifactDiagnosticEvidence {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.field === "string" &&
+    typeof value.type === "string" &&
+    EVIDENCE_TYPES.includes(value.type as ArtifactEvidenceType)
   );
 }
 
