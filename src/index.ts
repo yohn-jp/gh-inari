@@ -13,6 +13,7 @@ export * from "./contract/index.js";
 export * from "./github/index.js";
 export * from "./pull-request-template.js";
 export * from "./semantic-template.js";
+export * from "./diagnostics.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,
