@@ -115,10 +115,34 @@ test("unsafe control-character content is rejected by the canonical loader inste
     result.invalidFields.map((field) => field.field),
     ["problem"],
   );
-  assert.equal(result.invalidFields[0]?.reason, "constraint");
+  assert.equal(result.invalidFields[0]?.reason, "unsupported");
   const diagnostic = result.diagnostics.diagnostics.find((entry) => entry.path === "$.fields.problem");
-  assert.equal(diagnostic?.detailCode, "FIELD_CONSTRAINT_VIOLATION");
+  assert.equal(diagnostic?.state, "unsupported");
+  assert.equal(diagnostic?.code, "FIELD_UNSUPPORTED");
+  assert.equal(diagnostic?.detailCode, "FIELD_UNSUPPORTED");
   assert.equal(JSON.stringify(result.diagnostics).includes(String.fromCharCode(0x0007)), false);
+});
+
+test("a normalization rejection is diagnostically distinguishable from a semantic constraint violation", () => {
+  const unsafeContent = loadCanonicalArtifact(
+    issueContractFixture,
+    adaptCliFieldCandidate({ ...issueFields, problem: `broken${BELL}content` }),
+  );
+  const constraintViolation = loadCanonicalArtifact(
+    issueContractFixture,
+    adaptCliFieldCandidate({ ...issueFields, category: "not-a-contract-value" }),
+  );
+
+  const unsafeDiagnostic = unsafeContent.diagnostics.diagnostics.find((entry) => entry.path === "$.fields.problem");
+  const constraintDiagnostic = constraintViolation.diagnostics.diagnostics.find(
+    (entry) => entry.path === "$.fields.category",
+  );
+
+  assert.equal(unsafeDiagnostic?.state, "unsupported");
+  assert.equal(unsafeDiagnostic?.reason, "unsupported");
+  assert.equal(constraintDiagnostic?.state, "invalid");
+  assert.equal(constraintDiagnostic?.reason, "constraint");
+  assert.notEqual(unsafeDiagnostic?.detailCode, constraintDiagnostic?.detailCode);
 });
 
 test("already-canonical valid JSON is unchanged by loading it through the normalization boundary", () => {
@@ -138,5 +162,44 @@ test("whitespace-only required values remain rejected after normalization", () =
   assert.deepEqual(
     result.invalidFields.map((field) => field.field),
     ["problem"],
+  );
+});
+
+test("a linked-issue reference value normalizes the same from JSON and native Markdown ingress despite CRLF and padding", () => {
+  const cleanPrFields = { ...prFields, linked_issue: "Closes #21" };
+  const messyPrFields = { ...prFields, linked_issue: "  Closes #21  \r\n" };
+
+  const fromCleanJson = loadCanonicalJsonArtifact(pullRequestContractFixture, cleanPrFields);
+  const fromMessyJson = loadCanonicalJsonArtifact(pullRequestContractFixture, messyPrFields);
+  assert.equal(fromCleanJson.valid, true);
+  assert.equal(fromMessyJson.valid, true);
+  assert.deepEqual(fromMessyJson.canonicalJson, fromCleanJson.canonicalJson);
+
+  const body = renderPullRequestArtifact(pullRequestContractFixture, cleanPrFields);
+  const fromMarkdown = loadCanonicalMarkdownArtifact(pullRequestContractFixture, body);
+  assert.equal(fromMarkdown.valid, true);
+  assert.equal(fromMarkdown.canonicalJson.linked_issue, fromCleanJson.canonicalJson.linked_issue);
+});
+
+test("a cross-repository short-form reference normalizes the same after BOM and CRLF cleanup", () => {
+  const result = loadCanonicalJsonArtifact(pullRequestContractFixture, {
+    ...prFields,
+    linked_issue: `${BOM}Fixes acme/widgets#42\r\n`,
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.canonicalJson.linked_issue, "Fixes acme/widgets#42");
+});
+
+test("normalization does not launder a value that merely resembles a reference into a valid linked issue", () => {
+  const result = loadCanonicalJsonArtifact(pullRequestContractFixture, {
+    ...prFields,
+    linked_issue: "  This closes nothing in particular  \r\n",
+  });
+
+  assert.equal(result.valid, false);
+  assert.deepEqual(
+    result.invalidFields.map((field) => field.field),
+    ["linked_issue"],
   );
 });

@@ -295,20 +295,24 @@ export function validatePartialSemanticInput(contractInput: unknown, input: unkn
       const rawValue = supplied[field.id];
       const normalization = normalizeFieldValue(field, rawValue);
       if (!normalization.ok) {
+        // A normalization rejection is a parse-boundary failure, not a
+        // semantic constraint violation: it must stay distinguishable in the
+        // #118 diagnostics contract (state/code/reason "unsupported") from
+        // the FIELD_INVALID/"constraint" shape validateField produces below.
         const message = normalization.violation.message;
-        const issue: PartialFieldIssue = { field: field.id, path, reason: "constraint", message, constraints };
+        const issue: PartialFieldIssue = { field: field.id, path, reason: "unsupported", message, constraints };
         invalidFields.push(issue);
         unresolved.set(field.id, constraints);
         diagnostics.push(
           createArtifactDiagnostic({
-            state: "invalid",
-            code: "FIELD_INVALID",
-            detailCode: "FIELD_CONSTRAINT_VIOLATION",
-            reason: "constraint",
+            state: "unsupported",
+            code: "FIELD_UNSUPPORTED",
+            detailCode: "FIELD_UNSUPPORTED",
+            reason: "unsupported",
             path,
             message,
             actual: createFieldEvidence(path, rawValue),
-            recovery: [{ action: "replace", path, hint: "Provide a valid value for this field." }],
+            recovery: [{ action: "retry", path, hint: "Resubmit the field with supported content." }],
           }),
         );
         continue;
