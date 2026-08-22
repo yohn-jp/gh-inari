@@ -24,6 +24,78 @@ export class ArtifactPreparationError extends Error {
     }
 }
 const GITHUB_NO_RESPONSE = "_No response_";
+/**
+ * Bounded invisible template identity marker embedded in newly rendered
+ * artifacts. It is the primary template-selection signal for governed
+ * read/repair/validation; legacy artifacts without a marker (or with one
+ * that cannot be trusted) fall back to deterministic structural matching.
+ * The marker is metadata only: it never substitutes for the authoritative
+ * repository governance/provenance that resolves the actual contract.
+ */
+export const TEMPLATE_IDENTITY_MARKER_VERSION = "1";
+const TEMPLATE_IDENTITY_MARKER_PREFIX = "<!-- inari:template ";
+const TEMPLATE_IDENTITY_MARKER_SUFFIX = " -->";
+const TEMPLATE_IDENTITY_MARKER_LINE_PATTERN = /^<!-- inari:template (\{.*\}) -->$/u;
+const TEMPLATE_IDENTITY_MARKER_MAX_LENGTH = 512;
+function renderTemplateIdentityMarker(contract) {
+    const marker = {
+        version: TEMPLATE_IDENTITY_MARKER_VERSION,
+        kind: contract.artifactKind,
+        path: contract.templateIdentity.path,
+    };
+    return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
+}
+/**
+ * Recognize and remove a trailing template identity marker line without
+ * applying semantic parsing. Only a line starting with the exact reserved
+ * marker prefix is treated as a marker attempt at all; ordinary trailing
+ * HTML comments (e.g. PR template scaffolding) are left untouched here and
+ * handled by the existing comment-stripping path. Once the reserved prefix
+ * is detected, the line is never silently ignored as "absent" again: an
+ * oversized, truncated, or otherwise broken marker attempt fails closed as
+ * "malformed" instead of falling through to structural matching.
+ */
+export function extractTemplateIdentityMarker(body) {
+    const source = normalizeSource(body);
+    const lines = source.split("\n");
+    let end = lines.length;
+    while (end > 0 && (lines[end - 1] ?? "").trim().length === 0)
+        end -= 1;
+    const candidate = end > 0 ? (lines[end - 1] ?? "").trim() : undefined;
+    if (candidate === undefined || !candidate.startsWith(TEMPLATE_IDENTITY_MARKER_PREFIX)) {
+        return { status: "absent", body: source };
+    }
+    const remaining = lines.slice(0, end - 1);
+    while (remaining.at(-1) !== undefined && (remaining.at(-1) ?? "").trim().length === 0)
+        remaining.pop();
+    const strippedBody = remaining.length === 0 ? "" : `${remaining.join("\n")}\n`;
+    if (candidate.length > TEMPLATE_IDENTITY_MARKER_MAX_LENGTH || !candidate.endsWith(TEMPLATE_IDENTITY_MARKER_SUFFIX)) {
+        return { status: "malformed", body: strippedBody };
+    }
+    const match = TEMPLATE_IDENTITY_MARKER_LINE_PATTERN.exec(candidate);
+    if (match === null)
+        return { status: "malformed", body: strippedBody };
+    let payload;
+    try {
+        payload = JSON.parse(match[1]);
+    }
+    catch {
+        return { status: "malformed", body: strippedBody };
+    }
+    if (!isTemplateIdentityMarkerShape(payload))
+        return { status: "malformed", body: strippedBody };
+    if (payload.version !== TEMPLATE_IDENTITY_MARKER_VERSION) {
+        return { status: "unsupported-version", marker: payload, body: strippedBody };
+    }
+    return { status: "valid", marker: payload, body: strippedBody };
+}
+function isTemplateIdentityMarkerShape(value) {
+    return (isRecord(value) &&
+        typeof value.version === "string" &&
+        (value.kind === "issue" || value.kind === "pull_request") &&
+        typeof value.path === "string" &&
+        value.path.trim().length > 0);
+}
 /** Parse the documented JSON input envelope while keeping field semantics adapter-independent. */
 export function parseArtifactInputDocument(input) {
     if (!isRecord(input))
@@ -518,7 +590,7 @@ function renderIssueBody(contract, values) {
             .join("\n\n");
         blocks.push([`### ${escapeHeading(title)}`, body].filter((part) => part.length > 0).join("\n\n"));
     }
-    return `${blocks.join("\n\n")}\n`;
+    return `${blocks.join("\n\n")}\n\n${renderTemplateIdentityMarker(contract)}\n`;
 }
 function renderPullRequestBody(contract, values) {
     const blocks = [];
@@ -539,7 +611,7 @@ function renderPullRequestBody(contract, values) {
             .filter(Boolean);
         blocks.push([`${"#".repeat(level)} ${escapeHeading(title)}`, ...rendered].join("\n\n"));
     }
-    return `${blocks.join("\n\n")}\n`;
+    return `${blocks.join("\n\n")}\n\n${renderTemplateIdentityMarker(contract)}\n`;
 }
 function renderDocumentation(section, content) {
     const level = section.render.headingLevel ?? section.nativeMetadata.headingLevel;
@@ -597,7 +669,8 @@ function issueSemanticValue(field, value) {
     return value;
 }
 function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
-    const source = normalizeSource(stripComments ? removeHtmlComments(body) : body);
+    const markerFreeBody = extractTemplateIdentityMarker(body).body;
+    const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
     const lines = source.split("\n");
     const values = {};
     const diagnostics = [];

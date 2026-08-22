@@ -1673,7 +1673,7 @@ test("issue check is read-only and classifies a canonical artifact as current", 
       {
         number: 80,
         title: "feat: remediation",
-        body: REMOTE_ISSUE_BODY.replace("- [ ] The behavior", "\\- [ ] The behavior"),
+        body: `${REMOTE_ISSUE_BODY.replace("- [ ] The behavior", "\\- [ ] The behavior")}\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`,
         state: "open",
         html_url: "https://github.com/acme/inari/issues/80",
         labels: [],
@@ -1902,6 +1902,150 @@ test("issue check on a multi-template wrong-template match emits diagnostics onc
   }
 });
 
+test("a valid template identity marker resolves deterministically even when structural matching alone would be ambiguous", async () => {
+  const alphaTemplate = [
+    "name: Alpha",
+    "description: Alpha template",
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes: { label: Summary }",
+    "    validations: { required: true }",
+    "",
+  ].join("\n");
+  const betaTemplate = [
+    "name: Beta",
+    "description: Beta template",
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes: { label: Summary }",
+    "    validations: { required: true }",
+    "",
+  ].join("\n");
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [
+        { path: ".github/ISSUE_TEMPLATE/alpha.yml", sha: "alpha-sha", source: alphaTemplate },
+        { path: ".github/ISSUE_TEMPLATE/beta.yml", sha: "beta-sha", source: betaTemplate },
+      ],
+      {
+        number: 91,
+        title: "Marker-tagged issue",
+        body: '### Summary\n\nHello\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/beta.yml"} -->\n',
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/91",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "91", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.classification, "valid");
+    assert.equal((output.template as { path?: string } | undefined)?.path, ".github/ISSUE_TEMPLATE/beta.yml");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("a template identity marker naming an unknown template fails closed instead of falling back to structural matching", async () => {
+  const alphaTemplate = [
+    "name: Alpha",
+    "description: Alpha template",
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes: { label: Summary }",
+    "    validations: { required: true }",
+    "",
+  ].join("\n");
+  const transport = new CliStubTransport(
+    remoteArtifactResponses([{ path: ".github/ISSUE_TEMPLATE/alpha.yml", sha: "alpha-sha", source: alphaTemplate }], {
+      number: 92,
+      title: "Marker-tagged issue",
+      body: '### Summary\n\nHello\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/gone.yml"} -->\n',
+      state: "open",
+      html_url: "https://github.com/acme/inari/issues/92",
+      labels: [],
+      assignees: [],
+    }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "92", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.classification, "wrong-template");
+    assert.equal(output.valid, false);
+    assert.equal("template" in output, false);
+    const diagnostics = output.diagnostics as readonly { code: string }[];
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]?.code, "EXISTING_TEMPLATE_MARKER_INVALID");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("an oversized template identity marker fails closed instead of being ignored as absent", async () => {
+  const alphaTemplate = [
+    "name: Alpha",
+    "description: Alpha template",
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes: { label: Summary }",
+    "    validations: { required: true }",
+    "",
+  ].join("\n");
+  const oversizedPath = `.github/ISSUE_TEMPLATE/${"a".repeat(600)}.yml`;
+  const transport = new CliStubTransport(
+    remoteArtifactResponses([{ path: ".github/ISSUE_TEMPLATE/alpha.yml", sha: "alpha-sha", source: alphaTemplate }], {
+      number: 93,
+      title: "Marker-tagged issue",
+      // The body otherwise parses cleanly under alpha.yml; only the marker is
+      // corrupted. A naive implementation could silently ignore the oversized
+      // marker line as "absent" and fall back to a structural match that
+      // happens to succeed, hiding the corrupted marker instead of failing
+      // closed on it.
+      body: `### Summary\n\nHello\n\n<!-- inari:template {"version":"1","kind":"issue","path":"${oversizedPath}"} -->\n`,
+      state: "open",
+      html_url: "https://github.com/acme/inari/issues/93",
+      labels: [],
+      assignees: [],
+    }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "93", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.classification, "wrong-template");
+    assert.equal(output.valid, false);
+    assert.equal("template" in output, false);
+    const diagnostics = output.diagnostics as readonly { code: string }[];
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]?.code, "EXISTING_TEMPLATE_MARKER_INVALID");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("issue edit performs the mutation, reaches the adapter, and reports reconciled governance", async () => {
   const transport = new CliStubTransport([
     ...remoteArtifactResponses(
@@ -2016,10 +2160,10 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
     JSON.stringify({ fields: { ...desiredFields, problem: "A converged problem" }, title: "feat: remediation" }),
     "utf8",
   );
-  const convergedBody = REMOTE_ISSUE_BODY.replace("A reproducible problem", "A converged problem").replace(
+  const convergedBody = `${REMOTE_ISSUE_BODY.replace("A reproducible problem", "A converged problem").replace(
     "- [ ] The behavior is covered",
     "\\- [ ] The behavior is covered",
-  );
+  )}\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`;
 
   const firstTransport = new CliStubTransport([
     ...remoteArtifactResponses(

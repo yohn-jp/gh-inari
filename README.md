@@ -195,7 +195,11 @@ parse the existing artifact with the same parser and semantic validator as
 metadata. Successful reads report `projection: "canonical"`; wrong-template,
 unparseable, ambiguous, and semantically invalid artifacts report structured
 diagnostics with `projection: "unavailable"` and never return guessed fields.
-When `--template` is omitted, all supported candidates are evaluated
+When `--template` is omitted, Inari first looks for the bounded invisible
+template identity marker every rendered artifact now carries. A valid marker
+resolves the contract directly; an unknown, stale, or wrong-kind marker fails
+closed with a diagnostic instead of guessing another template. Artifacts
+without a marker fall back to evaluating all supported candidates
 deterministically; multiple structural matches fail closed. Native template
 boilerplate and raw Markdown are intentionally absent from successful output.
 

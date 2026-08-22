@@ -1,6 +1,6 @@
 import { type PartialSemanticValidationResult, type PartialSemanticRepairResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
 import { type ArtifactDiagnosticReport } from "./diagnostics.js";
-import { type CanonicalContract } from "./contract/ir.js";
+import { type ArtifactKind, type CanonicalContract } from "./contract/ir.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
     readonly title?: string;
@@ -86,7 +86,7 @@ export interface PreparedPullRequestArtifact {
     readonly artifact: ValidatedRenderedPullRequestArtifact;
 }
 export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable" | "ambiguous";
-export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE" | "EXISTING_NON_CANONICAL" | "EXISTING_TEMPLATE_COMPILE_FAILED";
+export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE" | "EXISTING_NON_CANONICAL" | "EXISTING_TEMPLATE_COMPILE_FAILED" | "EXISTING_TEMPLATE_MARKER_INVALID";
 export interface ExistingArtifactDiagnostic {
     readonly code: ExistingArtifactDiagnosticCode;
     readonly path: string;
@@ -117,6 +117,38 @@ export interface ExistingPullRequestReader {
         readonly url: string;
     }>;
 }
+/**
+ * Bounded invisible template identity marker embedded in newly rendered
+ * artifacts. It is the primary template-selection signal for governed
+ * read/repair/validation; legacy artifacts without a marker (or with one
+ * that cannot be trusted) fall back to deterministic structural matching.
+ * The marker is metadata only: it never substitutes for the authoritative
+ * repository governance/provenance that resolves the actual contract.
+ */
+export declare const TEMPLATE_IDENTITY_MARKER_VERSION: "1";
+export interface TemplateIdentityMarker {
+    readonly version: string;
+    readonly kind: ArtifactKind;
+    readonly path: string;
+}
+export type TemplateIdentityMarkerStatus = "absent" | "valid" | "malformed" | "unsupported-version";
+export interface TemplateIdentityMarkerExtraction {
+    readonly status: TemplateIdentityMarkerStatus;
+    readonly marker?: TemplateIdentityMarker;
+    /** Body with a recognized trailing marker line removed; unchanged when none is present. */
+    readonly body: string;
+}
+/**
+ * Recognize and remove a trailing template identity marker line without
+ * applying semantic parsing. Only a line starting with the exact reserved
+ * marker prefix is treated as a marker attempt at all; ordinary trailing
+ * HTML comments (e.g. PR template scaffolding) are left untouched here and
+ * handled by the existing comment-stripping path. Once the reserved prefix
+ * is detected, the line is never silently ignored as "absent" again: an
+ * oversized, truncated, or otherwise broken marker attempt fails closed as
+ * "malformed" instead of falling through to structural matching.
+ */
+export declare function extractTemplateIdentityMarker(body: string): TemplateIdentityMarkerExtraction;
 export interface FetchedExistingArtifact {
     readonly number: number;
     readonly url: string;

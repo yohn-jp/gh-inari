@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ArtifactPreparationError,
+  extractTemplateIdentityMarker,
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
   prepareIssueArtifact,
@@ -11,6 +12,7 @@ import {
   removeHtmlComments,
   renderIssueArtifact,
   renderPullRequestArtifact,
+  TEMPLATE_IDENTITY_MARKER_VERSION,
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
 } from "./artifact.js";
@@ -350,7 +352,10 @@ body:
   );
   const emptyNativeBody = "### Logs\n\n```shell\n\n```\n";
   assert.equal(validateExistingIssueArtifact(contract, emptyNativeBody).valid, true);
-  assert.equal(renderIssueArtifact(contract, { logs: "echo hello" }), "### Logs\n\n```shell\necho hello\n```\n");
+  assert.equal(
+    renderIssueArtifact(contract, { logs: "echo hello" }),
+    '### Logs\n\n```shell\necho hello\n```\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/logs.yml"} -->\n',
+  );
   const parsed = parseExistingIssueArtifact(contract, "### Logs\n\n```shell\necho hello\n```\n");
   assert.deepEqual(parsed.values, { logs: "echo hello" });
   assert.equal(parsed.parsed, true);
@@ -830,4 +835,128 @@ test("HTML comment removal is linear and fails closed on unterminated comments",
   assert.equal(removeHtmlComments("before<!--unterminated"), "before");
   assert.equal(removeHtmlComments("<!--".repeat(10_000)), "");
   assert.equal(removeHtmlComments("<!--unterminated<!--nested"), "");
+});
+
+test("rendered Issue and PR bodies carry a bounded template identity marker that round-trips invisibly", () => {
+  const issueBody = renderIssueArtifact(issueContractFixture, {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests", "docs"],
+  });
+  assert.ok(
+    issueBody.endsWith(
+      `<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`,
+    ),
+  );
+  const issueMarker = extractTemplateIdentityMarker(issueBody);
+  assert.equal(issueMarker.status, "valid");
+  assert.deepEqual(issueMarker.marker, {
+    version: TEMPLATE_IDENTITY_MARKER_VERSION,
+    kind: "issue",
+    path: issueContractFixture.templateIdentity.path,
+  });
+  const issueParsed = parseExistingIssueArtifact(issueContractFixture, issueBody);
+  assert.equal(issueParsed.parsed, true);
+  assert.deepEqual(issueParsed.values, {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests", "docs"],
+  });
+
+  const prBody = renderPullRequestArtifact(pullRequestContractFixture, {
+    summary: "A deterministic summary",
+    linked_issue: "Closes #21",
+    acceptance: ["tests"],
+    scope: "Small and explicit",
+  });
+  assert.ok(
+    prBody.endsWith(
+      `<!-- inari:template {"version":"1","kind":"pull_request","path":".github/PULL_REQUEST_TEMPLATE.md"} -->\n`,
+    ),
+  );
+  const prMarker = extractTemplateIdentityMarker(prBody);
+  assert.equal(prMarker.status, "valid");
+  assert.deepEqual(prMarker.marker, {
+    version: TEMPLATE_IDENTITY_MARKER_VERSION,
+    kind: "pull_request",
+    path: pullRequestContractFixture.templateIdentity.path,
+  });
+  const prParsed = parseExistingPullRequestArtifact(pullRequestContractFixture, prBody);
+  assert.equal(prParsed.parsed, true);
+  assert.deepEqual(prParsed.values, {
+    summary: "A deterministic summary",
+    linked_issue: "Closes #21",
+    acceptance: ["tests"],
+    scope: "Small and explicit",
+  });
+});
+
+test("template identity marker extraction fails closed on malformed and unsupported-version markers", () => {
+  assert.equal(extractTemplateIdentityMarker("### Problem\n\nvalue\n").status, "absent");
+  assert.equal(
+    extractTemplateIdentityMarker("### Problem\n\nvalue\n\n<!-- an ordinary trailing comment -->\n").status,
+    "absent",
+  );
+
+  const malformed = extractTemplateIdentityMarker("### Problem\n\nvalue\n\n<!-- inari:template not-json -->\n");
+  assert.equal(malformed.status, "malformed");
+  assert.equal(malformed.marker, undefined);
+  assert.equal(malformed.body, "### Problem\n\nvalue\n");
+
+  const wrongShape = extractTemplateIdentityMarker(
+    '### Problem\n\nvalue\n\n<!-- inari:template {"version":"1","kind":"issue"} -->\n',
+  );
+  assert.equal(wrongShape.status, "malformed");
+
+  const staleVersion = extractTemplateIdentityMarker(
+    '### Problem\n\nvalue\n\n<!-- inari:template {"version":"9","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n',
+  );
+  assert.equal(staleVersion.status, "unsupported-version");
+  assert.deepEqual(staleVersion.marker, {
+    version: "9",
+    kind: "issue",
+    path: ".github/ISSUE_TEMPLATE/feature.yml",
+  });
+  assert.equal(staleVersion.body, "### Problem\n\nvalue\n");
+
+  const valid = extractTemplateIdentityMarker(
+    '### Problem\n\nvalue\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n',
+  );
+  assert.equal(valid.status, "valid");
+  assert.equal(valid.body, "### Problem\n\nvalue\n");
+
+  // A line clearly starting with the reserved marker prefix must never be
+  // silently ignored as "absent" once detected, even if it is oversized or
+  // never properly closed: falling back to structural matching for a
+  // corrupted/adversarial marker attempt would defeat the marker's
+  // fail-closed contract.
+  const oversizedPath = `.github/ISSUE_TEMPLATE/${"a".repeat(600)}.yml`;
+  const oversized = extractTemplateIdentityMarker(
+    `### Problem\n\nvalue\n\n<!-- inari:template {"version":"1","kind":"issue","path":"${oversizedPath}"} -->\n`,
+  );
+  assert.equal(oversized.status, "malformed");
+  assert.equal(oversized.marker, undefined);
+  assert.equal(oversized.body, "### Problem\n\nvalue\n");
+
+  const unterminated = extractTemplateIdentityMarker(
+    '### Problem\n\nvalue\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"}\n',
+  );
+  assert.equal(unterminated.status, "malformed");
+  assert.equal(unterminated.body, "### Problem\n\nvalue\n");
+});
+
+test("legacy artifacts without a template identity marker still validate through structural matching", () => {
+  const rendered = renderIssueArtifact(issueContractFixture, {
+    problem: "A reproducible problem",
+    category: "feature",
+    affected_areas: ["cli"],
+    acceptance: ["tests"],
+  });
+  const legacyBody = extractTemplateIdentityMarker(rendered).body;
+  assert.equal(extractTemplateIdentityMarker(legacyBody).status, "absent");
+  const result = validateExistingIssueArtifact(issueContractFixture, legacyBody);
+  assert.equal(result.valid, true);
+  assert.equal(result.classification, "valid");
 });

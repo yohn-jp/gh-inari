@@ -1,4 +1,4 @@
-import { prepareIssueArtifact, preparePullRequestArtifact, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
+import { extractTemplateIdentityMarker, prepareIssueArtifact, preparePullRequestArtifact, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { compileRepositoryGovernedContract, compileRepositoryGovernedContracts, updateGovernedIssue, updateGovernedPullRequest, } from "./governance.js";
 import { createHash } from "node:crypto";
 export class RemediationError extends Error {
@@ -16,6 +16,10 @@ export class RemediationError extends Error {
 const MAX_DIFF_CHANGES = 32;
 const MAX_DIFF_VALUE = 240;
 const MAX_PREVIEW = 160;
+const DOMAIN_ARTIFACT_KIND = {
+    issue: "issue",
+    pr: "pull_request",
+};
 /** Read and select an existing artifact using the same governed candidate path as `get`. */
 export async function readGovernedExistingArtifact(adapter, domain, number, selector) {
     let contracts;
@@ -33,6 +37,15 @@ export async function readGovernedExistingArtifact(adapter, domain, number, sele
         failedTemplates = [];
     }
     const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
+    if (selector === undefined) {
+        const marker = extractTemplateIdentityMarker(remote.body ?? "");
+        if (marker.status !== "absent") {
+            // A marker is the primary selection signal: resolve and validate only
+            // the one contract it names, without structurally probing every other
+            // compiled candidate first.
+            return resolveExistingArtifactByMarker(domain, remote, contracts, failedTemplates, marker.status, marker.marker);
+        }
+    }
     const candidates = contracts.map((contract) => ({
         contract,
         result: domain === "issue"
@@ -64,6 +77,53 @@ export async function readGovernedExistingArtifact(adapter, domain, number, sele
             attemptedTemplates: selected.result.attemptedTemplates,
         },
     };
+}
+/**
+ * Resolve a marker-tagged existing artifact directly against the one
+ * already-compiled repository template it names, without structurally
+ * parsing the body against any other candidate. The marker only selects
+ * among contracts freshly compiled from current trusted repository
+ * governance, so it can never override that authoritative provenance. An
+ * unknown, stale, wrong-kind, or otherwise untrustworthy marker fails
+ * explicitly rather than falling back to a different template or to
+ * structural matching.
+ */
+function resolveExistingArtifactByMarker(domain, remote, contracts, failedTemplates, status, marker) {
+    const invalid = (message) => {
+        const diagnostic = {
+            code: "EXISTING_TEMPLATE_MARKER_INVALID",
+            path: "$.template",
+            message,
+        };
+        return {
+            remote,
+            result: {
+                valid: false,
+                classification: "wrong-template",
+                parse: { parsed: false, values: {}, diagnostics: [diagnostic] },
+                violations: [diagnostic],
+            },
+        };
+    };
+    if (status !== "valid" || marker === undefined) {
+        return invalid(status === "unsupported-version"
+            ? `Artifact template identity marker uses an unsupported marker version: ${marker?.version ?? "unknown"}.`
+            : "Artifact template identity marker is malformed.");
+    }
+    if (marker.kind !== DOMAIN_ARTIFACT_KIND[domain]) {
+        return invalid(`Artifact template identity marker names a "${marker.kind}" template, which cannot resolve a ${DOMAIN_ARTIFACT_KIND[domain]} artifact.`);
+    }
+    const contract = contracts.find((candidate) => candidate.templateIdentity.path === marker.path);
+    if (contract === undefined) {
+        const failed = failedTemplates.find((failedTemplate) => failedTemplate.path === marker.path);
+        return invalid(failed === undefined
+            ? `Artifact template identity marker names an unknown or stale template: ${marker.path}.`
+            : `[${failed.path}] Artifact template identity marker names a template that failed to compile: ${failed.message}`);
+    }
+    const result = domain === "issue"
+        ? validateExistingIssueArtifact(contract, remote.body)
+        : validateExistingPullRequestArtifact(contract, remote.body);
+    return { remote, contract, result };
 }
 /** Classify the current artifact and prove whether a canonical body can preserve its semantics. */
 export function assessExistingArtifact(domain, read) {
