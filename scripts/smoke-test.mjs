@@ -336,7 +336,7 @@ function main() {
       "repos/smoke/repository/issues/21": {
         number: 21,
         title: "feat: smoke get",
-        body: "### Problem\n\nA smoke-test problem\n",
+        body: '### Problem\n\nA smoke-test problem\n\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n',
         state: "open",
         html_url: "https://github.com/smoke/repository/issues/21",
         labels: [],
