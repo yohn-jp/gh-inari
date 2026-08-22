@@ -580,9 +580,10 @@ function renderDocumentation(section: CanonicalContract["sections"][number], con
 function renderFieldValue(field: CanonicalField, value: unknown, kind: "issue" | "pull_request"): string {
   if (field.type === "string" || field.type === "enum") {
     if (typeof value === "string" && (kind !== "issue" || value.trim().length > 0)) {
+      const renderedValue = kind === "issue" ? issueNativeValue(field, value) : value;
       return field.nativeMetadata.render === undefined
-        ? escapeMarkdownValue(value)
-        : renderCodeBlock(value, field.nativeMetadata.render);
+        ? escapeMarkdownValue(renderedValue)
+        : renderCodeBlock(renderedValue, field.nativeMetadata.render);
     }
     if (kind === "pull_request") return field.nativeMetadata.placeholder ?? "";
     return field.nativeMetadata.render === undefined
@@ -592,9 +593,13 @@ function renderFieldValue(field: CanonicalField, value: unknown, kind: "issue" |
   if (field.type === "array") {
     if (!Array.isArray(value)) return kind === "issue" ? GITHUB_NO_RESPONSE : "";
     if (value.length === 0) return kind === "issue" ? GITHUB_NO_RESPONSE : "";
+    const renderedValues =
+      kind === "issue"
+        ? value.map((entry) => (typeof entry === "string" ? issueNativeValue(field, entry) : String(entry)))
+        : value.map((entry) => String(entry));
     if (field.nativeMetadata.multiple === true)
-      return value.map((entry) => escapeMarkdownValue(String(entry))).join(", ");
-    return value.map((entry) => `- ${escapeMarkdownValue(String(entry))}`).join("\n");
+      return renderedValues.map((entry) => escapeMarkdownValue(entry)).join(", ");
+    return renderedValues.map((entry) => `- ${escapeMarkdownValue(entry)}`).join("\n");
   }
   const selected = new Set(
     Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [],
@@ -604,6 +609,21 @@ function renderFieldValue(field: CanonicalField, value: unknown, kind: "issue" |
     (item) => `- [${selected.has(item.id) ? "x" : " "}] ${escapeMarkdownValue(item.label)}`,
   );
   return [placeholder === undefined ? "" : placeholder, lines.join("\n")].filter(Boolean).join("\n\n");
+}
+
+/** Map canonical Issue semantic values to the labels shown by GitHub Issue Forms. */
+function issueNativeValue(field: CanonicalField, value: string): string {
+  if (field.type === "enum") return field.options.find((option) => option.value === value)?.label ?? value;
+  if (field.type === "array") return field.items.options?.find((option) => option.value === value)?.label ?? value;
+  return value;
+}
+
+/** Map GitHub Issue Form labels back to canonical semantic values. */
+function issueSemanticValue(field: CanonicalField, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (field.type === "enum") return field.options.find((option) => option.label === value)?.value ?? value;
+  if (field.type === "array") return field.items.options?.find((option) => option.label === value)?.value ?? value;
+  return value;
 }
 
 function parseRenderedBody(
@@ -696,7 +716,7 @@ function parseRenderedBody(
       }
     }
     const fieldLines = trimLineRange(lines.slice(contentStart, fieldEnd));
-    const parsed = parseFieldLines(field, fieldLines, `$.${field.id}`, stripComments);
+    const parsed = parseFieldLines(field, fieldLines, `$.${field.id}`, stripComments, issueHeadingLevel !== undefined);
     diagnostics.push(...parsed.diagnostics);
     if (parsed.value !== undefined) values[field.id] = parsed.value;
     if (parsed.diagnostics.length > 0) return { parsed: false, values: {}, diagnostics };
@@ -718,6 +738,7 @@ function parseFieldLines(
   lines: readonly string[],
   path: string,
   stripComments: boolean,
+  issueBody: boolean,
 ): { value: unknown; diagnostics: readonly ExistingArtifactDiagnostic[] } {
   const diagnostics: ExistingArtifactDiagnostic[] = [];
   const filtered = stripComments ? lines.filter((line) => line.trim().length > 0) : lines;
@@ -727,16 +748,16 @@ function parseFieldLines(
     return { value: field.type === "array" ? [] : undefined, diagnostics };
   }
   if (field.type === "string" || field.type === "enum") {
-    const value =
+    const parsedValue =
       field.nativeMetadata.render === undefined
         ? trimBlankLines(unescapeMarkdownValue(filtered.join("\n")))
         : parseRenderedCodeBlock(filtered, field.nativeMetadata.render, path, diagnostics);
     const placeholder = stripComments
       ? removeHtmlComments(field.nativeMetadata.placeholder ?? "")
       : (field.nativeMetadata.placeholder ?? "");
-    if (stripComments && value !== undefined && value === trimBlankLines(placeholder))
+    if (stripComments && parsedValue !== undefined && parsedValue === trimBlankLines(placeholder))
       return { value: undefined, diagnostics };
-    return { value, diagnostics };
+    return { value: issueBody ? issueSemanticValue(field, parsedValue) : parsedValue, diagnostics };
   }
   if (field.type === "array") {
     if (field.nativeMetadata.multiple === true) {
@@ -747,7 +768,7 @@ function parseFieldLines(
         .map((entry) => entry.trim())
         .filter((entry) => entry.length > 0);
       if (values.length === 0) return { value: undefined, diagnostics };
-      return { value: values, diagnostics };
+      return { value: issueBody ? values.map((value) => issueSemanticValue(field, value)) : values, diagnostics };
     }
     const values = filtered
       .map((line) => {

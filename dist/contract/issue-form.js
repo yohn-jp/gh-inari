@@ -7,6 +7,7 @@ import { selectIssueTemplate, } from "../template-discovery.js";
 // alphanumeric characters, hyphens, and underscores; it does not require a
 // letter as the first character.
 const identifierPattern = /^[A-Za-z0-9_-]+$/u;
+const GITHUB_NO_RESPONSE_LABEL = "_No response_";
 export class IssueFormCompilerError extends Error {
     code;
     path;
@@ -353,8 +354,8 @@ function compileTextField(elementType, id, attributes, validation, index, pathPr
 function compileDropdown(id, attributes, validation, index, pathPrefix, diagnostics) {
     checkUnknownKeys(attributes, ["label", "description", "options", "multiple", "default"], `${pathPrefix}.attributes`, diagnostics);
     const common = parseFieldCommon(id, attributes, validation, index, pathPrefix, diagnostics);
-    const optionValues = parseDropdownOptions(attributes.options, `${pathPrefix}.attributes.options`, diagnostics);
     const multiple = optionalBoolean(attributes, "multiple", `${pathPrefix}.attributes`, diagnostics) ?? false;
+    const optionValues = parseDropdownOptions(attributes.options, `${pathPrefix}.attributes.options`, diagnostics, multiple);
     const defaultIndex = optionalSafeInteger(attributes, "default", `${pathPrefix}.attributes`, diagnostics);
     let defaultOption;
     if (defaultIndex !== undefined) {
@@ -480,7 +481,7 @@ function parseValidations(value, pathPrefix, diagnostics) {
     checkUnknownKeys(validations, ["required"], pathPrefix, diagnostics);
     return { required: optionalBoolean(validations, "required", pathPrefix, diagnostics) ?? false };
 }
-function parseDropdownOptions(value, pathPrefix, diagnostics) {
+function parseDropdownOptions(value, pathPrefix, diagnostics, multiple) {
     const options = requiredArrayValue(value, pathPrefix, diagnostics);
     if (options === undefined)
         return undefined;
@@ -492,6 +493,18 @@ function parseDropdownOptions(value, pathPrefix, diagnostics) {
         if (typeof option !== "string" || option.length === 0) {
             diagnostics.add("ISSUE_FORM_INVALID_VALUE", `${pathPrefix}[${index}]`, "Dropdown options must be non-empty strings.");
             return;
+        }
+        if (option !== option.trim()) {
+            diagnostics.add("ISSUE_FORM_UNSUPPORTED_SEMANTICS", `${pathPrefix}[${index}]`, "Dropdown labels must not have leading or trailing whitespace because native artifact parsing trims values.");
+        }
+        if (/\r|\n/u.test(option)) {
+            diagnostics.add("ISSUE_FORM_UNSUPPORTED_SEMANTICS", `${pathPrefix}[${index}]`, "Dropdown labels must not contain line breaks because native artifact parsing is line-based.");
+        }
+        if (option === GITHUB_NO_RESPONSE_LABEL) {
+            diagnostics.add("ISSUE_FORM_UNSUPPORTED_SEMANTICS", `${pathPrefix}[${index}]`, `Dropdown label "${GITHUB_NO_RESPONSE_LABEL}" is reserved for an empty Issue Form response.`);
+        }
+        if (multiple && option.includes(",")) {
+            diagnostics.add("ISSUE_FORM_UNSUPPORTED_SEMANTICS", `${pathPrefix}[${index}]`, "Multi-select dropdown labels must not contain commas because native artifact parsing uses commas as separators.");
         }
         if (seen.has(option))
             diagnostics.add("ISSUE_FORM_DUPLICATE_VALUE", `${pathPrefix}[${index}]`, `Duplicate dropdown option "${option}".`);

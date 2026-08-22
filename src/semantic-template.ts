@@ -934,7 +934,18 @@ function rebindField(field: CanonicalField, source: SemanticSection): CanonicalF
       id: source.id,
       ...(source.label === undefined ? {} : { label: source.label }),
       ...(source.description === undefined ? {} : { description: source.description }),
-      nativeMetadata,
+      nativeMetadata: {
+        ...nativeMetadata,
+        ...(options === undefined
+          ? {}
+          : {
+              options: options.map((option) => ({
+                value: option.value,
+                label: option.label,
+                ...(option.description === undefined ? {} : { description: option.description }),
+              })),
+            }),
+      },
       items: { ...field.items, ...(options === undefined ? {} : { options }) },
     };
   }

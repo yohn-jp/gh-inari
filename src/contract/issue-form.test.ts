@@ -276,6 +276,41 @@ body:
   );
 });
 
+test("rejects dropdown labels that cannot round-trip through the native Issue artifact", () => {
+  const cases = [
+    {
+      name: "multi-select comma",
+      attributes: 'multiple: true\n      options: ["Frontend, web", Backend]',
+    },
+    {
+      name: "multi-select trimmed label",
+      attributes: 'multiple: true\n      options: [" Frontend", Backend]',
+    },
+    {
+      name: "reserved empty-response label",
+      attributes: 'options: ["_No response_", Backend]',
+    },
+  ];
+  for (const example of cases) {
+    const source = `name: Form
+description: Description
+body:
+  - type: dropdown
+    id: choice
+    attributes:
+      label: Choice
+      ${example.attributes}
+`;
+    assert.throws(
+      () => compileIssueFormYaml(source, TEMPLATE),
+      (error: unknown) =>
+        error instanceof IssueFormCompilerError &&
+        error.violations.some((violation) => violation.code === "ISSUE_FORM_UNSUPPORTED_SEMANTICS"),
+      example.name,
+    );
+  }
+});
+
 test("missing IDs are ambiguous while native-valid and native-invalid IDs follow GitHub's syntax", () => {
   const missingId = `name: Form
 description: Description

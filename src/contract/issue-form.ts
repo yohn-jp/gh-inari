@@ -31,6 +31,7 @@ type Position = { readonly line: number; readonly column: number };
 // alphanumeric characters, hyphens, and underscores; it does not require a
 // letter as the first character.
 const identifierPattern = /^[A-Za-z0-9_-]+$/u;
+const GITHUB_NO_RESPONSE_LABEL = "_No response_";
 
 export type IssueFormCompilerErrorCode =
   | "ISSUE_FORM_INVALID_YAML"
@@ -521,8 +522,13 @@ function compileDropdown(
     diagnostics,
   );
   const common = parseFieldCommon(id, attributes, validation, index, pathPrefix, diagnostics);
-  const optionValues = parseDropdownOptions(attributes.options, `${pathPrefix}.attributes.options`, diagnostics);
   const multiple = optionalBoolean(attributes, "multiple", `${pathPrefix}.attributes`, diagnostics) ?? false;
+  const optionValues = parseDropdownOptions(
+    attributes.options,
+    `${pathPrefix}.attributes.options`,
+    diagnostics,
+    multiple,
+  );
   const defaultIndex = optionalSafeInteger(attributes, "default", `${pathPrefix}.attributes`, diagnostics);
   let defaultOption: string | undefined;
   if (defaultIndex !== undefined) {
@@ -689,6 +695,7 @@ function parseDropdownOptions(
   value: unknown,
   pathPrefix: string,
   diagnostics: Diagnostics,
+  multiple: boolean,
 ): readonly string[] | undefined {
   const options = requiredArrayValue(value, pathPrefix, diagnostics);
   if (options === undefined) return undefined;
@@ -704,6 +711,34 @@ function parseDropdownOptions(
         "Dropdown options must be non-empty strings.",
       );
       return;
+    }
+    if (option !== option.trim()) {
+      diagnostics.add(
+        "ISSUE_FORM_UNSUPPORTED_SEMANTICS",
+        `${pathPrefix}[${index}]`,
+        "Dropdown labels must not have leading or trailing whitespace because native artifact parsing trims values.",
+      );
+    }
+    if (/\r|\n/u.test(option)) {
+      diagnostics.add(
+        "ISSUE_FORM_UNSUPPORTED_SEMANTICS",
+        `${pathPrefix}[${index}]`,
+        "Dropdown labels must not contain line breaks because native artifact parsing is line-based.",
+      );
+    }
+    if (option === GITHUB_NO_RESPONSE_LABEL) {
+      diagnostics.add(
+        "ISSUE_FORM_UNSUPPORTED_SEMANTICS",
+        `${pathPrefix}[${index}]`,
+        `Dropdown label "${GITHUB_NO_RESPONSE_LABEL}" is reserved for an empty Issue Form response.`,
+      );
+    }
+    if (multiple && option.includes(",")) {
+      diagnostics.add(
+        "ISSUE_FORM_UNSUPPORTED_SEMANTICS",
+        `${pathPrefix}[${index}]`,
+        "Multi-select dropdown labels must not contain commas because native artifact parsing uses commas as separators.",
+      );
     }
     if (seen.has(option))
       diagnostics.add(

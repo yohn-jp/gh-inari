@@ -361,9 +361,10 @@ function renderDocumentation(section, content) {
 function renderFieldValue(field, value, kind) {
     if (field.type === "string" || field.type === "enum") {
         if (typeof value === "string" && (kind !== "issue" || value.trim().length > 0)) {
+            const renderedValue = kind === "issue" ? issueNativeValue(field, value) : value;
             return field.nativeMetadata.render === undefined
-                ? escapeMarkdownValue(value)
-                : renderCodeBlock(value, field.nativeMetadata.render);
+                ? escapeMarkdownValue(renderedValue)
+                : renderCodeBlock(renderedValue, field.nativeMetadata.render);
         }
         if (kind === "pull_request")
             return field.nativeMetadata.placeholder ?? "";
@@ -376,14 +377,35 @@ function renderFieldValue(field, value, kind) {
             return kind === "issue" ? GITHUB_NO_RESPONSE : "";
         if (value.length === 0)
             return kind === "issue" ? GITHUB_NO_RESPONSE : "";
+        const renderedValues = kind === "issue"
+            ? value.map((entry) => (typeof entry === "string" ? issueNativeValue(field, entry) : String(entry)))
+            : value.map((entry) => String(entry));
         if (field.nativeMetadata.multiple === true)
-            return value.map((entry) => escapeMarkdownValue(String(entry))).join(", ");
-        return value.map((entry) => `- ${escapeMarkdownValue(String(entry))}`).join("\n");
+            return renderedValues.map((entry) => escapeMarkdownValue(entry)).join(", ");
+        return renderedValues.map((entry) => `- ${escapeMarkdownValue(entry)}`).join("\n");
     }
     const selected = new Set(Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : []);
     const placeholder = kind === "pull_request" ? field.nativeMetadata.placeholder : undefined;
     const lines = field.items.map((item) => `- [${selected.has(item.id) ? "x" : " "}] ${escapeMarkdownValue(item.label)}`);
     return [placeholder === undefined ? "" : placeholder, lines.join("\n")].filter(Boolean).join("\n\n");
+}
+/** Map canonical Issue semantic values to the labels shown by GitHub Issue Forms. */
+function issueNativeValue(field, value) {
+    if (field.type === "enum")
+        return field.options.find((option) => option.value === value)?.label ?? value;
+    if (field.type === "array")
+        return field.items.options?.find((option) => option.value === value)?.label ?? value;
+    return value;
+}
+/** Map GitHub Issue Form labels back to canonical semantic values. */
+function issueSemanticValue(field, value) {
+    if (value === undefined)
+        return undefined;
+    if (field.type === "enum")
+        return field.options.find((option) => option.label === value)?.value ?? value;
+    if (field.type === "array")
+        return field.items.options?.find((option) => option.label === value)?.value ?? value;
+    return value;
 }
 function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
     const source = normalizeSource(stripComments ? removeHtmlComments(body) : body);
@@ -467,7 +489,7 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
             }
         }
         const fieldLines = trimLineRange(lines.slice(contentStart, fieldEnd));
-        const parsed = parseFieldLines(field, fieldLines, `$.${field.id}`, stripComments);
+        const parsed = parseFieldLines(field, fieldLines, `$.${field.id}`, stripComments, issueHeadingLevel !== undefined);
         diagnostics.push(...parsed.diagnostics);
         if (parsed.value !== undefined)
             values[field.id] = parsed.value;
@@ -487,7 +509,7 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
         return { parsed: false, values: {}, diagnostics };
     return { parsed: true, values, diagnostics: [] };
 }
-function parseFieldLines(field, lines, path, stripComments) {
+function parseFieldLines(field, lines, path, stripComments, issueBody) {
     const diagnostics = [];
     const filtered = stripComments ? lines.filter((line) => line.trim().length > 0) : lines;
     if (filtered.length === 1 && filtered[0]?.trim() === GITHUB_NO_RESPONSE) {
@@ -496,15 +518,15 @@ function parseFieldLines(field, lines, path, stripComments) {
         return { value: field.type === "array" ? [] : undefined, diagnostics };
     }
     if (field.type === "string" || field.type === "enum") {
-        const value = field.nativeMetadata.render === undefined
+        const parsedValue = field.nativeMetadata.render === undefined
             ? trimBlankLines(unescapeMarkdownValue(filtered.join("\n")))
             : parseRenderedCodeBlock(filtered, field.nativeMetadata.render, path, diagnostics);
         const placeholder = stripComments
             ? removeHtmlComments(field.nativeMetadata.placeholder ?? "")
             : (field.nativeMetadata.placeholder ?? "");
-        if (stripComments && value !== undefined && value === trimBlankLines(placeholder))
+        if (stripComments && parsedValue !== undefined && parsedValue === trimBlankLines(placeholder))
             return { value: undefined, diagnostics };
-        return { value, diagnostics };
+        return { value: issueBody ? issueSemanticValue(field, parsedValue) : parsedValue, diagnostics };
     }
     if (field.type === "array") {
         if (field.nativeMetadata.multiple === true) {
@@ -517,7 +539,7 @@ function parseFieldLines(field, lines, path, stripComments) {
                 .filter((entry) => entry.length > 0);
             if (values.length === 0)
                 return { value: undefined, diagnostics };
-            return { value: values, diagnostics };
+            return { value: issueBody ? values.map((value) => issueSemanticValue(field, value)) : values, diagnostics };
         }
         const values = filtered
             .map((line) => {
