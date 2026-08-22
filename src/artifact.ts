@@ -1,7 +1,9 @@
 import {
   assertSemanticInput,
   SemanticValidationError,
+  validatePartialSemanticInput,
   validateSemanticInput,
+  type PartialSemanticValidationResult,
   type SemanticValidationResult,
   type SemanticViolation,
 } from "./contract/validation.js";
@@ -173,6 +175,15 @@ export function parseArtifactInputDocument(input: unknown): ArtifactInputDocumen
   }
   return { fields: input, metadata: {} };
 }
+
+/** Classify an artifact input envelope without applying semantic defaults. */
+export function validatePartialArtifactInput(contractInput: unknown, input: unknown): PartialSemanticValidationResult {
+  assertCanonicalContract(contractInput);
+  return validatePartialSemanticInput(contractInput, parseArtifactInputDocument(input).fields);
+}
+
+/** Terminology alias for callers that treat validation as classification. */
+export const classifyPartialArtifactInput = validatePartialArtifactInput;
 
 export function renderIssueArtifact(contractInput: unknown, input: unknown): string {
   assertCanonicalContract(contractInput);
