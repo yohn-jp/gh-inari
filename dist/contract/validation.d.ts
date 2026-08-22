@@ -64,6 +64,43 @@ export interface PartialSemanticValidationResult {
     readonly projectedConstraints: readonly PartialFieldConstraintProjection[];
     readonly diagnostics: ArtifactDiagnosticReport;
 }
+/**
+ * The immutable state a caller carries between partial repair attempts.
+ *
+ * This deliberately contains accepted semantic values only.  Missing and
+ * invalid values are not carried forward, so a repair cannot accidentally
+ * turn an earlier diagnostic into candidate state.
+ */
+export interface PartialSemanticRepairContext {
+    readonly identity: PartialArtifactIdentity;
+    readonly acceptedFields: readonly string[];
+    readonly values: Readonly<Record<string, unknown>>;
+}
+/** Result of merging one bounded repair patch into an accepted candidate. */
+export interface PartialSemanticRepairResult {
+    /** True only when the patch and the complete merged candidate are valid. */
+    readonly valid: boolean;
+    /** True when the merged candidate can be rendered by the canonical path. */
+    readonly complete: boolean;
+    readonly artifactKind: CanonicalContract["artifactKind"];
+    readonly templateIdentity: CanonicalContract["templateIdentity"];
+    readonly identity: PartialArtifactIdentity;
+    /** Accepted values after this attempt; invalid patch values are excluded. */
+    readonly values: Readonly<Record<string, unknown>>;
+    /** Values after canonical defaults are materialized, when complete is true. */
+    readonly canonicalValues: Readonly<Record<string, unknown>>;
+    readonly acceptedFields: readonly string[];
+    readonly changedFields: readonly string[];
+    /** True when no patch value changed accepted semantic state. */
+    readonly noOp: boolean;
+    readonly context: PartialSemanticRepairContext;
+    readonly missingFields: readonly PartialFieldIssue[];
+    readonly invalidFields: readonly PartialFieldIssue[];
+    readonly projectedConstraints: readonly PartialFieldConstraintProjection[];
+    readonly diagnostics: ArtifactDiagnosticReport;
+    /** The reclassified candidate, useful for the next stateless attempt. */
+    readonly partial: PartialSemanticValidationResult;
+}
 export declare class SemanticValidationError extends Error {
     readonly violations: readonly SemanticViolation[];
     constructor(violations: readonly SemanticViolation[]);
@@ -80,6 +117,22 @@ export declare function validateSemanticInput(contractInput: unknown, input: unk
  * are sufficient for a caller to merge a later repair patch locally.
  */
 export declare function validatePartialSemanticInput(contractInput: unknown, input: unknown): PartialSemanticValidationResult;
+/**
+ * Merge a targeted repair into a prior partial result without retaining any
+ * process-local state.  `previous` may be a partial validation result or the
+ * compact `PartialSemanticRepairContext` returned by an earlier attempt.
+ * `patch` may be a bare field map or an envelope containing `fields`/`patch`
+ * and an optional identity which is checked against the prior context.
+ *
+ * A patch is validated before it is merged.  An invalid replacement therefore
+ * cannot erase a previously accepted value, while its bounded diagnostic is
+ * still returned to the caller for the next retry.
+ */
+export declare function repairPartialSemanticInput(contractInput: unknown, previous: unknown, patch?: unknown): PartialSemanticRepairResult;
+/** Terminology alias for callers that describe the operation as a merge. */
+export declare const mergePartialSemanticInput: typeof repairPartialSemanticInput;
+/** Build a transport-safe context from a partial validation result. */
+export declare function createPartialSemanticRepairContext(result: PartialSemanticValidationResult): PartialSemanticRepairContext;
 /** Compact, canonical JSON projection for transport between repair attempts. */
 export declare function serializePartialSemanticValidationResult(result: PartialSemanticValidationResult): string;
 /** Terminology aliases for callers that treat validation as classification. */

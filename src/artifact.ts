@@ -1,9 +1,11 @@
 import {
   assertSemanticInput,
+  repairPartialSemanticInput,
   SemanticValidationError,
   validatePartialSemanticInput,
   validateSemanticInput,
   type PartialSemanticValidationResult,
+  type PartialSemanticRepairResult,
   type SemanticValidationResult,
   type SemanticViolation,
 } from "./contract/validation.js";
@@ -184,6 +186,19 @@ export function validatePartialArtifactInput(contractInput: unknown, input: unkn
 
 /** Terminology alias for callers that treat validation as classification. */
 export const classifyPartialArtifactInput = validatePartialArtifactInput;
+
+/** Merge only a targeted field patch into a prior stateless partial result. */
+export function repairPartialArtifactInput(
+  contractInput: unknown,
+  previous: unknown,
+  patch?: unknown,
+): PartialSemanticRepairResult {
+  assertCanonicalContract(contractInput);
+  return repairPartialSemanticInput(contractInput, previous, patch);
+}
+
+/** Terminology alias for callers that describe targeted repair as a merge. */
+export const mergePartialArtifactInput = repairPartialArtifactInput;
 
 export function renderIssueArtifact(contractInput: unknown, input: unknown): string {
   assertCanonicalContract(contractInput);
