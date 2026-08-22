@@ -1,4 +1,4 @@
-import { SemanticValidationError, validatePartialSemanticInput, validateSemanticInput, } from "./contract/validation.js";
+import { repairPartialSemanticInput, SemanticValidationError, validatePartialSemanticInput, validateSemanticInput, } from "./contract/validation.js";
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
 export class ArtifactInputError extends Error {
@@ -54,6 +54,13 @@ export function validatePartialArtifactInput(contractInput, input) {
 }
 /** Terminology alias for callers that treat validation as classification. */
 export const classifyPartialArtifactInput = validatePartialArtifactInput;
+/** Merge only a targeted field patch into a prior stateless partial result. */
+export function repairPartialArtifactInput(contractInput, previous, patch) {
+    assertCanonicalContract(contractInput);
+    return repairPartialSemanticInput(contractInput, previous, patch);
+}
+/** Terminology alias for callers that describe targeted repair as a merge. */
+export const mergePartialArtifactInput = repairPartialArtifactInput;
 export function renderIssueArtifact(contractInput, input) {
     assertCanonicalContract(contractInput);
     if (contractInput.artifactKind !== "issue")

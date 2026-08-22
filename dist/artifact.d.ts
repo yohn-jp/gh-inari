@@ -1,4 +1,4 @@
-import { type PartialSemanticValidationResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
+import { type PartialSemanticValidationResult, type PartialSemanticRepairResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
 import { type CanonicalContract } from "./contract/ir.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
@@ -93,6 +93,10 @@ export declare function parseArtifactInputDocument(input: unknown): ArtifactInpu
 export declare function validatePartialArtifactInput(contractInput: unknown, input: unknown): PartialSemanticValidationResult;
 /** Terminology alias for callers that treat validation as classification. */
 export declare const classifyPartialArtifactInput: typeof validatePartialArtifactInput;
+/** Merge only a targeted field patch into a prior stateless partial result. */
+export declare function repairPartialArtifactInput(contractInput: unknown, previous: unknown, patch?: unknown): PartialSemanticRepairResult;
+/** Terminology alias for callers that describe targeted repair as a merge. */
+export declare const mergePartialArtifactInput: typeof repairPartialArtifactInput;
 export declare function renderIssueArtifact(contractInput: unknown, input: unknown): string;
 export declare function renderPullRequestArtifact(contractInput: unknown, input: unknown): string;
 /** Construct the only values accepted by the GitHub mutation adapter. */

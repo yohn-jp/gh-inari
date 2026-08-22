@@ -200,6 +200,222 @@ export function validatePartialSemanticInput(contractInput, input) {
         diagnostics: report,
     };
 }
+/**
+ * Merge a targeted repair into a prior partial result without retaining any
+ * process-local state.  `previous` may be a partial validation result or the
+ * compact `PartialSemanticRepairContext` returned by an earlier attempt.
+ * `patch` may be a bare field map or an envelope containing `fields`/`patch`
+ * and an optional identity which is checked against the prior context.
+ *
+ * A patch is validated before it is merged.  An invalid replacement therefore
+ * cannot erase a previously accepted value, while its bounded diagnostic is
+ * still returned to the caller for the next retry.
+ */
+export function repairPartialSemanticInput(contractInput, previous, patch) {
+    assertCanonicalContract(contractInput);
+    const contract = contractInput;
+    const identity = createPartialArtifactIdentity(contract);
+    const contextResult = readRepairContext(previous, identity);
+    const context = contextResult.context;
+    const contextDiagnostics = [...contextResult.diagnostics];
+    const contextSemantic = validatePartialSemanticInput(contract, context.values);
+    const contextFieldIds = context.acceptedFields
+        .map(fieldPathToId)
+        .filter((field) => field !== undefined);
+    let contextValid = contextResult.valid;
+    if (contextSemantic.invalidFields.length > 0 ||
+        !sameStringSet(contextFieldIds, Object.keys(contextSemantic.values))) {
+        contextDiagnostics.push(repairDiagnostic("repair.values", "Repair context contains values rejected by the contract."));
+        contextValid = false;
+    }
+    const embeddedPatch = patch === undefined && isRecord(previous) && Object.prototype.hasOwnProperty.call(previous, "patch")
+        ? previous.patch
+        : patch;
+    const patchResult = readRepairPatch(embeddedPatch, identity);
+    contextDiagnostics.push(...patchResult.diagnostics);
+    const accepted = { ...context.values };
+    const changedFields = [];
+    const patchFields = patchResult.fields;
+    const validatedPatch = validatePartialSemanticInput(contract, patchFields);
+    // Only field values accepted by the canonical validator enter candidate
+    // state.  This makes retry behavior deterministic even when the caller
+    // resubmits a malformed correction for an already accepted field.
+    for (const fieldPath of contextValid && patchResult.valid ? validatedPatch.acceptedFields : []) {
+        const field = fieldPath.slice("$.fields.".length);
+        if (!Object.prototype.hasOwnProperty.call(patchFields, field))
+            continue;
+        if (!sameSemanticValue(accepted[field], patchFields[field]))
+            changedFields.push(field);
+        accepted[field] = patchFields[field];
+    }
+    const partial = validatePartialSemanticInput(contract, accepted);
+    const completeValidation = validateSemanticInput(contract, accepted);
+    const patchInvalid = validatedPatch.invalidFields.length > 0 || !patchResult.valid;
+    const diagnostics = createArtifactDiagnosticReport([...contextDiagnostics, ...validatedPatch.diagnostics.diagnostics, ...partial.diagnostics.diagnostics], partial.acceptedFields);
+    const valid = contextValid && patchResult.valid && !patchInvalid && completeValidation.valid;
+    const complete = valid && completeValidation.valid;
+    const normalizedChanged = [...new Set(changedFields)].sort(compareStrings);
+    const noOp = normalizedChanged.length === 0;
+    const nextContext = {
+        identity,
+        acceptedFields: partial.acceptedFields,
+        values: partial.values,
+    };
+    return {
+        valid,
+        complete,
+        artifactKind: contract.artifactKind,
+        templateIdentity: contract.templateIdentity,
+        identity,
+        values: partial.values,
+        canonicalValues: completeValidation.values,
+        acceptedFields: partial.acceptedFields,
+        changedFields: normalizedChanged,
+        noOp,
+        context: nextContext,
+        missingFields: partial.missingFields,
+        invalidFields: [...validatedPatch.invalidFields, ...partial.invalidFields].sort(comparePartialIssues),
+        projectedConstraints: partial.projectedConstraints,
+        diagnostics,
+        partial,
+    };
+}
+/** Terminology alias for callers that describe the operation as a merge. */
+export const mergePartialSemanticInput = repairPartialSemanticInput;
+/** Build a transport-safe context from a partial validation result. */
+export function createPartialSemanticRepairContext(result) {
+    return {
+        identity: result.identity,
+        acceptedFields: [...result.acceptedFields].sort(compareStrings),
+        values: Object.fromEntries(Object.keys(result.values)
+            .sort(compareStrings)
+            .map((field) => [field, result.values[field]])),
+    };
+}
+function createPartialArtifactIdentity(contract) {
+    return {
+        artifactKind: contract.artifactKind,
+        irVersion: contract.irVersion,
+        schemaVersion: contract.schemaVersion,
+        templateIdentity: contract.templateIdentity,
+    };
+}
+function readRepairContext(input, expected) {
+    const diagnostics = [];
+    const empty = { identity: expected, acceptedFields: [], values: {} };
+    if (!isRecord(input)) {
+        diagnostics.push(repairDiagnostic("repair.context", "Repair context must be an object."));
+        return { context: empty, valid: false, diagnostics };
+    }
+    const source = isRecord(input.context) ? input.context : input;
+    const identity = source.identity;
+    if (!matchesPartialIdentity(identity, expected)) {
+        diagnostics.push(repairDiagnostic("repair.identity", "Repair context does not match the supplied contract."));
+    }
+    const values = source.values ?? source.acceptedValues ?? source.accepted;
+    const acceptedFields = source.acceptedFields;
+    if (!isRecord(values)) {
+        diagnostics.push(repairDiagnostic("repair.values", "Repair context accepted values must be an object."));
+        return { context: empty, valid: false, diagnostics };
+    }
+    if (acceptedFields !== undefined && (!Array.isArray(acceptedFields) || !acceptedFields.every(isString))) {
+        diagnostics.push(repairDiagnostic("repair.acceptedFields", "Repair context accepted fields are invalid."));
+    }
+    const suppliedFields = Object.keys(values).sort(compareStrings);
+    const declaredFields = Array.isArray(acceptedFields)
+        ? acceptedFields
+            .filter(isString)
+            .map(fieldPathToId)
+            .filter((field) => field !== undefined)
+        : suppliedFields;
+    if (new Set(declaredFields).size !== declaredFields.length || !sameStringSet(declaredFields, suppliedFields)) {
+        diagnostics.push(repairDiagnostic("repair.acceptedFields", "Repair context accepted fields do not match its values."));
+    }
+    const context = {
+        identity: expected,
+        acceptedFields: suppliedFields.map((field) => `$.fields.${field}`),
+        values: Object.fromEntries(suppliedFields.map((field) => [field, values[field]])),
+    };
+    return { context, valid: diagnostics.length === 0, diagnostics };
+}
+function readRepairPatch(input, expected) {
+    const diagnostics = [];
+    if (input === undefined)
+        return { fields: {}, valid: true, diagnostics };
+    if (!isRecord(input)) {
+        diagnostics.push(repairDiagnostic("repair.patch", "Repair patch must be an object."));
+        return { fields: {}, valid: false, diagnostics };
+    }
+    const patchIdentity = input.identity;
+    if (patchIdentity !== undefined && !matchesPartialIdentity(patchIdentity, expected)) {
+        diagnostics.push(repairDiagnostic("repair.identity", "Repair patch does not match the supplied contract."));
+    }
+    let fields = input;
+    if (Object.prototype.hasOwnProperty.call(input, "patch"))
+        fields = input.patch;
+    else if (Object.prototype.hasOwnProperty.call(input, "fields"))
+        fields = input.fields;
+    if (!isRecord(fields)) {
+        diagnostics.push(repairDiagnostic("repair.patch", "Repair patch fields must be an object."));
+        return { fields: {}, valid: false, diagnostics };
+    }
+    // Envelopes are the only form in which identity is allowed.  Bare semantic
+    // field maps must not silently smuggle context properties into validation.
+    if (fields === input) {
+        const envelopeKeys = ["identity", "acceptedFields", "values", "context"];
+        const contextKeys = Object.keys(input).filter((key) => envelopeKeys.includes(key));
+        if (contextKeys.length > 0) {
+            diagnostics.push(repairDiagnostic("repair.patch", "Repair patch envelope must provide fields or patch."));
+            return { fields: {}, valid: false, diagnostics };
+        }
+    }
+    return { fields, valid: diagnostics.length === 0, diagnostics };
+}
+function matchesPartialIdentity(input, expected) {
+    if (!isRecord(input))
+        return false;
+    if (input.artifactKind !== expected.artifactKind ||
+        input.irVersion !== expected.irVersion ||
+        input.schemaVersion !== expected.schemaVersion ||
+        !isRecord(input.templateIdentity)) {
+        return false;
+    }
+    const template = input.templateIdentity;
+    const expectedTemplate = expected.templateIdentity;
+    return (template.id === expectedTemplate.id &&
+        template.name === expectedTemplate.name &&
+        template.path === expectedTemplate.path &&
+        template.source === expectedTemplate.source);
+}
+function repairDiagnostic(path, message) {
+    return createArtifactDiagnostic({
+        state: "invalid",
+        code: "FIELD_INVALID",
+        detailCode: "FIELD_CONSTRAINT_VIOLATION",
+        reason: "constraint",
+        path,
+        message,
+        recovery: [{ action: "repair", path, hint: "Use the identity and accepted values from the prior result." }],
+    });
+}
+function fieldPathToId(path) {
+    if (!path.startsWith("$.fields."))
+        return undefined;
+    const field = path.slice("$.fields.".length);
+    return field.length === 0 || field.includes(".") || field.includes("[") ? undefined : field;
+}
+function sameStringSet(left, right) {
+    if (left.length !== right.length)
+        return false;
+    const rightSet = new Set(right);
+    return left.every((value) => rightSet.has(value));
+}
+function sameSemanticValue(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+function isString(value) {
+    return typeof value === "string";
+}
 /** Compact, canonical JSON projection for transport between repair attempts. */
 export function serializePartialSemanticValidationResult(result) {
     const normalized = validatePartialResultShape(result);
