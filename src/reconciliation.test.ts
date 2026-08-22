@@ -4,15 +4,23 @@ import { test } from "node:test";
 import {
   applySemanticPatch,
   assessExistingArtifact,
+  currentArtifactInput,
   diffArtifact,
   prepareRemediationArtifact,
   prepareSyncInput,
   RemediationError,
+  renderCanonicalBody,
   type ExistingArtifactRead,
 } from "./reconciliation.js";
 import { compileIssueFormYaml, type IssueFormTemplateIdentity } from "./contract/issue-form.js";
 import { parsePullRequestTemplate } from "./pull-request-template.js";
-import { validateExistingIssueArtifact, validateExistingPullRequestArtifact } from "./artifact.js";
+import {
+  parseExistingPullRequestArtifact,
+  preparePullRequestArtifact,
+  renderPullRequestArtifact,
+  validateExistingIssueArtifact,
+  validateExistingPullRequestArtifact,
+} from "./artifact.js";
 import type { CanonicalContract } from "./contract/index.js";
 
 const ISSUE_SOURCE = [
@@ -126,6 +134,82 @@ test("pull-request semantic remediation preserves resource-specific metadata and
     () => applySemanticPatch("pr", read, { fields: {}, metadata: { head: "other" } }),
     (error: unknown) => error instanceof Error && error.name === "RemediationError",
   );
+});
+
+test("PR create, edit, normalize, and sync share one canonical renderer", () => {
+  const path = ".github/PULL_REQUEST_TEMPLATE.md";
+  const contract = trusted(
+    parsePullRequestTemplate(PR_SOURCE, {
+      id: "default",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "Default",
+      path,
+    }),
+    path,
+    PR_SOURCE,
+  );
+  const initialInput = {
+    fields: { summary: "Initial **summary**\nwith a second line" },
+    metadata: { title: "feat: initial", head: "feature", base: "main", draft: false },
+  };
+  const created = preparePullRequestArtifact(contract, initialInput).artifact;
+  assert.equal(created.body, renderPullRequestArtifact(contract, initialInput.fields));
+
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 84,
+      title: initialInput.metadata.title,
+      body: created.body,
+      state: "open",
+      url: "https://github.com/acme/inari/pull/84",
+      draft: false,
+      head: initialInput.metadata.head,
+      base: initialInput.metadata.base,
+    },
+    contract,
+    result: validateExistingPullRequestArtifact(contract, created.body),
+  };
+  assert.equal(assessExistingArtifact("pr", read).status, "valid-current");
+  assert.equal(renderCanonicalBody("pr", contract, read.result.parse.values), created.body);
+
+  const editedInput = applySemanticPatch("pr", read, {
+    fields: { summary: "Edited summary\nwith a second line" },
+    metadata: {},
+  });
+  const edited = prepareRemediationArtifact("pr", contract, editedInput);
+  assert.equal(edited.body, renderPullRequestArtifact(contract, editedInput.fields));
+
+  const editedRead: ExistingArtifactRead = {
+    ...read,
+    remote: { ...read.remote, body: edited.body },
+    result: validateExistingPullRequestArtifact(contract, edited.body),
+  };
+  const normalized = prepareRemediationArtifact("pr", contract, currentArtifactInput("pr", editedRead));
+  assert.equal(normalized.body, edited.body);
+  assert.equal(diffArtifact("pr", editedRead, normalized).changed, false);
+
+  const syncedInput = prepareSyncInput("pr", editedRead, {
+    fields: { summary: "Synced summary\nwith a second line" },
+    metadata: { title: "feat: synced", head: "feature", base: "main", draft: false },
+  });
+  const synced = prepareRemediationArtifact("pr", contract, syncedInput);
+  assert.equal(synced.body, renderPullRequestArtifact(contract, syncedInput.fields));
+  const syncedTitle = syncedInput.metadata.title;
+  assert.equal(syncedTitle, "feat: synced");
+  const syncedRead: ExistingArtifactRead = {
+    ...editedRead,
+    remote: {
+      ...editedRead.remote,
+      title: syncedTitle ?? "feat: synced",
+      body: synced.body,
+    },
+    result: validateExistingPullRequestArtifact(contract, synced.body),
+  };
+  const repeated = prepareRemediationArtifact("pr", contract, currentArtifactInput("pr", syncedRead));
+  assert.equal(repeated.body, synced.body);
+  assert.equal(diffArtifact("pr", syncedRead, repeated).changed, false);
+  assert.deepEqual(parseExistingPullRequestArtifact(contract, repeated.body).values, syncedInput.fields);
 });
 
 test("sync with an explicitly named contract replaces a current body that fails to parse under it", () => {
