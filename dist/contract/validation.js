@@ -256,7 +256,7 @@ function pathFromSemanticViolation(path, field) {
     if (path === `$.${field}`)
         return partialFieldPath(field);
     if (path.startsWith(`$.${field}`))
-        return `$.fields.${path.slice(`$.${field}`.length)}`;
+        return `$.fields.${field}${path.slice(`$.${field}`.length)}`;
     return partialFieldPath(field);
 }
 function violationReason(code) {
