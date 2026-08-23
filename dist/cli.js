@@ -500,7 +500,7 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             else {
                 contract = await compileLocalGovernedContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
             }
-            const document = await readInputDocument(parsed.options.from);
+            const document = await resolveArtifactInputDocument(parsed, contract);
             const preparedDocument = mergeOptionMetadata(document, parsed.options);
             if (command === "validate") {
                 const validation = loadCanonicalArtifact(contract, preparedDocument);
@@ -517,11 +517,11 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             return 0;
         }
         rejectGovernedPolicyOverride(parsed.options.policy);
-        const document = await readInputDocument(parsed.options.from);
-        const preparedDocument = mergeOptionMetadata(document, parsed.options);
         const adapter = createAdapter(dependencies, root, parsed.options.repository);
         await adapter.resolveRepositoryContext();
         const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
+        const document = await resolveArtifactInputDocument(parsed, contract);
+        const preparedDocument = mergeOptionMetadata(document, parsed.options);
         if (domain === "issue") {
             const prepared = prepareIssueArtifact(contract, preparedDocument);
             const created = await createGovernedIssue(adapter, prepared.artifact);
@@ -637,7 +637,7 @@ async function runExistingRemediation(domain, operation, number, parsed, root, d
         desiredInput = currentArtifactInput(domain, read);
     }
     else {
-        const input = await readInputDocument(parsed.options.from);
+        const input = await resolveArtifactInputDocument(parsed, read.contract);
         desiredInput =
             operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
     }
@@ -739,12 +739,121 @@ function mergeOptionMetadata(document, options) {
     };
     return { fields: document.fields, metadata };
 }
+/** Bound on how many accepted field names an unknown-field diagnostic lists before truncating. */
+const MAX_LISTED_FIELDS = 12;
+/** Bound on how many close-name suggestions an unknown-field diagnostic offers. */
+const MAX_FIELD_SUGGESTIONS = 3;
+/** Suggestions only surface within this edit distance; beyond it a name is not "close". */
+const MAX_SUGGESTION_DISTANCE = 3;
+function compareStrings(left, right) {
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+function levenshteinDistance(left, right) {
+    const rows = left.length + 1;
+    const cols = right.length + 1;
+    const previous = new Array(cols);
+    const current = new Array(cols);
+    for (let column = 0; column < cols; column += 1)
+        previous[column] = column;
+    for (let row = 1; row < rows; row += 1) {
+        current[0] = row;
+        for (let column = 1; column < cols; column += 1) {
+            const cost = left[row - 1] === right[column - 1] ? 0 : 1;
+            current[column] = Math.min((previous[column] ?? 0) + 1, (current[column - 1] ?? 0) + 1, (previous[column - 1] ?? 0) + cost);
+        }
+        for (let column = 0; column < cols; column += 1)
+            previous[column] = current[column] ?? 0;
+    }
+    return previous[cols - 1] ?? 0;
+}
+function unknownFieldError(name, allowedFields) {
+    const suggestions = allowedFields
+        .map((candidate) => ({ candidate, distance: levenshteinDistance(candidate, name) }))
+        .filter((entry) => entry.distance <= MAX_SUGGESTION_DISTANCE)
+        .sort((left, right) => left.distance - right.distance || compareStrings(left.candidate, right.candidate))
+        .slice(0, MAX_FIELD_SUGGESTIONS)
+        .map((entry) => entry.candidate);
+    return new CliError("FIELD_UNKNOWN", `Unknown field "${name}" for this template.`, "--field", {
+        field: name,
+        allowedFields: allowedFields.slice(0, MAX_LISTED_FIELDS),
+        allowedFieldCount: allowedFields.length,
+        ...(suggestions.length === 0 ? {} : { suggestions }),
+    });
+}
+function duplicateFieldError(name, occurrences) {
+    return new CliError("FIELD_DUPLICATE", `Field "${name}" was provided ${occurrences} times as a scalar --field option; a scalar field accepts exactly one value.`, "--field", { field: name, occurrences });
+}
+function fieldConflictError(names) {
+    return new CliError("FIELD_CONFLICT", `Field(s) ${names.join(", ")} were supplied by both --from and --field; remove one source.`, "--field", { fields: names });
+}
+/**
+ * Resolve raw `--field` occurrences against the selected canonical contract:
+ * the contract's projected JSON Schema is the only authority for accepted
+ * field names, scalar-vs-list shape, and requiredness -- there is no second,
+ * handwritten field table here. A field whose schema type is "array" accumulates
+ * every occurrence in argv order (deterministic repeated-value ordering); any
+ * other field accepts at most one occurrence.
+ */
+function resolveDirectFields(contract, entries) {
+    const properties = projectContract(contract).schema.properties;
+    const allowedFields = Object.keys(properties).sort(compareStrings);
+    const grouped = new Map();
+    for (const entry of entries) {
+        if (!Object.prototype.hasOwnProperty.call(properties, entry.name))
+            throw unknownFieldError(entry.name, allowedFields);
+        const values = grouped.get(entry.name);
+        if (values === undefined)
+            grouped.set(entry.name, [entry.value]);
+        else
+            values.push(entry.value);
+    }
+    const fields = {};
+    for (const [name, values] of grouped) {
+        if (properties[name]?.type === "array") {
+            fields[name] = values;
+            continue;
+        }
+        if (values.length > 1)
+            throw duplicateFieldError(name, values.length);
+        fields[name] = values[0];
+    }
+    return fields;
+}
+/** Merge direct-field values into a document under a deterministic, order-independent conflict rule. */
+function mergeDirectFields(document, directFields) {
+    const directNames = Object.keys(directFields);
+    if (directNames.length === 0)
+        return document;
+    const conflicts = directNames
+        .filter((name) => Object.prototype.hasOwnProperty.call(document.fields, name))
+        .sort(compareStrings);
+    if (conflicts.length > 0)
+        throw fieldConflictError(conflicts);
+    return { fields: { ...document.fields, ...directFields }, metadata: document.metadata };
+}
+/**
+ * Resolve one artifact input document from `--from` and/or `--field`, sharing
+ * the same candidate/normalization/validation path regardless of source. At
+ * least one of the two is required; when both are present, `--from` supplies
+ * the base document and direct fields are merged in under a conflict rule
+ * that never depends on which flag appeared first in argv.
+ */
+async function resolveArtifactInputDocument(parsed, contract) {
+    const hasFrom = typeof parsed.options.from === "string";
+    if (!hasFrom && parsed.fields.length === 0) {
+        throw new CliError("INPUT_REQUIRED", "Use --from <file.json> or --field <name>=<value>.", "--from");
+    }
+    const document = hasFrom ? await readInputDocument(parsed.options.from) : { fields: {}, metadata: {} };
+    const directFields = resolveDirectFields(contract, parsed.fields);
+    return mergeDirectFields(document, directFields);
+}
 function templateSelector(parsed, positional) {
     return typeof parsed.options.template === "string" ? parsed.options.template : positional;
 }
 function parseArguments(argv) {
     const positionals = [];
     const options = {};
+    const fields = [];
     for (let index = 0; index < argv.length; index += 1) {
         const token = argv[index];
         if (token === undefined)
@@ -768,6 +877,16 @@ function parseArguments(argv) {
         const rawKey = equalIndex >= 0 ? token.slice(2, equalIndex) : token.slice(2);
         const normalizedKey = rawKey === "repo" ? "repository" : rawKey;
         const key = normalizedKey.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+        if (key === "field") {
+            const raw = equalIndex >= 0 ? token.slice(equalIndex + 1) : argv[++index];
+            if (raw === undefined || (equalIndex < 0 && raw.startsWith("--")))
+                throw new CliError("INVALID_OPTION", "Option --field requires a value.");
+            const separatorIndex = raw.indexOf("=");
+            if (separatorIndex <= 0)
+                throw new CliError("INVALID_OPTION", 'Option --field requires "<name>=<value>" syntax.', "--field");
+            fields.push({ name: raw.slice(0, separatorIndex), value: raw.slice(separatorIndex + 1) });
+            continue;
+        }
         if (BOOLEAN_OPTIONS.has(key)) {
             if (equalIndex < 0) {
                 options[key] = true;
@@ -790,7 +909,7 @@ function parseArguments(argv) {
             throw new CliError("INVALID_OPTION", `Option --${rawKey} requires a value.`);
         options[key] = value;
     }
-    return { positionals, options };
+    return { positionals, options, fields };
 }
 function toErrorShape(error) {
     if (error instanceof CliError)
@@ -838,7 +957,10 @@ function classifyExitCode(error) {
             error.code === "INPUT_TOO_LARGE" ||
             error.code === "INVALID_ARTIFACT_NUMBER" ||
             error.code === "UNKNOWN_SKILL_SCENARIO" ||
-            error.code === "SKILL_OUTPUT_EXCEEDS_BUDGET"))
+            error.code === "SKILL_OUTPUT_EXCEEDS_BUDGET" ||
+            error.code === "FIELD_UNKNOWN" ||
+            error.code === "FIELD_DUPLICATE" ||
+            error.code === "FIELD_CONFLICT"))
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN")
         return EXIT_VALIDATION;
@@ -973,20 +1095,22 @@ function artifactLeaves(domain) {
             example: `inari ${domain} schema feature --compact`,
         },
         validate: {
-            usage: `${domain} validate --template <template> --from <file.json>`,
-            summary: `Validate local JSON input against a template's schema. ` +
+            usage: `${domain} validate --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
+            summary: `Validate input against a template's schema, from JSON, direct --field values, or both. ` +
+                `Field names/types come from \`${domain} schema\`, not a separate list. ` +
                 `To validate an existing ${noun} instead, use \`${domain} validate <number> [--template <template>]\`.`,
-            example: `inari ${domain} validate --template feature --from ${domain}.json`,
+            example: `inari ${domain} validate --template feature --field problem="A problem"`,
         },
         render: {
-            usage: `${domain} render --template <template> --from <file.json>`,
-            summary: `Render validated JSON input into canonical Markdown without mutating GitHub.`,
-            example: `inari ${domain} render --template feature --from ${domain}.json`,
+            usage: `${domain} render --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
+            summary: `Render validated input into canonical Markdown without mutating GitHub.`,
+            example: `inari ${domain} render --template feature --field problem="A problem"`,
         },
         create: {
-            usage: `${domain} create --template <template> --from <file.json>`,
-            summary: `Validate, render, and create a governed ${noun} on GitHub.`,
-            example: `inari ${domain} create --template feature --from ${domain}.json`,
+            usage: `${domain} create --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
+            summary: `Validate, render, and create a governed ${noun} on GitHub. A repeated field's schema type "array" ` +
+                `accumulates every --field occurrence in argv order; --from and --field may compose but never name the same field.`,
+            example: `inari ${domain} create --template feature --field problem="A problem" --title "feat: add support"`,
         },
         explain: {
             usage: `${domain} explain <number> [--template <template>]`,
@@ -1004,9 +1128,9 @@ function artifactLeaves(domain) {
             example: `inari ${domain} check 123`,
         },
         edit: {
-            usage: `${domain} edit <number> --from <file.json> [--dry-run]`,
-            summary: `Apply an explicit semantic patch to an existing ${noun}.`,
-            example: `inari ${domain} edit 123 --from patch.json --dry-run`,
+            usage: `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
+            summary: `Apply an explicit semantic patch to an existing ${noun}; only the fields you supply change.`,
+            example: `inari ${domain} edit 123 --field problem="Updated problem" --dry-run`,
         },
         normalize: {
             usage: `${domain} normalize <number> [--dry-run]`,
@@ -1014,13 +1138,19 @@ function artifactLeaves(domain) {
             example: `inari ${domain} normalize 123 --dry-run`,
         },
         sync: {
-            usage: `${domain} sync <number> --from <file.json> [--dry-run]`,
+            usage: `${domain} sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
             summary: `Reconcile an existing ${noun} to a complete desired semantic state.`,
             example: `inari ${domain} sync 123 --from desired.json --dry-run`,
         },
     };
 }
 const GLOBAL_OPTIONS = `  --from <path>       JSON input file, or - for stdin
+  --field <name>=<value>
+                      Direct semantic field input, repeatable; field names/types/requiredness
+                      come from the selected template's schema (see \`schema\`). A field whose
+                      schema type is "array" accumulates every occurrence in argv order; any
+                      other field accepts at most one. May compose with --from, but the same
+                      field cannot be named by both.
   --template <id>     Repository-native template id, path, or unique name
   --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
   --repository <r>    GitHub repository override; governed commands use its default-branch governance
@@ -1141,27 +1271,27 @@ Commands:
                       .github/inari/pull-requests/<id>.json (multiple PR templates).
                       Other --to paths write successfully but are never discovered.
   issue schema [template]
-  issue validate --template <template> --from <file.json>
-  issue render --template <template> --from <file.json>
-  issue create --template <template> --from <file.json>
+  issue validate --template <template> [--from <file.json>] [--field <name>=<value> ...]
+  issue render --template <template> [--from <file.json>] [--field <name>=<value> ...]
+  issue create --template <template> [--from <file.json>] [--field <name>=<value> ...]
   issue validate <number> [--template <template>]
   issue explain <number> [--template <template>]
   issue get <number> [--template <template>] --json
   issue check <number> [--template <template>]
-  issue edit <number> --from <file.json> [--dry-run]
+  issue edit <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   issue normalize <number> [--dry-run]
-  issue sync <number> --from <file.json> [--dry-run]
+  issue sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   pr schema [template]
-  pr validate --template <template> --from <file.json>
-  pr render --template <template> --from <file.json>
-  pr create --template <template> --from <file.json>
+  pr validate --template <template> [--from <file.json>] [--field <name>=<value> ...]
+  pr render --template <template> [--from <file.json>] [--field <name>=<value> ...]
+  pr create --template <template> [--from <file.json>] [--field <name>=<value> ...]
   pr validate <number> [--template <template>]
   pr explain <number> [--template <template>]
   pr get <number> [--template <template>] --json
   pr check <number> [--template <template>]
-  pr edit <number> --from <file.json> [--dry-run]
+  pr edit <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   pr normalize <number> [--dry-run]
-  pr sync <number> --from <file.json> [--dry-run]
+  pr sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   skill [scenario] [--json]
 
 Options:
