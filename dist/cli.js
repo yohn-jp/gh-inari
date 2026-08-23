@@ -8,7 +8,7 @@ import { projectContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
-import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, readGovernedExistingArtifact, RemediationError, validateReconstructedInput, updateGovernedExistingArtifact, } from "./reconciliation.js";
+import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, remediationDiagnosticReport, remediationFailureDetails, readGovernedExistingArtifact, RemediationError, translateRemediationFailure, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 const EXIT_USAGE = 1;
@@ -648,27 +648,44 @@ async function runExistingRemediation(domain, operation, number, parsed, root, d
         return assessment.status === "valid-current" ? 0 : EXIT_VALIDATION;
     }
     if (read.contract === undefined) {
-        throw new RemediationError(operation === "normalize" ? "NORMALIZATION_UNSAFE" : "SYNC_CURRENT_UNSUPPORTED", "No authoritative template could be selected for the existing artifact.", "$.template");
+        throw new RemediationError(operation === "normalize"
+            ? "NORMALIZATION_UNSAFE"
+            : operation === "edit"
+                ? "SEMANTIC_PATCH_UNSUPPORTED"
+                : "SYNC_CURRENT_UNSUPPORTED", "No authoritative template could be selected for the existing artifact.", "$.template", operation === "edit" || operation === "normalize" ? remediationFailureDetails(read) : undefined, operation === "edit" || operation === "normalize"
+            ? remediationDiagnosticReport(domain, operation, read)
+            : undefined);
     }
     let desiredInput;
-    if (operation === "normalize") {
-        if (!read.result.valid || !read.result.parse.parsed) {
-            if (read.templateSelection !== "explicit" || read.contract === undefined) {
+    try {
+        if (operation === "normalize") {
+            if (!read.result.valid || !read.result.parse.parsed) {
                 throw new RemediationError("NORMALIZATION_UNSAFE", "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.", "$.artifact");
             }
             desiredInput = currentArtifactInput(domain, read);
-            validateReconstructedInput(read.contract, desiredInput, "NORMALIZATION_UNSAFE");
         }
         else {
-            desiredInput = currentArtifactInput(domain, read);
+            const input = await resolveArtifactInputDocument(parsed, read.contract);
+            desiredInput =
+                operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
         }
     }
-    else {
-        const input = await resolveArtifactInputDocument(parsed, read.contract);
-        desiredInput =
-            operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
+    catch (error) {
+        if (operation === "edit" || operation === "normalize") {
+            throw translateRemediationFailure(domain, operation, read, error);
+        }
+        throw error;
     }
-    const desired = prepareRemediationArtifact(domain, read.contract, desiredInput);
+    let desired;
+    try {
+        desired = prepareRemediationArtifact(domain, read.contract, desiredInput);
+    }
+    catch (error) {
+        if (operation === "edit" || operation === "normalize") {
+            throw translateRemediationFailure(domain, operation, read, error, desiredInput);
+        }
+        throw error;
+    }
     const diff = diffArtifact(domain, read, desired);
     const resultBase = {
         ...base,
@@ -981,7 +998,21 @@ function toErrorShape(error) {
             ...(error.details === undefined ? {} : { details: error.details }),
         };
     if (error instanceof SemanticValidationError)
-        return { code: "SEMANTIC_VALIDATION_FAILED", message: error.message, violations: error.violations };
+        return {
+            code: "SEMANTIC_VALIDATION_FAILED",
+            message: error.message,
+            violations: error.violations,
+            ...(error.details === undefined ? {} : { details: error.details }),
+            ...(error.diagnostics === undefined ? {} : { diagnostics: error.diagnostics }),
+        };
+    if (error instanceof RemediationError)
+        return {
+            code: error.code,
+            message: error.message,
+            ...(error.path === undefined ? {} : { path: error.path }),
+            ...(error.details === undefined ? {} : { details: error.details }),
+            ...(error.diagnostics === undefined ? {} : { diagnostics: error.diagnostics }),
+        };
     if (error instanceof ArtifactInputError)
         return { code: error.code, message: error.message, path: error.path };
     if (isGitHubAdapterError(error))
