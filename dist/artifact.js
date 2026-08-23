@@ -1,5 +1,5 @@
 import { repairPartialSemanticInput, SemanticValidationError, validatePartialSemanticInput, validateSemanticInput, } from "./contract/validation.js";
-import { createArtifactDiagnostic, createArtifactDiagnosticReport, } from "./diagnostics.js";
+import { createArtifactDiagnostic, createArtifactDiagnosticReport, createFieldEvidence, MAX_ARTIFACT_DIAGNOSTICS, } from "./diagnostics.js";
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
 export class ArtifactInputError extends Error {
@@ -22,10 +22,12 @@ export class ArtifactPreparationError extends Error {
         super(message);
         this.name = "ArtifactPreparationError";
         this.code = code;
-        this.diagnostics = diagnostics;
+        this.diagnostics = createArtifactDiagnosticReport(diagnostics.slice(0, MAX_ARTIFACT_DIAGNOSTICS)).diagnostics;
     }
 }
 const GITHUB_NO_RESPONSE = "_No response_";
+/** Explicit empty strings need a representation distinct from omitted values. */
+const EXPLICIT_EMPTY_STRING_MARKER = "\u200B";
 /**
  * Bounded invisible template identity marker embedded in newly rendered
  * artifacts. It is the primary template-selection signal for governed
@@ -374,6 +376,7 @@ export function preparePullRequestArtifact(contractInput, input) {
             ? {}
             : { maintainerCanModify: input.metadata.maintainerCanModify }),
     });
+    verifyPullRequestMetadataRoundTrip(input.metadata, artifact);
     return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
 export function parseExistingIssueArtifact(contractInput, body) {
@@ -555,35 +558,133 @@ function validateParsedArtifact(contract, parse) {
 function requireTrustedProvenance(contract) {
     if (contract.provenance === undefined) {
         throw new ArtifactPreparationError("ARTIFACT_PROVENANCE_MISSING", "Mutation preparation requires a contract bound to trusted repository governance.", [
-            {
-                code: "ROUND_TRIP_PARSE",
+            createArtifactDiagnostic({
+                state: "unrecoverable",
+                code: "ARTIFACT_UNRECOVERABLE",
+                reason: "unrecoverable",
                 path: "$.provenance",
                 message: "The compiled contract has no trusted repository/ref provenance.",
-            },
+                recovery: [{ action: "retry", path: "$.provenance" }],
+            }),
         ]);
+    }
+}
+function verifyPullRequestMetadataRoundTrip(input, artifact) {
+    const expected = {
+        title: input.title,
+        head: input.head,
+        base: input.base,
+        ...(input.draft === undefined ? {} : { draft: input.draft }),
+        ...(input.maintainerCanModify === undefined ? {} : { maintainerCanModify: input.maintainerCanModify }),
+    };
+    const actual = {
+        title: artifact.title,
+        head: artifact.head,
+        base: artifact.base,
+        ...(artifact.draft === undefined ? {} : { draft: artifact.draft }),
+        ...(artifact.maintainerCanModify === undefined ? {} : { maintainerCanModify: artifact.maintainerCanModify }),
+    };
+    const mismatches = [];
+    for (const key of Object.keys(expected).sort(compareStrings)) {
+        const path = `$.metadata.${key}`;
+        if (stableValue(expected[key]) === stableValue(actual[key]))
+            continue;
+        mismatches.push(createArtifactDiagnostic({
+            state: "conflicting",
+            code: "FIELD_CONFLICT",
+            detailCode: "FIELD_VALUE_CONFLICT",
+            reason: "conflict",
+            path,
+            message: "Prepared pull request metadata changed before the mutation boundary.",
+            expected: createFieldEvidence(path, expected[key]),
+            actual: createFieldEvidence(path, actual[key]),
+            recovery: [{ action: "repair", path, hint: "Repair the pull request metadata projection." }],
+        }));
+    }
+    if (mismatches.length > 0) {
+        throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", "Prepared pull request metadata did not preserve its validated values.", mismatches);
     }
 }
 function verifyRenderedRoundTrip(contract, expectedValues, body, kind) {
     const parsed = kind === "issue" ? parseExistingIssueArtifact(contract, body) : parseExistingPullRequestArtifact(contract, body);
     if (!parsed.parsed) {
-        throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact did not reparse under the compiled contract.`, parsed.diagnostics.map((diagnostic) => ({
-            code: "ROUND_TRIP_PARSE",
-            path: diagnostic.path,
-            message: diagnostic.message,
-        })));
+        throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact did not reparse under the compiled contract.`, roundTripParseDiagnostics(contract, expectedValues, parsed.diagnostics));
     }
     const reconstructed = validateSemanticInput(contract, parsed.values);
     if (!reconstructed.valid) {
-        throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact failed semantic validation after reparsing.`, reconstructed.violations.map((violation) => ({
-            code: "ROUND_TRIP_SEMANTIC",
-            path: violation.path,
-            message: violation.message,
-        })));
+        throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact failed semantic validation after reparsing.`, roundTripSemanticDiagnostics(contract, expectedValues, parsed.values, reconstructed.violations));
     }
     const mismatches = compareMaterializedValues(expectedValues, reconstructed.values);
     if (mismatches.length > 0) {
         throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact did not preserve its validated semantic values.`, mismatches);
     }
+}
+function roundTripParseDiagnostics(contract, expectedValues, diagnostics) {
+    const projected = diagnostics.slice(0, MAX_ARTIFACT_DIAGNOSTICS).map((diagnostic) => {
+        const fieldId = semanticFieldId(contract, diagnostic.path);
+        const path = fieldId === undefined ? semanticDiagnosticPath(contract, diagnostic.path) : fieldPath(fieldId);
+        return createArtifactDiagnostic({
+            state: "unsupported",
+            code: "FIELD_UNSUPPORTED",
+            detailCode: "TEMPLATE_UNPARSEABLE",
+            reason: "unsupported",
+            ...(path === undefined ? {} : { path }),
+            message: roundTripParseMessage(diagnostic.code),
+            ...(fieldId === undefined
+                ? {}
+                : {
+                    expected: createFieldEvidence(fieldPath(fieldId), expectedValues[fieldId]),
+                    actual: createFieldEvidence(fieldPath(fieldId), undefined),
+                }),
+            recovery: path === undefined ? [{ action: "retry" }] : [{ action: "repair", path }],
+        });
+    });
+    return projected.length > 0
+        ? projected
+        : [
+            createArtifactDiagnostic({
+                state: "unrecoverable",
+                code: "ARTIFACT_UNRECOVERABLE",
+                reason: "unrecoverable",
+                message: "Rendered artifact could not be reparsed under the compiled contract.",
+                recovery: [{ action: "retry" }],
+            }),
+        ];
+}
+function roundTripSemanticDiagnostics(contract, expectedValues, actualValues, violations) {
+    const projected = violations.slice(0, MAX_ARTIFACT_DIAGNOSTICS).map((violation) => {
+        const fieldId = semanticFieldId(contract, violation.path);
+        const path = fieldId === undefined ? semanticDiagnosticPath(contract, violation.path) : fieldPath(fieldId);
+        const evidencePath = fieldId === undefined ? path : fieldPath(fieldId);
+        return createArtifactDiagnostic({
+            state: "invalid",
+            code: "FIELD_INVALID",
+            detailCode: violation.code === "INPUT_TYPE" ? "FIELD_TYPE_MISMATCH" : "FIELD_CONSTRAINT_VIOLATION",
+            reason: violation.code === "INPUT_TYPE" ? "type" : "constraint",
+            ...(path === undefined ? {} : { path }),
+            message: violation.code === "INPUT_TYPE"
+                ? "Reparsed semantic value has an unsupported type."
+                : "Reparsed semantic value violates a compiled constraint.",
+            ...(evidencePath === undefined
+                ? {}
+                : {
+                    expected: createFieldEvidence(evidencePath, fieldId === undefined ? undefined : expectedValues[fieldId]),
+                    actual: createFieldEvidence(evidencePath, fieldId === undefined ? undefined : actualValues[fieldId]),
+                }),
+            recovery: path === undefined ? [{ action: "repair" }] : [{ action: "repair", path }],
+        });
+    });
+    return projected.length > 0
+        ? projected
+        : [
+            createArtifactDiagnostic({
+                state: "unrecoverable",
+                code: "ARTIFACT_UNRECOVERABLE",
+                reason: "unrecoverable",
+                message: "Reparsed artifact failed semantic validation under the compiled contract.",
+                recovery: [{ action: "retry" }],
+            }),
+        ];
 }
 function compareMaterializedValues(expected, actual) {
     const keys = [...new Set([...Object.keys(expected), ...Object.keys(actual)])].sort(compareStrings);
@@ -591,28 +692,69 @@ function compareMaterializedValues(expected, actual) {
     for (const key of keys) {
         const expectedPresent = Object.prototype.hasOwnProperty.call(expected, key);
         const actualPresent = Object.prototype.hasOwnProperty.call(actual, key);
-        const path = `$.${key}`;
+        const path = fieldPath(key);
         if (!expectedPresent || !actualPresent) {
-            diagnostics.push({
-                code: "ROUND_TRIP_MISMATCH",
+            diagnostics.push(createArtifactDiagnostic({
+                state: "conflicting",
+                code: "FIELD_CONFLICT",
+                detailCode: "FIELD_VALUE_CONFLICT",
+                reason: "conflict",
                 path,
-                message: "Rendered artifact changed whether a semantic field was materialized.",
-                ...(expectedPresent ? { expected: expected[key] } : {}),
-                ...(actualPresent ? { actual: actual[key] } : {}),
-            });
+                message: "Rendered artifact changed whether this semantic field was materialized.",
+                expected: createFieldEvidence(path, expectedPresent ? expected[key] : undefined),
+                actual: createFieldEvidence(path, actualPresent ? actual[key] : undefined),
+                recovery: [{ action: "repair", path, hint: "Repair the renderer/parser mapping for this field." }],
+            }));
             continue;
         }
         if (stableValue(expected[key]) !== stableValue(actual[key])) {
-            diagnostics.push({
-                code: "ROUND_TRIP_MISMATCH",
+            diagnostics.push(createArtifactDiagnostic({
+                state: "conflicting",
+                code: "FIELD_CONFLICT",
+                detailCode: "FIELD_VALUE_CONFLICT",
+                reason: "conflict",
                 path,
-                message: "Rendered artifact changed a materialized semantic value.",
-                expected: expected[key],
-                actual: actual[key],
-            });
+                message: "Rendered artifact changed this materialized semantic value.",
+                expected: createFieldEvidence(path, expected[key]),
+                actual: createFieldEvidence(path, actual[key]),
+                recovery: [{ action: "repair", path, hint: "Repair the renderer/parser mapping for this field." }],
+            }));
         }
     }
     return diagnostics;
+}
+function fieldPath(fieldId) {
+    return `$.fields.${fieldId}`;
+}
+function semanticFieldId(contract, path) {
+    const fields = contract.sections.flatMap((section) => section.fields);
+    for (const field of fields) {
+        if (path === `$.${field.id}` || path.startsWith(`$.${field.id}[`))
+            return field.id;
+    }
+    const sectionId = /^\$\.sections\.([^.[\]]+)/u.exec(path)?.[1];
+    return sectionId === undefined
+        ? undefined
+        : contract.sections.find((section) => section.id === sectionId)?.fields[0]?.id;
+}
+function semanticDiagnosticPath(contract, path) {
+    const sectionId = /^\$\.sections\.([^.[\]]+)/u.exec(path)?.[1];
+    if (sectionId !== undefined && contract.sections.some((section) => section.id === sectionId)) {
+        return `$.sections.${sectionId}`;
+    }
+    return path === "$" ? undefined : path.startsWith("$.artifact") ? undefined : path;
+}
+function roundTripParseMessage(code) {
+    switch (code) {
+        case "EXISTING_UNKNOWN_CHECKLIST_ITEM":
+            return "Rendered artifact contains an undeclared checklist item.";
+        case "EXISTING_EXTRA_CONTENT":
+            return "Rendered artifact contains content outside the compiled template structure.";
+        case "EXISTING_WRONG_TEMPLATE":
+            return "Rendered artifact does not match the compiled template structure.";
+        default:
+            return "Rendered artifact does not match the compiled field representation.";
+    }
 }
 function stableValue(value) {
     if (value === undefined)
@@ -677,6 +819,11 @@ function renderDocumentation(section, content) {
 }
 function renderFieldValue(field, value, kind) {
     if (field.type === "string" || field.type === "enum") {
+        if (typeof value === "string" && value.length === 0) {
+            return field.nativeMetadata.render === undefined
+                ? EXPLICIT_EMPTY_STRING_MARKER
+                : renderCodeBlock(EXPLICIT_EMPTY_STRING_MARKER, field.nativeMetadata.render);
+        }
         if (typeof value === "string" && (kind !== "issue" || value.trim().length > 0)) {
             const renderedValue = kind === "issue" ? issueNativeValue(field, value) : value;
             return field.nativeMetadata.render === undefined
@@ -863,6 +1010,8 @@ function parseFieldLines(field, lines, path, stripComments, issueBody) {
         const parsedValue = field.nativeMetadata.render === undefined
             ? trimBlankLines(unescapeMarkdownValue(filtered.join("\n")))
             : parseRenderedCodeBlock(filtered, field.nativeMetadata.render, path, diagnostics);
+        if (parsedValue === EXPLICIT_EMPTY_STRING_MARKER)
+            return { value: "", diagnostics };
         const placeholder = stripComments
             ? removeHtmlComments(field.nativeMetadata.placeholder ?? "")
             : (field.nativeMetadata.placeholder ?? "");

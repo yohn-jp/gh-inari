@@ -1,5 +1,5 @@
 import { type PartialSemanticValidationResult, type PartialSemanticRepairResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
-import { type ArtifactDiagnosticReport } from "./diagnostics.js";
+import { type ArtifactDiagnostic, type ArtifactDiagnosticReport } from "./diagnostics.js";
 import { type ArtifactKind, type CanonicalContract } from "./contract/ir.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
@@ -62,18 +62,14 @@ export declare class ArtifactInputError extends Error {
     constructor(code: ArtifactInputErrorCode, message: string, path?: string, details?: unknown);
 }
 export type ArtifactPreparationErrorCode = "ARTIFACT_PROVENANCE_MISSING" | "ARTIFACT_ROUND_TRIP_INVALID";
-export type ArtifactRoundTripDiagnosticCode = "ROUND_TRIP_PARSE" | "ROUND_TRIP_SEMANTIC" | "ROUND_TRIP_MISMATCH";
-export interface ArtifactRoundTripDiagnostic {
-    readonly code: ArtifactRoundTripDiagnosticCode;
-    readonly path: string;
-    readonly message: string;
-    readonly expected?: unknown;
-    readonly actual?: unknown;
-}
+/** @deprecated Round-trip diagnostics use the shared #118 diagnostic contract. */
+export type ArtifactRoundTripDiagnostic = ArtifactDiagnostic;
+/** @deprecated Use ArtifactDiagnosticCode/ArtifactDiagnosticDetailCode. */
+export type ArtifactRoundTripDiagnosticCode = ArtifactDiagnostic["code"];
 /** Stable failures raised before a mutation-capable artifact is created. */
 export declare class ArtifactPreparationError extends Error {
     readonly code: ArtifactPreparationErrorCode;
-    readonly diagnostics: readonly ArtifactRoundTripDiagnostic[];
+    readonly diagnostics: readonly ArtifactDiagnostic[];
     constructor(code: ArtifactPreparationErrorCode, message: string, diagnostics?: readonly ArtifactRoundTripDiagnostic[]);
 }
 export interface PreparedIssueArtifact {

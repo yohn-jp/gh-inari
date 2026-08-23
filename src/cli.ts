@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ArtifactInputError,
+  ArtifactPreparationError,
   loadCanonicalArtifact,
   parseArtifactInputDocument,
   prepareIssueArtifact,
@@ -46,7 +47,6 @@ import {
   translateRemediationFailure,
   updateGovernedExistingArtifact,
 } from "./reconciliation.js";
-import type { ArtifactDiagnosticReport } from "./diagnostics.js";
 import {
   discoverSemanticTemplates,
   importNativeTemplate,
@@ -184,7 +184,7 @@ interface CliErrorShape {
   readonly path?: string;
   readonly details?: unknown;
   readonly violations?: unknown;
-  readonly diagnostics?: ArtifactDiagnosticReport;
+  readonly diagnostics?: unknown;
 }
 
 /** The installed gh-inari executable entrypoint. */
@@ -1340,6 +1340,9 @@ function toErrorShape(error: unknown): CliErrorShape {
       path: error.path,
       ...(error.details === undefined ? {} : { details: error.details }),
     };
+  if (error instanceof ArtifactPreparationError) {
+    return { code: error.code, message: error.message, diagnostics: error.diagnostics };
+  }
   if (isGitHubAdapterError(error)) return { code: error.code, message: error.message, details: error.details };
   if (isObjectWithCode(error))
     return {
@@ -1356,7 +1359,8 @@ function classifyExitCode(error: unknown): number {
   if (
     error instanceof SemanticValidationError ||
     error instanceof ArtifactInputError ||
-    error instanceof RemediationError
+    error instanceof RemediationError ||
+    error instanceof ArtifactPreparationError
   )
     return EXIT_VALIDATION;
   if (isGitHubAdapterError(error)) return EXIT_REMOTE;
@@ -1456,9 +1460,14 @@ function isPositiveInteger(value: string): boolean {
   return /^[1-9]\d*$/u.test(value);
 }
 
-function isObjectWithCode(
-  value: unknown,
-): value is { code: string; message?: unknown; path?: unknown; details?: unknown; violations?: unknown } {
+function isObjectWithCode(value: unknown): value is {
+  code: string;
+  message?: unknown;
+  path?: unknown;
+  details?: unknown;
+  violations?: unknown;
+  diagnostics?: unknown;
+} {
   return typeof value === "object" && value !== null && "code" in value && typeof value.code === "string";
 }
 
