@@ -5,11 +5,13 @@ import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullReques
 export class ArtifactInputError extends Error {
     code;
     path;
-    constructor(code, message, path = "$") {
+    details;
+    constructor(code, message, path = "$", details) {
         super(message);
         this.name = "ArtifactInputError";
         this.code = code;
         this.path = path;
+        this.details = details;
     }
 }
 /** Stable failures raised before a mutation-capable artifact is created. */

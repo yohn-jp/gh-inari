@@ -349,6 +349,40 @@ test("--help=full prints the complete command and option reference", async () =>
   assert.match(output, /skill \[scenario\]/);
 });
 
+test("pr sync help exposes the complete canonical --from envelope", async () => {
+  const { exitCode, output } = await captureHelp(["pr", "sync", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /fields \(object\)/);
+  assert.match(output, /title \(string\)/);
+  assert.match(output, /head \(string\)/);
+  assert.match(output, /base \(string\)/);
+  assert.match(output, /draft \(boolean\)/);
+  assert.match(output, /maintainerCanModify \(boolean\)/);
+  assert.match(output, /`fields` must be the semantic object/);
+});
+
+test("pr schema projects the canonical sync input and a valid minimal example", async () => {
+  const result = await captureJson(["pr", "schema", "default", "--json"]);
+  assert.equal(result.exitCode, 0);
+  const syncInput = result.output.syncInput as {
+    schema: { required?: readonly string[]; properties: Record<string, unknown> };
+    minimalExample: { fields: Record<string, unknown>; title: string; head: string; base: string };
+  };
+  assert.deepEqual(syncInput.schema.required, ["fields", "title", "head", "base"]);
+  assert.deepEqual(Object.keys(syncInput.schema.properties), [
+    "fields",
+    "title",
+    "head",
+    "base",
+    "draft",
+    "maintainerCanModify",
+  ]);
+  assert.ok(Object.keys(syncInput.minimalExample.fields).length > 0);
+  assert.ok(syncInput.minimalExample.title.length > 0);
+  assert.ok(syncInput.minimalExample.head.length > 0);
+  assert.ok(syncInput.minimalExample.base.length > 0);
+});
+
 async function captureOutput(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
   const originalLog = console.log;
   const lines: string[] = [];

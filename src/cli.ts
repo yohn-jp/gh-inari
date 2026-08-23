@@ -17,6 +17,12 @@ import {
 import { projectContract, type CanonicalContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
+  assertPullRequestSyncInputComplete,
+  parsePullRequestSyncInput,
+  projectPullRequestSyncInput,
+  renderPullRequestSyncInputHelp,
+} from "./pr-sync-input.js";
+import {
   compileLocalGovernedContract,
   compileRepositoryGovernedContract,
   createGovernedIssue,
@@ -672,7 +678,14 @@ async function runArtifactCommand(
       );
     }
     const projection = projectContract(contract);
-    if (parsed.options.compact === true) console.log(JSON.stringify({ schema: renderSemanticCompactSchema(contract) }));
+    const syncInput = domain === "pr" ? projectPullRequestSyncInput(contract) : undefined;
+    if (parsed.options.compact === true)
+      console.log(
+        JSON.stringify({
+          schema: renderSemanticCompactSchema(contract),
+          ...(syncInput === undefined ? {} : { syncInput }),
+        }),
+      );
     else
       console.log(
         JSON.stringify({
@@ -680,6 +693,7 @@ async function runArtifactCommand(
           template: contract.templateIdentity,
           ...projection,
           directFields: projectDirectFieldUsage(contract),
+          ...(syncInput === undefined ? {} : { syncInput }),
         }),
       );
     return 0;
@@ -910,7 +924,7 @@ async function runExistingRemediation(
       }
       desiredInput = currentArtifactInput(domain, read);
     } else {
-      const input = await resolveArtifactInputDocument(parsed, read.contract);
+      const input = await resolveArtifactInputDocument(parsed, read.contract, domain === "pr" && operation === "sync");
       desiredInput =
         operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
     }
@@ -994,7 +1008,10 @@ function createAdapter(
   return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
 
-async function readInputDocument(value: string | boolean | undefined): Promise<ArtifactInputDocument> {
+async function readInputDocument(
+  value: string | boolean | undefined,
+  parser: (input: unknown) => ArtifactInputDocument = parseArtifactInputDocument,
+): Promise<ArtifactInputDocument> {
   if (typeof value !== "string" || value.length === 0)
     throw new CliError("INPUT_REQUIRED", "Use --from <file.json>.", "--from");
   let source: string;
@@ -1021,7 +1038,7 @@ async function readInputDocument(value: string | boolean | undefined): Promise<A
     if (cause instanceof Error) error.cause = cause;
     throw error;
   }
-  return parseArtifactInputDocument(parsed);
+  return parser(parsed);
 }
 
 function mergeOptionMetadata(
@@ -1214,14 +1231,18 @@ function mergeDirectFields(
 async function resolveArtifactInputDocument(
   parsed: ParsedArgs,
   contract: CanonicalContract,
+  requirePullRequestSyncInput = false,
 ): Promise<ArtifactInputDocument> {
   const hasFrom = typeof parsed.options.from === "string";
   if (!hasFrom && parsed.fields.length === 0) {
     throw new CliError("INPUT_REQUIRED", "Use --from <file.json> or --field <name>=<value>.", "--from");
   }
-  const document = hasFrom ? await readInputDocument(parsed.options.from) : { fields: {}, metadata: {} };
+  const document = hasFrom
+    ? await readInputDocument(parsed.options.from, requirePullRequestSyncInput ? parsePullRequestSyncInput : undefined)
+    : { fields: {}, metadata: {} };
   const directFields = resolveDirectFields(contract, parsed.fields);
-  return mergeDirectFields(document, directFields);
+  const merged = mergeDirectFields(document, directFields);
+  return requirePullRequestSyncInput ? assertPullRequestSyncInputComplete(merged) : merged;
 }
 
 function templateSelector(parsed: ParsedArgs, positional: string | undefined): string | undefined {
@@ -1312,7 +1333,13 @@ function toErrorShape(error: unknown): CliErrorShape {
       ...(error.details === undefined ? {} : { details: error.details }),
       ...(error.diagnostics === undefined ? {} : { diagnostics: error.diagnostics }),
     };
-  if (error instanceof ArtifactInputError) return { code: error.code, message: error.message, path: error.path };
+  if (error instanceof ArtifactInputError)
+    return {
+      code: error.code,
+      message: error.message,
+      path: error.path,
+      ...(error.details === undefined ? {} : { details: error.details }),
+    };
   if (isGitHubAdapterError(error)) return { code: error.code, message: error.message, details: error.details };
   if (isObjectWithCode(error))
     return {
@@ -1549,7 +1576,10 @@ function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHel
     },
     sync: {
       usage: `${domain} sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
-      summary: `Reconcile an existing ${noun} to a complete desired semantic state.`,
+      summary:
+        domain === "pr"
+          ? `Reconcile an existing ${noun} to a complete desired semantic state. ${renderPullRequestSyncInputHelp()}`
+          : `Reconcile an existing ${noun} to a complete desired semantic state.`,
       example: `inari ${domain} sync 123 --from desired.json --dry-run`,
     },
   };
