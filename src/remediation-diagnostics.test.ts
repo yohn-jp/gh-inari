@@ -13,16 +13,7 @@ import {
   type ExistingArtifactRead,
 } from "./reconciliation.js";
 
-const SOURCE = [
-  "## Summary",
-  "",
-  "Describe the change.",
-  "",
-  "## Linked issue",
-  "",
-  "Closes #",
-  "",
-].join("\n");
+const SOURCE = ["## Summary", "", "Describe the change.", "", "## Linked issue", "", "Closes #", ""].join("\n");
 
 function contract(): CanonicalContract {
   const parsed = parsePullRequestTemplate(SOURCE, {
