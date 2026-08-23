@@ -85,7 +85,7 @@ test("normalize diagnostics distinguish missing semantics through the shared con
   assert.equal(missing?.recovery?.[0]?.action, "provide");
 });
 
-test("explicit-template reconstruction requirements stay field-diagnostic instead of reverting to parser failure", () => {
+test("explicit-template reconstruction requirements stay field-diagnostic", () => {
   const read = readWith("## Summary\n\nA summary\n", "explicit");
   const requirement = createArtifactDiagnostic({
     state: "missing",
