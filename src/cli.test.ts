@@ -54,6 +54,45 @@ const REMOTE_ISSUE_TEMPLATE = [
   "",
 ].join("\n");
 
+/** A remote Issue Form with a scalar, a repeated (multi-select) list, and a checklist field, for direct --field CLI coverage. */
+const REMOTE_ISSUE_TEMPLATE_DIRECT_FIELDS = `name: Feature
+description: Remote feature
+title: "feat: "
+body:
+  - type: textarea
+    id: problem
+    attributes: { label: Problem }
+    validations: { required: true }
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - bug
+        - feature
+    validations: { required: true }
+  - type: dropdown
+    id: areas
+    attributes:
+      label: Areas
+      multiple: true
+      options:
+        - cli
+        - docs
+        - contracts
+    validations: { required: false }
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      options:
+        - label: Tests
+          required: true
+        - label: Docs
+          required: false
+    validations: { required: true }
+`;
+
 const REMOTE_PR_TEMPLATE = [
   "## Summary",
   "",
@@ -2509,4 +2548,485 @@ test("edit surfaces governance-generation reconciliation instead of hiding a cro
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+async function captureJson(argv: readonly string[]): Promise<{ exitCode: number; output: Record<string, unknown> }> {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli([...argv]);
+    return { exitCode, output: JSON.parse(lines[0] ?? "{}") as Record<string, unknown> };
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+async function runIssueValidateDirectFields(
+  argv: readonly string[],
+  repositoryRoot: string,
+): Promise<{ exitCode: number; output: Record<string, unknown> }> {
+  const transport = new CliStubTransport(
+    remoteGovernanceResponses(
+      ".github/ISSUE_TEMPLATE/direct-fields.yml",
+      "direct-fields-sha",
+      REMOTE_ISSUE_TEMPLATE_DIRECT_FIELDS,
+    ),
+  );
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["issue", "validate", "--template", "direct-fields", "--repository", "acme/inari", "--json", ...argv],
+      { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    return { exitCode, output: JSON.parse(lines[0] ?? "{}") as Record<string, unknown> };
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+test("issue validate accepts a direct scalar --field and matches equivalent --from JSON input", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-direct-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "issue.json");
+  await writeFile(inputPath, JSON.stringify({ fields: { problem: "A reproducible problem" } }));
+  try {
+    const fromResult = await runIssueValidateDirectFields(["--from", inputPath], repositoryRoot);
+    const fieldResult = await runIssueValidateDirectFields(
+      ["--field", "problem=A reproducible problem"],
+      repositoryRoot,
+    );
+    assert.equal(fieldResult.exitCode, fromResult.exitCode);
+    assert.deepEqual(fieldResult.output, fromResult.output);
+    assert.deepEqual((fieldResult.output.values as Record<string, unknown>).problem, "A reproducible problem");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue validate accepts repeated --field values for a list field, preserving argv order", async () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const result = await runIssueValidateDirectFields(
+    [
+      "--field",
+      "areas=docs",
+      "--field",
+      "category=bug",
+      "--field",
+      "areas=cli",
+      "--field",
+      "problem=A reproducible problem",
+    ],
+    repositoryRoot,
+  );
+  const values = result.output.values as Record<string, unknown>;
+  assert.deepEqual(values.areas, ["docs", "cli"]);
+});
+
+test("issue validate accepts repeated --field values for a checklist field, selecting items by id in argv order", async () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const result = await runIssueValidateDirectFields(
+    ["--field", "acceptance=Docs", "--field", "acceptance=Tests"],
+    repositoryRoot,
+  );
+  const values = result.output.values as Record<string, unknown>;
+  assert.deepEqual(values.acceptance, ["Docs", "Tests"]);
+});
+
+test("direct --field input and equivalent --from JSON produce identical canonical output across scalar, list, and checklist fields", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-direct-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "issue.json");
+  const completeFields = {
+    problem: "A reproducible problem",
+    category: "bug",
+    areas: ["cli", "docs"],
+    acceptance: ["Tests"],
+  };
+  await writeFile(inputPath, JSON.stringify({ fields: completeFields }));
+  try {
+    const fromResult = await runIssueValidateDirectFields(["--from", inputPath], repositoryRoot);
+    const fieldResult = await runIssueValidateDirectFields(
+      [
+        "--field",
+        "problem=A reproducible problem",
+        "--field",
+        "category=bug",
+        "--field",
+        "areas=cli",
+        "--field",
+        "areas=docs",
+        "--field",
+        "acceptance=Tests",
+      ],
+      repositoryRoot,
+    );
+    assert.equal(fromResult.output.valid, true);
+    assert.equal(fieldResult.output.valid, true);
+    assert.deepEqual(fieldResult.output, fromResult.output);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pr validate accepts direct --field input equivalent to --from JSON for a governed pull request template", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-direct-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "pr.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({ fields: { summary: "A deterministic pull request summary", linked_issue: "Closes #21" } }),
+  );
+  try {
+    const fromTransport = new CliStubTransport(
+      remoteGovernanceResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", REMOTE_PR_TEMPLATE, {
+        sha: "pr-policy-sha",
+        source: REMOTE_PR_POLICY,
+      }),
+    );
+    const fieldTransport = new CliStubTransport(
+      remoteGovernanceResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", REMOTE_PR_TEMPLATE, {
+        sha: "pr-policy-sha",
+        source: REMOTE_PR_POLICY,
+      }),
+    );
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (line: string) => lines.push(line);
+    let fromOutput: Record<string, unknown>;
+    let fieldOutput: Record<string, unknown>;
+    try {
+      lines.length = 0;
+      await runCli(
+        ["pr", "validate", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
+        {
+          repositoryRoot,
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: fromTransport }),
+        },
+      );
+      fromOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+
+      lines.length = 0;
+      await runCli(
+        [
+          "pr",
+          "validate",
+          "--template",
+          "default",
+          "--field",
+          "summary=A deterministic pull request summary",
+          "--field",
+          "linked_issue=Closes #21",
+          "--repository",
+          "acme/inari",
+          "--json",
+        ],
+        { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport: fieldTransport }) },
+      );
+      fieldOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    } finally {
+      console.log = originalLog;
+    }
+    assert.deepEqual(fieldOutput, fromOutput);
+    assert.deepEqual((fieldOutput.values as Record<string, unknown>).summary, "A deterministic pull request summary");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unknown --field name is rejected with a compact, contract-derived diagnostic", async () => {
+  const result = await captureJson(["issue", "validate", "--template", "feature", "--field", "problm=x", "--json"]);
+  assert.equal(result.exitCode, 2);
+  const error = result.output.error as {
+    code: string;
+    path?: string;
+    details?: { field?: string; allowedFields?: string[]; allowedFieldCount?: number; suggestions?: string[] };
+  };
+  assert.equal(error.code, "FIELD_UNKNOWN");
+  assert.equal(error.path, "--field");
+  assert.equal(error.details?.field, "problm");
+  assert.ok(error.details?.allowedFields?.includes("problem"));
+  assert.ok((error.details?.allowedFieldCount ?? 0) > 0);
+  assert.ok(error.details?.suggestions?.includes("problem"));
+});
+
+test("a scalar field supplied twice via --field is rejected as a duplicate", async () => {
+  const result = await captureJson([
+    "issue",
+    "validate",
+    "--template",
+    "feature",
+    "--field",
+    "problem=first",
+    "--field",
+    "problem=second",
+    "--json",
+  ]);
+  assert.equal(result.exitCode, 2);
+  const error = result.output.error as { code: string; details?: { field?: string; occurrences?: number } };
+  assert.equal(error.code, "FIELD_DUPLICATE");
+  assert.equal(error.details?.field, "problem");
+  assert.equal(error.details?.occurrences, 2);
+});
+
+test("the same field named by both --from and --field conflicts, regardless of which flag appears first in argv", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-direct-"));
+  const inputPath = path.join(directory, "issue.json");
+  await writeFile(inputPath, JSON.stringify({ fields: { problem: "from json" } }));
+  try {
+    const fieldFirst = await captureJson([
+      "issue",
+      "validate",
+      "--template",
+      "feature",
+      "--field",
+      "problem=from field",
+      "--from",
+      inputPath,
+      "--json",
+    ]);
+    const fromFirst = await captureJson([
+      "issue",
+      "validate",
+      "--template",
+      "feature",
+      "--from",
+      inputPath,
+      "--field",
+      "problem=from field",
+      "--json",
+    ]);
+    assert.equal(fieldFirst.exitCode, 2);
+    assert.equal(fromFirst.exitCode, 2);
+    assert.deepEqual(fieldFirst.output, fromFirst.output);
+    const error = fieldFirst.output.error as { code: string; details?: { fields?: string[] } };
+    assert.equal(error.code, "FIELD_CONFLICT");
+    assert.deepEqual(error.details?.fields, ["problem"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue edit accepts a direct --field patch without --from, changing only the supplied field", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 80,
+        title: "feat: remediation",
+        body: "Rendered body",
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha"),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["issue", "edit", "80", "--field", "problem=A changed problem", "--repository", "acme/inari"],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.mutation, "applied");
+    assert.equal((output.governance as { reconciled?: boolean }).reconciled, true);
+    assert.ok(transport.calls.some((args) => args.includes("PATCH")));
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("--field names accepted at runtime match exactly the fields projected by `schema`, with no parallel field table", async () => {
+  const schemaResult = await captureJson(["issue", "schema", "feature", "--json"]);
+  assert.equal(schemaResult.exitCode, 0);
+  const schema = schemaResult.output.schema as { properties: Record<string, unknown> };
+  const fieldNames = Object.keys(schema.properties).sort();
+  assert.ok(fieldNames.includes("problem"));
+
+  const args = fieldNames.flatMap((name) => ["--field", `${name}=A placeholder value`]);
+  const validateResult = await captureJson(["issue", "validate", "--template", "feature", ...args, "--json"]);
+  assert.notEqual((validateResult.output.error as { code?: string } | undefined)?.code, "FIELD_UNKNOWN");
+  assert.equal(validateResult.exitCode, 0);
+  assert.equal(validateResult.output.valid, true);
+  assert.deepEqual(Object.keys(validateResult.output.values as Record<string, unknown>).sort(), fieldNames);
+});
+
+test("--field on a command that does not resolve an artifact input document fails explicitly instead of being silently ignored", async () => {
+  const cases: readonly (readonly string[])[] = [
+    ["issue", "schema", "feature", "--field", "problem=x"],
+    ["issue", "explain", "1", "--field", "problem=x"],
+    ["issue", "get", "1", "--field", "problem=x"],
+    ["issue", "check", "1", "--field", "problem=x"],
+    ["issue", "normalize", "1", "--field", "problem=x"],
+    ["template", "list", "--field", "problem=x"],
+  ];
+  for (const argv of cases) {
+    const result = await captureJson([...argv, "--json"]);
+    assert.equal(result.exitCode, 1, argv.join(" "));
+    const error = result.output.error as { code?: string; path?: string } | undefined;
+    assert.equal(error?.code, "FIELD_UNSUPPORTED_COMMAND", argv.join(" "));
+    assert.equal(error?.path, "--field", argv.join(" "));
+  }
+});
+
+test("`issue validate <number> --field ...` does not silently fall back to the existing-artifact path and ignore the field", async () => {
+  // No network responses are stubbed: if --field were ignored and this fell through to
+  // runExistingValidation, the unstubbed adapter call would surface as an unrelated GitHub
+  // adapter failure instead of the local schema/validation result this test asserts on.
+  const result = await captureJson([
+    "issue",
+    "validate",
+    "--template",
+    "feature",
+    "1",
+    "--field",
+    "problem=A reproducible problem",
+    "--json",
+  ]);
+  assert.notEqual((result.output.error as { code?: string } | undefined)?.code, "FIELD_UNSUPPORTED_COMMAND");
+  const values = result.output.values as Record<string, unknown> | undefined;
+  assert.equal(values?.problem, "A reproducible problem");
+});
+
+test("schema's directFields projection matches accepted --field names, types, and repeatability at runtime", async () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const schemaTransport = new CliStubTransport(
+    remoteGovernanceResponses(
+      ".github/ISSUE_TEMPLATE/direct-fields.yml",
+      "direct-fields-sha",
+      REMOTE_ISSUE_TEMPLATE_DIRECT_FIELDS,
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  let directFields: readonly {
+    name: string;
+    type: string;
+    required: boolean;
+    repeatable: boolean;
+    cliSyntax: string;
+  }[];
+  try {
+    const exitCode = await runCli(["issue", "schema", "direct-fields", "--repository", "acme/inari", "--json"], {
+      repositoryRoot,
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: schemaTransport }),
+    });
+    assert.equal(exitCode, 0);
+    directFields = (JSON.parse(lines[0] ?? "{}") as { directFields: typeof directFields }).directFields;
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(
+    directFields.map((entry) => entry.name),
+    ["acceptance", "areas", "category", "problem"],
+  );
+  const byName = new Map(directFields.map((entry) => [entry.name, entry]));
+  assert.deepEqual(byName.get("problem"), {
+    name: "problem",
+    type: "string",
+    required: true,
+    repeatable: false,
+    cliSyntax: "--field problem=<value>",
+  });
+  assert.deepEqual(byName.get("areas"), {
+    name: "areas",
+    type: "array",
+    required: false,
+    repeatable: true,
+    cliSyntax: "--field areas=<value> (repeatable)",
+  });
+
+  // The projection is not just documentation: build the exact --field args it describes
+  // (repeating only the repeatable fields, with values valid for that field) and confirm the
+  // runtime accepts every one of them and reaches a fully valid canonical result.
+  const sampleValues: Readonly<Record<string, readonly string[]>> = {
+    problem: ["A reproducible problem"],
+    category: ["bug"],
+    areas: ["cli", "docs"],
+    acceptance: ["Tests"],
+  };
+  const args = directFields.flatMap((entry) => {
+    const values = sampleValues[entry.name] ?? [];
+    return (entry.repeatable ? values : values.slice(0, 1)).flatMap((value) => ["--field", `${entry.name}=${value}`]);
+  });
+  const validateTransport = new CliStubTransport(
+    remoteGovernanceResponses(
+      ".github/ISSUE_TEMPLATE/direct-fields.yml",
+      "direct-fields-sha",
+      REMOTE_ISSUE_TEMPLATE_DIRECT_FIELDS,
+    ),
+  );
+  const validateLines: string[] = [];
+  console.log = (line: string) => validateLines.push(line);
+  try {
+    await runCli(
+      ["issue", "validate", "--template", "direct-fields", "--repository", "acme/inari", "--json", ...args],
+      { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport: validateTransport }) },
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  const validateOutput = JSON.parse(validateLines[0] ?? "{}") as {
+    error?: { code?: string };
+    valid?: boolean;
+    values?: Record<string, unknown>;
+  };
+  assert.equal(validateOutput.error?.code, undefined);
+  assert.equal(validateOutput.valid, true);
+  assert.deepEqual(validateOutput.values?.areas, ["cli", "docs"]);
+  assert.equal(validateOutput.values?.problem, "A reproducible problem");
+});
+
+test("validate's missingFields progressive diagnostics project each unresolved field's type and requiredness from the contract", async () => {
+  const result = await captureJson([
+    "issue",
+    "validate",
+    "--template",
+    "feature",
+    "--field",
+    "problem=A reproducible problem",
+    "--json",
+  ]);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.output.valid, false);
+  const missingFields = result.output.missingFields as readonly {
+    field: string;
+    constraints?: { type?: string; required?: boolean };
+  }[];
+  const capability = missingFields.find((entry) => entry.field === "capability");
+  assert.equal(capability?.constraints?.type, "string");
+  assert.equal(capability?.constraints?.required, true);
+  const constraints = missingFields.find((entry) => entry.field === "constraints");
+  assert.equal(constraints, undefined, "an optional field must not be reported as a missing/required field");
 });
