@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArtifactInputError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
+import { ArtifactInputError, ArtifactPreparationError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
 import { projectContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
@@ -978,6 +978,9 @@ function toErrorShape(error) {
         return { code: "SEMANTIC_VALIDATION_FAILED", message: error.message, violations: error.violations };
     if (error instanceof ArtifactInputError)
         return { code: error.code, message: error.message, path: error.path };
+    if (error instanceof ArtifactPreparationError) {
+        return { code: error.code, message: error.message, diagnostics: error.diagnostics };
+    }
     if (isGitHubAdapterError(error))
         return { code: error.code, message: error.message, details: error.details };
     if (isObjectWithCode(error))
@@ -993,7 +996,8 @@ function toErrorShape(error) {
 function classifyExitCode(error) {
     if (error instanceof SemanticValidationError ||
         error instanceof ArtifactInputError ||
-        error instanceof RemediationError)
+        error instanceof RemediationError ||
+        error instanceof ArtifactPreparationError)
         return EXIT_VALIDATION;
     if (isGitHubAdapterError(error))
         return EXIT_REMOTE;

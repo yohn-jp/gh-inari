@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ArtifactInputError,
+  ArtifactPreparationError,
   loadCanonicalArtifact,
   parseArtifactInputDocument,
   prepareIssueArtifact,
@@ -174,6 +175,7 @@ interface CliErrorShape {
   readonly path?: string;
   readonly details?: unknown;
   readonly violations?: unknown;
+  readonly diagnostics?: unknown;
 }
 
 /** The installed gh-inari executable entrypoint. */
@@ -1271,6 +1273,9 @@ function toErrorShape(error: unknown): CliErrorShape {
   if (error instanceof SemanticValidationError)
     return { code: "SEMANTIC_VALIDATION_FAILED", message: error.message, violations: error.violations };
   if (error instanceof ArtifactInputError) return { code: error.code, message: error.message, path: error.path };
+  if (error instanceof ArtifactPreparationError) {
+    return { code: error.code, message: error.message, diagnostics: error.diagnostics };
+  }
   if (isGitHubAdapterError(error)) return { code: error.code, message: error.message, details: error.details };
   if (isObjectWithCode(error))
     return {
@@ -1287,7 +1292,8 @@ function classifyExitCode(error: unknown): number {
   if (
     error instanceof SemanticValidationError ||
     error instanceof ArtifactInputError ||
-    error instanceof RemediationError
+    error instanceof RemediationError ||
+    error instanceof ArtifactPreparationError
   )
     return EXIT_VALIDATION;
   if (isGitHubAdapterError(error)) return EXIT_REMOTE;
@@ -1387,9 +1393,14 @@ function isPositiveInteger(value: string): boolean {
   return /^[1-9]\d*$/u.test(value);
 }
 
-function isObjectWithCode(
-  value: unknown,
-): value is { code: string; message?: unknown; path?: unknown; details?: unknown; violations?: unknown } {
+function isObjectWithCode(value: unknown): value is {
+  code: string;
+  message?: unknown;
+  path?: unknown;
+  details?: unknown;
+  violations?: unknown;
+  diagnostics?: unknown;
+} {
   return typeof value === "object" && value !== null && "code" in value && typeof value.code === "string";
 }
 

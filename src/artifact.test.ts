@@ -17,6 +17,8 @@ import {
   validateExistingPullRequestArtifact,
 } from "./artifact.js";
 import {
+  CANONICAL_IR_VERSION,
+  CONTRACT_SCHEMA_VERSION,
   compileIssueFormYaml,
   projectToJsonSchema,
   LINKED_ISSUE_PATTERN,
@@ -204,7 +206,7 @@ test("prepared PR artifacts preserve checklist values before commented trailing 
   assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_UNPARSEABLE"));
 });
 
-test("preparation fails with typed diagnostics when rendering loses a semantic value", () => {
+test("prepared Issue artifacts preserve explicit empty optional scalar values", () => {
   const contract = governedFixture(
     compileIssueFormYaml(
       "name: Optional\ndescription: Optional\nbody:\n  - type: input\n    id: optional\n    attributes:\n      label: Optional\n",
@@ -218,16 +220,109 @@ test("preparation fails with typed diagnostics when rendering loses a semantic v
     ),
   );
 
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { optional: "" },
+    metadata: { title: "fix: preserve empty optional" },
+  });
+  assert.deepEqual(parseExistingIssueArtifact(contract, prepared.artifact.body).values, { optional: "" });
+});
+
+test("prepared PR artifacts preserve metadata and scalar, list, optional, and multiline values", () => {
+  const contract = governedFixture(pullRequestContractFixture);
+  const fields = {
+    summary: "A multiline summary\nwith a second line",
+    linked_issue: "Closes #113",
+    acceptance: ["tests"],
+    scope: "",
+  };
+  const prepared = preparePullRequestArtifact(contract, {
+    fields,
+    metadata: {
+      title: "fix: field-level round-trip diagnostics",
+      head: "feat/113-round-trip",
+      base: "main",
+      draft: false,
+      maintainerCanModify: true,
+    },
+  });
+
+  assert.deepEqual(parseExistingPullRequestArtifact(contract, prepared.artifact.body).values, fields);
+  assert.equal(prepared.artifact.title, "fix: field-level round-trip diagnostics");
+  assert.equal(prepared.artifact.head, "feat/113-round-trip");
+  assert.equal(prepared.artifact.base, "main");
+});
+
+test("round-trip mismatches use the shared bounded field diagnostic contract", () => {
+  const contract = governedFixture({
+    irVersion: CANONICAL_IR_VERSION,
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    artifactKind: "issue",
+    templateIdentity: {
+      id: "issue-form-comma-list",
+      name: "Comma list",
+      path: ".github/ISSUE_TEMPLATE/comma-list.yml",
+      source: "issue_form",
+    },
+    nativeMetadata: {
+      source: "issue_form",
+      path: ".github/ISSUE_TEMPLATE/comma-list.yml",
+    },
+    sections: [
+      {
+        id: "items",
+        title: "Items",
+        kind: "input",
+        render: { order: 0 },
+        nativeMetadata: { elementType: "dropdown", sourceId: "items" },
+        fields: [
+          {
+            id: "items",
+            label: "Items",
+            type: "array",
+            selection: "multi_select",
+            required: "optional",
+            items: {
+              type: "string",
+              options: [
+                { value: "alpha", label: "alpha,beta" },
+                { value: "beta", label: "beta" },
+              ],
+            },
+            render: { order: 0 },
+            nativeMetadata: {
+              elementType: "dropdown",
+              sourceId: "items",
+              multiple: true,
+              options: [{ value: "alpha" }, { value: "beta" }],
+            },
+          },
+        ],
+      },
+    ],
+    supplementalConstraints: { fields: [] },
+  });
+
   assert.throws(
     () =>
       prepareIssueArtifact(contract, {
-        fields: { optional: "" },
-        metadata: { title: "fix: invalid round trip" },
+        fields: { items: ["alpha"] },
+        metadata: { title: "fix: bounded diagnostics" },
       }),
-    (error: unknown) =>
-      error instanceof ArtifactPreparationError &&
-      error.code === "ARTIFACT_ROUND_TRIP_INVALID" &&
-      error.diagnostics.some((diagnostic) => diagnostic.code === "ROUND_TRIP_MISMATCH"),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPreparationError);
+      assert.equal(error.code, "ARTIFACT_ROUND_TRIP_INVALID");
+      assert.deepEqual(
+        error.diagnostics.map((diagnostic) => diagnostic.path),
+        ["$.fields.items"],
+      );
+      assert.equal(error.diagnostics[0]?.code, "FIELD_CONFLICT");
+      assert.equal(error.diagnostics[0]?.detailCode, "FIELD_VALUE_CONFLICT");
+      assert.equal(error.diagnostics[0]?.expected?.type, "array");
+      assert.equal(error.diagnostics[0]?.actual?.type, "array");
+      assert.equal(JSON.stringify(error.diagnostics).includes("alpha"), false);
+      assert.equal(JSON.stringify(error.diagnostics).includes("beta"), false);
+      return true;
+    },
   );
 });
 
