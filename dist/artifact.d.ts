@@ -58,7 +58,8 @@ export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_
 export declare class ArtifactInputError extends Error {
     readonly code: ArtifactInputErrorCode;
     readonly path: string;
-    constructor(code: ArtifactInputErrorCode, message: string, path?: string);
+    readonly details?: unknown;
+    constructor(code: ArtifactInputErrorCode, message: string, path?: string, details?: unknown);
 }
 export type ArtifactPreparationErrorCode = "ARTIFACT_PROVENANCE_MISSING" | "ARTIFACT_ROUND_TRIP_INVALID";
 /** @deprecated Round-trip diagnostics use the shared #118 diagnostic contract. */
@@ -90,6 +91,15 @@ export interface ExistingArtifactDiagnostic {
 }
 export interface ExistingArtifactParseResult {
     readonly parsed: boolean;
+    readonly values: Readonly<Record<string, unknown>>;
+    readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+}
+/**
+ * Semantic values recovered from an artifact that did not pass the strict
+ * structural parser. Values are extracted only from unambiguous contract
+ * sections and are still subject to the canonical semantic loader before use.
+ */
+export interface RecoverableArtifactValues {
     readonly values: Readonly<Record<string, unknown>>;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
@@ -194,6 +204,14 @@ export declare function prepareIssueArtifact(contractInput: unknown, input: Arti
 export declare function preparePullRequestArtifact(contractInput: unknown, input: ArtifactInputDocument): PreparedPullRequestArtifact;
 export declare function parseExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
 export declare function parseExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
+/**
+ * Recover field values from a malformed or wrong-template body without
+ * weakening the strict existing-artifact parser. The section boundaries and
+ * field decoding are the same parser primitives used by strict parsing; only
+ * the order/complete-structure requirement is relaxed for an explicitly
+ * selected repair target.
+ */
+export declare function recoverExistingArtifactValues(contractInput: unknown, body: string | null | undefined): RecoverableArtifactValues;
 export declare function validateExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
 export declare function validateExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
 export interface ExistingArtifactCandidate {

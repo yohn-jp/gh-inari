@@ -349,6 +349,40 @@ test("--help=full prints the complete command and option reference", async () =>
   assert.match(output, /skill \[scenario\]/);
 });
 
+test("pr sync help exposes the complete canonical --from envelope", async () => {
+  const { exitCode, output } = await captureHelp(["pr", "sync", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /fields \(object\)/);
+  assert.match(output, /title \(string\)/);
+  assert.match(output, /head \(string\)/);
+  assert.match(output, /base \(string\)/);
+  assert.match(output, /draft \(boolean\)/);
+  assert.match(output, /maintainerCanModify \(boolean\)/);
+  assert.match(output, /`fields` must be the semantic object/);
+});
+
+test("pr schema projects the canonical sync input and a valid minimal example", async () => {
+  const result = await captureJson(["pr", "schema", "default", "--json"]);
+  assert.equal(result.exitCode, 0);
+  const syncInput = result.output.syncInput as {
+    schema: { required?: readonly string[]; properties: Record<string, unknown> };
+    minimalExample: { fields: Record<string, unknown>; title: string; head: string; base: string };
+  };
+  assert.deepEqual(syncInput.schema.required, ["fields", "title", "head", "base"]);
+  assert.deepEqual(Object.keys(syncInput.schema.properties), [
+    "fields",
+    "title",
+    "head",
+    "base",
+    "draft",
+    "maintainerCanModify",
+  ]);
+  assert.ok(Object.keys(syncInput.minimalExample.fields).length > 0);
+  assert.ok(syncInput.minimalExample.title.length > 0);
+  assert.ok(syncInput.minimalExample.head.length > 0);
+  assert.ok(syncInput.minimalExample.base.length > 0);
+});
+
 async function captureOutput(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
   const originalLog = console.log;
   const lines: string[] = [];
@@ -1809,6 +1843,198 @@ test("pull request normalize dry-run reports representation drift without mutati
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     assert.equal(output.dryRun, true);
     assert.equal(output.changed, true);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("explicit PR template normalizes a wrong-order body and preserves recoverable values", async () => {
+  const wrongTemplateBody = [
+    "## Linked issue",
+    "",
+    "Closes #112",
+    "",
+    "## Summary",
+    "",
+    "A deterministic pull request summary",
+    "",
+    "## Scope",
+    "",
+    "### Included",
+    "",
+    "Implemented scope.",
+    "",
+    "### Excluded",
+    "",
+    "Excluded scope.",
+    "",
+    "## Validation",
+    "",
+    "- [x] Tests",
+    "- [ ] Build",
+    "- [ ] Typecheck",
+    "- [ ] Package check",
+    "",
+    "## Breaking changes",
+    "",
+    "No.",
+    "",
+  ].join("\n");
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 112,
+        title: "feat: remediation",
+        body: wrongTemplateBody,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/112",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["pr", "normalize", "112", "--template", "default", "--dry-run", "--repository", "acme/inari"],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.dryRun, true);
+    assert.equal(output.changed, true);
+    assert.equal((output.diff as { rendered: { changed: boolean } }).rendered.changed, true);
+    assert.equal(
+      (output.diff as { semantic: readonly unknown[] }).semantic.some((change) =>
+        JSON.stringify(change).includes("A deterministic pull request summary"),
+      ),
+      false,
+    );
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("explicit PR template lets edit repair a malformed body without inferred-template failure", async () => {
+  const malformedBody = [
+    "## Linked issue",
+    "",
+    "Closes #112",
+    "",
+    "## Summary",
+    "",
+    "A deterministic pull request summary",
+    "",
+    "## Validation",
+    "",
+    "- [x] Tests",
+    "",
+    "## Unexpected trailing section",
+    "",
+    "recoverable noise",
+    "",
+  ].join("\n");
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 114,
+        title: "feat: remediation",
+        body: malformedBody,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/114",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      [
+        "pr",
+        "edit",
+        "114",
+        "--template",
+        "default",
+        "--field",
+        "summary=An updated deterministic summary",
+        "--dry-run",
+        "--repository",
+        "acme/inari",
+      ],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.dryRun, true);
+    assert.equal(output.changed, true);
+    assert.equal(
+      (output.diff as { semantic: readonly { path: string }[] }).semantic.some(
+        (change) => change.path === "$.fields.summary",
+      ),
+      true,
+    );
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("explicit PR normalization returns bounded requirements for unrecoverable required values", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 113,
+        title: "feat: incomplete",
+        body: "## Summary\n\nA deterministic pull request summary\n",
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/113",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["pr", "normalize", "113", "--template", "default", "--json", "--repository", "acme/inari"],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 2);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error?: { code?: string; details?: { requirements?: { missingFields?: readonly { field: string }[] } } };
+    };
+    assert.equal(output.error?.code, "NORMALIZATION_UNSAFE");
+    assert.deepEqual(
+      output.error?.details?.requirements?.missingFields?.map((field) => field.field),
+      ["linked_issue", "validation"],
+    );
     assert.equal(
       transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
       false,

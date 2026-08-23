@@ -1,22 +1,33 @@
 import { type ArtifactInputDocument, type ExistingArtifactDiagnostic, type ExistingArtifactValidationResult } from "./artifact.js";
 import { type CanonicalContract } from "./contract/index.js";
+import { type ArtifactDiagnosticReport } from "./diagnostics.js";
 import { type GovernedArtifactDomain, type GovernedMutationResult } from "./governance.js";
 import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest } from "./github/index.js";
 import type { ValidatedRenderedIssueArtifact, ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 import type { TemplateSelector } from "./template-discovery.js";
 export type RemediationOperation = "check" | "edit" | "normalize" | "sync";
 export type RemediationStatus = "valid-current" | "non-canonical" | "semantically-invalid" | "unsupported" | "ambiguous";
-export type RemediationErrorCode = "SEMANTIC_PATCH_INVALID" | "SEMANTIC_PATCH_UNSUPPORTED" | "NORMALIZATION_UNSAFE" | "SYNC_INPUT_INCOMPLETE" | "SYNC_CURRENT_UNSUPPORTED" | "PR_HEAD_CHANGE_UNSUPPORTED";
+export type RemediationErrorCode = "SEMANTIC_PATCH_INVALID" | "SEMANTIC_PATCH_UNSUPPORTED" | "SEMANTIC_VALIDATION_FAILED" | "NORMALIZATION_UNSAFE" | "SYNC_INPUT_INCOMPLETE" | "SYNC_CURRENT_UNSUPPORTED" | "PR_HEAD_CHANGE_UNSUPPORTED";
 export declare class RemediationError extends Error {
     readonly code: RemediationErrorCode;
     readonly path?: string;
     readonly details?: Readonly<Record<string, unknown>>;
-    constructor(code: RemediationErrorCode, message: string, path?: string, details?: Readonly<Record<string, unknown>>);
+    readonly diagnostics?: ArtifactDiagnosticReport;
+    constructor(code: RemediationErrorCode, message: string, path?: string, details?: Readonly<Record<string, unknown>>, diagnostics?: ArtifactDiagnosticReport);
 }
+/** Project recoverable normalize/edit failures through the shared #118 contract. */
+export declare function remediationDiagnosticReport(domain: GovernedArtifactDomain, operation: "edit" | "normalize", read: ExistingArtifactRead, input?: ArtifactInputDocument, error?: unknown): ArtifactDiagnosticReport;
+/** Attach the common report while preserving the command's existing outer error. */
+export declare function translateRemediationFailure(domain: GovernedArtifactDomain, operation: "edit" | "normalize", read: ExistingArtifactRead, error: unknown, input?: ArtifactInputDocument): unknown;
+/** Bounded context for explicit-template repair without retaining source/body data. */
+export declare function remediationFailureDetails(read: ExistingArtifactRead): Readonly<Record<string, unknown>>;
 export interface ExistingArtifactRead {
     readonly remote: GitHubIssue | GitHubPullRequest;
     readonly contract?: CanonicalContract;
     readonly result: ExistingArtifactValidationResult;
+    readonly templateSelection?: "explicit" | "inferred";
+    /** Candidate-local parser diagnostics retained only for normalize/edit projection. */
+    readonly remediationDiagnostics?: readonly ExistingArtifactDiagnostic[];
 }
 export interface ExistingArtifactAssessment {
     readonly status: RemediationStatus;
@@ -55,18 +66,11 @@ export declare function renderCanonicalBody(domain: GovernedArtifactDomain, cont
 export declare function currentArtifactInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead): ArtifactInputDocument;
 /** Apply an explicit semantic patch without touching raw Markdown or inferring missing fields. */
 export declare function applySemanticPatch(domain: GovernedArtifactDomain, read: ExistingArtifactRead, patch: ArtifactInputDocument): ArtifactInputDocument;
+/** Validate values recovered during an explicit-template repair. */
+export declare function validateReconstructedInput(contract: CanonicalContract, input: ArtifactInputDocument, code: "NORMALIZATION_UNSAFE" | "SEMANTIC_PATCH_INVALID"): void;
 /** Validate and prepare the complete desired state through the existing artifact boundary. */
 export declare function prepareRemediationArtifact(domain: GovernedArtifactDomain, contract: CanonicalContract, input: ArtifactInputDocument): PreparedRemediationArtifact;
-/**
- * Ensure a declarative sync only names fields in the authoritative contract.
- *
- * Sync declares a complete desired state, so unlike `edit` it does not need the
- * current body to parse: an unparseable/non-matching current body is treated as
- * an empty current state and fully replaced. `read.contract` is only present
- * here when the caller named an explicit `--template` (see
- * `readGovernedExistingArtifact`); auto-discovery still fails closed on an
- * unparseable current body.
- */
+/** Ensure a declarative sync only names fields in the authoritative contract. */
 export declare function prepareSyncInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: ArtifactInputDocument): ArtifactInputDocument;
 /** Compare the current semantic/rendered artifact with a prepared canonical projection. */
 export declare function diffArtifact(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: PreparedRemediationArtifact): SemanticArtifactDiff;

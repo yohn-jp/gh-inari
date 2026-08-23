@@ -94,12 +94,14 @@ export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_
 export class ArtifactInputError extends Error {
   readonly code: ArtifactInputErrorCode;
   readonly path: string;
+  readonly details?: unknown;
 
-  constructor(code: ArtifactInputErrorCode, message: string, path = "$") {
+  constructor(code: ArtifactInputErrorCode, message: string, path = "$", details?: unknown) {
     super(message);
     this.name = "ArtifactInputError";
     this.code = code;
     this.path = path;
+    this.details = details;
   }
 }
 
@@ -159,6 +161,16 @@ export interface ExistingArtifactDiagnostic {
 
 export interface ExistingArtifactParseResult {
   readonly parsed: boolean;
+  readonly values: Readonly<Record<string, unknown>>;
+  readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+}
+
+/**
+ * Semantic values recovered from an artifact that did not pass the strict
+ * structural parser. Values are extracted only from unambiguous contract
+ * sections and are still subject to the canonical semantic loader before use.
+ */
+export interface RecoverableArtifactValues {
   readonly values: Readonly<Record<string, unknown>>;
   readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
@@ -630,6 +642,67 @@ export function parseExistingPullRequestArtifact(
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
   }
   return parseRenderedBody(contractInput, body ?? "", undefined, true);
+}
+
+/**
+ * Recover field values from a malformed or wrong-template body without
+ * weakening the strict existing-artifact parser. The section boundaries and
+ * field decoding are the same parser primitives used by strict parsing; only
+ * the order/complete-structure requirement is relaxed for an explicitly
+ * selected repair target.
+ */
+export function recoverExistingArtifactValues(
+  contractInput: unknown,
+  body: string | null | undefined,
+): RecoverableArtifactValues {
+  assertCanonicalContract(contractInput);
+  const contract = contractInput;
+  const strict =
+    contract.artifactKind === "issue"
+      ? parseExistingIssueArtifact(contract, body)
+      : parseExistingPullRequestArtifact(contract, body);
+  if (strict.parsed) return { values: strict.values, diagnostics: strict.diagnostics };
+
+  const markerFreeBody = extractTemplateIdentityMarker(body ?? "").body;
+  const stripComments = contract.artifactKind === "pull_request";
+  const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
+  const blocks = headingBlocks(source);
+  const values: Record<string, unknown> = {};
+  const expectedTitles = new Map<string, number>();
+
+  for (const section of contract.sections) {
+    if (section.kind !== "input") continue;
+    const field = section.fields[0];
+    const title = section.title ?? field?.label;
+    if (field === undefined || title === undefined) continue;
+    const expectedTitle = escapeHeading(title);
+    expectedTitles.set(expectedTitle, (expectedTitles.get(expectedTitle) ?? 0) + 1);
+  }
+
+  for (const section of contract.sections) {
+    if (section.kind !== "input") continue;
+    const field = section.fields[0];
+    const title = section.title ?? field?.label;
+    if (field === undefined || title === undefined) continue;
+    const expectedTitle = escapeHeading(title);
+    if (expectedTitles.get(expectedTitle) !== 1) continue;
+    const candidates = blocks.filter((block) => block.title === expectedTitle);
+    if (candidates.length !== 1) continue;
+    const block = candidates[0] as HeadingBlock;
+    const parsed = parseFieldLines(
+      field,
+      block.body,
+      `$.${field.id}`,
+      stripComments,
+      contract.artifactKind === "issue",
+    );
+    // parseFieldLines may retain known checklist selections alongside a
+    // bounded structural diagnostic. The canonical loader below decides
+    // whether such a partial value is semantically usable.
+    if (parsed.value !== undefined) values[field.id] = parsed.value;
+  }
+
+  return { values, diagnostics: strict.diagnostics };
 }
 
 export function validateExistingIssueArtifact(
@@ -1272,6 +1345,34 @@ function parseRenderedBody(
   }
   if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics };
   return { parsed: true, values, diagnostics: [] };
+}
+
+interface HeadingBlock {
+  readonly title: string;
+  readonly body: readonly string[];
+}
+
+function headingBlocks(source: string): readonly HeadingBlock[] {
+  const lines = source.split("\n");
+  const starts: { readonly index: number; readonly title: string }[] = [];
+  let openFence: string | undefined;
+  lines.forEach((line, index) => {
+    const fenceMatch = /^(`{3,})/u.exec(line);
+    if (openFence === undefined && fenceMatch !== null) {
+      openFence = fenceMatch[1];
+      return;
+    }
+    if (openFence !== undefined) {
+      if (fenceMatch !== null && fenceMatch[1] === openFence) openFence = undefined;
+      return;
+    }
+    const match = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*$/u.exec(line);
+    if (match !== null) starts.push({ index, title: match[1] as string });
+  });
+  return starts.map((start, position) => {
+    const next = starts[position + 1]?.index ?? lines.length;
+    return { title: start.title, body: trimLineRange(lines.slice(start.index + 1, next)) };
+  });
 }
 
 function parseFieldLines(

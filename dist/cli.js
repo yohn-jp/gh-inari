@@ -6,9 +6,10 @@ import { fileURLToPath } from "node:url";
 import { ArtifactInputError, ArtifactPreparationError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
 import { projectContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
+import { assertPullRequestSyncInputComplete, parsePullRequestSyncInput, projectPullRequestSyncInput, renderPullRequestSyncInputHelp, } from "./pr-sync-input.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
-import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, readGovernedExistingArtifact, RemediationError, updateGovernedExistingArtifact, } from "./reconciliation.js";
+import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, remediationDiagnosticReport, remediationFailureDetails, readGovernedExistingArtifact, RemediationError, translateRemediationFailure, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 const EXIT_USAGE = 1;
@@ -481,14 +482,19 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             contract = await compileLocalGovernedContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
         }
         const projection = projectContract(contract);
+        const syncInput = domain === "pr" ? projectPullRequestSyncInput(contract) : undefined;
         if (parsed.options.compact === true)
-            console.log(JSON.stringify({ schema: renderSemanticCompactSchema(contract) }));
+            console.log(JSON.stringify({
+                schema: renderSemanticCompactSchema(contract),
+                ...(syncInput === undefined ? {} : { syncInput }),
+            }));
         else
             console.log(JSON.stringify({
                 contract,
                 template: contract.templateIdentity,
                 ...projection,
                 directFields: projectDirectFieldUsage(contract),
+                ...(syncInput === undefined ? {} : { syncInput }),
             }));
         return 0;
     }
@@ -648,21 +654,44 @@ async function runExistingRemediation(domain, operation, number, parsed, root, d
         return assessment.status === "valid-current" ? 0 : EXIT_VALIDATION;
     }
     if (read.contract === undefined) {
-        throw new RemediationError(operation === "normalize" ? "NORMALIZATION_UNSAFE" : "SYNC_CURRENT_UNSUPPORTED", "No authoritative template could be selected for the existing artifact.", "$.template");
+        throw new RemediationError(operation === "normalize"
+            ? "NORMALIZATION_UNSAFE"
+            : operation === "edit"
+                ? "SEMANTIC_PATCH_UNSUPPORTED"
+                : "SYNC_CURRENT_UNSUPPORTED", "No authoritative template could be selected for the existing artifact.", "$.template", operation === "edit" || operation === "normalize" ? remediationFailureDetails(read) : undefined, operation === "edit" || operation === "normalize"
+            ? remediationDiagnosticReport(domain, operation, read)
+            : undefined);
     }
     let desiredInput;
-    if (operation === "normalize") {
-        if (!read.result.valid || !read.result.parse.parsed) {
-            throw new RemediationError("NORMALIZATION_UNSAFE", "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.", "$.artifact");
+    try {
+        if (operation === "normalize") {
+            if (!read.result.valid || !read.result.parse.parsed) {
+                throw new RemediationError("NORMALIZATION_UNSAFE", "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.", "$.artifact");
+            }
+            desiredInput = currentArtifactInput(domain, read);
         }
-        desiredInput = currentArtifactInput(domain, read);
+        else {
+            const input = await resolveArtifactInputDocument(parsed, read.contract, domain === "pr" && operation === "sync");
+            desiredInput =
+                operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
+        }
     }
-    else {
-        const input = await resolveArtifactInputDocument(parsed, read.contract);
-        desiredInput =
-            operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
+    catch (error) {
+        if (operation === "edit" || operation === "normalize") {
+            throw translateRemediationFailure(domain, operation, read, error);
+        }
+        throw error;
     }
-    const desired = prepareRemediationArtifact(domain, read.contract, desiredInput);
+    let desired;
+    try {
+        desired = prepareRemediationArtifact(domain, read.contract, desiredInput);
+    }
+    catch (error) {
+        if (operation === "edit" || operation === "normalize") {
+            throw translateRemediationFailure(domain, operation, read, error, desiredInput);
+        }
+        throw error;
+    }
     const diff = diffArtifact(domain, read, desired);
     const resultBase = {
         ...base,
@@ -713,7 +742,7 @@ function createAdapter(dependencies, root, repository) {
     const factory = dependencies.createAdapter ?? ((options) => new GitHubAdapter(options));
     return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
-async function readInputDocument(value) {
+async function readInputDocument(value, parser = parseArtifactInputDocument) {
     if (typeof value !== "string" || value.length === 0)
         throw new CliError("INPUT_REQUIRED", "Use --from <file.json>.", "--from");
     let source;
@@ -747,7 +776,7 @@ async function readInputDocument(value) {
             error.cause = cause;
         throw error;
     }
-    return parseArtifactInputDocument(parsed);
+    return parser(parsed);
 }
 function mergeOptionMetadata(document, options) {
     const metadata = {
@@ -893,14 +922,17 @@ function mergeDirectFields(document, directFields) {
  * the base document and direct fields are merged in under a conflict rule
  * that never depends on which flag appeared first in argv.
  */
-async function resolveArtifactInputDocument(parsed, contract) {
+async function resolveArtifactInputDocument(parsed, contract, requirePullRequestSyncInput = false) {
     const hasFrom = typeof parsed.options.from === "string";
     if (!hasFrom && parsed.fields.length === 0) {
         throw new CliError("INPUT_REQUIRED", "Use --from <file.json> or --field <name>=<value>.", "--from");
     }
-    const document = hasFrom ? await readInputDocument(parsed.options.from) : { fields: {}, metadata: {} };
+    const document = hasFrom
+        ? await readInputDocument(parsed.options.from, requirePullRequestSyncInput ? parsePullRequestSyncInput : undefined)
+        : { fields: {}, metadata: {} };
     const directFields = resolveDirectFields(contract, parsed.fields);
-    return mergeDirectFields(document, directFields);
+    const merged = mergeDirectFields(document, directFields);
+    return requirePullRequestSyncInput ? assertPullRequestSyncInputComplete(merged) : merged;
 }
 function templateSelector(parsed, positional) {
     return typeof parsed.options.template === "string" ? parsed.options.template : positional;
@@ -975,9 +1007,28 @@ function toErrorShape(error) {
             ...(error.details === undefined ? {} : { details: error.details }),
         };
     if (error instanceof SemanticValidationError)
-        return { code: "SEMANTIC_VALIDATION_FAILED", message: error.message, violations: error.violations };
+        return {
+            code: "SEMANTIC_VALIDATION_FAILED",
+            message: error.message,
+            violations: error.violations,
+            ...(error.details === undefined ? {} : { details: error.details }),
+            ...(error.diagnostics === undefined ? {} : { diagnostics: error.diagnostics }),
+        };
+    if (error instanceof RemediationError)
+        return {
+            code: error.code,
+            message: error.message,
+            ...(error.path === undefined ? {} : { path: error.path }),
+            ...(error.details === undefined ? {} : { details: error.details }),
+            ...(error.diagnostics === undefined ? {} : { diagnostics: error.diagnostics }),
+        };
     if (error instanceof ArtifactInputError)
-        return { code: error.code, message: error.message, path: error.path };
+        return {
+            code: error.code,
+            message: error.message,
+            path: error.path,
+            ...(error.details === undefined ? {} : { details: error.details }),
+        };
     if (error instanceof ArtifactPreparationError) {
         return { code: error.code, message: error.message, diagnostics: error.diagnostics };
     }
@@ -1201,7 +1252,9 @@ function artifactLeaves(domain) {
         },
         sync: {
             usage: `${domain} sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
-            summary: `Reconcile an existing ${noun} to a complete desired semantic state.`,
+            summary: domain === "pr"
+                ? `Reconcile an existing ${noun} to a complete desired semantic state. ${renderPullRequestSyncInputHelp()}`
+                : `Reconcile an existing ${noun} to a complete desired semantic state.`,
             example: `inari ${domain} sync 123 --from desired.json --dry-run`,
         },
     };
