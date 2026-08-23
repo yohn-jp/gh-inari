@@ -1,0 +1,36 @@
+name: Sync dist for PR 141
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  sync-dist:
+    if: github.event.pull_request.number == 141
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Build and commit dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          corepack enable
+          corepack prepare pnpm@11.18.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm run build
+          git add dist
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: sync generated dist"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
