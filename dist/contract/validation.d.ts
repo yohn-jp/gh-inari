@@ -103,7 +103,9 @@ export interface PartialSemanticRepairResult {
 }
 export declare class SemanticValidationError extends Error {
     readonly violations: readonly SemanticViolation[];
-    constructor(violations: readonly SemanticViolation[]);
+    readonly diagnostics?: ArtifactDiagnosticReport;
+    readonly details?: Readonly<Record<string, unknown>>;
+    constructor(violations: readonly SemanticViolation[], diagnostics?: ArtifactDiagnosticReport, details?: Readonly<Record<string, unknown>>);
 }
 /**
  * Validate the semantic field map for a compiled contract. This is the one

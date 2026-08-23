@@ -4,10 +4,14 @@ import { normalizeFieldValue } from "./normalization.js";
 import { createArtifactDiagnostic, createArtifactDiagnosticReport, createFieldEvidence, serializeArtifactDiagnosticReport, } from "../diagnostics.js";
 export class SemanticValidationError extends Error {
     violations;
-    constructor(violations) {
+    diagnostics;
+    details;
+    constructor(violations, diagnostics, details) {
         super(violations.map((violation) => `${violation.path}: ${violation.message}`).join("\n"));
         this.name = "SemanticValidationError";
         this.violations = violations;
+        this.diagnostics = diagnostics;
+        this.details = details;
     }
 }
 /**
