@@ -1,4 +1,4 @@
-import { extractTemplateIdentityMarker, prepareIssueArtifact, preparePullRequestArtifact, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
+import { extractTemplateIdentityMarker, loadCanonicalArtifact, prepareIssueArtifact, preparePullRequestArtifact, recoverExistingArtifactValues, renderIssueArtifact, renderPullRequestArtifact, selectExistingArtifactCandidate, validatePartialArtifactInput, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { compileRepositoryGovernedContract, compileRepositoryGovernedContracts, updateGovernedIssue, updateGovernedPullRequest, } from "./governance.js";
 import { createHash } from "node:crypto";
 export class RemediationError extends Error {
@@ -59,7 +59,12 @@ export async function readGovernedExistingArtifact(adapter, domain, number, sele
         // contract identity (e.g. a full-replacement sync) are not forced through
         // the auto-discovery ambiguity/failure path.
         const explicitContract = selector !== undefined ? candidates[0]?.contract : undefined;
-        return { remote, contract: selected.contract ?? explicitContract, result: selected.result };
+        return {
+            remote,
+            contract: selected.contract ?? explicitContract,
+            result: selected.result,
+            templateSelection: selector === undefined ? "inferred" : "explicit",
+        };
     }
     const compileDiagnostics = failedTemplates.map((failed) => ({
         code: "EXISTING_TEMPLATE_COMPILE_FAILED",
@@ -161,22 +166,25 @@ export function renderCanonicalBody(domain, contract, fields) {
 }
 /** Build the complete semantic input represented by the current remote artifact. */
 export function currentArtifactInput(domain, read) {
+    const fields = read.result.parse.parsed || read.contract === undefined || read.templateSelection !== "explicit"
+        ? read.result.parse.values
+        : recoverExistingArtifactValues(read.contract, read.remote.body).values;
     if (domain === "issue") {
         const remote = read.remote;
         return {
-            fields: read.result.parse.values,
+            fields,
             metadata: { title: remote.title, labels: remote.labels, assignees: remote.assignees },
         };
     }
     const remote = read.remote;
     return {
-        fields: read.result.parse.values,
+        fields,
         metadata: { title: remote.title, head: remote.head, base: remote.base, draft: remote.draft },
     };
 }
 /** Apply an explicit semantic patch without touching raw Markdown or inferring missing fields. */
 export function applySemanticPatch(domain, read, patch) {
-    if (read.contract === undefined || !read.result.parse.parsed) {
+    if (read.contract === undefined || (!read.result.parse.parsed && read.templateSelection !== "explicit")) {
         throw new RemediationError("SEMANTIC_PATCH_UNSUPPORTED", "The existing artifact is not safely parseable under one authoritative template.", "$.artifact");
     }
     assertKnownFields(read.contract, patch.fields, "SEMANTIC_PATCH_INVALID");
@@ -188,7 +196,27 @@ export function applySemanticPatch(domain, read, patch) {
             throw new RemediationError("PR_HEAD_CHANGE_UNSUPPORTED", "Pull request head branches cannot be changed through the GitHub pull-request model.", "$.head", { current: remote.head, requested: patch.metadata.head });
         }
     }
-    return { fields: { ...current.fields, ...patch.fields }, metadata };
+    const merged = { fields: { ...current.fields, ...patch.fields }, metadata };
+    if (read.templateSelection === "explicit" && !read.result.valid) {
+        validateReconstructedInput(read.contract, merged, "SEMANTIC_PATCH_INVALID");
+    }
+    return merged;
+}
+/** Validate values recovered during an explicit-template repair. */
+export function validateReconstructedInput(contract, input, code) {
+    const loaded = loadCanonicalArtifact(contract, input);
+    if (loaded.valid)
+        return;
+    const partial = validatePartialArtifactInput(contract, input.fields);
+    throw new RemediationError(code, "The selected template requires semantic values that could not be recovered from the existing artifact.", "$.fields", {
+        requirements: {
+            acceptedFields: partial.acceptedFields,
+            missingFields: partial.missingFields,
+            invalidFields: partial.invalidFields,
+            projectedConstraints: partial.projectedConstraints,
+            diagnostics: partial.diagnostics,
+        },
+    });
 }
 /** Validate and prepare the complete desired state through the existing artifact boundary. */
 export function prepareRemediationArtifact(domain, contract, input) {
@@ -221,7 +249,7 @@ export function prepareSyncInput(domain, read, desired) {
 }
 /** Compare the current semantic/rendered artifact with a prepared canonical projection. */
 export function diffArtifact(domain, read, desired) {
-    const currentFields = read.result.parse.values;
+    const currentFields = currentArtifactInput(domain, read).fields;
     const desiredFields = desiredFieldsFromArtifact(domain, desired, read.contract);
     const keys = [...new Set([...Object.keys(currentFields), ...Object.keys(desiredFields)])].sort(compareStrings);
     const semantic = [];

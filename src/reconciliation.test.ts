@@ -9,6 +9,7 @@ import {
   prepareRemediationArtifact,
   prepareSyncInput,
   RemediationError,
+  validateReconstructedInput,
   renderCanonicalBody,
   type ExistingArtifactRead,
 } from "./reconciliation.js";
@@ -17,6 +18,7 @@ import { parsePullRequestTemplate } from "./pull-request-template.js";
 import {
   parseExistingPullRequestArtifact,
   preparePullRequestArtifact,
+  recoverExistingArtifactValues,
   renderPullRequestArtifact,
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
@@ -342,5 +344,144 @@ test("sync without a resolvable contract still refuses to replace an unparseable
   assert.throws(
     () => prepareSyncInput("issue", read, { fields: {}, metadata: {} }),
     (error: unknown) => error instanceof RemediationError && error.code === "SYNC_CURRENT_UNSUPPORTED",
+  );
+});
+
+test("explicit PR template recovery preserves unambiguous values from a wrong-order body", () => {
+  const path = ".github/PULL_REQUEST_TEMPLATE.md";
+  const source = `## Summary
+
+<!-- Describe the change. -->
+
+## Linked issue
+
+Closes #
+
+## Validation
+
+- [ ] Tests
+- [ ] Build
+`;
+  const contract = trusted(
+    parsePullRequestTemplate(source, {
+      id: "default",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "Default",
+      path,
+    }),
+    path,
+    source,
+  );
+  const body = `## Validation
+
+- [x] Tests
+- [ ] Build
+
+## Linked issue
+
+Closes #112
+
+## Summary
+
+A recovered summary
+`;
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 112,
+      title: "feat: recover",
+      body,
+      state: "open",
+      url: "https://github.com/acme/inari/pull/112",
+      draft: false,
+      head: "feature",
+      base: "main",
+    },
+    contract,
+    result: validateExistingPullRequestArtifact(contract, body),
+    templateSelection: "explicit",
+  };
+
+  assert.equal(read.result.classification, "wrong-template");
+  assert.deepEqual(recoverExistingArtifactValues(contract, body).values, {
+    summary: "A recovered summary",
+    linked_issue: "Closes #112",
+    validation: ["tests"],
+  });
+  const desired = prepareRemediationArtifact("pr", contract, currentArtifactInput("pr", read));
+  assert.equal(validateExistingPullRequestArtifact(contract, desired.body).valid, true);
+  assert.match(desired.body, /^## Summary/mu);
+  assert.match(desired.body, /A recovered summary/u);
+  assert.match(desired.body, /Closes #112/u);
+});
+
+test("explicit PR recovery reports missing required semantics as bounded requirements", () => {
+  const path = ".github/PULL_REQUEST_TEMPLATE.md";
+  const source = `## Summary
+
+Describe the change.
+
+## Linked issue
+
+Closes #
+
+## Validation
+
+- [ ] Tests
+`;
+  const base = parsePullRequestTemplate(source, {
+    id: "default",
+    type: "pull-request-default",
+    kind: "pull-request",
+    name: "Default",
+    path,
+  });
+  const contract = trusted(
+    {
+      ...base,
+      supplementalConstraints: {
+        fields: [
+          { fieldId: "summary", required: true },
+          { fieldId: "linked_issue", required: true },
+          { fieldId: "validation", required: true, checklistMinCompleted: 1 },
+        ],
+      },
+    },
+    path,
+    source,
+  );
+  const body = "## Summary\n\nA recovered summary\n";
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 113,
+      title: "feat: incomplete",
+      body,
+      state: "open",
+      url: "https://github.com/acme/inari/pull/113",
+      draft: false,
+      head: "feature",
+      base: "main",
+    },
+    contract,
+    result: validateExistingPullRequestArtifact(contract, body),
+    templateSelection: "explicit",
+  };
+
+  assert.throws(
+    () => validateReconstructedInput(contract, currentArtifactInput("pr", read), "NORMALIZATION_UNSAFE"),
+    (error: unknown) => {
+      assert.ok(error instanceof RemediationError);
+      assert.equal(error.code, "NORMALIZATION_UNSAFE");
+      const requirements = error.details?.requirements as {
+        missingFields?: readonly { field: string }[];
+        diagnostics?: { diagnostics: readonly unknown[] };
+      };
+      assert.deepEqual(
+        requirements.missingFields?.map((field) => field.field),
+        ["linked_issue", "validation"],
+      );
+      assert.equal((requirements.diagnostics?.diagnostics.length ?? 0) <= 32, true);
+      return true;
+    },
   );
 });

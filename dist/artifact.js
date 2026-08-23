@@ -387,6 +387,60 @@ export function parseExistingPullRequestArtifact(contractInput, body) {
     }
     return parseRenderedBody(contractInput, body ?? "", undefined, true);
 }
+/**
+ * Recover field values from a malformed or wrong-template body without
+ * weakening the strict existing-artifact parser. The section boundaries and
+ * field decoding are the same parser primitives used by strict parsing; only
+ * the order/complete-structure requirement is relaxed for an explicitly
+ * selected repair target.
+ */
+export function recoverExistingArtifactValues(contractInput, body) {
+    assertCanonicalContract(contractInput);
+    const contract = contractInput;
+    const strict = contract.artifactKind === "issue"
+        ? parseExistingIssueArtifact(contract, body)
+        : parseExistingPullRequestArtifact(contract, body);
+    if (strict.parsed)
+        return { values: strict.values, diagnostics: strict.diagnostics };
+    const markerFreeBody = extractTemplateIdentityMarker(body ?? "").body;
+    const stripComments = contract.artifactKind === "pull_request";
+    const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
+    const blocks = headingBlocks(source);
+    const values = {};
+    const expectedTitles = new Map();
+    for (const section of contract.sections) {
+        if (section.kind !== "input")
+            continue;
+        const field = section.fields[0];
+        const title = section.title ?? field?.label;
+        if (field === undefined || title === undefined)
+            continue;
+        const expectedTitle = escapeHeading(title);
+        expectedTitles.set(expectedTitle, (expectedTitles.get(expectedTitle) ?? 0) + 1);
+    }
+    for (const section of contract.sections) {
+        if (section.kind !== "input")
+            continue;
+        const field = section.fields[0];
+        const title = section.title ?? field?.label;
+        if (field === undefined || title === undefined)
+            continue;
+        const expectedTitle = escapeHeading(title);
+        if (expectedTitles.get(expectedTitle) !== 1)
+            continue;
+        const candidates = blocks.filter((block) => block.title === expectedTitle);
+        if (candidates.length !== 1)
+            continue;
+        const block = candidates[0];
+        const parsed = parseFieldLines(field, block.body, `$.${field.id}`, stripComments, contract.artifactKind === "issue");
+        // parseFieldLines may retain known checklist selections alongside a
+        // bounded structural diagnostic. The canonical loader below decides
+        // whether such a partial value is semantically usable.
+        if (parsed.value !== undefined)
+            values[field.id] = parsed.value;
+    }
+    return { values, diagnostics: strict.diagnostics };
+}
 export function validateExistingIssueArtifact(contractInput, body) {
     assertCanonicalContract(contractInput);
     const parse = parseExistingIssueArtifact(contractInput, body);
@@ -770,6 +824,30 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
     if (diagnostics.length > 0)
         return { parsed: false, values: {}, diagnostics };
     return { parsed: true, values, diagnostics: [] };
+}
+function headingBlocks(source) {
+    const lines = source.split("\n");
+    const starts = [];
+    let openFence;
+    lines.forEach((line, index) => {
+        const fenceMatch = /^(`{3,})/u.exec(line);
+        if (openFence === undefined && fenceMatch !== null) {
+            openFence = fenceMatch[1];
+            return;
+        }
+        if (openFence !== undefined) {
+            if (fenceMatch !== null && fenceMatch[1] === openFence)
+                openFence = undefined;
+            return;
+        }
+        const match = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*$/u.exec(line);
+        if (match !== null)
+            starts.push({ index, title: match[1] });
+    });
+    return starts.map((start, position) => {
+        const next = starts[position + 1]?.index ?? lines.length;
+        return { title: start.title, body: trimLineRange(lines.slice(start.index + 1, next)) };
+    });
 }
 function parseFieldLines(field, lines, path, stripComments, issueBody) {
     const diagnostics = [];

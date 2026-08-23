@@ -97,6 +97,15 @@ export interface ExistingArtifactParseResult {
     readonly values: Readonly<Record<string, unknown>>;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
+/**
+ * Semantic values recovered from an artifact that did not pass the strict
+ * structural parser. Values are extracted only from unambiguous contract
+ * sections and are still subject to the canonical semantic loader before use.
+ */
+export interface RecoverableArtifactValues {
+    readonly values: Readonly<Record<string, unknown>>;
+    readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+}
 export interface ExistingArtifactValidationResult {
     readonly valid: boolean;
     readonly classification: ExistingArtifactClassification;
@@ -198,6 +207,14 @@ export declare function prepareIssueArtifact(contractInput: unknown, input: Arti
 export declare function preparePullRequestArtifact(contractInput: unknown, input: ArtifactInputDocument): PreparedPullRequestArtifact;
 export declare function parseExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
 export declare function parseExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
+/**
+ * Recover field values from a malformed or wrong-template body without
+ * weakening the strict existing-artifact parser. The section boundaries and
+ * field decoding are the same parser primitives used by strict parsing; only
+ * the order/complete-structure requirement is relaxed for an explicitly
+ * selected repair target.
+ */
+export declare function recoverExistingArtifactValues(contractInput: unknown, body: string | null | undefined): RecoverableArtifactValues;
 export declare function validateExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
 export declare function validateExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
 export interface ExistingArtifactCandidate {

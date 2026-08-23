@@ -17,6 +17,8 @@ export interface ExistingArtifactRead {
     readonly remote: GitHubIssue | GitHubPullRequest;
     readonly contract?: CanonicalContract;
     readonly result: ExistingArtifactValidationResult;
+    /** Whether the caller explicitly selected the contract for repair. */
+    readonly templateSelection?: "explicit" | "inferred";
 }
 export interface ExistingArtifactAssessment {
     readonly status: RemediationStatus;
@@ -55,6 +57,8 @@ export declare function renderCanonicalBody(domain: GovernedArtifactDomain, cont
 export declare function currentArtifactInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead): ArtifactInputDocument;
 /** Apply an explicit semantic patch without touching raw Markdown or inferring missing fields. */
 export declare function applySemanticPatch(domain: GovernedArtifactDomain, read: ExistingArtifactRead, patch: ArtifactInputDocument): ArtifactInputDocument;
+/** Validate values recovered during an explicit-template repair. */
+export declare function validateReconstructedInput(contract: CanonicalContract, input: ArtifactInputDocument, code: "NORMALIZATION_UNSAFE" | "SEMANTIC_PATCH_INVALID"): void;
 /** Validate and prepare the complete desired state through the existing artifact boundary. */
 export declare function prepareRemediationArtifact(domain: GovernedArtifactDomain, contract: CanonicalContract, input: ArtifactInputDocument): PreparedRemediationArtifact;
 /**
