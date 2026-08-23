@@ -58,7 +58,8 @@ export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_
 export declare class ArtifactInputError extends Error {
     readonly code: ArtifactInputErrorCode;
     readonly path: string;
-    constructor(code: ArtifactInputErrorCode, message: string, path?: string);
+    readonly details?: unknown;
+    constructor(code: ArtifactInputErrorCode, message: string, path?: string, details?: unknown);
 }
 export type ArtifactPreparationErrorCode = "ARTIFACT_PROVENANCE_MISSING" | "ARTIFACT_ROUND_TRIP_INVALID";
 export type ArtifactRoundTripDiagnosticCode = "ROUND_TRIP_PARSE" | "ROUND_TRIP_SEMANTIC" | "ROUND_TRIP_MISMATCH";

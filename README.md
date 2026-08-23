@@ -186,6 +186,11 @@ inari pr sync <number> --from desired.json [--dry-run]
 
 The `fields` object is the semantic input contract shown by `schema`. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. `--title`, `--head`, and `--base` override envelope metadata.
 
+`pr sync --from` accepts a complete pull-request desired-state envelope. Use
+`inari pr sync --help` for the top-level contract, or
+`inari pr schema <template> --json` for its machine-readable `syncInput.schema`
+and a valid `syncInput.minimalExample`.
+
 Schema and validation output is JSON. `--json` makes render and create output JSON as well. Validation failures return exit status `2`; usage errors return `1`; GitHub/transport failures return `3`. Error objects contain stable `code`, `path` where applicable, and ordered `violations`.
 
 `issue get` and `pr get` are canonical-only v1 reads. They resolve the target

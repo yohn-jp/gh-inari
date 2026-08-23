@@ -91,12 +91,14 @@ export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_
 export class ArtifactInputError extends Error {
   readonly code: ArtifactInputErrorCode;
   readonly path: string;
+  readonly details?: unknown;
 
-  constructor(code: ArtifactInputErrorCode, message: string, path = "$") {
+  constructor(code: ArtifactInputErrorCode, message: string, path = "$", details?: unknown) {
     super(message);
     this.name = "ArtifactInputError";
     this.code = code;
     this.path = path;
+    this.details = details;
   }
 }
 
