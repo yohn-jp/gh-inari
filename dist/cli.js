@@ -8,7 +8,7 @@ import { projectContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
-import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, readGovernedExistingArtifact, RemediationError, updateGovernedExistingArtifact, } from "./reconciliation.js";
+import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, readGovernedExistingArtifact, RemediationError, validateReconstructedInput, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 const EXIT_USAGE = 1;
@@ -653,9 +653,15 @@ async function runExistingRemediation(domain, operation, number, parsed, root, d
     let desiredInput;
     if (operation === "normalize") {
         if (!read.result.valid || !read.result.parse.parsed) {
-            throw new RemediationError("NORMALIZATION_UNSAFE", "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.", "$.artifact");
+            if (read.templateSelection !== "explicit" || read.contract === undefined) {
+                throw new RemediationError("NORMALIZATION_UNSAFE", "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.", "$.artifact");
+            }
+            desiredInput = currentArtifactInput(domain, read);
+            validateReconstructedInput(read.contract, desiredInput, "NORMALIZATION_UNSAFE");
         }
-        desiredInput = currentArtifactInput(domain, read);
+        else {
+            desiredInput = currentArtifactInput(domain, read);
+        }
     }
     else {
         const input = await resolveArtifactInputDocument(parsed, read.contract);

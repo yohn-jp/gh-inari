@@ -1,10 +1,13 @@
 import {
   extractTemplateIdentityMarker,
+  loadCanonicalArtifact,
   prepareIssueArtifact,
   preparePullRequestArtifact,
+  recoverExistingArtifactValues,
   renderIssueArtifact,
   renderPullRequestArtifact,
   selectExistingArtifactCandidate,
+  validatePartialArtifactInput,
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
   type ArtifactInputDocument,
@@ -58,6 +61,8 @@ export interface ExistingArtifactRead {
   readonly remote: GitHubIssue | GitHubPullRequest;
   readonly contract?: CanonicalContract;
   readonly result: ExistingArtifactValidationResult;
+  /** Whether the caller explicitly selected the contract for repair. */
+  readonly templateSelection?: "explicit" | "inferred";
 }
 
 export interface ExistingArtifactAssessment {
@@ -149,7 +154,12 @@ export async function readGovernedExistingArtifact(
     // contract identity (e.g. a full-replacement sync) are not forced through
     // the auto-discovery ambiguity/failure path.
     const explicitContract = selector !== undefined ? candidates[0]?.contract : undefined;
-    return { remote, contract: selected.contract ?? explicitContract, result: selected.result };
+    return {
+      remote,
+      contract: selected.contract ?? explicitContract,
+      result: selected.result,
+      templateSelection: selector === undefined ? "inferred" : "explicit",
+    };
   }
 
   const compileDiagnostics: ExistingArtifactDiagnostic[] = failedTemplates.map((failed) => ({
@@ -283,16 +293,20 @@ export function currentArtifactInput(
   domain: GovernedArtifactDomain,
   read: ExistingArtifactRead,
 ): ArtifactInputDocument {
+  const fields =
+    read.result.parse.parsed || read.contract === undefined || read.templateSelection !== "explicit"
+      ? read.result.parse.values
+      : recoverExistingArtifactValues(read.contract, read.remote.body).values;
   if (domain === "issue") {
     const remote = read.remote as GitHubIssue;
     return {
-      fields: read.result.parse.values,
+      fields,
       metadata: { title: remote.title, labels: remote.labels, assignees: remote.assignees },
     };
   }
   const remote = read.remote as GitHubPullRequest;
   return {
-    fields: read.result.parse.values,
+    fields,
     metadata: { title: remote.title, head: remote.head, base: remote.base, draft: remote.draft },
   };
 }
@@ -303,7 +317,7 @@ export function applySemanticPatch(
   read: ExistingArtifactRead,
   patch: ArtifactInputDocument,
 ): ArtifactInputDocument {
-  if (read.contract === undefined || !read.result.parse.parsed) {
+  if (read.contract === undefined || (!read.result.parse.parsed && read.templateSelection !== "explicit")) {
     throw new RemediationError(
       "SEMANTIC_PATCH_UNSUPPORTED",
       "The existing artifact is not safely parseable under one authoritative template.",
@@ -324,7 +338,36 @@ export function applySemanticPatch(
       );
     }
   }
-  return { fields: { ...current.fields, ...patch.fields }, metadata };
+  const merged = { fields: { ...current.fields, ...patch.fields }, metadata };
+  if (read.templateSelection === "explicit" && !read.result.valid) {
+    validateReconstructedInput(read.contract, merged, "SEMANTIC_PATCH_INVALID");
+  }
+  return merged;
+}
+
+/** Validate values recovered during an explicit-template repair. */
+export function validateReconstructedInput(
+  contract: CanonicalContract,
+  input: ArtifactInputDocument,
+  code: "NORMALIZATION_UNSAFE" | "SEMANTIC_PATCH_INVALID",
+): void {
+  const loaded = loadCanonicalArtifact(contract, input);
+  if (loaded.valid) return;
+  const partial = validatePartialArtifactInput(contract, input.fields);
+  throw new RemediationError(
+    code,
+    "The selected template requires semantic values that could not be recovered from the existing artifact.",
+    "$.fields",
+    {
+      requirements: {
+        acceptedFields: partial.acceptedFields,
+        missingFields: partial.missingFields,
+        invalidFields: partial.invalidFields,
+        projectedConstraints: partial.projectedConstraints,
+        diagnostics: partial.diagnostics,
+      },
+    },
+  );
 }
 
 /** Validate and prepare the complete desired state through the existing artifact boundary. */
@@ -380,7 +423,7 @@ export function diffArtifact(
   read: ExistingArtifactRead,
   desired: PreparedRemediationArtifact,
 ): SemanticArtifactDiff {
-  const currentFields = read.result.parse.values;
+  const currentFields = currentArtifactInput(domain, read).fields;
   const desiredFields = desiredFieldsFromArtifact(domain, desired, read.contract);
   const keys = [...new Set([...Object.keys(currentFields), ...Object.keys(desiredFields)])].sort(compareStrings);
   const semantic: SemanticDiffChange[] = [];

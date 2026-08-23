@@ -35,6 +35,7 @@ import {
   prepareSyncInput,
   readGovernedExistingArtifact,
   RemediationError,
+  validateReconstructedInput,
   updateGovernedExistingArtifact,
 } from "./reconciliation.js";
 import {
@@ -888,13 +889,18 @@ async function runExistingRemediation(
   let desiredInput: ArtifactInputDocument;
   if (operation === "normalize") {
     if (!read.result.valid || !read.result.parse.parsed) {
-      throw new RemediationError(
-        "NORMALIZATION_UNSAFE",
-        "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.",
-        "$.artifact",
-      );
+      if (read.templateSelection !== "explicit" || read.contract === undefined) {
+        throw new RemediationError(
+          "NORMALIZATION_UNSAFE",
+          "Normalization requires a semantically valid artifact whose values can be round-tripped canonically.",
+          "$.artifact",
+        );
+      }
+      desiredInput = currentArtifactInput(domain, read);
+      validateReconstructedInput(read.contract, desiredInput, "NORMALIZATION_UNSAFE");
+    } else {
+      desiredInput = currentArtifactInput(domain, read);
     }
-    desiredInput = currentArtifactInput(domain, read);
   } else {
     const input = await resolveArtifactInputDocument(parsed, read.contract);
     desiredInput =
