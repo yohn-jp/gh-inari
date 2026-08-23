@@ -82,7 +82,7 @@ test("normalize diagnostics distinguish missing semantics through the shared con
   assert.equal(missing?.state, "missing");
   assert.equal(missing?.detailCode, "FIELD_REQUIRED");
   assert.equal(missing?.path, "$.fields.linked_issue");
-  assert.equal(missing?.recovery[0]?.action, "provide");
+  assert.equal(missing?.recovery?.[0]?.action, "provide");
 });
 
 test("explicit-template reconstruction requirements stay field-diagnostic instead of reverting to parser failure", () => {
@@ -127,6 +127,6 @@ test("unsupported PR head changes use the common bounded diagnostic vocabulary",
   const diagnostic = report.diagnostics.find((entry) => entry.path === "$.metadata.head");
   assert.equal(diagnostic?.state, "unsupported");
   assert.equal(diagnostic?.code, "FIELD_UNSUPPORTED");
-  assert.equal(diagnostic?.recovery[0]?.action, "replace");
+  assert.equal(diagnostic?.recovery?.[0]?.action, "replace");
   assert.equal(JSON.stringify(remediationFailureDetails(read)).includes(read.remote.body ?? ""), false);
 });
