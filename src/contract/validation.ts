@@ -138,11 +138,19 @@ export interface PartialSemanticRepairResult {
 
 export class SemanticValidationError extends Error {
   readonly violations: readonly SemanticViolation[];
+  readonly diagnostics?: ArtifactDiagnosticReport;
+  readonly details?: Readonly<Record<string, unknown>>;
 
-  constructor(violations: readonly SemanticViolation[]) {
+  constructor(
+    violations: readonly SemanticViolation[],
+    diagnostics?: ArtifactDiagnosticReport,
+    details?: Readonly<Record<string, unknown>>,
+  ) {
     super(violations.map((violation) => `${violation.path}: ${violation.message}`).join("\n"));
     this.name = "SemanticValidationError";
     this.violations = violations;
+    this.diagnostics = diagnostics;
+    this.details = details;
   }
 }
 

@@ -7,15 +7,20 @@ import {
   renderIssueArtifact,
   renderPullRequestArtifact,
   selectExistingArtifactCandidate,
-  validatePartialArtifactInput,
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
+  validatePartialArtifactInput,
   type ArtifactInputDocument,
   type ExistingArtifactDiagnostic,
   type ExistingArtifactValidationResult,
   type TemplateIdentityMarker,
 } from "./artifact.js";
-import { type ArtifactKind, type CanonicalContract } from "./contract/index.js";
+import { SemanticValidationError, type ArtifactKind, type CanonicalContract } from "./contract/index.js";
+import {
+  createArtifactDiagnostic,
+  createArtifactDiagnosticReport,
+  type ArtifactDiagnosticReport,
+} from "./diagnostics.js";
 import {
   compileRepositoryGovernedContract,
   compileRepositoryGovernedContracts,
@@ -38,6 +43,7 @@ export type RemediationStatus =
 export type RemediationErrorCode =
   | "SEMANTIC_PATCH_INVALID"
   | "SEMANTIC_PATCH_UNSUPPORTED"
+  | "SEMANTIC_VALIDATION_FAILED"
   | "NORMALIZATION_UNSAFE"
   | "SYNC_INPUT_INCOMPLETE"
   | "SYNC_CURRENT_UNSUPPORTED"
@@ -47,22 +53,213 @@ export class RemediationError extends Error {
   readonly code: RemediationErrorCode;
   readonly path?: string;
   readonly details?: Readonly<Record<string, unknown>>;
+  readonly diagnostics?: ArtifactDiagnosticReport;
 
-  constructor(code: RemediationErrorCode, message: string, path?: string, details?: Readonly<Record<string, unknown>>) {
+  constructor(
+    code: RemediationErrorCode,
+    message: string,
+    path?: string,
+    details?: Readonly<Record<string, unknown>>,
+    diagnostics?: ArtifactDiagnosticReport,
+  ) {
     super(message);
     this.name = "RemediationError";
     this.code = code;
     this.path = path;
     this.details = details;
+    this.diagnostics = diagnostics;
   }
+}
+
+/** Project recoverable normalize/edit failures through the shared #118 contract. */
+export function remediationDiagnosticReport(
+  domain: GovernedArtifactDomain,
+  operation: "edit" | "normalize",
+  read: ExistingArtifactRead,
+  input?: ArtifactInputDocument,
+  error?: unknown,
+): ArtifactDiagnosticReport {
+  const requirementReport = remediationRequirementDiagnostics(error);
+  if (requirementReport !== undefined) return boundedDiagnosticReport(requirementReport);
+
+  let semanticReport: ArtifactDiagnosticReport | undefined;
+  if (read.result.parse.parsed && read.contract !== undefined) {
+    const candidate =
+      error instanceof RemediationError && error.code === "PR_HEAD_CHANGE_UNSUPPORTED"
+        ? currentArtifactInput(domain, read)
+        : (input ?? currentArtifactInput(domain, read));
+    const loaded = loadCanonicalArtifact(read.contract, candidate);
+    semanticReport = boundedDiagnosticReport(loaded.diagnostics);
+  }
+
+  if (error instanceof RemediationError && error.code === "SEMANTIC_PATCH_INVALID") {
+    return createArtifactDiagnosticReport(
+      [
+        ...(semanticReport?.diagnostics.slice(0, 31) ?? []),
+        createArtifactDiagnostic({
+          state: "invalid",
+          code: "FIELD_INVALID",
+          detailCode: "FIELD_CONSTRAINT_VIOLATION",
+          reason: "constraint",
+          path: error.path,
+          message: error.message,
+          recovery: [{ action: "replace", path: error.path, hint: "Remove or replace the undeclared field." }],
+        }),
+      ],
+      semanticReport?.acceptedFields ?? [],
+    );
+  }
+
+  if (error instanceof RemediationError && error.code === "PR_HEAD_CHANGE_UNSUPPORTED") {
+    return createArtifactDiagnosticReport(
+      [
+        ...(semanticReport?.diagnostics.slice(0, 31) ?? []),
+        createArtifactDiagnostic({
+          state: "unsupported",
+          code: "FIELD_UNSUPPORTED",
+          detailCode: "FIELD_UNSUPPORTED",
+          reason: "unsupported",
+          path: "$.metadata.head",
+          message: error.message,
+          recovery: [
+            {
+              action: "replace",
+              path: "$.metadata.head",
+              hint: "Keep the current pull-request head branch and retry.",
+            },
+          ],
+        }),
+      ],
+      semanticReport?.acceptedFields ?? [],
+    );
+  }
+
+  if (
+    semanticReport !== undefined &&
+    (semanticReport.diagnostics.length > 0 || semanticReport.acceptedFields.length > 0)
+  ) {
+    return semanticReport;
+  }
+
+  const sourceDiagnostics = read.remediationDiagnostics ?? read.result.parse.diagnostics;
+  const projected = sourceDiagnostics.slice(0, 32).map((diagnostic) => {
+    const ambiguous = diagnostic.code === "EXISTING_AMBIGUOUS_TEMPLATE";
+    const selectedTemplate = read.contract?.templateIdentity.path;
+    const hasSelectedTemplate = selectedTemplate !== undefined;
+    const path = projectExistingDiagnosticPath(diagnostic.path, read.contract);
+    const recovery = ambiguous
+      ? [
+          {
+            action: "select-template" as const,
+            path: "$.template",
+            hint: "Select one authoritative template with --template and retry.",
+          },
+        ]
+      : hasSelectedTemplate
+        ? [
+            {
+              action: "repair" as const,
+              path: "$.artifact",
+              hint: `Repair the artifact to match selected template "${selectedTemplate}" and retry.`,
+            },
+          ]
+        : [
+            {
+              action: "select-template" as const,
+              path: "$.template",
+              hint: "Select an authoritative template with --template and retry.",
+            },
+          ];
+    return createArtifactDiagnostic({
+      state: ambiguous ? "conflicting" : "unsupported",
+      code: ambiguous ? "FIELD_CONFLICT" : "FIELD_UNSUPPORTED",
+      detailCode: ambiguous ? "TEMPLATE_AMBIGUOUS" : "TEMPLATE_UNPARSEABLE",
+      reason: ambiguous ? "conflict" : "unsupported",
+      path,
+      message: existingDiagnosticMessage(diagnostic.code, hasSelectedTemplate),
+      recovery,
+    });
+  });
+
+  if (projected.length > 0) return createArtifactDiagnosticReport(projected);
+
+  const selectedTemplate = read.contract?.templateIdentity.path;
+  return createArtifactDiagnosticReport([
+    createArtifactDiagnostic({
+      state: "unrecoverable",
+      code: "ARTIFACT_UNRECOVERABLE",
+      path: "$.artifact",
+      message:
+        operation === "normalize"
+          ? "Normalization cannot preserve the existing artifact deterministically."
+          : "The existing artifact cannot be safely edited as a semantic document.",
+      recovery: [
+        {
+          action: "repair",
+          path: "$.artifact",
+          hint:
+            selectedTemplate === undefined
+              ? "Repair the artifact against an authoritative template and retry."
+              : `Repair the artifact against selected template "${selectedTemplate}" and retry.`,
+        },
+      ],
+    }),
+  ]);
+}
+
+/** Attach the common report while preserving the command's existing outer error. */
+export function translateRemediationFailure(
+  domain: GovernedArtifactDomain,
+  operation: "edit" | "normalize",
+  read: ExistingArtifactRead,
+  error: unknown,
+  input?: ArtifactInputDocument,
+): unknown {
+  const diagnostics = remediationDiagnosticReport(domain, operation, read, input, error);
+  const details = {
+    ...remediationFailureDetails(read),
+    ...(error instanceof RemediationError && error.details !== undefined ? error.details : {}),
+  };
+  if (error instanceof RemediationError) {
+    return new RemediationError(error.code, error.message, error.path, details, diagnostics);
+  }
+  if (error instanceof SemanticValidationError) {
+    return new SemanticValidationError(error.violations, diagnostics, details);
+  }
+  return error;
+}
+
+/** Bounded context for explicit-template repair without retaining source/body data. */
+export function remediationFailureDetails(read: ExistingArtifactRead): Readonly<Record<string, unknown>> {
+  const template = read.contract?.templateIdentity;
+  const requirements = explicitRepairRequirements(read);
+  return {
+    ...(template === undefined
+      ? {}
+      : {
+          template: {
+            id: boundDiagnosticText(template.id),
+            name: boundDiagnosticText(template.name),
+            path: boundDiagnosticText(template.path),
+            source: template.source,
+          },
+        }),
+    ...(read.result.attemptedTemplates === undefined
+      ? {}
+      : {
+          attemptedTemplates: read.result.attemptedTemplates.slice(0, 32).map(boundDiagnosticText),
+        }),
+    ...(requirements === undefined ? {} : { requirements }),
+  };
 }
 
 export interface ExistingArtifactRead {
   readonly remote: GitHubIssue | GitHubPullRequest;
   readonly contract?: CanonicalContract;
   readonly result: ExistingArtifactValidationResult;
-  /** Whether the caller explicitly selected the contract for repair. */
   readonly templateSelection?: "explicit" | "inferred";
+  /** Candidate-local parser diagnostics retained only for normalize/edit projection. */
+  readonly remediationDiagnostics?: readonly ExistingArtifactDiagnostic[];
 }
 
 export interface ExistingArtifactAssessment {
@@ -133,9 +330,6 @@ export async function readGovernedExistingArtifact(
   if (selector === undefined) {
     const marker = extractTemplateIdentityMarker(remote.body ?? "");
     if (marker.status !== "absent") {
-      // A marker is the primary selection signal: resolve and validate only
-      // the one contract it names, without structurally probing every other
-      // compiled candidate first.
       return resolveExistingArtifactByMarker(domain, remote, contracts, failedTemplates, marker.status, marker.marker);
     }
   }
@@ -148,17 +342,50 @@ export async function readGovernedExistingArtifact(
         : validateExistingPullRequestArtifact(contract, remote.body),
   }));
   const selected = selectExistingArtifactCandidate(candidates);
+
+  if (selector !== undefined && candidates[0] !== undefined && !candidates[0].result.parse.parsed) {
+    // Explicit template selection is authoritative for repair. Keep the strict
+    // parser untouched, but recover only unambiguous contract-owned values and
+    // expose them as a semantic candidate to edit/normalize. Structural parser
+    // failures remain available separately for bounded diagnostics.
+    const contract = candidates[0].contract;
+    const strictResult = candidates[0].result;
+    const recovered = recoverExistingArtifactValues(contract, remote.body);
+    const input = artifactInputFromRemote(domain, remote, recovered.values);
+    const loaded = loadCanonicalArtifact(contract, input);
+    const result: ExistingArtifactValidationResult = {
+      valid: loaded.valid,
+      classification: loaded.valid ? "valid" : "semantic",
+      parse: {
+        parsed: true,
+        values: loaded.valid ? loaded.canonical : recovered.values,
+        diagnostics: [],
+      },
+      violations: loaded.valid ? [] : loaded.violations,
+    };
+    return {
+      remote,
+      contract,
+      result,
+      templateSelection: "explicit",
+      remediationDiagnostics: strictResult.parse.diagnostics,
+    };
+  }
+
   if (selected.contract !== undefined || failedTemplates.length === 0) {
-    // An explicit selector names exactly one contract. Surface it even when the
-    // current body does not parse under it, so callers that only need the
-    // contract identity (e.g. a full-replacement sync) are not forced through
-    // the auto-discovery ambiguity/failure path.
     const explicitContract = selector !== undefined ? candidates[0]?.contract : undefined;
+    const remediationDiagnostics =
+      selected.contract === undefined
+        ? candidates.flatMap((candidate) => candidate.result.parse.diagnostics).slice(0, 32)
+        : undefined;
     return {
       remote,
       contract: selected.contract ?? explicitContract,
       result: selected.result,
       templateSelection: selector === undefined ? "inferred" : "explicit",
+      ...(remediationDiagnostics === undefined || remediationDiagnostics.length === 0
+        ? {}
+        : { remediationDiagnostics }),
     };
   }
 
@@ -180,16 +407,6 @@ export async function readGovernedExistingArtifact(
   };
 }
 
-/**
- * Resolve a marker-tagged existing artifact directly against the one
- * already-compiled repository template it names, without structurally
- * parsing the body against any other candidate. The marker only selects
- * among contracts freshly compiled from current trusted repository
- * governance, so it can never override that authoritative provenance. An
- * unknown, stale, wrong-kind, or otherwise untrustworthy marker fails
- * explicitly rather than falling back to a different template or to
- * structural matching.
- */
 function resolveExistingArtifactByMarker(
   domain: GovernedArtifactDomain,
   remote: GitHubIssue | GitHubPullRequest,
@@ -297,17 +514,30 @@ export function currentArtifactInput(
     read.result.parse.parsed || read.contract === undefined || read.templateSelection !== "explicit"
       ? read.result.parse.values
       : recoverExistingArtifactValues(read.contract, read.remote.body).values;
+  return artifactInputFromRemote(domain, read.remote, fields);
+}
+
+function artifactInputFromRemote(
+  domain: GovernedArtifactDomain,
+  remote: GitHubIssue | GitHubPullRequest,
+  fields: Readonly<Record<string, unknown>>,
+): ArtifactInputDocument {
   if (domain === "issue") {
-    const remote = read.remote as GitHubIssue;
+    const issue = remote as GitHubIssue;
     return {
       fields,
-      metadata: { title: remote.title, labels: remote.labels, assignees: remote.assignees },
+      metadata: { title: issue.title, labels: issue.labels, assignees: issue.assignees },
     };
   }
-  const remote = read.remote as GitHubPullRequest;
+  const pullRequest = remote as GitHubPullRequest;
   return {
     fields,
-    metadata: { title: remote.title, head: remote.head, base: remote.base, draft: remote.draft },
+    metadata: {
+      title: pullRequest.title,
+      head: pullRequest.head,
+      base: pullRequest.base,
+      draft: pullRequest.draft,
+    },
   };
 }
 
@@ -380,16 +610,7 @@ export function prepareRemediationArtifact(
   return preparePullRequestArtifact(contract, input).artifact;
 }
 
-/**
- * Ensure a declarative sync only names fields in the authoritative contract.
- *
- * Sync declares a complete desired state, so unlike `edit` it does not need the
- * current body to parse: an unparseable/non-matching current body is treated as
- * an empty current state and fully replaced. `read.contract` is only present
- * here when the caller named an explicit `--template` (see
- * `readGovernedExistingArtifact`); auto-discovery still fails closed on an
- * unparseable current body.
- */
+/** Ensure a declarative sync only names fields in the authoritative contract. */
 export function prepareSyncInput(
   domain: GovernedArtifactDomain,
   read: ExistingArtifactRead,
@@ -480,8 +701,6 @@ function desiredFieldsFromArtifact(
   contract: CanonicalContract | undefined,
 ): Readonly<Record<string, unknown>> {
   if (contract === undefined) return {};
-  // Reparse the canonical projection through the existing parser. This keeps
-  // the diff's semantic side tied to the same round-trip authority as writes.
   const parsed =
     domain === "issue"
       ? validateExistingIssueArtifact(contract, artifact.body)
@@ -532,6 +751,80 @@ function assertKnownFields(
   if (unknown !== undefined) {
     throw new RemediationError(code, `Unknown semantic field "${unknown}".`, `$.fields.${unknown}`, { field: unknown });
   }
+}
+
+function remediationRequirementDiagnostics(error: unknown): ArtifactDiagnosticReport | undefined {
+  if (!(error instanceof RemediationError)) return undefined;
+  const requirements = error.details?.requirements;
+  if (typeof requirements !== "object" || requirements === null) return undefined;
+  const diagnostics = (requirements as { diagnostics?: unknown }).diagnostics;
+  if (!isArtifactDiagnosticReport(diagnostics)) return undefined;
+  return diagnostics;
+}
+
+function explicitRepairRequirements(read: ExistingArtifactRead): Readonly<Record<string, unknown>> | undefined {
+  if (read.contract === undefined || read.templateSelection !== "explicit" || read.result.valid) return undefined;
+  const domain: GovernedArtifactDomain = read.contract.artifactKind === "issue" ? "issue" : "pr";
+  const partial = validatePartialArtifactInput(read.contract, currentArtifactInput(domain, read).fields);
+  return {
+    acceptedFields: partial.acceptedFields,
+    missingFields: partial.missingFields,
+    invalidFields: partial.invalidFields,
+    projectedConstraints: partial.projectedConstraints,
+    diagnostics: partial.diagnostics,
+  };
+}
+
+function isArtifactDiagnosticReport(value: unknown): value is ArtifactDiagnosticReport {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "diagnostics" in value &&
+    Array.isArray((value as { diagnostics?: unknown }).diagnostics) &&
+    "acceptedFields" in value &&
+    Array.isArray((value as { acceptedFields?: unknown }).acceptedFields)
+  );
+}
+
+function boundedDiagnosticReport(report: ArtifactDiagnosticReport): ArtifactDiagnosticReport {
+  return createArtifactDiagnosticReport(report.diagnostics.slice(0, 32), report.acceptedFields.slice(0, 128));
+}
+
+function existingDiagnosticMessage(code: ExistingArtifactDiagnostic["code"], hasSelectedTemplate: boolean): string {
+  if (code === "EXISTING_AMBIGUOUS_TEMPLATE") return "The artifact matches more than one repository template.";
+  if (code === "EXISTING_EXTRA_CONTENT")
+    return "The artifact contains content outside the selected template structure.";
+  if (code === "EXISTING_UNKNOWN_CHECKLIST_ITEM") {
+    return "The artifact contains a checklist item that is not declared by the selected template.";
+  }
+  if (code === "EXISTING_TEMPLATE_COMPILE_FAILED") return "The repository template could not be compiled.";
+  if (code === "EXISTING_TEMPLATE_MARKER_INVALID") return "The artifact template identity marker is invalid.";
+  if (code === "EXISTING_WRONG_TEMPLATE") {
+    return hasSelectedTemplate
+      ? "The artifact structure does not match the selected template."
+      : "The artifact structure does not match an authoritative template.";
+  }
+  return hasSelectedTemplate
+    ? "The artifact representation does not match the selected template."
+    : "The artifact representation could not be parsed against an authoritative template.";
+}
+
+function projectExistingDiagnosticPath(path: string, contract: CanonicalContract | undefined): string {
+  if (path === "$" || path === "$.body") return "$.artifact";
+  if (path === "$.template") return path;
+  if (contract !== undefined) {
+    const fieldIds = contract.sections.flatMap((section) => section.fields.map((field) => field.id));
+    const lastSegment = path.split(".").at(-1);
+    const field = fieldIds.find((id) => id === lastSegment);
+    if (field !== undefined) return `$.fields.${field}`;
+  }
+  const fieldLikePath = /^\$\.(?:sections\.)?([A-Za-z][A-Za-z0-9_-]*)$/u.exec(path);
+  if (fieldLikePath?.[1] !== undefined) return `$.fields.${fieldLikePath[1]}`;
+  return path;
+}
+
+function boundDiagnosticText(value: string): string {
+  return value.slice(0, 160);
 }
 
 function isCompiledOutcome(
