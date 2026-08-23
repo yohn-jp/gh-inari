@@ -2880,3 +2880,153 @@ test("--field names accepted at runtime match exactly the fields projected by `s
   assert.equal(validateResult.output.valid, true);
   assert.deepEqual(Object.keys(validateResult.output.values as Record<string, unknown>).sort(), fieldNames);
 });
+
+test("--field on a command that does not resolve an artifact input document fails explicitly instead of being silently ignored", async () => {
+  const cases: readonly (readonly string[])[] = [
+    ["issue", "schema", "feature", "--field", "problem=x"],
+    ["issue", "explain", "1", "--field", "problem=x"],
+    ["issue", "get", "1", "--field", "problem=x"],
+    ["issue", "check", "1", "--field", "problem=x"],
+    ["issue", "normalize", "1", "--field", "problem=x"],
+    ["template", "list", "--field", "problem=x"],
+  ];
+  for (const argv of cases) {
+    const result = await captureJson([...argv, "--json"]);
+    assert.equal(result.exitCode, 1, argv.join(" "));
+    const error = result.output.error as { code?: string; path?: string } | undefined;
+    assert.equal(error?.code, "FIELD_UNSUPPORTED_COMMAND", argv.join(" "));
+    assert.equal(error?.path, "--field", argv.join(" "));
+  }
+});
+
+test("`issue validate <number> --field ...` does not silently fall back to the existing-artifact path and ignore the field", async () => {
+  // No network responses are stubbed: if --field were ignored and this fell through to
+  // runExistingValidation, the unstubbed adapter call would surface as an unrelated GitHub
+  // adapter failure instead of the local schema/validation result this test asserts on.
+  const result = await captureJson([
+    "issue",
+    "validate",
+    "--template",
+    "feature",
+    "1",
+    "--field",
+    "problem=A reproducible problem",
+    "--json",
+  ]);
+  assert.notEqual((result.output.error as { code?: string } | undefined)?.code, "FIELD_UNSUPPORTED_COMMAND");
+  const values = result.output.values as Record<string, unknown> | undefined;
+  assert.equal(values?.problem, "A reproducible problem");
+});
+
+test("schema's directFields projection matches accepted --field names, types, and repeatability at runtime", async () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const schemaTransport = new CliStubTransport(
+    remoteGovernanceResponses(
+      ".github/ISSUE_TEMPLATE/direct-fields.yml",
+      "direct-fields-sha",
+      REMOTE_ISSUE_TEMPLATE_DIRECT_FIELDS,
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  let directFields: readonly {
+    name: string;
+    type: string;
+    required: boolean;
+    repeatable: boolean;
+    cliSyntax: string;
+  }[];
+  try {
+    const exitCode = await runCli(["issue", "schema", "direct-fields", "--repository", "acme/inari", "--json"], {
+      repositoryRoot,
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: schemaTransport }),
+    });
+    assert.equal(exitCode, 0);
+    directFields = (JSON.parse(lines[0] ?? "{}") as { directFields: typeof directFields }).directFields;
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(
+    directFields.map((entry) => entry.name),
+    ["acceptance", "areas", "category", "problem"],
+  );
+  const byName = new Map(directFields.map((entry) => [entry.name, entry]));
+  assert.deepEqual(byName.get("problem"), {
+    name: "problem",
+    type: "string",
+    required: true,
+    repeatable: false,
+    cliSyntax: "--field problem=<value>",
+  });
+  assert.deepEqual(byName.get("areas"), {
+    name: "areas",
+    type: "array",
+    required: false,
+    repeatable: true,
+    cliSyntax: "--field areas=<value> (repeatable)",
+  });
+
+  // The projection is not just documentation: build the exact --field args it describes
+  // (repeating only the repeatable fields, with values valid for that field) and confirm the
+  // runtime accepts every one of them and reaches a fully valid canonical result.
+  const sampleValues: Readonly<Record<string, readonly string[]>> = {
+    problem: ["A reproducible problem"],
+    category: ["bug"],
+    areas: ["cli", "docs"],
+    acceptance: ["Tests"],
+  };
+  const args = directFields.flatMap((entry) => {
+    const values = sampleValues[entry.name] ?? [];
+    return (entry.repeatable ? values : values.slice(0, 1)).flatMap((value) => ["--field", `${entry.name}=${value}`]);
+  });
+  const validateTransport = new CliStubTransport(
+    remoteGovernanceResponses(
+      ".github/ISSUE_TEMPLATE/direct-fields.yml",
+      "direct-fields-sha",
+      REMOTE_ISSUE_TEMPLATE_DIRECT_FIELDS,
+    ),
+  );
+  const validateLines: string[] = [];
+  console.log = (line: string) => validateLines.push(line);
+  try {
+    await runCli(
+      ["issue", "validate", "--template", "direct-fields", "--repository", "acme/inari", "--json", ...args],
+      { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport: validateTransport }) },
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  const validateOutput = JSON.parse(validateLines[0] ?? "{}") as {
+    error?: { code?: string };
+    valid?: boolean;
+    values?: Record<string, unknown>;
+  };
+  assert.equal(validateOutput.error?.code, undefined);
+  assert.equal(validateOutput.valid, true);
+  assert.deepEqual(validateOutput.values?.areas, ["cli", "docs"]);
+  assert.equal(validateOutput.values?.problem, "A reproducible problem");
+});
+
+test("validate's missingFields progressive diagnostics project each unresolved field's type and requiredness from the contract", async () => {
+  const result = await captureJson([
+    "issue",
+    "validate",
+    "--template",
+    "feature",
+    "--field",
+    "problem=A reproducible problem",
+    "--json",
+  ]);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.output.valid, false);
+  const missingFields = result.output.missingFields as readonly {
+    field: string;
+    constraints?: { type?: string; required?: boolean };
+  }[];
+  const capability = missingFields.find((entry) => entry.field === "capability");
+  assert.equal(capability?.constraints?.type, "string");
+  assert.equal(capability?.constraints?.required, true);
+  const constraints = missingFields.find((entry) => entry.field === "constraints");
+  assert.equal(constraints, undefined, "an optional field must not be reported as a missing/required field");
+});

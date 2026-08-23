@@ -36,6 +36,8 @@ const KNOWN_ARTIFACT_COMMANDS = new Set([
     "sync",
 ]);
 const KNOWN_TEMPLATE_COMMANDS = new Set(["list", "sync", "import"]);
+/** issue/pr commands that resolve an ArtifactInputDocument and therefore accept --field; every other command must reject it explicitly rather than silently ignore it. */
+const FIELD_CAPABLE_ARTIFACT_COMMANDS = new Set(["validate", "render", "create", "edit", "sync"]);
 const INSTALL_COMMAND = "gh extension install yohn-jp/gh-inari";
 const UPDATE_COMMAND = "gh extension upgrade inari";
 const FALLBACK_COMMAND = "npx --yes gh-inari";
@@ -99,6 +101,9 @@ export async function runCli(argv, dependencies = {}) {
             return runDiagnostic(metadata, parsed.options, json, dependencies);
         const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
         const [domain, command, ...rest] = parsed.positionals;
+        if (parsed.fields.length > 0 && !isFieldCapableCommand(domain, command)) {
+            throw fieldUnsupportedCommandError(parsed.positionals);
+        }
         if (domain === "template" && command === "list") {
             return await runTemplateList(root, parsed.options.repository, dependencies);
         }
@@ -479,14 +484,20 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         if (parsed.options.compact === true)
             console.log(JSON.stringify({ schema: renderSemanticCompactSchema(contract) }));
         else
-            console.log(JSON.stringify({ contract, template: contract.templateIdentity, ...projection }));
+            console.log(JSON.stringify({
+                contract,
+                template: contract.templateIdentity,
+                ...projection,
+                directFields: projectDirectFieldUsage(contract),
+            }));
         return 0;
     }
     if (command === "validate" || command === "render" || command === "create") {
         if (command === "validate" &&
             rest[0] !== undefined &&
             isPositiveInteger(rest[0]) &&
-            parsed.options.from === undefined) {
+            parsed.options.from === undefined &&
+            parsed.fields.length === 0) {
             return runExistingValidation(domain, Number(rest[0]), parsed, root, dependencies, json);
         }
         if (command === "validate" || command === "render") {
@@ -504,7 +515,17 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             const preparedDocument = mergeOptionMetadata(document, parsed.options);
             if (command === "validate") {
                 const validation = loadCanonicalArtifact(contract, preparedDocument);
-                console.log(JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.canonical }));
+                console.log(JSON.stringify({
+                    valid: validation.valid,
+                    violations: validation.violations,
+                    values: validation.canonical,
+                    // Progressive --field discovery: each unresolved field's type/required/constraints,
+                    // reusing the existing #120/#121 partial-classification projection rather than a
+                    // second field table -- so retrying with more --field values is guided by the same
+                    // contract metadata resolveDirectFields itself accepts.
+                    missingFields: validation.missingFields,
+                    invalidFields: validation.invalidFields,
+                }));
                 return validation.valid ? 0 : EXIT_VALIDATION;
             }
             const body = domain === "issue"
@@ -786,20 +807,54 @@ function duplicateFieldError(name, occurrences) {
 function fieldConflictError(names) {
     return new CliError("FIELD_CONFLICT", `Field(s) ${names.join(", ")} were supplied by both --from and --field; remove one source.`, "--field", { fields: names });
 }
+/** True only for the issue/pr commands that actually resolve an ArtifactInputDocument from --field. */
+function isFieldCapableCommand(domain, command) {
+    return ((domain === "issue" || domain === "pr") && command !== undefined && FIELD_CAPABLE_ARTIFACT_COMMANDS.has(command));
+}
+function fieldUnsupportedCommandError(positionals) {
+    const label = positionals.length === 0 ? "this command" : `"${positionals.join(" ")}"`;
+    const supported = [...FIELD_CAPABLE_ARTIFACT_COMMANDS].sort(compareStrings);
+    return new CliError("FIELD_UNSUPPORTED_COMMAND", `--field is only supported by issue/pr ${supported.join(", ")}; ${label} does not accept direct field input.`, "--field", { command: positionals.join(" "), supportedCommands: supported });
+}
+/**
+ * The one field-usage projection shared by direct --field acceptance
+ * (resolveDirectFields, below) and discovery/help (the `schema` command's
+ * `directFields`, and progressive help via missing/invalid field
+ * diagnostics). Both read this same contract-derived list, so the CLI's
+ * documented `--field` syntax and its runtime acceptance cannot drift from
+ * each other or from the selected canonical contract.
+ */
+function projectDirectFieldUsage(contract) {
+    const schema = projectContract(contract).schema;
+    const required = new Set(schema.required ?? []);
+    return Object.keys(schema.properties)
+        .sort(compareStrings)
+        .map((name) => {
+        const repeatable = schema.properties[name]?.type === "array";
+        return {
+            name,
+            type: repeatable ? "array" : "string",
+            required: required.has(name),
+            repeatable,
+            cliSyntax: repeatable ? `--field ${name}=<value> (repeatable)` : `--field ${name}=<value>`,
+        };
+    });
+}
 /**
  * Resolve raw `--field` occurrences against the selected canonical contract:
- * the contract's projected JSON Schema is the only authority for accepted
- * field names, scalar-vs-list shape, and requiredness -- there is no second,
- * handwritten field table here. A field whose schema type is "array" accumulates
- * every occurrence in argv order (deterministic repeated-value ordering); any
- * other field accepts at most one occurrence.
+ * `projectDirectFieldUsage` is the only authority for accepted field names,
+ * scalar-vs-list shape, and requiredness -- there is no second, handwritten
+ * field table here. A repeatable field accumulates every occurrence in argv
+ * order (deterministic repeated-value ordering); any other field accepts at
+ * most one occurrence.
  */
 function resolveDirectFields(contract, entries) {
-    const properties = projectContract(contract).schema.properties;
-    const allowedFields = Object.keys(properties).sort(compareStrings);
+    const usage = projectDirectFieldUsage(contract);
+    const usageByName = new Map(usage.map((entry) => [entry.name, entry]));
+    const allowedFields = usage.map((entry) => entry.name);
     const grouped = new Map();
     for (const entry of entries) {
-        if (!Object.prototype.hasOwnProperty.call(properties, entry.name))
+        if (!usageByName.has(entry.name))
             throw unknownFieldError(entry.name, allowedFields);
         const values = grouped.get(entry.name);
         if (values === undefined)
@@ -809,7 +864,7 @@ function resolveDirectFields(contract, entries) {
     }
     const fields = {};
     for (const [name, values] of grouped) {
-        if (properties[name]?.type === "array") {
+        if (usageByName.get(name)?.repeatable === true) {
             fields[name] = values;
             continue;
         }
@@ -950,7 +1005,8 @@ function classifyExitCode(error) {
         (error.code === "UNKNOWN_COMMAND" ||
             error.code === "INVALID_OPTION" ||
             error.code === "INPUT_REQUIRED" ||
-            error.code === "INPUT_READ_FAILED"))
+            error.code === "INPUT_READ_FAILED" ||
+            error.code === "FIELD_UNSUPPORTED_COMMAND"))
         return EXIT_USAGE;
     if (error instanceof CliError &&
         (error.code === "INPUT_INVALID_JSON" ||
@@ -1097,7 +1153,9 @@ function artifactLeaves(domain) {
         validate: {
             usage: `${domain} validate --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
             summary: `Validate input against a template's schema, from JSON, direct --field values, or both. ` +
-                `Field names/types come from \`${domain} schema\`, not a separate list. ` +
+                `Run \`${domain} schema\` for its "directFields" projection (name/type/required/repeatable, one entry ` +
+                `per accepted --field), or submit a partial set here and read back "missingFields"/"invalidFields" for ` +
+                `what still needs a value -- there is no separate field list to consult. ` +
                 `To validate an existing ${noun} instead, use \`${domain} validate <number> [--template <template>]\`.`,
             example: `inari ${domain} validate --template feature --field problem="A problem"`,
         },
@@ -1146,11 +1204,13 @@ function artifactLeaves(domain) {
 }
 const GLOBAL_OPTIONS = `  --from <path>       JSON input file, or - for stdin
   --field <name>=<value>
-                      Direct semantic field input, repeatable; field names/types/requiredness
-                      come from the selected template's schema (see \`schema\`). A field whose
-                      schema type is "array" accumulates every occurrence in argv order; any
-                      other field accepts at most one. May compose with --from, but the same
-                      field cannot be named by both.
+                      Direct semantic field input, repeatable; only accepted on validate, render,
+                      create, edit, and sync. Field names/types/requiredness come from the
+                      selected template's schema -- see \`schema\`'s "directFields" projection, or
+                      submit a partial set and read "missingFields"/"invalidFields" back from
+                      validate. A repeatable ("array"-typed) field accumulates every occurrence
+                      in argv order; any other field accepts at most one. May compose with
+                      --from, but the same field cannot be named by both.
   --template <id>     Repository-native template id, path, or unique name
   --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
   --repository <r>    GitHub repository override; governed commands use its default-branch governance
