@@ -5,6 +5,7 @@ import {
   assertCanonicalContract,
   CANONICAL_IR_VERSION,
   CONTRACT_SCHEMA_VERSION,
+  MULTI_SELECT_OPTION_SEPARATOR,
   type ArrayField,
   type CanonicalContract,
   type CanonicalField,
@@ -733,7 +734,7 @@ function parseDropdownOptions(
         `Dropdown label "${GITHUB_NO_RESPONSE_LABEL}" is reserved for an empty Issue Form response.`,
       );
     }
-    if (multiple && option.includes(",")) {
+    if (multiple && option.includes(MULTI_SELECT_OPTION_SEPARATOR)) {
       diagnostics.add(
         "ISSUE_FORM_UNSUPPORTED_SEMANTICS",
         `${pathPrefix}[${index}]`,

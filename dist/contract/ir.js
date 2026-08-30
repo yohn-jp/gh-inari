@@ -8,6 +8,8 @@
 export const CANONICAL_IR_VERSION = "1.0.0";
 export const CONTRACT_SCHEMA_VERSION = "1.0.0";
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+/** Separator used by native multi-select Issue Form artifacts. */
+export const MULTI_SELECT_OPTION_SEPARATOR = ",";
 /**
  * GitHub's syntactic closing-reference language for pull request bodies.
  * Contextual effects, such as closing only when targeting the default branch,
@@ -415,6 +417,13 @@ function validateOptionList(value, path, violations) {
     });
     return options;
 }
+function validateMultiSelectOptionLabels(options, path, violations) {
+    options?.forEach((option, index) => {
+        if (option.label.includes(MULTI_SELECT_OPTION_SEPARATOR)) {
+            addViolation(violations, "IR_INVALID_OPTIONS", `${path}[${index}].label`, "Multi-select option labels must not contain commas because native artifact parsing uses commas as separators.");
+        }
+    });
+}
 function validateChecklistItems(value, path, violations) {
     if (!Array.isArray(value) || value.length === 0) {
         addViolation(violations, "IR_INVALID_OPTIONS", path, "Checklist items must be a non-empty array.");
@@ -672,6 +681,8 @@ function validateField(value, path, index, source, fieldIds, violations) {
             if (hasOwn(items, "options")) {
                 const options = validateOptionList(items.options, `${path}.items.options`, violations);
                 allowedValues = options?.map((option) => option.value);
+                if (selection === "multi_select")
+                    validateMultiSelectOptionLabels(options, `${path}.items.options`, violations);
             }
         }
         if (selection === "multi_select" &&

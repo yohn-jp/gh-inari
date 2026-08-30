@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { stringify as stringifyYaml } from "yaml";
 import {
   assertCanonicalContract,
+  MULTI_SELECT_OPTION_SEPARATOR,
   type CanonicalContract,
   type CanonicalField,
   type CanonicalSection,
@@ -1174,6 +1175,17 @@ function normalizeSection(
     addViolation(violations, "SEMANTIC_TEMPLATE_INVALID_VALUE", pathPrefix, "minLength cannot exceed maxLength.");
   if (minItems !== undefined && maxItems !== undefined && minItems > maxItems)
     addViolation(violations, "SEMANTIC_TEMPLATE_INVALID_VALUE", pathPrefix, "minItems cannot exceed maxItems.");
+  if (type === "array" && multiple === true) {
+    options?.forEach((option, index) => {
+      if (option.label.includes(MULTI_SELECT_OPTION_SEPARATOR))
+        addViolation(
+          violations,
+          "SEMANTIC_TEMPLATE_INVALID_VALUE",
+          `${pathPrefix}.options[${index}].label`,
+          "Multi-select option labels must not contain commas because native artifact parsing uses commas as separators.",
+        );
+    });
+  }
   if (id === undefined) return undefined;
   return {
     id,

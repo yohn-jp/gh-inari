@@ -8,6 +8,8 @@
 export declare const CANONICAL_IR_VERSION: "1.0.0";
 export declare const CONTRACT_SCHEMA_VERSION: "1.0.0";
 export declare const JSON_SCHEMA_DIALECT: "https://json-schema.org/draft/2020-12/schema";
+/** Separator used by native multi-select Issue Form artifacts. */
+export declare const MULTI_SELECT_OPTION_SEPARATOR: ",";
 /**
  * GitHub's syntactic closing-reference language for pull request bodies.
  * Contextual effects, such as closing only when targeting the default branch,
