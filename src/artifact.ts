@@ -596,6 +596,11 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
   const title = requiredMetadataString(input.metadata.title ?? contractInput.nativeMetadata.title, "title");
   const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
+  const expectedMetadata: Readonly<Record<string, unknown>> = {
+    title,
+    ...(labels === undefined ? {} : { labels: [...labels] }),
+    ...(input.metadata.assignees === undefined ? {} : { assignees: [...input.metadata.assignees] }),
+  };
   const body = renderIssueBody(contractInput, loaded.canonical);
   verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue");
   const artifact = createValidatedRenderedIssueArtifact({
@@ -606,14 +611,7 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
     ...(labels === undefined ? {} : { labels }),
     ...(input.metadata.assignees === undefined ? {} : { assignees: input.metadata.assignees }),
   });
-  verifyIssueMetadataRoundTrip(
-    {
-      title,
-      ...(labels === undefined ? {} : { labels }),
-      ...(input.metadata.assignees === undefined ? {} : { assignees: input.metadata.assignees }),
-    },
-    artifact,
-  );
+  verifyIssueMetadataRoundTrip(expectedMetadata, artifact);
   return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
 
