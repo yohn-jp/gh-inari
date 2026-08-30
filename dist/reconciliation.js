@@ -64,6 +64,23 @@ export function remediationDiagnosticReport(domain, operation, read, input, erro
             }),
         ], semanticReport?.acceptedFields ?? []);
     }
+    if (error instanceof RemediationError &&
+        error.code === "SEMANTIC_PATCH_UNSUPPORTED" &&
+        typeof error.details?.metadata === "string") {
+        const path = error.path ?? `$.metadata.${error.details.metadata}`;
+        return createArtifactDiagnosticReport([
+            ...(semanticReport?.diagnostics.slice(0, 31) ?? []),
+            createArtifactDiagnostic({
+                state: "unsupported",
+                code: "FIELD_UNSUPPORTED",
+                detailCode: "FIELD_UNSUPPORTED",
+                reason: "unsupported",
+                path,
+                message: error.message,
+                recovery: [{ action: "replace", path, hint: "Remove the unsupported metadata option and retry." }],
+            }),
+        ], semanticReport?.acceptedFields ?? []);
+    }
     if (semanticReport !== undefined &&
         (semanticReport.diagnostics.length > 0 || semanticReport.acceptedFields.length > 0)) {
         return semanticReport;
@@ -359,28 +376,41 @@ function artifactInputFromRemote(domain, remote, fields) {
             head: pullRequest.head,
             base: pullRequest.base,
             draft: pullRequest.draft,
+            ...(pullRequest.maintainerCanModify === undefined
+                ? {}
+                : { maintainerCanModify: pullRequest.maintainerCanModify }),
         },
     };
 }
 /** Apply an explicit semantic patch without touching raw Markdown or inferring missing fields. */
 export function applySemanticPatch(domain, read, patch) {
+    assertSupportedEditMetadata(domain, patch.metadata, read.remote);
     if (read.contract === undefined || (!read.result.parse.parsed && read.templateSelection !== "explicit")) {
         throw new RemediationError("SEMANTIC_PATCH_UNSUPPORTED", "The existing artifact is not safely parseable under one authoritative template.", "$.artifact");
     }
     assertKnownFields(read.contract, patch.fields, "SEMANTIC_PATCH_INVALID");
     const current = currentArtifactInput(domain, read);
     const metadata = { ...current.metadata, ...patch.metadata };
-    if (domain === "pr" && patch.metadata.head !== undefined) {
-        const remote = read.remote;
-        if (patch.metadata.head !== remote.head) {
-            throw new RemediationError("PR_HEAD_CHANGE_UNSUPPORTED", "Pull request head branches cannot be changed through the GitHub pull-request model.", "$.head", { current: remote.head, requested: patch.metadata.head });
-        }
-    }
     const merged = { fields: { ...current.fields, ...patch.fields }, metadata };
     if (read.templateSelection === "explicit" && !read.result.valid) {
         validateReconstructedInput(read.contract, merged, "SEMANTIC_PATCH_INVALID");
     }
     return merged;
+}
+/** Reject metadata that the primary edit operation cannot honor for this resource. */
+function assertSupportedEditMetadata(domain, metadata, remote) {
+    const keys = Object.keys(metadata).sort(compareStrings);
+    const supported = domain === "issue" ? new Set(["title", "labels", "assignees"]) : new Set(["title", "base", "maintainerCanModify"]);
+    for (const key of keys) {
+        if (domain === "pr" && key === "head") {
+            const pullRequest = remote;
+            const requested = metadata.head;
+            throw new RemediationError("PR_HEAD_CHANGE_UNSUPPORTED", "Pull request head branches cannot be changed through the GitHub pull-request model.", "$.metadata.head", { current: pullRequest.head, ...(requested === undefined ? {} : { requested }) });
+        }
+        if (supported.has(key))
+            continue;
+        throw new RemediationError("SEMANTIC_PATCH_UNSUPPORTED", `Metadata "${key}" is not supported by ${domain === "issue" ? "issue" : "pull request"} edit.`, `$.metadata.${key}`, { metadata: key });
+    }
 }
 /** Validate values recovered during an explicit-template repair. */
 export function validateReconstructedInput(contract, input, code) {
@@ -484,7 +514,13 @@ function currentMetadataForDiff(domain, remote) {
         return { title: issue.title, labels: issue.labels, assignees: issue.assignees };
     }
     const pullRequest = remote;
-    return { title: pullRequest.title, head: pullRequest.head, base: pullRequest.base, draft: pullRequest.draft };
+    return {
+        title: pullRequest.title,
+        head: pullRequest.head,
+        base: pullRequest.base,
+        draft: pullRequest.draft,
+        ...(pullRequest.maintainerCanModify === undefined ? {} : { maintainerCanModify: pullRequest.maintainerCanModify }),
+    };
 }
 function desiredMetadataForDiff(domain, artifact) {
     if (domain === "issue") {

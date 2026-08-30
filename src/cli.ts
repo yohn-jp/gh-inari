@@ -32,7 +32,12 @@ import {
   rejectGovernedPolicyOverride,
 } from "./governance.js";
 import { discoverTemplates, type TemplateSelector } from "./template-discovery.js";
-import type { GitHubIssue, GitHubPullRequest } from "./github/types.js";
+import type {
+  GitHubIssue,
+  GitHubPullRequest,
+  ValidatedRenderedIssueArtifact,
+  ValidatedRenderedPullRequestArtifact,
+} from "./github/types.js";
 import {
   applySemanticPatch,
   assessExistingArtifact,
@@ -925,9 +930,16 @@ async function runExistingRemediation(
       }
       desiredInput = currentArtifactInput(domain, read);
     } else {
-      const input = await resolveArtifactInputDocument(parsed, read.contract, domain === "pr" && operation === "sync");
+      const input = await resolveArtifactInputDocument(
+        parsed,
+        read.contract,
+        domain === "pr" && operation === "sync",
+        operation === "edit" && hasEditMetadataOption(parsed.options),
+      );
       desiredInput =
-        operation === "edit" ? applySemanticPatch(domain, read, input) : prepareSyncInput(domain, read, input);
+        operation === "edit"
+          ? applySemanticPatch(domain, read, mergeOptionMetadata(input, parsed.options))
+          : prepareSyncInput(domain, read, input);
     }
   } catch (error: unknown) {
     if (operation === "edit" || operation === "normalize") {
@@ -957,7 +969,15 @@ async function runExistingRemediation(
       JSON.stringify({
         ok: true,
         ...resultBase,
-        ...(parsed.options.dryRun === true ? { dryRun: true, mutation: "not-performed" } : {}),
+        ...(parsed.options.dryRun === true
+          ? {
+              dryRun: true,
+              mutation: "not-performed",
+              ...(operation === "edit"
+                ? { resulting: projectRemediationResult(domain, read.contract, desiredInput, desired) }
+                : {}),
+            }
+          : {}),
       }),
     );
     return 0;
@@ -997,6 +1017,43 @@ function existingArtifactMetadata(
     draft: remote.draft,
     head: remote.head,
     base: remote.base,
+    ...(remote.maintainerCanModify === undefined ? {} : { maintainerCanModify: remote.maintainerCanModify }),
+  };
+}
+
+function projectRemediationResult(
+  domain: "issue" | "pr",
+  contract: CanonicalContract | undefined,
+  input: ArtifactInputDocument,
+  artifact: ReturnType<typeof prepareRemediationArtifact>,
+): Readonly<Record<string, unknown>> {
+  if (contract === undefined) throw new Error("A remediation result requires a selected contract.");
+  const fields = loadCanonicalArtifact(contract, input).canonical;
+  if (domain === "issue") {
+    const issue = artifact as ValidatedRenderedIssueArtifact;
+    return {
+      fields,
+      metadata: {
+        title: issue.title,
+        ...(issue.labels === undefined ? {} : { labels: issue.labels }),
+        ...(issue.assignees === undefined ? {} : { assignees: issue.assignees }),
+      },
+      body: issue.body,
+    };
+  }
+  const pullRequest = artifact as ValidatedRenderedPullRequestArtifact;
+  return {
+    fields,
+    metadata: {
+      title: pullRequest.title,
+      head: pullRequest.head,
+      base: pullRequest.base,
+      ...(pullRequest.draft === undefined ? {} : { draft: pullRequest.draft }),
+      ...(pullRequest.maintainerCanModify === undefined
+        ? {}
+        : { maintainerCanModify: pullRequest.maintainerCanModify }),
+    },
+    body: pullRequest.body,
   };
 }
 
@@ -1055,6 +1112,12 @@ function mergeOptionMetadata(
     ...(typeof options.maintainerCanModify === "boolean" ? { maintainerCanModify: options.maintainerCanModify } : {}),
   };
   return { fields: document.fields, metadata };
+}
+
+function hasEditMetadataOption(options: Readonly<Record<string, string | boolean>>): boolean {
+  return ["title", "head", "base", "draft", "maintainerCanModify"].some((key) =>
+    Object.prototype.hasOwnProperty.call(options, key),
+  );
 }
 
 /** Bound on how many accepted field names an unknown-field diagnostic lists before truncating. */
@@ -1233,9 +1296,10 @@ async function resolveArtifactInputDocument(
   parsed: ParsedArgs,
   contract: CanonicalContract,
   requirePullRequestSyncInput = false,
+  allowEmpty = false,
 ): Promise<ArtifactInputDocument> {
   const hasFrom = typeof parsed.options.from === "string";
-  if (!hasFrom && parsed.fields.length === 0) {
+  if (!hasFrom && parsed.fields.length === 0 && !allowEmpty) {
     throw new CliError("INPUT_REQUIRED", "Use --from <file.json> or --field <name>=<value>.", "--from");
   }
   const document = hasFrom
@@ -1576,8 +1640,14 @@ function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHel
       example: `inari ${domain} check 123`,
     },
     edit: {
-      usage: `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
-      summary: `Apply an explicit semantic patch to an existing ${noun}; only the fields you supply change.`,
+      usage:
+        domain === "issue"
+          ? `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--dry-run]`
+          : `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--maintainer-can-modify[=true|false]] [--dry-run]`,
+      summary:
+        domain === "issue"
+          ? `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved, and --title is supported.`
+          : `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved. Supports --title, --base, and --maintainer-can-modify; --draft is unsupported for edit and is rejected.`,
       example: `inari ${domain} edit 123 --field problem="Updated problem" --dry-run`,
     },
     normalize: {
@@ -1735,7 +1805,7 @@ Commands:
   issue explain <number> [--template <template>]
   issue get <number> [--template <template>] --json
   issue check <number> [--template <template>]
-  issue edit <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
+  issue edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--dry-run]
   issue normalize <number> [--dry-run]
   issue sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   pr schema [template]
@@ -1746,7 +1816,7 @@ Commands:
   pr explain <number> [--template <template>]
   pr get <number> [--template <template>] --json
   pr check <number> [--template <template>]
-  pr edit <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
+  pr edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--maintainer-can-modify[=true|false]] [--dry-run]
   pr normalize <number> [--dry-run]
   pr sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   skill [scenario] [--json]
@@ -1755,7 +1825,7 @@ Options:
 ${GLOBAL_OPTIONS}
 
 Create always validates and renders before invoking gh. Schema, validate, render, check, and --dry-run remediation never mutate GitHub.
-Edit applies an explicit semantic patch; normalize preserves existing semantic values; issue sync preserves omitted current values; pr sync reconciles a complete desired semantic state.
+Edit is the primary patch path: it preserves omitted fields and metadata, validates the complete result, and renders canonical Markdown before mutation. Normalize preserves existing semantic values; issue sync preserves omitted current values; pr sync reconciles a complete desired semantic state.
 
 All other commands pass through to the real gh binary unchanged.
 

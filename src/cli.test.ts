@@ -367,6 +367,20 @@ test("issue sync help explains that omitted values are preserved", async () => {
   assert.match(output, /preserving fields and metadata omitted from the input/);
 });
 
+test("edit help identifies the primary patch path and its supported metadata", async () => {
+  const issue = await captureHelp(["issue", "edit", "--help"]);
+  assert.equal(issue.exitCode, 0);
+  assert.match(issue.output, /--title <title>/);
+  assert.match(issue.output, /omitted fields and metadata are preserved/);
+
+  const pullRequest = await captureHelp(["pr", "edit", "--help"]);
+  assert.equal(pullRequest.exitCode, 0);
+  assert.match(pullRequest.output, /--base <branch>/);
+  assert.match(pullRequest.output, /--maintainer-can-modify/);
+  assert.doesNotMatch(pullRequest.output, /pr edit[^\n]*--draft/u);
+  assert.match(pullRequest.output, /--draft is unsupported for edit and is rejected/);
+});
+
 test("pr schema projects the canonical sync input and a valid minimal example", async () => {
   const result = await captureJson(["pr", "schema", "default", "--json"]);
   assert.equal(result.exitCode, 0);
@@ -1953,6 +1967,271 @@ test("issue edit dry-run emits a bounded diff and performs no mutation", async (
   }
 });
 
+test("issue edit uses the remote artifact for a metadata-only patch and exposes the validated result", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["issue", "edit", "80", "--title", "feat: renamed", "--dry-run", "--repository", "acme/inari"],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      resulting?: {
+        fields?: Record<string, unknown>;
+        metadata?: Record<string, unknown>;
+        body?: string;
+      };
+    };
+    assert.equal(output.resulting?.metadata?.title, "feat: renamed");
+    assert.equal(output.resulting?.fields?.proposal, "A deterministic proposal");
+    assert.match(output.resulting?.body ?? "", /<!-- inari:template /u);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("pr edit applies supported metadata flags while preserving omitted remote metadata", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      [
+        "pr",
+        "edit",
+        "81",
+        "--title",
+        "feat: renamed",
+        "--base",
+        "release",
+        "--maintainer-can-modify=false",
+        "--dry-run",
+        "--repository",
+        "acme/inari",
+      ],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      resulting?: { fields?: Record<string, unknown>; metadata?: Record<string, unknown>; body?: string };
+    };
+    assert.equal(output.resulting?.fields?.summary, "A deterministic pull request summary");
+    assert.deepEqual(output.resulting?.metadata, {
+      title: "feat: renamed",
+      head: "feature",
+      base: "release",
+      draft: false,
+      maintainerCanModify: false,
+    });
+    assert.match(output.resulting?.body ?? "", /<!-- inari:template /u);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("pr edit mutates every supported metadata field and omits draft from PATCH", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+    command(
+      JSON.stringify({
+        number: 81,
+        title: "feat: renamed",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: false,
+        head: { ref: "feature" },
+        base: { ref: "release" },
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      [
+        "pr",
+        "edit",
+        "81",
+        "--title",
+        "feat: renamed",
+        "--base",
+        "release",
+        "--maintainer-can-modify=false",
+        "--repository",
+        "acme/inari",
+      ],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      mutation?: string;
+      governance?: { reconciled?: boolean };
+    };
+    assert.equal(output.mutation, "applied");
+    assert.equal(output.governance?.reconciled, true);
+    const update = transport.calls.find((args) => args.includes("PATCH") && args.includes("repos/acme/inari/pulls/81"));
+    assert.ok(update);
+    assert.ok(update.includes("title=feat: renamed"));
+    assert.ok(update.includes("base=release"));
+    assert.ok(update.includes("maintainer_can_modify=false"));
+    assert.equal(
+      update.some((argument) => argument.startsWith("draft=")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("issue edit rejects PR-only metadata before any mutation", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "edit", "80", "--draft", "--json", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error?: { code?: string; path?: string; diagnostics?: { diagnostics?: readonly { path?: string }[] } };
+    };
+    assert.equal(output.error?.code, "SEMANTIC_PATCH_UNSUPPORTED");
+    assert.equal(output.error?.path, "$.metadata.draft");
+    assert.equal(output.error?.diagnostics?.diagnostics?.[0]?.path, "$.metadata.draft");
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("pr edit rejects draft before mutation because pull-request PATCH does not support it", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "edit", "81", "--draft", "--json", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error?: {
+        code?: string;
+        message?: string;
+        path?: string;
+        diagnostics?: { diagnostics?: readonly { path?: string }[] };
+      };
+    };
+    assert.equal(output.error?.code, "SEMANTIC_PATCH_UNSUPPORTED");
+    assert.match(output.error?.message ?? "", /not supported by pull request edit/);
+    assert.equal(output.error?.path, "$.metadata.draft");
+    assert.equal(output.error?.diagnostics?.diagnostics?.[0]?.path, "$.metadata.draft");
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("pull request normalize dry-run reports representation drift without mutation", async () => {
   const transport = new CliStubTransport(
     remoteArtifactResponses(
@@ -2495,14 +2774,27 @@ test("issue edit performs the mutation, reaches the adapter, and reports reconci
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli(["issue", "edit", "80", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
-    });
+    const exitCode = await runCli(
+      [
+        "issue",
+        "edit",
+        "80",
+        "--from",
+        inputPath,
+        "--title",
+        "feat: renamed remediation",
+        "--repository",
+        "acme/inari",
+      ],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     assert.equal(output.mutation, "applied");
     assert.equal((output.governance as { reconciled?: boolean }).reconciled, true);
-    assert.ok(transport.calls.some((args) => args.includes("PATCH")));
+    const update = transport.calls.find((args) => args.includes("PATCH"));
+    assert.ok(update);
+    assert.ok(update.includes("title=feat: renamed remediation"));
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });

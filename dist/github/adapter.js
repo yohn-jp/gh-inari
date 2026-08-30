@@ -220,7 +220,6 @@ export class GitHubAdapter {
         appendRawField(args, "title", artifact.title);
         appendRawField(args, "body", artifact.body);
         appendRawField(args, "base", artifact.base);
-        appendBooleanField(args, "draft", artifact.draft);
         appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
         const result = await this.runApi(args, "pull_request.update");
         return parsePullRequest(result, "pull_request.update");
@@ -473,6 +472,9 @@ function parsePullRequest(value, operation) {
     const url = responseUrl(record, operation);
     const body = record.body === null ? null : responseString(record.body, "body", operation);
     const draft = responseBoolean(record.draft, "draft", operation);
+    const maintainerCanModify = record.maintainer_can_modify === undefined
+        ? undefined
+        : responseBoolean(record.maintainer_can_modify, "maintainer_can_modify", operation);
     const head = responseRef(record.head, "head", operation);
     const base = responseRef(record.base, "base", operation);
     return {
@@ -482,6 +484,7 @@ function parsePullRequest(value, operation) {
         state,
         url,
         draft,
+        ...(maintainerCanModify === undefined ? {} : { maintainerCanModify }),
         head,
         base,
     };

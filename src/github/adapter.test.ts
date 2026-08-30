@@ -101,6 +101,12 @@ function pullRequestPayloadWithDraft(number: number, draft: unknown): string {
   return JSON.stringify(payload);
 }
 
+function pullRequestPayloadWithMaintainerCanModify(number: number, value: unknown): string {
+  const payload = JSON.parse(pullRequestPayload(number)) as Record<string, unknown>;
+  payload.maintainer_can_modify = value;
+  return JSON.stringify(payload);
+}
+
 function governedFixture(contract: CanonicalContract): CanonicalContract {
   return {
     ...contract,
@@ -308,6 +314,17 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   assert.ok(pullRequestCreate.args.includes("head=feature"));
   assert.ok(pullRequestCreate.args.includes("base=main"));
   assert.ok(pullRequestCreate.args.includes("maintainer_can_modify=true"));
+
+  const pullRequestUpdate = transport.calls.find(
+    (call) => call.args.includes("repos/acme/inari/pulls/47") && call.args.includes("PATCH"),
+  );
+  assert.ok(pullRequestUpdate);
+  assert.ok(pullRequestUpdate.args.includes("base=main"));
+  assert.ok(pullRequestUpdate.args.includes("maintainer_can_modify=true"));
+  assert.equal(
+    pullRequestUpdate.args.some((argument) => argument.startsWith("draft=")),
+    false,
+  );
 });
 
 test("rejects missing and non-boolean pull request draft response fields", async () => {
@@ -345,6 +362,40 @@ test("preserves valid pull request draft boolean response fields", async () => {
 
     assert.equal((await adapter.getPullRequest(number)).draft, draft);
   }
+});
+
+test("preserves optional pull request maintainer-can-modify response metadata", async () => {
+  for (const [number, value] of [
+    [53, false],
+    [54, true],
+  ] as const) {
+    const transport = new StubGhTransport([
+      command(0, "gh version 2.0"),
+      command(),
+      command(0, pullRequestPayloadWithMaintainerCanModify(number, value)),
+    ]);
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    assert.equal((await adapter.getPullRequest(number)).maintainerCanModify, value);
+  }
+});
+
+test("rejects a non-boolean pull request maintainer-can-modify response field", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, pullRequestPayloadWithMaintainerCanModify(55, "true")),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.getPullRequest(55),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.details.operation === "pull_request.read" &&
+      error.details.path === "maintainer_can_modify",
+  );
 });
 
 test("rejects an unvalidated artifact before invoking any transport or mutation", async () => {

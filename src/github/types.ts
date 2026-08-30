@@ -76,6 +76,7 @@ export interface GitHubPullRequest {
   readonly state: "open" | "closed";
   readonly url: string;
   readonly draft: boolean;
+  readonly maintainerCanModify?: boolean;
   readonly head: string;
   readonly base: string;
 }
