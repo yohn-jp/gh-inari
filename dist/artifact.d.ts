@@ -239,6 +239,8 @@ export declare function selectExistingArtifactCandidate(candidates: readonly Exi
 export declare function validateRequiredMetadataString(value: unknown, key: string): ArtifactMetadataViolation | undefined;
 export declare function validateExistingIssueFromAdapter(reader: ExistingIssueReader, contract: unknown, issueNumber: number): Promise<FetchedExistingArtifact>;
 export declare function validateExistingPullRequestFromAdapter(reader: ExistingPullRequestReader, contract: unknown, pullRequestNumber: number): Promise<FetchedExistingArtifact>;
+/** @internal Validate the canonical Issue metadata handoff before mutation. */
+export declare function verifyIssueMetadataRoundTrip(expected: Readonly<Record<string, unknown>>, artifact: ValidatedRenderedIssueArtifact): void;
 /** Escape only Markdown constructs that could change the canonical section structure. */
 export declare function escapeMarkdownValue(value: string): string;
 export declare function removeHtmlComments(value: string): string;
