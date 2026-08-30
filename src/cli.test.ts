@@ -3262,3 +3262,23 @@ test("validate's missingFields progressive diagnostics project each unresolved f
   const constraints = missingFields.find((entry) => entry.field === "constraints");
   assert.equal(constraints, undefined, "an optional field must not be reported as a missing/required field");
 });
+
+test("validate excludes a default-backed field from missingFields when other required fields are absent", async () => {
+  const result = await captureJson(["issue", "validate", "--template", "bug", "--field", "summary=X", "--json"]);
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.output.valid, false);
+  assert.deepEqual(
+    (result.output.violations as readonly { path: string }[]).map((violation) => violation.path),
+    ["$.reproduction", "$.expected_behavior", "$.actual_behavior"],
+  );
+  const missingFields = result.output.missingFields as readonly { field: string }[];
+  assert.deepEqual(
+    missingFields.map((field) => field.field),
+    ["actual_behavior", "expected_behavior", "reproduction"],
+  );
+  assert.equal(
+    missingFields.some((field) => field.field === "acceptance"),
+    false,
+  );
+});
