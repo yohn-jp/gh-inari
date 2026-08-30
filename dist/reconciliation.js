@@ -400,9 +400,7 @@ export function applySemanticPatch(domain, read, patch) {
 /** Reject metadata that the primary edit operation cannot honor for this resource. */
 function assertSupportedEditMetadata(domain, metadata, remote) {
     const keys = Object.keys(metadata).sort(compareStrings);
-    const supported = domain === "issue"
-        ? new Set(["title", "labels", "assignees"])
-        : new Set(["title", "base", "draft", "maintainerCanModify"]);
+    const supported = domain === "issue" ? new Set(["title", "labels", "assignees"]) : new Set(["title", "base", "maintainerCanModify"]);
     for (const key of keys) {
         if (domain === "pr" && key === "head") {
             const pullRequest = remote;

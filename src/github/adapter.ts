@@ -331,7 +331,6 @@ export class GitHubAdapter {
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
     appendRawField(args, "base", artifact.base);
-    appendBooleanField(args, "draft", artifact.draft);
     appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
     const result = await this.runApi(args, "pull_request.update");
     return parsePullRequest(result, "pull_request.update");

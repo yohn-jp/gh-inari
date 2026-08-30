@@ -1290,10 +1290,10 @@ function artifactLeaves(domain) {
         edit: {
             usage: domain === "issue"
                 ? `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--dry-run]`
-                : `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--draft[=true|false]] [--maintainer-can-modify[=true|false]] [--dry-run]`,
+                : `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--maintainer-can-modify[=true|false]] [--dry-run]`,
             summary: domain === "issue"
                 ? `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved, and --title is supported.`
-                : `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved. Supports --title, --base, --draft, and --maintainer-can-modify; unsupported or immutable metadata is rejected.`,
+                : `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved. Supports --title, --base, and --maintainer-can-modify; --draft is unsupported for edit and is rejected.`,
             example: `inari ${domain} edit 123 --field problem="Updated problem" --dry-run`,
         },
         normalize: {
@@ -1457,7 +1457,7 @@ Commands:
   pr explain <number> [--template <template>]
   pr get <number> [--template <template>] --json
   pr check <number> [--template <template>]
-  pr edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--draft[=true|false]] [--maintainer-can-modify[=true|false]] [--dry-run]
+  pr edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--maintainer-can-modify[=true|false]] [--dry-run]
   pr normalize <number> [--dry-run]
   pr sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
   skill [scenario] [--json]

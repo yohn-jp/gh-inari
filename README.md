@@ -167,7 +167,7 @@ inari pr get <number> [--template <template>] --json
 inari issue check <number> [--template <template>]
 inari pr check <number> [--template <template>]
 inari issue edit <number> [--from patch.json] [--field name=value] [--title title] [--dry-run]
-inari pr edit <number> [--from patch.json] [--field name=value] [--title title] [--base branch] [--draft] [--maintainer-can-modify] [--dry-run]
+inari pr edit <number> [--from patch.json] [--field name=value] [--title title] [--base branch] [--maintainer-can-modify] [--dry-run]
 inari issue normalize <number> [--dry-run]
 inari pr normalize <number> [--dry-run]
 inari issue sync <number> --from desired.json [--dry-run]
@@ -184,7 +184,7 @@ inari pr sync <number> --from desired.json [--dry-run]
 }
 ```
 
-The `fields` object is the semantic input contract shown by `schema`; the same schema output exposes the separate required create metadata schema. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. Caller-supplied `title` metadata is required for both create commands, and `--title`, `--head`, and `--base` override envelope metadata. Existing `edit` commands use the remote artifact as their patch base: `--title` is supported for Issues and pull requests, while pull requests also support `--base`, `--draft`, and `--maintainer-can-modify`; omitted values are preserved and unsupported or immutable metadata is rejected.
+The `fields` object is the semantic input contract shown by `schema`; the same schema output exposes the separate required create metadata schema. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. Caller-supplied `title` metadata is required for both create commands, and `--title`, `--head`, and `--base` override envelope metadata. Existing `edit` commands use the remote artifact as their patch base: `--title` is supported for Issues and pull requests, while pull requests also support `--base` and `--maintainer-can-modify`; `--draft` is rejected for edit because pull-request PATCH does not accept it. Omitted values are preserved and unsupported or immutable metadata is rejected.
 
 `pr sync --from` accepts a complete pull-request desired-state envelope. Use
 `inari pr sync --help` for the top-level contract, or

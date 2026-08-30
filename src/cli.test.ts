@@ -377,7 +377,8 @@ test("edit help identifies the primary patch path and its supported metadata", a
   assert.equal(pullRequest.exitCode, 0);
   assert.match(pullRequest.output, /--base <branch>/);
   assert.match(pullRequest.output, /--maintainer-can-modify/);
-  assert.match(pullRequest.output, /unsupported or immutable metadata is rejected/);
+  assert.doesNotMatch(pullRequest.output, /pr edit[^\n]*--draft/u);
+  assert.match(pullRequest.output, /--draft is unsupported for edit and is rejected/);
 });
 
 test("pr schema projects the canonical sync input and a valid minimal example", async () => {
@@ -2040,7 +2041,6 @@ test("pr edit applies supported metadata flags while preserving omitted remote m
         "feat: renamed",
         "--base",
         "release",
-        "--draft",
         "--maintainer-can-modify=false",
         "--dry-run",
         "--repository",
@@ -2057,12 +2057,89 @@ test("pr edit applies supported metadata flags while preserving omitted remote m
       title: "feat: renamed",
       head: "feature",
       base: "release",
-      draft: true,
+      draft: false,
       maintainerCanModify: false,
     });
     assert.match(output.resulting?.body ?? "", /<!-- inari:template /u);
     assert.equal(
       transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("pr edit mutates every supported metadata field and omits draft from PATCH", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+    command(
+      JSON.stringify({
+        number: 81,
+        title: "feat: renamed",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: false,
+        head: { ref: "feature" },
+        base: { ref: "release" },
+      }),
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      [
+        "pr",
+        "edit",
+        "81",
+        "--title",
+        "feat: renamed",
+        "--base",
+        "release",
+        "--maintainer-can-modify=false",
+        "--repository",
+        "acme/inari",
+      ],
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      mutation?: string;
+      governance?: { reconciled?: boolean };
+    };
+    assert.equal(output.mutation, "applied");
+    assert.equal(output.governance?.reconciled, true);
+    const update = transport.calls.find((args) => args.includes("PATCH") && args.includes("repos/acme/inari/pulls/81"));
+    assert.ok(update);
+    assert.ok(update.includes("title=feat: renamed"));
+    assert.ok(update.includes("base=release"));
+    assert.ok(update.includes("maintainer_can_modify=false"));
+    assert.equal(
+      update.some((argument) => argument.startsWith("draft=")),
       false,
     );
   } finally {
@@ -2097,6 +2174,53 @@ test("issue edit rejects PR-only metadata before any mutation", async () => {
       error?: { code?: string; path?: string; diagnostics?: { diagnostics?: readonly { path?: string }[] } };
     };
     assert.equal(output.error?.code, "SEMANTIC_PATCH_UNSUPPORTED");
+    assert.equal(output.error?.path, "$.metadata.draft");
+    assert.equal(output.error?.diagnostics?.diagnostics?.[0]?.path, "$.metadata.draft");
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("pr edit rejects draft before mutation because pull-request PATCH does not support it", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "edit", "81", "--draft", "--json", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error?: {
+        code?: string;
+        message?: string;
+        path?: string;
+        diagnostics?: { diagnostics?: readonly { path?: string }[] };
+      };
+    };
+    assert.equal(output.error?.code, "SEMANTIC_PATCH_UNSUPPORTED");
+    assert.match(output.error?.message ?? "", /not supported by pull request edit/);
     assert.equal(output.error?.path, "$.metadata.draft");
     assert.equal(output.error?.diagnostics?.diagnostics?.[0]?.path, "$.metadata.draft");
     assert.equal(

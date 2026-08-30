@@ -314,6 +314,17 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   assert.ok(pullRequestCreate.args.includes("head=feature"));
   assert.ok(pullRequestCreate.args.includes("base=main"));
   assert.ok(pullRequestCreate.args.includes("maintainer_can_modify=true"));
+
+  const pullRequestUpdate = transport.calls.find(
+    (call) => call.args.includes("repos/acme/inari/pulls/47") && call.args.includes("PATCH"),
+  );
+  assert.ok(pullRequestUpdate);
+  assert.ok(pullRequestUpdate.args.includes("base=main"));
+  assert.ok(pullRequestUpdate.args.includes("maintainer_can_modify=true"));
+  assert.equal(
+    pullRequestUpdate.args.some((argument) => argument.startsWith("draft=")),
+    false,
+  );
 });
 
 test("rejects missing and non-boolean pull request draft response fields", async () => {

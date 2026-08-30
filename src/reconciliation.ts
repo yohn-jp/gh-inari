@@ -600,9 +600,7 @@ function assertSupportedEditMetadata(
 ): void {
   const keys = Object.keys(metadata).sort(compareStrings);
   const supported =
-    domain === "issue"
-      ? new Set(["title", "labels", "assignees"])
-      : new Set(["title", "base", "draft", "maintainerCanModify"]);
+    domain === "issue" ? new Set(["title", "labels", "assignees"]) : new Set(["title", "base", "maintainerCanModify"]);
   for (const key of keys) {
     if (domain === "pr" && key === "head") {
       const pullRequest = remote as GitHubPullRequest;
