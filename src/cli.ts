@@ -170,6 +170,8 @@ const VALUE_OPTIONS = new Set([
   "minimumVersion",
 ]);
 
+const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
+
 /** One `--field <name>=<value>` occurrence in argv order, before contract-aware resolution. */
 interface RawFieldEntry {
   readonly name: string;
@@ -872,6 +874,7 @@ async function runExistingRemediation(
   json: boolean,
 ): Promise<number> {
   void json;
+  rejectUnsupportedRemediationMetadata(domain, operation, parsed.options);
   rejectGovernedPolicyOverride(parsed.options.policy);
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   await adapter.resolveRepositoryContext();
@@ -942,7 +945,7 @@ async function runExistingRemediation(
           : prepareSyncInput(domain, read, input);
     }
   } catch (error: unknown) {
-    if (operation === "edit" || operation === "normalize") {
+    if (operation === "edit" || operation === "normalize" || operation === "sync") {
       throw translateRemediationFailure(domain, operation, read, error);
     }
     throw error;
@@ -952,12 +955,12 @@ async function runExistingRemediation(
   try {
     desired = prepareRemediationArtifact(domain, read.contract, desiredInput);
   } catch (error: unknown) {
-    if (operation === "edit" || operation === "normalize") {
+    if (operation === "edit" || operation === "normalize" || operation === "sync") {
       throw translateRemediationFailure(domain, operation, read, error, desiredInput);
     }
     throw error;
   }
-  const diff = diffArtifact(domain, read, desired);
+  const diff = diffArtifact(domain, read, desired, operation === "sync");
   const resultBase = {
     ...base,
     changed: diff.changed,
@@ -1115,8 +1118,33 @@ function mergeOptionMetadata(
 }
 
 function hasEditMetadataOption(options: Readonly<Record<string, string | boolean>>): boolean {
-  return ["title", "head", "base", "draft", "maintainerCanModify"].some((key) =>
-    Object.prototype.hasOwnProperty.call(options, key),
+  return METADATA_OPTION_KEYS.some((key) => Object.prototype.hasOwnProperty.call(options, key));
+}
+
+function rejectUnsupportedRemediationMetadata(
+  domain: "issue" | "pr",
+  operation: "check" | "edit" | "normalize" | "sync",
+  options: Readonly<Record<string, string | boolean>>,
+): void {
+  if (operation === "edit") return;
+  const supplied = METADATA_OPTION_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(options, key));
+  if (supplied.length === 0) return;
+  const flags = supplied.map((key) => (key === "maintainerCanModify" ? "--maintainer-can-modify" : `--${key}`));
+  const label = flags.length === 1 ? "flag" : "flags";
+  const verb = flags.length === 1 ? "is" : "are";
+  const guidance =
+    operation === "sync"
+      ? "use the documented --from input contract for metadata changes"
+      : "this remediation command does not accept metadata mutation flags";
+  throw new CliError(
+    "METADATA_UNSUPPORTED_COMMAND",
+    `${flags.join(", ")} ${label} ${verb} not accepted by ${domain} ${operation}; ${guidance}.`,
+    `$.metadata.${supplied[0]}`,
+    {
+      command: `${domain} ${operation}`,
+      metadata: supplied,
+      flags,
+    },
   );
 }
 
@@ -1441,7 +1469,8 @@ function classifyExitCode(error: unknown): number {
       error.code === "INVALID_OPTION" ||
       error.code === "INPUT_REQUIRED" ||
       error.code === "INPUT_READ_FAILED" ||
-      error.code === "FIELD_UNSUPPORTED_COMMAND")
+      error.code === "FIELD_UNSUPPORTED_COMMAND" ||
+      error.code === "METADATA_UNSUPPORTED_COMMAND")
   )
     return EXIT_USAGE;
   if (
@@ -1636,7 +1665,7 @@ function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHel
     },
     check: {
       usage: `${domain} check <number> [--template <template>]`,
-      summary: `Check whether an existing ${noun} is normalizable without mutating GitHub.`,
+      summary: `Check whether an existing ${noun} is normalizable without mutating GitHub. Metadata mutation flags are rejected.`,
       example: `inari ${domain} check 123`,
     },
     edit: {
@@ -1652,15 +1681,15 @@ function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHel
     },
     normalize: {
       usage: `${domain} normalize <number> [--dry-run]`,
-      summary: `Repair an existing ${noun}'s native projection while preserving its existing semantic values.`,
+      summary: `Repair an existing ${noun}'s native projection while preserving its existing semantic values. Metadata mutation flags are rejected.`,
       example: `inari ${domain} normalize 123 --dry-run`,
     },
     sync: {
       usage: `${domain} sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
       summary:
         domain === "pr"
-          ? `Reconcile an existing ${noun} to a complete desired semantic state. ${renderPullRequestSyncInputHelp()}`
-          : `Reconcile an existing ${noun} to a complete desired semantic state, preserving fields and metadata omitted from the input.`,
+          ? `Reconcile an existing ${noun} to a complete desired semantic state. Direct metadata mutation flags are rejected; immutable head changes and unsupported draft changes fail. ${renderPullRequestSyncInputHelp()}`
+          : `Reconcile an existing ${noun} to a complete desired semantic state, preserving fields and metadata omitted from the input. Direct metadata mutation flags are rejected.`,
       example: `inari ${domain} sync 123 --from desired.json --dry-run`,
     },
   };

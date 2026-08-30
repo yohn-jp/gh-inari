@@ -17,14 +17,15 @@ export class RemediationError extends Error {
         this.diagnostics = diagnostics;
     }
 }
-/** Project recoverable normalize/edit failures through the shared #118 contract. */
+/** Project recoverable remediation failures through the shared #118 contract. */
 export function remediationDiagnosticReport(domain, operation, read, input, error) {
     const requirementReport = remediationRequirementDiagnostics(error);
     if (requirementReport !== undefined)
         return boundedDiagnosticReport(requirementReport);
     let semanticReport;
     if (read.result.parse.parsed && read.contract !== undefined) {
-        const candidate = error instanceof RemediationError && error.code === "PR_HEAD_CHANGE_UNSUPPORTED"
+        const candidate = error instanceof RemediationError &&
+            (error.code === "PR_HEAD_CHANGE_UNSUPPORTED" || error.code === "PR_DRAFT_CHANGE_UNSUPPORTED")
             ? currentArtifactInput(domain, read)
             : (input ?? currentArtifactInput(domain, read));
         const loaded = loadCanonicalArtifact(read.contract, candidate);
@@ -64,8 +65,28 @@ export function remediationDiagnosticReport(domain, operation, read, input, erro
             }),
         ], semanticReport?.acceptedFields ?? []);
     }
+    if (error instanceof RemediationError && error.code === "PR_DRAFT_CHANGE_UNSUPPORTED") {
+        return createArtifactDiagnosticReport([
+            ...(semanticReport?.diagnostics.slice(0, 31) ?? []),
+            createArtifactDiagnostic({
+                state: "unsupported",
+                code: "FIELD_UNSUPPORTED",
+                detailCode: "FIELD_UNSUPPORTED",
+                reason: "unsupported",
+                path: "$.metadata.draft",
+                message: error.message,
+                recovery: [
+                    {
+                        action: "replace",
+                        path: "$.metadata.draft",
+                        hint: "Omit draft or keep the current pull-request draft state and retry.",
+                    },
+                ],
+            }),
+        ], semanticReport?.acceptedFields ?? []);
+    }
     if (error instanceof RemediationError &&
-        error.code === "SEMANTIC_PATCH_UNSUPPORTED" &&
+        (error.code === "SEMANTIC_PATCH_UNSUPPORTED" || error.code === "SYNC_METADATA_UNSUPPORTED") &&
         typeof error.details?.metadata === "string") {
         const path = error.path ?? `$.metadata.${error.details.metadata}`;
         return createArtifactDiagnosticReport([
@@ -134,7 +155,9 @@ export function remediationDiagnosticReport(domain, operation, read, input, erro
             path: "$.artifact",
             message: operation === "normalize"
                 ? "Normalization cannot preserve the existing artifact deterministically."
-                : "The existing artifact cannot be safely edited as a semantic document.",
+                : operation === "sync"
+                    ? "The existing artifact cannot be safely synchronized as a semantic document."
+                    : "The existing artifact cannot be safely edited as a semantic document.",
             recovery: [
                 {
                     action: "repair",
@@ -440,6 +463,7 @@ export function prepareSyncInput(domain, read, desired) {
         throw new RemediationError("SYNC_CURRENT_UNSUPPORTED", "Sync refuses to replace an unsupported or unparseable existing artifact.", "$.artifact");
     }
     assertKnownFields(read.contract, desired.fields, "SYNC_INPUT_INCOMPLETE");
+    assertSupportedSyncMetadata(domain, desired.metadata);
     if (domain === "issue") {
         const current = currentArtifactInput(domain, read);
         return {
@@ -450,13 +474,34 @@ export function prepareSyncInput(domain, read, desired) {
     if (domain === "pr" && desired.metadata.head !== undefined) {
         const remote = read.remote;
         if (desired.metadata.head !== remote.head) {
-            throw new RemediationError("PR_HEAD_CHANGE_UNSUPPORTED", "Pull request head branches cannot be changed through the GitHub pull-request model.", "$.head", { current: remote.head, requested: desired.metadata.head });
+            throw new RemediationError("PR_HEAD_CHANGE_UNSUPPORTED", "Pull request head branches cannot be changed through the GitHub pull-request model.", "$.head", { current: boundDiagnosticText(remote.head), requested: boundDiagnosticText(desired.metadata.head) });
+        }
+    }
+    if (domain === "pr" && desired.metadata.draft !== undefined) {
+        const remote = read.remote;
+        if (desired.metadata.draft !== remote.draft) {
+            throw new RemediationError("PR_DRAFT_CHANGE_UNSUPPORTED", "Pull request draft state cannot be changed through the GitHub pull-request update model.", "$.draft", { current: remote.draft, requested: desired.metadata.draft });
         }
     }
     return desired;
 }
-/** Compare the current semantic/rendered artifact with a prepared canonical projection. */
-export function diffArtifact(domain, read, desired) {
+function assertSupportedSyncMetadata(domain, metadata) {
+    const supported = domain === "issue"
+        ? new Set(["title", "labels", "assignees"])
+        : new Set(["title", "head", "base", "draft", "maintainerCanModify"]);
+    const unsupported = Object.keys(metadata)
+        .filter((key) => !supported.has(key))
+        .sort(compareStrings);
+    const key = unsupported[0];
+    if (key === undefined)
+        return;
+    throw new RemediationError("SYNC_METADATA_UNSUPPORTED", `Metadata "${key}" is not supported by ${domain} sync.`, `$.metadata.${key}`, { metadata: key });
+}
+/**
+ * Compare the current semantic/rendered artifact with a prepared canonical projection.
+ * PR sync owns maintainerCanModify; edit retains its established diff behavior.
+ */
+export function diffArtifact(domain, read, desired, includePullRequestMaintainerCanModify = false) {
     const currentFields = currentArtifactInput(domain, read).fields;
     const desiredFields = desiredFieldsFromArtifact(domain, desired, read.contract);
     const keys = [...new Set([...Object.keys(currentFields), ...Object.keys(desiredFields)])].sort(compareStrings);
@@ -475,7 +520,7 @@ export function diffArtifact(domain, read, desired) {
         }
     }
     const currentMetadata = currentMetadataForDiff(domain, read.remote);
-    const desiredMetadata = desiredMetadataForDiff(domain, desired);
+    const desiredMetadata = desiredMetadataForDiff(domain, desired, includePullRequestMaintainerCanModify);
     for (const key of Object.keys(desiredMetadata).sort(compareStrings)) {
         if (stableValue(currentMetadata[key]) !== stableValue(desiredMetadata[key])) {
             semantic.push({
@@ -522,7 +567,7 @@ function currentMetadataForDiff(domain, remote) {
         ...(pullRequest.maintainerCanModify === undefined ? {} : { maintainerCanModify: pullRequest.maintainerCanModify }),
     };
 }
-function desiredMetadataForDiff(domain, artifact) {
+function desiredMetadataForDiff(domain, artifact, includePullRequestMaintainerCanModify) {
     if (domain === "issue") {
         const issue = artifact;
         return {
@@ -537,6 +582,9 @@ function desiredMetadataForDiff(domain, artifact) {
         head: pullRequest.head,
         base: pullRequest.base,
         ...(pullRequest.draft === undefined ? {} : { draft: pullRequest.draft }),
+        ...(includePullRequestMaintainerCanModify && pullRequest.maintainerCanModify !== undefined
+            ? { maintainerCanModify: pullRequest.maintainerCanModify }
+            : {}),
     };
 }
 function assertKnownFields(contract, fields, code) {
