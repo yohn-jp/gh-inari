@@ -37,6 +37,47 @@ test("findSkillScenario resolves known ids and returns undefined for unknown ids
   assert.equal(findSkillScenario("bogus-scenario"), undefined);
 });
 
+test("authoring scenarios make direct governed creation the conditional golden path", () => {
+  for (const domain of ["issue", "pr"] as const) {
+    const scenario = findSkillScenario(domain === "issue" ? "author-issue" : "author-pr");
+    assert.ok(scenario);
+
+    assert.equal(scenario.workflow[0]?.command, `inari ${domain} create`);
+    assert.match(scenario.workflow[0]?.summary ?? "", /directly/);
+
+    const schemaStep = scenario.workflow.find((step) => step.command === `inari ${domain} schema`);
+    assert.ok(schemaStep);
+    assert.match(schemaStep.summary, /If required fields are unknown/);
+
+    const validateStep = scenario.workflow.find((step) => step.command === `inari ${domain} validate`);
+    const renderStep = scenario.workflow.find((step) => step.command === `inari ${domain} render`);
+    assert.match(validateStep?.summary ?? "", /preview|debugging/);
+    assert.match(renderStep?.summary ?? "", /artifact generation/);
+    assert.match(scenario.invariants.join(" "), /golden path/);
+    assert.match(scenario.invariants.join(" "), /not a mandatory step/);
+    assert.match(scenario.invariants.join(" "), /not mandatory ceremony/);
+  }
+});
+
+test("inspect and repair scenarios use the 0.8 remediation paths", () => {
+  const inspect = findSkillScenario("inspect-governance");
+  assert.ok(inspect);
+  assert.deepEqual(
+    inspect.workflow.map((step) => step.command),
+    ["inari issue check <number>", "inari issue get <number>", "inari issue explain <number>"],
+  );
+
+  const repair = findSkillScenario("repair-invalid-artifact");
+  assert.ok(repair);
+  assert.equal(repair.title, "Repair or normalize a governed artifact");
+  const commands = repair.workflow.map((step) => step.command).join(" ");
+  assert.match(commands, /inari issue normalize/);
+  assert.match(commands, /inari issue edit/);
+  assert.match(commands, /inari issue sync/);
+  assert.match(repair.invariants.join(" "), /preservation of current semantics/);
+  assert.match(repair.invariants.join(" "), /Always preview a mutation/);
+});
+
 for (const scenario of SKILL_SCENARIOS) {
   test(`${scenario.id}: text and JSON projections derive from the same fields`, () => {
     const text = projectSkillScenarioToText(scenario);
