@@ -473,6 +473,9 @@ function parsePullRequest(value, operation) {
     const url = responseUrl(record, operation);
     const body = record.body === null ? null : responseString(record.body, "body", operation);
     const draft = responseBoolean(record.draft, "draft", operation);
+    const maintainerCanModify = record.maintainer_can_modify === undefined
+        ? undefined
+        : responseBoolean(record.maintainer_can_modify, "maintainer_can_modify", operation);
     const head = responseRef(record.head, "head", operation);
     const base = responseRef(record.base, "base", operation);
     return {
@@ -482,6 +485,7 @@ function parsePullRequest(value, operation) {
         state,
         url,
         draft,
+        ...(maintainerCanModify === undefined ? {} : { maintainerCanModify }),
         head,
         base,
     };

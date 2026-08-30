@@ -166,8 +166,8 @@ inari issue get <number> [--template <template>] --json
 inari pr get <number> [--template <template>] --json
 inari issue check <number> [--template <template>]
 inari pr check <number> [--template <template>]
-inari issue edit <number> --from patch.json [--dry-run]
-inari pr edit <number> --from patch.json [--dry-run]
+inari issue edit <number> [--from patch.json] [--field name=value] [--title title] [--dry-run]
+inari pr edit <number> [--from patch.json] [--field name=value] [--title title] [--base branch] [--draft] [--maintainer-can-modify] [--dry-run]
 inari issue normalize <number> [--dry-run]
 inari pr normalize <number> [--dry-run]
 inari issue sync <number> --from desired.json [--dry-run]
@@ -184,7 +184,7 @@ inari pr sync <number> --from desired.json [--dry-run]
 }
 ```
 
-The `fields` object is the semantic input contract shown by `schema`; the same schema output exposes the separate required create metadata schema. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. Caller-supplied `title` metadata is required for both create commands, and `--title`, `--head`, and `--base` override envelope metadata.
+The `fields` object is the semantic input contract shown by `schema`; the same schema output exposes the separate required create metadata schema. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. Caller-supplied `title` metadata is required for both create commands, and `--title`, `--head`, and `--base` override envelope metadata. Existing `edit` commands use the remote artifact as their patch base: `--title` is supported for Issues and pull requests, while pull requests also support `--base`, `--draft`, and `--maintainer-can-modify`; omitted values are preserved and unsupported or immutable metadata is rejected.
 
 `pr sync --from` accepts a complete pull-request desired-state envelope. Use
 `inari pr sync --help` for the top-level contract, or
@@ -213,14 +213,15 @@ boilerplate and raw Markdown are intentionally absent from successful output.
 Existing artifact remediation uses one semantic pipeline for both Issues and
 pull requests. `check` is read-only and classifies an artifact as
 `valid-current`, `non-canonical`, `semantically-invalid`, `unsupported`, or
-`ambiguous`. `edit` applies only an explicit semantic patch from JSON; it never
-accepts raw Markdown as the mutation contract. `normalize` re-renders a
+`ambiguous`. `edit` applies an explicit semantic/metadata patch from JSON or
+direct CLI options; it never accepts raw Markdown as the mutation contract. `normalize` re-renders a
 parseable, semantically valid artifact and fails closed when preservation is
 not proven. `issue sync` overlays its input onto the current canonical state,
 while `pr sync` treats its input as the complete desired semantic state; both
 reconcile the canonical projection deterministically. A successful no-op is
 reported explicitly, and `--dry-run` returns a bounded semantic/rendered diff
-without calling a GitHub mutation.
+plus the validated resulting fields, metadata, and canonical body without
+calling a GitHub mutation.
 
 ## Source of truth and supported semantics
 

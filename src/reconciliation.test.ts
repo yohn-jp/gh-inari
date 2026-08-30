@@ -266,6 +266,13 @@ test("pull-request semantic remediation preserves resource-specific metadata and
     () => applySemanticPatch("pr", read, { fields: {}, metadata: { head: "other" } }),
     (error: unknown) => error instanceof Error && error.name === "RemediationError",
   );
+  assert.throws(
+    () => applySemanticPatch("pr", read, { fields: {}, metadata: { labels: ["release"] } }),
+    (error: unknown) =>
+      error instanceof RemediationError &&
+      error.code === "SEMANTIC_PATCH_UNSUPPORTED" &&
+      error.path === "$.metadata.labels",
+  );
 });
 
 test("PR create, edit, normalize, and sync share one canonical renderer", () => {
