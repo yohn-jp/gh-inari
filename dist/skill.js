@@ -2,21 +2,32 @@
 export const SKILL_MODEL_VERSION = "1.0.0";
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
 export const MAX_SKILL_OUTPUT_BYTES = 4096;
-const HELP_DISCLAIMER = "This playbook does not restate exact flags; run the help pointer above for precise syntax.";
+const HELP_DISCLAIMER = "This playbook does not restate exact flags; run the help pointer below for precise syntax.";
 export const SKILL_SCENARIOS = [
     {
         id: "author-issue",
         title: "Author a governed Issue",
         whenToUse: "Use when creating a new Issue that must satisfy repository governance from the start.",
         workflow: [
-            { summary: "Inspect the required fields for the target template.", command: "inari issue schema <template>" },
-            { summary: "Validate a draft input document against the contract.", command: "inari issue validate <template>" },
-            { summary: "Render the validated input into the final Issue body.", command: "inari issue render <template>" },
-            { summary: "Create the governed Issue on the repository.", command: "inari issue create <template>" },
+            {
+                summary: "Create directly with governed fields when the template and required fields are known.",
+                command: "inari issue create",
+            },
+            {
+                summary: "If required fields are unknown, inspect the target template before creating.",
+                command: "inari issue schema",
+            },
+            {
+                summary: "For explicit preview or debugging, validate input without creating.",
+                command: "inari issue validate",
+            },
+            { summary: "For explicit artifact generation, render input without creating.", command: "inari issue render" },
         ],
         invariants: [
             "Never call raw `gh issue create` for a governed template; it bypasses contract validation.",
-            "Validate before render; render before create.",
+            "Direct governed creation is the golden path when required fields are already known.",
+            "Schema inspection is conditional, not a mandatory step when field requirements are known.",
+            "Validate and render are explicit preview, debugging, or artifact-generation paths, not mandatory ceremony.",
             HELP_DISCLAIMER,
         ],
         canonicalEntrypoint: "inari issue create",
@@ -27,14 +38,22 @@ export const SKILL_SCENARIOS = [
         title: "Author a governed Pull Request",
         whenToUse: "Use when opening a new Pull Request that must satisfy repository governance from the start.",
         workflow: [
-            { summary: "Inspect the required fields for the target template.", command: "inari pr schema <template>" },
-            { summary: "Validate a draft input document against the contract.", command: "inari pr validate <template>" },
-            { summary: "Render the validated input into the final PR body.", command: "inari pr render <template>" },
-            { summary: "Create the governed Pull Request on the repository.", command: "inari pr create <template>" },
+            {
+                summary: "Create directly with governed fields when the template and required fields are known.",
+                command: "inari pr create",
+            },
+            {
+                summary: "If required fields are unknown, inspect the target template before creating.",
+                command: "inari pr schema",
+            },
+            { summary: "For explicit preview or debugging, validate input without creating.", command: "inari pr validate" },
+            { summary: "For explicit artifact generation, render input without creating.", command: "inari pr render" },
         ],
         invariants: [
             "Never call raw `gh pr create` for a governed template; it bypasses contract validation.",
-            "Validate before render; render before create.",
+            "Direct governed creation is the golden path when required fields are already known.",
+            "Schema inspection is conditional, not a mandatory step when field requirements are known.",
+            "Validate and render are explicit preview, debugging, or artifact-generation paths, not mandatory ceremony.",
             HELP_DISCLAIMER,
         ],
         canonicalEntrypoint: "inari pr create",
@@ -46,11 +65,18 @@ export const SKILL_SCENARIOS = [
         whenToUse: "Use when you need to read the governance classification of an existing Issue or PR without changing it.",
         workflow: [
             { summary: "Classify the artifact against its governed contract.", command: "inari issue check <number>" },
-            { summary: "Read detailed field-level explanation or raw values.", command: "inari issue explain <number>" },
+            {
+                summary: "Read canonical fields and metadata when the artifact is available canonically.",
+                command: "inari issue get <number>",
+            },
+            {
+                summary: "Read detailed diagnostics when the classification needs explanation.",
+                command: "inari issue explain <number>",
+            },
         ],
         invariants: [
             "Read-only: this scenario never mutates the artifact.",
-            "Applies equally to PRs via `inari pr check`/`inari pr explain`.",
+            "Applies equally to PRs via the corresponding `inari pr` commands.",
             HELP_DISCLAIMER,
         ],
         canonicalEntrypoint: "inari issue check",
@@ -58,20 +84,28 @@ export const SKILL_SCENARIOS = [
     },
     {
         id: "repair-invalid-artifact",
-        title: "Repair an invalid governed artifact",
-        whenToUse: "Use when `inspect-governance` shows an existing Issue or PR is invalid or non-normalized and needs correction.",
+        title: "Repair or normalize a governed artifact",
+        whenToUse: "Use when inspection identifies a non-canonical or semantically invalid Issue or PR that needs correction.",
         workflow: [
             { summary: "Classify the artifact and confirm it needs repair.", command: "inari issue check <number>" },
             {
-                summary: "Preview the repair without mutating the artifact.",
-                command: "inari issue normalize <number> --dry-run",
+                summary: "Preview, then apply canonicalization after review for a parseable, semantically valid artifact.",
+                command: "inari issue normalize <number>",
             },
-            { summary: "Apply the repair once the dry run looks correct.", command: "inari issue normalize <number>" },
+            {
+                summary: "Preview, then apply an explicit semantic or metadata patch after review.",
+                command: "inari issue edit <number>",
+            },
+            {
+                summary: "Preview, then apply a sync operation after review when desired-state convergence is required.",
+                command: "inari issue sync <number>",
+            },
         ],
         invariants: [
-            "Always run a dry run before applying any mutation.",
-            "Never mutate the artifact directly from a `check` failure without a dry-run step first.",
-            "Applies equally to PRs via `inari pr check`/`inari pr normalize`.",
+            "Check is read-only; choose normalize, edit, or sync from its classification.",
+            "Normalize only when preservation of current semantics is proven; use edit or sync for explicit repair.",
+            "Always preview a mutation before applying it.",
+            "Applies equally to PRs via the corresponding `inari pr` commands.",
             HELP_DISCLAIMER,
         ],
         canonicalEntrypoint: "inari issue normalize",
