@@ -361,6 +361,12 @@ test("pr sync help exposes the complete canonical --from envelope", async () => 
   assert.match(output, /`fields` must be the semantic object/);
 });
 
+test("issue sync help explains that omitted values are preserved", async () => {
+  const { exitCode, output } = await captureHelp(["issue", "sync", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /preserving fields and metadata omitted from the input/);
+});
+
 test("pr schema projects the canonical sync input and a valid minimal example", async () => {
   const result = await captureJson(["pr", "schema", "default", "--json"]);
   assert.equal(result.exitCode, 0);
