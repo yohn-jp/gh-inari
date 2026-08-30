@@ -6,6 +6,7 @@ import {
   ArtifactPreparationError,
   extractIssueDependencyMarker,
   extractTemplateIdentityMarker,
+  parseArtifactInputDocument,
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
   prepareIssueArtifact,
@@ -1232,8 +1233,8 @@ test("Issue dependency semantics round-trip through the canonical body marker an
       acceptance: ["tests"],
     },
     dependencies: {
-      blockedBy: [{ repository: "yohn-jp/gh-inari", number: 149 }],
-      blocks: [{ repository: "yohn-jp/portal", number: 3 }],
+      blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
+      blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 3 }],
     },
   };
   const body = renderIssueArtifact(issueContractFixture, input);
@@ -1244,4 +1245,73 @@ test("Issue dependency semantics round-trip through the canonical body marker an
   assert.equal(parsed.valid, true);
   assert.deepEqual(parsed.parse.dependencies, input.dependencies);
   assert.deepEqual(projectExistingArtifact(parsed).dependencies, input.dependencies);
+});
+
+test("prepared Issue artifacts preserve dependencies at the mutation boundary", () => {
+  const input = {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "feat: dependency boundary" },
+    dependencies: {
+      blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
+      blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 3 }],
+    },
+  };
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), input);
+  const parsed = validateExistingIssueArtifact(issueContractFixture, prepared.artifact.body);
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.parse.dependencies, input.dependencies);
+  assert.deepEqual(projectExistingArtifact(parsed).dependencies, input.dependencies);
+});
+
+test("parsing keeps self-reference semantic validation outside representation parsing", () => {
+  const body = renderIssueArtifact(issueContractFixture, {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+    dependencies: {
+      blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 157 }],
+    },
+  });
+  const parsed = parseExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.parsed, true);
+  const validated = validateExistingIssueArtifact(issueContractFixture, body, {
+    repositoryId: "R_kgDOinari",
+    repository: "yohn-jp/gh-inari",
+    number: 157,
+  });
+  assert.equal(validated.valid, false);
+  assert.equal(validated.classification, "semantic");
+  assert.deepEqual(validated.violations, [
+    {
+      code: "INPUT_DEPENDENCY",
+      path: "$.dependencies.blockedBy[0]",
+      message: "An Issue cannot depend on itself.",
+    },
+  ]);
+});
+
+test("input dependency diagnostics retain the public envelope path", () => {
+  assert.throws(
+    () => parseArtifactInputDocument({ fields: {}, dependencies: { blockedBy: "yohn-jp/gh-inari#149" } }),
+    (error: unknown) => {
+      assert.equal((error as { code: string }).code, "INPUT_DEPENDENCIES_INVALID");
+      assert.equal((error as { path: string }).path, "$.dependencies.blockedBy");
+      assert.deepEqual((error as { details: readonly { path: string }[] }).details, [
+        {
+          code: "DEPENDENCIES_NOT_ARRAY",
+          path: "$.dependencies.blockedBy",
+          message: "blockedBy must be an array of Issue references.",
+        },
+      ]);
+      return true;
+    },
+  );
 });

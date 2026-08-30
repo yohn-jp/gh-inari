@@ -37,6 +37,8 @@ export interface RepositoryContext {
     readonly name: string;
     readonly nameWithOwner: string;
     readonly url: string;
+    /** Immutable GitHub repository node ID when resolved from gh. */
+    readonly repositoryId?: string;
 }
 /** A file entry from the repository Git tree at a trusted ref. */
 export interface RepositoryTreeEntry {
@@ -58,6 +60,8 @@ export interface GitHubIssue {
     readonly url: string;
     readonly labels: readonly string[];
     readonly assignees: readonly string[];
+    /** Immutable repository node ID when supplied by the adapter context. */
+    readonly repositoryId?: string;
 }
 export interface GitHubPullRequest {
     readonly number: number;

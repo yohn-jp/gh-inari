@@ -217,9 +217,10 @@ const DOMAIN_ARTIFACT_KIND = {
 };
 function issueReferenceFromRemote(remote, number) {
     const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(remote.url);
-    if (match === null)
+    const repositoryId = "repositoryId" in remote ? remote.repositoryId : undefined;
+    if (match === null || repositoryId === undefined)
         return undefined;
-    return { repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+    return { repositoryId, repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
 }
 /** Read and select an existing artifact using the same governed candidate path as `get`. */
 export async function readGovernedExistingArtifact(adapter, domain, number, selector) {

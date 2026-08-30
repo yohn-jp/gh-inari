@@ -34,6 +34,8 @@ export interface ContractProvenanceRepository {
     readonly owner: string;
     readonly name: string;
     readonly nameWithOwner: string;
+    /** Immutable GitHub repository node ID when supplied by the adapter. */
+    readonly repositoryId?: string;
 }
 export interface ContractProvenanceSource {
     readonly path: string;

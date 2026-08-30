@@ -5,20 +5,23 @@
  * generic Issue primitive, rather than a template field or a Portal model,
  * so later consumers can reuse them without learning a repository's Markdown
  * layout.
+ *
+ * For GitHub, repositoryId is the opaque repository node ID returned by
+ * `gh repo view --json id`.  Rename/transfer changes the repository locator,
+ * but not the referenced repository identity key; the locator is therefore
+ * never used for equality, sorting, duplicate detection, or self checks.
  */
 const REPOSITORY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
+const REPOSITORY_ID_PATTERN = /^[^\s\/#]{1,256}$/u;
 export const EMPTY_ISSUE_DEPENDENCIES = Object.freeze({ blockedBy: [], blocks: [] });
 function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function hasOwn(value, key) {
-    return Object.prototype.hasOwnProperty.call(value, key);
-}
 function repositoryKey(reference) {
-    return `${reference.repository}#${reference.number}`;
+    return `${reference.repositoryId}#${reference.number}`;
 }
 function compareReferences(left, right) {
-    return left.repository.localeCompare(right.repository, "en-US") || left.number - right.number;
+    return left.repositoryId.localeCompare(right.repositoryId, "en-US") || left.number - right.number;
 }
 function invalidResult(violations) {
     return { valid: false, dependencies: EMPTY_ISSUE_DEPENDENCIES, violations };
@@ -37,19 +40,23 @@ export function normalizeIssueReference(input, path = "$") {
             valid: false,
             reference: undefined,
             violations: [
-                referenceViolation(typeof input === "string" || Array.isArray(input) ? "REFERENCE_AMBIGUOUS" : "REFERENCE_NOT_OBJECT", path, "Issue references must be objects containing repository and number."),
+                referenceViolation(typeof input === "string" || Array.isArray(input) ? "REFERENCE_AMBIGUOUS" : "REFERENCE_NOT_OBJECT", path, "Issue references must be objects containing repositoryId and number."),
             ],
         };
     }
     const violations = [];
     for (const key of Object.keys(input)) {
-        if (key !== "repository" && key !== "number") {
+        if (key !== "repositoryId" && key !== "repository" && key !== "number") {
             violations.push(referenceViolation("REFERENCE_UNKNOWN_PROPERTY", `${path}.${key}`, `Reference property "${key}" is not supported.`));
         }
     }
+    const repositoryId = input.repositoryId;
+    if (typeof repositoryId !== "string" || !REPOSITORY_ID_PATTERN.test(repositoryId)) {
+        violations.push(referenceViolation("REFERENCE_REPOSITORY_ID_INVALID", `${path}.repositoryId`, "repositoryId must be an immutable repository identity, not an owner/name locator or URL."));
+    }
     const repository = input.repository;
-    if (typeof repository !== "string" || !REPOSITORY_PATTERN.test(repository)) {
-        violations.push(referenceViolation(repository === "" || typeof repository !== "string" ? "REFERENCE_REPOSITORY_INVALID" : "REFERENCE_AMBIGUOUS", `${path}.repository`, "Repository must be an owner/name identity without a host, URL, or issue suffix."));
+    if (repository !== undefined && (typeof repository !== "string" || !REPOSITORY_PATTERN.test(repository))) {
+        violations.push(referenceViolation(repository === "" || typeof repository !== "string" ? "REFERENCE_REPOSITORY_INVALID" : "REFERENCE_AMBIGUOUS", `${path}.repository`, "repository is a display/transport locator and must be an owner/name value without a host, URL, or issue suffix."));
     }
     const number = input.number;
     if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) {
@@ -59,7 +66,11 @@ export function normalizeIssueReference(input, path = "$") {
         return { valid: false, reference: undefined, violations };
     return {
         valid: true,
-        reference: { repository: repository.toLocaleLowerCase("en-US"), number: number },
+        reference: {
+            repositoryId: repositoryId,
+            ...(repository === undefined ? {} : { repository: repository.toLocaleLowerCase("en-US") }),
+            number: number,
+        },
         violations: [],
     };
 }
@@ -128,6 +139,6 @@ export const normalizeIssueDependencies = validateIssueDependencies;
 export const projectIssueDependencies = validateIssueDependencies;
 /** Stable key useful to adapters without exposing parsing rules. */
 export function issueReferenceKey(reference) {
-    return repositoryKey({ repository: reference.repository.toLocaleLowerCase("en-US"), number: reference.number });
+    return repositoryKey({ repositoryId: reference.repositoryId, number: reference.number });
 }
 //# sourceMappingURL=issue-reference.js.map

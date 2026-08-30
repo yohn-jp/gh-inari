@@ -134,7 +134,10 @@ test("resolves the current repository deterministically and preserves the gh cwd
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    command(
+      0,
+      JSON.stringify({ id: "R_kgDOinari", nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" }),
+    ),
   ]);
   const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
 
@@ -147,10 +150,11 @@ test("resolves the current repository deterministically and preserves the gh cwd
     name: "inari",
     nameWithOwner: "acme/inari",
     url: "https://github.com/acme/inari",
+    repositoryId: "R_kgDOinari",
   });
   assert.deepEqual(
     transport.calls.map((call) => call.args),
-    [["--version"], ["auth", "status"], ["repo", "view", "--json", "nameWithOwner,url"]],
+    [["--version"], ["auth", "status"], ["repo", "view", "--json", "id,nameWithOwner,url"]],
   );
   assert.ok(transport.calls.every((call) => call.cwd === "/workspace/inari"));
 });
@@ -210,7 +214,10 @@ test("retries repository context resolution after a transient failure instead of
     command(0, "gh version 2.0"),
     command(),
     command(1, "", "Unable to resolve repository"),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    command(
+      0,
+      JSON.stringify({ id: "R_kgDOinari", nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" }),
+    ),
   ]);
   const adapter = new GitHubAdapter({ transport });
 
@@ -253,6 +260,21 @@ test("returns a typed failure when the local repository cannot be resolved", asy
       error instanceof RepositoryResolutionError &&
       error.code === "REPOSITORY_RESOLUTION_FAILED" &&
       error.category === "repository",
+  );
+});
+
+test("fails closed when repository resolution has no immutable identity", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+  ]);
+  const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
+
+  await assert.rejects(
+    adapter.resolveRepositoryContext(),
+    (error: unknown) =>
+      error instanceof RepositoryResolutionError && error.message.includes("stable repository identity"),
   );
 });
 
@@ -565,13 +587,17 @@ test("applies bounded, operation-class-specific timeouts to every real adapter c
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    command(
+      0,
+      JSON.stringify({ id: "R_kgDOinari", nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" }),
+    ),
     command(0, issuePayload()),
   ]);
   const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
 
   await adapter.resolveRepositoryContext();
-  await adapter.getIssue(42);
+  const issue = await adapter.getIssue(42);
+  assert.equal(issue.repositoryId, "R_kgDOinari");
 
   const [ghVersion, authStatus, repoView, issueRead] = transport.calls;
   assert.equal(ghVersion.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
@@ -660,7 +686,10 @@ test("classifies a mutation call's bounded timeout distinctly from read timeouts
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    command(
+      0,
+      JSON.stringify({ id: "R_kgDOinari", nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" }),
+    ),
     command(0, issuePayload(44)),
   ]);
   const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });

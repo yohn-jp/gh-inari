@@ -155,7 +155,7 @@ export class GitHubAdapter {
         assertIssueNumber(issueNumber, "issue_number");
         const context = await this.resolveRepositoryContext();
         const result = await this.runApi(this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "GET"), "issue.read");
-        return parseIssue(result, "issue.read");
+        return parseIssue(result, "issue.read", context.repositoryId);
     }
     async readIssue(issueNumber) {
         return this.getIssue(issueNumber);
@@ -179,7 +179,7 @@ export class GitHubAdapter {
         appendRawFields(args, "labels[]", artifact.labels);
         appendRawFields(args, "assignees[]", artifact.assignees);
         const result = await this.runApi(args, "issue.create");
-        return parseIssue(result, "issue.create");
+        return parseIssue(result, "issue.create", context.repositoryId);
     }
     async updateIssue(issueNumber, artifact) {
         assertIssueNumber(issueNumber, "issue_number");
@@ -195,7 +195,7 @@ export class GitHubAdapter {
         appendRawFields(args, "labels[]", artifact.labels);
         appendRawFields(args, "assignees[]", artifact.assignees);
         const result = await this.runApi(args, "issue.update");
-        return parseIssue(result, "issue.update");
+        return parseIssue(result, "issue.update", context.repositoryId);
     }
     async createPullRequest(artifact) {
         assertValidatedRenderedPullRequestArtifact(artifact);
@@ -232,7 +232,7 @@ export class GitHubAdapter {
             return override;
         }
         await this.ensureAuthenticated(this.normalizedHostname());
-        const result = await this.runCommand(["repo", "view", "--json", "nameWithOwner,url"], "repository.resolve");
+        const result = await this.runCommand(["repo", "view", "--json", "id,nameWithOwner,url"], "repository.resolve");
         if (result.exitCode !== 0) {
             if (UNAUTHENTICATED_MESSAGE_PATTERN.test(result.stderr)) {
                 throw new GhUnauthenticatedError(this.normalizedHostname(), summarize(result.stderr));
@@ -246,11 +246,11 @@ export class GitHubAdapter {
         catch (error) {
             throw new RepositoryResolutionError("gh returned invalid JSON while resolving the current repository.", { operation: "repository.resolve", response: summarize(result.stdout) }, error);
         }
-        if (!isRecord(payload) || typeof payload.nameWithOwner !== "string") {
-            throw new RepositoryResolutionError("gh returned no valid repository nameWithOwner for the current working directory.", { operation: "repository.resolve", response: summarize(result.stdout) });
+        if (!isRecord(payload) || typeof payload.nameWithOwner !== "string" || !isStableRepositoryId(payload.id)) {
+            throw new RepositoryResolutionError("gh returned no valid stable repository identity for the current working directory.", { operation: "repository.resolve", response: summarize(result.stdout) });
         }
         try {
-            return repositoryContextFromNameWithOwner(payload.nameWithOwner, typeof payload.url === "string" ? payload.url : undefined, this.normalizedHostname() ?? DEFAULT_HOSTNAME);
+            return repositoryContextFromNameWithOwner(payload.nameWithOwner, typeof payload.url === "string" ? payload.url : undefined, this.normalizedHostname() ?? DEFAULT_HOSTNAME, payload.id);
         }
         catch (error) {
             if (error instanceof RepositoryResolutionError)
@@ -445,7 +445,7 @@ function parseJson(value, operation) {
         throw new GitHubApiResponseError(operation, `gh returned invalid JSON during ${operation}.`, { response: summarize(value) }, error);
     }
 }
-function parseIssue(value, operation) {
+function parseIssue(value, operation, repositoryId) {
     const record = responseRecord(value, operation);
     const number = responseNumber(record.number, "number", operation);
     if (record.pull_request !== undefined)
@@ -462,6 +462,7 @@ function parseIssue(value, operation) {
         url,
         labels: responseNames(record.labels, "labels", operation),
         assignees: responseNames(record.assignees, "assignees", operation),
+        ...(repositoryId === undefined ? {} : { repositoryId }),
     };
 }
 function parsePullRequest(value, operation) {
@@ -613,7 +614,7 @@ function parseRepositoryOverride(repository, fallbackHostname) {
     }
     throw new InvalidRepositoryOverrideError(repository);
 }
-function repositoryContextFromNameWithOwner(nameWithOwner, url, fallbackHostname) {
+function repositoryContextFromNameWithOwner(nameWithOwner, url, fallbackHostname, repositoryId) {
     const parts = nameWithOwner.split("/");
     if (parts.length !== 2) {
         throw new RepositoryResolutionError("Repository nameWithOwner must contain exactly owner/name.", {
@@ -621,9 +622,9 @@ function repositoryContextFromNameWithOwner(nameWithOwner, url, fallbackHostname
         });
     }
     const hostname = url === undefined ? fallbackHostname : repositoryUrlHostname(url, fallbackHostname);
-    return repositoryContext(hostname, parts[0], parts[1], url);
+    return repositoryContext(hostname, parts[0], parts[1], url, repositoryId);
 }
-function repositoryContext(hostname, owner, name, url) {
+function repositoryContext(hostname, owner, name, url, repositoryId) {
     const normalizedHostname = hostname.trim().toLowerCase();
     if (!isValidHostname(normalizedHostname) || !isValidRepositorySegment(owner) || !isValidRepositorySegment(name)) {
         throw new RepositoryResolutionError("Repository identity contains an invalid hostname, owner, or name.", {
@@ -638,6 +639,7 @@ function repositoryContext(hostname, owner, name, url) {
         name,
         nameWithOwner,
         url: url ?? `https://${normalizedHostname}/${nameWithOwner}`,
+        ...(repositoryId === undefined ? {} : { repositoryId }),
     });
 }
 function repositoryUrlHostname(url, fallbackHostname) {
@@ -655,6 +657,9 @@ function isValidRepositorySegment(value) {
     if (value === "." || value === "..")
         return false;
     return /^[A-Za-z0-9_.-]+$/u.test(value);
+}
+function isStableRepositoryId(value) {
+    return typeof value === "string" && value.length > 0 && value.length <= 256 && /^[^\s\/#]+$/u.test(value);
 }
 function isRecord(value) {
     return typeof value === "object" && value !== null;

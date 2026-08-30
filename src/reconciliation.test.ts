@@ -161,6 +161,49 @@ test("Issue sync preserves omitted fields and metadata from the current artifact
   assert.doesNotMatch(synced.body, /Default context/u);
 });
 
+test("Issue edit and sync preserve omitted dependencies from the current artifact", () => {
+  const identity: IssueFormTemplateIdentity = {
+    id: "feature",
+    name: "Feature",
+    path: ".github/ISSUE_TEMPLATE/feature.yml",
+    type: "issue-form",
+    kind: "issue",
+  };
+  const contract = trusted(compileIssueFormYaml(ISSUE_SOURCE, identity), identity.path, ISSUE_SOURCE);
+  const dependencies = {
+    blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
+    blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 3 }],
+  };
+  const current = prepareRemediationArtifact("issue", contract, {
+    fields: { summary: "Initial summary" },
+    metadata: { title: "feat: dependency preservation", labels: [], assignees: [] },
+    dependencies,
+  });
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 157,
+      title: "feat: dependency preservation",
+      body: current.body,
+      state: "open",
+      url: "https://github.com/acme/inari/issues/157",
+      labels: [],
+      assignees: [],
+    },
+    contract,
+    result: validateExistingIssueArtifact(contract, current.body),
+  };
+
+  assert.deepEqual(currentArtifactInput("issue", read).dependencies, dependencies);
+  assert.deepEqual(
+    applySemanticPatch("issue", read, { fields: { summary: "Edited summary" }, metadata: {} }).dependencies,
+    dependencies,
+  );
+  assert.deepEqual(
+    prepareSyncInput("issue", read, { fields: { summary: "Synced summary" }, metadata: {} }).dependencies,
+    dependencies,
+  );
+});
+
 test("Issue normalization preserves semantic option values while canonicalizing native labels", () => {
   const source = normalizeSemanticTemplate({
     version: 1,

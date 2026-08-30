@@ -189,9 +189,19 @@ function parseInputDependencies(input) {
     const result = validateIssueDependencies(input);
     if (!result.valid) {
         const first = result.violations[0];
-        throw new ArtifactInputError("INPUT_DEPENDENCIES_INVALID", first?.message ?? "Issue dependencies are invalid.", first?.path ?? "$.dependencies", result.violations);
+        const violations = result.violations.map((violation) => ({
+            ...violation,
+            path: prefixDependencyPath(violation.path),
+        }));
+        throw new ArtifactInputError("INPUT_DEPENDENCIES_INVALID", first?.message ?? "Issue dependencies are invalid.", prefixDependencyPath(first?.path ?? "$.dependencies"), violations);
     }
     return result.dependencies;
+}
+/** Prefix dependency violations when they cross the public input envelope boundary. */
+function prefixDependencyPath(path) {
+    if (path === "$")
+        return "$.dependencies";
+    return path.startsWith("$.") ? `$.dependencies${path.slice(1)}` : "$.dependencies";
 }
 /** Adapt a parsed JSON envelope without granting it canonical status. */
 export function adaptJsonArtifactCandidate(input) {
@@ -482,11 +492,11 @@ export function preparePullRequestArtifact(contractInput, input) {
     verifyPullRequestMetadataRoundTrip(input.metadata, artifact);
     return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
-export function parseExistingIssueArtifact(contractInput, body, subject) {
+export function parseExistingIssueArtifact(contractInput, body) {
     assertCanonicalContract(contractInput);
     if (contractInput.artifactKind !== "issue")
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
-    return parseRenderedBody(contractInput, body ?? "", 3, false, subject);
+    return parseRenderedBody(contractInput, body ?? "", 3, false);
 }
 export function parseExistingPullRequestArtifact(contractInput, body) {
     assertCanonicalContract(contractInput);
@@ -635,7 +645,7 @@ export async function validateExistingIssueFromAdapter(reader, contract, issueNu
     return {
         number: issueNumber,
         url: issue.url,
-        result: validateExistingIssueArtifact(contract, issue.body, issueReferenceFromUrl(issue.url, issueNumber)),
+        result: validateExistingIssueArtifact(contract, issue.body, issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId)),
     };
 }
 export async function validateExistingPullRequestFromAdapter(reader, contract, pullRequestNumber) {
@@ -661,7 +671,7 @@ function validateParsedArtifact(contract, parse, subject) {
             parse,
             violations: dependencyValidation.violations.map((violation) => ({
                 code: "INPUT_DEPENDENCY",
-                path: violation.path,
+                path: prefixDependencyPath(violation.path),
                 message: violation.message,
             })),
         };
@@ -941,9 +951,11 @@ function stableValue(value) {
         .map((key) => `${JSON.stringify(key)}:${stableValue(record[key])}`)
         .join(",")}}`;
 }
-function issueReferenceFromUrl(url, number) {
+function issueReferenceFromUrl(url, number, repositoryId) {
     const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(url);
-    return match === null ? undefined : { repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+    if (match === null || repositoryId === undefined)
+        return undefined;
+    return { repositoryId, repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
 }
 function renderIssueBody(contract, values, dependencies = undefined) {
     const blocks = [];
@@ -1051,7 +1063,7 @@ function issueSemanticValue(field, value) {
         return field.items.options?.find((option) => option.label === value)?.value ?? value;
     return value;
 }
-function parseRenderedBody(contract, body, issueHeadingLevel, stripComments, subject) {
+function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
     const dependencyMarker = contract.artifactKind === "issue" ? extractIssueDependencyMarker(body) : { status: "absent", body };
     const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker.body).body;
     const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
@@ -1069,7 +1081,7 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments, sub
         });
     }
     else if (dependencyMarker.status === "valid") {
-        const validation = validateIssueDependencies(dependencies, subject);
+        const validation = validateIssueDependencies(dependencies);
         if (!validation.valid) {
             diagnostics.push(...validation.violations.map((violation) => ({
                 code: "EXISTING_UNPARSEABLE",

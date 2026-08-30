@@ -122,6 +122,7 @@ export interface ExistingIssueReader {
     getIssue(issueNumber: number): Promise<{
         readonly body: string | null;
         readonly url: string;
+        readonly repositoryId?: string;
     }>;
 }
 export interface ExistingPullRequestReader {
@@ -222,7 +223,7 @@ export declare function renderPullRequestArtifact(contractInput: unknown, input:
 /** Construct the only values accepted by the GitHub mutation adapter. */
 export declare function prepareIssueArtifact(contractInput: unknown, input: ArtifactInputDocument): PreparedIssueArtifact;
 export declare function preparePullRequestArtifact(contractInput: unknown, input: ArtifactInputDocument): PreparedPullRequestArtifact;
-export declare function parseExistingIssueArtifact(contractInput: unknown, body: string | null | undefined, subject?: IssueReference): ExistingArtifactParseResult;
+export declare function parseExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
 export declare function parseExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactParseResult;
 /**
  * Recover field values from a malformed or wrong-template body without

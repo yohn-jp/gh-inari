@@ -362,8 +362,9 @@ function issueReferenceFromRemote(
   number: number,
 ): import("./contract/issue-reference.js").IssueReference | undefined {
   const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(remote.url);
-  if (match === null) return undefined;
-  return { repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+  const repositoryId = "repositoryId" in remote ? remote.repositoryId : undefined;
+  if (match === null || repositoryId === undefined) return undefined;
+  return { repositoryId, repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
 }
 
 /** Read and select an existing artifact using the same governed candidate path as `get`. */
