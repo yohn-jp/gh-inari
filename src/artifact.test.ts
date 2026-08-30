@@ -19,6 +19,7 @@ import {
 } from "./artifact.js";
 import {
   CANONICAL_IR_VERSION,
+  CanonicalIrValidationError,
   CONTRACT_SCHEMA_VERSION,
   compileIssueFormYaml,
   projectToJsonSchema,
@@ -253,7 +254,7 @@ test("prepared PR artifacts preserve metadata and scalar, list, optional, and mu
   assert.equal(prepared.artifact.base, "main");
 });
 
-test("round-trip mismatches use the shared bounded field diagnostic contract", () => {
+test("unsafe multi-select labels are rejected at the canonical boundary", () => {
   const contract = governedFixture({
     irVersion: CANONICAL_IR_VERSION,
     schemaVersion: CONTRACT_SCHEMA_VERSION,
@@ -310,18 +311,9 @@ test("round-trip mismatches use the shared bounded field diagnostic contract", (
         metadata: { title: "fix: bounded diagnostics" },
       }),
     (error: unknown) => {
-      assert.ok(error instanceof ArtifactPreparationError);
-      assert.equal(error.code, "ARTIFACT_ROUND_TRIP_INVALID");
-      assert.deepEqual(
-        error.diagnostics.map((diagnostic) => diagnostic.path),
-        ["$.fields.items"],
-      );
-      assert.equal(error.diagnostics[0]?.code, "FIELD_CONFLICT");
-      assert.equal(error.diagnostics[0]?.detailCode, "FIELD_VALUE_CONFLICT");
-      assert.equal(error.diagnostics[0]?.expected?.type, "array");
-      assert.equal(error.diagnostics[0]?.actual?.type, "array");
-      assert.equal(JSON.stringify(error.diagnostics).includes("alpha"), false);
-      assert.equal(JSON.stringify(error.diagnostics).includes("beta"), false);
+      assert.ok(error instanceof CanonicalIrValidationError);
+      assert.equal(error.violations[0]?.code, "IR_INVALID_OPTIONS");
+      assert.equal(error.violations[0]?.path, "$.sections[0].fields[0].items.options[0].label");
       return true;
     },
   );

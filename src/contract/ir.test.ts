@@ -86,6 +86,32 @@ test("required checklist items cannot be represented as optional", () => {
   assert.ok(result.violations.some((violation) => violation.code === "IR_CHECKLIST_REQUIRED_MISMATCH"));
 });
 
+test("multi-select option labels cannot contain the native separator", () => {
+  const invalid = serializedFixture(issueContractFixture) as {
+    sections: Array<{
+      fields: Array<{
+        selection: string;
+        items: { options: Array<{ label: string }> };
+        nativeMetadata: { multiple: boolean };
+      }>;
+    }>;
+  };
+  invalid.sections[2].fields[0].items.options[0].label = "CLI, web";
+
+  const result = validateCanonicalContract(invalid);
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.violations.some(
+      (violation) =>
+        violation.code === "IR_INVALID_OPTIONS" && violation.path === "$.sections[2].fields[0].items.options[0].label",
+    ),
+  );
+
+  invalid.sections[2].fields[0].selection = "list";
+  invalid.sections[2].fields[0].nativeMetadata.multiple = false;
+  assert.equal(validateCanonicalContract(invalid).valid, true);
+});
+
 test("supplemental constraints must reference fields and cannot contradict native constraints", () => {
   const invalid = serializedFixture(pullRequestContractFixture) as {
     sections: Array<{ fields: Array<Record<string, unknown>> }>;

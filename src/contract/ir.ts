@@ -9,6 +9,8 @@
 export const CANONICAL_IR_VERSION = "1.0.0" as const;
 export const CONTRACT_SCHEMA_VERSION = "1.0.0" as const;
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema" as const;
+/** Separator used by native multi-select Issue Form artifacts. */
+export const MULTI_SELECT_OPTION_SEPARATOR = "," as const;
 /**
  * GitHub's syntactic closing-reference language for pull request bodies.
  * Contextual effects, such as closing only when targeting the default branch,
@@ -922,6 +924,23 @@ function validateOptionList(
   return options;
 }
 
+function validateMultiSelectOptionLabels(
+  options: readonly EnumOption[] | undefined,
+  path: string,
+  violations: CanonicalIrViolation[],
+): void {
+  options?.forEach((option, index) => {
+    if (option.label.includes(MULTI_SELECT_OPTION_SEPARATOR)) {
+      addViolation(
+        violations,
+        "IR_INVALID_OPTIONS",
+        `${path}[${index}].label`,
+        "Multi-select option labels must not contain commas because native artifact parsing uses commas as separators.",
+      );
+    }
+  });
+}
+
 function validateChecklistItems(
   value: unknown,
   path: string,
@@ -1298,6 +1317,7 @@ function validateField(
       if (hasOwn(items, "options")) {
         const options = validateOptionList(items.options, `${path}.items.options`, violations);
         allowedValues = options?.map((option) => option.value);
+        if (selection === "multi_select") validateMultiSelectOptionLabels(options, `${path}.items.options`, violations);
       }
     }
     if (
