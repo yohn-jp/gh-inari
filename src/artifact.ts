@@ -409,6 +409,24 @@ export function loadCanonicalArtifact(contractInput: unknown, candidateInput: un
   }
 
   const partial = validatePartialSemanticInput(contractInput, candidate.fields);
+  // Partial classification intentionally asks repair callers for explicit
+  // values, including fields whose defaults can complete a full input.  The
+  // loader's missingFields output instead describes why the complete
+  // validation failed, so default-backed fields must only appear when the
+  // full validator actually reports them as required and absent.
+  const missingFields = partial.missingFields.filter((issue) =>
+    validation.violations.some(
+      (violation) => violation.code === "INPUT_REQUIRED" && violation.path === `$.${issue.field}`,
+    ),
+  );
+  const missingFieldPaths = new Set(missingFields.map((issue) => issue.path));
+  const diagnostics = createArtifactDiagnosticReport(
+    partial.diagnostics.diagnostics.filter(
+      (diagnostic) =>
+        diagnostic.state !== "missing" || (diagnostic.path !== undefined && missingFieldPaths.has(diagnostic.path)),
+    ),
+    partial.acceptedFields,
+  );
   return {
     valid: false,
     complete: false,
@@ -417,9 +435,9 @@ export function loadCanonicalArtifact(contractInput: unknown, candidateInput: un
     values: partial.values,
     candidate,
     acceptedFields: partial.acceptedFields,
-    missingFields: partial.missingFields,
+    missingFields,
     invalidFields: partial.invalidFields,
-    diagnostics: partial.diagnostics,
+    diagnostics,
     violations: validation.violations,
   };
 }
@@ -578,10 +596,6 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
   const title = requiredMetadataString(input.metadata.title ?? contractInput.nativeMetadata.title, "title");
   const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
-  const expectedLabels =
-    contractInput.nativeMetadata.labels === undefined && input.metadata.labels === undefined
-      ? undefined
-      : [...(contractInput.nativeMetadata.labels ?? []), ...(input.metadata.labels ?? [])];
   const body = renderIssueBody(contractInput, loaded.canonical);
   verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue");
   const artifact = createValidatedRenderedIssueArtifact({
@@ -595,7 +609,7 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   verifyIssueMetadataRoundTrip(
     {
       title,
-      ...(expectedLabels === undefined ? {} : { labels: expectedLabels }),
+      ...(labels === undefined ? {} : { labels }),
       ...(input.metadata.assignees === undefined ? {} : { assignees: input.metadata.assignees }),
     },
     artifact,
@@ -942,7 +956,8 @@ function verifyPullRequestMetadataRoundTrip(
   }
 }
 
-function verifyIssueMetadataRoundTrip(
+/** @internal Validate the canonical Issue metadata handoff before mutation. */
+export function verifyIssueMetadataRoundTrip(
   expected: Readonly<Record<string, unknown>>,
   artifact: ValidatedRenderedIssueArtifact,
 ): void {

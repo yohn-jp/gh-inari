@@ -39,6 +39,26 @@ const ISSUE_SOURCE = [
   "",
 ].join("\n");
 
+const ISSUE_WITH_OPTIONAL_CONTEXT_SOURCE = [
+  "name: Feature",
+  "description: Feature",
+  "body:",
+  "  - type: textarea",
+  "    id: summary",
+  "    attributes:",
+  "      label: Summary",
+  "    validations:",
+  "      required: true",
+  "  - type: textarea",
+  "    id: context",
+  "    attributes:",
+  "      label: Context",
+  "      value: Default context",
+  "    validations:",
+  "      required: false",
+  "",
+].join("\n");
+
 const PR_SOURCE = ["## Summary", "", "Describe the change.", ""].join("\n");
 
 function trusted(contract: CanonicalContract, path: string, source: string): CanonicalContract {
@@ -97,6 +117,48 @@ test("Issue semantic remediation is deterministic and idempotent", () => {
     result: validateExistingIssueArtifact(contract, patched.body),
   };
   assert.equal(diffArtifact("issue", convergedRead, patched).changed, false);
+});
+
+test("Issue sync preserves omitted fields and metadata from the current artifact", () => {
+  const identity: IssueFormTemplateIdentity = {
+    id: "feature",
+    name: "Feature",
+    path: ".github/ISSUE_TEMPLATE/feature.yml",
+    type: "issue-form",
+    kind: "issue",
+  };
+  const contract = trusted(
+    compileIssueFormYaml(ISSUE_WITH_OPTIONAL_CONTEXT_SOURCE, identity),
+    identity.path,
+    ISSUE_WITH_OPTIONAL_CONTEXT_SOURCE,
+  );
+  const currentInput = {
+    fields: { summary: "Initial summary", context: "Existing context" },
+    metadata: { title: "feat: initial", labels: ["bug"], assignees: ["alice"] },
+  };
+  const current = prepareRemediationArtifact("issue", contract, currentInput);
+  const read: ExistingArtifactRead = {
+    remote: {
+      number: 85,
+      title: "feat: initial",
+      body: current.body,
+      state: "open",
+      url: "https://github.com/acme/inari/issues/85",
+      labels: ["bug"],
+      assignees: ["alice"],
+    },
+    contract,
+    result: validateExistingIssueArtifact(contract, current.body),
+  };
+
+  const syncedInput = prepareSyncInput("issue", read, { fields: { summary: "Updated summary" }, metadata: {} });
+  assert.deepEqual(syncedInput.fields, { summary: "Updated summary", context: "Existing context" });
+  assert.deepEqual(syncedInput.metadata, currentInput.metadata);
+
+  const synced = prepareRemediationArtifact("issue", contract, syncedInput);
+  assert.deepEqual(validateExistingIssueArtifact(contract, synced.body).parse.values, syncedInput.fields);
+  assert.match(synced.body, /Existing context/u);
+  assert.doesNotMatch(synced.body, /Default context/u);
 });
 
 test("Issue normalization preserves semantic option values while canonicalizing native labels", () => {

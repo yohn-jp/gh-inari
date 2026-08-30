@@ -404,12 +404,19 @@ export function prepareRemediationArtifact(domain, contract, input) {
         return prepareIssueArtifact(contract, input).artifact;
     return preparePullRequestArtifact(contract, input).artifact;
 }
-/** Ensure a declarative sync only names fields in the authoritative contract. */
+/** Ensure a declarative sync names only authoritative fields and preserves omitted Issue state. */
 export function prepareSyncInput(domain, read, desired) {
     if (read.contract === undefined) {
         throw new RemediationError("SYNC_CURRENT_UNSUPPORTED", "Sync refuses to replace an unsupported or unparseable existing artifact.", "$.artifact");
     }
     assertKnownFields(read.contract, desired.fields, "SYNC_INPUT_INCOMPLETE");
+    if (domain === "issue") {
+        const current = currentArtifactInput(domain, read);
+        return {
+            fields: { ...current.fields, ...desired.fields },
+            metadata: { ...current.metadata, ...desired.metadata },
+        };
+    }
     if (domain === "pr" && desired.metadata.head !== undefined) {
         const remote = read.remote;
         if (desired.metadata.head !== remote.head) {

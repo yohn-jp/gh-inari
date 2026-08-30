@@ -361,6 +361,12 @@ test("pr sync help exposes the complete canonical --from envelope", async () => 
   assert.match(output, /`fields` must be the semantic object/);
 });
 
+test("issue sync help explains that omitted values are preserved", async () => {
+  const { exitCode, output } = await captureHelp(["issue", "sync", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /preserving fields and metadata omitted from the input/);
+});
+
 test("pr schema projects the canonical sync input and a valid minimal example", async () => {
   const result = await captureJson(["pr", "schema", "default", "--json"]);
   assert.equal(result.exitCode, 0);
@@ -3255,4 +3261,24 @@ test("validate's missingFields progressive diagnostics project each unresolved f
   assert.equal(capability?.constraints?.required, true);
   const constraints = missingFields.find((entry) => entry.field === "constraints");
   assert.equal(constraints, undefined, "an optional field must not be reported as a missing/required field");
+});
+
+test("validate excludes a default-backed field from missingFields when other required fields are absent", async () => {
+  const result = await captureJson(["issue", "validate", "--template", "bug", "--field", "summary=X", "--json"]);
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.output.valid, false);
+  assert.deepEqual(
+    (result.output.violations as readonly { path: string }[]).map((violation) => violation.path),
+    ["$.reproduction", "$.expected_behavior", "$.actual_behavior"],
+  );
+  const missingFields = result.output.missingFields as readonly { field: string }[];
+  assert.deepEqual(
+    missingFields.map((field) => field.field),
+    ["actual_behavior", "expected_behavior", "reproduction"],
+  );
+  assert.equal(
+    missingFields.some((field) => field.field === "acceptance"),
+    false,
+  );
 });

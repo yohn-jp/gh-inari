@@ -15,6 +15,7 @@ import {
   TEMPLATE_IDENTITY_MARKER_VERSION,
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
+  verifyIssueMetadataRoundTrip,
 } from "./artifact.js";
 import {
   CANONICAL_IR_VERSION,
@@ -536,24 +537,48 @@ test("native title defaults and caller labels are deterministic", () => {
   assert.equal(explicit.artifact.title, "custom title");
 });
 
-test("Issue metadata round-trip rejects lossy label deduplication", () => {
+test("Issue metadata round-trip accepts canonical label deduplication", () => {
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+    metadata: {
+      title: "fix: preserve issue metadata",
+      labels: ["enhancement", "enhancement", "custom", "custom"],
+      assignees: ["octocat"],
+    },
+  });
+
+  assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
+  assert.deepEqual(prepared.artifact.assignees, ["octocat"]);
+});
+
+test("Issue metadata round-trip rejects genuine title, label, and assignee divergence", () => {
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+    metadata: {
+      title: "fix: preserve issue metadata",
+      labels: ["custom"],
+      assignees: ["octocat"],
+    },
+  });
+
   assert.throws(
     () =>
-      prepareIssueArtifact(governedFixture(issueContractFixture), {
-        fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
-        metadata: { title: "fix: preserve issue metadata", labels: ["enhancement"], assignees: ["octocat"] },
-      }),
+      verifyIssueMetadataRoundTrip(
+        {
+          title: "fix: changed issue metadata",
+          labels: ["custom"],
+          assignees: ["other-user"],
+        },
+        prepared.artifact,
+      ),
     (error: unknown) => {
       assert.ok(error instanceof ArtifactPreparationError);
       assert.equal(error.code, "ARTIFACT_ROUND_TRIP_INVALID");
       assert.deepEqual(
         error.diagnostics.map((diagnostic) => diagnostic.path),
-        ["$.metadata.labels"],
+        ["$.metadata.assignees", "$.metadata.labels", "$.metadata.title"],
       );
-      assert.equal(error.diagnostics[0]?.code, "FIELD_CONFLICT");
-      assert.equal(error.diagnostics[0]?.detailCode, "FIELD_VALUE_CONFLICT");
-      assert.equal(error.diagnostics[0]?.expected?.type, "array");
-      assert.equal(error.diagnostics[0]?.actual?.type, "array");
+      assert.ok(error.diagnostics.every((diagnostic) => diagnostic.detailCode === "FIELD_VALUE_CONFLICT"));
       return true;
     },
   );
