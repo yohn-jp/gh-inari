@@ -57,7 +57,7 @@ export function validateSemanticInput(contractInput, input) {
             }
             continue;
         }
-        const normalization = present ? normalizeFieldValue(field, rawValue) : { ok: true, value: rawValue };
+        const normalization = normalizeFieldValue(field, rawValue);
         if (!normalization.ok) {
             violations.push({ code: normalization.violation.code, path, message: normalization.violation.message });
             continue;

@@ -423,6 +423,41 @@ _No response_
   assert.match(rendered, /### Areas\n\n_No response_/);
 });
 
+test("Issue Form Markdown-special defaults normalize before preparation and round-trip", () => {
+  const contract = governedFixture(
+    compileIssueFormYaml(
+      `name: Default form
+description: Default round-trip fixture
+body:
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: "- [ ] "
+    validations:
+      required: true
+`,
+      {
+        id: "issue-form:default.yml",
+        type: "issue-form",
+        kind: "issue",
+        name: "default",
+        path: ".github/ISSUE_TEMPLATE/default.yml",
+      },
+    ),
+  );
+
+  const prepared = prepareIssueArtifact(contract, {
+    fields: {},
+    metadata: { title: "fix: default round trip" },
+  });
+
+  assert.deepEqual(prepared.validation.values, { acceptance: "- [ ]" });
+  const parsed = parseExistingIssueArtifact(contract, prepared.artifact.body);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, prepared.validation.values);
+});
+
 test("native textarea render output uses and parses GitHub code fences", () => {
   const contract = compileIssueFormYaml(
     `name: Logs
