@@ -1,6 +1,7 @@
 import { repairPartialSemanticInput, SemanticValidationError, validatePartialSemanticInput, validateSemanticInput, } from "./contract/validation.js";
 import { createArtifactDiagnostic, createArtifactDiagnosticReport, createFieldEvidence, MAX_ARTIFACT_DIAGNOSTICS, } from "./diagnostics.js";
 import { assertCanonicalContract, } from "./contract/ir.js";
+import { EMPTY_ISSUE_DEPENDENCIES, validateIssueDependencies, } from "./contract/issue-reference.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
 export class ArtifactInputError extends Error {
     code;
@@ -41,6 +42,11 @@ const TEMPLATE_IDENTITY_MARKER_PREFIX = "<!-- inari:template ";
 const TEMPLATE_IDENTITY_MARKER_SUFFIX = " -->";
 const TEMPLATE_IDENTITY_MARKER_LINE_PATTERN = /^<!-- inari:template (\{.*\}) -->$/u;
 const TEMPLATE_IDENTITY_MARKER_MAX_LENGTH = 512;
+export const ISSUE_DEPENDENCY_MARKER_VERSION = "1";
+const ISSUE_DEPENDENCY_MARKER_PREFIX = "<!-- inari:issue-dependencies ";
+const ISSUE_DEPENDENCY_MARKER_SUFFIX = " -->";
+const ISSUE_DEPENDENCY_MARKER_LINE_PATTERN = /^<!-- inari:issue-dependencies (\{.*\}) -->$/u;
+const ISSUE_DEPENDENCY_MARKER_MAX_LENGTH = 8_192;
 function renderTemplateIdentityMarker(contract) {
     const marker = {
         version: TEMPLATE_IDENTITY_MARKER_VERSION,
@@ -48,6 +54,54 @@ function renderTemplateIdentityMarker(contract) {
         path: contract.templateIdentity.path,
     };
     return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
+}
+function renderIssueDependencyMarker(dependencies) {
+    return `${ISSUE_DEPENDENCY_MARKER_PREFIX}${JSON.stringify({
+        version: ISSUE_DEPENDENCY_MARKER_VERSION,
+        dependencies,
+    })}${ISSUE_DEPENDENCY_MARKER_SUFFIX}`;
+}
+/**
+ * Read only the reserved trailing dependency marker emitted by Inari.  No
+ * ordinary Markdown is interpreted as a relationship declaration.
+ */
+export function extractIssueDependencyMarker(body) {
+    const source = normalizeSource(body);
+    const lines = source.split("\n");
+    let end = lines.length;
+    while (end > 0 && (lines[end - 1] ?? "").trim().length === 0)
+        end -= 1;
+    const candidate = end > 0 ? (lines[end - 1] ?? "").trim() : undefined;
+    if (candidate === undefined || !candidate.startsWith(ISSUE_DEPENDENCY_MARKER_PREFIX)) {
+        return { status: "absent", body: source };
+    }
+    const remaining = lines.slice(0, end - 1);
+    while (remaining.at(-1) !== undefined && (remaining.at(-1) ?? "").trim().length === 0)
+        remaining.pop();
+    const strippedBody = remaining.length === 0 ? "" : `${remaining.join("\n")}\n`;
+    if (candidate.length > ISSUE_DEPENDENCY_MARKER_MAX_LENGTH || !candidate.endsWith(ISSUE_DEPENDENCY_MARKER_SUFFIX)) {
+        return { status: "malformed", body: strippedBody };
+    }
+    const match = ISSUE_DEPENDENCY_MARKER_LINE_PATTERN.exec(candidate);
+    if (match === null)
+        return { status: "malformed", body: strippedBody };
+    let payload;
+    try {
+        payload = JSON.parse(match[1]);
+    }
+    catch {
+        return { status: "malformed", body: strippedBody };
+    }
+    if (!isRecord(payload) || payload.version !== ISSUE_DEPENDENCY_MARKER_VERSION) {
+        return { status: "unsupported-version", body: strippedBody };
+    }
+    if (!Object.prototype.hasOwnProperty.call(payload, "dependencies")) {
+        return { status: "malformed", body: strippedBody };
+    }
+    const validation = validateIssueDependencies(payload.dependencies);
+    if (!validation.valid)
+        return { status: "malformed", body: strippedBody };
+    return { status: "valid", dependencies: validation.dependencies, body: strippedBody };
 }
 /**
  * Recognize and remove a trailing template identity marker line without
@@ -113,16 +167,31 @@ export function parseArtifactInputDocument(input) {
             if (input[key] !== undefined)
                 metadata[key] = input[key];
         }
-        const unknown = Object.keys(input).filter((key) => key !== "fields" && !Object.prototype.hasOwnProperty.call(metadata, key));
+        const dependencies = parseInputDependencies(input.dependencies);
+        const unknown = Object.keys(input).filter((key) => key !== "fields" && key !== "dependencies" && !Object.prototype.hasOwnProperty.call(metadata, key));
         if (unknown.length > 0)
             throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Unknown input property "${unknown[0]}".`, `$.${unknown[0]}`);
-        return { fields: input.fields, metadata: parseMetadata(metadata) };
+        return {
+            fields: input.fields,
+            metadata: parseMetadata(metadata),
+            ...(dependencies === undefined ? {} : { dependencies }),
+        };
     }
     const reservedInBare = Object.keys(input).find((key) => metadataKeys.includes(key));
     if (reservedInBare !== undefined) {
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Reserved metadata key "${reservedInBare}" cannot appear without a fields property.`, `$.${reservedInBare}`);
     }
     return { fields: input, metadata: {} };
+}
+function parseInputDependencies(input) {
+    if (input === undefined)
+        return undefined;
+    const result = validateIssueDependencies(input);
+    if (!result.valid) {
+        const first = result.violations[0];
+        throw new ArtifactInputError("INPUT_DEPENDENCIES_INVALID", first?.message ?? "Issue dependencies are invalid.", first?.path ?? "$.dependencies", result.violations);
+    }
+    return result.dependencies;
 }
 /** Adapt a parsed JSON envelope without granting it canonical status. */
 export function adaptJsonArtifactCandidate(input) {
@@ -151,7 +220,7 @@ export function adaptMarkdownArtifactCandidate(contractInput, body) {
         return { parsed: false, diagnostics: parse.diagnostics };
     return {
         parsed: true,
-        candidate: { fields: parse.values, metadata: {}, source: "markdown" },
+        candidate: { fields: parse.values, metadata: {}, source: "markdown", dependencies: parse.dependencies },
         diagnostics: parse.diagnostics,
     };
 }
@@ -171,6 +240,24 @@ export function adaptExistingArtifactCandidate(contractInput, body) {
 export function loadCanonicalArtifact(contractInput, candidateInput) {
     assertCanonicalContract(contractInput);
     const candidate = normalizeArtifactCandidate(candidateInput);
+    const dependencyValidation = contractInput.artifactKind === "issue"
+        ? validateIssueDependencies(candidate.dependencies)
+        : candidate.dependencies === undefined
+            ? { valid: true, dependencies: EMPTY_ISSUE_DEPENDENCIES, violations: [] }
+            : {
+                valid: false,
+                dependencies: EMPTY_ISSUE_DEPENDENCIES,
+                violations: [
+                    {
+                        code: "DEPENDENCIES_UNKNOWN_PROPERTY",
+                        path: "$.dependencies",
+                        message: "Issue dependencies are supported only for Issue artifacts.",
+                    },
+                ],
+            };
+    if (!dependencyValidation.valid) {
+        throw new ArtifactInputError("INPUT_DEPENDENCIES_INVALID", dependencyValidation.violations[0]?.message ?? "Issue dependencies are invalid.", dependencyValidation.violations[0]?.path ?? "$.dependencies", dependencyValidation.violations);
+    }
     const validation = validateSemanticInput(contractInput, candidate.fields);
     if (validation.valid) {
         const acceptedFields = Object.keys(validation.values)
@@ -189,6 +276,7 @@ export function loadCanonicalArtifact(contractInput, candidateInput) {
             invalidFields: [],
             diagnostics,
             violations: [],
+            dependencies: dependencyValidation.dependencies,
         };
     }
     const partial = validatePartialSemanticInput(contractInput, candidate.fields);
@@ -212,6 +300,7 @@ export function loadCanonicalArtifact(contractInput, candidateInput) {
         invalidFields: partial.invalidFields,
         diagnostics,
         violations: validation.violations,
+        dependencies: dependencyValidation.dependencies,
     };
 }
 /** Explicitly named alias for callers that pass a candidate object. */
@@ -323,7 +412,7 @@ export function renderIssueArtifact(contractInput, input) {
     const loaded = loadCanonicalArtifact(contractInput, input);
     if (!loaded.valid)
         throw new SemanticValidationError(loaded.violations);
-    return renderIssueBody(contractInput, loaded.canonical);
+    return renderIssueBody(contractInput, loaded.canonical, loaded.dependencies);
 }
 export function renderPullRequestArtifact(contractInput, input) {
     assertCanonicalContract(contractInput);
@@ -351,8 +440,8 @@ export function prepareIssueArtifact(contractInput, input) {
         ...(labels === undefined ? {} : { labels: [...labels] }),
         ...(input.metadata.assignees === undefined ? {} : { assignees: [...input.metadata.assignees] }),
     };
-    const body = renderIssueBody(contractInput, loaded.canonical);
-    verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue");
+    const body = renderIssueBody(contractInput, loaded.canonical, loaded.dependencies);
+    verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue", loaded.dependencies);
     const artifact = createValidatedRenderedIssueArtifact({
         kind: "issue",
         title,
@@ -393,11 +482,11 @@ export function preparePullRequestArtifact(contractInput, input) {
     verifyPullRequestMetadataRoundTrip(input.metadata, artifact);
     return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
-export function parseExistingIssueArtifact(contractInput, body) {
+export function parseExistingIssueArtifact(contractInput, body, subject) {
     assertCanonicalContract(contractInput);
     if (contractInput.artifactKind !== "issue")
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
-    return parseRenderedBody(contractInput, body ?? "", 3, false);
+    return parseRenderedBody(contractInput, body ?? "", 3, false, subject);
 }
 export function parseExistingPullRequestArtifact(contractInput, body) {
     assertCanonicalContract(contractInput);
@@ -420,8 +509,9 @@ export function recoverExistingArtifactValues(contractInput, body) {
         ? parseExistingIssueArtifact(contract, body)
         : parseExistingPullRequestArtifact(contract, body);
     if (strict.parsed)
-        return { values: strict.values, diagnostics: strict.diagnostics };
-    const markerFreeBody = extractTemplateIdentityMarker(body ?? "").body;
+        return { values: strict.values, dependencies: strict.dependencies, diagnostics: strict.diagnostics };
+    const dependencyMarker = contract.artifactKind === "issue" ? extractIssueDependencyMarker(body ?? "") : undefined;
+    const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker?.body ?? body ?? "").body;
     const stripComments = contract.artifactKind === "pull_request";
     const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
     const blocks = headingBlocks(source);
@@ -458,12 +548,13 @@ export function recoverExistingArtifactValues(contractInput, body) {
         if (parsed.value !== undefined)
             values[field.id] = parsed.value;
     }
-    return { values, diagnostics: strict.diagnostics };
+    const dependencies = dependencyMarker?.dependencies;
+    return { values, dependencies, diagnostics: strict.diagnostics };
 }
-export function validateExistingIssueArtifact(contractInput, body) {
+export function validateExistingIssueArtifact(contractInput, body, subject) {
     assertCanonicalContract(contractInput);
     const parse = parseExistingIssueArtifact(contractInput, body);
-    return validateParsedArtifact(contractInput, parse);
+    return validateParsedArtifact(contractInput, parse, subject);
 }
 export function validateExistingPullRequestArtifact(contractInput, body) {
     assertCanonicalContract(contractInput);
@@ -477,6 +568,7 @@ export function projectExistingArtifact(result) {
         projection: result.valid ? "canonical" : "unavailable",
         classification: result.classification,
         ...(result.valid ? { fields: result.parse.values } : {}),
+        ...(result.valid && result.parse.dependencies !== undefined ? { dependencies: result.parse.dependencies } : {}),
         diagnostics: result.parse.diagnostics,
         ...(result.classification === "semantic" ? { violations: result.violations } : {}),
         ...(result.attemptedTemplates === undefined ? {} : { attemptedTemplates: result.attemptedTemplates }),
@@ -540,7 +632,11 @@ export function validateRequiredMetadataString(value, key) {
 }
 export async function validateExistingIssueFromAdapter(reader, contract, issueNumber) {
     const issue = await reader.getIssue(issueNumber);
-    return { number: issueNumber, url: issue.url, result: validateExistingIssueArtifact(contract, issue.body) };
+    return {
+        number: issueNumber,
+        url: issue.url,
+        result: validateExistingIssueArtifact(contract, issue.body, issueReferenceFromUrl(issue.url, issueNumber)),
+    };
 }
 export async function validateExistingPullRequestFromAdapter(reader, contract, pullRequestNumber) {
     const pullRequest = await reader.getPullRequest(pullRequestNumber);
@@ -550,17 +646,31 @@ export async function validateExistingPullRequestFromAdapter(reader, contract, p
         result: validateExistingPullRequestArtifact(contract, pullRequest.body),
     };
 }
-function validateParsedArtifact(contract, parse) {
+function validateParsedArtifact(contract, parse, subject) {
     if (!parse.parsed) {
         const classification = parse.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_WRONG_TEMPLATE")
             ? "wrong-template"
             : "unparseable";
         return { valid: false, classification, parse, violations: parse.diagnostics };
     }
+    const dependencyValidation = contract.artifactKind === "issue" ? validateIssueDependencies(parse.dependencies, subject) : undefined;
+    if (dependencyValidation !== undefined && !dependencyValidation.valid) {
+        return {
+            valid: false,
+            classification: "semantic",
+            parse,
+            violations: dependencyValidation.violations.map((violation) => ({
+                code: "INPUT_DEPENDENCY",
+                path: violation.path,
+                message: violation.message,
+            })),
+        };
+    }
     const semantic = loadCanonicalArtifact(contract, {
         fields: parse.values,
         metadata: {},
         source: "existing",
+        dependencies: parse.dependencies,
     });
     return {
         valid: semantic.valid,
@@ -650,7 +760,7 @@ export function verifyIssueMetadataRoundTrip(expected, artifact) {
         throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", "Prepared issue metadata did not preserve its validated values.", mismatches);
     }
 }
-function verifyRenderedRoundTrip(contract, expectedValues, body, kind) {
+function verifyRenderedRoundTrip(contract, expectedValues, body, kind, expectedDependencies = undefined) {
     const parsed = kind === "issue" ? parseExistingIssueArtifact(contract, body) : parseExistingPullRequestArtifact(contract, body);
     if (!parsed.parsed) {
         throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact did not reparse under the compiled contract.`, roundTripParseDiagnostics(contract, expectedValues, parsed.diagnostics));
@@ -659,7 +769,24 @@ function verifyRenderedRoundTrip(contract, expectedValues, body, kind) {
     if (!reconstructed.valid) {
         throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact failed semantic validation after reparsing.`, roundTripSemanticDiagnostics(contract, expectedValues, parsed.values, reconstructed.violations));
     }
-    const mismatches = compareMaterializedValues(expectedValues, reconstructed.values);
+    const mismatches = [...compareMaterializedValues(expectedValues, reconstructed.values)];
+    if (kind === "issue") {
+        const actualDependencies = parsed.dependencies ?? EMPTY_ISSUE_DEPENDENCIES;
+        const expected = expectedDependencies ?? EMPTY_ISSUE_DEPENDENCIES;
+        if (stableValue(expected) !== stableValue(actualDependencies)) {
+            mismatches.push(createArtifactDiagnostic({
+                state: "conflicting",
+                code: "FIELD_CONFLICT",
+                detailCode: "FIELD_VALUE_CONFLICT",
+                reason: "conflict",
+                path: "$.dependencies",
+                message: "Rendered artifact changed its Issue dependency semantics.",
+                expected: createFieldEvidence("$.dependencies", expected),
+                actual: createFieldEvidence("$.dependencies", actualDependencies),
+                recovery: [{ action: "repair", path: "$.dependencies" }],
+            }));
+        }
+    }
     if (mismatches.length > 0) {
         throw new ArtifactPreparationError("ARTIFACT_ROUND_TRIP_INVALID", `Rendered ${kind} artifact did not preserve its validated semantic values.`, mismatches);
     }
@@ -814,7 +941,11 @@ function stableValue(value) {
         .map((key) => `${JSON.stringify(key)}:${stableValue(record[key])}`)
         .join(",")}}`;
 }
-function renderIssueBody(contract, values) {
+function issueReferenceFromUrl(url, number) {
+    const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(url);
+    return match === null ? undefined : { repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+}
+function renderIssueBody(contract, values, dependencies = undefined) {
     const blocks = [];
     for (let sectionIndex = 0; sectionIndex < contract.sections.length; sectionIndex += 1) {
         const section = contract.sections[sectionIndex];
@@ -833,7 +964,11 @@ function renderIssueBody(contract, values) {
             .join("\n\n");
         blocks.push([`### ${escapeHeading(title)}`, body].filter((part) => part.length > 0).join("\n\n"));
     }
-    return `${blocks.join("\n\n")}\n\n${renderTemplateIdentityMarker(contract)}\n`;
+    const marker = renderTemplateIdentityMarker(contract);
+    const dependencyMarker = dependencies !== undefined && (dependencies.blockedBy.length > 0 || dependencies.blocks.length > 0)
+        ? `\n${renderIssueDependencyMarker(dependencies)}`
+        : "";
+    return `${blocks.join("\n\n")}\n\n${marker}${dependencyMarker}\n`;
 }
 function renderPullRequestBody(contract, values) {
     const blocks = [];
@@ -916,12 +1051,33 @@ function issueSemanticValue(field, value) {
         return field.items.options?.find((option) => option.label === value)?.value ?? value;
     return value;
 }
-function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
-    const markerFreeBody = extractTemplateIdentityMarker(body).body;
+function parseRenderedBody(contract, body, issueHeadingLevel, stripComments, subject) {
+    const dependencyMarker = contract.artifactKind === "issue" ? extractIssueDependencyMarker(body) : { status: "absent", body };
+    const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker.body).body;
     const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
     const lines = source.split("\n");
     const values = {};
     const diagnostics = [];
+    const dependencies = contract.artifactKind === "issue" ? (dependencyMarker.dependencies ?? EMPTY_ISSUE_DEPENDENCIES) : undefined;
+    if (dependencyMarker.status === "malformed" || dependencyMarker.status === "unsupported-version") {
+        diagnostics.push({
+            code: "EXISTING_UNPARSEABLE",
+            path: "$.dependencies",
+            message: dependencyMarker.status === "unsupported-version"
+                ? "Issue dependency marker uses an unsupported version."
+                : "Issue dependency marker is malformed or semantically invalid.",
+        });
+    }
+    else if (dependencyMarker.status === "valid") {
+        const validation = validateIssueDependencies(dependencies, subject);
+        if (!validation.valid) {
+            diagnostics.push(...validation.violations.map((violation) => ({
+                code: "EXISTING_UNPARSEABLE",
+                path: violation.path,
+                message: violation.message,
+            })));
+        }
+    }
     let cursor = 0;
     for (let sectionIndex = 0; sectionIndex < contract.sections.length; sectionIndex += 1) {
         const section = contract.sections[sectionIndex];
@@ -1017,7 +1173,7 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
     }
     if (diagnostics.length > 0)
         return { parsed: false, values: {}, diagnostics };
-    return { parsed: true, values, diagnostics: [] };
+    return { parsed: true, values, dependencies, diagnostics: [] };
 }
 function headingBlocks(source) {
     const lines = source.split("\n");

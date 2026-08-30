@@ -61,7 +61,7 @@ export declare function readGovernedExistingArtifact(adapter: GitHubAdapter, dom
 /** Classify the current artifact and prove whether a canonical body can preserve its semantics. */
 export declare function assessExistingArtifact(domain: GovernedArtifactDomain, read: ExistingArtifactRead): ExistingArtifactAssessment;
 /** Render through the existing canonical renderer; this is the only representation authority. */
-export declare function renderCanonicalBody(domain: GovernedArtifactDomain, contract: CanonicalContract, fields: Readonly<Record<string, unknown>>): string;
+export declare function renderCanonicalBody(domain: GovernedArtifactDomain, contract: CanonicalContract, fields: Readonly<Record<string, unknown>>, dependencies?: import("./contract/issue-reference.js").IssueDependencies): string;
 /** Build the complete semantic input represented by the current remote artifact. */
 export declare function currentArtifactInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead): ArtifactInputDocument;
 /** Apply an explicit semantic patch without touching raw Markdown or inferring missing fields. */

@@ -740,6 +740,9 @@ async function runArtifactCommand(
             valid: validation.valid,
             violations: validation.violations,
             values: validation.canonical,
+            ...(domain === "issue" && validation.dependencies === undefined
+              ? {}
+              : { dependencies: validation.dependencies }),
             // Progressive --field discovery: each unresolved field's type/required/constraints,
             // reusing the existing #120/#121 partial-classification projection rather than a
             // second field table -- so retrying with more --field values is guided by the same
@@ -752,7 +755,7 @@ async function runArtifactCommand(
       }
       const body =
         domain === "issue"
-          ? renderIssueArtifact(contract, preparedDocument.fields)
+          ? renderIssueArtifact(contract, preparedDocument)
           : renderPullRequestArtifact(contract, preparedDocument.fields);
       if (json) console.log(JSON.stringify({ valid: true, body }));
       else process.stdout.write(body);
@@ -1114,7 +1117,11 @@ function mergeOptionMetadata(
     ...(typeof options.draft === "boolean" ? { draft: options.draft } : {}),
     ...(typeof options.maintainerCanModify === "boolean" ? { maintainerCanModify: options.maintainerCanModify } : {}),
   };
-  return { fields: document.fields, metadata };
+  return {
+    fields: document.fields,
+    metadata,
+    ...(document.dependencies === undefined ? {} : { dependencies: document.dependencies }),
+  };
 }
 
 function hasEditMetadataOption(options: Readonly<Record<string, string | boolean>>): boolean {
@@ -1310,7 +1317,11 @@ function mergeDirectFields(
     .filter((name) => Object.prototype.hasOwnProperty.call(document.fields, name))
     .sort(compareStrings);
   if (conflicts.length > 0) throw fieldConflictError(conflicts);
-  return { fields: { ...document.fields, ...directFields }, metadata: document.metadata };
+  return {
+    fields: { ...document.fields, ...directFields },
+    metadata: document.metadata,
+    ...(document.dependencies === undefined ? {} : { dependencies: document.dependencies }),
+  };
 }
 
 /**

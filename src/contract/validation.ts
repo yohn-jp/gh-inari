@@ -27,7 +27,8 @@ export type SemanticViolationCode =
   | "INPUT_MAX_ITEMS"
   | "INPUT_CHECKLIST_REQUIRED"
   | "INPUT_CHECKLIST_INCOMPLETE"
-  | "INPUT_UNSAFE_CONTENT";
+  | "INPUT_UNSAFE_CONTENT"
+  | "INPUT_DEPENDENCY";
 
 export interface SemanticViolation {
   readonly code: SemanticViolationCode;

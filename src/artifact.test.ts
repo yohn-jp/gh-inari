@@ -4,11 +4,13 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ArtifactPreparationError,
+  extractIssueDependencyMarker,
   extractTemplateIdentityMarker,
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
   prepareIssueArtifact,
   preparePullRequestArtifact,
+  projectExistingArtifact,
   removeHtmlComments,
   renderIssueArtifact,
   renderPullRequestArtifact,
@@ -1219,4 +1221,27 @@ test("legacy artifacts without a template identity marker still validate through
   const result = validateExistingIssueArtifact(issueContractFixture, legacyBody);
   assert.equal(result.valid, true);
   assert.equal(result.classification, "valid");
+});
+
+test("Issue dependency semantics round-trip through the canonical body marker and projection", () => {
+  const input = {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+    dependencies: {
+      blockedBy: [{ repository: "yohn-jp/gh-inari", number: 149 }],
+      blocks: [{ repository: "yohn-jp/portal", number: 3 }],
+    },
+  };
+  const body = renderIssueArtifact(issueContractFixture, input);
+  const marker = extractIssueDependencyMarker(body);
+  assert.equal(marker.status, "valid");
+  assert.deepEqual(marker.dependencies, input.dependencies);
+  const parsed = validateExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.parse.dependencies, input.dependencies);
+  assert.deepEqual(projectExistingArtifact(parsed).dependencies, input.dependencies);
 });
