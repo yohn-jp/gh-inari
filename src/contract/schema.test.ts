@@ -46,3 +46,14 @@ test("rendering order and native metadata are projected separately from semantic
   assert.equal("sections" in projection.schema, false);
   assert.equal("render" in (projection.schema.properties.problem ?? {}), false);
 });
+
+test("required create title metadata is projected separately from semantic fields", () => {
+  for (const contract of [issueContractFixture, pullRequestContractFixture]) {
+    const projection = projectContract(contract);
+    assert.deepEqual(projection.metadata.required, ["title"]);
+    assert.deepEqual(Object.keys(projection.metadata.properties), ["title"]);
+    assert.equal(projection.metadata.properties.title?.type, "string");
+    assert.equal(projection.metadata.properties.title?.pattern, "\\S");
+    assert.equal("title" in projection.schema.properties, false);
+  }
+});

@@ -683,6 +683,7 @@ async function runArtifactCommand(
       console.log(
         JSON.stringify({
           schema: renderSemanticCompactSchema(contract),
+          metadata: projection.metadata,
           ...(syncInput === undefined ? {} : { syncInput }),
         }),
       );
@@ -1533,7 +1534,7 @@ function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHel
   return {
     schema: {
       usage: `${domain} schema [template]`,
-      summary: `Print the semantic field schema for a ${noun} template.`,
+      summary: `Print the semantic field schema and required create metadata schema for a ${noun} template.`,
       example: `inari ${domain} schema feature --compact`,
     },
     validate: {
@@ -1552,10 +1553,11 @@ function artifactLeaves(domain: "issue" | "pr"): Readonly<Record<string, LeafHel
       example: `inari ${domain} render --template feature --field problem="A problem"`,
     },
     create: {
-      usage: `${domain} create --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
+      usage: `${domain} create --template <template> --title <title> [--from <file.json>] [--field <name>=<value> ...]`,
       summary:
         `Validate, render, and create a governed ${noun} on GitHub. A repeated field's schema type "array" ` +
-        `accumulates every --field occurrence in argv order; --from and --field may compose but never name the same field.`,
+        `accumulates every --field occurrence in argv order; --from and --field may compose but never name the same field. ` +
+        `The caller-supplied title must contain content beyond any fixed native template prefix.`,
       example: `inari ${domain} create --template feature --field problem="A problem" --title "feat: add support"`,
     },
     explain: {
@@ -1607,7 +1609,7 @@ const GLOBAL_OPTIONS = `  --from <path>       JSON input file, or - for stdin
   --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
   --repository <r>    GitHub repository override; governed commands use its default-branch governance
   --repo <r>, -R <r>  Alias for --repository
-  --title <title>     Issue/PR title for create
+  --title <title>     Required Issue/PR title for create; metadata, not a semantic --field
   --head <branch>     PR head branch for create
   --base <branch>     PR base branch for create
   --compact            Emit only semantic fields and constraints for schema

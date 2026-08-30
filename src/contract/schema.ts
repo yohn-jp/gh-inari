@@ -5,7 +5,12 @@ import {
   type ContractProvenance,
   JSON_SCHEMA_DIALECT,
 } from "./ir.js";
-import { effectiveFieldConstraints, schemaMinItems, schemaStringPatternProjection } from "./constraints.js";
+import {
+  effectiveFieldConstraints,
+  REQUIRED_STRING_PATTERN,
+  schemaMinItems,
+  schemaStringPatternProjection,
+} from "./constraints.js";
 
 /** JSON Schema values used by the projected public input contract. */
 export type JsonSchemaPrimitive = string | number | boolean | null;
@@ -52,6 +57,8 @@ export interface RenderingProjection {
 
 export interface ContractProjection {
   readonly schema: JsonSchemaDocument;
+  /** Required metadata accepted by create; deliberately separate from semantic body fields. */
+  readonly metadata: JsonSchemaDocument;
   /** Rendering/native information intentionally remains outside JSON Schema. */
   readonly rendering: RenderingProjection;
 }
@@ -152,6 +159,16 @@ function schemaIdentifier(contract: CanonicalContract): string {
   ].join(":");
 }
 
+function metadataSchemaIdentifier(contract: CanonicalContract): string {
+  return [
+    "urn:inari:contract",
+    encodeURIComponent(contract.artifactKind),
+    encodeURIComponent(contract.templateIdentity.id),
+    "metadata-schema",
+    encodeURIComponent(contract.schemaVersion),
+  ].join(":");
+}
+
 export function projectToJsonSchema(input: unknown): JsonSchemaDocument {
   assertCanonicalContract(input);
   return projectValidatedContractToJsonSchema(input);
@@ -179,12 +196,46 @@ function projectValidatedContractToJsonSchema(contract: CanonicalContract): Json
   };
 }
 
+function projectValidatedArtifactMetadataSchema(contract: CanonicalContract): JsonSchemaDocument {
+  const noun = contract.artifactKind === "issue" ? "Issue" : "pull request";
+  const nativeTitle = contract.nativeMetadata.title?.trim();
+  const hasNativeTitle = nativeTitle !== undefined && nativeTitle.length > 0;
+  const titleDescription = hasNativeTitle
+    ? `Caller-supplied ${noun} title; provide content beyond the fixed native template prefix.`
+    : `Caller-supplied ${noun} title.`;
+  return {
+    $schema: JSON_SCHEMA_DIALECT,
+    $id: metadataSchemaIdentifier(contract),
+    title: `${noun.charAt(0).toUpperCase()}${noun.slice(1)} metadata input`,
+    description: `Required metadata accepted by \`${contract.artifactKind === "issue" ? "issue" : "pr"} create\`.`,
+    type: "object",
+    properties: {
+      title: {
+        title: "Title",
+        description: titleDescription,
+        type: "string",
+        minLength: 1,
+        pattern: REQUIRED_STRING_PATTERN,
+      },
+    },
+    required: ["title"],
+    additionalProperties: false,
+  };
+}
+
+/** Project the required create metadata separately from semantic body fields. */
+export function projectArtifactMetadataSchema(input: unknown): JsonSchemaDocument {
+  assertCanonicalContract(input);
+  return projectValidatedArtifactMetadataSchema(input);
+}
+
 export const toJsonSchema = projectToJsonSchema;
 
 export function projectContract(input: unknown): ContractProjection {
   assertCanonicalContract(input);
   return {
     schema: projectValidatedContractToJsonSchema(input),
+    metadata: projectValidatedArtifactMetadataSchema(input),
     rendering: {
       artifactKind: input.artifactKind,
       templateIdentity: input.templateIdentity,
