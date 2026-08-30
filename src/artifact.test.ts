@@ -523,16 +523,40 @@ body:
 test("native title defaults and caller labels are deterministic", () => {
   const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
     fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
-    metadata: { labels: ["custom", "enhancement"] },
+    metadata: { labels: ["custom"], assignees: ["octocat"] },
   });
   assert.equal(prepared.artifact.title, "Feature");
   assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
+  assert.deepEqual(prepared.artifact.assignees, ["octocat"]);
 
   const explicit = prepareIssueArtifact(governedFixture(issueContractFixture), {
     fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
     metadata: { title: "custom title" },
   });
   assert.equal(explicit.artifact.title, "custom title");
+});
+
+test("Issue metadata round-trip rejects lossy label deduplication", () => {
+  assert.throws(
+    () =>
+      prepareIssueArtifact(governedFixture(issueContractFixture), {
+        fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+        metadata: { title: "fix: preserve issue metadata", labels: ["enhancement"], assignees: ["octocat"] },
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPreparationError);
+      assert.equal(error.code, "ARTIFACT_ROUND_TRIP_INVALID");
+      assert.deepEqual(
+        error.diagnostics.map((diagnostic) => diagnostic.path),
+        ["$.metadata.labels"],
+      );
+      assert.equal(error.diagnostics[0]?.code, "FIELD_CONFLICT");
+      assert.equal(error.diagnostics[0]?.detailCode, "FIELD_VALUE_CONFLICT");
+      assert.equal(error.diagnostics[0]?.expected?.type, "array");
+      assert.equal(error.diagnostics[0]?.actual?.type, "array");
+      return true;
+    },
+  );
 });
 
 test("semantic violations are stable and mutation artifacts cannot be prepared", () => {
