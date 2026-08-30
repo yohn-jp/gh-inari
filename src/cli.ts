@@ -561,7 +561,8 @@ interface CreateRecoveryAction {
 }
 
 const CREATE_RECOVERY_ACTIONS = 3;
-const GOVERNED_CREATE_OPTION = "--body";
+const GOVERNED_CREATE_OPTIONS = ["--body", "--body-file", "-b", "-F"] as const;
+type GovernedCreateOption = (typeof GOVERNED_CREATE_OPTIONS)[number];
 
 /**
  * Recognized gh-compatible create guidance is intentionally narrow. In
@@ -572,24 +573,21 @@ function intentAwareCreateOptionError(argv: readonly string[], error: unknown): 
   if (
     !(error instanceof CliError) ||
     error.code !== "INVALID_OPTION" ||
-    error.message !== `Unknown option ${GOVERNED_CREATE_OPTION}.`
+    !GOVERNED_CREATE_OPTIONS.some((option) => error.message === `Unknown option ${option}.`)
   )
     return undefined;
   const domain = governedCreateDomain(argv);
-  if (
-    domain === undefined ||
-    !argv.some((token) => token === GOVERNED_CREATE_OPTION || token.startsWith(`${GOVERNED_CREATE_OPTION}=`))
-  )
-    return undefined;
+  const option = findGovernedCreateOption(argv);
+  if (domain === undefined || option === undefined || error.message !== `Unknown option ${option}.`) return undefined;
 
   const recovery = createRecoveryActions(domain);
   return new CliError(
     "GOVERNED_CREATE_OPTION",
-    `Option ${GOVERNED_CREATE_OPTION} is a gh-compatible raw Markdown input, but governed ${domain} creation requires Inari's canonical structured input. ` +
+    `Option ${option} is a gh-compatible raw Markdown input, but governed ${domain} creation requires Inari's canonical structured input. ` +
       `Use ${recovery[0]?.command}, then ${recovery[1]?.command}, and create with ${recovery[2]?.command}.`,
     "$argv",
     {
-      option: GOVERNED_CREATE_OPTION,
+      option,
       domain,
       operation: "create",
       recovery,
@@ -612,6 +610,12 @@ function createRecoveryActions(domain: GovernedCreateDomain): readonly CreateRec
   return actions.slice(0, CREATE_RECOVERY_ACTIONS);
 }
 
+function findGovernedCreateOption(argv: readonly string[]): GovernedCreateOption | undefined {
+  return argv
+    .map((token) => GOVERNED_CREATE_OPTIONS.find((option) => token === option || token.startsWith(`${option}=`)))
+    .find((option): option is GovernedCreateOption => option !== undefined);
+}
+
 /** Locate only the governed domain/create positionals; option values are never treated as commands. */
 function governedCreateDomain(argv: readonly string[]): GovernedCreateDomain | undefined {
   const positionals: string[] = [];
@@ -623,6 +627,10 @@ function governedCreateDomain(argv: readonly string[]): GovernedCreateDomain | u
       break;
     }
     if (token === "-R") {
+      index += 1;
+      continue;
+    }
+    if (token === "-b" || token === "-F" || token.startsWith("-b=") || token.startsWith("-F=")) {
       index += 1;
       continue;
     }
@@ -1449,6 +1457,8 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
       options.repository = value;
       continue;
     }
+    if (token === "-b" || token.startsWith("-b=")) throw new CliError("INVALID_OPTION", "Unknown option -b.");
+    if (token === "-F" || token.startsWith("-F=")) throw new CliError("INVALID_OPTION", "Unknown option -F.");
     if (!token.startsWith("--")) {
       positionals.push(token);
       continue;

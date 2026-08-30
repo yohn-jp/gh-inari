@@ -557,35 +557,49 @@ test("malformed options return a structured usage error", async () => {
   }
 });
 
-test("gh-compatible --body on governed Issue and PR create returns bounded intent-aware guidance", async () => {
+test("gh-compatible raw-body create options return bounded intent-aware guidance for Issue and PR", async () => {
+  const options = [
+    ["--body", "# raw body"],
+    ["--body=# raw body"],
+    ["-b", "# raw body"],
+    ["-b=# raw body"],
+    ["--body-file", "/tmp/raw-body.md"],
+    ["--body-file=/tmp/raw-body.md"],
+    ["-F", "/tmp/raw-body.md"],
+    ["-F=/tmp/raw-body.md"],
+  ] as const;
   for (const domain of ["issue", "pr"] as const) {
-    const result = await captureJson([domain, "create", "--body", "# raw body", "--json"]);
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.output.error && (result.output.error as { code?: string }).code, "GOVERNED_CREATE_OPTION");
-    const error = result.output.error as {
-      message?: string;
-      details?: {
-        option?: string;
-        domain?: string;
-        operation?: string;
-        recovery?: readonly { action: string; command: string }[];
+    for (const optionArgs of options) {
+      const result = await captureJson([domain, "create", ...optionArgs, "--json"]);
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.output.error && (result.output.error as { code?: string }).code, "GOVERNED_CREATE_OPTION");
+      const error = result.output.error as {
+        message?: string;
+        details?: {
+          option?: string;
+          domain?: string;
+          operation?: string;
+          recovery?: readonly { action: string; command: string }[];
+        };
       };
-    };
-    assert.equal(error.message?.includes("# raw body"), false);
-    assert.equal(error.details?.option, "--body");
-    assert.equal(error.details?.domain, domain);
-    assert.equal(error.details?.operation, "create");
-    assert.deepEqual(error.details?.recovery, [
-      { action: "discover-template", command: "inari template list" },
-      { action: "inspect-schema", command: `inari ${domain} schema <template>` },
-      {
-        action: "create",
-        command:
-          domain === "issue"
-            ? 'inari issue create --template <template> --title "<title>" --field <name>=<value>'
-            : 'inari pr create --template <template> --title "<title>" --head <branch> --base <branch> --field <name>=<value>',
-      },
-    ]);
+      const option = optionArgs[0]?.split("=", 1)[0];
+      assert.equal(error.message?.includes(option ?? ""), true);
+      if (optionArgs[1] !== undefined) assert.equal(error.message?.includes(optionArgs[1]), false);
+      assert.equal(error.details?.option, option);
+      assert.equal(error.details?.domain, domain);
+      assert.equal(error.details?.operation, "create");
+      assert.deepEqual(error.details?.recovery, [
+        { action: "discover-template", command: "inari template list" },
+        { action: "inspect-schema", command: `inari ${domain} schema <template>` },
+        {
+          action: "create",
+          command:
+            domain === "issue"
+              ? 'inari issue create --template <template> --title "<title>" --field <name>=<value>'
+              : 'inari pr create --template <template> --title "<title>" --head <branch> --base <branch> --field <name>=<value>',
+        },
+      ]);
+    }
   }
 });
 
