@@ -7,7 +7,7 @@ import type { ValidatedRenderedIssueArtifact, ValidatedRenderedPullRequestArtifa
 import type { TemplateSelector } from "./template-discovery.js";
 export type RemediationOperation = "check" | "edit" | "normalize" | "sync";
 export type RemediationStatus = "valid-current" | "non-canonical" | "semantically-invalid" | "unsupported" | "ambiguous";
-export type RemediationErrorCode = "SEMANTIC_PATCH_INVALID" | "SEMANTIC_PATCH_UNSUPPORTED" | "SEMANTIC_VALIDATION_FAILED" | "NORMALIZATION_UNSAFE" | "SYNC_INPUT_INCOMPLETE" | "SYNC_CURRENT_UNSUPPORTED" | "PR_HEAD_CHANGE_UNSUPPORTED";
+export type RemediationErrorCode = "SEMANTIC_PATCH_INVALID" | "SEMANTIC_PATCH_UNSUPPORTED" | "SEMANTIC_VALIDATION_FAILED" | "NORMALIZATION_UNSAFE" | "SYNC_INPUT_INCOMPLETE" | "SYNC_CURRENT_UNSUPPORTED" | "SYNC_METADATA_UNSUPPORTED" | "PR_HEAD_CHANGE_UNSUPPORTED" | "PR_DRAFT_CHANGE_UNSUPPORTED";
 export declare class RemediationError extends Error {
     readonly code: RemediationErrorCode;
     readonly path?: string;
@@ -15,10 +15,10 @@ export declare class RemediationError extends Error {
     readonly diagnostics?: ArtifactDiagnosticReport;
     constructor(code: RemediationErrorCode, message: string, path?: string, details?: Readonly<Record<string, unknown>>, diagnostics?: ArtifactDiagnosticReport);
 }
-/** Project recoverable normalize/edit failures through the shared #118 contract. */
-export declare function remediationDiagnosticReport(domain: GovernedArtifactDomain, operation: "edit" | "normalize", read: ExistingArtifactRead, input?: ArtifactInputDocument, error?: unknown): ArtifactDiagnosticReport;
+/** Project recoverable remediation failures through the shared #118 contract. */
+export declare function remediationDiagnosticReport(domain: GovernedArtifactDomain, operation: "edit" | "normalize" | "sync", read: ExistingArtifactRead, input?: ArtifactInputDocument, error?: unknown): ArtifactDiagnosticReport;
 /** Attach the common report while preserving the command's existing outer error. */
-export declare function translateRemediationFailure(domain: GovernedArtifactDomain, operation: "edit" | "normalize", read: ExistingArtifactRead, error: unknown, input?: ArtifactInputDocument): unknown;
+export declare function translateRemediationFailure(domain: GovernedArtifactDomain, operation: "edit" | "normalize" | "sync", read: ExistingArtifactRead, error: unknown, input?: ArtifactInputDocument): unknown;
 /** Bounded context for explicit-template repair without retaining source/body data. */
 export declare function remediationFailureDetails(read: ExistingArtifactRead): Readonly<Record<string, unknown>>;
 export interface ExistingArtifactRead {
@@ -72,7 +72,10 @@ export declare function validateReconstructedInput(contract: CanonicalContract, 
 export declare function prepareRemediationArtifact(domain: GovernedArtifactDomain, contract: CanonicalContract, input: ArtifactInputDocument): PreparedRemediationArtifact;
 /** Ensure a declarative sync names only authoritative fields and preserves omitted Issue state. */
 export declare function prepareSyncInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: ArtifactInputDocument): ArtifactInputDocument;
-/** Compare the current semantic/rendered artifact with a prepared canonical projection. */
-export declare function diffArtifact(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: PreparedRemediationArtifact): SemanticArtifactDiff;
+/**
+ * Compare the current semantic/rendered artifact with a prepared canonical projection.
+ * PR sync owns maintainerCanModify; edit retains its established diff behavior.
+ */
+export declare function diffArtifact(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: PreparedRemediationArtifact, includePullRequestMaintainerCanModify?: boolean): SemanticArtifactDiff;
 /** Apply a prepared artifact through the existing freshness and reconciliation boundary. */
 export declare function updateGovernedExistingArtifact(adapter: GitHubAdapter, domain: GovernedArtifactDomain, number: number, artifact: PreparedRemediationArtifact): Promise<GovernedMutationResult<GitHubIssue> | GovernedMutationResult<GitHubPullRequest>>;

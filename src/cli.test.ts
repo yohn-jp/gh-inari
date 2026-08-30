@@ -1926,6 +1926,57 @@ test("issue check is read-only and classifies a canonical artifact as current", 
   }
 });
 
+const REMEDIATION_METADATA_FLAG_CASES = [
+  { key: "title", argv: ["--title", "replacement"] },
+  { key: "head", argv: ["--head", "other-branch"] },
+  { key: "base", argv: ["--base", "release"] },
+  { key: "draft", argv: ["--draft=true"] },
+  { key: "maintainerCanModify", argv: ["--maintainer-can-modify=false"] },
+] as const;
+
+const REMEDIATION_METADATA_COMMANDS = [
+  ["issue", "sync"],
+  ["pr", "sync"],
+  ["issue", "normalize"],
+  ["pr", "normalize"],
+  ["issue", "check"],
+  ["pr", "check"],
+] as const;
+
+test("remediation metadata ownership matrix rejects every direct metadata flag before any read or mutation", async () => {
+  for (const [domain, operation] of REMEDIATION_METADATA_COMMANDS) {
+    for (const metadata of REMEDIATION_METADATA_FLAG_CASES) {
+      let adapterCreated = false;
+      const result = await captureJson([domain, operation, "80", ...metadata.argv, "--json"], {
+        createAdapter: () => {
+          adapterCreated = true;
+          throw new Error("metadata rejection must precede adapter creation");
+        },
+      });
+      assert.equal(result.exitCode, 1, `${domain} ${operation} ${metadata.key}`);
+      const error = result.output.error as {
+        code?: string;
+        path?: string;
+        details?: { metadata?: readonly string[] };
+      };
+      assert.equal(error.code, "METADATA_UNSUPPORTED_COMMAND", `${domain} ${operation} ${metadata.key}`);
+      assert.equal(error.path, `$.metadata.${metadata.key}`);
+      assert.deepEqual(error.details?.metadata, [metadata.key]);
+      assert.equal(adapterCreated, false);
+    }
+  }
+});
+
+test("remediation help exposes only the documented non-metadata input contracts", async () => {
+  for (const [domain, operation] of REMEDIATION_METADATA_COMMANDS) {
+    const help = await captureHelp([domain, operation, "--help"]);
+    assert.equal(help.exitCode, 0);
+    for (const metadata of REMEDIATION_METADATA_FLAG_CASES) {
+      assert.equal(help.output.includes(metadata.argv[0]), false, `${domain} ${operation} ${metadata.key}`);
+    }
+  }
+});
+
 test("issue edit dry-run emits a bounded diff and performs no mutation", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
   const inputPath = path.join(root, "patch.json");
@@ -2852,7 +2903,7 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
   const inputPath = path.join(directory, "desired.json");
   await writeFile(
     inputPath,
-    JSON.stringify({ fields: { ...desiredFields, problem: "A converged problem" }, title: "feat: remediation" }),
+    JSON.stringify({ fields: { ...desiredFields, problem: "A converged problem" }, title: "feat: synced" }),
     "utf8",
   );
   const convergedBody = `${REMOTE_ISSUE_BODY.replace("A reproducible problem", "A converged problem").replace(
@@ -2888,7 +2939,7 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
     command(
       JSON.stringify({
         number: 80,
-        title: "feat: remediation",
+        title: "feat: synced",
         body: convergedBody,
         state: "open",
         html_url: "https://github.com/acme/inari/issues/80",
@@ -2908,7 +2959,9 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
     assert.equal(firstExitCode, 0, lines[0]);
     const firstOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     assert.equal(firstOutput.mutation, "applied");
-    assert.ok(firstTransport.calls.some((args) => args.includes("PATCH")));
+    const firstUpdate = firstTransport.calls.find((args) => args.includes("PATCH"));
+    assert.ok(firstUpdate);
+    assert.ok(firstUpdate.includes("title=feat: synced"));
 
     lines.length = 0;
     const secondTransport = new CliStubTransport(
@@ -2916,7 +2969,7 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
         [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
         {
           number: 80,
-          title: "feat: remediation",
+          title: "feat: synced",
           body: convergedBody,
           state: "open",
           html_url: "https://github.com/acme/inari/issues/80",
@@ -2955,9 +3008,10 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
         validation: ["tests"],
         breaking_changes: "Yes, this changes behavior.",
       },
-      title: "feat: remediation",
+      title: "feat: synced",
       head: "feature",
-      base: "main",
+      base: "release",
+      maintainerCanModify: false,
     }),
     "utf8",
   );
@@ -2971,6 +3025,7 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
         state: "open",
         html_url: "https://github.com/acme/inari/pull/81",
         draft: false,
+        maintainer_can_modify: true,
         head: { ref: "feature" },
         base: { ref: "main" },
       },
@@ -2982,13 +3037,14 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
     command(
       JSON.stringify({
         number: 81,
-        title: "feat: remediation",
+        title: "feat: synced",
         body: "Rendered body",
         state: "open",
         html_url: "https://github.com/acme/inari/pull/81",
         draft: false,
+        maintainer_can_modify: false,
         head: { ref: "feature" },
-        base: { ref: "main" },
+        base: { ref: "release" },
       }),
     ),
     ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
@@ -3005,9 +3061,163 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     assert.equal(output.mutation, "applied");
-    assert.ok(transport.calls.some((args) => args.includes("PATCH")));
+    const update = transport.calls.find((args) => args.includes("PATCH"));
+    assert.ok(update);
+    assert.ok(update.includes("title=feat: synced"));
+    assert.ok(update.includes("base=release"));
+    assert.ok(update.includes("maintainer_can_modify=false"));
   } finally {
     console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pr sync rejects immutable and unsupported metadata with bounded diagnostics before mutation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "desired.json");
+  const baseInput = {
+    fields: {
+      summary: "A converged pull request summary",
+      linked_issue: "Closes #21",
+      included: "Implemented scope.",
+      excluded: "Excluded scope.",
+      validation: ["tests"],
+      breaking_changes: "Yes, this changes behavior.",
+    },
+    title: "feat: remediation",
+    head: "feature",
+    base: "main",
+  };
+  const cases = [
+    {
+      key: "head",
+      value: "other-branch",
+      code: "PR_HEAD_CHANGE_UNSUPPORTED",
+      path: "$.head",
+      diagnosticPath: "$.metadata.head",
+    },
+    {
+      key: "draft",
+      value: true,
+      code: "PR_DRAFT_CHANGE_UNSUPPORTED",
+      path: "$.draft",
+      diagnosticPath: "$.metadata.draft",
+    },
+  ] as const;
+  try {
+    for (const testCase of cases) {
+      await writeFile(inputPath, JSON.stringify({ ...baseInput, [testCase.key]: testCase.value }), "utf8");
+      const transport = new CliStubTransport(
+        remoteArtifactResponses(
+          [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+          {
+            number: 81,
+            title: "feat: remediation",
+            body: REMOTE_PR_BODY,
+            state: "open",
+            html_url: "https://github.com/acme/inari/pull/81",
+            draft: false,
+            maintainer_can_modify: true,
+            head: { ref: "feature" },
+            base: { ref: "main" },
+          },
+          { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+        ),
+      );
+      const result = await captureJson(["pr", "sync", "81", "--from", inputPath, "--repository", "acme/inari"], {
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      });
+      assert.equal(result.exitCode, 2, testCase.key);
+      const error = result.output.error as {
+        code?: string;
+        path?: string;
+        diagnostics?: { diagnostics?: readonly { code?: string; path?: string }[] };
+      };
+      assert.equal(error.code, testCase.code, testCase.key);
+      assert.equal(error.path, testCase.path, testCase.key);
+      assert.equal(error.diagnostics?.diagnostics?.length, 1, testCase.key);
+      assert.deepEqual(error.diagnostics?.diagnostics?.[0], {
+        version: 1,
+        state: "unsupported",
+        code: "FIELD_UNSUPPORTED",
+        reason: "unsupported",
+        detailCode: "FIELD_UNSUPPORTED",
+        path: testCase.diagnosticPath,
+        message:
+          testCase.key === "head"
+            ? "Pull request head branches cannot be changed through the GitHub pull-request model."
+            : "Pull request draft state cannot be changed through the GitHub pull-request update model.",
+        recovery: [
+          {
+            action: "replace",
+            path: testCase.diagnosticPath,
+            hint:
+              testCase.key === "head"
+                ? "Keep the current pull-request head branch and retry."
+                : "Omit draft or keep the current pull-request draft state and retry.",
+          },
+        ],
+      });
+      assert.equal(
+        transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+        false,
+        testCase.key,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue sync rejects PR-only metadata from its generic input envelope before mutation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-remediation-"));
+  const inputPath = path.join(directory, "desired.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: {
+        problem: "A reproducible problem",
+        proposal: "A deterministic proposal",
+        non_goals: "No unrelated scope",
+        acceptance: "- [ ] The behavior is covered",
+      },
+      title: "feat: remediation",
+      head: "other-branch",
+    }),
+    "utf8",
+  );
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 80,
+        title: "feat: remediation",
+        body: REMOTE_ISSUE_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  try {
+    const result = await captureJson(["issue", "sync", "80", "--from", inputPath, "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(result.exitCode, 2);
+    const error = result.output.error as {
+      code?: string;
+      path?: string;
+      diagnostics?: { diagnostics?: readonly { path?: string }[] };
+    };
+    assert.equal(error.code, "SYNC_METADATA_UNSUPPORTED");
+    assert.equal(error.path, "$.metadata.head");
+    assert.equal(error.diagnostics?.diagnostics?.[0]?.path, "$.metadata.head");
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -3206,12 +3416,15 @@ test("edit surfaces governance-generation reconciliation instead of hiding a cro
   }
 });
 
-async function captureJson(argv: readonly string[]): Promise<{ exitCode: number; output: Record<string, unknown> }> {
+async function captureJson(
+  argv: readonly string[],
+  dependencies: Parameters<typeof runCli>[1] = {},
+): Promise<{ exitCode: number; output: Record<string, unknown> }> {
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli([...argv]);
+    const exitCode = await runCli([...argv], dependencies);
     return { exitCode, output: JSON.parse(lines[0] ?? "{}") as Record<string, unknown> };
   } finally {
     console.log = originalLog;
