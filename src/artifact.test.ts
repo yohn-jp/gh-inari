@@ -15,6 +15,7 @@ import {
   TEMPLATE_IDENTITY_MARKER_VERSION,
   validateExistingIssueArtifact,
   validateExistingPullRequestArtifact,
+  verifyIssueMetadataRoundTrip,
 } from "./artifact.js";
 import {
   CANONICAL_IR_VERSION,
@@ -612,6 +613,53 @@ test("pull-request create requires title metadata independently of branch metada
       const shaped = error as { code?: string; path?: string };
       assert.equal(shaped.code, "INPUT_METADATA_INVALID");
       assert.equal(shaped.path, "$.title");
+      return true;
+    },
+  );
+});
+
+test("Issue metadata round-trip accepts canonical label deduplication", () => {
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+    metadata: {
+      title: "fix: preserve issue metadata",
+      labels: ["enhancement", "enhancement", "custom", "custom"],
+      assignees: ["octocat"],
+    },
+  });
+
+  assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
+  assert.deepEqual(prepared.artifact.assignees, ["octocat"]);
+});
+
+test("Issue metadata round-trip rejects genuine title, label, and assignee divergence", () => {
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
+    metadata: {
+      title: "fix: preserve issue metadata",
+      labels: ["custom"],
+      assignees: ["octocat"],
+    },
+  });
+
+  assert.throws(
+    () =>
+      verifyIssueMetadataRoundTrip(
+        {
+          title: "fix: changed issue metadata",
+          labels: ["custom"],
+          assignees: ["other-user"],
+        },
+        prepared.artifact,
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPreparationError);
+      assert.equal(error.code, "ARTIFACT_ROUND_TRIP_INVALID");
+      assert.deepEqual(
+        error.diagnostics.map((diagnostic) => diagnostic.path),
+        ["$.metadata.assignees", "$.metadata.labels", "$.metadata.title"],
+      );
+      assert.ok(error.diagnostics.every((diagnostic) => diagnostic.detailCode === "FIELD_VALUE_CONFLICT"));
       return true;
     },
   );

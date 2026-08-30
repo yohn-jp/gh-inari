@@ -596,6 +596,11 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
   const title = requiredCreateTitle(input.metadata.title, contractInput.nativeMetadata.title);
   const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
+  const expectedMetadata: Readonly<Record<string, unknown>> = {
+    title,
+    ...(labels === undefined ? {} : { labels: [...labels] }),
+    ...(input.metadata.assignees === undefined ? {} : { assignees: [...input.metadata.assignees] }),
+  };
   const body = renderIssueBody(contractInput, loaded.canonical);
   verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue");
   const artifact = createValidatedRenderedIssueArtifact({
@@ -606,6 +611,7 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
     ...(labels === undefined ? {} : { labels }),
     ...(input.metadata.assignees === undefined ? {} : { assignees: input.metadata.assignees }),
   });
+  verifyIssueMetadataRoundTrip(expectedMetadata, artifact);
   return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
 
@@ -943,6 +949,46 @@ function verifyPullRequestMetadataRoundTrip(
     throw new ArtifactPreparationError(
       "ARTIFACT_ROUND_TRIP_INVALID",
       "Prepared pull request metadata did not preserve its validated values.",
+      mismatches,
+    );
+  }
+}
+
+/** @internal Validate the canonical Issue metadata handoff before mutation. */
+export function verifyIssueMetadataRoundTrip(
+  expected: Readonly<Record<string, unknown>>,
+  artifact: ValidatedRenderedIssueArtifact,
+): void {
+  const actual: Readonly<Record<string, unknown>> = {
+    title: artifact.title,
+    ...(artifact.labels === undefined ? {} : { labels: artifact.labels }),
+    ...(artifact.assignees === undefined ? {} : { assignees: artifact.assignees }),
+  };
+  const mismatches: ArtifactDiagnostic[] = [];
+  const keys = [...new Set([...Object.keys(expected), ...Object.keys(actual)])].sort(compareStrings);
+  for (const key of keys) {
+    const expectedPresent = Object.prototype.hasOwnProperty.call(expected, key);
+    const actualPresent = Object.prototype.hasOwnProperty.call(actual, key);
+    const path = `$.metadata.${key}`;
+    if (expectedPresent && actualPresent && stableValue(expected[key]) === stableValue(actual[key])) continue;
+    mismatches.push(
+      createArtifactDiagnostic({
+        state: "conflicting",
+        code: "FIELD_CONFLICT",
+        detailCode: "FIELD_VALUE_CONFLICT",
+        reason: "conflict",
+        path,
+        message: "Prepared issue metadata changed before the mutation boundary.",
+        expected: createFieldEvidence(path, expectedPresent ? expected[key] : undefined),
+        actual: createFieldEvidence(path, actualPresent ? actual[key] : undefined),
+        recovery: [{ action: "repair", path, hint: "Repair the issue metadata projection." }],
+      }),
+    );
+  }
+  if (mismatches.length > 0) {
+    throw new ArtifactPreparationError(
+      "ARTIFACT_ROUND_TRIP_INVALID",
+      "Prepared issue metadata did not preserve its validated values.",
       mismatches,
     );
   }
