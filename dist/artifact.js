@@ -98,10 +98,7 @@ export function extractIssueDependencyMarker(body) {
     if (!Object.prototype.hasOwnProperty.call(payload, "dependencies")) {
         return { status: "malformed", body: strippedBody };
     }
-    const validation = validateIssueDependencies(payload.dependencies);
-    if (!validation.valid)
-        return { status: "malformed", body: strippedBody };
-    return { status: "valid", dependencies: validation.dependencies, body: strippedBody };
+    return { status: "valid", dependencies: payload.dependencies, body: strippedBody };
 }
 /**
  * Recognize and remove a trailing template identity marker line without
@@ -645,7 +642,7 @@ export async function validateExistingIssueFromAdapter(reader, contract, issueNu
     return {
         number: issueNumber,
         url: issue.url,
-        result: validateExistingIssueArtifact(contract, issue.body, issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId)),
+        result: validateExistingIssueArtifact(contract, issue.body, issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId, issue.repositoryHost)),
     };
 }
 export async function validateExistingPullRequestFromAdapter(reader, contract, pullRequestNumber) {
@@ -663,7 +660,8 @@ function validateParsedArtifact(contract, parse, subject) {
             : "unparseable";
         return { valid: false, classification, parse, violations: parse.diagnostics };
     }
-    const dependencyValidation = contract.artifactKind === "issue" ? validateIssueDependencies(parse.dependencies, subject) : undefined;
+    const dependencyInput = parse.dependencyInput ?? parse.dependencies;
+    const dependencyValidation = contract.artifactKind === "issue" ? validateIssueDependencies(dependencyInput, subject) : undefined;
     if (dependencyValidation !== undefined && !dependencyValidation.valid) {
         return {
             valid: false,
@@ -676,16 +674,19 @@ function validateParsedArtifact(contract, parse, subject) {
             })),
         };
     }
+    const normalizedParse = dependencyValidation === undefined
+        ? parse
+        : { ...parse, dependencies: dependencyValidation.dependencies, dependencyInput: undefined };
     const semantic = loadCanonicalArtifact(contract, {
         fields: parse.values,
         metadata: {},
         source: "existing",
-        dependencies: parse.dependencies,
+        dependencies: dependencyValidation?.dependencies ?? parse.dependencies,
     });
     return {
         valid: semantic.valid,
         classification: semantic.valid ? "valid" : "semantic",
-        parse,
+        parse: normalizedParse,
         violations: semantic.violations,
     };
 }
@@ -951,11 +952,16 @@ function stableValue(value) {
         .map((key) => `${JSON.stringify(key)}:${stableValue(record[key])}`)
         .join(",")}}`;
 }
-function issueReferenceFromUrl(url, number, repositoryId) {
-    const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(url);
+function issueReferenceFromUrl(url, number, repositoryId, repositoryHost) {
+    const match = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(url);
     if (match === null || repositoryId === undefined)
         return undefined;
-    return { repositoryId, repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+    return {
+        repositoryHost: (repositoryHost ?? match[1]).toLocaleLowerCase("en-US"),
+        repositoryId,
+        repository: `${match[2]}/${match[3]}`.toLocaleLowerCase("en-US"),
+        number,
+    };
 }
 function renderIssueBody(contract, values, dependencies = undefined) {
     const blocks = [];
@@ -1080,16 +1086,6 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
                 : "Issue dependency marker is malformed or semantically invalid.",
         });
     }
-    else if (dependencyMarker.status === "valid") {
-        const validation = validateIssueDependencies(dependencies);
-        if (!validation.valid) {
-            diagnostics.push(...validation.violations.map((violation) => ({
-                code: "EXISTING_UNPARSEABLE",
-                path: violation.path,
-                message: violation.message,
-            })));
-        }
-    }
     let cursor = 0;
     for (let sectionIndex = 0; sectionIndex < contract.sections.length; sectionIndex += 1) {
         const section = contract.sections[sectionIndex];
@@ -1185,7 +1181,13 @@ function parseRenderedBody(contract, body, issueHeadingLevel, stripComments) {
     }
     if (diagnostics.length > 0)
         return { parsed: false, values: {}, diagnostics };
-    return { parsed: true, values, dependencies, diagnostics: [] };
+    return {
+        parsed: true,
+        values,
+        dependencies,
+        ...(dependencyMarker.status === "valid" ? { dependencyInput: dependencyMarker.dependencies } : {}),
+        diagnostics: [],
+    };
 }
 function headingBlocks(source) {
     const lines = source.split("\n");

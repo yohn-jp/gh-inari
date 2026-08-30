@@ -6,22 +6,26 @@
  * so later consumers can reuse them without learning a repository's Markdown
  * layout.
  *
- * For GitHub, repositoryId is the opaque repository node ID returned by
- * `gh repo view --json id`.  Rename/transfer changes the repository locator,
- * but not the referenced repository identity key; the locator is therefore
- * never used for equality, sorting, duplicate detection, or self checks.
+ * For GitHub, repositoryHost + repositoryId is the identity tuple, where
+ * repositoryId is the decimal REST repository database ID returned by
+ * `gh api repos/{owner}/{repo}`. Rename/transfer within one host changes the
+ * repository locator, but not the identity key; migration across hosts is a
+ * different identity. The locator is never used for equality, sorting,
+ * duplicate detection, or self checks.
  */
 const REPOSITORY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
-const REPOSITORY_ID_PATTERN = /^[^\s\/#]{1,256}$/u;
+const REPOSITORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/u;
 export const EMPTY_ISSUE_DEPENDENCIES = Object.freeze({ blockedBy: [], blocks: [] });
 function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function repositoryKey(reference) {
-    return `${reference.repositoryId}#${reference.number}`;
+    return `${reference.repositoryHost}#${reference.repositoryId}#${reference.number}`;
 }
 function compareReferences(left, right) {
-    return left.repositoryId.localeCompare(right.repositoryId, "en-US") || left.number - right.number;
+    return (left.repositoryHost.localeCompare(right.repositoryHost, "en-US") ||
+        left.repositoryId.localeCompare(right.repositoryId, "en-US") ||
+        left.number - right.number);
 }
 function invalidResult(violations) {
     return { valid: false, dependencies: EMPTY_ISSUE_DEPENDENCIES, violations };
@@ -40,19 +44,23 @@ export function normalizeIssueReference(input, path = "$") {
             valid: false,
             reference: undefined,
             violations: [
-                referenceViolation(typeof input === "string" || Array.isArray(input) ? "REFERENCE_AMBIGUOUS" : "REFERENCE_NOT_OBJECT", path, "Issue references must be objects containing repositoryId and number."),
+                referenceViolation(typeof input === "string" || Array.isArray(input) ? "REFERENCE_AMBIGUOUS" : "REFERENCE_NOT_OBJECT", path, "Issue references must be objects containing repositoryHost, repositoryId, and number."),
             ],
         };
     }
     const violations = [];
     for (const key of Object.keys(input)) {
-        if (key !== "repositoryId" && key !== "repository" && key !== "number") {
+        if (key !== "repositoryHost" && key !== "repositoryId" && key !== "repository" && key !== "number") {
             violations.push(referenceViolation("REFERENCE_UNKNOWN_PROPERTY", `${path}.${key}`, `Reference property "${key}" is not supported.`));
         }
     }
+    const repositoryHost = input.repositoryHost;
+    if (typeof repositoryHost !== "string" || repositoryHost.length === 0 || /[\s/]/u.test(repositoryHost)) {
+        violations.push(referenceViolation("REFERENCE_REPOSITORY_HOST_INVALID", `${path}.repositoryHost`, "repositoryHost must be a non-empty GitHub host without whitespace or path separators."));
+    }
     const repositoryId = input.repositoryId;
     if (typeof repositoryId !== "string" || !REPOSITORY_ID_PATTERN.test(repositoryId)) {
-        violations.push(referenceViolation("REFERENCE_REPOSITORY_ID_INVALID", `${path}.repositoryId`, "repositoryId must be an immutable repository identity, not an owner/name locator or URL."));
+        violations.push(referenceViolation("REFERENCE_REPOSITORY_ID_INVALID", `${path}.repositoryId`, "repositoryId must be a positive decimal REST repository database ID for this host, not an owner/name locator or URL."));
     }
     const repository = input.repository;
     if (repository !== undefined && (typeof repository !== "string" || !REPOSITORY_PATTERN.test(repository))) {
@@ -67,6 +75,7 @@ export function normalizeIssueReference(input, path = "$") {
     return {
         valid: true,
         reference: {
+            repositoryHost: repositoryHost.toLocaleLowerCase("en-US"),
             repositoryId: repositoryId,
             ...(repository === undefined ? {} : { repository: repository.toLocaleLowerCase("en-US") }),
             number: number,
@@ -139,6 +148,10 @@ export const normalizeIssueDependencies = validateIssueDependencies;
 export const projectIssueDependencies = validateIssueDependencies;
 /** Stable key useful to adapters without exposing parsing rules. */
 export function issueReferenceKey(reference) {
-    return repositoryKey({ repositoryId: reference.repositoryId, number: reference.number });
+    return repositoryKey({
+        repositoryHost: reference.repositoryHost.toLocaleLowerCase("en-US"),
+        repositoryId: reference.repositoryId,
+        number: reference.number,
+    });
 }
 //# sourceMappingURL=issue-reference.js.map

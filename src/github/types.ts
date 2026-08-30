@@ -43,7 +43,7 @@ export interface RepositoryContext {
   readonly name: string;
   readonly nameWithOwner: string;
   readonly url: string;
-  /** Immutable GitHub repository node ID when resolved from gh. */
+  /** Decimal REST repository database ID when resolved from gh. */
   readonly repositoryId?: string;
 }
 
@@ -69,8 +69,10 @@ export interface GitHubIssue {
   readonly url: string;
   readonly labels: readonly string[];
   readonly assignees: readonly string[];
-  /** Immutable repository node ID when supplied by the adapter context. */
+  /** Decimal REST repository database ID when supplied by the adapter context. */
   readonly repositoryId?: string;
+  /** Normalized GitHub host/install boundary paired with repositoryId. */
+  readonly repositoryHost?: string;
 }
 
 export interface GitHubPullRequest {

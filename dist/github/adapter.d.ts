@@ -48,6 +48,8 @@ export declare class GitHubAdapter {
     createPullRequest(artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
     updatePullRequest(pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
     private resolveRepositoryContextOnce;
+    /** Resolve the host-scoped REST repository database identity for both local and explicit targets. */
+    private resolveRepositoryView;
     private repositoryOverride;
     private repositoryHostOverride;
     private normalizedHostname;

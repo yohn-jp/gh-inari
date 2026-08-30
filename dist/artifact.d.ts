@@ -98,6 +98,8 @@ export interface ExistingArtifactParseResult {
     readonly parsed: boolean;
     readonly values: Readonly<Record<string, unknown>>;
     readonly dependencies?: IssueDependencies;
+    /** Raw dependency declaration retained for the semantic validation boundary. */
+    readonly dependencyInput?: unknown;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
 /**
@@ -123,6 +125,7 @@ export interface ExistingIssueReader {
         readonly body: string | null;
         readonly url: string;
         readonly repositoryId?: string;
+        readonly repositoryHost?: string;
     }>;
 }
 export interface ExistingPullRequestReader {

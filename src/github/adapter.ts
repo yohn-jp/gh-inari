@@ -253,7 +253,7 @@ export class GitHubAdapter {
       this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "GET"),
       "issue.read",
     );
-    return parseIssue(result, "issue.read", context.repositoryId);
+    return parseIssue(result, "issue.read", context.repositoryId, context.hostname);
   }
 
   async readIssue(issueNumber: number): Promise<GitHubIssue> {
@@ -284,7 +284,7 @@ export class GitHubAdapter {
     appendRawFields(args, "labels[]", artifact.labels);
     appendRawFields(args, "assignees[]", artifact.assignees);
     const result = await this.runApi(args, "issue.create");
-    return parseIssue(result, "issue.create", context.repositoryId);
+    return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
   }
 
   async updateIssue(issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue> {
@@ -301,7 +301,7 @@ export class GitHubAdapter {
     appendRawFields(args, "labels[]", artifact.labels);
     appendRawFields(args, "assignees[]", artifact.assignees);
     const result = await this.runApi(args, "issue.update");
-    return parseIssue(result, "issue.update", context.repositoryId);
+    return parseIssue(result, "issue.update", context.repositoryId, context.hostname);
   }
 
   async createPullRequest(artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest> {
@@ -341,53 +341,80 @@ export class GitHubAdapter {
     const override = this.repositoryOverride();
     if (override !== undefined) {
       await this.ensureAuthenticated(override.hostname);
-      return override;
+      return this.resolveRepositoryView(`${override.hostname}/${override.nameWithOwner}`, override.hostname);
     }
 
     await this.ensureAuthenticated(this.normalizedHostname());
-    const result = await this.runCommand(["repo", "view", "--json", "id,nameWithOwner,url"], "repository.resolve");
-    if (result.exitCode !== 0) {
-      if (UNAUTHENTICATED_MESSAGE_PATTERN.test(result.stderr)) {
-        throw new GhUnauthenticatedError(this.normalizedHostname(), summarize(result.stderr));
+    return this.resolveRepositoryView(undefined, this.normalizedHostname() ?? DEFAULT_HOSTNAME);
+  }
+
+  /** Resolve the host-scoped REST repository database identity for both local and explicit targets. */
+  private async resolveRepositoryView(
+    repositoryArgument: string | undefined,
+    fallbackHostname: string,
+  ): Promise<RepositoryContext> {
+    let metadata: RepositoryContext;
+    if (repositoryArgument === undefined) {
+      const result = await this.runCommand(["repo", "view", "--json", "nameWithOwner,url"], "repository.resolve");
+      if (result.exitCode !== 0) {
+        if (UNAUTHENTICATED_MESSAGE_PATTERN.test(result.stderr)) {
+          throw new GhUnauthenticatedError(fallbackHostname, summarize(result.stderr));
+        }
+        throw new RepositoryResolutionError(
+          "Unable to resolve the current GitHub repository. Check the working directory and authentication.",
+          { operation: "repository.resolve", exitCode: result.exitCode, stderr: summarize(result.stderr) },
+        );
+      }
+      const payload = parseJson(result.stdout, "repository.resolve");
+      if (!isRecord(payload) || typeof payload.nameWithOwner !== "string") {
+        throw new RepositoryResolutionError("gh returned no valid repository locator.", {
+          operation: "repository.resolve",
+          response: summarize(result.stdout),
+        });
+      }
+      try {
+        metadata = repositoryContextFromNameWithOwner(
+          payload.nameWithOwner,
+          typeof payload.url === "string" ? payload.url : undefined,
+          fallbackHostname,
+        );
+      } catch (error) {
+        if (error instanceof RepositoryResolutionError) throw error;
+        throw new RepositoryResolutionError(
+          "gh returned an invalid repository locator.",
+          { operation: "repository.resolve", response: summarize(result.stdout) },
+          error,
+        );
+      }
+    } else {
+      metadata = parseRepositoryOverride(repositoryArgument, fallbackHostname);
+    }
+
+    const identityResult = await this.runCommand(
+      ["api", `repos/${metadata.nameWithOwner}`, "--hostname", metadata.hostname, "--method", "GET", "--jq", ".id"],
+      "repository.resolve",
+    );
+    if (identityResult.exitCode !== 0) {
+      if (UNAUTHENTICATED_MESSAGE_PATTERN.test(identityResult.stderr)) {
+        throw new GhUnauthenticatedError(metadata.hostname, summarize(identityResult.stderr));
       }
       throw new RepositoryResolutionError(
-        "Unable to resolve the GitHub repository from the current working directory. Check the git remote or provide a repository override.",
-        { operation: "repository.resolve", exitCode: result.exitCode, stderr: summarize(result.stderr) },
+        "Unable to resolve the GitHub repository database identity. Check the target repository and authentication.",
+        {
+          operation: "repository.resolve",
+          exitCode: identityResult.exitCode,
+          stderr: summarize(identityResult.stderr),
+        },
       );
     }
-
-    let payload: unknown;
-    try {
-      payload = JSON.parse(result.stdout) as unknown;
-    } catch (error) {
-      throw new RepositoryResolutionError(
-        "gh returned invalid JSON while resolving the current repository.",
-        { operation: "repository.resolve", response: summarize(result.stdout) },
-        error,
-      );
+    const repositoryId = parseRepositoryDatabaseId(identityResult.stdout);
+    if (repositoryId === undefined) {
+      throw new RepositoryResolutionError("gh returned no valid repository database identity.", {
+        operation: "repository.resolve",
+        response: summarize(identityResult.stdout),
+      });
     }
-    if (!isRecord(payload) || typeof payload.nameWithOwner !== "string" || !isStableRepositoryId(payload.id)) {
-      throw new RepositoryResolutionError(
-        "gh returned no valid stable repository identity for the current working directory.",
-        { operation: "repository.resolve", response: summarize(result.stdout) },
-      );
-    }
-
-    try {
-      return repositoryContextFromNameWithOwner(
-        payload.nameWithOwner,
-        typeof payload.url === "string" ? payload.url : undefined,
-        this.normalizedHostname() ?? DEFAULT_HOSTNAME,
-        payload.id,
-      );
-    } catch (error) {
-      if (error instanceof RepositoryResolutionError) throw error;
-      throw new RepositoryResolutionError(
-        "gh returned an invalid repository identity.",
-        { operation: "repository.resolve", response: summarize(result.stdout) },
-        error,
-      );
-    }
+    return repositoryContext(metadata.hostname, metadata.owner, metadata.name, metadata.url, repositoryId);
   }
 
   private repositoryOverride(): RepositoryContext | undefined {
@@ -546,10 +573,14 @@ function assertArtifactRepository(
   context: RepositoryContext,
 ): void {
   const provenance = artifact.provenance;
-  if (
-    provenance.repository.host.toLowerCase() !== context.hostname.toLowerCase() ||
-    provenance.repository.nameWithOwner !== context.nameWithOwner
-  ) {
+  const hostMatches = provenance.repository.host.toLowerCase() === context.hostname.toLowerCase();
+  const provenanceId = provenance.repository.repositoryId;
+  const identityMatches =
+    provenanceId !== undefined && context.repositoryId !== undefined && provenanceId === context.repositoryId;
+  // owner/name is a mutable locator. Mutation provenance must carry both
+  // authorities; accepting a locator-only artifact could target a
+  // same-name repository recreated after a rename/transfer.
+  if (!hostMatches || !identityMatches) {
     throw new ContractViolationError(
       "Mutation artifact provenance does not match the target repository.",
       "provenance.repository",
@@ -561,7 +592,13 @@ function assertProvenance(value: unknown): void {
   if (!isRecord(value)) {
     throw new ContractViolationError("Mutation requires trusted repository/ref provenance.", "provenance");
   }
-  if (!isRecord(value.repository) || typeof value.repository.nameWithOwner !== "string") {
+  if (
+    !isRecord(value.repository) ||
+    typeof value.repository.host !== "string" ||
+    typeof value.repository.nameWithOwner !== "string" ||
+    typeof value.repository.repositoryId !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(value.repository.repositoryId)
+  ) {
     throw new ContractViolationError("Mutation requires trusted repository/ref provenance.", "provenance.repository");
   }
 }
@@ -609,7 +646,7 @@ function parseJson(value: string, operation: string): unknown {
   }
 }
 
-function parseIssue(value: unknown, operation: string, repositoryId?: string): GitHubIssue {
+function parseIssue(value: unknown, operation: string, repositoryId?: string, repositoryHost?: string): GitHubIssue {
   const record = responseRecord(value, operation);
   const number = responseNumber(record.number, "number", operation);
   if (record.pull_request !== undefined) throw new GitHubResourceKindMismatchError(operation, number);
@@ -626,6 +663,7 @@ function parseIssue(value: unknown, operation: string, repositoryId?: string): G
     labels: responseNames(record.labels, "labels", operation),
     assignees: responseNames(record.assignees, "assignees", operation),
     ...(repositoryId === undefined ? {} : { repositoryId }),
+    ...(repositoryHost === undefined ? {} : { repositoryHost }),
   };
 }
 
@@ -854,7 +892,12 @@ function isValidRepositorySegment(value: string): boolean {
 }
 
 function isStableRepositoryId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256 && /^[^\s\/#]+$/u.test(value);
+  return typeof value === "string" && /^[1-9][0-9]{0,19}$/u.test(value);
+}
+
+function parseRepositoryDatabaseId(value: string): string | undefined {
+  const normalized = value.trim();
+  return isStableRepositoryId(normalized) ? normalized : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

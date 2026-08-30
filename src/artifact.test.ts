@@ -22,6 +22,7 @@ import {
 } from "./artifact.js";
 import {
   CANONICAL_IR_VERSION,
+  CanonicalIrValidationError,
   CONTRACT_SCHEMA_VERSION,
   compileIssueFormYaml,
   projectToJsonSchema,
@@ -256,7 +257,7 @@ test("prepared PR artifacts preserve metadata and scalar, list, optional, and mu
   assert.equal(prepared.artifact.base, "main");
 });
 
-test("round-trip mismatches use the shared bounded field diagnostic contract", () => {
+test("unsafe multi-select labels are rejected at the canonical boundary", () => {
   const contract = governedFixture({
     irVersion: CANONICAL_IR_VERSION,
     schemaVersion: CONTRACT_SCHEMA_VERSION,
@@ -313,18 +314,57 @@ test("round-trip mismatches use the shared bounded field diagnostic contract", (
         metadata: { title: "fix: bounded diagnostics" },
       }),
     (error: unknown) => {
+      assert.ok(error instanceof CanonicalIrValidationError);
+      assert.equal(error.violations[0]?.code, "IR_INVALID_OPTIONS");
+      assert.equal(error.violations[0]?.path, "$.sections[0].fields[0].items.options[0].label");
+      return true;
+    },
+  );
+});
+
+test("round-trip mismatches use the shared bounded field diagnostic contract", () => {
+  const base = governedFixture(issueContractFixture);
+  const contract: CanonicalContract = {
+    ...base,
+    sections: base.sections.map((section, sectionIndex) =>
+      sectionIndex !== 2
+        ? section
+        : {
+            ...section,
+            fields: section.fields.map((field) =>
+              field.type !== "array"
+                ? field
+                : {
+                    ...field,
+                    items: {
+                      ...field.items,
+                      options: field.items.options?.map((option) => ({ ...option, label: "same" })),
+                    },
+                  },
+            ),
+          },
+    ),
+  };
+
+  assert.throws(
+    () =>
+      prepareIssueArtifact(contract, {
+        fields: { problem: "problem", category: "feature", affected_areas: ["docs"], acceptance: ["tests"] },
+        metadata: { title: "fix: bounded diagnostics" },
+      }),
+    (error: unknown) => {
       assert.ok(error instanceof ArtifactPreparationError);
       assert.equal(error.code, "ARTIFACT_ROUND_TRIP_INVALID");
       assert.deepEqual(
         error.diagnostics.map((diagnostic) => diagnostic.path),
-        ["$.fields.items"],
+        ["$.fields.affected_areas"],
       );
       assert.equal(error.diagnostics[0]?.code, "FIELD_CONFLICT");
       assert.equal(error.diagnostics[0]?.detailCode, "FIELD_VALUE_CONFLICT");
       assert.equal(error.diagnostics[0]?.expected?.type, "array");
       assert.equal(error.diagnostics[0]?.actual?.type, "array");
-      assert.equal(JSON.stringify(error.diagnostics).includes("alpha"), false);
-      assert.equal(JSON.stringify(error.diagnostics).includes("beta"), false);
+      assert.equal(JSON.stringify(error.diagnostics).includes("docs"), false);
+      assert.equal(JSON.stringify(error.diagnostics).includes("same"), false);
       return true;
     },
   );
@@ -1233,8 +1273,10 @@ test("Issue dependency semantics round-trip through the canonical body marker an
       acceptance: ["tests"],
     },
     dependencies: {
-      blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
-      blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 3 }],
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+      ],
+      blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 3 }],
     },
   };
   const body = renderIssueArtifact(issueContractFixture, input);
@@ -1257,8 +1299,10 @@ test("prepared Issue artifacts preserve dependencies at the mutation boundary", 
     },
     metadata: { title: "feat: dependency boundary" },
     dependencies: {
-      blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
-      blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 3 }],
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+      ],
+      blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 3 }],
     },
   };
   const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), input);
@@ -1277,13 +1321,16 @@ test("parsing keeps self-reference semantic validation outside representation pa
       acceptance: ["tests"],
     },
     dependencies: {
-      blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 157 }],
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 157 },
+      ],
     },
   });
   const parsed = parseExistingIssueArtifact(issueContractFixture, body);
   assert.equal(parsed.parsed, true);
   const validated = validateExistingIssueArtifact(issueContractFixture, body, {
-    repositoryId: "R_kgDOinari",
+    repositoryHost: "github.com",
+    repositoryId: "100000157",
     repository: "yohn-jp/gh-inari",
     number: 157,
   });
@@ -1294,6 +1341,34 @@ test("parsing keeps self-reference semantic validation outside representation pa
       code: "INPUT_DEPENDENCY",
       path: "$.dependencies.blockedBy[0]",
       message: "An Issue cannot depend on itself.",
+    },
+  ]);
+});
+
+test("dependency marker extraction preserves semantic violations for the validator", () => {
+  const reference = { repositoryHost: "github.com", repositoryId: "100000157", number: 149 };
+  const body = `${renderIssueArtifact(issueContractFixture, {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+  }).trimEnd()}\n<!-- inari:issue-dependencies ${JSON.stringify({
+    version: "1",
+    dependencies: { blockedBy: [reference, reference] },
+  })} -->\n`;
+  const extracted = extractIssueDependencyMarker(body);
+  assert.equal(extracted.status, "valid");
+  const parsed = parseExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.parsed, true);
+  const validated = validateExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(validated.valid, false);
+  assert.deepEqual(validated.violations, [
+    {
+      code: "INPUT_DEPENDENCY",
+      path: "$.dependencies.blockedBy[1]",
+      message: 'Duplicate blockedBy reference "github.com#100000157#149".',
     },
   ]);
 });

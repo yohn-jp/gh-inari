@@ -216,11 +216,17 @@ const DOMAIN_ARTIFACT_KIND = {
     pr: "pull_request",
 };
 function issueReferenceFromRemote(remote, number) {
-    const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(remote.url);
+    const match = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(remote.url);
     const repositoryId = "repositoryId" in remote ? remote.repositoryId : undefined;
     if (match === null || repositoryId === undefined)
         return undefined;
-    return { repositoryId, repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+    const repositoryHost = "repositoryHost" in remote ? remote.repositoryHost : undefined;
+    return {
+        repositoryHost: (repositoryHost ?? match[1]).toLocaleLowerCase("en-US"),
+        repositoryId,
+        repository: `${match[2]}/${match[3]}`.toLocaleLowerCase("en-US"),
+        number,
+    };
 }
 /** Read and select an existing artifact using the same governed candidate path as `get`. */
 export async function readGovernedExistingArtifact(adapter, domain, number, selector) {

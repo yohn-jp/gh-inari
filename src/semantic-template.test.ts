@@ -73,6 +73,34 @@ test("semantic Issue source compiles to the canonical IR and a deterministic nat
   });
 });
 
+test("semantic multi-select options reject comma-containing labels", () => {
+  assert.throws(
+    () =>
+      normalizeSemanticTemplate({
+        version: 1,
+        kind: "issue",
+        id: "comma-options",
+        name: "Comma options",
+        description: "Reject ambiguous multi-select labels",
+        sections: [
+          {
+            id: "areas",
+            type: "array",
+            label: "Areas",
+            multiple: true,
+            options: ["Frontend, web", "Backend"],
+          },
+        ],
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof SemanticTemplateError);
+      assert.equal(error.code, "SEMANTIC_TEMPLATE_INVALID_VALUE");
+      assert.equal(error.path, "$.sections[0].options[0].label");
+      return true;
+    },
+  );
+});
+
 test("sync writes projections, --check detects drift, and unchanged generation is byte-stable", async () => {
   await withRepository(async (root) => {
     await mkdir(path.join(root, ".github/inari/issues"), { recursive: true });

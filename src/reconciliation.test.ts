@@ -171,8 +171,10 @@ test("Issue edit and sync preserve omitted dependencies from the current artifac
   };
   const contract = trusted(compileIssueFormYaml(ISSUE_SOURCE, identity), identity.path, ISSUE_SOURCE);
   const dependencies = {
-    blockedBy: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
-    blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 3 }],
+    blockedBy: [
+      { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+    ],
+    blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 3 }],
   };
   const current = prepareRemediationArtifact("issue", contract, {
     fields: { summary: "Initial summary" },

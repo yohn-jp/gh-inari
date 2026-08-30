@@ -9,23 +9,28 @@ import {
   type IssueReference,
 } from "./issue-reference.js";
 
-const subject: IssueReference = { repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 157 };
+const subject: IssueReference = {
+  repositoryHost: "github.com",
+  repositoryId: "100000157",
+  repository: "yohn-jp/gh-inari",
+  number: 157,
+};
 
 test("normalizes same-repository and cross-repository references deterministically", () => {
   const result = normalizeIssueDependencies({
     blockedBy: [
-      { repositoryId: "R_kgDOother", repository: "Other-Org/Other-Repo", number: 4 },
-      { repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 },
+      { repositoryHost: "github.com", repositoryId: "100000004", repository: "Other-Org/Other-Repo", number: 4 },
+      { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
     ],
-    blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 2 }],
+    blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 2 }],
   });
   assert.equal(result.valid, true);
   assert.deepEqual(result.dependencies, {
     blockedBy: [
-      { repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 },
-      { repositoryId: "R_kgDOother", repository: "other-org/other-repo", number: 4 },
+      { repositoryHost: "github.com", repositoryId: "100000004", repository: "other-org/other-repo", number: 4 },
+      { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
     ],
-    blocks: [{ repositoryId: "R_kgDOPortal", repository: "yohn-jp/portal", number: 2 }],
+    blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 2 }],
   });
 });
 
@@ -42,10 +47,12 @@ test("rejects ambiguous, duplicate, self, and contradictory references", () => {
     {
       blockedBy: [
         "yohn-jp/gh-inari#157",
-        { repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 },
-        { repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 },
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
       ],
-      blocks: [{ repositoryId: "R_kgDOinari", repository: "yohn-jp/gh-inari", number: 149 }],
+      blocks: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+      ],
     },
     subject,
   );
@@ -58,7 +65,11 @@ test("rejects ambiguous, duplicate, self, and contradictory references", () => {
 
 test("rejects a canonical object that refers to its own Issue", () => {
   const result = validateIssueDependencies(
-    { blockedBy: [{ repositoryId: "R_kgDOinari", repository: "Yohn-Jp/gh-inari", number: 157 }] },
+    {
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "Yohn-Jp/gh-inari", number: 157 },
+      ],
+    },
     subject,
   );
   assert.equal(result.valid, false);
@@ -76,7 +87,7 @@ test("rejects malformed repository and issue identities", () => {
   assert.equal(result.valid, false);
   assert.deepEqual(
     result.violations.map((violation) => violation.code),
-    ["REFERENCE_REPOSITORY_ID_INVALID", "REFERENCE_NUMBER_INVALID"],
+    ["REFERENCE_REPOSITORY_HOST_INVALID", "REFERENCE_REPOSITORY_ID_INVALID", "REFERENCE_NUMBER_INVALID"],
   );
 });
 
@@ -85,25 +96,31 @@ test("rejects owner/name-only references because the locator is not a stable ide
   assert.equal(result.valid, false);
   assert.deepEqual(
     result.violations.map((violation) => violation.code),
-    ["REFERENCE_REPOSITORY_ID_INVALID"],
+    ["REFERENCE_REPOSITORY_HOST_INVALID", "REFERENCE_REPOSITORY_ID_INVALID"],
   );
 });
 
 test("aliases expose the same canonical normalization", () => {
   assert.deepEqual(
-    normalizeIssueDependencies({ blocks: [{ repositoryId: "R_kgDOPortal", repository: "Yohn-Jp/Portal", number: 3 }] }),
-    validateIssueDependencies({ blocks: [{ repositoryId: "R_kgDOPortal", repository: "Yohn-Jp/Portal", number: 3 }] }),
+    normalizeIssueDependencies({
+      blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "Yohn-Jp/Portal", number: 3 }],
+    }),
+    validateIssueDependencies({
+      blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "Yohn-Jp/Portal", number: 3 }],
+    }),
   );
 });
 
 test("repository rename or transfer changes only the locator, never the identity key", () => {
   const before = normalizeIssueReference({
-    repositoryId: "R_kgDOinari",
+    repositoryHost: "github.com",
+    repositoryId: "100000157",
     repository: "old-owner/old-name",
     number: 157,
   });
   const after = normalizeIssueReference({
-    repositoryId: "R_kgDOinari",
+    repositoryHost: "github.com",
+    repositoryId: "100000157",
     repository: "new-owner/new-name",
     number: 157,
   });
@@ -114,4 +131,43 @@ test("repository rename or transfer changes only the locator, never the identity
     issueReferenceKey(after.reference as IssueReference),
   );
   assert.equal(after.reference?.repository, "new-owner/new-name");
+});
+
+test("the same numeric ID on another GitHub host is a different repository identity", () => {
+  const publicHost = normalizeIssueReference({
+    repositoryHost: "github.com",
+    repositoryId: "100000157",
+    repository: "yohn-jp/gh-inari",
+    number: 157,
+  });
+  const enterpriseHost = normalizeIssueReference({
+    repositoryHost: "ghe.example.com",
+    repositoryId: "100000157",
+    repository: "yohn-jp/gh-inari",
+    number: 157,
+  });
+  assert.equal(publicHost.valid, true);
+  assert.equal(enterpriseHost.valid, true);
+  assert.notEqual(
+    issueReferenceKey(publicHost.reference as IssueReference),
+    issueReferenceKey(enterpriseHost.reference as IssueReference),
+  );
+});
+
+test("legacy opaque IDs are rejected instead of being silently equated", () => {
+  const legacy = normalizeIssueReference({
+    repositoryHost: "github.com",
+    repositoryId: "MDEwOlJlcG9zaXRvcnkx",
+    repository: "yohn-jp/gh-inari",
+    number: 157,
+  });
+  const current = normalizeIssueReference({
+    repositoryHost: "github.com",
+    repositoryId: "100000157",
+    repository: "yohn-jp/gh-inari",
+    number: 157,
+  });
+  assert.equal(legacy.valid, false);
+  assert.equal(current.valid, true);
+  assert.equal(legacy.violations[0]?.code, "REFERENCE_REPOSITORY_ID_INVALID");
 });

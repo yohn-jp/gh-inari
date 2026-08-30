@@ -8,6 +8,8 @@
 export const CANONICAL_IR_VERSION = "1.0.0";
 export const CONTRACT_SCHEMA_VERSION = "1.0.0";
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+/** Separator used by native multi-select Issue Form artifacts. */
+export const MULTI_SELECT_OPTION_SEPARATOR = ",";
 /**
  * GitHub's syntactic closing-reference language for pull request bodies.
  * Contextual effects, such as closing only when targeting the default branch,
@@ -146,8 +148,8 @@ function validateProvenance(value, path, artifactKind, templatePath, violations)
         if (owner !== undefined && name !== undefined && nameWithOwner !== `${owner}/${name}`) {
             addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.repository.nameWithOwner`, "Repository nameWithOwner must match owner and name.");
         }
-        if (repositoryId !== undefined && repositoryId.trim().length === 0) {
-            addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.repository.repositoryId`, "Repository repositoryId must be a non-empty immutable identity.");
+        if (repositoryId !== undefined && !/^[1-9][0-9]{0,19}$/u.test(repositoryId)) {
+            addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.repository.repositoryId`, "Repository repositoryId must be a positive decimal REST database identity.");
         }
     }
     const templateSource = validateProvenanceSource(template, `${path}.template`, ref, violations);
@@ -419,6 +421,13 @@ function validateOptionList(value, path, violations) {
     });
     return options;
 }
+function validateMultiSelectOptionLabels(options, path, violations) {
+    options?.forEach((option, index) => {
+        if (option.label.includes(MULTI_SELECT_OPTION_SEPARATOR)) {
+            addViolation(violations, "IR_INVALID_OPTIONS", `${path}[${index}].label`, "Multi-select option labels must not contain commas because native artifact parsing uses commas as separators.");
+        }
+    });
+}
 function validateChecklistItems(value, path, violations) {
     if (!Array.isArray(value) || value.length === 0) {
         addViolation(violations, "IR_INVALID_OPTIONS", path, "Checklist items must be a non-empty array.");
@@ -676,6 +685,8 @@ function validateField(value, path, index, source, fieldIds, violations) {
             if (hasOwn(items, "options")) {
                 const options = validateOptionList(items.options, `${path}.items.options`, violations);
                 allowedValues = options?.map((option) => option.value);
+                if (selection === "multi_select")
+                    validateMultiSelectOptionLabels(options, `${path}.items.options`, violations);
             }
         }
         if (selection === "multi_select" &&

@@ -173,6 +173,8 @@ export interface ExistingArtifactParseResult {
   readonly parsed: boolean;
   readonly values: Readonly<Record<string, unknown>>;
   readonly dependencies?: IssueDependencies;
+  /** Raw dependency declaration retained for the semantic validation boundary. */
+  readonly dependencyInput?: unknown;
   readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
 
@@ -201,6 +203,7 @@ export interface ExistingIssueReader {
     readonly body: string | null;
     readonly url: string;
     readonly repositoryId?: string;
+    readonly repositoryHost?: string;
   }>;
 }
 
@@ -305,9 +308,7 @@ export function extractIssueDependencyMarker(body: string): IssueDependencyMarke
   if (!Object.prototype.hasOwnProperty.call(payload, "dependencies")) {
     return { status: "malformed", body: strippedBody };
   }
-  const validation = validateIssueDependencies(payload.dependencies);
-  if (!validation.valid) return { status: "malformed", body: strippedBody };
-  return { status: "valid", dependencies: validation.dependencies, body: strippedBody };
+  return { status: "valid", dependencies: payload.dependencies as IssueDependencies, body: strippedBody };
 }
 
 /**
@@ -992,7 +993,7 @@ export async function validateExistingIssueFromAdapter(
     result: validateExistingIssueArtifact(
       contract,
       issue.body,
-      issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId),
+      issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId, issue.repositoryHost),
     ),
   };
 }
@@ -1021,8 +1022,9 @@ function validateParsedArtifact(
       : "unparseable";
     return { valid: false, classification, parse, violations: parse.diagnostics };
   }
+  const dependencyInput = parse.dependencyInput ?? parse.dependencies;
   const dependencyValidation =
-    contract.artifactKind === "issue" ? validateIssueDependencies(parse.dependencies, subject) : undefined;
+    contract.artifactKind === "issue" ? validateIssueDependencies(dependencyInput, subject) : undefined;
   if (dependencyValidation !== undefined && !dependencyValidation.valid) {
     return {
       valid: false,
@@ -1035,16 +1037,20 @@ function validateParsedArtifact(
       })),
     };
   }
+  const normalizedParse =
+    dependencyValidation === undefined
+      ? parse
+      : { ...parse, dependencies: dependencyValidation.dependencies, dependencyInput: undefined };
   const semantic = loadCanonicalArtifact(contract, {
     fields: parse.values,
     metadata: {},
     source: "existing",
-    dependencies: parse.dependencies,
+    dependencies: dependencyValidation?.dependencies ?? parse.dependencies,
   });
   return {
     valid: semantic.valid,
     classification: semantic.valid ? "valid" : "semantic",
-    parse,
+    parse: normalizedParse,
     violations: semantic.violations,
   };
 }
@@ -1381,10 +1387,20 @@ function stableValue(value: unknown): string {
     .join(",")}}`;
 }
 
-function issueReferenceFromUrl(url: string, number: number, repositoryId?: string): IssueReference | undefined {
-  const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(url);
+function issueReferenceFromUrl(
+  url: string,
+  number: number,
+  repositoryId?: string,
+  repositoryHost?: string,
+): IssueReference | undefined {
+  const match = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(url);
   if (match === null || repositoryId === undefined) return undefined;
-  return { repositoryId, repository: `${match[1]}/${match[2]}`.toLocaleLowerCase("en-US"), number };
+  return {
+    repositoryHost: (repositoryHost ?? match[1]).toLocaleLowerCase("en-US"),
+    repositoryId,
+    repository: `${match[2]}/${match[3]}`.toLocaleLowerCase("en-US"),
+    number,
+  };
 }
 
 function renderIssueBody(
@@ -1523,17 +1539,6 @@ function parseRenderedBody(
           ? "Issue dependency marker uses an unsupported version."
           : "Issue dependency marker is malformed or semantically invalid.",
     });
-  } else if (dependencyMarker.status === "valid") {
-    const validation = validateIssueDependencies(dependencies);
-    if (!validation.valid) {
-      diagnostics.push(
-        ...validation.violations.map((violation) => ({
-          code: "EXISTING_UNPARSEABLE" as const,
-          path: violation.path,
-          message: violation.message,
-        })),
-      );
-    }
   }
   let cursor = 0;
 
@@ -1629,7 +1634,13 @@ function parseRenderedBody(
     });
   }
   if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics };
-  return { parsed: true, values, dependencies, diagnostics: [] };
+  return {
+    parsed: true,
+    values,
+    dependencies,
+    ...(dependencyMarker.status === "valid" ? { dependencyInput: dependencyMarker.dependencies } : {}),
+    diagnostics: [],
+  };
 }
 
 interface HeadingBlock {
