@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument } from "yaml";
-import { assertCanonicalContract, CANONICAL_IR_VERSION, CONTRACT_SCHEMA_VERSION, } from "./ir.js";
+import { assertCanonicalContract, CANONICAL_IR_VERSION, CONTRACT_SCHEMA_VERSION, MULTI_SELECT_OPTION_SEPARATOR, } from "./ir.js";
 import { selectIssueTemplate, } from "../template-discovery.js";
 // GitHub's native Issue Form schema permits any non-empty identifier made of
 // alphanumeric characters, hyphens, and underscores; it does not require a
@@ -503,7 +503,7 @@ function parseDropdownOptions(value, pathPrefix, diagnostics, multiple) {
         if (option === GITHUB_NO_RESPONSE_LABEL) {
             diagnostics.add("ISSUE_FORM_UNSUPPORTED_SEMANTICS", `${pathPrefix}[${index}]`, `Dropdown label "${GITHUB_NO_RESPONSE_LABEL}" is reserved for an empty Issue Form response.`);
         }
-        if (multiple && option.includes(",")) {
+        if (multiple && option.includes(MULTI_SELECT_OPTION_SEPARATOR)) {
             diagnostics.add("ISSUE_FORM_UNSUPPORTED_SEMANTICS", `${pathPrefix}[${index}]`, "Multi-select dropdown labels must not contain commas because native artifact parsing uses commas as separators.");
         }
         if (seen.has(option))
