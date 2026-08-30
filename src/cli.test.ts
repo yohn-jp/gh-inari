@@ -557,6 +557,87 @@ test("malformed options return a structured usage error", async () => {
   }
 });
 
+test("gh-compatible raw-body create options return bounded intent-aware guidance for Issue and PR", async () => {
+  const options = [
+    ["--body", "# raw body"],
+    ["--body=# raw body"],
+    ["-b", "# raw body"],
+    ["-b=# raw body"],
+    ["--body-file", "/tmp/raw-body.md"],
+    ["--body-file=/tmp/raw-body.md"],
+    ["-F", "/tmp/raw-body.md"],
+    ["-F=/tmp/raw-body.md"],
+  ] as const;
+  for (const domain of ["issue", "pr"] as const) {
+    for (const optionArgs of options) {
+      const result = await captureJson([domain, "create", ...optionArgs, "--json"]);
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.output.error && (result.output.error as { code?: string }).code, "GOVERNED_CREATE_OPTION");
+      const error = result.output.error as {
+        message?: string;
+        details?: {
+          option?: string;
+          domain?: string;
+          operation?: string;
+          recovery?: readonly { action: string; command: string }[];
+        };
+      };
+      const option = optionArgs[0]?.split("=", 1)[0];
+      assert.equal(error.message?.includes(option ?? ""), true);
+      if (optionArgs[1] !== undefined) assert.equal(error.message?.includes(optionArgs[1]), false);
+      assert.equal(error.details?.option, option);
+      assert.equal(error.details?.domain, domain);
+      assert.equal(error.details?.operation, "create");
+      assert.deepEqual(error.details?.recovery, [
+        { action: "discover-template", command: "inari template list" },
+        { action: "inspect-schema", command: `inari ${domain} schema <template>` },
+        {
+          action: "create",
+          command:
+            domain === "issue"
+              ? 'inari issue create --template <template> --title "<title>" --field <name>=<value>'
+              : 'inari pr create --template <template> --title "<title>" --head <branch> --base <branch> --field <name>=<value>',
+        },
+      ]);
+    }
+  }
+});
+
+test("human --body recovery guidance names bounded canonical commands without accepting raw Markdown", async () => {
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (line: string) => errors.push(line);
+  try {
+    const exitCode = await runCli(["issue", "create", "--body", "secret raw Markdown"]);
+    assert.equal(exitCode, 1);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(errors.length, 1);
+  assert.match(errors[0] ?? "", /inari template list/);
+  assert.match(errors[0] ?? "", /inari issue schema <template>/);
+  assert.match(errors[0] ?? "", /inari issue create .*--field <name>=<value>/);
+  assert.doesNotMatch(errors[0] ?? "", /secret raw Markdown/);
+});
+
+test("unsupported create options without recognized migration intent retain generic option errors", async () => {
+  const result = await captureJson(["issue", "create", "--editor", "--json"]);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.output.error, {
+    code: "INVALID_OPTION",
+    message: "Unknown option --editor.",
+  });
+});
+
+test("an earlier unrelated invalid option is not relabeled merely because --body also appears", async () => {
+  const result = await captureJson(["issue", "create", "--editor", "--body", "raw", "--json"]);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.output.error, {
+    code: "INVALID_OPTION",
+    message: "Unknown option --editor.",
+  });
+});
+
 test("an unrecognized top-level domain falls back to the real gh binary with the original argv", async () => {
   const calls: (readonly string[])[] = [];
   const exitCode = await runCli(["repo", "view", "--json", "name"], {
