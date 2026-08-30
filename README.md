@@ -184,7 +184,7 @@ inari pr sync <number> --from desired.json [--dry-run]
 }
 ```
 
-The `fields` object is the semantic input contract shown by `schema`. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. `--title`, `--head`, and `--base` override envelope metadata.
+The `fields` object is the semantic input contract shown by `schema`; the same schema output exposes the separate required create metadata schema. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. Caller-supplied `title` metadata is required for both create commands, and `--title`, `--head`, and `--base` override envelope metadata.
 
 `pr sync --from` accepts a complete pull-request desired-state envelope. Use
 `inari pr sync --help` for the top-level contract, or
@@ -254,7 +254,7 @@ templates:
 
 Template and section bindings are deterministic. Stale, unknown, or ambiguous template/section references fail closed. `linkedIssue: true` means that the field contains a GitHub closing reference: `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or `resolved`, followed by `#ISSUE-NUMBER` or `OWNER/REPOSITORY#ISSUE-NUMBER`, with an optional colon and case-insensitive keyword. This validates syntax only; GitHub applies automatic linking/closure only under its own contextual rules, including the target default branch.
 
-Issue Form top-level `title` is the exact default title used when the caller omits a title; an explicit caller title replaces it without inferred prefix concatenation. Top-level `labels` are repository-governed defaults and are always retained; caller-supplied labels are appended in order with duplicates removed. Top-level `assignees`, `projects`, and `type`, and upload fields remain unsupported and fail closed rather than being approximated.
+Issue Form top-level `title` is a fixed native prefix for create validation, but it does not satisfy the caller's required title metadata by itself. An explicit caller title is used as supplied without inferred prefix concatenation or automatic generation. Top-level `labels` are repository-governed defaults and are always retained; caller-supplied labels are appended in order with duplicates removed. Top-level `assignees`, `projects`, and `type`, and upload fields remain unsupported and fail closed rather than being approximated.
 
 ## Scope
 

@@ -520,19 +520,101 @@ body:
   assert.equal(parsed.parsed, true);
 });
 
-test("native title defaults and caller labels are deterministic", () => {
-  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), {
-    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
-    metadata: { labels: ["custom", "enhancement"] },
-  });
-  assert.equal(prepared.artifact.title, "Feature");
-  assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
+test("create requires caller title metadata and preserves caller labels", () => {
+  const contract = governedFixture(issueContractFixture);
+  const fields = { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] };
+  assert.throws(
+    () => prepareIssueArtifact(contract, { fields, metadata: { labels: ["custom", "enhancement"] } }),
+    (error: unknown) => {
+      const shaped = error as {
+        code?: string;
+        path?: string;
+        details?: { diagnostics?: { diagnostics?: readonly { state?: string; detailCode?: string; path?: string }[] } };
+      };
+      assert.equal(shaped.code, "INPUT_METADATA_INVALID");
+      assert.equal(shaped.path, "$.title");
+      assert.deepEqual(shaped.details?.diagnostics?.diagnostics?.[0], {
+        version: 1,
+        state: "missing",
+        code: "FIELD_MISSING",
+        reason: "required",
+        detailCode: "FIELD_REQUIRED",
+        path: "$.title",
+        message: "title must be a non-empty string.",
+        recovery: [{ action: "provide", path: "$.title", hint: "Provide a value for title." }],
+      });
+      return true;
+    },
+  );
 
-  const explicit = prepareIssueArtifact(governedFixture(issueContractFixture), {
-    fields: { problem: "problem", category: "feature", affected_areas: [], acceptance: ["tests"] },
-    metadata: { title: "custom title" },
+  const prepared = prepareIssueArtifact(contract, {
+    fields,
+    metadata: { title: "custom title", labels: ["custom", "enhancement"] },
   });
-  assert.equal(explicit.artifact.title, "custom title");
+  assert.equal(prepared.artifact.title, "custom title");
+  assert.deepEqual(prepared.artifact.labels, ["enhancement", "custom"]);
+});
+
+test("create rejects a fixed native title prefix but accepts caller content unchanged", () => {
+  const contract = governedFixture(
+    compileIssueFormYaml(
+      `name: Bug
+description: Bug report
+title: "fix: "
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+    validations:
+      required: true
+`,
+      {
+        id: "issue-form:bug.yml",
+        type: "issue-form",
+        kind: "issue",
+        name: "bug",
+        path: ".github/ISSUE_TEMPLATE/bug.yml",
+      },
+    ),
+  );
+  const fields = { summary: "A reproducible bug" };
+
+  assert.throws(
+    () => prepareIssueArtifact(contract, { fields, metadata: { title: "fix: " } }),
+    (error: unknown) => {
+      const shaped = error as {
+        code?: string;
+        path?: string;
+        details?: { diagnostics?: { diagnostics?: readonly { state?: string; detailCode?: string; path?: string }[] } };
+      };
+      assert.equal(shaped.code, "INPUT_METADATA_INVALID");
+      assert.equal(shaped.path, "$.title");
+      assert.equal(shaped.details?.diagnostics?.diagnostics?.[0]?.state, "invalid");
+      assert.equal(shaped.details?.diagnostics?.diagnostics?.[0]?.detailCode, "FIELD_CONSTRAINT_VIOLATION");
+      assert.equal(shaped.details?.diagnostics?.diagnostics?.[0]?.path, "$.title");
+      return true;
+    },
+  );
+
+  const prepared = prepareIssueArtifact(contract, { fields, metadata: { title: "fix: crash on startup" } });
+  assert.equal(prepared.artifact.title, "fix: crash on startup");
+});
+
+test("pull-request create requires title metadata independently of branch metadata", () => {
+  assert.throws(
+    () =>
+      preparePullRequestArtifact(governedFixture(pullRequestContractFixture), {
+        fields: { summary: "A complete pull request", linked_issue: "Closes #1", acceptance: ["tests"] },
+        metadata: { head: "feature/example", base: "main" },
+      }),
+    (error: unknown) => {
+      const shaped = error as { code?: string; path?: string };
+      assert.equal(shaped.code, "INPUT_METADATA_INVALID");
+      assert.equal(shaped.path, "$.title");
+      return true;
+    },
+  );
 });
 
 test("semantic violations are stable and mutation artifacts cannot be prepared", () => {

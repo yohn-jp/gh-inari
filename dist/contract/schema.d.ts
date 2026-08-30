@@ -40,10 +40,14 @@ export interface RenderingProjection {
 }
 export interface ContractProjection {
     readonly schema: JsonSchemaDocument;
+    /** Required metadata accepted by create; deliberately separate from semantic body fields. */
+    readonly metadata: JsonSchemaDocument;
     /** Rendering/native information intentionally remains outside JSON Schema. */
     readonly rendering: RenderingProjection;
 }
 export declare function projectToJsonSchema(input: unknown): JsonSchemaDocument;
+/** Project the required create metadata separately from semantic body fields. */
+export declare function projectArtifactMetadataSchema(input: unknown): JsonSchemaDocument;
 export declare const toJsonSchema: typeof projectToJsonSchema;
 export declare function projectContract(input: unknown): ContractProjection;
 export declare function serializeJsonSchema(schema: JsonSchema): string;

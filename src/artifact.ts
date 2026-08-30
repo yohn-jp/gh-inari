@@ -576,7 +576,7 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   requireTrustedProvenance(contractInput);
   const loaded = loadCanonicalArtifact(contractInput, input);
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
-  const title = requiredMetadataString(input.metadata.title ?? contractInput.nativeMetadata.title, "title");
+  const title = requiredCreateTitle(input.metadata.title, contractInput.nativeMetadata.title);
   const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
   const body = renderIssueBody(contractInput, loaded.canonical);
   verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue");
@@ -602,7 +602,7 @@ export function preparePullRequestArtifact(
   requireTrustedProvenance(contractInput);
   const loaded = loadCanonicalArtifact(contractInput, input);
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
-  const title = requiredMetadataString(input.metadata.title, "title");
+  const title = requiredCreateTitle(input.metadata.title, contractInput.nativeMetadata.title);
   const head = requiredMetadataString(input.metadata.head, "head");
   const base = requiredMetadataString(input.metadata.base, "base");
   const body = renderPullRequestBody(contractInput, loaded.canonical);
@@ -1548,8 +1548,54 @@ type MutableArtifactInputMetadata = {
 
 function requiredMetadataString(value: unknown, key: string): string {
   const violation = validateRequiredMetadataString(value, key);
-  if (violation !== undefined) throw new ArtifactInputError(violation.code, violation.message, violation.path);
+  if (violation !== undefined) {
+    throwMetadataInputError(
+      value,
+      key,
+      violation.message,
+      value === undefined ? "missing" : "invalid",
+      value === undefined ? `Provide a value for ${key}.` : `Provide a non-empty string for ${key}.`,
+    );
+  }
   return value as string;
+}
+
+function requiredCreateTitle(value: unknown, nativeTitle: string | undefined): string {
+  const title = requiredMetadataString(value, "title");
+  const nativePrefix = nativeTitle?.trim();
+  if (nativePrefix !== undefined && nativePrefix.length > 0 && title.trim() === nativePrefix) {
+    throwMetadataInputError(
+      title,
+      "title",
+      "title must contain content beyond the fixed native template prefix.",
+      "invalid",
+      "Provide a title containing caller content beyond the fixed native template prefix.",
+    );
+  }
+  return title;
+}
+
+function throwMetadataInputError(
+  value: unknown,
+  key: string,
+  message: string,
+  state: "missing" | "invalid",
+  hint: string,
+): never {
+  const path = `$.${key}`;
+  const diagnostic = createArtifactDiagnostic({
+    state,
+    code: state === "missing" ? "FIELD_MISSING" : "FIELD_INVALID",
+    detailCode: state === "missing" ? "FIELD_REQUIRED" : "FIELD_CONSTRAINT_VIOLATION",
+    reason: state === "missing" ? "required" : "constraint",
+    path,
+    message,
+    ...(state === "missing" || value === undefined ? {} : { actual: createFieldEvidence(path, value) }),
+    recovery: [{ action: "provide", path, hint }],
+  });
+  throw new ArtifactInputError("INPUT_METADATA_INVALID", message, path, {
+    diagnostics: createArtifactDiagnosticReport([diagnostic]),
+  });
 }
 
 function stringArray(value: unknown, key: string): readonly string[] {

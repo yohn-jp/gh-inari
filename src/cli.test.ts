@@ -364,6 +364,12 @@ test("pr sync help exposes the complete canonical --from envelope", async () => 
 test("pr schema projects the canonical sync input and a valid minimal example", async () => {
   const result = await captureJson(["pr", "schema", "default", "--json"]);
   assert.equal(result.exitCode, 0);
+  const metadata = result.output.metadata as {
+    required: readonly string[];
+    properties: Record<string, { type?: string }>;
+  };
+  assert.deepEqual(metadata.required, ["title"]);
+  assert.equal(metadata.properties.title?.type, "string");
   const syncInput = result.output.syncInput as {
     schema: { required?: readonly string[]; properties: Record<string, unknown> };
     minimalExample: { fields: Record<string, unknown>; title: string; head: string; base: string };
@@ -381,6 +387,21 @@ test("pr schema projects the canonical sync input and a valid minimal example", 
   assert.ok(syncInput.minimalExample.title.length > 0);
   assert.ok(syncInput.minimalExample.head.length > 0);
   assert.ok(syncInput.minimalExample.base.length > 0);
+});
+
+test("issue schema exposes required title metadata without making title a semantic field", async () => {
+  const result = await captureJson(["issue", "schema", "feature", "--json"]);
+  assert.equal(result.exitCode, 0);
+  const metadata = result.output.metadata as {
+    required: readonly string[];
+    properties: Record<string, { type?: string; pattern?: string }>;
+  };
+  const schema = result.output.schema as { properties: Record<string, unknown> };
+  assert.deepEqual(metadata.required, ["title"]);
+  assert.deepEqual(Object.keys(metadata.properties), ["title"]);
+  assert.equal(metadata.properties.title?.type, "string");
+  assert.equal(metadata.properties.title?.pattern, "\\S");
+  assert.equal("title" in schema.properties, false);
 });
 
 async function captureOutput(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
@@ -997,6 +1018,117 @@ test("invalid create input is rejected after target governance is resolved and b
       false,
     );
     assert.equal(JSON.parse(lines[0] ?? "{}").error.code, "SEMANTIC_VALIDATION_FAILED");
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Issue create rejects a missing or prefix-only title before mutation with stable metadata diagnostics", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const fields = { problem: "problem", proposal: "proposal", non_goals: "none", acceptance: "done" };
+  const cases = [
+    { name: "missing", input: { fields }, state: "missing" },
+    { name: "prefix-only", input: { fields, title: "feat: " }, state: "invalid" },
+  ] as const;
+  const originalLog = console.log;
+  try {
+    for (const testCase of cases) {
+      const inputPath = path.join(directory, `${testCase.name}.json`);
+      await writeFile(inputPath, JSON.stringify(testCase.input));
+      const lines: string[] = [];
+      const transport = new CliStubTransport(
+        remoteGovernanceResponses(".github/ISSUE_TEMPLATE/feature.yml", "feature-sha", REMOTE_ISSUE_TEMPLATE),
+      );
+      console.log = (line: string) => lines.push(line);
+      const exitCode = await runCli(
+        ["issue", "create", "--template", "feature", "--from", inputPath, "--repository", "acme/inari", "--json"],
+        {
+          repositoryRoot,
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        },
+      );
+      assert.equal(exitCode, 2, testCase.name);
+      assert.equal(
+        transport.calls.some((args) => args.includes("POST")),
+        false,
+        testCase.name,
+      );
+      const output = JSON.parse(lines[0] ?? "{}") as {
+        error?: {
+          code?: string;
+          path?: string;
+          details?: {
+            diagnostics?: { diagnostics?: readonly { state?: string; detailCode?: string; path?: string }[] };
+          };
+        };
+      };
+      assert.equal(output.error?.code, "INPUT_METADATA_INVALID", testCase.name);
+      assert.equal(output.error?.path, "$.title", testCase.name);
+      assert.equal(output.error?.details?.diagnostics?.diagnostics?.[0]?.state, testCase.state, testCase.name);
+      assert.equal(output.error?.details?.diagnostics?.diagnostics?.[0]?.path, "$.title", testCase.name);
+      assert.equal(
+        output.error?.details?.diagnostics?.diagnostics?.[0]?.detailCode,
+        testCase.state === "missing" ? "FIELD_REQUIRED" : "FIELD_CONSTRAINT_VIOLATION",
+        testCase.name,
+      );
+    }
+  } finally {
+    console.log = originalLog;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("PR create rejects a missing title before mutation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-cli-"));
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const inputPath = path.join(directory, "pull-request.json");
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      fields: {
+        summary: "A deterministic pull request summary",
+        linked_issue: "Closes #10",
+        validation: ["tests"],
+      },
+      head: "feature/example",
+      base: "main",
+    }),
+  );
+  const transport = new CliStubTransport(
+    remoteGovernanceResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", REMOTE_PR_TEMPLATE, {
+      sha: "pr-policy-sha",
+      source: REMOTE_PR_POLICY,
+    }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(
+      ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
+      {
+        repositoryRoot,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      },
+    );
+    assert.equal(exitCode, 2);
+    assert.equal(
+      transport.calls.some((args) => args.includes("POST")),
+      false,
+    );
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error?: {
+        code?: string;
+        path?: string;
+        details?: { diagnostics?: { diagnostics?: readonly { state?: string; detailCode?: string }[] } };
+      };
+    };
+    assert.equal(output.error?.code, "INPUT_METADATA_INVALID");
+    assert.equal(output.error?.path, "$.title");
+    assert.equal(output.error?.details?.diagnostics?.diagnostics?.[0]?.state, "missing");
+    assert.equal(output.error?.details?.diagnostics?.diagnostics?.[0]?.detailCode, "FIELD_REQUIRED");
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });
