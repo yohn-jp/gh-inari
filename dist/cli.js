@@ -1256,7 +1256,7 @@ function artifactLeaves(domain) {
             usage: `${domain} sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
             summary: domain === "pr"
                 ? `Reconcile an existing ${noun} to a complete desired semantic state. ${renderPullRequestSyncInputHelp()}`
-                : `Reconcile an existing ${noun} to a complete desired semantic state.`,
+                : `Reconcile an existing ${noun} to a complete desired semantic state, preserving fields and metadata omitted from the input.`,
             example: `inari ${domain} sync 123 --from desired.json --dry-run`,
         },
     };
@@ -1417,7 +1417,7 @@ Options:
 ${GLOBAL_OPTIONS}
 
 Create always validates and renders before invoking gh. Schema, validate, render, check, and --dry-run remediation never mutate GitHub.
-Edit applies an explicit semantic patch; normalize preserves existing semantic values; sync reconciles a complete desired semantic state.
+Edit applies an explicit semantic patch; normalize preserves existing semantic values; issue sync preserves omitted current values; pr sync reconciles a complete desired semantic state.
 
 All other commands pass through to the real gh binary unchanged.
 

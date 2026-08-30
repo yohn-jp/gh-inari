@@ -70,7 +70,7 @@ export declare function applySemanticPatch(domain: GovernedArtifactDomain, read:
 export declare function validateReconstructedInput(contract: CanonicalContract, input: ArtifactInputDocument, code: "NORMALIZATION_UNSAFE" | "SEMANTIC_PATCH_INVALID"): void;
 /** Validate and prepare the complete desired state through the existing artifact boundary. */
 export declare function prepareRemediationArtifact(domain: GovernedArtifactDomain, contract: CanonicalContract, input: ArtifactInputDocument): PreparedRemediationArtifact;
-/** Ensure a declarative sync only names fields in the authoritative contract. */
+/** Ensure a declarative sync names only authoritative fields and preserves omitted Issue state. */
 export declare function prepareSyncInput(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: ArtifactInputDocument): ArtifactInputDocument;
 /** Compare the current semantic/rendered artifact with a prepared canonical projection. */
 export declare function diffArtifact(domain: GovernedArtifactDomain, read: ExistingArtifactRead, desired: PreparedRemediationArtifact): SemanticArtifactDiff;

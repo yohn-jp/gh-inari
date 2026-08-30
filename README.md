@@ -190,6 +190,8 @@ The `fields` object is the semantic input contract shown by `schema`; the same s
 `inari pr sync --help` for the top-level contract, or
 `inari pr schema <template> --json` for its machine-readable `syncInput.schema`
 and a valid `syncInput.minimalExample`.
+`issue sync --from` overlays supplied semantic fields and metadata onto the
+current artifact, preserving values omitted from the input.
 
 Schema and validation output is JSON. `--json` makes render and create output JSON as well. Validation failures return exit status `2`; usage errors return `1`; GitHub/transport failures return `3`. Error objects contain stable `code`, `path` where applicable, and ordered `violations`.
 
@@ -214,8 +216,9 @@ pull requests. `check` is read-only and classifies an artifact as
 `ambiguous`. `edit` applies only an explicit semantic patch from JSON; it never
 accepts raw Markdown as the mutation contract. `normalize` re-renders a
 parseable, semantically valid artifact and fails closed when preservation is
-not proven. `sync` treats its input as the complete desired semantic state and
-reconciles the canonical projection deterministically. A successful no-op is
+not proven. `issue sync` overlays its input onto the current canonical state,
+while `pr sync` treats its input as the complete desired semantic state; both
+reconcile the canonical projection deterministically. A successful no-op is
 reported explicitly, and `--dry-run` returns a bounded semantic/rendered diff
 without calling a GitHub mutation.
 
