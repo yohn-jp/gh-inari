@@ -202,11 +202,15 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   try {
     parsed = parseArguments(argv);
   } catch (error: unknown) {
-    const shape = toErrorShape(error);
+    const reportedError = intentAwareCreateOptionError(argv, error) ?? error;
+    const shape = toErrorShape(reportedError);
     const json = argv.some((token) => token === "--json" || token === "--json=true");
-    if (json || isMachineCommandTokens(argv)) console.log(JSON.stringify({ ok: false, error: shape }));
+    if (json) console.log(JSON.stringify({ ok: false, error: shape }));
+    else if (reportedError instanceof CliError && reportedError.code === "GOVERNED_CREATE_OPTION")
+      console.error(`${shape.code}: ${shape.message}`);
+    else if (isMachineCommandTokens(argv)) console.log(JSON.stringify({ ok: false, error: shape }));
     else console.error(`${shape.code}: ${shape.message}`);
-    return classifyExitCode(error);
+    return classifyExitCode(reportedError);
   }
   const diagnosticRequested =
     parsed.options.diagnose === true ||
@@ -547,6 +551,91 @@ class CliError extends Error {
     this.path = path;
     this.details = details;
   }
+}
+
+type GovernedCreateDomain = "issue" | "pr";
+
+interface CreateRecoveryAction {
+  readonly action: "discover-template" | "inspect-schema" | "create";
+  readonly command: string;
+}
+
+const CREATE_RECOVERY_ACTIONS = 3;
+const GOVERNED_CREATE_OPTION = "--body";
+
+/**
+ * Recognized gh-compatible create guidance is intentionally narrow. In
+ * particular, the body value is never parsed, echoed, or accepted as an
+ * alternate governed input path.
+ */
+function intentAwareCreateOptionError(argv: readonly string[], error: unknown): CliError | undefined {
+  if (
+    !(error instanceof CliError) ||
+    error.code !== "INVALID_OPTION" ||
+    error.message !== `Unknown option ${GOVERNED_CREATE_OPTION}.`
+  )
+    return undefined;
+  const domain = governedCreateDomain(argv);
+  if (
+    domain === undefined ||
+    !argv.some((token) => token === GOVERNED_CREATE_OPTION || token.startsWith(`${GOVERNED_CREATE_OPTION}=`))
+  )
+    return undefined;
+
+  const recovery = createRecoveryActions(domain);
+  return new CliError(
+    "GOVERNED_CREATE_OPTION",
+    `Option ${GOVERNED_CREATE_OPTION} is a gh-compatible raw Markdown input, but governed ${domain} creation requires Inari's canonical structured input. ` +
+      `Use ${recovery[0]?.command}, then ${recovery[1]?.command}, and create with ${recovery[2]?.command}.`,
+    "$argv",
+    {
+      option: GOVERNED_CREATE_OPTION,
+      domain,
+      operation: "create",
+      recovery,
+    },
+  );
+}
+
+function createRecoveryActions(domain: GovernedCreateDomain): readonly CreateRecoveryAction[] {
+  const actions: readonly CreateRecoveryAction[] = [
+    { action: "discover-template", command: "inari template list" },
+    { action: "inspect-schema", command: `inari ${domain} schema <template>` },
+    {
+      action: "create",
+      command:
+        domain === "issue"
+          ? 'inari issue create --template <template> --title "<title>" --field <name>=<value>'
+          : 'inari pr create --template <template> --title "<title>" --head <branch> --base <branch> --field <name>=<value>',
+    },
+  ];
+  return actions.slice(0, CREATE_RECOVERY_ACTIONS);
+}
+
+/** Locate only the governed domain/create positionals; option values are never treated as commands. */
+function governedCreateDomain(argv: readonly string[]): GovernedCreateDomain | undefined {
+  const positionals: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === undefined) continue;
+    if (token === "--") {
+      positionals.push(...argv.slice(index + 1));
+      break;
+    }
+    if (token === "-R") {
+      index += 1;
+      continue;
+    }
+    if (!token.startsWith("--")) {
+      positionals.push(token);
+      continue;
+    }
+    if (token.includes("=")) continue;
+    const key = token.slice(2).replace(/-([a-z])/gu, (_match, letter: string) => letter.toUpperCase());
+    if (VALUE_OPTIONS.has(key) || key === "field") index += 1;
+  }
+  const domain = positionals[0];
+  return (domain === "issue" || domain === "pr") && positionals[1] === "create" ? domain : undefined;
 }
 
 /** Bound for local --from <file> and stdin artifact input, independent of semantic field constraints. */
@@ -1470,7 +1559,8 @@ function classifyExitCode(error: unknown): number {
       error.code === "INPUT_REQUIRED" ||
       error.code === "INPUT_READ_FAILED" ||
       error.code === "FIELD_UNSUPPORTED_COMMAND" ||
-      error.code === "METADATA_UNSUPPORTED_COMMAND")
+      error.code === "METADATA_UNSUPPORTED_COMMAND" ||
+      error.code === "GOVERNED_CREATE_OPTION")
   )
     return EXIT_USAGE;
   if (
