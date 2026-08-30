@@ -357,6 +357,22 @@ const DOMAIN_ARTIFACT_KIND: Readonly<Record<GovernedArtifactDomain, ArtifactKind
   pr: "pull_request",
 };
 
+function issueReferenceFromRemote(
+  remote: GitHubIssue | GitHubPullRequest,
+  number: number,
+): import("./contract/issue-reference.js").IssueReference | undefined {
+  const match = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]*$/u.exec(remote.url);
+  const repositoryId = "repositoryId" in remote ? remote.repositoryId : undefined;
+  if (match === null || repositoryId === undefined) return undefined;
+  const repositoryHost = "repositoryHost" in remote ? remote.repositoryHost : undefined;
+  return {
+    repositoryHost: (repositoryHost ?? match[1]).toLocaleLowerCase("en-US"),
+    repositoryId,
+    repository: `${match[2]}/${match[3]}`.toLocaleLowerCase("en-US"),
+    number,
+  };
+}
+
 /** Read and select an existing artifact using the same governed candidate path as `get`. */
 export async function readGovernedExistingArtifact(
   adapter: GitHubAdapter,
@@ -391,7 +407,7 @@ export async function readGovernedExistingArtifact(
     contract,
     result:
       domain === "issue"
-        ? validateExistingIssueArtifact(contract, remote.body)
+        ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, number))
         : validateExistingPullRequestArtifact(contract, remote.body),
   }));
   const selected = selectExistingArtifactCandidate(candidates);
@@ -404,7 +420,7 @@ export async function readGovernedExistingArtifact(
     const contract = candidates[0].contract;
     const strictResult = candidates[0].result;
     const recovered = recoverExistingArtifactValues(contract, remote.body);
-    const input = artifactInputFromRemote(domain, remote, recovered.values);
+    const input = artifactInputFromRemote(domain, remote, recovered.values, recovered.dependencies);
     const loaded = loadCanonicalArtifact(contract, input);
     const result: ExistingArtifactValidationResult = {
       valid: loaded.valid,
@@ -412,6 +428,7 @@ export async function readGovernedExistingArtifact(
       parse: {
         parsed: true,
         values: loaded.valid ? loaded.canonical : recovered.values,
+        ...(loaded.dependencies === undefined ? {} : { dependencies: loaded.dependencies }),
         diagnostics: [],
       },
       violations: loaded.valid ? [] : loaded.violations,
@@ -509,7 +526,7 @@ function resolveExistingArtifactByMarker(
   }
   const result =
     domain === "issue"
-      ? validateExistingIssueArtifact(contract, remote.body)
+      ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, remote.number))
       : validateExistingPullRequestArtifact(contract, remote.body);
   return { remote, contract, result };
 }
@@ -529,7 +546,12 @@ export function assessExistingArtifact(
     return { status: "semantically-invalid", normalizable: false, diagnostics: read.result.parse.diagnostics };
   }
 
-  const canonicalBody = renderCanonicalBody(domain, read.contract, read.result.parse.values);
+  const canonicalBody = renderCanonicalBody(
+    domain,
+    read.contract,
+    read.result.parse.values,
+    read.result.parse.dependencies,
+  );
   const currentBody = read.remote.body ?? "";
   const normalizable = canonicalBody !== currentBody;
   const diagnostics: readonly ExistingArtifactDiagnostic[] = normalizable
@@ -554,8 +576,11 @@ export function renderCanonicalBody(
   domain: GovernedArtifactDomain,
   contract: CanonicalContract,
   fields: Readonly<Record<string, unknown>>,
+  dependencies?: import("./contract/issue-reference.js").IssueDependencies,
 ): string {
-  return domain === "issue" ? renderIssueArtifact(contract, fields) : renderPullRequestArtifact(contract, fields);
+  return domain === "issue"
+    ? renderIssueArtifact(contract, { fields, ...(dependencies === undefined ? {} : { dependencies }) })
+    : renderPullRequestArtifact(contract, fields);
 }
 
 /** Build the complete semantic input represented by the current remote artifact. */
@@ -563,23 +588,27 @@ export function currentArtifactInput(
   domain: GovernedArtifactDomain,
   read: ExistingArtifactRead,
 ): ArtifactInputDocument {
-  const fields =
-    read.result.parse.parsed || read.contract === undefined || read.templateSelection !== "explicit"
-      ? read.result.parse.values
-      : recoverExistingArtifactValues(read.contract, read.remote.body).values;
-  return artifactInputFromRemote(domain, read.remote, fields);
+  const recovered =
+    !read.result.parse.parsed && read.contract !== undefined && read.templateSelection === "explicit"
+      ? recoverExistingArtifactValues(read.contract, read.remote.body)
+      : undefined;
+  const fields = recovered === undefined ? read.result.parse.values : recovered.values;
+  const dependencies = read.result.parse.dependencies ?? recovered?.dependencies;
+  return artifactInputFromRemote(domain, read.remote, fields, dependencies);
 }
 
 function artifactInputFromRemote(
   domain: GovernedArtifactDomain,
   remote: GitHubIssue | GitHubPullRequest,
   fields: Readonly<Record<string, unknown>>,
+  dependencies?: import("./contract/issue-reference.js").IssueDependencies,
 ): ArtifactInputDocument {
   if (domain === "issue") {
     const issue = remote as GitHubIssue;
     return {
       fields,
       metadata: { title: issue.title, labels: issue.labels, assignees: issue.assignees },
+      ...(dependencies === undefined ? {} : { dependencies }),
     };
   }
   const pullRequest = remote as GitHubPullRequest;
@@ -614,7 +643,15 @@ export function applySemanticPatch(
   assertKnownFields(read.contract, patch.fields, "SEMANTIC_PATCH_INVALID");
   const current = currentArtifactInput(domain, read);
   const metadata = { ...current.metadata, ...patch.metadata };
-  const merged = { fields: { ...current.fields, ...patch.fields }, metadata };
+  const merged = {
+    fields: { ...current.fields, ...patch.fields },
+    metadata,
+    ...(patch.dependencies === undefined
+      ? current.dependencies === undefined
+        ? {}
+        : { dependencies: current.dependencies }
+      : { dependencies: patch.dependencies }),
+  };
   if (read.templateSelection === "explicit" && !read.result.valid) {
     validateReconstructedInput(read.contract, merged, "SEMANTIC_PATCH_INVALID");
   }
@@ -706,6 +743,11 @@ export function prepareSyncInput(
     return {
       fields: { ...current.fields, ...desired.fields },
       metadata: { ...current.metadata, ...desired.metadata },
+      ...(desired.dependencies === undefined
+        ? current.dependencies === undefined
+          ? {}
+          : { dependencies: current.dependencies }
+        : { dependencies: desired.dependencies }),
     };
   }
   if (domain === "pr" && desired.metadata.head !== undefined) {
@@ -761,7 +803,8 @@ export function diffArtifact(
   desired: PreparedRemediationArtifact,
   includePullRequestMaintainerCanModify = false,
 ): SemanticArtifactDiff {
-  const currentFields = currentArtifactInput(domain, read).fields;
+  const currentInput = currentArtifactInput(domain, read);
+  const currentFields = currentInput.fields;
   const desiredFields = desiredFieldsFromArtifact(domain, desired, read.contract);
   const keys = [...new Set([...Object.keys(currentFields), ...Object.keys(desiredFields)])].sort(compareStrings);
   const semantic: SemanticDiffChange[] = [];
@@ -775,6 +818,18 @@ export function diffArtifact(
         ...(Object.prototype.hasOwnProperty.call(desiredFields, key)
           ? { after: boundedValue(desiredFields[key]) }
           : {}),
+      });
+    }
+  }
+
+  if (domain === "issue") {
+    const currentDependencies = currentInput.dependencies;
+    const desiredDependencies = desiredDependenciesFromArtifact(desired, read.contract);
+    if (stableValue(currentDependencies) !== stableValue(desiredDependencies)) {
+      semantic.push({
+        path: "$.dependencies",
+        ...(currentDependencies === undefined ? {} : { before: boundedValue(currentDependencies) }),
+        ...(desiredDependencies === undefined ? {} : { after: boundedValue(desiredDependencies) }),
       });
     }
   }
@@ -823,6 +878,14 @@ function desiredFieldsFromArtifact(
       ? validateExistingIssueArtifact(contract, artifact.body)
       : validateExistingPullRequestArtifact(contract, artifact.body);
   return parsed.parse.values;
+}
+
+function desiredDependenciesFromArtifact(
+  artifact: PreparedRemediationArtifact,
+  contract: CanonicalContract | undefined,
+): import("./contract/issue-reference.js").IssueDependencies | undefined {
+  if (contract === undefined || contract.artifactKind !== "issue") return undefined;
+  return validateExistingIssueArtifact(contract, artifact.body).parse.dependencies;
 }
 
 function currentMetadataForDiff(

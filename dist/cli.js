@@ -607,6 +607,9 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
                     valid: validation.valid,
                     violations: validation.violations,
                     values: validation.canonical,
+                    ...(domain === "issue" && validation.dependencies === undefined
+                        ? {}
+                        : { dependencies: validation.dependencies }),
                     // Progressive --field discovery: each unresolved field's type/required/constraints,
                     // reusing the existing #120/#121 partial-classification projection rather than a
                     // second field table -- so retrying with more --field values is guided by the same
@@ -617,7 +620,7 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
                 return validation.valid ? 0 : EXIT_VALIDATION;
             }
             const body = domain === "issue"
-                ? renderIssueArtifact(contract, preparedDocument.fields)
+                ? renderIssueArtifact(contract, preparedDocument)
                 : renderPullRequestArtifact(contract, preparedDocument.fields);
             if (json)
                 console.log(JSON.stringify({ valid: true, body }));
@@ -679,6 +682,7 @@ async function runExistingValidation(domain, number, parsed, root, dependencies,
         url: remote.url,
         diagnostics: projection.diagnostics,
         ...(projection.violations === undefined ? {} : { violations: projection.violations }),
+        ...(projection.dependencies === undefined ? {} : { dependencies: projection.dependencies }),
         ...(projection.attemptedTemplates === undefined ? {} : { attemptedTemplates: projection.attemptedTemplates }),
     };
     console.log(JSON.stringify(output));
@@ -700,6 +704,7 @@ async function runExistingGet(domain, number, parsed, root, dependencies) {
         ...(contract === undefined ? {} : { template: contract.templateIdentity }),
         metadata: existingArtifactMetadata(domain, remote),
         ...(projection.fields === undefined ? {} : { fields: projection.fields }),
+        ...(projection.dependencies === undefined ? {} : { dependencies: projection.dependencies }),
         diagnostics: projection.diagnostics,
         ...(projection.violations === undefined ? {} : { violations: projection.violations }),
         ...(projection.attemptedTemplates === undefined ? {} : { attemptedTemplates: projection.attemptedTemplates }),
@@ -835,7 +840,8 @@ function existingArtifactMetadata(domain, remote) {
 function projectRemediationResult(domain, contract, input, artifact) {
     if (contract === undefined)
         throw new Error("A remediation result requires a selected contract.");
-    const fields = loadCanonicalArtifact(contract, input).canonical;
+    const loaded = loadCanonicalArtifact(contract, input);
+    const fields = loaded.canonical;
     if (domain === "issue") {
         const issue = artifact;
         return {
@@ -845,6 +851,7 @@ function projectRemediationResult(domain, contract, input, artifact) {
                 ...(issue.labels === undefined ? {} : { labels: issue.labels }),
                 ...(issue.assignees === undefined ? {} : { assignees: issue.assignees }),
             },
+            ...(loaded.dependencies === undefined ? {} : { dependencies: loaded.dependencies }),
             body: issue.body,
         };
     }
@@ -912,7 +919,11 @@ function mergeOptionMetadata(document, options) {
         ...(typeof options.draft === "boolean" ? { draft: options.draft } : {}),
         ...(typeof options.maintainerCanModify === "boolean" ? { maintainerCanModify: options.maintainerCanModify } : {}),
     };
-    return { fields: document.fields, metadata };
+    return {
+        fields: document.fields,
+        metadata,
+        ...(document.dependencies === undefined ? {} : { dependencies: document.dependencies }),
+    };
 }
 function hasEditMetadataOption(options) {
     return METADATA_OPTION_KEYS.some((key) => Object.prototype.hasOwnProperty.call(options, key));
@@ -1059,7 +1070,11 @@ function mergeDirectFields(document, directFields) {
         .sort(compareStrings);
     if (conflicts.length > 0)
         throw fieldConflictError(conflicts);
-    return { fields: { ...document.fields, ...directFields }, metadata: document.metadata };
+    return {
+        fields: { ...document.fields, ...directFields },
+        metadata: document.metadata,
+        ...(document.dependencies === undefined ? {} : { dependencies: document.dependencies }),
+    };
 }
 /**
  * Resolve one artifact input document from `--from` and/or `--field`, sharing

@@ -1,6 +1,7 @@
 import { type PartialSemanticValidationResult, type PartialSemanticRepairResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
 import { type ArtifactDiagnostic, type ArtifactDiagnosticReport } from "./diagnostics.js";
 import { type ArtifactKind, type CanonicalContract } from "./contract/ir.js";
+import { type IssueDependencies, type IssueReference } from "./contract/issue-reference.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
     readonly title?: string;
@@ -14,6 +15,8 @@ export interface ArtifactInputMetadata {
 export interface ArtifactInputDocument {
     readonly fields: Readonly<Record<string, unknown>>;
     readonly metadata: ArtifactInputMetadata;
+    /** Generic Issue relationships, independent of template-specific fields. */
+    readonly dependencies?: IssueDependencies;
 }
 /**
  * A representation-independent candidate entering the canonical contract.
@@ -26,6 +29,7 @@ export interface ArtifactCandidate {
     readonly fields: unknown;
     readonly metadata: ArtifactInputMetadata;
     readonly source: ArtifactCandidateSource;
+    readonly dependencies?: IssueDependencies;
 }
 export interface ArtifactCandidateAdapterResult {
     readonly parsed: boolean;
@@ -48,13 +52,14 @@ export interface CanonicalArtifactLoadResult {
     readonly invalidFields: PartialSemanticValidationResult["invalidFields"];
     readonly diagnostics: ArtifactDiagnosticReport;
     readonly violations: readonly SemanticViolation[];
+    readonly dependencies?: IssueDependencies;
 }
 export interface ArtifactMetadataViolation {
     readonly code: "INPUT_METADATA_INVALID";
     readonly path: string;
     readonly message: string;
 }
-export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_INVALID";
+export type ArtifactInputErrorCode = "INPUT_DOCUMENT_INVALID" | "INPUT_METADATA_INVALID" | "INPUT_DEPENDENCIES_INVALID";
 export declare class ArtifactInputError extends Error {
     readonly code: ArtifactInputErrorCode;
     readonly path: string;
@@ -92,6 +97,9 @@ export interface ExistingArtifactDiagnostic {
 export interface ExistingArtifactParseResult {
     readonly parsed: boolean;
     readonly values: Readonly<Record<string, unknown>>;
+    readonly dependencies?: IssueDependencies;
+    /** Raw dependency declaration retained for the semantic validation boundary. */
+    readonly dependencyInput?: unknown;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
 /**
@@ -101,6 +109,7 @@ export interface ExistingArtifactParseResult {
  */
 export interface RecoverableArtifactValues {
     readonly values: Readonly<Record<string, unknown>>;
+    readonly dependencies?: IssueDependencies;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
 export interface ExistingArtifactValidationResult {
@@ -115,6 +124,8 @@ export interface ExistingIssueReader {
     getIssue(issueNumber: number): Promise<{
         readonly body: string | null;
         readonly url: string;
+        readonly repositoryId?: string;
+        readonly repositoryHost?: string;
     }>;
 }
 export interface ExistingPullRequestReader {
@@ -132,6 +143,7 @@ export interface ExistingPullRequestReader {
  * repository governance/provenance that resolves the actual contract.
  */
 export declare const TEMPLATE_IDENTITY_MARKER_VERSION: "1";
+export declare const ISSUE_DEPENDENCY_MARKER_VERSION: "1";
 export interface TemplateIdentityMarker {
     readonly version: string;
     readonly kind: ArtifactKind;
@@ -144,6 +156,18 @@ export interface TemplateIdentityMarkerExtraction {
     /** Body with a recognized trailing marker line removed; unchanged when none is present. */
     readonly body: string;
 }
+export type IssueDependencyMarkerStatus = "absent" | "valid" | "malformed" | "unsupported-version";
+export interface IssueDependencyMarkerExtraction {
+    readonly status: IssueDependencyMarkerStatus;
+    readonly dependencies?: IssueDependencies;
+    /** Body with a recognized trailing dependency marker removed. */
+    readonly body: string;
+}
+/**
+ * Read only the reserved trailing dependency marker emitted by Inari.  No
+ * ordinary Markdown is interpreted as a relationship declaration.
+ */
+export declare function extractIssueDependencyMarker(body: string): IssueDependencyMarkerExtraction;
 /**
  * Recognize and remove a trailing template identity marker line without
  * applying semantic parsing. Only a line starting with the exact reserved
@@ -212,7 +236,7 @@ export declare function parseExistingPullRequestArtifact(contractInput: unknown,
  * selected repair target.
  */
 export declare function recoverExistingArtifactValues(contractInput: unknown, body: string | null | undefined): RecoverableArtifactValues;
-export declare function validateExistingIssueArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
+export declare function validateExistingIssueArtifact(contractInput: unknown, body: string | null | undefined, subject?: IssueReference): ExistingArtifactValidationResult;
 export declare function validateExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
 export interface ExistingArtifactCandidate {
     readonly contract: CanonicalContract;
@@ -227,6 +251,7 @@ export interface ExistingArtifactProjection {
     readonly projection: "canonical" | "unavailable";
     readonly classification: ExistingArtifactClassification;
     readonly fields?: Readonly<Record<string, unknown>>;
+    readonly dependencies?: IssueDependencies;
     readonly diagnostics: readonly ExistingArtifactDiagnostic[];
     readonly violations?: readonly SemanticViolation[];
     readonly attemptedTemplates?: readonly string[];

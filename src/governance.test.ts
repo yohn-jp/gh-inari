@@ -65,6 +65,7 @@ function governanceResponses(
   return [
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -101,6 +102,7 @@ test("governance is bound to the repository override, not the CWD repository", a
     owner: "acme",
     name: "repository-b",
     nameWithOwner: "acme/repository-b",
+    repositoryId: "100000200",
   });
   assert.equal(contract.provenance?.ref, "main");
   assert.equal(contract.provenance?.treeSha, "tree-sha-a");
@@ -144,6 +146,7 @@ test("authoritative discovery matches all supported native PR template locations
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -184,13 +187,14 @@ test("nested remote governance paths fail closed", async () => {
     ),
     (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_INVALID",
   );
-  assert.equal(transport.calls.length, 4);
+  assert.equal(transport.calls.length, 5);
 });
 
 test("missing or unavailable remote governance never falls back to local files", async () => {
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command("", 1, "offline"),
   ]);
@@ -365,6 +369,7 @@ test("createGovernedPullRequest fails closed when a policy governance input is n
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -421,6 +426,7 @@ test("createGovernedPullRequest proceeds through the existing mutation path when
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     tree,
     blobResponse("pr-template-sha", templateSource),
@@ -463,6 +469,7 @@ test("createGovernedPullRequest rejects a head branch that violates repository b
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -495,7 +502,7 @@ test("createGovernedPullRequest rejects a head branch that violates repository b
     transport.calls.some((args) => args.includes("POST")),
     false,
   );
-  assert.equal(transport.calls.length, 6);
+  assert.equal(transport.calls.length, 7);
 });
 
 test("a malformed repository branch governance declaration fails closed while compiling the contract, before any PR mutation is reachable", async () => {
@@ -505,6 +512,7 @@ test("a malformed repository branch governance declaration fails closed while co
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -537,6 +545,7 @@ test("unavailable repository branch governance fails closed before any PR mutati
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -580,6 +589,7 @@ test("a repository PR policy with no branch rule leaves the existing valid-branc
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     tree,
     blobResponse("pr-template-sha", templateSource),
@@ -630,6 +640,7 @@ test("compileRepositoryGovernedContract succeeds for a repository governed by .g
   const transport = new StubGovernanceTransport([
     command("gh version 2.0"),
     command(),
+    command("100000200\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({

@@ -69,6 +69,14 @@ function command(exitCode = 0, stdout = "", stderr = ""): GhCommandResult {
   return { exitCode, stdout, stderr };
 }
 
+function repositoryIdentityResponse(repository = "acme/inari", id = "100000157", host = "github.com"): GhCommandResult {
+  return command(0, `${id}\n`);
+}
+
+function repositoryMetadataResponse(repository = "acme/inari", host = "github.com"): GhCommandResult {
+  return command(0, JSON.stringify({ nameWithOwner: repository, url: `https://${host}/${repository}` }));
+}
+
 function issuePayload(number = 42): string {
   return JSON.stringify({
     number,
@@ -117,6 +125,7 @@ function governedFixture(contract: CanonicalContract): CanonicalContract {
         owner: "acme",
         name: "inari",
         nameWithOwner: "acme/inari",
+        repositoryId: "100000157",
       },
       ref: "main",
       treeSha: "fixture-tree-sha",
@@ -134,7 +143,8 @@ test("resolves the current repository deterministically and preserves the gh cwd
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    repositoryMetadataResponse(),
+    repositoryIdentityResponse(),
   ]);
   const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
 
@@ -147,26 +157,60 @@ test("resolves the current repository deterministically and preserves the gh cwd
     name: "inari",
     nameWithOwner: "acme/inari",
     url: "https://github.com/acme/inari",
+    repositoryId: "100000157",
   });
   assert.deepEqual(
     transport.calls.map((call) => call.args),
-    [["--version"], ["auth", "status"], ["repo", "view", "--json", "nameWithOwner,url"]],
+    [
+      ["--version"],
+      ["auth", "status"],
+      ["repo", "view", "--json", "nameWithOwner,url"],
+      ["api", "repos/acme/inari", "--hostname", "github.com", "--method", "GET", "--jq", ".id"],
+    ],
   );
   assert.ok(transport.calls.every((call) => call.cwd === "/workspace/inari"));
 });
 
 test("uses an explicit repository override without asking gh to infer local context", async () => {
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), repositoryIdentityResponse()]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
   const context = await adapter.resolveRepositoryContext();
 
   assert.equal(context.nameWithOwner, "acme/inari");
   assert.equal(context.hostname, "github.com");
+  assert.equal(context.repositoryId, "100000157");
   assert.deepEqual(
     transport.calls.map((call) => call.args),
-    [["--version"], ["auth", "status", "--hostname", "github.com"]],
+    [
+      ["--version"],
+      ["auth", "status", "--hostname", "github.com"],
+      ["api", "repos/acme/inari", "--hostname", "github.com", "--method", "GET", "--jq", ".id"],
+    ],
   );
+});
+
+test("binds explicit GHES repository overrides to the resolved host and database identity", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse("acme/inari", "100000157", "ghe.example.com"),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "ghe.example.com/acme/inari", transport });
+
+  const context = await adapter.resolveRepositoryContext();
+  assert.equal(context.hostname, "ghe.example.com");
+  assert.equal(context.repositoryId, "100000157");
+  assert.deepEqual(transport.calls[2]?.args, [
+    "api",
+    "repos/acme/inari",
+    "--hostname",
+    "ghe.example.com",
+    "--method",
+    "GET",
+    "--jq",
+    ".id",
+  ]);
 });
 
 test("returns a typed actionable failure when gh is unavailable", async () => {
@@ -184,7 +228,12 @@ test("returns a typed actionable failure when gh is unavailable", async () => {
 });
 
 test("retries gh availability after a transient failure instead of replaying a stale rejection", async () => {
-  const transport = new StubGhTransport([new MissingGhError(), command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([
+    new MissingGhError(),
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+  ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
   await assert.rejects(adapter.checkAuthentication(), (error: unknown) => error instanceof GhNotInstalledError);
@@ -194,14 +243,14 @@ test("retries gh availability after a transient failure instead of replaying a s
 });
 
 test("coalesces concurrent gh availability checks onto one in-flight call", async () => {
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), repositoryIdentityResponse()]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
   await Promise.all([adapter.resolveRepositoryContext(), adapter.resolveRepositoryContext()]);
 
   assert.deepEqual(
     transport.calls.map((call) => call.args[0]),
-    ["--version", "auth"],
+    ["--version", "auth", "api"],
   );
 });
 
@@ -210,7 +259,8 @@ test("retries repository context resolution after a transient failure instead of
     command(0, "gh version 2.0"),
     command(),
     command(1, "", "Unable to resolve repository"),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    repositoryMetadataResponse(),
+    repositoryIdentityResponse(),
   ]);
   const adapter = new GitHubAdapter({ transport });
 
@@ -256,10 +306,42 @@ test("returns a typed failure when the local repository cannot be resolved", asy
   );
 });
 
+test("fails closed when repository resolution has no immutable identity", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryMetadataResponse(),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+  ]);
+  const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
+
+  await assert.rejects(
+    adapter.resolveRepositoryContext(),
+    (error: unknown) =>
+      error instanceof RepositoryResolutionError && error.message.includes("repository database identity"),
+  );
+});
+
+test("fails closed when an explicit repository override has no immutable identity", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await assert.rejects(
+    adapter.resolveRepositoryContext(),
+    (error: unknown) =>
+      error instanceof RepositoryResolutionError && error.message.includes("repository database identity"),
+  );
+});
+
 test("supports MVP Issue and pull request reads and mutations through a fake transport", async () => {
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, issuePayload()),
     command(0, pullRequestPayload()),
     command(0, issuePayload(44)),
@@ -332,6 +414,7 @@ test("rejects missing and non-boolean pull request draft response fields", async
     const transport = new StubGhTransport([
       command(0, "gh version 2.0"),
       command(),
+      repositoryIdentityResponse(),
       command(0, pullRequestPayloadWithDraft(50, draft)),
     ]);
     const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -356,6 +439,7 @@ test("preserves valid pull request draft boolean response fields", async () => {
     const transport = new StubGhTransport([
       command(0, "gh version 2.0"),
       command(),
+      repositoryIdentityResponse(),
       command(0, pullRequestPayloadWithDraft(number, draft)),
     ]);
     const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -372,6 +456,7 @@ test("preserves optional pull request maintainer-can-modify response metadata", 
     const transport = new StubGhTransport([
       command(0, "gh version 2.0"),
       command(),
+      repositoryIdentityResponse(),
       command(0, pullRequestPayloadWithMaintainerCanModify(number, value)),
     ]);
     const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -384,6 +469,7 @@ test("rejects a non-boolean pull request maintainer-can-modify response field", 
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, pullRequestPayloadWithMaintainerCanModify(55, "true")),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -432,6 +518,7 @@ test("rejects a prepared artifact bound to a different repository before mutatio
         ...sourceContract.provenance?.repository,
         name: "other",
         nameWithOwner: "acme/other",
+        repositoryId: "100000999",
       },
     },
   } as CanonicalContract;
@@ -444,7 +531,7 @@ test("rejects a prepared artifact bound to a different repository before mutatio
     },
     metadata: { title: "mismatch" },
   }).artifact;
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), repositoryIdentityResponse()]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
   await assert.rejects(
@@ -461,6 +548,7 @@ test("keeps API failures and process transport failures distinct from contract f
   const apiFailureTransport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(1, "", "HTTP 500: service unavailable"),
   ]);
   const apiFailureAdapter = new GitHubAdapter({ repository: "acme/inari", transport: apiFailureTransport });
@@ -473,6 +561,7 @@ test("keeps API failures and process transport failures distinct from contract f
   const transportFailureTransport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     new Error("socket closed"),
   ]);
   const transportFailureAdapter = new GitHubAdapter({
@@ -506,7 +595,12 @@ test("surfaces an output-limit transport failure with a stable machine-readable 
 });
 
 test("rejects partial JSON from a zero-exit API response", async () => {
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), command(0, '{"number":42')]);
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, '{"number":42'),
+  ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
   await assert.rejects(
@@ -520,6 +614,7 @@ test("getIssue fails closed when GitHub returns a pull-request-shaped resource",
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, JSON.stringify(prShapedIssue)),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -538,6 +633,7 @@ test("updateIssue fails closed before mutating a pull-request-shaped resource", 
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, JSON.stringify(prShapedIssue)),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -565,25 +661,28 @@ test("applies bounded, operation-class-specific timeouts to every real adapter c
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    repositoryMetadataResponse(),
+    repositoryIdentityResponse(),
     command(0, issuePayload()),
   ]);
   const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
 
   await adapter.resolveRepositoryContext();
-  await adapter.getIssue(42);
+  const issue = await adapter.getIssue(42);
+  assert.equal(issue.repositoryId, "100000157");
 
-  const [ghVersion, authStatus, repoView, issueRead] = transport.calls;
+  const [ghVersion, authStatus, repoView, repositoryIdentity, issueRead] = transport.calls;
   assert.equal(ghVersion.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
   assert.equal(authStatus.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
   assert.equal(repoView.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.repositoryResolution);
+  assert.equal(repositoryIdentity.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.repositoryResolution);
   assert.equal(issueRead.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.read);
   assert.ok(transport.calls.every((call) => call.maxStdoutBytes === DEFAULT_GH_OUTPUT_LIMITS_BYTES.stdout));
   assert.ok(transport.calls.every((call) => call.maxStderrBytes === DEFAULT_GH_OUTPUT_LIMITS_BYTES.stderr));
 });
 
 test("honors caller-supplied timeout overrides per operation class", async () => {
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), repositoryIdentityResponse()]);
   const adapter = new GitHubAdapter({
     repository: "acme/inari",
     transport,
@@ -592,11 +691,13 @@ test("honors caller-supplied timeout overrides per operation class", async () =>
 
   await adapter.resolveRepositoryContext();
 
-  assert.ok(transport.calls.every((call) => call.timeoutMs === 1234));
+  assert.equal(transport.calls[0]?.timeoutMs, 1234);
+  assert.equal(transport.calls[1]?.timeoutMs, 1234);
+  assert.equal(transport.calls[2]?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.repositoryResolution);
 });
 
 test("honors caller-supplied stdout and stderr output limits for every operation", async () => {
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), repositoryIdentityResponse()]);
   const adapter = new GitHubAdapter({
     repository: "acme/inari",
     transport,
@@ -644,7 +745,7 @@ test("rejects invalid output limit overrides instead of disabling the bound", as
 });
 
 test("an explicit-undefined timeout override falls back to the default instead of disabling the bound", async () => {
-  const transport = new StubGhTransport([command(0, "gh version 2.0"), command()]);
+  const transport = new StubGhTransport([command(0, "gh version 2.0"), command(), repositoryIdentityResponse()]);
   const adapter = new GitHubAdapter({
     repository: "acme/inari",
     transport,
@@ -653,14 +754,17 @@ test("an explicit-undefined timeout override falls back to the default instead o
 
   await adapter.resolveRepositoryContext();
 
-  assert.ok(transport.calls.every((call) => call.timeoutMs === DEFAULT_GH_TIMEOUTS_MS.auth));
+  assert.equal(transport.calls[0]?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
+  assert.equal(transport.calls[1]?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
+  assert.equal(transport.calls[2]?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.repositoryResolution);
 });
 
 test("classifies a mutation call's bounded timeout distinctly from read timeouts", async () => {
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
-    command(0, JSON.stringify({ nameWithOwner: "acme/inari", url: "https://github.com/acme/inari" })),
+    repositoryMetadataResponse(),
+    repositoryIdentityResponse(),
     command(0, issuePayload(44)),
   ]);
   const adapter = new GitHubAdapter({ cwd: "/workspace/inari", transport });
@@ -704,6 +808,7 @@ test("decodes a governed repository blob with exact valid multibyte UTF-8 text",
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, blobPayload(sha, Buffer.from(text, "utf8").toString("base64"))),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -719,6 +824,7 @@ test("rejects a governed repository blob containing invalid UTF-8 byte sequences
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, blobPayload(sha, invalidUtf8.toString("base64"))),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
@@ -738,6 +844,7 @@ test("rejects a base64-valid but UTF-8-invalid governed repository blob", async 
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
     command(),
+    repositoryIdentityResponse(),
     command(0, blobPayload(sha, truncatedMultibyte.toString("base64"))),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });

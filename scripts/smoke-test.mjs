@@ -371,6 +371,10 @@ if (args[0] !== "api") {
   process.exit(1);
 }
 const endpoint = args[1];
+if (endpoint === "repos/smoke/repository" && args.includes("--jq") && args[args.indexOf("--jq") + 1] === ".id") {
+  process.stdout.write("100000157\\n");
+  process.exit(0);
+}
 const responses = ${JSON.stringify(fakeGhResponses)};
 if (!(endpoint in responses)) {
   process.stderr.write("unsupported fake gh endpoint: " + endpoint + "\\n");

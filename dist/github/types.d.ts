@@ -37,6 +37,8 @@ export interface RepositoryContext {
     readonly name: string;
     readonly nameWithOwner: string;
     readonly url: string;
+    /** Decimal REST repository database ID when resolved from gh. */
+    readonly repositoryId?: string;
 }
 /** A file entry from the repository Git tree at a trusted ref. */
 export interface RepositoryTreeEntry {
@@ -58,6 +60,10 @@ export interface GitHubIssue {
     readonly url: string;
     readonly labels: readonly string[];
     readonly assignees: readonly string[];
+    /** Decimal REST repository database ID when supplied by the adapter context. */
+    readonly repositoryId?: string;
+    /** Normalized GitHub host/install boundary paired with repositoryId. */
+    readonly repositoryHost?: string;
 }
 export interface GitHubPullRequest {
     readonly number: number;

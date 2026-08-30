@@ -4,11 +4,14 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ArtifactPreparationError,
+  extractIssueDependencyMarker,
   extractTemplateIdentityMarker,
+  parseArtifactInputDocument,
   parseExistingIssueArtifact,
   parseExistingPullRequestArtifact,
   prepareIssueArtifact,
   preparePullRequestArtifact,
+  projectExistingArtifact,
   removeHtmlComments,
   renderIssueArtifact,
   renderPullRequestArtifact,
@@ -1259,4 +1262,131 @@ test("legacy artifacts without a template identity marker still validate through
   const result = validateExistingIssueArtifact(issueContractFixture, legacyBody);
   assert.equal(result.valid, true);
   assert.equal(result.classification, "valid");
+});
+
+test("Issue dependency semantics round-trip through the canonical body marker and projection", () => {
+  const input = {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+    dependencies: {
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+      ],
+      blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 3 }],
+    },
+  };
+  const body = renderIssueArtifact(issueContractFixture, input);
+  const marker = extractIssueDependencyMarker(body);
+  assert.equal(marker.status, "valid");
+  assert.deepEqual(marker.dependencies, input.dependencies);
+  const parsed = validateExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.parse.dependencies, input.dependencies);
+  assert.deepEqual(projectExistingArtifact(parsed).dependencies, input.dependencies);
+});
+
+test("prepared Issue artifacts preserve dependencies at the mutation boundary", () => {
+  const input = {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "feat: dependency boundary" },
+    dependencies: {
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 149 },
+      ],
+      blocks: [{ repositoryHost: "github.com", repositoryId: "200000002", repository: "yohn-jp/portal", number: 3 }],
+    },
+  };
+  const prepared = prepareIssueArtifact(governedFixture(issueContractFixture), input);
+  const parsed = validateExistingIssueArtifact(issueContractFixture, prepared.artifact.body);
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.parse.dependencies, input.dependencies);
+  assert.deepEqual(projectExistingArtifact(parsed).dependencies, input.dependencies);
+});
+
+test("parsing keeps self-reference semantic validation outside representation parsing", () => {
+  const body = renderIssueArtifact(issueContractFixture, {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+    dependencies: {
+      blockedBy: [
+        { repositoryHost: "github.com", repositoryId: "100000157", repository: "yohn-jp/gh-inari", number: 157 },
+      ],
+    },
+  });
+  const parsed = parseExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.parsed, true);
+  const validated = validateExistingIssueArtifact(issueContractFixture, body, {
+    repositoryHost: "github.com",
+    repositoryId: "100000157",
+    repository: "yohn-jp/gh-inari",
+    number: 157,
+  });
+  assert.equal(validated.valid, false);
+  assert.equal(validated.classification, "semantic");
+  assert.deepEqual(validated.violations, [
+    {
+      code: "INPUT_DEPENDENCY",
+      path: "$.dependencies.blockedBy[0]",
+      message: "An Issue cannot depend on itself.",
+    },
+  ]);
+});
+
+test("dependency marker extraction preserves semantic violations for the validator", () => {
+  const reference = { repositoryHost: "github.com", repositoryId: "100000157", number: 149 };
+  const body = `${renderIssueArtifact(issueContractFixture, {
+    fields: {
+      problem: "A reproducible problem",
+      category: "feature",
+      affected_areas: ["cli"],
+      acceptance: ["tests"],
+    },
+  }).trimEnd()}\n<!-- inari:issue-dependencies ${JSON.stringify({
+    version: "1",
+    dependencies: { blockedBy: [reference, reference] },
+  })} -->\n`;
+  const extracted = extractIssueDependencyMarker(body);
+  assert.equal(extracted.status, "valid");
+  const parsed = parseExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.parsed, true);
+  const validated = validateExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(validated.valid, false);
+  assert.deepEqual(validated.violations, [
+    {
+      code: "INPUT_DEPENDENCY",
+      path: "$.dependencies.blockedBy[1]",
+      message: 'Duplicate blockedBy reference "github.com#100000157#149".',
+    },
+  ]);
+});
+
+test("input dependency diagnostics retain the public envelope path", () => {
+  assert.throws(
+    () => parseArtifactInputDocument({ fields: {}, dependencies: { blockedBy: "yohn-jp/gh-inari#149" } }),
+    (error: unknown) => {
+      assert.equal((error as { code: string }).code, "INPUT_DEPENDENCIES_INVALID");
+      assert.equal((error as { path: string }).path, "$.dependencies.blockedBy");
+      assert.deepEqual((error as { details: readonly { path: string }[] }).details, [
+        {
+          code: "DEPENDENCIES_NOT_ARRAY",
+          path: "$.dependencies.blockedBy",
+          message: "blockedBy must be an array of Issue references.",
+        },
+      ]);
+      return true;
+    },
+  );
 });

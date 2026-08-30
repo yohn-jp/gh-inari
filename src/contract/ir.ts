@@ -42,6 +42,8 @@ export interface ContractProvenanceRepository {
   readonly owner: string;
   readonly name: string;
   readonly nameWithOwner: string;
+  /** Decimal REST repository database ID when supplied by the adapter. */
+  readonly repositoryId?: string;
 }
 
 export interface ContractProvenanceSource {
@@ -469,11 +471,17 @@ function validateProvenance(
     );
   }
   if (repository !== undefined) {
-    checkUnknownKeys(repository, ["host", "owner", "name", "nameWithOwner"], `${path}.repository`, violations);
+    checkUnknownKeys(
+      repository,
+      ["host", "owner", "name", "nameWithOwner", "repositoryId"],
+      `${path}.repository`,
+      violations,
+    );
     const host = requiredString(repository, "host", `${path}.repository`, violations);
     const owner = requiredString(repository, "owner", `${path}.repository`, violations);
     const name = requiredString(repository, "name", `${path}.repository`, violations);
     const nameWithOwner = requiredString(repository, "nameWithOwner", `${path}.repository`, violations);
+    const repositoryId = optionalString(repository, "repositoryId", `${path}.repository`, violations);
     if (host !== undefined && /[\s/]/u.test(host)) {
       addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.repository.host`, "Repository host is invalid.");
     }
@@ -483,6 +491,14 @@ function validateProvenance(
         "IR_INVALID_PROVENANCE",
         `${path}.repository.nameWithOwner`,
         "Repository nameWithOwner must match owner and name.",
+      );
+    }
+    if (repositoryId !== undefined && !/^[1-9][0-9]{0,19}$/u.test(repositoryId)) {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.repository.repositoryId`,
+        "Repository repositoryId must be a positive decimal REST database identity.",
       );
     }
   }
@@ -1966,6 +1982,7 @@ function canonicalizeProvenance(provenance: ContractProvenance): UnknownRecord {
       owner: provenance.repository.owner,
       name: provenance.repository.name,
       nameWithOwner: provenance.repository.nameWithOwner,
+      ...(provenance.repository.repositoryId === undefined ? {} : { repositoryId: provenance.repository.repositoryId }),
     },
     ref: provenance.ref,
     treeSha: provenance.treeSha,

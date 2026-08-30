@@ -36,6 +36,8 @@ export interface ContractProvenanceRepository {
     readonly owner: string;
     readonly name: string;
     readonly nameWithOwner: string;
+    /** Decimal REST repository database ID when supplied by the adapter. */
+    readonly repositoryId?: string;
 }
 export interface ContractProvenanceSource {
     readonly path: string;

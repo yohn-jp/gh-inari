@@ -190,6 +190,16 @@ const REMOTE_ISSUE_BODY = [
   "",
 ].join("\n");
 
+const REMOTE_ISSUE_BODY_WITH_DEPENDENCIES = `${REMOTE_ISSUE_BODY}
+<!-- inari:issue-dependencies ${JSON.stringify({
+  version: "1",
+  dependencies: {
+    blockedBy: [{ repositoryHost: "github.com", repositoryId: "100000149", repository: "acme/inari", number: 149 }],
+    blocks: [],
+  },
+})} -->
+`;
+
 const REMOTE_PR_BODY = [
   "## Summary",
   "",
@@ -241,6 +251,7 @@ function remoteGovernanceResponses(
   return [
     command("gh version 2.0"),
     command(),
+    command("100000157\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(JSON.stringify({ sha: GOVERNANCE_TREE_SHA, truncated: false, tree })),
     blobResponse(templateSha, templateSource),
@@ -272,6 +283,7 @@ function remoteArtifactResponses(
   return [
     command("gh version 2.0"),
     command(),
+    command("100000157\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -1275,8 +1287,8 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       },
     );
     assert.equal(exitCode, 0);
-    assert.equal(transport.calls.length, 10);
-    assert.deepEqual(transport.calls[7]?.slice(0, 6), [
+    assert.equal(transport.calls.length, 11);
+    assert.deepEqual(transport.calls[8]?.slice(0, 6), [
       "api",
       "repos/acme/inari/issues",
       "--hostname",
@@ -1284,7 +1296,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       "--method",
       "POST",
     ]);
-    assert.match(transport.calls[7]?.join(" ") ?? "", /### Problem/);
+    assert.match(transport.calls[8]?.join(" ") ?? "", /### Problem/);
     const output = JSON.parse(lines[0] ?? "{}") as { ok: boolean; governance?: { reconciled?: boolean } };
     assert.equal(output.ok, true);
     assert.equal(output.governance?.reconciled, true);
@@ -1341,6 +1353,7 @@ test("template list --repository reports authoritative remote templates", async 
   const transport = new CliStubTransport([
     command("gh version 2.0"),
     command(),
+    command("100000157\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -1417,9 +1430,9 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       },
     );
     assert.equal(exitCode, 0);
-    assert.equal(transport.calls.length, 11);
-    assert.match(transport.calls[8]?.join(" ") ?? "", /## Summary/);
-    assert.match(transport.calls[8]?.join(" ") ?? "", /## Linked issue/);
+    assert.equal(transport.calls.length, 12);
+    assert.match(transport.calls[9]?.join(" ") ?? "", /## Summary/);
+    assert.match(transport.calls[9]?.join(" ") ?? "", /## Linked issue/);
     const output = JSON.parse(lines[0] ?? "{}") as { ok: boolean; governance?: { reconciled?: boolean } };
     assert.equal(output.ok, true);
     assert.equal(output.governance?.reconciled, true);
@@ -1544,7 +1557,7 @@ test("PR create fails closed before mutation when the actual resolved head branc
       },
     );
     assert.equal(exitCode, 3);
-    assert.equal(transport.calls.length, 6);
+    assert.equal(transport.calls.length, 7);
     assert.equal(
       transport.calls.some((args) => args.includes("POST")),
       false,
@@ -1579,6 +1592,7 @@ test("ambiguous remote template selection fails after target resolution", async 
   const transport = new CliStubTransport([
     command("gh version 2.0"),
     command(),
+    command("100000157\n"),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -1601,7 +1615,7 @@ test("ambiguous remote template selection fails after target resolution", async 
     });
     assert.equal(exitCode, 2);
     assert.equal(factoryCalls, 1);
-    assert.equal(transport.calls.length, 4);
+    assert.equal(transport.calls.length, 5);
     assert.equal(JSON.parse(lines[0] ?? "{}").error.code, "TEMPLATE_SELECTION_AMBIGUOUS");
   } finally {
     console.log = originalLog;
@@ -1706,7 +1720,7 @@ test("issue get auto-selects the matching governed Issue Form and omits raw Mark
       {
         number: 21,
         title: "feat: canonical retrieval",
-        body: REMOTE_ISSUE_BODY,
+        body: REMOTE_ISSUE_BODY_WITH_DEPENDENCIES,
         state: "open",
         html_url: "https://github.com/acme/inari/issues/21",
         labels: [{ name: "enhancement" }],
@@ -1740,6 +1754,10 @@ test("issue get auto-selects the matching governed Issue Form and omits raw Mark
       state: "open",
       labels: ["enhancement"],
       assignees: ["octocat"],
+    });
+    assert.deepEqual(output.dependencies, {
+      blockedBy: [{ repositoryHost: "github.com", repositoryId: "100000149", repository: "acme/inari", number: 149 }],
+      blocks: [],
     });
     assert.equal("body" in output, false);
     assert.ok(transport.calls.some((args) => args.includes("repos/acme/inari/issues/21")));
