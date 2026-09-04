@@ -39,7 +39,8 @@ test("repository-native Issue and PR fixtures traverse the shared product core",
   const prInput = {
     summary: "A deterministic end-to-end product proof",
     linked_issue: "Closes #22",
-    validation: "pnpm test; pnpm run build",
+    changes: "The governed implementation and behavioral changes",
+    validation: ["typecheck", "tests", "build"],
   };
   assert.equal(validateSemanticInput(pr, prInput).valid, true);
   const prBody = renderPullRequestArtifact(pr, prInput);
