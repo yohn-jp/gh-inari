@@ -15,12 +15,14 @@ function versionOutput(version = "0.9.0"): string {
   });
 }
 
-async function captureJson(runCanonicalDiagnosticCommand: () => {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-  error?: string;
-}): Promise<{ exitCode: number; output: Record<string, unknown> }> {
+async function captureJson(
+  runCanonicalDiagnosticCommand: () => {
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    error?: string;
+  },
+): Promise<{ exitCode: number; output: Record<string, unknown> }> {
   const lines: string[] = [];
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
