@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { compileLocalGovernedContract, compileRepositoryGovernedContract } from "./governance.js";
+import {
+  compileLocalGovernedContract,
+  compileRepositoryGovernedContract,
+  verifyGovernedMutationFreshness,
+} from "./governance.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
 import { TemplateResolutionError } from "./template-resolver.js";
 
@@ -125,6 +129,42 @@ test("Issue and PR repository compile paths read the same remote default authori
   assert.equal(pullRequest.templateIdentity.path, ".github/PULL_REQUEST_TEMPLATE/release.md");
   assert.equal(issue.provenance?.templateResolution?.path, ".github/inari/template-resolution.yml");
   assert.equal(pullRequest.provenance?.templateResolution?.path, ".github/inari/template-resolution.yml");
+});
+
+test("explicit remote selection records an existing resolution config for freshness without applying it", async () => {
+  const config = "version: 1\ndefaults:\n  issue: feature\n";
+  const tree = (sha: string) =>
+    command(
+      JSON.stringify({
+        sha,
+        truncated: false,
+        tree: [
+          { path: ".github/ISSUE_TEMPLATE/bug.yml", type: "blob", sha: "bug-sha" },
+          { path: ".github/ISSUE_TEMPLATE/feature.yml", type: "blob", sha: "feature-sha" },
+          { path: ".github/inari/template-resolution.yml", type: "blob", sha: "config-sha" },
+        ],
+      }),
+    );
+  const transport = new StubTransport([
+    command("gh version 2.0"),
+    command(),
+    command("100000200\n"),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree("tree-a"),
+    blobResponse("config-sha", config),
+    blobResponse("bug-sha", ISSUE_TEMPLATE),
+    command(JSON.stringify({ default_branch: "main" })),
+    tree("tree-b"),
+  ]);
+  const adapter = new GitHubAdapter({
+    repository: "acme/repository",
+    transport,
+  });
+
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "bug");
+  assert.equal(contract.templateIdentity.id, "bug");
+  assert.equal(contract.provenance?.templateResolution?.sha, "config-sha");
+  await verifyGovernedMutationFreshness(adapter, contract.provenance as NonNullable<typeof contract.provenance>);
 });
 
 test("explicit local template selection bypasses an invalid omitted-selector config", async () => {

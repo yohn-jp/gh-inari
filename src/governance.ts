@@ -211,8 +211,8 @@ export async function compileRepositoryGovernedContract(
   options: GovernedContractCompileOptions = {},
 ): Promise<CanonicalContract> {
   const source = await readRepositoryGovernanceSource(adapter);
-  const resolution = selector === undefined ? await readRepositoryTemplateResolutionConfig(adapter, source) : undefined;
-  const configuredDefault = resolution?.config.defaults[domain];
+  const resolution = await readRepositoryTemplateResolutionConfig(adapter, source, selector === undefined);
+  const configuredDefault = resolution?.config?.defaults[domain];
   const semanticCandidates = source.semanticTemplates.filter(
     (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
   );
@@ -728,13 +728,14 @@ async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<R
 }
 
 interface RepositoryTemplateResolutionSource {
-  readonly config: import("./template-resolver.js").TemplateResolutionConfig;
+  readonly config?: import("./template-resolver.js").TemplateResolutionConfig;
   readonly source: ContractProvenanceSource;
 }
 
 async function readRepositoryTemplateResolutionConfig(
   adapter: GitHubAdapter,
   source: RepositoryGovernanceSource,
+  parseConfig: boolean,
 ): Promise<RepositoryTemplateResolutionSource | undefined> {
   const entry = source.templateResolutionEntry;
   if (entry === undefined) return undefined;
@@ -743,6 +744,8 @@ async function readRepositoryTemplateResolutionConfig(
   const serialized = await readGovernedValue("repository.governance.blob", source.context, source.ref, () =>
     adapter.getRepositoryBlob(entry.sha),
   );
+  const sourceIdentityValue = sourceIdentity(entry, source.ref, serialized);
+  if (!parseConfig) return { source: sourceIdentityValue };
   let config;
   try {
     config = parseTemplateResolutionConfig(serialized, entry.path);
@@ -753,7 +756,7 @@ async function readRepositoryTemplateResolutionConfig(
       error instanceof Error ? error.message : "template resolution config is invalid",
     );
   }
-  return { config, source: sourceIdentity(entry, source.ref, serialized) };
+  return { config, source: sourceIdentityValue };
 }
 
 function createRemoteSemanticIdentities(tree: readonly RepositoryTreeEntry[]): readonly SemanticTemplateIdentity[] {

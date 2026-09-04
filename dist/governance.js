@@ -109,8 +109,8 @@ async function resolveLocalPolicyPath(root, policyPath) {
  */
 export async function compileRepositoryGovernedContract(adapter, domain, selector, options = {}) {
     const source = await readRepositoryGovernanceSource(adapter);
-    const resolution = selector === undefined ? await readRepositoryTemplateResolutionConfig(adapter, source) : undefined;
-    const configuredDefault = resolution?.config.defaults[domain];
+    const resolution = await readRepositoryTemplateResolutionConfig(adapter, source, selector === undefined);
+    const configuredDefault = resolution?.config?.defaults[domain];
     const semanticCandidates = source.semanticTemplates.filter((template) => template.kind === (domain === "issue" ? "issue" : "pull_request"));
     if (semanticCandidates.length > 0) {
         const semanticIdentity = await resolveTemplate({
@@ -470,13 +470,16 @@ async function readRepositoryGovernanceSource(adapter) {
         ...(templateResolutionEntry === undefined ? {} : { templateResolutionEntry }),
     };
 }
-async function readRepositoryTemplateResolutionConfig(adapter, source) {
+async function readRepositoryTemplateResolutionConfig(adapter, source, parseConfig) {
     const entry = source.templateResolutionEntry;
     if (entry === undefined)
         return undefined;
     if (entry.type !== "blob")
         throw invalidSource(source.context, entry.path, "template resolution config is not a file");
     const serialized = await readGovernedValue("repository.governance.blob", source.context, source.ref, () => adapter.getRepositoryBlob(entry.sha));
+    const sourceIdentityValue = sourceIdentity(entry, source.ref, serialized);
+    if (!parseConfig)
+        return { source: sourceIdentityValue };
     let config;
     try {
         config = parseTemplateResolutionConfig(serialized, entry.path);
@@ -484,7 +487,7 @@ async function readRepositoryTemplateResolutionConfig(adapter, source) {
     catch (error) {
         throw invalidSource(source.context, entry.path, error instanceof Error ? error.message : "template resolution config is invalid");
     }
-    return { config, source: sourceIdentity(entry, source.ref, serialized) };
+    return { config, source: sourceIdentityValue };
 }
 function createRemoteSemanticIdentities(tree) {
     const identities = [];
