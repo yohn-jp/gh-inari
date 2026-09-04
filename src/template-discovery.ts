@@ -3,6 +3,12 @@ import { lstatSync, readdirSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  nativeTemplateResolutionCandidate,
+  resolveTemplateSync,
+  TemplateResolutionError,
+  isTemplateSelectorValue,
+} from "./template-resolver.js";
 
 const GITHUB_DIRECTORY = ".github";
 const ISSUE_TEMPLATE_DIRECTORY = "ISSUE_TEMPLATE";
@@ -505,47 +511,29 @@ function selectFromCandidates(
   candidates: readonly TemplateIdentity[],
   selector?: string | TemplateSelector,
 ): TemplateIdentity {
-  if (selector === undefined) return resolveSelection(candidates, selector, false);
-
-  if (typeof selector === "string") {
-    if (selector.trim().length === 0) throw new InvalidTemplateSelectorError(selector);
-
-    const exactIdMatches = candidates.filter((candidate) => candidate.id === selector);
-    if (exactIdMatches.length > 0) return resolveSelection(exactIdMatches, selector, false);
-
-    const exactPathMatches = candidates.filter((candidate) => candidate.path === selector);
-    if (exactPathMatches.length > 0) return resolveSelection(exactPathMatches, selector, false);
-
-    const nameMatches = candidates.filter((candidate) => sameName(candidate.name, selector));
-    return resolveSelection(nameMatches, selector, true);
+  if (
+    (typeof selector === "string" && selector.trim().length === 0) ||
+    (selector !== undefined && typeof selector !== "string" && !isTemplateSelectorValue(selector))
+  ) {
+    throw new InvalidTemplateSelectorError(selector);
   }
-
-  if (!isTemplateSelectorValue(selector)) throw new InvalidTemplateSelectorError(selector);
-  const entries = Object.entries(selector).filter(([, value]) => value !== undefined);
-  if (entries.length === 0) throw new InvalidTemplateSelectorError(selector);
-
-  const matches = candidates.filter((candidate) => matchesSelector(candidate, selector));
-  return resolveSelection(matches, selector, "name" in selector && selector.name !== undefined);
-}
-
-function matchesSelector(candidate: TemplateIdentity, selector: TemplateSelector): boolean {
-  if (selector.id !== undefined && candidate.id !== selector.id) return false;
-  if (selector.type !== undefined && candidate.type !== selector.type) return false;
-  if (selector.kind !== undefined && candidate.kind !== selector.kind) return false;
-  if (selector.name !== undefined && !sameName(candidate.name, selector.name)) return false;
-  if (selector.path !== undefined && candidate.path !== selector.path) return false;
-  return true;
-}
-
-function resolveSelection(
-  candidates: readonly TemplateIdentity[],
-  selector: string | TemplateSelector | undefined,
-  selectedByName: boolean,
-): TemplateIdentity {
-  if (candidates.length === 0) throw new TemplateNotFoundError(selector, candidates);
-  if (candidates.length === 1) return candidates[0] as TemplateIdentity;
-  if (selectedByName) throw new TemplateNameConflictError(selector as string | TemplateSelector, candidates);
-  throw new TemplateSelectionAmbiguousError(selector, candidates);
+  try {
+    return resolveTemplateSync({
+      candidates: candidates.map(nativeTemplateResolutionCandidate),
+      selector,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof TemplateResolutionError)) throw error;
+    if (error.code === "TEMPLATE_RESOLUTION_NO_CANDIDATES") throw new TemplateNotFoundError(selector, []);
+    if (error.code === "TEMPLATE_RESOLUTION_SELECTOR_AMBIGUOUS") {
+      if (error.details.match === "name")
+        throw new TemplateNameConflictError(selector as string | TemplateSelector, candidates);
+      throw new TemplateSelectionAmbiguousError(selector, candidates);
+    }
+    if (error.code === "TEMPLATE_RESOLUTION_SELECTOR_NOT_FOUND") throw new TemplateNotFoundError(selector, []);
+    if (error.code === "TEMPLATE_RESOLUTION_AMBIGUOUS") throw new TemplateSelectionAmbiguousError(selector, candidates);
+    throw error;
+  }
 }
 
 function sameName(left: string, right: string): boolean {
@@ -561,19 +549,6 @@ function selectorLabel(selector: string | TemplateSelector | undefined): string 
   if (typeof selector === "string") return JSON.stringify(selector);
   const value = selector.id ?? selector.path ?? selector.name ?? selector.type ?? selector.kind;
   return value === undefined ? "the requested selector" : JSON.stringify(value);
-}
-
-const TEMPLATE_SELECTOR_KEYS = new Set(["id", "type", "kind", "name", "path"]);
-
-function isTemplateSelectorValue(value: unknown): value is TemplateSelector {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const entries = Object.entries(value).filter(([, option]) => option !== undefined);
-  return (
-    entries.length > 0 &&
-    entries.every(
-      ([key, option]) => TEMPLATE_SELECTOR_KEYS.has(key) && typeof option === "string" && option.trim().length > 0,
-    )
-  );
 }
 
 function compareStrings(left: string, right: string): number {

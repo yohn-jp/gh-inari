@@ -35,6 +35,10 @@
     "./semantic-template": {
       "types": "./dist/semantic-template.d.ts",
       "import": "./dist/semantic-template.js"
+    },
+    "./template-resolver": {
+      "types": "./dist/template-resolver.d.ts",
+      "import": "./dist/template-resolver.js"
     }
   },
   "files": [

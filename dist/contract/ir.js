@@ -126,7 +126,7 @@ function validateProvenance(value, path, artifactKind, templatePath, violations)
         addViolation(violations, "IR_INVALID_PROVENANCE", path, "Contract provenance must be an object.");
         return;
     }
-    checkUnknownKeys(value, ["authority", "repository", "ref", "treeSha", "template", "policy", "branchGovernance"], path, violations);
+    checkUnknownKeys(value, ["authority", "repository", "ref", "treeSha", "template", "policy", "templateResolution", "branchGovernance"], path, violations);
     const authority = requiredString(value, "authority", path, violations);
     const ref = requiredString(value, "ref", path, violations);
     requiredString(value, "treeSha", path, violations);
@@ -161,6 +161,9 @@ function validateProvenance(value, path, artifactKind, templatePath, violations)
             addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.policy`, "Only pull request contracts may contain policy provenance.");
         }
         validateProvenanceSource(value.policy, `${path}.policy`, ref, violations);
+    }
+    if (hasOwn(value, "templateResolution")) {
+        validateProvenanceSource(value.templateResolution, `${path}.templateResolution`, ref, violations);
     }
     if (hasOwn(value, "branchGovernance")) {
         if (artifactKind !== "pull_request") {
@@ -1136,6 +1139,9 @@ function canonicalizeProvenance(provenance) {
         treeSha: provenance.treeSha,
         template: source(provenance.template),
         ...(provenance.policy === undefined ? {} : { policy: source(provenance.policy) }),
+        ...(provenance.templateResolution === undefined
+            ? {}
+            : { templateResolution: source(provenance.templateResolution) }),
     };
 }
 function canonicalizeContract(contract) {

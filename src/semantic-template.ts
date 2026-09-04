@@ -13,6 +13,11 @@ import {
 import { compileIssueFormYaml, type IssueFormTemplateIdentity } from "./contract/issue-form.js";
 import { parsePullRequestTemplate, renderPullRequestTemplate } from "./pull-request-template.js";
 import { type TemplateIdentity, type TemplateSelector } from "./template-discovery.js";
+import {
+  semanticTemplateResolutionCandidate,
+  resolveTemplateSync,
+  TemplateResolutionError,
+} from "./template-resolver.js";
 
 export const SEMANTIC_TEMPLATE_VERSION = 1 as const;
 export const SEMANTIC_TEMPLATE_DIRECTORY = ".github/inari" as const;
@@ -671,23 +676,25 @@ export function selectSemanticTemplate(
   selector?: string | TemplateSelector,
 ): SemanticTemplateIdentity {
   const candidates = identities.filter((identity) => identity.kind === kind);
-  const matches = candidates.filter((identity) => semanticSelectorMatches(identity, selector));
-  if (matches.length === 1) return matches[0] as SemanticTemplateIdentity;
-  if (matches.length === 0)
+  try {
+    return resolveTemplateSync({
+      candidates: candidates.map(semanticTemplateResolutionCandidate),
+      selector,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof TemplateResolutionError)) throw error;
+    const ambiguous =
+      error.code === "TEMPLATE_RESOLUTION_AMBIGUOUS" || error.code === "TEMPLATE_RESOLUTION_SELECTOR_AMBIGUOUS";
     throw new SemanticTemplateError([
       {
-        code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+        code: ambiguous ? "SEMANTIC_TEMPLATE_AMBIGUOUS" : "SEMANTIC_TEMPLATE_INVALID_VALUE",
         path: "$.template",
-        message: "No semantic template matches the requested selector.",
+        message: ambiguous
+          ? "The semantic template selector matches multiple contracts."
+          : "No semantic template matches the requested selector.",
       },
     ]);
-  throw new SemanticTemplateError([
-    {
-      code: "SEMANTIC_TEMPLATE_AMBIGUOUS",
-      path: "$.template",
-      message: "The semantic template selector matches multiple contracts.",
-    },
-  ]);
+  }
 }
 
 export function semanticTemplateGeneratedPath(kind: SemanticTemplateKind, id: string): string {
@@ -1060,32 +1067,6 @@ async function findGeneratedFiles(root: string): Promise<string[]> {
     if (content.includes(GENERATED_TEMPLATE_NOTICE)) files.push(relative);
   }
   return [...new Set(files)].sort();
-}
-
-function semanticSelectorMatches(
-  identity: SemanticTemplateIdentity,
-  selector: string | TemplateSelector | undefined,
-): boolean {
-  if (selector === undefined) return true;
-  const defaultPullRequestName =
-    identity.kind === "pull_request" && identity.generatedPath === PR_NATIVE_DEFAULT ? "default" : undefined;
-  if (typeof selector === "string")
-    return (
-      selector === identity.id ||
-      selector === identity.sourcePath ||
-      selector === identity.generatedPath ||
-      selector.toLocaleLowerCase("en-US") === identity.name.toLocaleLowerCase("en-US") ||
-      selector.toLocaleLowerCase("en-US") === defaultPullRequestName
-    );
-  return (
-    (selector.id === undefined || selector.id === identity.id) &&
-    (selector.path === undefined ||
-      selector.path === identity.sourcePath ||
-      selector.path === identity.generatedPath) &&
-    (selector.name === undefined ||
-      selector.name.toLocaleLowerCase("en-US") === identity.name.toLocaleLowerCase("en-US") ||
-      selector.name.toLocaleLowerCase("en-US") === defaultPullRequestName)
-  );
 }
 
 function normalizeSection(

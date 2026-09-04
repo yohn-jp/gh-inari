@@ -262,6 +262,22 @@ templates:
 
 Template and section bindings are deterministic. Stale, unknown, or ambiguous template/section references fail closed. `linkedIssue: true` means that the field contains a GitHub closing reference: `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or `resolved`, followed by `#ISSUE-NUMBER` or `OWNER/REPOSITORY#ISSUE-NUMBER`, with an optional colon and case-insensitive keyword. This validates syntax only; GitHub applies automatic linking/closure only under its own contextual rules, including the target default branch.
 
+When `issue create` or `pr create` omits `--template`, the shared resolver uses
+the repository's optional `.github/inari/template-resolution.yml` authority:
+
+```yaml
+version: 1
+defaults:
+  issue: feature
+  pr: default
+```
+
+The precedence is explicit selector, configured default, sole candidate,
+interactive TTY selection, then bounded failure. Non-interactive execution never
+guesses among multiple candidates. An invalid or unavailable configured default
+also fails closed. Candidate identifiers and an explicit `--template` recovery
+action are included in structured ambiguity diagnostics.
+
 Issue Form top-level `title` is a fixed native prefix for create validation, but it does not satisfy the caller's required title metadata by itself. An explicit caller title is used as supplied without inferred prefix concatenation or automatic generation. Top-level `labels` are repository-governed defaults and are always retained; caller-supplied labels are appended in order with duplicates removed. Top-level `assignees`, `projects`, and `type`, and upload fields remain unsupported and fail closed rather than being approximated.
 
 ## Scope

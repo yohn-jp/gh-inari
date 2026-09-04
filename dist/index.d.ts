@@ -10,6 +10,7 @@ export * from "./contract/index.js";
 export * from "./github/index.js";
 export * from "./pull-request-template.js";
 export * from "./semantic-template.js";
+export * from "./template-resolver.js";
 export * from "./diagnostics.js";
 export * from "./command-contract.js";
 export { discoverTemplates, discoverTemplatesSync, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, selectTemplate, selectIssueTemplate, selectPullRequestTemplate, TemplateDiscoveryError, TemplateFilesystemError, TemplateNotFoundError, TemplateSelectionAmbiguousError, TemplateNameConflictError, InvalidTemplateSelectorError, } from "./template-discovery.js";

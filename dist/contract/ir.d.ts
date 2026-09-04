@@ -70,6 +70,8 @@ export interface ContractProvenance {
     readonly treeSha: string;
     readonly template: ContractProvenanceSource;
     readonly policy?: ContractProvenanceSource;
+    /** Template selection configuration used when the selector was omitted. */
+    readonly templateResolution?: ContractProvenanceSource;
     /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
     readonly branchGovernance?: PullRequestBranchGovernance;
 }
