@@ -15,7 +15,12 @@ import {
   renderPullRequestArtifact,
   type ArtifactInputDocument,
 } from "./artifact.js";
-import { projectContract, type CanonicalContract, SemanticValidationError } from "./contract/index.js";
+import {
+  effectiveFieldConstraints,
+  projectContract,
+  type CanonicalContract,
+  SemanticValidationError,
+} from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
   assertPullRequestSyncInputComplete,
@@ -1401,18 +1406,23 @@ interface DirectFieldUsage {
  * each other or from the selected canonical contract.
  */
 function projectDirectFieldUsage(contract: CanonicalContract): readonly DirectFieldUsage[] {
-  const schema = projectContract(contract).schema;
-  const required = new Set(schema.required ?? []);
-  return Object.keys(schema.properties)
-    .sort(compareStrings)
-    .map((name) => {
-      const repeatable = schema.properties[name]?.type === "array";
+  return contract.sections
+    .flatMap((section) => section.fields)
+    .sort((left, right) => compareStrings(left.id, right.id))
+    .map((field) => {
+      const repeatable = field.type === "array" || field.type === "checklist";
+      const required = effectiveFieldConstraints(contract, field).required;
       return {
-        name,
+        name: field.id,
         type: repeatable ? "array" : "string",
-        required: required.has(name),
+        required,
         repeatable,
-        cliSyntax: repeatable ? `--field ${name}=<value> (repeatable)` : `--field ${name}=<value>`,
+        cliSyntax:
+          field.type === "checklist"
+            ? `--field ${field.id}=<option-id> (repeatable)`
+            : repeatable
+              ? `--field ${field.id}=<value> (repeatable)`
+              : `--field ${field.id}=<value>`,
       };
     });
 }

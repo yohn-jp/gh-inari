@@ -5,12 +5,18 @@ import {
   COMMAND_CONTRACT_ID,
   COMMAND_CONTRACT_VERSION,
   INARI_COMMANDS,
+  commandExample,
+  commandInvocation,
   commandUsage,
   getCommandForPositionals,
   getOption,
+  helpInvocation,
+  optionSyntax,
+  projectCommandHelp,
   projectCommandContract,
   tokenizeCommandArgv,
 } from "./command-contract.js";
+import { SKILL_SCENARIOS } from "./skill.js";
 
 test("the command contract is versioned and projects every Inari-owned command", () => {
   const projection = projectCommandContract();
@@ -60,4 +66,58 @@ test("the shared tokenizer consumes every value-taking option before command ide
 test("unknown upstream command trees stay outside the owned command contract", () => {
   assert.equal(getCommandForPositionals(["pr", "list"]), undefined);
   assert.equal(getCommandForPositionals(["repo", "view"]), undefined);
+});
+
+test("every owned command keeps routing, usage, discovery, and Skill references on one authority", () => {
+  const projection = projectCommandContract();
+  for (const command of INARI_COMMANDS) {
+    const lookupPositionals = command.id === "skill.scenario" ? ["skill", "<scenario>"] : command.path;
+    const parsed = tokenizeCommandArgv(lookupPositionals);
+    assert.deepEqual(parsed.positionals, lookupPositionals, command.id);
+    assert.equal(getCommandForPositionals(parsed.positionals)?.id, command.id, command.id);
+
+    const projected = projection.commands.find((entry) => entry.id === command.id);
+    assert.ok(projected, command.id);
+    assert.equal(projected.invocation, commandInvocation(command.id), command.id);
+    assert.equal(projected.example, commandExample(command.id), command.id);
+    assert.deepEqual(
+      projected.options.map((option) => option.id),
+      command.optionIds,
+      command.id,
+    );
+
+    const help = projectCommandHelp(command.path);
+    if (command.id === "root.help")
+      assert.deepEqual(
+        help.commands.map((entry) => entry.id),
+        projection.commands.map((entry) => entry.id),
+      );
+    else if (command.domain === "skill")
+      assert.deepEqual(
+        help.commands.map((entry) => entry.id),
+        projection.commands.filter((entry) => entry.domain === "skill").map((entry) => entry.id),
+      );
+    else
+      assert.deepEqual(
+        help.commands.map((entry) => entry.id),
+        [command.id],
+        command.id,
+      );
+    for (const optionId of command.optionIds.filter((id) => id !== "help" && id !== "json")) {
+      assert.match(
+        commandUsage(command),
+        new RegExp(optionSyntax(getOption(optionId)).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")),
+        command.id,
+      );
+    }
+  }
+
+  for (const scenario of SKILL_SCENARIOS) {
+    assert.equal(scenario.canonicalEntrypoint, commandInvocation(scenario.canonicalCommandId), scenario.id);
+    assert.equal(scenario.helpPointer, helpInvocation(scenario.helpDomain), scenario.id);
+    for (const step of scenario.workflow) {
+      assert.equal(step.command, commandExample(step.commandId), `${scenario.id}:${step.commandId}`);
+      assert.equal(getCommandForPositionals(step.command.split(" ").slice(1))?.id, step.commandId, step.commandId);
+    }
+  }
 });
