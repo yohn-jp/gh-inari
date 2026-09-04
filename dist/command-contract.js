@@ -422,7 +422,7 @@ export const INARI_COMMANDS = [
     command("issue.schema", "issue", "schema", ["issue", "schema"], "Print the selected Issue template's semantic and metadata schema.", [...ARTIFACT_OPTIONS, "compact"], "[template]"),
     command("issue.validate", "issue", "validate", ["issue", "validate"], "Validate local or existing Issue input against its selected contract.", [...LOCAL_ARTIFACT_INPUT_OPTIONS], "[<number>]"),
     command("issue.render", "issue", "render", ["issue", "render"], "Render validated Issue input into canonical Markdown.", [...LOCAL_ARTIFACT_INPUT_OPTIONS]),
-    command("issue.create", "issue", "create", ["issue", "create"], "Validate, render, and create a governed Issue. Checklist fields use repeated --field name=<option-id> values projected by the selected artifact contract.", ISSUE_CREATE_OPTIONS),
+    command("issue.create", "issue", "create", ["issue", "create"], "Validate, render, and create a governed Issue.", ISSUE_CREATE_OPTIONS),
     command("issue.explain", "issue", "explain", ["issue", "explain"], "Explain the governance state of an existing Issue.", [...EXISTING_OPTIONS], "<number>"),
     command("issue.get", "issue", "get", ["issue", "get"], "Project an existing Issue as canonical semantic JSON.", [...EXISTING_OPTIONS], "<number>"),
     command("issue.check", "issue", "check", ["issue", "check"], "Check whether an existing Issue is canonical and normalizable.", [...EXISTING_OPTIONS], "<number>"),
@@ -434,7 +434,7 @@ export const INARI_COMMANDS = [
     command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [
         ...LOCAL_ARTIFACT_INPUT_OPTIONS,
     ]),
-    command("pr.create", "pr", "create", ["pr", "create"], "Validate, render, and create a governed PR. Checklist fields use repeated --field name=<option-id> values; array fields use repeated --field name=<value> values, all projected by the selected artifact contract.", PR_CREATE_OPTIONS),
+    command("pr.create", "pr", "create", ["pr", "create"], "Validate, render, and create a governed PR. Checklist and array fields use repeated --field name=<option-id> values projected by the selected artifact contract.", PR_CREATE_OPTIONS),
     command("pr.explain", "pr", "explain", ["pr", "explain"], "Explain the governance state of an existing PR.", [...EXISTING_OPTIONS], "<number>"),
     command("pr.get", "pr", "get", ["pr", "get"], "Project an existing PR as canonical semantic JSON.", [...EXISTING_OPTIONS], "<number>"),
     command("pr.check", "pr", "check", ["pr", "check"], "Check whether an existing PR is canonical and normalizable.", [...EXISTING_OPTIONS], "<number>"),
@@ -449,7 +449,10 @@ export const INARI_COMMANDS = [
     command("template.sync", "template", "sync", ["template", "sync"], "Regenerate native templates from semantic contracts.", ["help", "json", "check"]),
     command("template.import", "template", "import", ["template", "import"], "Import a native template into a semantic contract.", ["help", "json", "from", "to"]),
     command("skill.index", "skill", "index", ["skill"], "List bounded operational playbooks.", ["help", "json"]),
-    command("skill.scenario", "skill", "scenario", ["skill"], "Print one bounded operational playbook.", ["help", "json"], "[scenario]"),
+    command("skill.scenario", "skill", "scenario", ["skill"], "Print one bounded operational playbook.", [
+        "help",
+        "json",
+    ]),
 ];
 const commandsById = new Map(INARI_COMMANDS.map((entry) => [entry.id, entry]));
 const optionsByAlias = new Map();
@@ -464,8 +467,6 @@ export function getCommand(id) {
     return result;
 }
 export function getCommandForPositionals(positionals) {
-    if (positionals[0] === "skill" && positionals.length > 1)
-        return getCommand("skill.scenario");
     const exact = INARI_COMMANDS.find((entry) => entry.path.length > 0 && entry.path.every((part, index) => positionals[index] === part));
     if (exact !== undefined)
         return exact;
