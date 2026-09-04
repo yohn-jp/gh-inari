@@ -12,36 +12,14 @@ import { discoverTemplates } from "./template-discovery.js";
 import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, remediationDiagnosticReport, remediationFailureDetails, readGovernedExistingArtifact, RemediationError, translateRemediationFailure, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
+import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
 const EXIT_INTERNAL = 4;
 const DIAGNOSTIC_PROTOCOL_VERSION = 1;
-const RUNTIME_CAPABILITIES = [
-    "canonical-invocation",
-    "machine-readable-version",
-    "capability-diagnostics",
-    "extension-bootstrap",
-];
-const CANONICAL_INVOCATION = "gh inari";
-const KNOWN_ARTIFACT_COMMANDS = new Set([
-    "schema",
-    "validate",
-    "render",
-    "create",
-    "explain",
-    "get",
-    "check",
-    "edit",
-    "normalize",
-    "sync",
-]);
-const KNOWN_TEMPLATE_COMMANDS = new Set(["list", "sync", "import"]);
-/** issue/pr commands that resolve an ArtifactInputDocument and therefore accept --field; every other command must reject it explicitly rather than silently ignore it. */
-const FIELD_CAPABLE_ARTIFACT_COMMANDS = new Set(["validate", "render", "create", "edit", "sync"]);
-const INSTALL_COMMAND = "gh extension install yohn-jp/gh-inari";
-const UPDATE_COMMAND = "gh extension upgrade inari";
-const FALLBACK_COMMAND = "npx --yes gh-inari";
+const { extensionInstall: INSTALL_COMMAND, extensionUpdate: UPDATE_COMMAND, fallback: FALLBACK_COMMAND, } = AGENT_INVOCATION_CONTRACT;
+const CANONICAL_INVOCATION = AGENT_INVOCATION_CONTRACT.canonical;
 const BOOLEAN_OPTIONS = new Set([
     "help",
     "json",
@@ -205,6 +183,7 @@ function runtimeInfo(metadata) {
         name: metadata.name,
         version: metadata.version,
         protocol: DIAGNOSTIC_PROTOCOL_VERSION,
+        commandContractVersion: COMMAND_CONTRACT_VERSION,
         capabilities: [...RUNTIME_CAPABILITIES],
         invocation: {
             canonical: CANONICAL_INVOCATION,
@@ -338,6 +317,7 @@ function isRuntimeInfo(value) {
         candidate.name === "gh-inari" &&
         typeof candidate.version === "string" &&
         typeof candidate.protocol === "number" &&
+        (candidate.commandContractVersion === undefined || typeof candidate.commandContractVersion === "string") &&
         Array.isArray(candidate.capabilities) &&
         candidate.capabilities.every((capability) => typeof capability === "string") &&
         typeof invocation === "object" &&
@@ -397,7 +377,6 @@ class CliError extends Error {
     }
 }
 const CREATE_RECOVERY_ACTIONS = 3;
-const GOVERNED_CREATE_OPTIONS = ["--body", "--body-file", "-b", "-F"];
 /**
  * Recognized gh-compatible create guidance is intentionally narrow. In
  * particular, the body value is never parsed, echoed, or accepted as an
@@ -406,7 +385,7 @@ const GOVERNED_CREATE_OPTIONS = ["--body", "--body-file", "-b", "-F"];
 function intentAwareCreateOptionError(argv, error) {
     if (!(error instanceof CliError) ||
         error.code !== "INVALID_OPTION" ||
-        !GOVERNED_CREATE_OPTIONS.some((option) => error.message === `Unknown option ${option}.`))
+        !getOption("rawBody").aliases.some((option) => error.message === `Unknown option ${option}.`))
         return undefined;
     const domain = governedCreateDomain(argv);
     const option = findGovernedCreateOption(argv);
@@ -423,51 +402,21 @@ function intentAwareCreateOptionError(argv, error) {
 }
 function createRecoveryActions(domain) {
     const actions = [
-        { action: "discover-template", command: "inari template list" },
-        { action: "inspect-schema", command: `inari ${domain} schema <template>` },
+        { action: "discover-template", command: commandInvocation("template.list") },
+        { action: "inspect-schema", command: commandTemplateSchemaInvocation(domain) },
         {
             action: "create",
-            command: domain === "issue"
-                ? 'inari issue create --template <template> --title "<title>" --field <name>=<value>'
-                : 'inari pr create --template <template> --title "<title>" --head <branch> --base <branch> --field <name>=<value>',
+            command: commandRecoveryInvocation(`${domain}.create`),
         },
     ];
     return actions.slice(0, CREATE_RECOVERY_ACTIONS);
 }
 function findGovernedCreateOption(argv) {
-    return argv
-        .map((token) => GOVERNED_CREATE_OPTIONS.find((option) => token === option || token.startsWith(`${option}=`)))
-        .find((option) => option !== undefined);
+    return tokenizeCommandArgv(argv).options.find((occurrence) => occurrence.definition?.id === "rawBody")?.rawName;
 }
 /** Locate only the governed domain/create positionals; option values are never treated as commands. */
 function governedCreateDomain(argv) {
-    const positionals = [];
-    for (let index = 0; index < argv.length; index += 1) {
-        const token = argv[index];
-        if (token === undefined)
-            continue;
-        if (token === "--") {
-            positionals.push(...argv.slice(index + 1));
-            break;
-        }
-        if (token === "-R") {
-            index += 1;
-            continue;
-        }
-        if (token === "-b" || token === "-F" || token.startsWith("-b=") || token.startsWith("-F=")) {
-            index += 1;
-            continue;
-        }
-        if (!token.startsWith("--")) {
-            positionals.push(token);
-            continue;
-        }
-        if (token.includes("="))
-            continue;
-        const key = token.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
-        if (VALUE_OPTIONS.has(key) || key === "field")
-            index += 1;
-    }
+    const { positionals } = tokenizeCommandArgv(argv);
     const domain = positionals[0];
     return (domain === "issue" || domain === "pr") && positionals[1] === "create" ? domain : undefined;
 }
@@ -995,11 +944,17 @@ function fieldConflictError(names) {
 }
 /** True only for the issue/pr commands that actually resolve an ArtifactInputDocument from --field. */
 function isFieldCapableCommand(domain, command) {
-    return ((domain === "issue" || domain === "pr") && command !== undefined && FIELD_CAPABLE_ARTIFACT_COMMANDS.has(command));
+    if (domain !== "issue" && domain !== "pr")
+        return false;
+    const definition = getCommandForPositionals([domain, command ?? ""]);
+    return definition?.optionIds.includes("field") === true;
 }
 function fieldUnsupportedCommandError(positionals) {
     const label = positionals.length === 0 ? "this command" : `"${positionals.join(" ")}"`;
-    const supported = [...FIELD_CAPABLE_ARTIFACT_COMMANDS].sort(compareStrings);
+    const supported = getDomainCommands("issue")
+        .filter((entry) => entry.optionIds.includes("field"))
+        .map((entry) => entry.operation)
+        .sort(compareStrings);
     return new CliError("FIELD_UNSUPPORTED_COMMAND", `--field is only supported by issue/pr ${supported.join(", ")}; ${label} does not accept direct field input.`, "--field", { command: positionals.join(" "), supportedCommands: supported });
 }
 /**
@@ -1099,39 +1054,35 @@ function templateSelector(parsed, positional) {
     return typeof parsed.options.template === "string" ? parsed.options.template : positional;
 }
 function parseArguments(argv) {
-    const positionals = [];
     const options = {};
     const fields = [];
-    for (let index = 0; index < argv.length; index += 1) {
-        const token = argv[index];
-        if (token === undefined)
-            continue;
-        if (token === "--") {
-            positionals.push(...argv.slice(index + 1));
-            break;
+    const tokenized = tokenizeCommandArgv(argv);
+    for (const occurrence of tokenized.options) {
+        const option = occurrence.definition;
+        if (option === undefined) {
+            if (occurrence.rawName.startsWith("--")) {
+                throw new CliError("INVALID_OPTION", `Unknown option ${occurrence.rawName}.`);
+            }
+            throw new CliError("INVALID_OPTION", `Unknown option ${occurrence.rawName}.`);
         }
-        if (token === "-R") {
-            const value = argv[++index];
-            if (value === undefined || value.startsWith("--"))
-                throw new CliError("INVALID_OPTION", "Option -R requires a value.");
-            options.repository = value;
+        if (option.id === "rawBody")
+            throw new CliError("INVALID_OPTION", `Unknown option ${occurrence.rawName}.`);
+        if (option.arity === "required" && occurrence.value === undefined) {
+            throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires a value.`);
+        }
+        if (option.id === "help") {
+            if (occurrence.value === undefined) {
+                options.help = true;
+                continue;
+            }
+            if (occurrence.value !== "full" && occurrence.value !== "json")
+                throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} accepts only full or json.`);
+            options.help = occurrence.value;
             continue;
         }
-        if (token === "-b" || token.startsWith("-b="))
-            throw new CliError("INVALID_OPTION", "Unknown option -b.");
-        if (token === "-F" || token.startsWith("-F="))
-            throw new CliError("INVALID_OPTION", "Unknown option -F.");
-        if (!token.startsWith("--")) {
-            positionals.push(token);
-            continue;
-        }
-        const equalIndex = token.indexOf("=");
-        const rawKey = equalIndex >= 0 ? token.slice(2, equalIndex) : token.slice(2);
-        const normalizedKey = rawKey === "repo" ? "repository" : rawKey;
-        const key = normalizedKey.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
-        if (key === "field") {
-            const raw = equalIndex >= 0 ? token.slice(equalIndex + 1) : argv[++index];
-            if (raw === undefined || (equalIndex < 0 && raw.startsWith("--")))
+        if (option.id === "field") {
+            const raw = occurrence.value;
+            if (raw === undefined)
                 throw new CliError("INVALID_OPTION", "Option --field requires a value.");
             const separatorIndex = raw.indexOf("=");
             if (separatorIndex <= 0)
@@ -1139,29 +1090,22 @@ function parseArguments(argv) {
             fields.push({ name: raw.slice(0, separatorIndex), value: raw.slice(separatorIndex + 1) });
             continue;
         }
-        if (BOOLEAN_OPTIONS.has(key)) {
-            if (equalIndex < 0) {
+        const key = option.id;
+        if (option.valueType === "boolean") {
+            if (occurrence.value === undefined) {
                 options[key] = true;
                 continue;
             }
-            const rawValue = token.slice(equalIndex + 1);
-            if (key === "help" && rawValue === "full") {
-                options[key] = rawValue;
-                continue;
-            }
-            if (rawValue !== "true" && rawValue !== "false")
-                throw new CliError("INVALID_OPTION", `Option --${rawKey} must be true or false.`);
-            options[key] = rawValue === "true";
+            if (occurrence.value !== "true" && occurrence.value !== "false")
+                throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} must be true or false.`);
+            options[key] = occurrence.value === "true";
             continue;
         }
-        if (!VALUE_OPTIONS.has(key))
-            throw new CliError("INVALID_OPTION", `Unknown option --${rawKey}.`);
-        const value = equalIndex >= 0 ? token.slice(equalIndex + 1) : argv[++index];
-        if (value === undefined || (equalIndex < 0 && value.startsWith("--")))
-            throw new CliError("INVALID_OPTION", `Option --${rawKey} requires a value.`);
-        options[key] = value;
+        if (occurrence.value === undefined || occurrence.value.length === 0)
+            throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires a value.`);
+        options[key] = occurrence.value;
     }
-    return { positionals, options, fields };
+    return { positionals: tokenized.positionals, options, fields };
 }
 function toErrorShape(error) {
     if (error instanceof CliError)
@@ -1249,17 +1193,13 @@ function classifyExitCode(error) {
     return EXIT_INTERNAL;
 }
 /**
- * True when argv targets a command gh-inari implements; false means it must fall back to the real `gh` binary.
- * `--help` on an unowned domain or subcommand (e.g. `repo view --help`, `pr list --help`) is not claimed here so
- * that help delegates to real `gh` the same way execution does -- Inari does not reproduce upstream help text.
+ * True when argv targets a command Inari implements; false means it must fall
+ * back to the real `gh` binary. The same tokenizer is used by parseArguments,
+ * so supported option values cannot become routing positionals.
  */
-function isPositionalToken(token, previous) {
-    if (previous === "-R")
-        return false;
-    return token !== "-R" && !token.startsWith("--");
-}
 function isOwnedInvocation(argv) {
-    const first = findPositional(argv);
+    const { positionals } = tokenizeCommandArgv(argv);
+    const first = positionals[0];
     if (first === undefined)
         return true;
     if (first === "diagnose" || first === "doctor" || first === "version" || first === "help")
@@ -1269,47 +1209,23 @@ function isOwnedInvocation(argv) {
     if (argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor"))
         return true;
     const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
-    if (first === "template") {
-        const second = findPositional(argv, argv.indexOf(first) + 1);
-        if (helpRequested && second === undefined)
-            return true;
-        return second !== undefined && KNOWN_TEMPLATE_COMMANDS.has(second);
-    }
-    if (first === "issue" || first === "pr") {
-        const second = findPositional(argv, argv.indexOf(first) + 1);
-        if (helpRequested && second === undefined)
-            return true;
-        return second !== undefined && KNOWN_ARTIFACT_COMMANDS.has(second);
-    }
-    return false;
-}
-function findPositional(argv, fromIndex = 0) {
-    for (let index = fromIndex; index < argv.length; index += 1) {
-        const token = argv[index];
-        if (token !== undefined && isPositionalToken(token, index > 0 ? argv[index - 1] : undefined))
-            return token;
-    }
-    return undefined;
+    if (helpRequested && (first === "issue" || first === "pr" || first === "template") && positionals.length === 1)
+        return true;
+    return getCommandForPositionals(positionals) !== undefined;
 }
 function isMachineCommand(positionals) {
-    return ((positionals.length >= 2 && KNOWN_ARTIFACT_COMMANDS.has(positionals[1] ?? "")) ||
-        positionals[0] === "diagnose" ||
-        positionals[0] === "doctor" ||
-        positionals[0] === "version" ||
-        positionals[0] === "skill");
+    return getCommandForPositionals(positionals) !== undefined;
 }
 function isMachineCommandTokens(argv) {
-    if (argv.includes("--diagnose") || argv.includes("--doctor") || argv.includes("diagnose") || argv.includes("doctor"))
+    const { positionals } = tokenizeCommandArgv(argv);
+    if (argv.includes("--diagnose") ||
+        argv.includes("--doctor") ||
+        positionals[0] === "diagnose" ||
+        positionals[0] === "doctor")
         return true;
-    if (argv.includes("--version") || argv.includes("version"))
+    if (positionals[0] === "version")
         return argv.includes("--json");
-    if (argv.includes("skill"))
-        return true;
-    const domainIndex = argv.findIndex((token) => token === "issue" || token === "pr");
-    if (domainIndex < 0)
-        return false;
-    const command = argv[domainIndex + 1];
-    return command !== undefined && KNOWN_ARTIFACT_COMMANDS.has(command);
+    return positionals[0] === "skill" || getCommandForPositionals(positionals) !== undefined;
 }
 function isPositiveInteger(value) {
     return /^[1-9]\d*$/u.test(value);
@@ -1344,142 +1260,29 @@ async function readStdin() {
     }
     return Buffer.concat(chunks).toString("utf8");
 }
-const TEMPLATE_LEAVES = {
-    list: {
-        usage: "template list",
-        summary: "List discovered repository-native and semantic templates.",
-        example: "inari template list",
-    },
-    sync: {
-        usage: "template sync [--check]",
-        summary: "Regenerate native GitHub templates from semantic template contracts under .github/inari/.",
-        example: "inari template sync --check",
-    },
-    import: {
-        usage: "template import --from <native-template> [--to <semantic-file>]",
-        summary: "Import a native GitHub template into a semantic template contract. Discovered semantic paths: " +
-            ".github/inari/issues/<id>.json, .github/inari/pull-request.json (single PR template), or " +
-            ".github/inari/pull-requests/<id>.json (multiple PR templates). Other --to paths write successfully " +
-            "but are never discovered.",
-        example: "inari template import --from .github/ISSUE_TEMPLATE/feature.yml",
-    },
-};
-function artifactLeaves(domain) {
-    const noun = domain === "issue" ? "issue" : "pull request";
-    return {
-        schema: {
-            usage: `${domain} schema [template]`,
-            summary: `Print the semantic field schema and required create metadata schema for a ${noun} template.`,
-            example: `inari ${domain} schema feature --compact`,
-        },
-        validate: {
-            usage: `${domain} validate --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
-            summary: `Validate input against a template's schema, from JSON, direct --field values, or both. ` +
-                `Run \`${domain} schema\` for its "directFields" projection (name/type/required/repeatable, one entry ` +
-                `per accepted --field), or submit a partial set here and read back "missingFields"/"invalidFields" for ` +
-                `what still needs a value -- there is no separate field list to consult. ` +
-                `To validate an existing ${noun} instead, use \`${domain} validate <number> [--template <template>]\`.`,
-            example: `inari ${domain} validate --template feature --field problem="A problem"`,
-        },
-        render: {
-            usage: `${domain} render --template <template> [--from <file.json>] [--field <name>=<value> ...]`,
-            summary: `Render validated input into canonical Markdown without mutating GitHub.`,
-            example: `inari ${domain} render --template feature --field problem="A problem"`,
-        },
-        create: {
-            usage: `${domain} create --template <template> --title <title> [--from <file.json>] [--field <name>=<value> ...]`,
-            summary: `Validate, render, and create a governed ${noun} on GitHub. A repeated field's schema type "array" ` +
-                `accumulates every --field occurrence in argv order; --from and --field may compose but never name the same field. ` +
-                `The caller-supplied title must contain content beyond any fixed native template prefix.`,
-            example: `inari ${domain} create --template feature --field problem="A problem" --title "feat: add support"`,
-        },
-        explain: {
-            usage: `${domain} explain <number> [--template <template>]`,
-            summary: `Explain why an existing ${noun} does or does not satisfy its governed contract.`,
-            example: `inari ${domain} explain 123`,
-        },
-        get: {
-            usage: `${domain} get <number> [--template <template>] --json`,
-            summary: `Project an existing ${noun} as its canonical semantic JSON.`,
-            example: `inari ${domain} get 123 --json`,
-        },
-        check: {
-            usage: `${domain} check <number> [--template <template>]`,
-            summary: `Check whether an existing ${noun} is normalizable without mutating GitHub. Metadata mutation flags are rejected.`,
-            example: `inari ${domain} check 123`,
-        },
-        edit: {
-            usage: domain === "issue"
-                ? `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--dry-run]`
-                : `${domain} edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--maintainer-can-modify[=true|false]] [--dry-run]`,
-            summary: domain === "issue"
-                ? `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved, and --title is supported.`
-                : `Apply a patch to an existing ${noun}; omitted fields and metadata are preserved. Supports --title, --base, and --maintainer-can-modify; --draft is unsupported for edit and is rejected.`,
-            example: `inari ${domain} edit 123 --field problem="Updated problem" --dry-run`,
-        },
-        normalize: {
-            usage: `${domain} normalize <number> [--dry-run]`,
-            summary: `Repair an existing ${noun}'s native projection while preserving its existing semantic values. Metadata mutation flags are rejected.`,
-            example: `inari ${domain} normalize 123 --dry-run`,
-        },
-        sync: {
-            usage: `${domain} sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]`,
-            summary: domain === "pr"
-                ? `Reconcile an existing ${noun} to a complete desired semantic state. Direct metadata mutation flags are rejected; immutable head changes and unsupported draft changes fail. ${renderPullRequestSyncInputHelp()}`
-                : `Reconcile an existing ${noun} to a complete desired semantic state, preserving fields and metadata omitted from the input. Direct metadata mutation flags are rejected.`,
-            example: `inari ${domain} sync 123 --from desired.json --dry-run`,
-        },
-    };
-}
-const GLOBAL_OPTIONS = `  --from <path>       JSON input file, or - for stdin
-  --field <name>=<value>
-                      Direct semantic field input, repeatable; only accepted on validate, render,
-                      create, edit, and sync. Field names/types/requiredness come from the
-                      selected template's schema -- see \`schema\`'s "directFields" projection, or
-                      submit a partial set and read "missingFields"/"invalidFields" back from
-                      validate. A repeatable ("array"-typed) field accumulates every occurrence
-                      in argv order; any other field accepts at most one. May compose with
-                      --from, but the same field cannot be named by both.
-  --template <id>     Repository-native template id, path, or unique name
-  --policy <path>     Local PR policy for schema/validate/render --from workflows; forbidden for governed remote operations
-  --repository <r>    GitHub repository override; governed commands use its default-branch governance
-  --repo <r>, -R <r>  Alias for --repository
-  --title <title>     Required Issue/PR title for create; metadata, not a semantic --field
-  --head <branch>     PR head branch for create
-  --base <branch>     PR base branch for create
-  --compact            Emit only semantic fields and constraints for schema
-  --check              Check generated native projections without writing
-  --dry-run            Show a bounded remediation diff without mutating GitHub
-  --draft             Create the PR as a draft
-  --maintainer-can-modify
-                      Allow maintainer edits on the PR
-  --json              Emit structured JSON output
-  --version           Print package version
-  --diagnose          Check the canonical gh extension and recovery path
-  --require-capability <id>
-                      Require a capability in --version/--diagnose checks
-  --minimum-version <v>
-                      Require a minimum semantic version in checks
-  --help              Print this help (--help=full for the complete reference)`;
 const DOMAIN_PASSTHROUGH_EXAMPLE = {
     issue: "issue list",
     pr: "pr checks",
     template: "template view",
 };
-/** Dispatches to root, domain, or leaf help by command depth; positionals are pre-parse-error tokens, so any --help value routes here. */
+/** Dispatches to root, domain, or leaf help from the canonical command model. */
 function printHelpFor(positionals, helpValue) {
+    if (helpValue === "json")
+        return console.log(JSON.stringify(projectCommandHelp(positionals)));
     if (helpValue === "full")
         return printFullHelp();
     const [domain, command] = positionals;
     if (domain === "issue" || domain === "pr") {
-        if (command !== undefined && command in artifactLeaves(domain))
-            return printLeafHelp(artifactLeaves(domain)[command]);
-        return printDomainHelp(domain, artifactLeaves(domain));
+        const definition = command === undefined ? undefined : getCommandForPositionals([domain, command]);
+        if (definition !== undefined && definition.domain === domain)
+            return printLeafHelp(definition);
+        return printDomainHelp(domain);
     }
     if (domain === "template") {
-        if (command !== undefined && command in TEMPLATE_LEAVES)
-            return printLeafHelp(TEMPLATE_LEAVES[command]);
-        return printDomainHelp("template", TEMPLATE_LEAVES);
+        const definition = command === undefined ? undefined : getCommandForPositionals([domain, command]);
+        if (definition !== undefined && definition.domain === domain)
+            return printLeafHelp(definition);
+        return printDomainHelp("template");
     }
     if (domain === "skill")
         return printSkillHelp(command);
@@ -1504,8 +1307,8 @@ Run \`inari <domain> --help\` for that domain's operations.
 Run \`inari --help=full\` for the complete command and option reference.
 Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime checks.`);
 }
-function printDomainHelp(domain, leaves) {
-    const lines = Object.values(leaves).map((leaf) => `  ${leaf.usage}`);
+function printDomainHelp(domain) {
+    const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
     console.log(`Usage: inari ${domain} <command> [...]
 
 Operations:
@@ -1520,11 +1323,12 @@ function printSkillHelp(scenarioId) {
         const scenario = findSkillScenario(scenarioId);
         if (scenario === undefined)
             return printSkillHelp(undefined);
-        return printLeafHelp({
-            usage: `skill ${scenario.id} [--json]`,
-            summary: scenario.title,
-            example: `inari skill ${scenario.id}`,
-        });
+        console.log(`Usage: ${commandInvocation("skill.scenario")} ${scenario.id} --help
+
+${scenario.title}
+
+Run \`${scenario.canonicalEntrypoint}\` for the playbook.`);
+        return;
     }
     const lines = SKILL_SCENARIOS.map((scenario) => `  skill ${scenario.id} [--json]  - ${scenario.title}`);
     console.log(`Usage: inari skill [scenario] [--json]
@@ -1538,61 +1342,62 @@ ${lines.join("\n")}
 Run \`inari skill <scenario> --help\` for that scenario's summary.
 Run \`inari <domain> --help\` for exact command syntax used by a playbook.`);
 }
-function printLeafHelp(leaf) {
-    console.log(`Usage: inari ${leaf.usage}
+function printLeafHelp(command) {
+    const options = command.optionIds
+        .filter((id) => id !== "help" && id !== "json")
+        .map((id) => `  ${optionSyntax(getOption(id))}  ${getOption(id).description}`)
+        .join("\n");
+    console.log(`Usage: inari ${commandUsage(command)}
 
-${leaf.summary}
+${leafSummary(command)}
 
 Example:
-  ${leaf.example}
+  ${commandExample(command.id)}
+
+Options:
+${options}
 
 Run \`inari --help=full\` for the complete option reference.`);
 }
 function printFullHelp() {
+    const commands = ["template", "issue", "pr"]
+        .flatMap((domain) => INARI_COMMANDS.filter((entry) => entry.domain === domain))
+        .map((entry) => `  ${commandUsage(entry)}`)
+        .join("\n");
+    const options = Object.values(COMMAND_OPTIONS)
+        .map((option) => `  ${optionSyntax(option)}  ${option.description}`)
+        .join("\n");
     console.log(`Usage: inari <command> [options]
 
 Commands:
-  template list
-  template sync [--check]
-  template import --from <native-template> [--to <semantic-file>]
-                      Discovered semantic paths: .github/inari/issues/<id>.json,
-                      .github/inari/pull-request.json (single PR template), or
-                      .github/inari/pull-requests/<id>.json (multiple PR templates).
-                      Other --to paths write successfully but are never discovered.
-  issue schema [template]
-  issue validate --template <template> [--from <file.json>] [--field <name>=<value> ...]
-  issue render --template <template> [--from <file.json>] [--field <name>=<value> ...]
-  issue create --template <template> [--from <file.json>] [--field <name>=<value> ...]
-  issue validate <number> [--template <template>]
-  issue explain <number> [--template <template>]
-  issue get <number> [--template <template>] --json
-  issue check <number> [--template <template>]
-  issue edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--dry-run]
-  issue normalize <number> [--dry-run]
-  issue sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
-  pr schema [template]
-  pr validate --template <template> [--from <file.json>] [--field <name>=<value> ...]
-  pr render --template <template> [--from <file.json>] [--field <name>=<value> ...]
-  pr create --template <template> [--from <file.json>] [--field <name>=<value> ...]
-  pr validate <number> [--template <template>]
-  pr explain <number> [--template <template>]
-  pr get <number> [--template <template>] --json
-  pr check <number> [--template <template>]
-  pr edit <number> [--from <file.json>] [--field <name>=<value> ...] [--title <title>] [--base <branch>] [--maintainer-can-modify[=true|false]] [--dry-run]
-  pr normalize <number> [--dry-run]
-  pr sync <number> [--from <file.json>] [--field <name>=<value> ...] [--dry-run]
+${commands}
   skill [scenario] [--json]
 
 Options:
-${GLOBAL_OPTIONS}
+${options}
 
 Create always validates and renders before invoking gh. Schema, validate, render, check, and --dry-run remediation never mutate GitHub.
 Edit is the primary patch path: it preserves omitted fields and metadata, validates the complete result, and renders canonical Markdown before mutation. Normalize preserves existing semantic values; issue sync preserves omitted current values; pr sync reconciles a complete desired semantic state.
 
 All other commands pass through to the real gh binary unchanged.
 
+Canonical invocation: inari
+Compatibility invocation: gh inari
 Canonical install: npm install --global gh-inari
 PATH-independent fallback: npx --yes gh-inari
 Extension compatibility path: gh extension install yohn-jp/gh-inari`);
+}
+function leafSummary(command) {
+    if (command.id === "pr.sync")
+        return `${command.summary} ${renderPullRequestSyncInputHelp()}`;
+    if (command.id === "issue.validate" || command.id === "pr.validate") {
+        const noun = command.domain === "issue" ? "issue" : "pull request";
+        return `${command.summary} Run \`${command.domain} schema\` for its contract-derived directFields projection; existing ${noun} validation uses a positive number.`;
+    }
+    if (command.id === "issue.schema" || command.id === "pr.schema") {
+        const noun = command.domain === "issue" ? "issue" : "pull request";
+        return `${command.summary} Dynamic --field names, types, requiredness, and checklist option IDs come from the selected ${noun} artifact contract.`;
+    }
+    return command.summary;
 }
 //# sourceMappingURL=cli.js.map

@@ -15,6 +15,7 @@ export * from "./github/index.js";
 export * from "./pull-request-template.js";
 export * from "./semantic-template.js";
 export * from "./diagnostics.js";
+export * from "./command-contract.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,
