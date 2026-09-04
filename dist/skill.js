@@ -1,27 +1,35 @@
+import { commandExample, commandInvocation, helpInvocation, } from "./command-contract.js";
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 export const SKILL_MODEL_VERSION = "1.0.0";
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
 export const MAX_SKILL_OUTPUT_BYTES = 4096;
 const HELP_DISCLAIMER = "This playbook does not restate exact flags; run the help pointer below for precise syntax.";
+function workflowStep(summary, commandId) {
+    return { summary, commandId, command: commandExample(commandId) };
+}
+function skillScenario(input) {
+    return {
+        id: input.id,
+        title: input.title,
+        whenToUse: input.whenToUse,
+        workflow: input.workflow.map(([summary, commandId]) => workflowStep(summary, commandId)),
+        invariants: input.invariants,
+        canonicalCommandId: input.canonicalCommandId,
+        helpDomain: input.helpDomain,
+        canonicalEntrypoint: commandInvocation(input.canonicalCommandId),
+        helpPointer: helpInvocation(input.helpDomain),
+    };
+}
 export const SKILL_SCENARIOS = [
-    {
+    skillScenario({
         id: "author-issue",
         title: "Author a governed Issue",
         whenToUse: "Use when creating a new Issue that must satisfy repository governance from the start.",
         workflow: [
-            {
-                summary: "Create directly with governed fields when the template and required fields are known.",
-                command: "inari issue create",
-            },
-            {
-                summary: "If required fields are unknown, inspect the target template before creating.",
-                command: "inari issue schema",
-            },
-            {
-                summary: "For explicit preview or debugging, validate input without creating.",
-                command: "inari issue validate",
-            },
-            { summary: "For explicit artifact generation, render input without creating.", command: "inari issue render" },
+            ["Create directly with governed fields when the template and required fields are known.", "issue.create"],
+            ["If required fields are unknown, inspect the target template before creating.", "issue.schema"],
+            ["For explicit preview or debugging, validate input without creating.", "issue.validate"],
+            ["For explicit artifact generation, render input without creating.", "issue.render"],
         ],
         invariants: [
             "Never call raw `gh issue create` for a governed template; it bypasses contract validation.",
@@ -30,24 +38,18 @@ export const SKILL_SCENARIOS = [
             "Validate and render are explicit preview, debugging, or artifact-generation paths, not mandatory ceremony.",
             HELP_DISCLAIMER,
         ],
-        canonicalEntrypoint: "inari issue create",
-        helpPointer: "inari issue --help",
-    },
-    {
+        canonicalCommandId: "issue.create",
+        helpDomain: "issue",
+    }),
+    skillScenario({
         id: "author-pr",
         title: "Author a governed Pull Request",
         whenToUse: "Use when opening a new Pull Request that must satisfy repository governance from the start.",
         workflow: [
-            {
-                summary: "Create directly with governed fields when the template and required fields are known.",
-                command: "inari pr create",
-            },
-            {
-                summary: "If required fields are unknown, inspect the target template before creating.",
-                command: "inari pr schema",
-            },
-            { summary: "For explicit preview or debugging, validate input without creating.", command: "inari pr validate" },
-            { summary: "For explicit artifact generation, render input without creating.", command: "inari pr render" },
+            ["Create directly with governed fields when the template and required fields are known.", "pr.create"],
+            ["If required fields are unknown, inspect the target template before creating.", "pr.schema"],
+            ["For explicit preview or debugging, validate input without creating.", "pr.validate"],
+            ["For explicit artifact generation, render input without creating.", "pr.render"],
         ],
         invariants: [
             "Never call raw `gh pr create` for a governed template; it bypasses contract validation.",
@@ -56,50 +58,38 @@ export const SKILL_SCENARIOS = [
             "Validate and render are explicit preview, debugging, or artifact-generation paths, not mandatory ceremony.",
             HELP_DISCLAIMER,
         ],
-        canonicalEntrypoint: "inari pr create",
-        helpPointer: "inari pr --help",
-    },
-    {
+        canonicalCommandId: "pr.create",
+        helpDomain: "pr",
+    }),
+    skillScenario({
         id: "inspect-governance",
         title: "Inspect governance state of an existing artifact",
         whenToUse: "Use when you need to read the governance classification of an existing Issue or PR without changing it.",
         workflow: [
-            { summary: "Classify the artifact against its governed contract.", command: "inari issue check <number>" },
-            {
-                summary: "Read canonical fields and metadata when the artifact is available canonically.",
-                command: "inari issue get <number>",
-            },
-            {
-                summary: "Read detailed diagnostics when the classification needs explanation.",
-                command: "inari issue explain <number>",
-            },
+            ["Classify the artifact against its governed contract.", "issue.check"],
+            ["Read canonical fields and metadata when the artifact is available canonically.", "issue.get"],
+            ["Read detailed diagnostics when the classification needs explanation.", "issue.explain"],
         ],
         invariants: [
             "Read-only: this scenario never mutates the artifact.",
             "Applies equally to PRs via the corresponding `inari pr` commands.",
             HELP_DISCLAIMER,
         ],
-        canonicalEntrypoint: "inari issue check",
-        helpPointer: "inari issue --help",
-    },
-    {
+        canonicalCommandId: "issue.check",
+        helpDomain: "issue",
+    }),
+    skillScenario({
         id: "repair-invalid-artifact",
         title: "Repair or normalize a governed artifact",
         whenToUse: "Use when inspection identifies a non-canonical or semantically invalid Issue or PR that needs correction.",
         workflow: [
-            { summary: "Classify the artifact and confirm it needs repair.", command: "inari issue check <number>" },
-            {
-                summary: "Preview, then apply canonicalization after review for a parseable, semantically valid artifact.",
-                command: "inari issue normalize <number>",
-            },
-            {
-                summary: "Preview, then apply an explicit semantic or metadata patch after review.",
-                command: "inari issue edit <number>",
-            },
-            {
-                summary: "Preview, then apply a sync operation after review when desired-state convergence is required.",
-                command: "inari issue sync <number>",
-            },
+            ["Classify the artifact and confirm it needs repair.", "issue.check"],
+            [
+                "Preview, then apply canonicalization after review for a parseable, semantically valid artifact.",
+                "issue.normalize",
+            ],
+            ["Preview, then apply an explicit semantic or metadata patch after review.", "issue.edit"],
+            ["Preview, then apply a sync operation after review when desired-state convergence is required.", "issue.sync"],
         ],
         invariants: [
             "Check is read-only; choose normalize, edit, or sync from its classification.",
@@ -108,9 +98,9 @@ export const SKILL_SCENARIOS = [
             "Applies equally to PRs via the corresponding `inari pr` commands.",
             HELP_DISCLAIMER,
         ],
-        canonicalEntrypoint: "inari issue normalize",
-        helpPointer: "inari issue --help",
-    },
+        canonicalCommandId: "issue.normalize",
+        helpDomain: "issue",
+    }),
 ];
 export function findSkillScenario(id) {
     return SKILL_SCENARIOS.find((scenario) => scenario.id === id);
@@ -143,6 +133,8 @@ export function projectSkillScenarioToJson(scenario) {
         whenToUse: scenario.whenToUse,
         workflow: scenario.workflow,
         invariants: scenario.invariants,
+        canonicalCommandId: scenario.canonicalCommandId,
+        helpDomain: scenario.helpDomain,
         canonicalEntrypoint: scenario.canonicalEntrypoint,
         helpPointer: scenario.helpPointer,
     };
@@ -161,9 +153,8 @@ export function projectSkillScenarioToText(scenario) {
     });
     lines.push("");
     lines.push("Invariants:");
-    for (const invariant of scenario.invariants) {
+    for (const invariant of scenario.invariants)
         lines.push(`  - ${invariant}`);
-    }
     lines.push("");
     lines.push(`Canonical entrypoint: ${scenario.canonicalEntrypoint}`);
     lines.push(`Exact syntax: ${scenario.helpPointer}`);

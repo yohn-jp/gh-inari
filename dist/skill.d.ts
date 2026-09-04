@@ -1,9 +1,13 @@
+import { type CommandDomain, type CommandId } from "./command-contract.js";
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 export declare const SKILL_MODEL_VERSION = "1.0.0";
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
 export declare const MAX_SKILL_OUTPUT_BYTES = 4096;
 export interface SkillWorkflowStep {
     readonly summary: string;
+    /** Stable reference into the versioned command contract. */
+    readonly commandId: CommandId;
+    /** Backward-compatible rendered command projection. */
     readonly command: string;
 }
 export interface SkillScenario {
@@ -12,6 +16,8 @@ export interface SkillScenario {
     readonly whenToUse: string;
     readonly workflow: readonly SkillWorkflowStep[];
     readonly invariants: readonly string[];
+    readonly canonicalCommandId: CommandId;
+    readonly helpDomain: Exclude<CommandDomain, "root">;
     readonly canonicalEntrypoint: string;
     readonly helpPointer: string;
 }
@@ -33,6 +39,8 @@ export interface SkillScenarioProjection {
     readonly whenToUse: string;
     readonly workflow: readonly SkillWorkflowStep[];
     readonly invariants: readonly string[];
+    readonly canonicalCommandId: CommandId;
+    readonly helpDomain: Exclude<CommandDomain, "root">;
     readonly canonicalEntrypoint: string;
     readonly helpPointer: string;
 }

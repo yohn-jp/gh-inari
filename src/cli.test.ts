@@ -1019,7 +1019,7 @@ test("machine-readable version reports the invocation contract and capabilities"
     assert.equal(output.version, "0.3.0");
     assert.equal(output.protocol, 1);
     assert.deepEqual(output.invocation, {
-      canonical: "gh inari",
+      canonical: "inari",
       direct: "gh-inari",
       fallback: "npx --yes gh-inari",
     });
