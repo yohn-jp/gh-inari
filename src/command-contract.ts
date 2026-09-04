@@ -30,17 +30,59 @@ export type CommandDomain = "root" | "issue" | "pr" | "template" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
-  | "root.help" | "root.version" | "root.diagnose" | "root.doctor"
-  | "issue.schema" | "issue.validate" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync"
-  | "pr.schema" | "pr.validate" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync"
-  | "template.list" | "template.sync" | "template.import"
-  | "skill.index" | "skill.scenario";
+  | "root.help"
+  | "root.version"
+  | "root.diagnose"
+  | "root.doctor"
+  | "issue.schema"
+  | "issue.validate"
+  | "issue.render"
+  | "issue.create"
+  | "issue.explain"
+  | "issue.get"
+  | "issue.check"
+  | "issue.edit"
+  | "issue.normalize"
+  | "issue.sync"
+  | "pr.schema"
+  | "pr.validate"
+  | "pr.render"
+  | "pr.create"
+  | "pr.explain"
+  | "pr.get"
+  | "pr.check"
+  | "pr.edit"
+  | "pr.normalize"
+  | "pr.sync"
+  | "template.list"
+  | "template.sync"
+  | "template.import"
+  | "skill.index"
+  | "skill.scenario";
 
 export type OptionId =
-  | "help" | "json" | "version" | "diagnose" | "doctor" | "from" | "field"
-  | "template" | "policy" | "repository" | "title" | "head" | "base" | "to"
-  | "requireCapability" | "minimumVersion" | "compact" | "check" | "dryRun"
-  | "draft" | "maintainerCanModify" | "rawBody";
+  | "help"
+  | "json"
+  | "version"
+  | "diagnose"
+  | "doctor"
+  | "from"
+  | "field"
+  | "template"
+  | "policy"
+  | "repository"
+  | "title"
+  | "head"
+  | "base"
+  | "to"
+  | "requireCapability"
+  | "minimumVersion"
+  | "compact"
+  | "check"
+  | "dryRun"
+  | "draft"
+  | "maintainerCanModify"
+  | "rawBody";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -72,7 +114,20 @@ const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "pol
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
-const PR_CREATE_OPTIONS = ["help", "json", "template", "title", "head", "base", "from", "field", "repository", "policy", "draft", "maintainerCanModify"] as const;
+const PR_CREATE_OPTIONS = [
+  "help",
+  "json",
+  "template",
+  "title",
+  "head",
+  "base",
+  "from",
+  "field",
+  "repository",
+  "policy",
+  "draft",
+  "maintainerCanModify",
+] as const;
 
 const option = (
   id: OptionId,
@@ -96,10 +151,32 @@ const option = (
 });
 
 export const COMMAND_OPTIONS = {
-  help: option("help", "help", ["--help"], "string", "optional", "Print progressive help; use --help=full for the complete reference or --help=json for discovery.", "full|json"),
+  help: option(
+    "help",
+    "help",
+    ["--help"],
+    "string",
+    "optional",
+    "Print progressive help; use --help=full for the complete reference or --help=json for discovery.",
+    "full|json",
+  ),
   json: option("json", "json", ["--json"], "boolean", "none", "Emit structured JSON output."),
-  version: option("version", "version", ["--version"], "boolean", "none", "Print version and runtime contract metadata."),
-  diagnose: option("diagnose", "diagnose", ["--diagnose"], "boolean", "none", "Check canonical runtime readiness and optional extension compatibility."),
+  version: option(
+    "version",
+    "version",
+    ["--version"],
+    "boolean",
+    "none",
+    "Print version and runtime contract metadata.",
+  ),
+  diagnose: option(
+    "diagnose",
+    "diagnose",
+    ["--diagnose"],
+    "boolean",
+    "none",
+    "Check canonical runtime readiness and optional extension compatibility.",
+  ),
   doctor: option("doctor", "doctor", ["--doctor"], "boolean", "none", "Alias for --diagnose."),
   from: option("from", "from", ["--from"], "string", "required", "JSON input file, or - for stdin.", "path"),
   field: option(
@@ -112,21 +189,113 @@ export const COMMAND_OPTIONS = {
     "<name>=<value>",
     true,
   ),
-  template: option("template", "template", ["--template"], "string", "required", "Repository-native template id, path, or unique name.", "template"),
-  policy: option("policy", "policy", ["--policy"], "string", "required", "Local PR policy for local schema/input workflows.", "path"),
-  repository: option("repository", "repository", ["--repository", "--repo", "-R"], "string", "required", "GitHub repository override; governed commands use its default-branch governance.", "repository"),
-  title: option("title", "title", ["--title"], "string", "required", "Caller-supplied Issue/PR title for create or metadata patch for edit.", "title"),
+  template: option(
+    "template",
+    "template",
+    ["--template"],
+    "string",
+    "required",
+    "Repository-native template id, path, or unique name.",
+    "template",
+  ),
+  policy: option(
+    "policy",
+    "policy",
+    ["--policy"],
+    "string",
+    "required",
+    "Local PR policy for local schema/input workflows.",
+    "path",
+  ),
+  repository: option(
+    "repository",
+    "repository",
+    ["--repository", "--repo", "-R"],
+    "string",
+    "required",
+    "GitHub repository override; governed commands use its default-branch governance.",
+    "repository",
+  ),
+  title: option(
+    "title",
+    "title",
+    ["--title"],
+    "string",
+    "required",
+    "Caller-supplied Issue/PR title for create or metadata patch for edit.",
+    "title",
+  ),
   head: option("head", "head", ["--head"], "string", "required", "PR head branch for create.", "branch"),
   base: option("base", "base", ["--base"], "string", "required", "PR base branch for create or edit.", "branch"),
-  to: option("to", "to", ["--to"], "string", "required", "Destination semantic template path for import.", "semantic-file"),
-  requireCapability: option("requireCapability", "require-capability", ["--require-capability"], "string", "required", "Require a capability in version/diagnose checks.", "id"),
-  minimumVersion: option("minimumVersion", "minimum-version", ["--minimum-version"], "string", "required", "Require a minimum semantic version in version/diagnose checks.", "v"),
-  compact: option("compact", "compact", ["--compact"], "boolean", "none", "Emit only semantic fields and constraints for schema."),
-  check: option("check", "check", ["--check"], "boolean", "none", "Check generated native projections without writing."),
-  dryRun: option("dryRun", "dry-run", ["--dry-run"], "boolean", "none", "Show a bounded remediation diff without mutating GitHub."),
+  to: option(
+    "to",
+    "to",
+    ["--to"],
+    "string",
+    "required",
+    "Destination semantic template path for import.",
+    "semantic-file",
+  ),
+  requireCapability: option(
+    "requireCapability",
+    "require-capability",
+    ["--require-capability"],
+    "string",
+    "required",
+    "Require a capability in version/diagnose checks.",
+    "id",
+  ),
+  minimumVersion: option(
+    "minimumVersion",
+    "minimum-version",
+    ["--minimum-version"],
+    "string",
+    "required",
+    "Require a minimum semantic version in version/diagnose checks.",
+    "v",
+  ),
+  compact: option(
+    "compact",
+    "compact",
+    ["--compact"],
+    "boolean",
+    "none",
+    "Emit only semantic fields and constraints for schema.",
+  ),
+  check: option(
+    "check",
+    "check",
+    ["--check"],
+    "boolean",
+    "none",
+    "Check generated native projections without writing.",
+  ),
+  dryRun: option(
+    "dryRun",
+    "dry-run",
+    ["--dry-run"],
+    "boolean",
+    "none",
+    "Show a bounded remediation diff without mutating GitHub.",
+  ),
   draft: option("draft", "draft", ["--draft"], "boolean", "none", "Create the PR as a draft."),
-  maintainerCanModify: option("maintainerCanModify", "maintainer-can-modify", ["--maintainer-can-modify"], "boolean", "none", "Allow maintainer edits on the PR."),
-  rawBody: option("rawBody", "body", ["--body", "--body-file", "-b", "-F"], "raw-input", "required", "Upstream gh raw Markdown input; rejected for governed create operations.", "value"),
+  maintainerCanModify: option(
+    "maintainerCanModify",
+    "maintainer-can-modify",
+    ["--maintainer-can-modify"],
+    "boolean",
+    "none",
+    "Allow maintainer edits on the PR.",
+  ),
+  rawBody: option(
+    "rawBody",
+    "body",
+    ["--body", "--body-file", "-b", "-F"],
+    "raw-input",
+    "required",
+    "Upstream gh raw Markdown input; rejected for governed create operations.",
+    "value",
+  ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
 const COMMAND_OPTIONS_BY_ID: Readonly<Record<OptionId, CommandOptionDefinition>> = COMMAND_OPTIONS;
@@ -154,34 +323,228 @@ const command = (
 
 export const INARI_COMMANDS: readonly CommandDefinition[] = [
   command("root.help", "root", "help", [], "Print progressive or full command help.", [...ROOT_OPTIONS]),
-  command("root.version", "root", "version", ["version"], "Print version and runtime contract metadata.", ["help", "json", "requireCapability", "minimumVersion"]),
-  command("root.diagnose", "root", "diagnose", ["diagnose"], "Check canonical runtime readiness and extension compatibility.", ["help", "json", "requireCapability", "minimumVersion"]),
-  command("root.doctor", "root", "doctor", ["doctor"], "Alias for diagnose.", ["help", "json", "requireCapability", "minimumVersion"]),
-  command("issue.schema", "issue", "schema", ["issue", "schema"], "Print the selected Issue template's semantic and metadata schema.", [...ARTIFACT_OPTIONS, "compact"], "[template]"),
-  command("issue.validate", "issue", "validate", ["issue", "validate"], "Validate local or existing Issue input against its selected contract.", [...LOCAL_ARTIFACT_INPUT_OPTIONS], "[<number>]"),
-  command("issue.render", "issue", "render", ["issue", "render"], "Render validated Issue input into canonical Markdown.", [...LOCAL_ARTIFACT_INPUT_OPTIONS]),
-  command("issue.create", "issue", "create", ["issue", "create"], "Validate, render, and create a governed Issue.", ISSUE_CREATE_OPTIONS),
-  command("issue.explain", "issue", "explain", ["issue", "explain"], "Explain the governance state of an existing Issue.", [...EXISTING_OPTIONS], "<number>"),
-  command("issue.get", "issue", "get", ["issue", "get"], "Project an existing Issue as canonical semantic JSON.", [...EXISTING_OPTIONS], "<number>"),
-  command("issue.check", "issue", "check", ["issue", "check"], "Check whether an existing Issue is canonical and normalizable.", [...EXISTING_OPTIONS], "<number>"),
-  command("issue.edit", "issue", "edit", ["issue", "edit"], "Apply a semantic or metadata patch to an existing Issue; omitted fields and metadata are preserved.", [...REMEDIATION_OPTIONS, "title"], "<number>"),
-  command("issue.normalize", "issue", "normalize", ["issue", "normalize"], "Repair an existing Issue's native projection.", ["help", "json", "repository", "template", "policy", "dryRun"], "<number>"),
-  command("issue.sync", "issue", "sync", ["issue", "sync"], "Reconcile an existing Issue to a desired semantic state, preserving fields and metadata omitted from the input.", [...REMEDIATION_OPTIONS], "<number>"),
-  command("pr.schema", "pr", "schema", ["pr", "schema"], "Print the selected PR template's semantic and metadata schema.", [...ARTIFACT_OPTIONS, "compact"], "[template]"),
-  command("pr.validate", "pr", "validate", ["pr", "validate"], "Validate local or existing PR input against its selected contract.", [...LOCAL_ARTIFACT_INPUT_OPTIONS], "[<number>]"),
-  command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [...LOCAL_ARTIFACT_INPUT_OPTIONS]),
-  command("pr.create", "pr", "create", ["pr", "create"], "Validate, render, and create a governed PR.", PR_CREATE_OPTIONS),
-  command("pr.explain", "pr", "explain", ["pr", "explain"], "Explain the governance state of an existing PR.", [...EXISTING_OPTIONS], "<number>"),
-  command("pr.get", "pr", "get", ["pr", "get"], "Project an existing PR as canonical semantic JSON.", [...EXISTING_OPTIONS], "<number>"),
-  command("pr.check", "pr", "check", ["pr", "check"], "Check whether an existing PR is canonical and normalizable.", [...EXISTING_OPTIONS], "<number>"),
-  command("pr.edit", "pr", "edit", ["pr", "edit"], "Apply a semantic or metadata patch to an existing PR; omitted fields and metadata are preserved. --draft is unsupported for edit and is rejected.", [...REMEDIATION_OPTIONS, "title", "base", "head", "maintainerCanModify"], "<number>"),
-  command("pr.normalize", "pr", "normalize", ["pr", "normalize"], "Repair an existing PR's native projection.", ["help", "json", "repository", "template", "policy", "dryRun"], "<number>"),
-  command("pr.sync", "pr", "sync", ["pr", "sync"], "Reconcile an existing PR to a desired semantic state.", [...REMEDIATION_OPTIONS], "<number>"),
-  command("template.list", "template", "list", ["template", "list"], "List discovered native and semantic templates.", ["help", "json", "repository"]),
-  command("template.sync", "template", "sync", ["template", "sync"], "Regenerate native templates from semantic contracts.", ["help", "json", "check"]),
-  command("template.import", "template", "import", ["template", "import"], "Import a native template into a semantic contract.", ["help", "json", "from", "to"]),
+  command("root.version", "root", "version", ["version"], "Print version and runtime contract metadata.", [
+    "help",
+    "json",
+    "requireCapability",
+    "minimumVersion",
+  ]),
+  command(
+    "root.diagnose",
+    "root",
+    "diagnose",
+    ["diagnose"],
+    "Check canonical runtime readiness and extension compatibility.",
+    ["help", "json", "requireCapability", "minimumVersion"],
+  ),
+  command("root.doctor", "root", "doctor", ["doctor"], "Alias for diagnose.", [
+    "help",
+    "json",
+    "requireCapability",
+    "minimumVersion",
+  ]),
+  command(
+    "issue.schema",
+    "issue",
+    "schema",
+    ["issue", "schema"],
+    "Print the selected Issue template's semantic and metadata schema.",
+    [...ARTIFACT_OPTIONS, "compact"],
+    "[template]",
+  ),
+  command(
+    "issue.validate",
+    "issue",
+    "validate",
+    ["issue", "validate"],
+    "Validate local or existing Issue input against its selected contract.",
+    [...LOCAL_ARTIFACT_INPUT_OPTIONS],
+    "[<number>]",
+  ),
+  command(
+    "issue.render",
+    "issue",
+    "render",
+    ["issue", "render"],
+    "Render validated Issue input into canonical Markdown.",
+    [...LOCAL_ARTIFACT_INPUT_OPTIONS],
+  ),
+  command(
+    "issue.create",
+    "issue",
+    "create",
+    ["issue", "create"],
+    "Validate, render, and create a governed Issue.",
+    ISSUE_CREATE_OPTIONS,
+  ),
+  command(
+    "issue.explain",
+    "issue",
+    "explain",
+    ["issue", "explain"],
+    "Explain the governance state of an existing Issue.",
+    [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "issue.get",
+    "issue",
+    "get",
+    ["issue", "get"],
+    "Project an existing Issue as canonical semantic JSON.",
+    [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "issue.check",
+    "issue",
+    "check",
+    ["issue", "check"],
+    "Check whether an existing Issue is canonical and normalizable.",
+    [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "issue.edit",
+    "issue",
+    "edit",
+    ["issue", "edit"],
+    "Apply a semantic or metadata patch to an existing Issue; omitted fields and metadata are preserved.",
+    [...REMEDIATION_OPTIONS, "title"],
+    "<number>",
+  ),
+  command(
+    "issue.normalize",
+    "issue",
+    "normalize",
+    ["issue", "normalize"],
+    "Repair an existing Issue's native projection.",
+    ["help", "json", "repository", "template", "policy", "dryRun"],
+    "<number>",
+  ),
+  command(
+    "issue.sync",
+    "issue",
+    "sync",
+    ["issue", "sync"],
+    "Reconcile an existing Issue to a desired semantic state, preserving fields and metadata omitted from the input.",
+    [...REMEDIATION_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.schema",
+    "pr",
+    "schema",
+    ["pr", "schema"],
+    "Print the selected PR template's semantic and metadata schema.",
+    [...ARTIFACT_OPTIONS, "compact"],
+    "[template]",
+  ),
+  command(
+    "pr.validate",
+    "pr",
+    "validate",
+    ["pr", "validate"],
+    "Validate local or existing PR input against its selected contract.",
+    [...LOCAL_ARTIFACT_INPUT_OPTIONS],
+    "[<number>]",
+  ),
+  command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [
+    ...LOCAL_ARTIFACT_INPUT_OPTIONS,
+  ]),
+  command(
+    "pr.create",
+    "pr",
+    "create",
+    ["pr", "create"],
+    "Validate, render, and create a governed PR.",
+    PR_CREATE_OPTIONS,
+  ),
+  command(
+    "pr.explain",
+    "pr",
+    "explain",
+    ["pr", "explain"],
+    "Explain the governance state of an existing PR.",
+    [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.get",
+    "pr",
+    "get",
+    ["pr", "get"],
+    "Project an existing PR as canonical semantic JSON.",
+    [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.check",
+    "pr",
+    "check",
+    ["pr", "check"],
+    "Check whether an existing PR is canonical and normalizable.",
+    [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.edit",
+    "pr",
+    "edit",
+    ["pr", "edit"],
+    "Apply a semantic or metadata patch to an existing PR; omitted fields and metadata are preserved. --draft is unsupported for edit and is rejected.",
+    [...REMEDIATION_OPTIONS, "title", "base", "head", "maintainerCanModify"],
+    "<number>",
+  ),
+  command(
+    "pr.normalize",
+    "pr",
+    "normalize",
+    ["pr", "normalize"],
+    "Repair an existing PR's native projection.",
+    ["help", "json", "repository", "template", "policy", "dryRun"],
+    "<number>",
+  ),
+  command(
+    "pr.sync",
+    "pr",
+    "sync",
+    ["pr", "sync"],
+    "Reconcile an existing PR to a desired semantic state.",
+    [...REMEDIATION_OPTIONS],
+    "<number>",
+  ),
+  command("template.list", "template", "list", ["template", "list"], "List discovered native and semantic templates.", [
+    "help",
+    "json",
+    "repository",
+  ]),
+  command(
+    "template.sync",
+    "template",
+    "sync",
+    ["template", "sync"],
+    "Regenerate native templates from semantic contracts.",
+    ["help", "json", "check"],
+  ),
+  command(
+    "template.import",
+    "template",
+    "import",
+    ["template", "import"],
+    "Import a native template into a semantic contract.",
+    ["help", "json", "from", "to"],
+  ),
   command("skill.index", "skill", "index", ["skill"], "List bounded operational playbooks.", ["help", "json"]),
-  command("skill.scenario", "skill", "scenario", ["skill"], "Print one bounded operational playbook.", ["help", "json"], "[scenario]"),
+  command(
+    "skill.scenario",
+    "skill",
+    "scenario",
+    ["skill"],
+    "Print one bounded operational playbook.",
+    ["help", "json"],
+    "[scenario]",
+  ),
 ] as const;
 
 const commandsById = new Map(INARI_COMMANDS.map((entry) => [entry.id, entry]));
@@ -262,7 +625,12 @@ export function tokenizeCommandArgv(argv: readonly string[]): TokenizedArgv {
       continue;
     }
     if (definition === undefined) {
-      options.push({ rawName, rawToken: token, hasEquals, ...(hasEquals ? { value: token.slice(equalIndex + 1) } : {}) });
+      options.push({
+        rawName,
+        rawToken: token,
+        hasEquals,
+        ...(hasEquals ? { value: token.slice(equalIndex + 1) } : {}),
+      });
       continue;
     }
     if (hasEquals) {
@@ -284,7 +652,10 @@ export function commandSupportsOption(commandId: CommandId, optionId: OptionId):
   return getCommand(commandId).optionIds.includes(optionId);
 }
 
-export function optionSyntax(optionDefinition: CommandOptionDefinition, repeatable = optionDefinition.repeatable): string {
+export function optionSyntax(
+  optionDefinition: CommandOptionDefinition,
+  repeatable = optionDefinition.repeatable,
+): string {
   const name = optionDefinition.aliases[0] ?? `--${optionDefinition.key}`;
   if (optionDefinition.arity === "none") return name;
   if (optionDefinition.arity === "optional") return `${name}[=${optionDefinition.placeholder ?? "value"}]`;
@@ -309,7 +680,8 @@ export function commandUsageInvocation(id: CommandId): string {
 }
 
 export function commandRecoveryInvocation(id: "issue.create" | "pr.create"): string {
-  const optionIds: readonly OptionId[] = id === "issue.create" ? ["template", "title", "field"] : ["template", "title", "head", "base", "field"];
+  const optionIds: readonly OptionId[] =
+    id === "issue.create" ? ["template", "title", "field"] : ["template", "title", "head", "base", "field"];
   const parts = optionIds.map((optionId) => {
     const optionDefinition = getOption(optionId);
     if (optionId === "title") return `${optionDefinition.aliases[0]} "<title>"`;
@@ -401,10 +773,13 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
   }
   const domain = positionals[0];
-  if (domain === "issue" || domain === "pr") return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
+  if (domain === "issue" || domain === "pr")
+    return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
   if (domain === "template") return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };
   if (domain === "skill") return { ...full, commands: full.commands.filter((entry) => entry.domain === "skill") };
-  return commandId === undefined ? { ...full, commands: [] } : { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
+  return commandId === undefined
+    ? { ...full, commands: [] }
+    : { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
 }
 
 export function commandUsage(entry: CommandDefinition): string {

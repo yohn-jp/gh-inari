@@ -32,7 +32,11 @@ export interface CliDependencies extends CoreCliDependencies {
 }
 
 function isDiagnosticRequest(argv: readonly string[]): boolean {
-  return argv.some((token) => token === "--diagnose" || token === "--doctor") || argv[0] === "diagnose" || argv[0] === "doctor";
+  return (
+    argv.some((token) => token === "--diagnose" || token === "--doctor") ||
+    argv[0] === "diagnose" ||
+    argv[0] === "doctor"
+  );
 }
 
 function runCanonicalDiagnosticCommand(args: readonly string[]): DiagnosticCommandResult {
@@ -131,7 +135,8 @@ function projectCanonicalRuntime(
     typeof (expected.invocation as Record<string, unknown> | undefined)?.canonical === "string"
       ? ((expected.invocation as Record<string, unknown>).canonical as string)
       : AGENT_INVOCATION_CONTRACT.canonical;
-  const expectedContract = typeof expected.commandContractVersion === "string" ? expected.commandContractVersion : undefined;
+  const expectedContract =
+    typeof expected.commandContractVersion === "string" ? expected.commandContractVersion : undefined;
   const requiredCapabilities = Array.isArray(expected.requiredCapabilities)
     ? expected.requiredCapabilities.filter((value): value is string => typeof value === "string")
     : [];
@@ -140,7 +145,9 @@ function projectCanonicalRuntime(
 
   const problems: string[] = [];
   if (parsed.invocation?.canonical !== expectedCanonical)
-    problems.push(`canonical invocation is ${JSON.stringify(parsed.invocation?.canonical ?? "unknown")}, expected ${JSON.stringify(expectedCanonical)}`);
+    problems.push(
+      `canonical invocation is ${JSON.stringify(parsed.invocation?.canonical ?? "unknown")}, expected ${JSON.stringify(expectedCanonical)}`,
+    );
   if (expectedContract !== undefined && parsed.commandContractVersion !== expectedContract)
     problems.push(`command contract is ${parsed.commandContractVersion ?? "unknown"}, expected ${expectedContract}`);
   if (missingCapabilities.length > 0) problems.push(`missing capability ${missingCapabilities.join(", ")}`);
@@ -170,7 +177,9 @@ function projectCanonicalRuntime(
 async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: CliDependencies): Promise<number> {
   const execute = dependencies.runCanonicalDiagnosticCommand ?? runCanonicalDiagnosticCommand;
   const canonicalProbe = execute(["--version", "--json"]);
-  const jsonArgv = argv.some((token) => token === "--json" || token === "--json=true") ? [...argv] : [...argv, "--json"];
+  const jsonArgv = argv.some((token) => token === "--json" || token === "--json=true")
+    ? [...argv]
+    : [...argv, "--json"];
   const lines: string[] = [];
   const originalLog = console.log;
   try {
@@ -190,7 +199,8 @@ async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: Cli
   if (json) console.log(JSON.stringify(output));
   else {
     console.log(`${String(output.name ?? "gh-inari")} ${String(output.version ?? "unknown")}`);
-    if (canonical.status === "ready") console.log(`${canonical.invocation}: ready (${canonical.version ?? "unknown version"})`);
+    if (canonical.status === "ready")
+      console.log(`${canonical.invocation}: ready (${canonical.version ?? "unknown version"})`);
     else {
       console.error(`${canonical.invocation}: ${canonical.detail ?? `the canonical runtime is ${canonical.status}`}`);
       console.error(`Action: ${canonical.recovery}`);

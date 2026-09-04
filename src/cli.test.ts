@@ -1051,6 +1051,21 @@ test("diagnose reports canonical runtime readiness independently from a missing 
   try {
     const exitCode = await runCli(["diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          version: "0.3.0",
+          commandContractVersion: "1.0.0",
+          capabilities: [
+            "canonical-invocation",
+            "machine-readable-version",
+            "capability-diagnostics",
+            "extension-bootstrap",
+          ],
+          invocation: { canonical: "inari" },
+        }),
+        stderr: "",
+      }),
       runDiagnosticCommand: () => ({ status: 0, stdout: "", stderr: "" }),
     });
     assert.equal(exitCode, 0);
@@ -1078,6 +1093,21 @@ test("diagnose reports stale extension capability health separately from the rea
   try {
     const exitCode = await runCli(["--diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          version: "0.3.0",
+          commandContractVersion: "1.0.0",
+          capabilities: [
+            "canonical-invocation",
+            "machine-readable-version",
+            "capability-diagnostics",
+            "extension-bootstrap",
+          ],
+          invocation: { canonical: "inari" },
+        }),
+        stderr: "",
+      }),
       runDiagnosticCommand: (args) =>
         args[0] === "extension"
           ? { status: 0, stdout: "gh inari\tyohn-jp/gh-inari\told\n", stderr: "" }
