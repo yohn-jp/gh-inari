@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -875,12 +875,18 @@ async function readInputDocument(value, parser = parseArtifactInputDocument) {
         source = await readStdin();
     else {
         try {
-            const stats = await stat(value);
-            if (stats.size > MAX_INPUT_BYTES)
-                throw inputTooLargeError(stats.size);
-            source = await readFile(value, "utf8");
-            if (Buffer.byteLength(source, "utf8") > MAX_INPUT_BYTES)
-                throw inputTooLargeError(Buffer.byteLength(source, "utf8"));
+            const handle = await open(value, "r");
+            try {
+                const stats = await handle.stat();
+                if (stats.size > MAX_INPUT_BYTES)
+                    throw inputTooLargeError(stats.size);
+                source = await handle.readFile("utf8");
+                if (Buffer.byteLength(source, "utf8") > MAX_INPUT_BYTES)
+                    throw inputTooLargeError(Buffer.byteLength(source, "utf8"));
+            }
+            finally {
+                await handle.close();
+            }
         }
         catch (cause) {
             if (cause instanceof CliError)
