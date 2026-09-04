@@ -4018,3 +4018,73 @@ test("validate excludes a default-backed field from missingFields when other req
     false,
   );
 });
+
+test("supported value-taking options before the domain cannot bypass owned routing", async () => {
+  const cases: readonly (readonly string[])[] = [
+    ["--repository", "acme/inari", "issue", "create"],
+    ["--repo=acme/inari", "issue", "create"],
+    ["-R", "acme/inari", "pr", "create"],
+    ["--template", "default", "issue", "create"],
+    ["--template=default", "pr", "create"],
+    ["--policy", "policy.yml", "issue", "create"],
+    ["--from", "input.json", "pr", "create"],
+    ["--title", "A title", "issue", "create"],
+    ["--head", "feature/example", "pr", "create"],
+    ["--base=main", "pr", "create"],
+  ];
+  for (const prefix of cases) {
+    const fallbackCalls: string[][] = [];
+    const result = await captureJson([...prefix, "--body", "raw Markdown", "--json"], {
+      runGhFallback: (argv) => (fallbackCalls.push([...argv]), 91),
+    });
+    assert.equal(result.exitCode, 1, prefix.join(" "));
+    assert.equal((result.output.error as { code?: string } | undefined)?.code, "GOVERNED_CREATE_OPTION");
+    assert.deepEqual(fallbackCalls, [], prefix.join(" "));
+  }
+
+  const afterDomainCases: readonly (readonly string[])[] = [
+    ["--repository", "acme/inari"],
+    ["--repo=acme/inari"],
+    ["-R", "acme/inari"],
+    ["--template", "default"],
+    ["--template=default"],
+    ["--policy", "policy.yml"],
+    ["--from", "input.json"],
+    ["--title", "A title"],
+    ["--head", "feature/example"],
+    ["--base=main"],
+  ];
+  for (const suffix of afterDomainCases) {
+    const domain = suffix.some((token) => token.includes("head") || token.includes("base")) ? "pr" : "issue";
+    const fallbackCalls: string[][] = [];
+    const result = await captureJson([domain, "create", ...suffix, "--body", "raw Markdown", "--json"], {
+      runGhFallback: (argv) => (fallbackCalls.push([...argv]), 91),
+    });
+    assert.equal(result.exitCode, 1, [domain, "create", ...suffix].join(" "));
+    assert.equal((result.output.error as { code?: string } | undefined)?.code, "GOVERNED_CREATE_OPTION");
+    assert.deepEqual(fallbackCalls, [], [domain, "create", ...suffix].join(" "));
+  }
+
+  const templateFallbackCalls: string[][] = [];
+  const templateResult = await captureJson(["--to=semantic.json", "template", "import", "--json"], {
+    runGhFallback: (argv) => (templateFallbackCalls.push([...argv]), 91),
+  });
+  assert.equal(templateResult.exitCode, 1);
+  assert.equal((templateResult.output.error as { code?: string } | undefined)?.code, "INPUT_REQUIRED");
+  assert.deepEqual(templateFallbackCalls, []);
+
+  const versionFallbackCalls: string[][] = [];
+  const versionResult = await captureJson(["--require-capability=canonical-invocation", "version", "--json"], {
+    runGhFallback: (argv) => (versionFallbackCalls.push([...argv]), 91),
+  });
+  assert.equal(versionResult.exitCode, 0);
+  assert.deepEqual(versionFallbackCalls, []);
+
+  const diagnoseFallbackCalls: string[][] = [];
+  const diagnoseResult = await captureJson(["--minimum-version", "999.0.0", "diagnose", "--json"], {
+    runGhFallback: (argv) => (diagnoseFallbackCalls.push([...argv]), 91),
+    runDiagnosticCommand: () => ({ status: 0, stdout: "", stderr: "" }),
+  });
+  assert.equal(diagnoseResult.exitCode, 2);
+  assert.deepEqual(diagnoseFallbackCalls, []);
+});
