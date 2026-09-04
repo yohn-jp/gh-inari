@@ -1,7 +1,11 @@
 import { type CanonicalContract, type ContractProvenance } from "./contract/ir.js";
 import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
+import { type TemplateResolverDependencies } from "./template-resolver.js";
 export type GovernedArtifactDomain = "issue" | "pr";
+export interface GovernedContractCompileOptions {
+    readonly templateResolver?: TemplateResolverDependencies;
+}
 export type GovernanceErrorCode = "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN" | "GOVERNANCE_SOURCE_UNAVAILABLE" | "GOVERNANCE_SOURCE_INVALID" | "GOVERNANCE_GENERATION_STALE" | "GOVERNANCE_BRANCH_INVALID";
 export interface GovernanceErrorDetails {
     readonly operation?: string;
@@ -34,14 +38,14 @@ export declare function rejectGovernedPolicyOverride(policyPath: string | boolea
  * this function so template, policy, and contract semantics remain owned by
  * the product compiler rather than by handwritten workflow scripts.
  */
-export declare function compileLocalGovernedContract(domain: GovernedArtifactDomain, root: string, selector?: string | TemplateSelector, policyPath?: string | boolean): Promise<CanonicalContract>;
+export declare function compileLocalGovernedContract(domain: GovernedArtifactDomain, root: string, selector?: string | TemplateSelector, policyPath?: string | boolean, options?: GovernedContractCompileOptions): Promise<CanonicalContract>;
 /** Compile every repository-native Issue Form with the shared compiler. */
 export declare function compileLocalIssueFormContracts(root: string): Promise<readonly CanonicalContract[]>;
 /**
  * Resolve and compile governance from the target repository's default branch.
  * No local repository files are consulted by this path.
  */
-export declare function compileRepositoryGovernedContract(adapter: GitHubAdapter, domain: GovernedArtifactDomain, selector?: string | TemplateSelector): Promise<CanonicalContract>;
+export declare function compileRepositoryGovernedContract(adapter: GitHubAdapter, domain: GovernedArtifactDomain, selector?: string | TemplateSelector, options?: GovernedContractCompileOptions): Promise<CanonicalContract>;
 /** One repository-native template's compilation outcome: either a usable contract or a bounded diagnostic. */
 export type CompiledTemplateOutcome = {
     readonly status: "compiled";
@@ -74,11 +78,12 @@ export declare function discoverRepositoryTemplates(adapter: GitHubAdapter): Pro
  * target repository's default branch advanced, but is not itself
  * disqualifying: it is content-equivalent, and therefore still acceptable,
  * only when every governance input the contract was compiled from (its
- * template, and its policy if one was used) is still present with the exact
- * same blob SHA. Any other outcome — a changed or removed template, a
- * changed, removed, or newly introduced policy — fails closed with a stable
- * GOVERNANCE_GENERATION_STALE error; the caller must recompile and
- * revalidate against the new generation before mutating.
+ * template, its policy if one was used, and its template-resolution config if
+ * one was used) is still present with the exact same blob SHA. Any other
+ * outcome — a changed or removed governance input, or a newly introduced
+ * policy/config — fails closed with a stable GOVERNANCE_GENERATION_STALE
+ * error; the caller must recompile and revalidate against the new generation
+ * before mutating.
  */
 export declare function verifyGovernedMutationFreshness(adapter: GitHubAdapter, provenance: ContractProvenance): Promise<void>;
 /**

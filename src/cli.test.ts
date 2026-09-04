@@ -340,7 +340,7 @@ test("issue --help prints only issue operations, not pr's", async () => {
 test("issue create --help prints that leaf's usage and an example, not the full command tree", async () => {
   const { exitCode, output } = await captureHelp(["issue", "create", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari issue create --template/);
+  assert.match(output, /Usage: inari issue create \[--template <template>\]/);
   assert.match(output, /generic array values repeat as --field name=<value>/);
   assert.match(output, /checklist values repeat as --field name=<option-id>/);
   assert.match(output, /Example:/);
@@ -351,7 +351,10 @@ test("issue create --help prints that leaf's usage and an example, not the full 
 test("pr create short help projects branch requirements and checklist field syntax", async () => {
   const { exitCode, output } = await captureHelp(["pr", "create", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari pr create --template <template> --title <title> --head <branch> --base <branch>/);
+  assert.match(
+    output,
+    /Usage: inari pr create \[--template <template>\] --title <title> --head <branch> --base <branch>/,
+  );
   assert.match(output, /generic array values repeat as --field name=<value>/);
   assert.match(output, /checklist values repeat as --field name=<option-id>/);
 });
@@ -1666,7 +1669,15 @@ test("ambiguous remote template selection fails after target resolution", async 
     assert.equal(exitCode, 2);
     assert.equal(factoryCalls, 1);
     assert.equal(transport.calls.length, 5);
-    assert.equal(JSON.parse(lines[0] ?? "{}").error.code, "TEMPLATE_SELECTION_AMBIGUOUS");
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      error?: { code?: string; details?: { candidates?: readonly string[]; recovery?: readonly unknown[] } };
+    };
+    assert.equal(output.error?.code, "TEMPLATE_RESOLUTION_AMBIGUOUS");
+    assert.deepEqual(output.error?.details?.candidates, [
+      "issue-form:.github/ISSUE_TEMPLATE/bug.yml",
+      "issue-form:.github/ISSUE_TEMPLATE/feature.yml",
+    ]);
+    assert.equal(output.error?.details?.recovery?.length, 1);
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });

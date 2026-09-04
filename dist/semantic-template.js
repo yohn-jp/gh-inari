@@ -6,6 +6,7 @@ import { stringify as stringifyYaml } from "yaml";
 import { assertCanonicalContract, MULTI_SELECT_OPTION_SEPARATOR, } from "./contract/ir.js";
 import { compileIssueFormYaml } from "./contract/issue-form.js";
 import { parsePullRequestTemplate, renderPullRequestTemplate } from "./pull-request-template.js";
+import { semanticTemplateResolutionCandidate, resolveTemplateSync, TemplateResolutionError, } from "./template-resolver.js";
 export const SEMANTIC_TEMPLATE_VERSION = 1;
 export const SEMANTIC_TEMPLATE_DIRECTORY = ".github/inari";
 export const SEMANTIC_ISSUE_DIRECTORY = ".github/inari/issues";
@@ -473,24 +474,26 @@ export function semanticSourceFromContract(contractInput) {
 }
 export function selectSemanticTemplate(identities, kind, selector) {
     const candidates = identities.filter((identity) => identity.kind === kind);
-    const matches = candidates.filter((identity) => semanticSelectorMatches(identity, selector));
-    if (matches.length === 1)
-        return matches[0];
-    if (matches.length === 0)
+    try {
+        return resolveTemplateSync({
+            candidates: candidates.map(semanticTemplateResolutionCandidate),
+            selector,
+        });
+    }
+    catch (error) {
+        if (!(error instanceof TemplateResolutionError))
+            throw error;
+        const ambiguous = error.code === "TEMPLATE_RESOLUTION_AMBIGUOUS" || error.code === "TEMPLATE_RESOLUTION_SELECTOR_AMBIGUOUS";
         throw new SemanticTemplateError([
             {
-                code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+                code: ambiguous ? "SEMANTIC_TEMPLATE_AMBIGUOUS" : "SEMANTIC_TEMPLATE_INVALID_VALUE",
                 path: "$.template",
-                message: "No semantic template matches the requested selector.",
+                message: ambiguous
+                    ? "The semantic template selector matches multiple contracts."
+                    : "No semantic template matches the requested selector.",
             },
         ]);
-    throw new SemanticTemplateError([
-        {
-            code: "SEMANTIC_TEMPLATE_AMBIGUOUS",
-            path: "$.template",
-            message: "The semantic template selector matches multiple contracts.",
-        },
-    ]);
+    }
 }
 export function semanticTemplateGeneratedPath(kind, id) {
     return kind === "issue"
@@ -854,24 +857,6 @@ async function findGeneratedFiles(root) {
             files.push(relative);
     }
     return [...new Set(files)].sort();
-}
-function semanticSelectorMatches(identity, selector) {
-    if (selector === undefined)
-        return true;
-    const defaultPullRequestName = identity.kind === "pull_request" && identity.generatedPath === PR_NATIVE_DEFAULT ? "default" : undefined;
-    if (typeof selector === "string")
-        return (selector === identity.id ||
-            selector === identity.sourcePath ||
-            selector === identity.generatedPath ||
-            selector.toLocaleLowerCase("en-US") === identity.name.toLocaleLowerCase("en-US") ||
-            selector.toLocaleLowerCase("en-US") === defaultPullRequestName);
-    return ((selector.id === undefined || selector.id === identity.id) &&
-        (selector.path === undefined ||
-            selector.path === identity.sourcePath ||
-            selector.path === identity.generatedPath) &&
-        (selector.name === undefined ||
-            selector.name.toLocaleLowerCase("en-US") === identity.name.toLocaleLowerCase("en-US") ||
-            selector.name.toLocaleLowerCase("en-US") === defaultPullRequestName));
 }
 function normalizeSection(value, pathPrefix, violations) {
     if (!isRecord(value)) {

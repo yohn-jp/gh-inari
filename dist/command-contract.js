@@ -321,7 +321,7 @@ export function commandUsage(entry) {
         .map((id) => {
         const optionDefinition = getOption(id);
         const required = ((entry.id === "issue.create" || entry.id === "pr.create") &&
-            (id === "template" || id === "title" || (entry.id === "pr.create" && (id === "head" || id === "base")))) ||
+            (id === "title" || (entry.id === "pr.create" && (id === "head" || id === "base")))) ||
             (entry.id === "template.import" && id === "from");
         const syntax = optionSyntax(optionDefinition);
         return required ? syntax : `[${syntax}]`;

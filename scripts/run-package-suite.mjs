@@ -22,6 +22,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/artifact.d.ts",
   "dist/artifact.js",
   "dist/artifact.js.map",
+  "dist/cli-core.d.ts",
+  "dist/cli-core.js",
+  "dist/cli-core.js.map",
   "dist/cli.d.ts",
   "dist/cli.js",
   "dist/cli.js.map",
@@ -103,6 +106,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/template-discovery.d.ts",
   "dist/template-discovery.js",
   "dist/template-discovery.js.map",
+  "dist/template-resolver.d.ts",
+  "dist/template-resolver.js",
+  "dist/template-resolver.js.map",
 ];
 
 const CODEX_MARKETPLACE_NAME = "gh-inari";

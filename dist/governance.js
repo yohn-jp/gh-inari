@@ -5,8 +5,9 @@ import { compileIssueFormTemplate, compileIssueFormYaml, } from "./contract/issu
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay, parsePullRequestPolicyOverlay, } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
-import { compileSemanticTemplate, compileSemanticTemplateSource, discoverSemanticTemplates, readSemanticTemplate, selectSemanticTemplate, normalizeSemanticTemplate, } from "./semantic-template.js";
-import { discoverTemplates, selectIssueTemplate, selectPullRequestTemplate, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, TemplateNotFoundError, } from "./template-discovery.js";
+import { compileSemanticTemplate, compileSemanticTemplateSource, discoverSemanticTemplates, readSemanticTemplate, normalizeSemanticTemplate, } from "./semantic-template.js";
+import { discoverTemplates, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, TemplateNotFoundError, } from "./template-discovery.js";
+import { nativeTemplateResolutionCandidate, parseTemplateResolutionConfig, readTemplateResolutionConfig, resolveTemplate, semanticTemplateResolutionCandidate, TEMPLATE_RESOLUTION_CONFIG_PATH, } from "./template-resolver.js";
 /** Stable, machine-readable failures for repository governance acquisition. */
 export class GovernanceError extends Error {
     code;
@@ -35,20 +36,39 @@ export function rejectGovernedPolicyOverride(policyPath) {
  * this function so template, policy, and contract semantics remain owned by
  * the product compiler rather than by handwritten workflow scripts.
  */
-export async function compileLocalGovernedContract(domain, root, selector, policyPath) {
+export async function compileLocalGovernedContract(domain, root, selector, policyPath, options = {}) {
     const discovery = await discoverTemplates(root);
     const semanticTemplates = await discoverSemanticTemplates(root);
     const semanticCandidates = semanticTemplates.filter((template) => template.kind === (domain === "issue" ? "issue" : "pull_request"));
+    const resolutionConfig = selector === undefined ? await readTemplateResolutionConfig(root) : undefined;
+    const configuredDefault = resolutionConfig?.defaults[domain];
     let contract;
     if (semanticCandidates.length > 0) {
-        const semanticIdentity = selectSemanticTemplate(semanticTemplates, domain === "issue" ? "issue" : "pull_request", selector);
+        const semanticIdentity = await resolveTemplate({
+            candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
+            selector,
+            configuredDefault,
+            dependencies: options.templateResolver,
+        });
         contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, semanticIdentity));
     }
     else if (domain === "issue") {
-        contract = await compileIssueFormTemplate(discovery, selector);
+        const identity = await resolveTemplate({
+            candidates: discovery.issueTemplates.map(nativeTemplateResolutionCandidate),
+            selector,
+            configuredDefault,
+            dependencies: options.templateResolver,
+        });
+        contract = await compileIssueFormTemplate(discovery, identity.id);
     }
     else {
-        contract = await compilePullRequestTemplate(root, selector);
+        const identity = await resolveTemplate({
+            candidates: discovery.pullRequestTemplates.map(nativeTemplateResolutionCandidate),
+            selector,
+            configuredDefault,
+            dependencies: options.templateResolver,
+        });
+        contract = await compilePullRequestTemplate(root, identity.id);
     }
     if (domain !== "pr")
         return contract;
@@ -87,16 +107,28 @@ async function resolveLocalPolicyPath(root, policyPath) {
  * Resolve and compile governance from the target repository's default branch.
  * No local repository files are consulted by this path.
  */
-export async function compileRepositoryGovernedContract(adapter, domain, selector) {
+export async function compileRepositoryGovernedContract(adapter, domain, selector, options = {}) {
     const source = await readRepositoryGovernanceSource(adapter);
+    const resolution = await readRepositoryTemplateResolutionConfig(adapter, source, selector === undefined);
+    const configuredDefault = resolution?.config?.defaults[domain];
     const semanticCandidates = source.semanticTemplates.filter((template) => template.kind === (domain === "issue" ? "issue" : "pull_request"));
     if (semanticCandidates.length > 0) {
-        const semanticIdentity = selectSemanticTemplate(source.semanticTemplates, domain === "issue" ? "issue" : "pull_request", selector);
-        return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity);
+        const semanticIdentity = await resolveTemplate({
+            candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
+            selector,
+            configuredDefault,
+            dependencies: options.templateResolver,
+        });
+        return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity, resolution?.source);
     }
     const { discovery } = source;
-    const selectedTemplate = domain === "issue" ? selectIssueTemplate(discovery, selector) : selectPullRequestTemplate(discovery, selector);
-    return compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, createRepositoryPolicySourceLoader(adapter, source));
+    const selectedTemplate = await resolveTemplate({
+        candidates: (domain === "issue" ? discovery.issueTemplates : discovery.pullRequestTemplates).map(nativeTemplateResolutionCandidate),
+        selector,
+        configuredDefault,
+        dependencies: options.templateResolver,
+    });
+    return compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, createRepositoryPolicySourceLoader(adapter, source), resolution?.source);
 }
 /**
  * Compile every supported native template from the target repository's
@@ -155,7 +187,7 @@ export async function compileRepositoryGovernedContracts(adapter, domain) {
     }
     return outcomes;
 }
-async function compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, policySourceLoader) {
+async function compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, policySourceLoader, templateResolutionSource) {
     const { context, ref, tree, discovery } = source;
     const templateEntry = findBlob(tree, selectedTemplate.path, context, ref);
     const templateSource = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(templateEntry.sha));
@@ -192,13 +224,14 @@ async function compileRepositoryGovernedContractFromSource(adapter, source, doma
             treeSha: source.treeSha,
             template: sourceIdentity(templateEntry, ref, templateSource),
             ...(policySource === undefined ? {} : { policy: policySource }),
+            ...(templateResolutionSource === undefined ? {} : { templateResolution: templateResolutionSource }),
             ...(branchGovernance === undefined ? {} : { branchGovernance }),
         },
     };
     assertCanonicalContract(bound);
     return bound;
 }
-async function compileRepositorySemanticContractFromSource(adapter, source, identity) {
+async function compileRepositorySemanticContractFromSource(adapter, source, identity, templateResolutionSource) {
     const { context, ref, tree, discovery } = source;
     const sourceEntry = findBlob(tree, identity.sourcePath, context, ref);
     const serialized = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(sourceEntry.sha));
@@ -240,6 +273,7 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
             treeSha: source.treeSha,
             template: sourceIdentity(nativeEntry, ref, nativeSource),
             ...(policySource === undefined ? {} : { policy: policySource }),
+            ...(templateResolutionSource === undefined ? {} : { templateResolution: templateResolutionSource }),
             ...(branchGovernance === undefined ? {} : { branchGovernance }),
         },
     };
@@ -277,11 +311,12 @@ export async function discoverRepositoryTemplates(adapter) {
  * target repository's default branch advanced, but is not itself
  * disqualifying: it is content-equivalent, and therefore still acceptable,
  * only when every governance input the contract was compiled from (its
- * template, and its policy if one was used) is still present with the exact
- * same blob SHA. Any other outcome — a changed or removed template, a
- * changed, removed, or newly introduced policy — fails closed with a stable
- * GOVERNANCE_GENERATION_STALE error; the caller must recompile and
- * revalidate against the new generation before mutating.
+ * template, its policy if one was used, and its template-resolution config if
+ * one was used) is still present with the exact same blob SHA. Any other
+ * outcome — a changed or removed governance input, or a newly introduced
+ * policy/config — fails closed with a stable GOVERNANCE_GENERATION_STALE
+ * error; the caller must recompile and revalidate against the new generation
+ * before mutating.
  */
 export async function verifyGovernedMutationFreshness(adapter, provenance) {
     const source = await readRepositoryGovernanceSource(adapter);
@@ -310,12 +345,23 @@ function assessGovernanceFreshness(source, provenance) {
         if (currentPolicyEntry !== undefined) {
             return { fresh: false, reason: "a policy governance input was introduced" };
         }
-        return { fresh: true };
     }
-    if (currentPolicyEntry === undefined ||
+    else if (currentPolicyEntry === undefined ||
         currentPolicyEntry.type !== "blob" ||
         currentPolicyEntry.sha !== provenance.policy.sha) {
         return { fresh: false, reason: "policy governance input changed" };
+    }
+    const currentTemplateResolutionEntry = findTemplateResolutionEntry(source.tree);
+    if (provenance.templateResolution === undefined) {
+        if (currentTemplateResolutionEntry !== undefined) {
+            return { fresh: false, reason: "a template resolution governance input was introduced" };
+        }
+        return { fresh: true };
+    }
+    if (currentTemplateResolutionEntry === undefined ||
+        currentTemplateResolutionEntry.type !== "blob" ||
+        currentTemplateResolutionEntry.sha !== provenance.templateResolution.sha) {
+        return { fresh: false, reason: "template resolution governance input changed" };
     }
     return { fresh: true };
 }
@@ -413,6 +459,7 @@ async function readRepositoryGovernanceSource(adapter) {
     const context = await adapter.resolveRepositoryContext();
     const ref = await readGovernedValue("repository.default_branch", context, undefined, () => adapter.getRepositoryDefaultBranch());
     const { sha: treeSha, entries: tree } = await readGovernedValue("repository.governance.tree", context, ref, () => adapter.getRepositoryTree(ref));
+    const templateResolutionEntry = findTemplateResolutionEntry(tree);
     return {
         context,
         ref,
@@ -420,7 +467,27 @@ async function readRepositoryGovernanceSource(adapter) {
         tree,
         discovery: createRemoteDiscovery(context, tree),
         semanticTemplates: createRemoteSemanticIdentities(tree),
+        ...(templateResolutionEntry === undefined ? {} : { templateResolutionEntry }),
     };
+}
+async function readRepositoryTemplateResolutionConfig(adapter, source, parseConfig) {
+    const entry = source.templateResolutionEntry;
+    if (entry === undefined)
+        return undefined;
+    if (entry.type !== "blob")
+        throw invalidSource(source.context, entry.path, "template resolution config is not a file");
+    const serialized = await readGovernedValue("repository.governance.blob", source.context, source.ref, () => adapter.getRepositoryBlob(entry.sha));
+    const sourceIdentityValue = sourceIdentity(entry, source.ref, serialized);
+    if (!parseConfig)
+        return { source: sourceIdentityValue };
+    let config;
+    try {
+        config = parseTemplateResolutionConfig(serialized, entry.path);
+    }
+    catch (error) {
+        throw invalidSource(source.context, entry.path, error instanceof Error ? error.message : "template resolution config is invalid");
+    }
+    return { config, source: sourceIdentityValue };
 }
 function createRemoteSemanticIdentities(tree) {
     const identities = [];
@@ -509,6 +576,9 @@ function findPolicy(tree) {
     if (preferred !== undefined)
         return preferred;
     return tree.find((entry) => entry.path === ".inari/pr-policy.yml");
+}
+function findTemplateResolutionEntry(tree) {
+    return tree.find((entry) => entry.path === TEMPLATE_RESOLUTION_CONFIG_PATH);
 }
 function sourceIdentity(entry, ref, content) {
     return {

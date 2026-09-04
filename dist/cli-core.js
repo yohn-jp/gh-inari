@@ -550,10 +550,12 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             rejectGovernedPolicyOverride(parsed.options.policy);
             const adapter = createAdapter(dependencies, root, parsed.options.repository);
             await adapter.resolveRepositoryContext();
-            contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
+            contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]), {
+                templateResolver: dependencies.templateResolver,
+            });
         }
         else {
-            contract = await compileLocalGovernedContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+            contract = await compileLocalGovernedContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy, { templateResolver: dependencies.templateResolver });
         }
         const projection = projectContract(contract);
         const syncInput = domain === "pr" ? projectPullRequestSyncInput(contract) : undefined;
@@ -587,10 +589,12 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
                 rejectGovernedPolicyOverride(parsed.options.policy);
                 const adapter = createAdapter(dependencies, root, parsed.options.repository);
                 await adapter.resolveRepositoryContext();
-                contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
+                contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]), {
+                    templateResolver: dependencies.templateResolver,
+                });
             }
             else {
-                contract = await compileLocalGovernedContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy);
+                contract = await compileLocalGovernedContract(domain, root, templateSelector(parsed, rest[0]), parsed.options.policy, { templateResolver: dependencies.templateResolver });
             }
             const document = await resolveArtifactInputDocument(parsed, contract);
             const preparedDocument = mergeOptionMetadata(document, parsed.options);
@@ -624,7 +628,9 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         rejectGovernedPolicyOverride(parsed.options.policy);
         const adapter = createAdapter(dependencies, root, parsed.options.repository);
         await adapter.resolveRepositoryContext();
-        const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]));
+        const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]), {
+            templateResolver: dependencies.templateResolver,
+        });
         const document = await resolveArtifactInputDocument(parsed, contract);
         const preparedDocument = mergeOptionMetadata(document, parsed.options);
         if (domain === "issue") {

@@ -33,14 +33,11 @@ import {
   compileSemanticTemplateSource,
   discoverSemanticTemplates,
   readSemanticTemplate,
-  selectSemanticTemplate,
   normalizeSemanticTemplate,
   type SemanticTemplateIdentity,
 } from "./semantic-template.js";
 import {
   discoverTemplates,
-  selectIssueTemplate,
-  selectPullRequestTemplate,
   discoverTemplatesFromPaths,
   classifyTemplatePath,
   isTemplateContainerPath,
@@ -49,8 +46,21 @@ import {
   type TemplateDiscoveryResult,
   type TemplateSelector,
 } from "./template-discovery.js";
+import {
+  nativeTemplateResolutionCandidate,
+  parseTemplateResolutionConfig,
+  readTemplateResolutionConfig,
+  resolveTemplate,
+  semanticTemplateResolutionCandidate,
+  TEMPLATE_RESOLUTION_CONFIG_PATH,
+  type TemplateResolverDependencies,
+} from "./template-resolver.js";
 
 export type GovernedArtifactDomain = "issue" | "pr";
+
+export interface GovernedContractCompileOptions {
+  readonly templateResolver?: TemplateResolverDependencies;
+}
 
 export type GovernanceErrorCode =
   | "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN"
@@ -115,24 +125,40 @@ export async function compileLocalGovernedContract(
   root: string,
   selector?: string | TemplateSelector,
   policyPath?: string | boolean,
+  options: GovernedContractCompileOptions = {},
 ): Promise<CanonicalContract> {
   const discovery = await discoverTemplates(root);
   const semanticTemplates = await discoverSemanticTemplates(root);
   const semanticCandidates = semanticTemplates.filter(
     (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
   );
+  const resolutionConfig = selector === undefined ? await readTemplateResolutionConfig(root) : undefined;
+  const configuredDefault = resolutionConfig?.defaults[domain];
   let contract: CanonicalContract;
   if (semanticCandidates.length > 0) {
-    const semanticIdentity = selectSemanticTemplate(
-      semanticTemplates,
-      domain === "issue" ? "issue" : "pull_request",
+    const semanticIdentity = await resolveTemplate({
+      candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
       selector,
-    );
+      configuredDefault,
+      dependencies: options.templateResolver,
+    });
     contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, semanticIdentity));
   } else if (domain === "issue") {
-    contract = await compileIssueFormTemplate(discovery, selector);
+    const identity = await resolveTemplate({
+      candidates: discovery.issueTemplates.map(nativeTemplateResolutionCandidate),
+      selector,
+      configuredDefault,
+      dependencies: options.templateResolver,
+    });
+    contract = await compileIssueFormTemplate(discovery, identity.id);
   } else {
-    contract = await compilePullRequestTemplate(root, selector);
+    const identity = await resolveTemplate({
+      candidates: discovery.pullRequestTemplates.map(nativeTemplateResolutionCandidate),
+      selector,
+      configuredDefault,
+      dependencies: options.templateResolver,
+    });
+    contract = await compilePullRequestTemplate(root, identity.id);
   }
   if (domain !== "pr") return contract;
 
@@ -182,28 +208,39 @@ export async function compileRepositoryGovernedContract(
   adapter: GitHubAdapter,
   domain: GovernedArtifactDomain,
   selector?: string | TemplateSelector,
+  options: GovernedContractCompileOptions = {},
 ): Promise<CanonicalContract> {
   const source = await readRepositoryGovernanceSource(adapter);
+  const resolution = await readRepositoryTemplateResolutionConfig(adapter, source, selector === undefined);
+  const configuredDefault = resolution?.config?.defaults[domain];
   const semanticCandidates = source.semanticTemplates.filter(
     (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
   );
   if (semanticCandidates.length > 0) {
-    const semanticIdentity = selectSemanticTemplate(
-      source.semanticTemplates,
-      domain === "issue" ? "issue" : "pull_request",
+    const semanticIdentity = await resolveTemplate({
+      candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
       selector,
-    );
-    return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity);
+      configuredDefault,
+      dependencies: options.templateResolver,
+    });
+    return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity, resolution?.source);
   }
   const { discovery } = source;
-  const selectedTemplate =
-    domain === "issue" ? selectIssueTemplate(discovery, selector) : selectPullRequestTemplate(discovery, selector);
+  const selectedTemplate = await resolveTemplate({
+    candidates: (domain === "issue" ? discovery.issueTemplates : discovery.pullRequestTemplates).map(
+      nativeTemplateResolutionCandidate,
+    ),
+    selector,
+    configuredDefault,
+    dependencies: options.templateResolver,
+  });
   return compileRepositoryGovernedContractFromSource(
     adapter,
     source,
     domain,
     selectedTemplate,
     createRepositoryPolicySourceLoader(adapter, source),
+    resolution?.source,
   );
 }
 
@@ -285,6 +322,7 @@ async function compileRepositoryGovernedContractFromSource(
   domain: GovernedArtifactDomain,
   selectedTemplate: TemplateDiscoveryResult["templates"][number],
   policySourceLoader: () => Promise<RepositoryPolicySource | undefined>,
+  templateResolutionSource?: ContractProvenanceSource,
 ): Promise<CanonicalContract> {
   const { context, ref, tree, discovery } = source;
   const templateEntry = findBlob(tree, selectedTemplate.path, context, ref);
@@ -326,6 +364,7 @@ async function compileRepositoryGovernedContractFromSource(
       treeSha: source.treeSha,
       template: sourceIdentity(templateEntry, ref, templateSource),
       ...(policySource === undefined ? {} : { policy: policySource }),
+      ...(templateResolutionSource === undefined ? {} : { templateResolution: templateResolutionSource }),
       ...(branchGovernance === undefined ? {} : { branchGovernance }),
     },
   };
@@ -337,6 +376,7 @@ async function compileRepositorySemanticContractFromSource(
   adapter: GitHubAdapter,
   source: RepositoryGovernanceSource,
   identity: SemanticTemplateIdentity,
+  templateResolutionSource?: ContractProvenanceSource,
 ): Promise<CanonicalContract> {
   const { context, ref, tree, discovery } = source;
   const sourceEntry = findBlob(tree, identity.sourcePath, context, ref);
@@ -386,6 +426,7 @@ async function compileRepositorySemanticContractFromSource(
       treeSha: source.treeSha,
       template: sourceIdentity(nativeEntry, ref, nativeSource),
       ...(policySource === undefined ? {} : { policy: policySource }),
+      ...(templateResolutionSource === undefined ? {} : { templateResolution: templateResolutionSource }),
       ...(branchGovernance === undefined ? {} : { branchGovernance }),
     },
   };
@@ -438,11 +479,12 @@ export async function discoverRepositoryTemplates(adapter: GitHubAdapter): Promi
  * target repository's default branch advanced, but is not itself
  * disqualifying: it is content-equivalent, and therefore still acceptable,
  * only when every governance input the contract was compiled from (its
- * template, and its policy if one was used) is still present with the exact
- * same blob SHA. Any other outcome — a changed or removed template, a
- * changed, removed, or newly introduced policy — fails closed with a stable
- * GOVERNANCE_GENERATION_STALE error; the caller must recompile and
- * revalidate against the new generation before mutating.
+ * template, its policy if one was used, and its template-resolution config if
+ * one was used) is still present with the exact same blob SHA. Any other
+ * outcome — a changed or removed governance input, or a newly introduced
+ * policy/config — fails closed with a stable GOVERNANCE_GENERATION_STALE
+ * error; the caller must recompile and revalidate against the new generation
+ * before mutating.
  */
 export async function verifyGovernedMutationFreshness(
   adapter: GitHubAdapter,
@@ -479,14 +521,26 @@ function assessGovernanceFreshness(
     if (currentPolicyEntry !== undefined) {
       return { fresh: false, reason: "a policy governance input was introduced" };
     }
-    return { fresh: true };
-  }
-  if (
+  } else if (
     currentPolicyEntry === undefined ||
     currentPolicyEntry.type !== "blob" ||
     currentPolicyEntry.sha !== provenance.policy.sha
   ) {
     return { fresh: false, reason: "policy governance input changed" };
+  }
+  const currentTemplateResolutionEntry = findTemplateResolutionEntry(source.tree);
+  if (provenance.templateResolution === undefined) {
+    if (currentTemplateResolutionEntry !== undefined) {
+      return { fresh: false, reason: "a template resolution governance input was introduced" };
+    }
+    return { fresh: true };
+  }
+  if (
+    currentTemplateResolutionEntry === undefined ||
+    currentTemplateResolutionEntry.type !== "blob" ||
+    currentTemplateResolutionEntry.sha !== provenance.templateResolution.sha
+  ) {
+    return { fresh: false, reason: "template resolution governance input changed" };
   }
   return { fresh: true };
 }
@@ -650,6 +704,7 @@ interface RepositoryGovernanceSource {
   readonly tree: readonly RepositoryTreeEntry[];
   readonly discovery: TemplateDiscoveryResult;
   readonly semanticTemplates: readonly SemanticTemplateIdentity[];
+  readonly templateResolutionEntry?: RepositoryTreeEntry;
 }
 
 async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<RepositoryGovernanceSource> {
@@ -660,6 +715,7 @@ async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<R
   const { sha: treeSha, entries: tree } = await readGovernedValue("repository.governance.tree", context, ref, () =>
     adapter.getRepositoryTree(ref),
   );
+  const templateResolutionEntry = findTemplateResolutionEntry(tree);
   return {
     context,
     ref,
@@ -667,7 +723,40 @@ async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<R
     tree,
     discovery: createRemoteDiscovery(context, tree),
     semanticTemplates: createRemoteSemanticIdentities(tree),
+    ...(templateResolutionEntry === undefined ? {} : { templateResolutionEntry }),
   };
+}
+
+interface RepositoryTemplateResolutionSource {
+  readonly config?: import("./template-resolver.js").TemplateResolutionConfig;
+  readonly source: ContractProvenanceSource;
+}
+
+async function readRepositoryTemplateResolutionConfig(
+  adapter: GitHubAdapter,
+  source: RepositoryGovernanceSource,
+  parseConfig: boolean,
+): Promise<RepositoryTemplateResolutionSource | undefined> {
+  const entry = source.templateResolutionEntry;
+  if (entry === undefined) return undefined;
+  if (entry.type !== "blob")
+    throw invalidSource(source.context, entry.path, "template resolution config is not a file");
+  const serialized = await readGovernedValue("repository.governance.blob", source.context, source.ref, () =>
+    adapter.getRepositoryBlob(entry.sha),
+  );
+  const sourceIdentityValue = sourceIdentity(entry, source.ref, serialized);
+  if (!parseConfig) return { source: sourceIdentityValue };
+  let config;
+  try {
+    config = parseTemplateResolutionConfig(serialized, entry.path);
+  } catch (error: unknown) {
+    throw invalidSource(
+      source.context,
+      entry.path,
+      error instanceof Error ? error.message : "template resolution config is invalid",
+    );
+  }
+  return { config, source: sourceIdentityValue };
 }
 
 function createRemoteSemanticIdentities(tree: readonly RepositoryTreeEntry[]): readonly SemanticTemplateIdentity[] {
@@ -766,6 +855,10 @@ function findPolicy(tree: readonly RepositoryTreeEntry[]): RepositoryTreeEntry |
   const preferred = tree.find((entry) => entry.path === ".github/inari/pr-policy.yml");
   if (preferred !== undefined) return preferred;
   return tree.find((entry) => entry.path === ".inari/pr-policy.yml");
+}
+
+function findTemplateResolutionEntry(tree: readonly RepositoryTreeEntry[]): RepositoryTreeEntry | undefined {
+  return tree.find((entry) => entry.path === TEMPLATE_RESOLUTION_CONFIG_PATH);
 }
 
 function sourceIdentity(entry: RepositoryTreeEntry, ref: string, content: string): ContractProvenanceSource {

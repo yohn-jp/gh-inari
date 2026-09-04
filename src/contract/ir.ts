@@ -79,6 +79,8 @@ export interface ContractProvenance {
   readonly treeSha: string;
   readonly template: ContractProvenanceSource;
   readonly policy?: ContractProvenanceSource;
+  /** Template selection configuration observed at compile time; defaults apply only when the selector is omitted. */
+  readonly templateResolution?: ContractProvenanceSource;
   /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
   readonly branchGovernance?: PullRequestBranchGovernance;
 }
@@ -453,7 +455,7 @@ function validateProvenance(
   }
   checkUnknownKeys(
     value,
-    ["authority", "repository", "ref", "treeSha", "template", "policy", "branchGovernance"],
+    ["authority", "repository", "ref", "treeSha", "template", "policy", "templateResolution", "branchGovernance"],
     path,
     violations,
   );
@@ -521,6 +523,9 @@ function validateProvenance(
       );
     }
     validateProvenanceSource(value.policy, `${path}.policy`, ref, violations);
+  }
+  if (hasOwn(value, "templateResolution")) {
+    validateProvenanceSource(value.templateResolution, `${path}.templateResolution`, ref, violations);
   }
   if (hasOwn(value, "branchGovernance")) {
     if (artifactKind !== "pull_request") {
@@ -1988,6 +1993,9 @@ function canonicalizeProvenance(provenance: ContractProvenance): UnknownRecord {
     treeSha: provenance.treeSha,
     template: source(provenance.template),
     ...(provenance.policy === undefined ? {} : { policy: source(provenance.policy) }),
+    ...(provenance.templateResolution === undefined
+      ? {}
+      : { templateResolution: source(provenance.templateResolution) }),
   };
 }
 

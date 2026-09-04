@@ -1,4 +1,5 @@
 import { GitHubAdapter } from "./github/index.js";
+import type { TemplateResolverDependencies } from "./template-resolver.js";
 interface PackageMetadata {
     readonly name: string;
     readonly version: string;
@@ -16,6 +17,7 @@ export interface CliDependencies {
     readonly packageMetadata?: PackageMetadata;
     readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
     readonly runGhFallback?: (argv: readonly string[]) => number;
+    readonly templateResolver?: TemplateResolverDependencies;
 }
 /** The installed gh-inari executable entrypoint. */
 export declare function runCli(argv: string[], dependencies?: CliDependencies): Promise<number>;
