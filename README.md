@@ -90,8 +90,10 @@ recovery command. The current capability identifiers are
 `canonical-invocation`, `machine-readable-version`, `capability-diagnostics`,
 and `extension-bootstrap`.
 
-The `inari`, `gh-inari`, and `gh inari` invocation forms are behaviorally
-identical:
+The `inari` executable is canonical. The direct package executable
+`gh-inari` and the `gh inari` extension form are compatibility paths with the
+same governed command semantics; prefer `inari` for agent and human-facing
+commands:
 
 ```bash
 inari issue schema feature --json

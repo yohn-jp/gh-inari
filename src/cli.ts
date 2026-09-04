@@ -118,6 +118,7 @@ interface RuntimeInfo {
   readonly capabilities: readonly string[];
   readonly invocation: {
     readonly canonical: string;
+    readonly compatibility: string;
     readonly direct: string;
     readonly fallback: string;
   };
@@ -130,7 +131,7 @@ interface DiagnosticCommandResult {
   readonly error?: string;
 }
 
-interface CanonicalDiagnostic {
+interface RuntimeDiagnostic {
   readonly status: "ready" | "missing" | "stale" | "unavailable";
   readonly version?: string;
   readonly capabilities?: readonly string[];
@@ -304,30 +305,33 @@ function runDiagnostic(
 ): number {
   const info = runtimeInfo(metadata);
   const requirements = runtimeRequirements(options, true);
-  const canonical = probeCanonicalExtension(requirements, dependencies.runDiagnosticCommand);
+  const canonical = diagnoseCanonicalRuntime(info, requirements);
+  const compatibility = probeCompatibilityExtension(requirements, dependencies.runDiagnosticCommand);
   const ok = canonical.status === "ready";
   const output = {
     ok,
     ...info,
     requiredCapabilities: requirements.capabilities,
     ...(requirements.minimumVersion === undefined ? {} : { minimumVersion: requirements.minimumVersion }),
-    canonical: {
-      invocation: CANONICAL_INVOCATION,
-      status: canonical.status,
-      ...(canonical.version === undefined ? {} : { version: canonical.version }),
-      ...(canonical.capabilities === undefined ? {} : { capabilities: canonical.capabilities }),
-      ...(canonical.missingCapabilities === undefined ? {} : { missingCapabilities: canonical.missingCapabilities }),
-      ...(canonical.detail === undefined ? {} : { detail: canonical.detail }),
-      recovery: canonical.recovery,
-    },
+    canonical: projectRuntimeDiagnostic(CANONICAL_INVOCATION, canonical),
+    compatibility: projectRuntimeDiagnostic(AGENT_INVOCATION_CONTRACT.compatibility, compatibility, "extension"),
   };
   if (json) console.log(JSON.stringify(output));
   else {
     console.log(`${metadata.name} ${metadata.version}`);
     if (ok) console.log(`${CANONICAL_INVOCATION}: ready (${canonical.version ?? "unknown version"})`);
     else {
-      console.error(`gh-inari: ${canonicalDiagnosticMessage(canonical)}`);
+      console.error(`${CANONICAL_INVOCATION}: ${runtimeDiagnosticMessage(canonical, "canonical runtime")}`);
       console.error(`Action: ${canonical.recovery}`);
+    }
+    if (compatibility.status !== "ready") {
+      console.error(
+        `${AGENT_INVOCATION_CONTRACT.compatibility} (compatibility): ${runtimeDiagnosticMessage(
+          compatibility,
+          "extension",
+        )}`,
+      );
+      console.error(`Action: ${compatibility.recovery}`);
     }
   }
   return ok ? 0 : EXIT_VALIDATION;
@@ -342,7 +346,8 @@ function runtimeInfo(metadata: PackageMetadata): RuntimeInfo {
     capabilities: [...RUNTIME_CAPABILITIES],
     invocation: {
       canonical: CANONICAL_INVOCATION,
-      direct: "gh-inari",
+      compatibility: AGENT_INVOCATION_CONTRACT.compatibility,
+      direct: AGENT_INVOCATION_CONTRACT.direct,
       fallback: FALLBACK_COMMAND,
     },
   };
@@ -374,10 +379,31 @@ function runtimeRequirements(
   };
 }
 
-function probeCanonicalExtension(
+function diagnoseCanonicalRuntime(
+  info: RuntimeInfo,
+  requirements: { readonly capabilities: readonly string[]; readonly minimumVersion?: string },
+): RuntimeDiagnostic {
+  const missingCapabilities = requirements.capabilities.filter((capability) => !info.capabilities.includes(capability));
+  if (
+    missingCapabilities.length > 0 ||
+    (requirements.minimumVersion !== undefined && !versionAtLeast(info.version, requirements.minimumVersion))
+  ) {
+    return {
+      status: "stale",
+      version: info.version,
+      capabilities: info.capabilities,
+      ...(missingCapabilities.length === 0 ? {} : { missingCapabilities }),
+      detail: runtimeRequirementMessage(info, missingCapabilities, requirements.minimumVersion),
+      recovery: FALLBACK_COMMAND,
+    };
+  }
+  return { status: "ready", version: info.version, capabilities: info.capabilities, recovery: FALLBACK_COMMAND };
+}
+
+function probeCompatibilityExtension(
   requirements: { readonly capabilities: readonly string[]; readonly minimumVersion?: string },
   runCommand: CliDependencies["runDiagnosticCommand"],
-): CanonicalDiagnostic {
+): RuntimeDiagnostic {
   const execute = runCommand ?? runGhDiagnosticCommand;
   const list = execute(["extension", "list"]);
   if (list.status !== 0) {
@@ -420,6 +446,24 @@ function probeCanonicalExtension(
       version: parsed.version,
       capabilities: parsed.capabilities,
       detail: `the installed extension uses diagnostic protocol ${parsed.protocol}; expected ${DIAGNOSTIC_PROTOCOL_VERSION}`,
+      recovery: UPDATE_COMMAND,
+    };
+  }
+  if (parsed.invocation.canonical !== CANONICAL_INVOCATION) {
+    return {
+      status: "stale",
+      version: parsed.version,
+      capabilities: parsed.capabilities,
+      detail: `the installed extension reports "${parsed.invocation.canonical}" as canonical; expected "${CANONICAL_INVOCATION}"`,
+      recovery: UPDATE_COMMAND,
+    };
+  }
+  if (parsed.commandContractVersion !== COMMAND_CONTRACT_VERSION) {
+    return {
+      status: "stale",
+      version: parsed.version,
+      capabilities: parsed.capabilities,
+      detail: `the installed extension uses command contract ${parsed.commandContractVersion ?? "unknown"}; expected ${COMMAND_CONTRACT_VERSION}`,
       recovery: UPDATE_COMMAND,
     };
   }
@@ -515,11 +559,28 @@ function runtimeRequirementMessage(
   return requirements.length === 0 ? "runtime requirements are not satisfied" : requirements.join("; ");
 }
 
-function canonicalDiagnosticMessage(diagnostic: CanonicalDiagnostic): string {
-  if (diagnostic.status === "missing") return "the canonical gh extension is not installed";
+function projectRuntimeDiagnostic(
+  invocation: string,
+  diagnostic: RuntimeDiagnostic,
+  kind?: "extension",
+): Record<string, unknown> {
+  return {
+    invocation,
+    ...(kind === undefined ? {} : { kind }),
+    status: diagnostic.status,
+    ...(diagnostic.version === undefined ? {} : { version: diagnostic.version }),
+    ...(diagnostic.capabilities === undefined ? {} : { capabilities: diagnostic.capabilities }),
+    ...(diagnostic.missingCapabilities === undefined ? {} : { missingCapabilities: diagnostic.missingCapabilities }),
+    ...(diagnostic.detail === undefined ? {} : { detail: diagnostic.detail }),
+    recovery: diagnostic.recovery,
+  };
+}
+
+function runtimeDiagnosticMessage(diagnostic: RuntimeDiagnostic, subject: string): string {
+  if (diagnostic.status === "missing") return `the ${subject} is not installed`;
   if (diagnostic.status === "unavailable") return diagnostic.detail ?? "the GitHub CLI could not be executed";
-  if (diagnostic.status === "stale") return diagnostic.detail ?? "the installed gh extension is stale";
-  return "the canonical gh extension is ready";
+  if (diagnostic.status === "stale") return diagnostic.detail ?? `the ${subject} is stale`;
+  return `the ${subject} is ready`;
 }
 
 function diagnosticProcessDetail(result: DiagnosticCommandResult): string {
