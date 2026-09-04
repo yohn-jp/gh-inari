@@ -1018,8 +1018,10 @@ test("machine-readable version reports the invocation contract and capabilities"
     assert.equal(output.name, "gh-inari");
     assert.equal(output.version, "0.3.0");
     assert.equal(output.protocol, 1);
+    assert.equal(output.commandContractVersion, "1.0.0");
     assert.deepEqual(output.invocation, {
       canonical: "inari",
+      compatibility: "gh inari",
       direct: "gh-inari",
       fallback: "npx --yes gh-inari",
     });
@@ -1034,35 +1036,70 @@ test("machine-readable version reports the invocation contract and capabilities"
   }
 });
 
-test("diagnose reports a missing canonical extension with one install command", async () => {
+test("diagnose reports canonical runtime readiness independently from a missing extension", async () => {
   const lines: string[] = [];
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          version: "0.3.0",
+          commandContractVersion: "1.0.0",
+          capabilities: [
+            "canonical-invocation",
+            "machine-readable-version",
+            "capability-diagnostics",
+            "extension-bootstrap",
+          ],
+          invocation: { canonical: "inari" },
+        }),
+        stderr: "",
+      }),
       runDiagnosticCommand: () => ({ status: 0, stdout: "", stderr: "" }),
     });
-    assert.equal(exitCode, 2);
+    assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as {
       ok?: boolean;
-      canonical?: { status?: string; recovery?: string };
+      canonical?: { invocation?: string; status?: string; recovery?: string };
+      compatibility?: { invocation?: string; kind?: string; status?: string; recovery?: string };
     };
-    assert.equal(output.ok, false);
-    assert.equal(output.canonical?.status, "missing");
-    assert.equal(output.canonical?.recovery, "gh extension install yohn-jp/gh-inari");
+    assert.equal(output.ok, true);
+    assert.equal(output.canonical?.invocation, "inari");
+    assert.equal(output.canonical?.status, "ready");
+    assert.equal(output.compatibility?.invocation, "gh inari");
+    assert.equal(output.compatibility?.kind, "extension");
+    assert.equal(output.compatibility?.status, "missing");
+    assert.equal(output.compatibility?.recovery, "gh extension install yohn-jp/gh-inari");
   } finally {
     console.log = originalLog;
   }
 });
 
-test("diagnose rejects a stale extension when its capability contract is incomplete", async () => {
+test("diagnose reports stale extension capability health separately from the ready canonical runtime", async () => {
   const lines: string[] = [];
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["--diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          version: "0.3.0",
+          commandContractVersion: "1.0.0",
+          capabilities: [
+            "canonical-invocation",
+            "machine-readable-version",
+            "capability-diagnostics",
+            "extension-bootstrap",
+          ],
+          invocation: { canonical: "inari" },
+        }),
+        stderr: "",
+      }),
       runDiagnosticCommand: (args) =>
         args[0] === "extension"
           ? { status: 0, stdout: "gh inari\tyohn-jp/gh-inari\told\n", stderr: "" }
@@ -1073,21 +1110,24 @@ test("diagnose rejects a stale extension when its capability contract is incompl
                 name: "gh-inari",
                 version: "0.2.0",
                 protocol: 1,
+                commandContractVersion: "1.0.0",
                 capabilities: ["canonical-invocation"],
-                invocation: { canonical: "gh inari", direct: "gh-inari", fallback: "npx --yes gh-inari" },
+                invocation: { canonical: "inari", direct: "gh-inari", fallback: "npx --yes gh-inari" },
               }),
               stderr: "",
             },
     });
-    assert.equal(exitCode, 2);
+    assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as {
       ok?: boolean;
-      canonical?: { status?: string; recovery?: string; missingCapabilities?: string[] };
+      canonical?: { status?: string; recovery?: string };
+      compatibility?: { status?: string; recovery?: string; missingCapabilities?: string[] };
     };
-    assert.equal(output.ok, false);
-    assert.equal(output.canonical?.status, "stale");
-    assert.equal(output.canonical?.recovery, "gh extension upgrade inari");
-    assert.deepEqual(output.canonical?.missingCapabilities, [
+    assert.equal(output.ok, true);
+    assert.equal(output.canonical?.status, "ready");
+    assert.equal(output.compatibility?.status, "stale");
+    assert.equal(output.compatibility?.recovery, "gh extension upgrade inari");
+    assert.deepEqual(output.compatibility?.missingCapabilities, [
       "machine-readable-version",
       "capability-diagnostics",
       "extension-bootstrap",
