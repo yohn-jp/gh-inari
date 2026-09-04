@@ -1067,14 +1067,15 @@ test("governed default PR rendering preserves policy-constrained values", async 
   const policy = readFileSync(new URL("../.github/inari/pr-policy.yml", import.meta.url), "utf8");
   const contract = compilePullRequestPolicyOverlay(native, policy);
   const schema = projectToJsonSchema(contract);
-  assert.equal(schema.properties.summary?.minLength, 10);
+  assert.equal(schema.properties.summary?.minLength, undefined);
   assert.equal(schema.properties.linked_issue?.pattern, LINKED_ISSUE_PATTERN);
-  assert.equal(schema.required?.includes("validation"), true);
+  assert.equal(schema.required?.includes("validation"), false);
 
   const input = {
     summary: "A governed summary",
     linked_issue: "Closes #125",
-    validation: "pnpm test",
+    changes: "The governed implementation and behavioral changes",
+    validation: ["typecheck", "tests", "build"],
   };
   const body = renderPullRequestArtifact(contract, input);
   const parsed = parseExistingPullRequestArtifact(contract, body);
@@ -1095,7 +1096,7 @@ test("PR placeholder-only sections reconstruct as omitted semantic values", asyn
   const body = renderPullRequestArtifact(nativeContract, {
     summary: "A deterministic summary",
     linked_issue: "Closes #22",
-    validation: "pnpm test",
+    validation: ["tests"],
   });
   const parsed = parseExistingPullRequestArtifact(nativeContract, body);
   assert.equal(parsed.parsed, true);
