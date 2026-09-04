@@ -341,9 +341,17 @@ test("issue create --help prints that leaf's usage and an example, not the full 
   const { exitCode, output } = await captureHelp(["issue", "create", "--help"]);
   assert.equal(exitCode, 0);
   assert.match(output, /Usage: inari issue create --template/);
+  assert.match(output, /Checklist fields use repeated --field name=<option-id>/);
   assert.match(output, /Example:/);
   assert.doesNotMatch(output, /pr create/);
   assert.doesNotMatch(output, /issue normalize/);
+});
+
+test("pr create short help projects branch requirements and checklist field syntax", async () => {
+  const { exitCode, output } = await captureHelp(["pr", "create", "--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari pr create --template <template> --title <title> --head <branch> --base <branch>/);
+  assert.match(output, /Checklist fields use repeated --field name=<option-id>/);
 });
 
 test("template import --help prints that leaf's usage", async () => {
@@ -3943,6 +3951,13 @@ test("schema's directFields projection matches accepted --field names, types, an
     required: false,
     repeatable: true,
     cliSyntax: "--field areas=<value> (repeatable)",
+  });
+  assert.deepEqual(byName.get("acceptance"), {
+    name: "acceptance",
+    type: "array",
+    required: true,
+    repeatable: true,
+    cliSyntax: "--field acceptance=<option-id> (repeatable)",
   });
 
   // The projection is not just documentation: build the exact --field args it describes

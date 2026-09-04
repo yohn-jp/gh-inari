@@ -564,7 +564,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "issue",
     "create",
     ["issue", "create"],
-    "Validate, render, and create a governed Issue.",
+    "Validate, render, and create a governed Issue. Checklist fields use repeated --field name=<option-id> values projected by the selected artifact contract.",
     ISSUE_CREATE_OPTIONS,
   ),
   command(
@@ -647,7 +647,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "pr",
     "create",
     ["pr", "create"],
-    "Validate, render, and create a governed PR. Checklist and array fields use repeated --field name=<option-id> values projected by the selected artifact contract.",
+    "Validate, render, and create a governed PR. Checklist fields use repeated --field name=<option-id> values; array fields use repeated --field name=<value> values, all projected by the selected artifact contract.",
     PR_CREATE_OPTIONS,
   ),
   command(
@@ -726,10 +726,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["help", "json", "from", "to"],
   ),
   command("skill.index", "skill", "index", ["skill"], "List bounded operational playbooks.", ["help", "json"]),
-  command("skill.scenario", "skill", "scenario", ["skill"], "Print one bounded operational playbook.", [
-    "help",
-    "json",
-  ]),
+  command(
+    "skill.scenario",
+    "skill",
+    "scenario",
+    ["skill"],
+    "Print one bounded operational playbook.",
+    ["help", "json"],
+    "[scenario]",
+  ),
 ] as const;
 
 const commandsById = new Map(INARI_COMMANDS.map((entry) => [entry.id, entry]));
@@ -745,6 +750,7 @@ export function getCommand(id: CommandId): CommandDefinition {
 }
 
 export function getCommandForPositionals(positionals: readonly string[]): CommandDefinition | undefined {
+  if (positionals[0] === "skill" && positionals.length > 1) return getCommand("skill.scenario");
   const exact = INARI_COMMANDS.find(
     (entry) => entry.path.length > 0 && entry.path.every((part, index) => positionals[index] === part),
   );

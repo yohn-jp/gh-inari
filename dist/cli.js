@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ArtifactInputError, ArtifactPreparationError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
-import { projectContract, SemanticValidationError } from "./contract/index.js";
+import { effectiveFieldConstraints, projectContract, SemanticValidationError, } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import { assertPullRequestSyncInputComplete, parsePullRequestSyncInput, projectPullRequestSyncInput, renderPullRequestSyncInputHelp, } from "./pr-sync-input.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
@@ -1010,18 +1010,22 @@ function fieldUnsupportedCommandError(positionals) {
  * each other or from the selected canonical contract.
  */
 function projectDirectFieldUsage(contract) {
-    const schema = projectContract(contract).schema;
-    const required = new Set(schema.required ?? []);
-    return Object.keys(schema.properties)
-        .sort(compareStrings)
-        .map((name) => {
-        const repeatable = schema.properties[name]?.type === "array";
+    return contract.sections
+        .flatMap((section) => section.fields)
+        .sort((left, right) => compareStrings(left.id, right.id))
+        .map((field) => {
+        const repeatable = field.type === "array" || field.type === "checklist";
+        const required = effectiveFieldConstraints(contract, field).required;
         return {
-            name,
+            name: field.id,
             type: repeatable ? "array" : "string",
-            required: required.has(name),
+            required,
             repeatable,
-            cliSyntax: repeatable ? `--field ${name}=<value> (repeatable)` : `--field ${name}=<value>`,
+            cliSyntax: field.type === "checklist"
+                ? `--field ${field.id}=<option-id> (repeatable)`
+                : repeatable
+                    ? `--field ${field.id}=<value> (repeatable)`
+                    : `--field ${field.id}=<value>`,
         };
     });
 }
