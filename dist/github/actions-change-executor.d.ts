@@ -69,7 +69,8 @@ export interface GitHubActionsEvidenceReaderOptions {
         readonly repositoryId: string;
         readonly rootIssue: number;
     };
-    readonly branchGovernance: PullRequestBranchGovernance;
+    /** Absent when the repository's PR policy declares no branch rule; the canonical branch grammar still applies. */
+    readonly branchGovernance?: PullRequestBranchGovernance;
     readonly transport: GitHubChangeEffectTransport;
     /** Trusted checkout containing the repository's default-branch governance. */
     readonly cwd?: string;
@@ -101,7 +102,7 @@ export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenc
     private readPullRequests;
     private request;
 }
-export declare function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance>;
+export declare function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance | undefined>;
 export interface GitHubActionsRuntimeOptions {
     readonly cwd: string;
     readonly request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest;

@@ -562,10 +562,9 @@ export function deriveCanonicalBranchIdentity(input) {
         identity = validateCanonicalBranchChangeIdentity(input.change, diagnostics);
     }
     let governance;
-    if (!hasOwn(input, "branchGovernance")) {
-        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.branchGovernance", "Property is required.");
-    }
-    else {
+    let governanceProvided = false;
+    if (hasOwn(input, "branchGovernance") && input.branchGovernance !== undefined) {
+        governanceProvided = true;
         governance = validateCanonicalBranchGovernance(input.branchGovernance, diagnostics);
     }
     let naming;
@@ -575,7 +574,10 @@ export function deriveCanonicalBranchIdentity(input) {
     else {
         naming = validateCanonicalBranchNaming(input.naming, diagnostics);
     }
-    if (diagnostics.length > 0 || identity === undefined || governance === undefined || naming === undefined) {
+    if (diagnostics.length > 0 ||
+        identity === undefined ||
+        (governanceProvided && governance === undefined) ||
+        naming === undefined) {
         return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
     }
     let branch;
@@ -590,17 +592,19 @@ export function deriveCanonicalBranchIdentity(input) {
         addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", "$.naming", `Derived branch exceeds its ${MAX_CHANGE_BRANCH_LENGTH}-character bound.`);
         return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
     }
-    let pattern;
-    try {
-        pattern = new RegExp(governance.pattern, "u");
-    }
-    catch (error) {
-        addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_GOVERNANCE", "$.branchGovernance.pattern", `Branch governance is invalid: ${error instanceof Error ? error.message : String(error)}`);
-        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
-    }
-    if (!pattern.test(branch)) {
-        addDiagnostic(diagnostics, "CHANGE_BRANCH_GOVERNANCE_MISMATCH", "$.branchGovernance.pattern", `Derived branch "${branch}" does not satisfy the repository's branch governance.`);
-        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    if (governance !== undefined) {
+        let pattern;
+        try {
+            pattern = new RegExp(governance.pattern, "u");
+        }
+        catch (error) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_GOVERNANCE", "$.branchGovernance.pattern", `Branch governance is invalid: ${error instanceof Error ? error.message : String(error)}`);
+            return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+        }
+        if (!pattern.test(branch)) {
+            addDiagnostic(diagnostics, "CHANGE_BRANCH_GOVERNANCE_MISMATCH", "$.branchGovernance.pattern", `Derived branch "${branch}" does not satisfy the repository's branch governance.`);
+            return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+        }
     }
     return { valid: true, branch, diagnostics: [] };
 }

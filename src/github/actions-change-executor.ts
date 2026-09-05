@@ -485,10 +485,11 @@ function deriveNaming(title: string): CanonicalBranchNamingInput {
 function branchBelongsToRootIssue(
   branch: string,
   rootIssue: number,
-  branchGovernance: PullRequestBranchGovernance,
+  branchGovernance: PullRequestBranchGovernance | undefined,
 ): boolean {
   const match = /^(feat|fix|docs|refactor|test|chore)\/(\d+)-([a-z0-9-]+)$/u.exec(branch);
   if (match === null || Number(match[2]) !== rootIssue || !CANONICAL_BRANCH_TYPES.has(match[1])) return false;
+  if (branchGovernance === undefined) return true;
   try {
     return new RegExp(branchGovernance.pattern, "u").test(branch);
   } catch {
@@ -507,7 +508,8 @@ export const deriveChangeNamingFromIssueTitle = deriveNaming;
 export interface GitHubActionsEvidenceReaderOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly identity: { readonly repositoryHost: string; readonly repositoryId: string; readonly rootIssue: number };
-  readonly branchGovernance: PullRequestBranchGovernance;
+  /** Absent when the repository's PR policy declares no branch rule; the canonical branch grammar still applies. */
+  readonly branchGovernance?: PullRequestBranchGovernance;
   readonly transport: GitHubChangeEffectTransport;
   /** Trusted checkout containing the repository's default-branch governance. */
   readonly cwd?: string;
@@ -985,7 +987,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
   }
 }
 
-export async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance> {
+export async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance | undefined> {
   try {
     for (const policyPath of POLICY_PATHS) {
       let source: string;
@@ -996,7 +998,7 @@ export async function loadBranchGovernance(cwd: string): Promise<PullRequestBran
         continue;
       }
       const overlay = parsePullRequestPolicyOverlay(source);
-      if (overlay.branch === undefined) throw new GitHubActionsChangeExecutorError();
+      // A repository-native policy with no branch rule declares no branch precondition.
       return overlay.branch;
     }
     throw new GitHubActionsChangeExecutorError();
