@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CHANGE_CONTRACT_VERSION,
+  CHANGE_TRANSITION_CONTRACT_VERSION,
   CHANGE_STATES,
   MAX_CHANGE_DIAGNOSTICS,
   MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH,
   MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH,
+  ChangeTransitionValidationError,
   ChangeValidationError,
   changeIdentityKey,
   createChangeDiagnostic,
@@ -13,11 +15,20 @@ import {
   deserializeChange,
   deserializeChangeDiagnosticReport,
   deriveCanonicalBranchIdentity,
+  deserializeChangeTransitionPlan,
+  deserializeChangeTransitionRequest,
   isChange,
+  isChangeTransitionPlan,
+  isChangeTransitionRequest,
+  planChangeTransition,
   serializeChange,
   serializeChangeDiagnosticReport,
+  serializeChangeTransitionPlan,
+  serializeChangeTransitionRequest,
   validateChange,
   validateChangeIdentity,
+  validateChangeTransitionPlan,
+  validateChangeTransitionRequest,
   type Change,
 } from "./change.js";
 
@@ -226,6 +237,153 @@ test("malformed serialized Change produces the same structured validation error 
     () => deserializeChange("{"),
     (error: unknown) => {
       assert.ok(error instanceof ChangeValidationError);
+      assert.equal(error.code, "CHANGE_INVALID_JSON");
+      assert.equal(error.path, "$");
+      return true;
+    },
+  );
+});
+
+const definedChange: Change = {
+  version: CHANGE_CONTRACT_VERSION,
+  identity: validChange.identity,
+  state: "DEFINED",
+  provenance: {
+    requester: "human:sophia",
+    issuer: "app:inari-issuer",
+  },
+};
+
+const issueRequest = {
+  version: CHANGE_TRANSITION_CONTRACT_VERSION,
+  transition: "issue",
+  change: definedChange,
+  target: {
+    branch: "feat/210-define-canonical-change-domain-contract",
+    baseBranch: "main",
+  },
+} as const;
+
+test("Core owns the lifecycle matrix and emits explicit issue effects", () => {
+  const result = validateChangeTransitionRequest(issueRequest);
+  assert.equal(result.valid, true);
+  assert.equal(isChangeTransitionRequest(result.request), true);
+
+  const plan = planChangeTransition(issueRequest);
+  assert.equal(plan.from, "DEFINED");
+  assert.equal(plan.to, "DRAFT");
+  assert.deepEqual(plan.effects, [
+    {
+      kind: "CREATE_BRANCH",
+      branch: "feat/210-define-canonical-change-domain-contract",
+      baseBranch: "main",
+    },
+    {
+      kind: "CREATE_PULL_REQUEST",
+      branch: "feat/210-define-canonical-change-domain-contract",
+      baseBranch: "main",
+      rootIssue: 210,
+      draft: true,
+    },
+  ]);
+  assert.deepEqual(plan.result, {
+    ...definedChange,
+    state: "DRAFT",
+    projection: { branch: "feat/210-define-canonical-change-domain-contract" },
+  });
+  assert.equal(isChangeTransitionPlan(plan), true);
+});
+
+test("ready and abort produce only their declared pull-request effects", () => {
+  const readyPlan = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "ready",
+    change: validChange,
+  });
+  assert.deepEqual(readyPlan.effects, [{ kind: "MARK_PULL_REQUEST_READY", pullRequest: 321 }]);
+  assert.equal(readyPlan.to, "REVIEW");
+
+  const abortPlan = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "abort",
+    change: { ...validChange, state: "REVIEW" },
+  });
+  assert.deepEqual(abortPlan.effects, [{ kind: "CLOSE_PULL_REQUEST", pullRequest: 321 }]);
+  assert.equal(abortPlan.to, "ABORTED");
+});
+
+test("invalid and future transitions fail closed with structured diagnostics", () => {
+  const invalid = validateChangeTransitionRequest({
+    ...issueRequest,
+    transition: "ready",
+  });
+  assert.equal(invalid.valid, false);
+  assert.equal(invalid.request, undefined);
+  assert.ok(invalid.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_TRANSITION_NOT_ALLOWED"));
+  assert.throws(
+    () => planChangeTransition({ ...issueRequest, transition: "ready" }),
+    (error: unknown) => {
+      assert.ok(error instanceof ChangeTransitionValidationError);
+      assert.equal(error.code, "CHANGE_TRANSITION_NOT_ALLOWED");
+      assert.ok(error.diagnostics.length > 0);
+      return true;
+    },
+  );
+
+  const future = validateChangeTransitionRequest({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "merge",
+    change: validChange,
+  });
+  assert.equal(future.valid, false);
+  assert.ok(future.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_UNSUPPORTED_TRANSITION"));
+
+  const missingTarget = validateChangeTransitionRequest({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "issue",
+    change: definedChange,
+  });
+  assert.equal(missingTarget.valid, false);
+  assert.ok(missingTarget.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_TRANSITION_TARGET"));
+});
+
+test("transition request and plan serialization is deterministic and round-trips", () => {
+  const reorderedRequest = {
+    target: {
+      baseBranch: "main",
+      branch: "feat/210-define-canonical-change-domain-contract",
+    },
+    change: {
+      provenance: { issuer: "app:inari-issuer", requester: "human:sophia" },
+      state: "DEFINED",
+      identity: { rootIssue: 210, repositoryId: "100000210", repositoryHost: "GITHUB.COM" },
+      version: CHANGE_CONTRACT_VERSION,
+    },
+    transition: "ISSUE",
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+  } satisfies Record<string, unknown>;
+  const serializedRequest = serializeChangeTransitionRequest(issueRequest);
+  assert.equal(serializedRequest, serializeChangeTransitionRequest(reorderedRequest));
+  assert.deepEqual(deserializeChangeTransitionRequest(serializedRequest), issueRequest);
+  assert.equal(isChangeTransitionRequest(deserializeChangeTransitionRequest(serializedRequest)), true);
+
+  const plan = planChangeTransition(issueRequest);
+  const serializedPlan = serializeChangeTransitionPlan(plan);
+  assert.deepEqual(deserializeChangeTransitionPlan(serializedPlan), plan);
+  assert.equal(serializedPlan, serializeChangeTransitionPlan(deserializeChangeTransitionPlan(serializedPlan)));
+  assert.equal(validateChangeTransitionPlan(JSON.parse(serializedPlan)).valid, true);
+
+  const invalidPlan = { ...plan, effects: [...plan.effects].reverse() };
+  const invalidResult = validateChangeTransitionPlan(invalidPlan);
+  assert.equal(invalidResult.valid, false);
+  assert.ok(invalidResult.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_PLAN"));
+});
+
+test("malformed transition JSON uses the structured Change error contract", () => {
+  assert.throws(
+    () => deserializeChangeTransitionPlan("{"),
+    (error: unknown) => {
+      assert.ok(error instanceof ChangeTransitionValidationError);
       assert.equal(error.code, "CHANGE_INVALID_JSON");
       assert.equal(error.path, "$");
       return true;

@@ -2,8 +2,9 @@
  * The transport-independent semantic contract for a governed Change.
  *
  * This module owns transport-independent Change data, validation, canonical
- * serialization, and pure canonical branch identity derivation. It does not
- * read or mutate GitHub state or plan transitions.
+ * serialization, pure canonical branch identity derivation, the lifecycle
+ * transition matrix, and pure effect planning. It does not read or mutate
+ * GitHub state or execute effects.
  */
 import type { PullRequestBranchGovernance } from "./contract/ir.js";
 export declare const CHANGE_CONTRACT_VERSION: 1;
@@ -60,7 +61,121 @@ export interface Change {
     readonly provenance: ChangeProvenance;
     readonly projection?: ChangeProjection;
 }
-export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH";
+/** Version of the transport-independent transition request and plan contract. */
+export declare const CHANGE_TRANSITION_CONTRACT_VERSION: 1;
+export type ChangeTransitionContractVersion = typeof CHANGE_TRANSITION_CONTRACT_VERSION;
+/**
+ * `merge` is reserved for a future merge-coordination capability.  It is
+ * represented in the request vocabulary but is intentionally not executable
+ * by this planning contract yet.
+ */
+export declare const CHANGE_TRANSITION_OPERATIONS: readonly ["issue", "ready", "abort", "merge"];
+export type ChangeTransition = (typeof CHANGE_TRANSITION_OPERATIONS)[number];
+export type ChangeTransitionOperation = ChangeTransition;
+export declare const CHANGE_TRANSITIONS: readonly ["issue", "ready", "abort", "merge"];
+export declare const CHANGE_IMPLEMENTED_TRANSITIONS: readonly ["issue", "ready", "abort"];
+/** The only lifecycle edges currently owned by Inari Core. */
+export declare const CHANGE_TRANSITION_RULES: readonly [{
+    readonly transition: "issue";
+    readonly from: "DEFINED";
+    readonly to: "DRAFT";
+}, {
+    readonly transition: "ready";
+    readonly from: "DRAFT";
+    readonly to: "REVIEW";
+}, {
+    readonly transition: "abort";
+    readonly from: "DRAFT";
+    readonly to: "ABORTED";
+}, {
+    readonly transition: "abort";
+    readonly from: "REVIEW";
+    readonly to: "ABORTED";
+}];
+export declare const CHANGE_TRANSITION_MATRIX: readonly [{
+    readonly transition: "issue";
+    readonly from: "DEFINED";
+    readonly to: "DRAFT";
+}, {
+    readonly transition: "ready";
+    readonly from: "DRAFT";
+    readonly to: "REVIEW";
+}, {
+    readonly transition: "abort";
+    readonly from: "DRAFT";
+    readonly to: "ABORTED";
+}, {
+    readonly transition: "abort";
+    readonly from: "REVIEW";
+    readonly to: "ABORTED";
+}];
+/**
+ * Inputs resolved by Core's projection policy before a transition is
+ * planned.  The target is data, not a transport or an adapter callback.
+ */
+export interface ChangeTransitionTarget {
+    readonly branch?: string;
+    readonly baseBranch?: string;
+    readonly pullRequest?: number;
+}
+export interface ChangeTransitionRequest {
+    readonly version: ChangeTransitionContractVersion;
+    readonly transition: ChangeTransition;
+    /** The current canonical Change snapshot. */
+    readonly change: Change;
+    /** Required for issue; may complete a partial projection for other edges. */
+    readonly target?: ChangeTransitionTarget;
+}
+export declare const CHANGE_EFFECT_KINDS: readonly ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY", "CLOSE_PULL_REQUEST"];
+export type ChangeEffectKind = (typeof CHANGE_EFFECT_KINDS)[number];
+/**
+ * Effects are declarative capabilities for a later executor.  They contain
+ * no GitHub client, credential, workflow, or mutation implementation.
+ */
+export type ChangeEffect = {
+    readonly kind: "CREATE_BRANCH";
+    readonly branch: string;
+    readonly baseBranch: string;
+} | {
+    readonly kind: "CREATE_PULL_REQUEST";
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly rootIssue: number;
+    readonly draft: true;
+} | {
+    readonly kind: "MARK_PULL_REQUEST_READY";
+    readonly pullRequest: number;
+} | {
+    readonly kind: "CLOSE_PULL_REQUEST";
+    readonly pullRequest: number;
+};
+export interface ChangeTransitionPlan {
+    readonly version: ChangeTransitionContractVersion;
+    readonly request: ChangeTransitionRequest;
+    readonly from: ChangeState;
+    readonly to: ChangeState;
+    /** The expected semantic snapshot after the declared effects succeed. */
+    readonly result: Change;
+    /** Effect order is semantic and must remain deterministic. */
+    readonly effects: readonly ChangeEffect[];
+}
+export interface ChangeTransitionRequestValidationResult {
+    readonly valid: boolean;
+    readonly request?: ChangeTransitionRequest;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+export type ChangeTransitionValidationResult = ChangeTransitionRequestValidationResult;
+export interface ChangeTransitionPlanValidationResult {
+    readonly valid: boolean;
+    readonly plan?: ChangeTransitionPlan;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+export interface ChangeEffectValidationResult {
+    readonly valid: boolean;
+    readonly effect?: ChangeEffect;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN";
 export interface ChangeDiagnosticInput {
     readonly code: ChangeDiagnosticCode;
     readonly path?: string;
@@ -107,6 +222,8 @@ export interface CanonicalBranchIdentityDerivationResult {
     readonly branch?: string;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+export declare const MAX_CHANGE_BASE_BRANCH_LENGTH: 255;
+export declare const MAX_CHANGE_TRANSITION_EFFECTS: 8;
 /** Create one bounded, versioned machine-readable diagnostic. */
 export declare function createChangeDiagnostic(input: ChangeDiagnosticInput): ChangeDiagnostic;
 /** Sort and bound a diagnostic set for deterministic machine consumption. */
@@ -156,3 +273,38 @@ export declare function serializeChange(input: unknown): string;
 export declare function deserializeChange(serialized: string): Change;
 export declare const parseChange: typeof deserializeChange;
 export declare const serializeChangeContract: typeof serializeChange;
+/** Validate a transport-independent lifecycle request and its transition policy. */
+export declare function validateChangeTransitionRequest(input: unknown): ChangeTransitionRequestValidationResult;
+export declare const validateChangeTransition: typeof validateChangeTransitionRequest;
+/** Assert a valid request at a trusted Core call boundary. */
+export declare function assertChangeTransitionRequest(input: unknown): asserts input is ChangeTransitionRequest;
+/**
+ * Produce a deterministic declarative plan.  This function has no I/O and
+ * never invokes an adapter or a privileged GitHub capability.
+ */
+export declare function planChangeTransition(input: unknown): ChangeTransitionPlan;
+export declare const createChangeTransitionPlan: typeof planChangeTransition;
+/** Validate one declarative effect primitive without executing it. */
+export declare function validateChangeEffect(input: unknown, path?: string): ChangeEffectValidationResult;
+/** Validate and canonicalize a previously generated or transported plan. */
+export declare function validateChangeTransitionPlan(input: unknown): ChangeTransitionPlanValidationResult;
+export declare const validateChangePlan: typeof validateChangeTransitionPlan;
+/** Assert a valid declarative plan at an executor boundary. */
+export declare function assertChangeTransitionPlan(input: unknown): asserts input is ChangeTransitionPlan;
+export declare class ChangeTransitionValidationError extends ChangeValidationError {
+    constructor(diagnostics: readonly ChangeDiagnostic[]);
+}
+/** Serialize the canonical transition request with stable property ordering. */
+export declare function serializeChangeTransitionRequest(input: unknown): string;
+/** Parse and validate an untrusted transition request JSON boundary. */
+export declare function deserializeChangeTransitionRequest(serialized: string): ChangeTransitionRequest;
+/** Serialize the canonical effect plan with stable property ordering. */
+export declare function serializeChangeTransitionPlan(input: unknown): string;
+/** Parse and validate an untrusted effect plan JSON boundary. */
+export declare function deserializeChangeTransitionPlan(serialized: string): ChangeTransitionPlan;
+export declare function isChangeTransitionRequest(input: unknown): input is ChangeTransitionRequest;
+export declare function isChangeTransitionPlan(input: unknown): input is ChangeTransitionPlan;
+export declare const parseChangeTransitionRequest: typeof deserializeChangeTransitionRequest;
+export declare const parseChangeTransitionPlan: typeof deserializeChangeTransitionPlan;
+export declare const serializeChangeTransitionRequestContract: typeof serializeChangeTransitionRequest;
+export declare const serializeChangeTransitionPlanContract: typeof serializeChangeTransitionPlan;
