@@ -270,6 +270,10 @@ function main() {
     fs.mkdirSync(sourceExtensionDirectory, { recursive: true });
     fs.copyFileSync(path.join(repoRoot, "gh-inari"), path.join(sourceExtensionDirectory, "gh-inari"));
     fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(sourceExtensionDirectory, "package.json"));
+    fs.copyFileSync(
+      path.join(repoRoot, "branch-naming-authority.mjs"),
+      path.join(sourceExtensionDirectory, "branch-naming-authority.mjs"),
+    );
     fs.cpSync(path.join(repoRoot, "dist"), path.join(sourceExtensionDirectory, "dist"), { recursive: true });
     console.log("installing the checked-out executable as a GitHub CLI extension...");
     run("gh", ["extension", "install", "."], {

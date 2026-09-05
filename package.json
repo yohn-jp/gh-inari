@@ -48,6 +48,8 @@
   "files": [
     "gh-inari",
     "dist",
+    "branch-naming-authority.mjs",
+    "branch-naming-authority.d.mts",
     "README.md",
     "LICENSE",
     ".codex-plugin",
