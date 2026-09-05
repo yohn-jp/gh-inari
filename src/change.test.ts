@@ -110,14 +110,19 @@ test("equivalent governed Change input produces the same canonical branch identi
   assert.deepEqual(deriveCanonicalBranchIdentity({ change: validChange, branchGovernance: governance, naming }), first);
 });
 
-test("missing or invalid branch governance fails closed with bounded structured diagnostics", () => {
-  const missing = deriveCanonicalBranchIdentity({
+test("absent branch governance imposes no branch precondition beyond the canonical grammar", () => {
+  const result = deriveCanonicalBranchIdentity({
     change: validChange,
-    naming: { type: "feat", slug: "missing-governance" },
-  } as unknown);
-  assert.equal(missing.valid, false);
-  assert.ok(missing.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_MISSING_PROPERTY"));
+    naming: { type: "feat", slug: "no-repository-branch-policy" },
+  });
+  assert.deepEqual(result, {
+    valid: true,
+    branch: "feat/210-no-repository-branch-policy",
+    diagnostics: [],
+  });
+});
 
+test("invalid branch governance fails closed with bounded structured diagnostics", () => {
   const invalid = deriveCanonicalBranchIdentity({
     change: validChange,
     branchGovernance: { pattern: "(a+)+$" },

@@ -386,6 +386,8 @@ function branchBelongsToRootIssue(branch, rootIssue, branchGovernance) {
     const match = /^(feat|fix|docs|refactor|test|chore)\/(\d+)-([a-z0-9-]+)$/u.exec(branch);
     if (match === null || Number(match[2]) !== rootIssue || !CANONICAL_BRANCH_TYPES.has(match[1]))
         return false;
+    if (branchGovernance === undefined)
+        return true;
     try {
         return new RegExp(branchGovernance.pattern, "u").test(branch);
     }
@@ -841,8 +843,7 @@ export async function loadBranchGovernance(cwd) {
                 continue;
             }
             const overlay = parsePullRequestPolicyOverlay(source);
-            if (overlay.branch === undefined)
-                throw new GitHubActionsChangeExecutorError();
+            // A repository-native policy with no branch rule declares no branch precondition.
             return overlay.branch;
         }
         throw new GitHubActionsChangeExecutorError();
