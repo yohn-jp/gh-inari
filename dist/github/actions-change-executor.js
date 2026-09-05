@@ -150,7 +150,8 @@ function repositoryName(repository) {
     return `${repository.owner}/${repository.name}`;
 }
 function apiPath(repository, suffix) {
-    return `repos/${repository.owner}/${repository.name}/${suffix}`;
+    const base = `repos/${repository.owner}/${repository.name}`;
+    return suffix === "" ? base : `${base}/${suffix}`;
 }
 async function boundedBody(response) {
     if (response.status === 204)

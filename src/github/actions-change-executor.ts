@@ -221,7 +221,8 @@ function repositoryName(repository: GitHubChangeEffectRepository): string {
 }
 
 function apiPath(repository: GitHubChangeEffectRepository, suffix: string): string {
-  return `repos/${repository.owner}/${repository.name}/${suffix}`;
+  const base = `repos/${repository.owner}/${repository.name}`;
+  return suffix === "" ? base : `${base}/${suffix}`;
 }
 
 async function boundedBody(response: Response): Promise<unknown> {
