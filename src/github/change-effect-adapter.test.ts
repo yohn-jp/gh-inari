@@ -109,12 +109,14 @@ test("CREATE_BRANCH reads the explicit base ref and creates the exact explicit b
   });
 });
 
-test("CREATE_PULL_REQUEST maps rootIssue to GitHub's issue conversion field without inventing title or body", async () => {
+test("CREATE_PULL_REQUEST creates a separate Draft PR with Core-owned title/body", async () => {
   const effect = {
     kind: "CREATE_PULL_REQUEST",
     branch: "Feature/Exact_Name",
     baseBranch: "Release/Exact",
     rootIssue: 216,
+    title: "Change #216",
+    body: "Closes #216",
     draft: true,
   } as const;
   const transport = new StubChangeEffectTransport([
@@ -131,7 +133,8 @@ test("CREATE_PULL_REQUEST maps rootIssue to GitHub's issue conversion field with
       body: {
         head: effect.branch,
         base: effect.baseBranch,
-        issue: effect.rootIssue,
+        title: effect.title,
+        body: effect.body,
         draft: true,
       },
     },
@@ -147,6 +150,22 @@ test("CREATE_PULL_REQUEST maps rootIssue to GitHub's issue conversion field with
       pullRequest: 901,
     },
   });
+});
+
+test("CREATE_PULL_REQUEST rejects an API response that reused the root Issue number", async () => {
+  const effect = {
+    kind: "CREATE_PULL_REQUEST",
+    branch: "feat/216-separate-pr",
+    baseBranch: "main",
+    rootIssue: 216,
+    title: "Change #216",
+    body: "Closes #216",
+    draft: true,
+  } as const;
+  const result = await adapter(
+    new StubChangeEffectTransport([response(201, pullRequest(216, effect.branch, effect.baseBranch, true))]),
+  ).execute(effect);
+  assert.equal(result.status, "failed");
 });
 
 test("MARK_PULL_REQUEST_READY uses GitHub's explicit ready-for-review mutation", async () => {
@@ -260,6 +279,8 @@ test("the adapter validates an effect but never repairs or canonicalizes its val
     branch: "FEATURE/Caller_Value",
     baseBranch: "Base/Caller_Value",
     rootIssue: 216,
+    title: "Change #216",
+    body: "Closes #216",
     draft: true,
   } as const;
   const transport = new StubChangeEffectTransport([
@@ -271,7 +292,8 @@ test("the adapter validates an effect but never repairs or canonicalizes its val
   assert.deepEqual(transport.calls[0]?.body, {
     head: "FEATURE/Caller_Value",
     base: "Base/Caller_Value",
-    issue: 216,
+    title: "Change #216",
+    body: "Closes #216",
     draft: true,
   });
 
@@ -282,11 +304,23 @@ test("the adapter validates an effect but never repairs or canonicalizes its val
       branch: "FEATURE/Caller_Value",
       baseBranch: "Base/Caller_Value",
       rootIssue: 216,
+      title: "Change #216",
+      body: "Closes #216",
       draft: false,
     } as unknown as ChangeEffect),
     (error: unknown) => error instanceof GitHubChangeEffectContractError,
   );
   assert.equal(invalidTransport.calls.length, 0);
+
+  const conversionTransport = new StubChangeEffectTransport([]);
+  await assert.rejects(
+    adapter(conversionTransport).execute({
+      ...effect,
+      issue: effect.rootIssue,
+    } as unknown as ChangeEffect),
+    (error: unknown) => error instanceof GitHubChangeEffectContractError,
+  );
+  assert.equal(conversionTransport.calls.length, 0);
 });
 
 test("API, transport, and response failures normalize to deterministic bounded evidence", async () => {
@@ -295,6 +329,8 @@ test("API, transport, and response failures normalize to deterministic bounded e
     branch: "Feature/Exact_Name",
     baseBranch: "main",
     rootIssue: 216,
+    title: "Change #216",
+    body: "Closes #216",
     draft: true,
   } as const;
   const apiFailure = await adapter(

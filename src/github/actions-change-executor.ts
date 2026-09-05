@@ -519,6 +519,11 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       200,
     );
     const issue = record(issueResponse);
+    // GitHub represents an Issue converted to a pull request by adding this
+    // field to the Issue response. A Change must retain two distinct artifacts.
+    if (Object.prototype.hasOwnProperty.call(issue, "pull_request")) {
+      throw new GitHubActionsChangeExecutorError();
+    }
     const issueNumber = positiveNumber(issue.number);
     const title = boundedString(issue.title, MAX_TITLE_LENGTH);
     const state = issue.state === "open" || issue.state === "closed" ? issue.state : undefined;

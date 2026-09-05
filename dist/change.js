@@ -37,6 +37,8 @@ export const MAX_CHANGE_PRINCIPAL_LENGTH = 160;
 export const MAX_CHANGE_BRANCH_LENGTH = 255;
 export const MAX_CHANGE_HOST_LENGTH = 255;
 export const MAX_CHANGE_IDEMPOTENCY_KEY_LENGTH = 512;
+export const MAX_CHANGE_PR_TITLE_LENGTH = 255;
+export const MAX_CHANGE_PR_BODY_LENGTH = 65_536;
 /** Version of the transport-independent transition request and plan contract. */
 export const CHANGE_TRANSITION_CONTRACT_VERSION = CHANGE_CONTRACT_VERSION;
 /**
@@ -142,7 +144,7 @@ const BRANCH_NAMING_KEYS = new Set(["type", "slug"]);
 const TRANSITION_REQUEST_KEYS = new Set(["version", "transition", "change", "target"]);
 const TRANSITION_TARGET_KEYS = new Set(["branch", "baseBranch", "pullRequest"]);
 const TRANSITION_PLAN_KEYS = new Set(["version", "request", "from", "to", "result", "effects"]);
-const EFFECT_KEYS = new Set(["kind", "branch", "baseBranch", "rootIssue", "draft", "pullRequest"]);
+const EFFECT_KEYS = new Set(["kind", "branch", "baseBranch", "rootIssue", "title", "body", "draft", "pullRequest"]);
 const CHANGE_PROJECTION_INPUT_KEYS = new Set([
     "change",
     "branchGovernance",
@@ -882,7 +884,8 @@ function classifyChangeBranchCandidates(branches, canonicalBranch) {
     });
 }
 function projectionPullRequestIdentityMatches(candidate, canonicalBranch, canonicalBaseBranch, rootIssue) {
-    return (candidate.head === canonicalBranch &&
+    return (candidate.number !== rootIssue &&
+        candidate.head === canonicalBranch &&
         candidate.base === canonicalBaseBranch &&
         (candidate.rootIssue === undefined || candidate.rootIssue === rootIssue));
 }
@@ -894,6 +897,13 @@ function classifyChangePullRequestCandidates(pullRequests, canonicalBranch, cano
                 candidate,
                 classification: "conflicting",
                 reason: "The same pull-request number was reported more than once.",
+            };
+        }
+        if (candidate.number === rootIssue) {
+            return {
+                candidate,
+                classification: "conflicting",
+                reason: "The canonical pull request number must be distinct from the root Issue number.",
             };
         }
         if (candidate.head === canonicalBranch && candidate.base !== canonicalBaseBranch) {
@@ -1581,6 +1591,17 @@ function transitionResult(request, to) {
         ...(Object.keys(projection).length === 0 ? {} : { projection }),
     };
 }
+/**
+ * The initial Draft PR metadata is semantic Change data, not adapter policy.
+ * Keep this payload intentionally small: implementation details and governed
+ * PR fields are completed by the later Ready admission path.
+ */
+function initialChangePullRequestPayload(rootIssue) {
+    return {
+        title: `Change #${rootIssue}`,
+        body: `Closes #${rootIssue}`,
+    };
+}
 function buildChangeTransitionPlan(request) {
     const rule = transitionRule(request.transition, request.change.state);
     if (rule === undefined) {
@@ -1592,6 +1613,7 @@ function buildChangeTransitionPlan(request) {
         if (resolved.branch === undefined || resolved.baseBranch === undefined) {
             throw new Error("A valid issue request must resolve branch and base branch targets.");
         }
+        const pullRequestPayload = initialChangePullRequestPayload(request.change.identity.rootIssue);
         effects.push({
             kind: "CREATE_BRANCH",
             branch: resolved.branch,
@@ -1601,6 +1623,7 @@ function buildChangeTransitionPlan(request) {
             branch: resolved.branch,
             baseBranch: resolved.baseBranch,
             rootIssue: request.change.identity.rootIssue,
+            ...pullRequestPayload,
             draft: true,
         });
     }
@@ -1682,6 +1705,21 @@ function validateEffectBranch(value, path, maxLength, diagnostics) {
     }
     return value;
 }
+function requiredEffectText(input, key, path, maxLength, diagnostics) {
+    if (!hasOwn(input, key)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.${key}`, "Effect property is required.");
+        return undefined;
+    }
+    const value = input[key];
+    if (typeof value !== "string" ||
+        value.length === 0 ||
+        value.length > maxLength ||
+        /[\u0000-\u001F\u007F]/u.test(value)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.${key}`, "Effect text is invalid.");
+        return undefined;
+    }
+    return value;
+}
 function requiredEffectNumber(input, key, path, diagnostics) {
     if (!hasOwn(input, key)) {
         addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.${key}`, "Effect property is required.");
@@ -1724,18 +1762,25 @@ export function validateChangeEffect(input, path = "$") {
         return { valid: true, effect: { kind, branch, baseBranch }, diagnostics: [] };
     }
     if (kind === "CREATE_PULL_REQUEST") {
-        const allowed = new Set(["kind", "branch", "baseBranch", "rootIssue", "draft"]);
+        const allowed = new Set(["kind", "branch", "baseBranch", "rootIssue", "title", "body", "draft"]);
         rejectEffectProperties(input, allowed, path, diagnostics);
         const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
         const baseBranch = requiredEffectBranch(input, "baseBranch", path, MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
         const rootIssue = requiredEffectNumber(input, "rootIssue", path, diagnostics);
+        const title = requiredEffectText(input, "title", path, MAX_CHANGE_PR_TITLE_LENGTH, diagnostics);
+        const body = requiredEffectText(input, "body", path, MAX_CHANGE_PR_BODY_LENGTH, diagnostics);
         if (!hasOwn(input, "draft") || input.draft !== true) {
             addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.draft`, "Create pull request effects must be draft.");
         }
-        if (diagnostics.length > 0 || branch === undefined || baseBranch === undefined || rootIssue === undefined) {
+        if (diagnostics.length > 0 ||
+            branch === undefined ||
+            baseBranch === undefined ||
+            rootIssue === undefined ||
+            title === undefined ||
+            body === undefined) {
             return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
         }
-        return { valid: true, effect: { kind, branch, baseBranch, rootIssue, draft: true }, diagnostics: [] };
+        return { valid: true, effect: { kind, branch, baseBranch, rootIssue, title, body, draft: true }, diagnostics: [] };
     }
     if (kind === "DELETE_BRANCH") {
         const allowed = new Set(["kind", "branch"]);

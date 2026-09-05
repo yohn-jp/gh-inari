@@ -283,6 +283,8 @@ test("Core owns the lifecycle matrix and emits explicit issue effects", () => {
       branch: "feat/210-define-canonical-change-domain-contract",
       baseBranch: "main",
       rootIssue: 210,
+      title: "Change #210",
+      body: "Closes #210",
       draft: true,
     },
   ]);

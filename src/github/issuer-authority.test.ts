@@ -55,6 +55,8 @@ const effects = [
     branch: "feat/217-establish-least-privilege-inari-issuer-app-authority",
     baseBranch: "main",
     rootIssue: 217,
+    title: "Change #217",
+    body: "Closes #217",
     draft: true,
   },
 ] as const;

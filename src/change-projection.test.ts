@@ -79,6 +79,29 @@ test("projects a healthy canonical Draft/Review/Accepted/Merged/Aborted lifecycl
   }
 });
 
+test("rejects a pull request that reuses the root Issue number", () => {
+  const result = projectChangeFromGitHubEvidence(
+    projectionInput({
+      issue: issueEvidence(),
+      branches: branchEvidence(),
+      pullRequests: pullRequestEvidence([
+        {
+          number: identity.rootIssue,
+          head: canonicalBranch,
+          base: canonicalBaseBranch,
+          state: "open",
+          draft: true,
+          merged: false,
+        },
+      ]),
+    }),
+  );
+  assert.equal(result.valid, false);
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.change?.projection?.pullRequest, undefined);
+  assert.equal(result.candidates.pullRequests[0]?.classification, "conflicting");
+});
+
 test("closed unmerged canonical PR with a retained branch is incomplete abort cleanup", () => {
   const result = projectChangeFromGitHubEvidence(
     projectionInput({
