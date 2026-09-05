@@ -1705,7 +1705,7 @@ function validateEffectBranch(value, path, maxLength, diagnostics) {
     }
     return value;
 }
-function requiredEffectText(input, key, path, maxLength, diagnostics) {
+function requiredEffectText(input, key, path, maxLength, allowLineBreaks, diagnostics) {
     if (!hasOwn(input, key)) {
         addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.${key}`, "Effect property is required.");
         return undefined;
@@ -1714,7 +1714,7 @@ function requiredEffectText(input, key, path, maxLength, diagnostics) {
     if (typeof value !== "string" ||
         value.length === 0 ||
         value.length > maxLength ||
-        /[\u0000-\u001F\u007F]/u.test(value)) {
+        (allowLineBreaks ? /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u : /[\u0000-\u001F\u007F]/u).test(value)) {
         addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.${key}`, "Effect text is invalid.");
         return undefined;
     }
@@ -1767,8 +1767,8 @@ export function validateChangeEffect(input, path = "$") {
         const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
         const baseBranch = requiredEffectBranch(input, "baseBranch", path, MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
         const rootIssue = requiredEffectNumber(input, "rootIssue", path, diagnostics);
-        const title = requiredEffectText(input, "title", path, MAX_CHANGE_PR_TITLE_LENGTH, diagnostics);
-        const body = requiredEffectText(input, "body", path, MAX_CHANGE_PR_BODY_LENGTH, diagnostics);
+        const title = requiredEffectText(input, "title", path, MAX_CHANGE_PR_TITLE_LENGTH, false, diagnostics);
+        const body = requiredEffectText(input, "body", path, MAX_CHANGE_PR_BODY_LENGTH, true, diagnostics);
         if (!hasOwn(input, "draft") || input.draft !== true) {
             addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.draft`, "Create pull request effects must be draft.");
         }
