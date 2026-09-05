@@ -108,7 +108,13 @@ function boundedArtifactBody(value) {
         return null;
     if (value === undefined)
         return undefined;
-    return boundedString(value, MAX_CHANGE_ARTIFACT_BODY_LENGTH);
+    if (typeof value !== "string" ||
+        value.length === 0 ||
+        value.length > MAX_CHANGE_ARTIFACT_BODY_LENGTH ||
+        /[\u0000-\u0009\u000B-\u000C\u000E-\u001F\u007F]/u.test(value)) {
+        throw new GitHubActionsChangeExecutorError();
+    }
+    return value;
 }
 function gitBlobSha(source) {
     const bytes = Buffer.byteLength(source, "utf8");
