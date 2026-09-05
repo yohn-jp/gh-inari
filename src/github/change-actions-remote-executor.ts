@@ -596,11 +596,11 @@ class GitHubRepositoryReadTransport implements GitHubChangeEffectTransport {
   }
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
-    const prefix = `repos/${this.#context.nameWithOwner}/`;
-    if (request.method !== "GET" || !request.path.startsWith(prefix)) {
+    const base = `repos/${this.#context.nameWithOwner}`;
+    if (request.method !== "GET" || !(request.path === base || request.path.startsWith(`${base}/`))) {
       throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "change.show", "invalid-read-path");
     }
-    const path = request.path.slice(prefix.length);
+    const path = request.path.slice(base.length).replace(/^\//u, "");
     try {
       return await this.#requestRepositoryApi.call(this.#api, path, "GET");
     } catch (error: unknown) {

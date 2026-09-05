@@ -96,7 +96,7 @@ class ReadTransport implements GitHubChangeEffectTransport {
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
     this.calls.push(request);
-    if (request.path.endsWith("repos/acme/inari/")) {
+    if (request.path.endsWith("repos/acme/inari")) {
       return { status: 200, body: { id: 218000001, default_branch: "main" } };
     }
     if (request.path.endsWith("issues/218")) {
@@ -134,7 +134,7 @@ class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
   pullRequest = false;
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
-    if (request.path.endsWith("repos/acme/inari/")) {
+    if (request.path.endsWith("repos/acme/inari")) {
       return { status: 200, body: { id: 218000001, default_branch: "main" } };
     }
     if (request.path.endsWith("issues/239")) {
