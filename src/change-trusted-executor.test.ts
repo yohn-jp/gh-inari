@@ -173,6 +173,51 @@ test("trusted issuance plans in Core, applies ordered effects, and verifies a fr
   assert.equal(result.projection.change?.state, "DRAFT");
 });
 
+test("trusted issuance fails closed for unavailable or malformed evidence and identity mismatch", async () => {
+  const cases: readonly [string, ChangeProjectionInput][] = [
+    [
+      "unavailable evidence",
+      input({
+        ...evidence([]),
+        branches: { status: "unavailable", reason: "repository read failed" },
+      }),
+    ],
+    [
+      "malformed evidence",
+      input({
+        ...evidence([]),
+        branches: { status: "available", value: "not-a-branch-list" } as unknown as ChangeGitHubEvidence["branches"],
+      }),
+    ],
+    [
+      "identity mismatch",
+      {
+        ...input({
+          issue: { status: "available", value: { number: 219, state: "open" } },
+          branches: { status: "available", value: [] },
+          pullRequests: { status: "available", value: [] },
+        }),
+        change: { ...identity, rootIssue: 219 },
+      },
+    ],
+  ];
+
+  for (const [name, current] of cases) {
+    const reader = new MutableReader(current);
+    const issuer = new FakeIssuer(reader);
+    await assert.rejects(
+      executor(reader, issuer).execute({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        operation: "issue",
+        issue: identity.rootIssue,
+      }),
+      (error: unknown) => error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_READ_FAILED",
+      name,
+    );
+    assert.deepEqual(issuer.effects, []);
+  }
+});
+
 test("healthy issuance retry returns the existing Change without effects", async () => {
   const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
   const issuer = new FakeIssuer(reader);

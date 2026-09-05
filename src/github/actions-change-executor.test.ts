@@ -17,10 +17,15 @@ import type {
   GitHubChangeEffectResponse,
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
+import { CHANGE_TRANSITION_CONTRACT_VERSION, projectChangeFromGitHubEvidence } from "../change.js";
+import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
   INARI_ISSUER_PRINCIPAL,
   type IssuerCredentialRequest,
+  type IssuerMutationRequest,
+  type IssuerMutationResult,
   type IssuerRepositoryIdentity,
+  type TrustedExecutionContext,
 } from "./issuer-authority.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest } from "../change-executor.js";
 
@@ -117,9 +122,111 @@ test("Actions evidence reader returns only bounded Core projection input", async
     type: "feat",
     slug: "execute-change-plans-safely",
   });
-  assert.deepEqual(result.evidence.branches, { status: "available", value: [] });
-  assert.deepEqual(result.evidence.pullRequests, { status: "available", value: [] });
+  assert.deepEqual(result.evidence.branches, { status: "absent" });
+  assert.deepEqual(result.evidence.pullRequests, { status: "absent" });
   assert.equal(JSON.stringify(result).includes("Not Found"), false);
+});
+
+class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
+  branch = false;
+  pullRequest = false;
+
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    if (request.path.endsWith("repos/acme/inari/")) {
+      return { status: 200, body: { id: 218000001, default_branch: "main" } };
+    }
+    if (request.path.endsWith("issues/218")) {
+      return { status: 200, body: { number: 218, title: "feat: Execute Change plans safely", state: "open" } };
+    }
+    if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
+      return this.branch
+        ? { status: 200, body: { ref: "refs/heads/feat/218-execute-change-plans-safely" } }
+        : { status: 404, body: { message: "Not Found" } };
+    }
+    if (request.path.includes("pulls?state=all")) {
+      return {
+        status: 200,
+        body: this.pullRequest
+          ? [
+              {
+                number: 2180,
+                head: { ref: "feat/218-execute-change-plans-safely" },
+                base: { ref: "main" },
+                state: "open",
+                draft: true,
+                merged_at: null,
+                user: { login: "inari-issuer[bot]" },
+              },
+            ]
+          : [],
+      };
+    }
+    throw new Error("unexpected read");
+  }
+}
+
+test("trusted executor preserves a reader's DEFINED pre-issuance projection and plans creation", async () => {
+  const transport = new MutablePreIssuanceTransport();
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+  const request = changeRemoteMutationRequest("issue", 218);
+  const initial = await reader.read(request);
+  const initialProjection = projectChangeFromGitHubEvidence(initial);
+  assert.equal(initialProjection.valid, true);
+  assert.equal(initialProjection.status, "absent");
+  assert.equal(initialProjection.change?.state, "DEFINED");
+
+  const effects: string[] = [];
+  const target: IssuerRepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: "218000001",
+    nameWithOwner: "acme/inari",
+  };
+  const execution: TrustedExecutionContext = {
+    version: 1,
+    runtime: "github-actions",
+    event: "workflow_dispatch",
+    repository: target,
+    workflowRef: "refs/heads/main",
+    workflowSha: "a".repeat(40),
+    workflowTrust: "protected",
+    codeExecution: "trusted-only",
+    fork: false,
+    pullRequest: false,
+  };
+  const issuerAuthority = {
+    applyEffects: async (input: IssuerMutationRequest): Promise<IssuerMutationResult> => {
+      const effect = input.effects[0];
+      assert.ok(effect);
+      effects.push(effect.kind);
+      if (effect.kind === "CREATE_BRANCH") transport.branch = true;
+      if (effect.kind === "CREATE_PULL_REQUEST") transport.pullRequest = true;
+      return {
+        version: 1,
+        authority: "issuer",
+        issuer: { kind: "github-app", slug: "inari-issuer", appId: "218", principal: INARI_ISSUER_PRINCIPAL },
+        repository: target,
+        installation: { appId: "218", installationId: "219", repositoryHost: "github.com" },
+        permissions: {},
+        effects: [{ kind: effect.kind, status: "applied" }],
+      };
+    },
+  };
+  const executor = new TrustedChangeExecutor({ reader, issuerAuthority, execution, target });
+  const result = await executor.execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: 218,
+  });
+
+  assert.deepEqual(effects, ["CREATE_BRANCH", "CREATE_PULL_REQUEST"]);
+  assert.equal(result.evidence?.outcome, "verified");
+  assert.equal(result.projection.change?.state, "DRAFT");
+  assert.equal(result.projection.change?.projection?.pullRequest, 2180);
 });
 
 test("App installation token is confined to the broker transport and never its scope/result", async () => {
