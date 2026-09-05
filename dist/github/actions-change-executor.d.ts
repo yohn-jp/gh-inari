@@ -53,12 +53,20 @@ export interface GitHubActionsEvidenceReaderOptions {
     };
     readonly branchGovernance: PullRequestBranchGovernance;
     readonly transport: GitHubChangeEffectTransport;
+    /** Trusted checkout containing the repository's default-branch governance. */
+    readonly cwd?: string;
 }
 /** Converts only bounded GitHub fields into the #213 Core evidence contract. */
 export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader {
     #private;
     constructor(options: GitHubActionsEvidenceReaderOptions);
     read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput>;
+    private readReadyEvidence;
+    private readPullRequestBody;
+    private readGovernanceTree;
+    private readGovernedContract;
+    private readLocalGovernanceFile;
+    private readMatchingGovernanceFile;
     private readBranch;
     private readPullRequests;
     private request;

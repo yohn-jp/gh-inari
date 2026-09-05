@@ -85,6 +85,10 @@ export declare const CHANGE_TRANSITION_RULES: readonly [{
     readonly from: "DRAFT";
     readonly to: "REVIEW";
 }, {
+    readonly transition: "ready";
+    readonly from: "REVIEW";
+    readonly to: "REVIEW";
+}, {
     readonly transition: "abort";
     readonly from: "DRAFT";
     readonly to: "ABORTED";
@@ -108,6 +112,10 @@ export declare const CHANGE_TRANSITION_MATRIX: readonly [{
 }, {
     readonly transition: "ready";
     readonly from: "DRAFT";
+    readonly to: "REVIEW";
+}, {
+    readonly transition: "ready";
+    readonly from: "REVIEW";
     readonly to: "REVIEW";
 }, {
     readonly transition: "abort";
@@ -313,6 +321,8 @@ export interface ChangeProjectionInput {
     readonly evidence: ChangeGitHubEvidence;
     /** Optional known provenance when projecting from an identity rather than a snapshot. */
     readonly provenance?: ChangeProvenance;
+    /** Additional bounded artifact evidence consumed only by Ready validation. */
+    readonly readyEvidence?: ChangeReadyEvidence;
 }
 export interface ChangeProjectionCandidate<T> {
     readonly candidate: T;
@@ -365,6 +375,34 @@ export interface ChangeMergeAdmissionValidationResult {
     readonly projection?: ChangeProjectionResult;
     /** Physical evidence; this is never promoted to canonical identity. */
     readonly physicalPullRequest?: ChangePullRequestEvidence;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+/** A governed artifact body paired with the Core-resolved canonical contract. */
+export interface ChangeReadyArtifactEvidence {
+    readonly contract: CanonicalContract;
+    readonly body: string | null;
+}
+/** Fresh evidence required by the governed DRAFT -> REVIEW transition. */
+export interface ChangeReadyEvidence {
+    readonly issue: ChangeReadyArtifactEvidence;
+    readonly pullRequest: ChangeMergeAdmissionPullRequest;
+}
+/** Inputs to the Core-owned Ready precondition gate. */
+export interface ChangeReadyTransitionInput {
+    readonly change: Change;
+    readonly projection: ChangeProjectionInput | ChangeProjectionResult;
+    readonly issue: ChangeReadyArtifactEvidence;
+    readonly pullRequest: ChangeMergeAdmissionPullRequest;
+    /** Optional explicit issuer assertion from the trusted caller. */
+    readonly issuer?: string;
+}
+export interface ChangeReadyTransitionValidationResult {
+    readonly valid: boolean;
+    readonly change?: Change;
+    readonly projection?: ChangeProjectionResult;
+    readonly physicalPullRequest?: ChangePullRequestEvidence;
+    /** True only when the validated healthy projection is already REVIEW. */
+    readonly idempotent?: boolean;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
 /** Naming aliases for adapters that describe the same admission boundary. */
@@ -551,6 +589,8 @@ export declare const MAX_CHANGE_TRANSITION_EFFECTS: 8;
 export declare const MAX_CHANGE_PROJECTION_CANDIDATES: 64;
 export declare const MAX_CHANGE_ISSUANCE_ATTEMPTS: 8;
 export declare const MAX_CHANGE_FAILURE_CODE_LENGTH: 80;
+/** Bodies are read through a bounded transport before entering Core. */
+export declare const MAX_CHANGE_ARTIFACT_BODY_LENGTH: 1048576;
 /** Create one bounded, versioned machine-readable diagnostic. */
 export declare function createChangeDiagnostic(input: ChangeDiagnosticInput): ChangeDiagnostic;
 /** Sort and bound a diagnostic set for deterministic machine consumption. */
@@ -733,3 +773,12 @@ export declare class ChangeIssuanceRecoveryValidationError extends ChangeValidat
 export declare function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissionValidationResult;
 export declare const validateCanonicalChangeProvenance: typeof validateChangeMergeAdmission;
 export declare const validateChangeProvenanceForMergeAdmission: typeof validateChangeMergeAdmission;
+/** Validate every semantic precondition before a Ready effect can be planned. */
+export declare function validateChangeReadyTransition(input: unknown): ChangeReadyTransitionValidationResult;
+export declare class ChangeReadyTransitionValidationError extends ChangeTransitionValidationError {
+    constructor(diagnostics: readonly ChangeDiagnostic[]);
+}
+/** Plan Ready only after the Core-owned precondition gate succeeds. */
+export declare function planChangeReadyTransition(input: unknown): ChangeTransitionPlan;
+export declare const validateReadyTransition: typeof validateChangeReadyTransition;
+export declare const planReadyTransition: typeof planChangeReadyTransition;

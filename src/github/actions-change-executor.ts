@@ -6,15 +6,19 @@
  * #217 issuer authority, and verifies a fresh #213 projection.
  */
 
-import { createSign } from "node:crypto";
+import { createHash, createSign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  MAX_CHANGE_ARTIFACT_BODY_LENGTH,
   deriveCanonicalBranchIdentity,
   type CanonicalBranchNamingInput,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
+  type ChangeReadyEvidence,
 } from "../change.js";
+import { extractTemplateIdentityMarker } from "../artifact.js";
+import { compileLocalGovernedContract } from "../governance.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
   changeRemoteMutationRequest,
@@ -44,10 +48,12 @@ import {
 } from "./issuer-authority.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
-import type { PullRequestBranchGovernance } from "../contract/ir.js";
+import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
+import type { CanonicalContract, ContractProvenance, PullRequestBranchGovernance } from "../contract/ir.js";
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_PULL_REQUESTS = 100;
+const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
 const MAX_TITLE_LENGTH = 255;
 const MAX_LOGIN_LENGTH = 160;
 const DEFAULT_API_URL = "https://api.github.com";
@@ -80,6 +86,22 @@ function boundedString(value: unknown, maxLength: number): string {
     throw new GitHubActionsChangeExecutorError();
   }
   return value;
+}
+
+function boundedArtifactBody(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (value === undefined) return undefined;
+  return boundedString(value, MAX_CHANGE_ARTIFACT_BODY_LENGTH);
+}
+
+function gitBlobSha(source: string): string {
+  const bytes = Buffer.byteLength(source, "utf8");
+  return createHash("sha1").update(`blob ${bytes}\0`, "utf8").update(source, "utf8").digest("hex");
+}
+
+function semanticSourcePath(domain: "issue" | "pr", id: string): string {
+  if (domain === "issue") return `.github/inari/issues/${id}.json`;
+  return id === "pull-request" ? ".github/inari/pull-request.json" : `.github/inari/pull-requests/${id}.json`;
 }
 
 function boundedSecret(value: unknown, maxLength: number): string {
@@ -331,6 +353,13 @@ export interface GitHubActionsEvidenceReaderOptions {
   readonly identity: { readonly repositoryHost: string; readonly repositoryId: string; readonly rootIssue: number };
   readonly branchGovernance: PullRequestBranchGovernance;
   readonly transport: GitHubChangeEffectTransport;
+  /** Trusted checkout containing the repository's default-branch governance. */
+  readonly cwd?: string;
+}
+
+interface GovernanceTree {
+  readonly sha: string;
+  readonly entries: readonly { readonly path: string; readonly type: "blob" | "tree"; readonly sha: string }[];
 }
 
 /** Converts only bounded GitHub fields into the #213 Core evidence contract. */
@@ -358,6 +387,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     const title = boundedString(issue.title, MAX_TITLE_LENGTH);
     const state = issue.state === "open" || issue.state === "closed" ? issue.state : undefined;
     if (issueNumber !== request.issue || state === undefined) throw new GitHubActionsChangeExecutorError();
+    const issueBody = boundedArtifactBody(issue.body);
     const naming = deriveNaming(title);
     const derivation = deriveCanonicalBranchIdentity({
       change: this.#options.identity,
@@ -367,6 +397,10 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     if (!derivation.valid || derivation.branch === undefined) throw new GitHubActionsChangeExecutorError();
     const branch = await this.readBranch(derivation.branch);
     const pullRequests = await this.readPullRequests(derivation.branch);
+    const readyEvidence =
+      request.operation === "ready"
+        ? await this.readReadyEvidence(baseBranch, issueBody, pullRequests, derivation.branch)
+        : undefined;
     return {
       change: this.#options.identity,
       branchGovernance: this.#options.branchGovernance,
@@ -377,7 +411,188 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
         branches: { status: "available", value: branch ? [{ name: derivation.branch }] : [] },
         pullRequests: { status: "available", value: pullRequests },
       },
+      ...(readyEvidence === undefined ? {} : { readyEvidence }),
     };
+  }
+
+  private async readReadyEvidence(
+    baseBranch: string,
+    issueBody: string | null | undefined,
+    pullRequests: readonly ChangePullRequestEvidence[],
+    branch: string,
+  ): Promise<ChangeReadyEvidence | undefined> {
+    if (this.#options.cwd === undefined || issueBody === undefined || issueBody === null) return undefined;
+    const canonical = pullRequests.filter((candidate) => candidate.head === branch && candidate.base === baseBranch);
+    if (canonical.length !== 1) return undefined;
+    const pullRequest = canonical[0];
+    if (pullRequest === undefined) return undefined;
+    const pullRequestBody = await this.readPullRequestBody(pullRequest.number);
+    if (pullRequestBody === undefined || pullRequestBody === null) return undefined;
+    const generation = await this.readGovernanceTree(baseBranch);
+    const issueContract = await this.readGovernedContract("issue", issueBody, baseBranch, generation);
+    const pullRequestContract = await this.readGovernedContract("pr", pullRequestBody, baseBranch, generation);
+    if (issueContract === undefined || pullRequestContract === undefined) return undefined;
+    return {
+      issue: { contract: issueContract, body: issueBody },
+      pullRequest: { contract: pullRequestContract, body: pullRequestBody },
+    };
+  }
+
+  private async readPullRequestBody(number: number): Promise<string | null | undefined> {
+    const response = await this.request(
+      { method: "GET", path: apiPath(this.#options.repository, `pulls/${number}`) },
+      200,
+    );
+    const value = record(response);
+    if (positiveNumber(value.number) !== number) throw new GitHubActionsChangeExecutorError();
+    return boundedArtifactBody(value.body);
+  }
+
+  private async readGovernanceTree(ref: string): Promise<GovernanceTree> {
+    const response = await this.request(
+      {
+        method: "GET",
+        path: apiPath(this.#options.repository, `git/trees/${encodeURIComponent(ref)}?recursive=1`),
+      },
+      200,
+    );
+    const value = record(response);
+    const sha = boundedString(value.sha, 255);
+    if (value.truncated !== false || !Array.isArray(value.tree) || value.tree.length > 2048) {
+      throw new GitHubActionsChangeExecutorError();
+    }
+    const entries = value.tree.map((entry): GovernanceTree["entries"][number] => {
+      const candidate = record(entry);
+      const type = candidate.type === "blob" || candidate.type === "tree" ? candidate.type : undefined;
+      if (type === undefined) throw new GitHubActionsChangeExecutorError();
+      return { path: boundedString(candidate.path, 512), type, sha: boundedString(candidate.sha, 255) };
+    });
+    return { sha, entries };
+  }
+
+  private async readGovernedContract(
+    domain: "issue" | "pr",
+    body: string,
+    ref: string,
+    generation: GovernanceTree,
+  ): Promise<CanonicalContract | undefined> {
+    const marker = extractTemplateIdentityMarker(body);
+    if (marker.status !== "valid" || marker.marker === undefined) return undefined;
+    const expectedKind = domain === "issue" ? "issue" : "pull_request";
+    if (marker.marker.kind !== expectedKind) return undefined;
+    const cwd = this.#options.cwd;
+    if (cwd === undefined) return undefined;
+    let contract: CanonicalContract;
+    try {
+      contract = await compileLocalGovernedContract(domain, cwd, marker.marker.path);
+    } catch {
+      return undefined;
+    }
+    const templatePath = contract.templateIdentity.path;
+    const templateEntry = generation.entries.find((entry) => entry.type === "blob" && entry.path === templatePath);
+    if (templateEntry === undefined) return undefined;
+    const templateSource = await this.readMatchingGovernanceFile(cwd, templateEntry.path, templateEntry.sha);
+    if (templateSource === undefined) return undefined;
+
+    // The local compiler is used only as the existing Core compiler seam. Its
+    // semantic source and generated native projection must both be the exact
+    // files observed in the trusted GitHub generation.
+    const semanticPath = semanticSourcePath(domain, contract.templateIdentity.id);
+    const semanticEntry = generation.entries.find((entry) => entry.path === semanticPath);
+    const semanticSource =
+      semanticEntry === undefined || semanticEntry.type !== "blob"
+        ? undefined
+        : await this.readMatchingGovernanceFile(cwd, semanticEntry.path, semanticEntry.sha);
+    if (
+      semanticEntry !== undefined
+        ? semanticSource === undefined
+        : (await this.readLocalGovernanceFile(cwd, semanticPath)) !== undefined
+    ) {
+      return undefined;
+    }
+    const policyEntry =
+      domain === "pr"
+        ? generation.entries.find((entry) => POLICY_PATHS.includes(entry.path as (typeof POLICY_PATHS)[number]))
+        : undefined;
+    if (policyEntry !== undefined && policyEntry.type !== "blob") return undefined;
+    const policySource =
+      policyEntry === undefined
+        ? undefined
+        : await this.readMatchingGovernanceFile(cwd, policyEntry.path, policyEntry.sha);
+    if (policyEntry !== undefined && policySource === undefined) return undefined;
+    if (domain === "pr" && policyEntry === undefined) {
+      for (const policyPath of POLICY_PATHS) {
+        if ((await this.readLocalGovernanceFile(cwd, policyPath)) !== undefined) return undefined;
+      }
+    }
+    const resolutionEntry = generation.entries.find((entry) => entry.path === TEMPLATE_RESOLUTION_CONFIG_PATH);
+    if (resolutionEntry !== undefined && resolutionEntry.type !== "blob") return undefined;
+    const resolutionSource =
+      resolutionEntry === undefined
+        ? undefined
+        : await this.readMatchingGovernanceFile(cwd, resolutionEntry.path, resolutionEntry.sha);
+    if (resolutionEntry !== undefined && resolutionSource === undefined) return undefined;
+    const provenance: ContractProvenance = {
+      authority: "repository-default-branch",
+      repository: {
+        host: this.#options.identity.repositoryHost,
+        owner: this.#options.repository.owner,
+        name: this.#options.repository.name,
+        nameWithOwner: `${this.#options.repository.owner}/${this.#options.repository.name}`,
+        repositoryId: this.#options.identity.repositoryId,
+      },
+      ref,
+      treeSha: generation.sha,
+      template: {
+        path: templatePath,
+        ref,
+        sha: templateEntry.sha,
+        digest: createHash("sha256").update(templateSource, "utf8").digest("hex"),
+      },
+      ...(policyEntry === undefined
+        ? {}
+        : {
+            policy: {
+              path: policyEntry.path,
+              ref,
+              sha: policyEntry.sha,
+              digest: createHash("sha256")
+                .update(policySource ?? "", "utf8")
+                .digest("hex"),
+            },
+          }),
+      ...(resolutionEntry === undefined
+        ? {}
+        : {
+            templateResolution: {
+              path: resolutionEntry.path,
+              ref,
+              sha: resolutionEntry.sha,
+              digest: createHash("sha256")
+                .update(resolutionSource ?? "", "utf8")
+                .digest("hex"),
+            },
+          }),
+      ...(domain === "pr" ? { branchGovernance: this.#options.branchGovernance } : {}),
+    };
+    return { ...contract, provenance };
+  }
+
+  private async readLocalGovernanceFile(cwd: string, filePath: string): Promise<string | undefined> {
+    try {
+      return await readFile(path.join(cwd, filePath), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readMatchingGovernanceFile(
+    cwd: string,
+    filePath: string,
+    expectedSha: string,
+  ): Promise<string | undefined> {
+    const source = await this.readLocalGovernanceFile(cwd, filePath);
+    return source !== undefined && gitBlobSha(source) === expectedSha ? source : undefined;
   }
 
   private async readBranch(branch: string): Promise<boolean> {
@@ -436,14 +651,19 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
 }
 
 async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance> {
-  try {
-    const source = await readFile(path.join(cwd, ".github", "inari", "pr-policy.yml"), "utf8");
+  for (const policyPath of POLICY_PATHS) {
+    let source: string;
+    try {
+      source = await readFile(path.join(cwd, policyPath), "utf8");
+    } catch {
+      // Continue only when this repository-native policy path is absent.
+      continue;
+    }
     const overlay = parsePullRequestPolicyOverlay(source);
     if (overlay.branch === undefined) throw new GitHubActionsChangeExecutorError();
     return overlay.branch;
-  } catch {
-    throw new GitHubActionsChangeExecutorError();
   }
+  throw new GitHubActionsChangeExecutorError();
 }
 
 function requiredEnvironment(environment: NodeJS.ProcessEnv, key: string): string {
@@ -538,6 +758,7 @@ export async function createGitHubActionsChangeExecutor(
     identity: { repositoryHost: repository.hostname, repositoryId, rootIssue: options.request.issue },
     branchGovernance,
     transport: readTransport,
+    cwd: options.cwd,
   });
   const broker = new GitHubActionsCredentialBroker({
     appId: requiredEnvironment(environment, "INARI_ISSUER_APP_ID"),

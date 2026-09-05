@@ -19,7 +19,7 @@ export interface ChangeTrustedExecutorOptions {
     readonly execution: TrustedExecutionContext;
     readonly target: IssuerRepositoryIdentity;
 }
-export type ChangeTrustedExecutorErrorCode = "CHANGE_EXECUTION_READ_FAILED" | "CHANGE_EXECUTION_EFFECT_FAILED" | "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED" | "CHANGE_EXECUTION_RECOVERY_REQUIRED";
+export type ChangeTrustedExecutorErrorCode = "CHANGE_EXECUTION_READ_FAILED" | "CHANGE_EXECUTION_PRECONDITION_FAILED" | "CHANGE_EXECUTION_EFFECT_FAILED" | "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED" | "CHANGE_EXECUTION_RECOVERY_REQUIRED";
 /** Bounded trusted-execution failure; provider/API details are discarded. */
 export declare class ChangeTrustedExecutorError extends Error {
     readonly code: ChangeTrustedExecutorErrorCode;
@@ -32,6 +32,8 @@ export declare class TrustedChangeExecutor implements ChangeRemoteExecutor {
     constructor(options: ChangeTrustedExecutorOptions);
     read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult>;
     execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult>;
+    private executeReady;
+    private verifyReadyProjection;
     private readInput;
     private executeIssue;
     private recoverIssuance;
