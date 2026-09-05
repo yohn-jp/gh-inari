@@ -32,6 +32,10 @@
       "types": "./dist/governance.d.ts",
       "import": "./dist/governance.js"
     },
+    "./change": {
+      "types": "./dist/change.d.ts",
+      "import": "./dist/change.js"
+    },
     "./semantic-template": {
       "types": "./dist/semantic-template.d.ts",
       "import": "./dist/semantic-template.js"
