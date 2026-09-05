@@ -514,6 +514,24 @@ Desired public contract:
 inari change issue 189
 ```
 
+### 17.1 Actions dogfood
+
+With `gh auth login` completed for the target repository, run the installed
+CLI or the package entrypoint from the repository checkout:
+
+```bash
+npx --yes gh-inari change issue 189 --repository yohn-jp/gh-inari --json
+# or: inari change issue 189 --repository yohn-jp/gh-inari --json
+inari change show 189 --repository yohn-jp/gh-inari --json
+gh pr view "$(inari change show 189 --repository yohn-jp/gh-inari --json | jq -r .pullRequest)" --json headRefName,isDraft,author
+```
+
+The first command dispatches the protected Actions executor. The executor
+keeps the Issuer App credentials in Actions secrets, creates the canonical
+branch and Draft PR, and returns only the bounded Change projection. `ready`
+and `abort` use the same semantic path; no #223 ruleset enforcement is
+required for this dogfood.
+
 Workflow filename, dispatch input shape, job structure, and token-generation details are implementation concerns.
 
 The transport may later be replaced or supplemented by MCP, a GitHub App event handler, a remote service, or another executor without changing Change semantics.

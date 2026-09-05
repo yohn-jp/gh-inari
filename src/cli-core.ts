@@ -21,7 +21,7 @@ import {
   type CanonicalContract,
   SemanticValidationError,
 } from "./contract/index.js";
-import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
+import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
   assertPullRequestSyncInputComplete,
   parsePullRequestSyncInput,
@@ -99,7 +99,6 @@ import {
 import {
   changeRemoteMutationRequest,
   changeRemoteReadRequest,
-  createUnavailableChangeRemoteExecutor,
   executeChangeRemoteMutationResult,
   readChangeRemoteProjection,
   type ChangeRemoteExecutor,
@@ -833,7 +832,15 @@ function createChangeExecutor(
   repository: string | boolean | undefined,
 ): ChangeRemoteExecutor {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
-  const factory = dependencies.createChangeExecutor ?? (() => createUnavailableChangeRemoteExecutor());
+  const factory =
+    dependencies.createChangeExecutor ??
+    ((options: ChangeRemoteExecutorOptions) => {
+      const adapter = (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
+        cwd: options.cwd,
+        ...(options.repository === undefined ? {} : { repository: options.repository }),
+      });
+      return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
+    });
   return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
 

@@ -17,6 +17,10 @@ export interface GitHubAdapterOptions {
     /** Overrides for the default bounded stdout/stderr byte limits for every gh operation. */
     readonly outputLimitsBytes?: Partial<GhTransportOutputLimits>;
 }
+export interface GitHubApiResponse {
+    readonly status: number;
+    readonly body: unknown;
+}
 export declare class GitHubAdapter {
     private readonly cwd;
     private readonly repository;
@@ -31,8 +35,20 @@ export declare class GitHubAdapter {
     private readonly authenticationPromises;
     constructor(options?: GitHubAdapterOptions);
     checkAuthentication(): Promise<void>;
+    /** Read the login attached to the caller's existing gh session. */
+    getAuthenticatedUser(): Promise<string>;
     resolveRepositoryContext(): Promise<RepositoryContext>;
     getRepositoryContext(): Promise<RepositoryContext>;
+    /**
+     * Request the fixed Actions API surface used by the Change transport.
+     * Callers supply only an adapter-owned relative Actions path and bounded form
+     * fields; repository, host, and authentication remain resolved here.
+     */
+    requestActionsApi(actionsPath: string, method: "GET" | "POST", fields?: Readonly<Record<string, string>>): Promise<unknown>;
+    /** Read the bounded repository API surface needed by Change projection. */
+    requestRepositoryApi(repositoryPath: string, method?: "GET"): Promise<GitHubApiResponse>;
+    /** Download one bounded Actions artifact archive through the caller's gh session. */
+    downloadActionsArtifact(artifactId: number): Promise<Uint8Array>;
     /** Read the target repository metadata used to select the trusted governance ref. */
     getRepositoryDefaultBranch(): Promise<string>;
     /** Read the complete Git tree for a trusted repository ref. Truncation is invalid for governance. */

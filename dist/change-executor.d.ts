@@ -60,18 +60,20 @@ export interface ChangeRemoteExecutor {
 /** Compatibility aliases for library callers naming the same boundary. */
 export type RemoteChangeExecutor = ChangeRemoteExecutor;
 export type ChangeExecutor = ChangeRemoteExecutor;
-export type ChangeRemoteExecutorErrorCode = "CHANGE_REMOTE_REQUEST_INVALID" | "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" | "CHANGE_REMOTE_RESULT_INVALID";
+export type ChangeRemoteExecutorErrorCode = "CHANGE_REMOTE_REQUEST_INVALID" | "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" | "CHANGE_REMOTE_TRANSPORT_FAILED" | "CHANGE_REMOTE_DISPATCH_FAILED" | "CHANGE_REMOTE_RUN_FAILED" | "CHANGE_REMOTE_CORRELATION_FAILED" | "CHANGE_REMOTE_RESULT_INVALID";
 export declare class ChangeRemoteExecutorError extends Error {
     readonly code: ChangeRemoteExecutorErrorCode;
     readonly details?: unknown;
     readonly diagnostics?: readonly ChangeDiagnostic[];
     constructor(code: ChangeRemoteExecutorErrorCode, message: string, details?: unknown, diagnostics?: readonly ChangeDiagnostic[]);
 }
+export declare function normalizeChangeRemoteProjection(operation: string, result: unknown): ChangeProjectionResult;
+export declare function normalizeChangeRemoteExecutionResult(operation: string, result: unknown): ChangeRemoteExecutionResult;
 export declare function changeRemoteMutationRequest(operation: ChangeRemoteMutation, issue: number, requester?: string): ChangeRemoteMutationRequest;
 export declare function changeRemoteReadRequest(issue: number, requester?: string): ChangeRemoteReadRequest;
 export declare function executeChangeRemoteMutation(executor: ChangeRemoteExecutor, request: ChangeRemoteMutationRequest): Promise<ChangeProjectionResult>;
 export declare function executeChangeRemoteMutationResult(executor: ChangeRemoteExecutor, request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult>;
 export declare function readChangeRemoteProjection(executor: ChangeRemoteExecutor, request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult>;
-/** Default until a repository configures a trusted remote executor. */
+/** Explicit fallback for a runtime that has no remote executor implementation. */
 export declare function createUnavailableChangeRemoteExecutor(): ChangeRemoteExecutor;
 export {};

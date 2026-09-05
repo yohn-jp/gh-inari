@@ -13,12 +13,14 @@ import {
 } from "./command-contract.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+  createUnavailableChangeRemoteExecutor,
   type ChangeRemoteExecutor,
   type ChangeRemoteMutationRequest,
   type ChangeRemoteReadRequest,
 } from "./change-executor.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { runCli } from "./cli.js";
+import { GhUnauthenticatedError, GitHubAdapter } from "./github/index.js";
 import { findSkillScenario } from "./skill.js";
 
 const identity = {
@@ -165,11 +167,74 @@ test("abort is routed through the same executor boundary", async () => {
   assert.equal(result.output?.operation, "change.abort");
 });
 
-test("missing remote executor returns a bounded machine-readable remote error", async () => {
-  const result = await capture(["change", "issue", "42", "--json"]);
+test("default Change wiring constructs an Actions-backed executor and normalizes dispatch failure", async () => {
+  const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
+  const adapter = {
+    async getRepositoryContext() {
+      return {
+        hostname: "github.com",
+        host: "github.com",
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+        url: "https://github.com/acme/inari",
+        repositoryId: "100000237",
+      };
+    },
+    async getAuthenticatedUser() {
+      return "octocat";
+    },
+    async requestActionsApi(path: string, method: "GET" | "POST", fields: Readonly<Record<string, string>> = {}) {
+      calls.push({ path, method, fields });
+      if (method === "POST") throw new Error("Bearer secret-token");
+      return { workflow_runs: [] };
+    },
+  } as unknown as GitHubAdapter;
+  const adapterOptions: ConstructorParameters<typeof GitHubAdapter>[0][] = [];
+  const result = await capture(["change", "issue", "42", "--json"], {
+    repositoryRoot: "/workspace/inari",
+    createAdapter: (options) => {
+      adapterOptions.push(options);
+      return adapter;
+    },
+  });
 
   assert.equal(result.exitCode, 3);
-  assert.deepEqual(result.output?.error, {
+  assert.equal((result.output?.error as { code?: string } | undefined)?.code, "CHANGE_REMOTE_DISPATCH_FAILED");
+  assert.deepEqual(adapterOptions, [{ cwd: "/workspace/inari" }]);
+  assert.equal(calls[0]?.method, "GET");
+  assert.equal(calls[1]?.method, "POST");
+  assert.equal(calls[1]?.path, "actions/workflows/inari-change-executor.yml/dispatches");
+  assert.deepEqual(JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}"), {
+    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    operation: "issue",
+    issue: 42,
+    requester: "github:octocat",
+  });
+  assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
+});
+
+test("caller authentication failure is distinct from an unconfigured executor", async () => {
+  const adapter = {
+    async getAuthenticatedUser() {
+      throw new GhUnauthenticatedError("github.com", "token=secret");
+    },
+  } as unknown as GitHubAdapter;
+  const authResult = await capture(["change", "issue", "42", "--json"], {
+    createAdapter: () => adapter,
+  });
+  assert.equal(authResult.exitCode, 3);
+  assert.deepEqual(authResult.output?.error, {
+    code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
+    message: "The GitHub Actions Change executor is unavailable.",
+    details: { operation: "change.issue", reason: "authentication" },
+  });
+
+  const unavailableResult = await capture(["change", "issue", "42", "--json"], {
+    changeExecutor: createUnavailableChangeRemoteExecutor(),
+  });
+  assert.equal(unavailableResult.exitCode, 3);
+  assert.deepEqual(unavailableResult.output?.error, {
     code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
     message: "No remote Change executor is configured for this CLI runtime.",
     details: { operation: "issue" },

@@ -18,7 +18,7 @@ import {
   type IssuerCredentialRequest,
   type IssuerRepositoryIdentity,
 } from "./issuer-authority.js";
-import { changeRemoteMutationRequest } from "../change-executor.js";
+import { changeRemoteMutationRequest, changeRemoteReadRequest } from "../change-executor.js";
 
 const repository = { hostname: "github.com", owner: "acme", name: "inari" } as const;
 const target: IssuerRepositoryIdentity = {
@@ -262,4 +262,18 @@ test("Trusted executor construction succeeds when the workflow ref, target ref, 
     fetch: repositoryOnlyFetch(false),
   });
   assert.ok(executor);
+});
+
+test("read-only Change executor construction does not require Issuer App secrets", async () => {
+  const environment = trustedEnvironment();
+  delete environment.INARI_ISSUER_APP_ID;
+  delete environment.INARI_ISSUER_INSTALLATION_ID;
+  delete environment.INARI_ISSUER_APP_PRIVATE_KEY;
+  const executor = await createGitHubActionsChangeExecutor({
+    cwd: process.cwd(),
+    request: changeRemoteReadRequest(218),
+    environment,
+    fetch: repositoryOnlyFetch(false),
+  });
+  assert.equal(typeof executor.read, "function");
 });

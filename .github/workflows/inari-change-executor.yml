@@ -1,5 +1,7 @@
 name: Inari Change executor
 
+run-name: Inari Change ${{ inputs.correlation }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,10 +9,18 @@ on:
         description: Semantic Inari Change request JSON
         required: true
         type: string
+      correlation:
+        description: Adapter-owned request correlation value
+        required: true
+        type: string
   workflow_call:
     inputs:
       request:
         description: Semantic Inari Change request JSON
+        required: true
+        type: string
+      correlation:
+        description: Adapter-owned request correlation value
         required: true
         type: string
 
@@ -47,4 +57,25 @@ jobs:
           INARI_ISSUER_APP_ID: ${{ secrets.INARI_ISSUER_APP_ID }}
           INARI_ISSUER_INSTALLATION_ID: ${{ secrets.INARI_ISSUER_INSTALLATION_ID }}
           INARI_ISSUER_APP_PRIVATE_KEY: ${{ secrets.INARI_ISSUER_APP_PRIVATE_KEY }}
-        run: corepack pnpm run build && node dist/github/actions-change-executor.js
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/inari-change-result"
+          corepack pnpm run build
+          build_status=$?
+          if [ "$build_status" -eq 0 ]; then
+            node dist/github/actions-change-executor.js > "$RUNNER_TEMP/inari-change-result/result.json"
+            execution_status=$?
+          else
+            printf '%s\n' '{"ok":false,"error":{"code":"CHANGE_ACTIONS_RUNTIME_FAILED","message":"Trusted Change execution failed closed."}}' > "$RUNNER_TEMP/inari-change-result/result.json"
+            execution_status=$build_status
+          fi
+          exit "$execution_status"
+
+      - name: Publish bounded result
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: inari-change-result-${{ inputs.correlation }}
+          path: ${{ runner.temp }}/inari-change-result/result.json
+          if-no-files-found: error
+          retention-days: 1

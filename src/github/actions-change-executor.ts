@@ -12,6 +12,7 @@ import path from "node:path";
 import {
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
   deriveCanonicalBranchIdentity,
+  projectChangeFromGitHubEvidence,
   type CanonicalBranchNamingInput,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
@@ -22,6 +23,7 @@ import { compileLocalGovernedContract } from "../governance.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
   changeRemoteMutationRequest,
+  changeRemoteReadRequest,
   type ChangeRemoteExecutor,
   type ChangeRemoteMutationRequest,
   type ChangeRemoteReadRequest,
@@ -650,7 +652,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
   }
 }
 
-async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance> {
+export async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance> {
   for (const policyPath of POLICY_PATHS) {
     let source: string;
     try {
@@ -674,7 +676,7 @@ function requiredEnvironment(environment: NodeJS.ProcessEnv, key: string): strin
 
 export interface GitHubActionsRuntimeOptions {
   readonly cwd: string;
-  readonly request: ChangeRemoteMutationRequest;
+  readonly request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest;
   readonly environment?: NodeJS.ProcessEnv;
   readonly fetch?: typeof globalThis.fetch;
 }
@@ -760,6 +762,14 @@ export async function createGitHubActionsChangeExecutor(
     transport: readTransport,
     cwd: options.cwd,
   });
+  if (options.request.operation === "show") {
+    return {
+      execute: async () => {
+        throw new GitHubActionsChangeExecutorError("Read-only Change execution cannot apply effects.");
+      },
+      read: async (request) => projectChangeFromGitHubEvidence(await reader.read(request)),
+    };
+  }
   const broker = new GitHubActionsCredentialBroker({
     appId: requiredEnvironment(environment, "INARI_ISSUER_APP_ID"),
     installationId: requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID"),
@@ -801,6 +811,13 @@ export async function runGitHubActionsChangeExecutor(
       throw new GitHubActionsChangeExecutorError();
     }
     const requestRecord = requestValue as Record<string, unknown>;
+    const allowedRequestKeys = new Set(["version", "operation", "issue", "requester"]);
+    if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
+      throw new GitHubActionsChangeExecutorError();
+    }
+    if (requestRecord.requester !== undefined && typeof requestRecord.requester !== "string") {
+      throw new GitHubActionsChangeExecutorError();
+    }
     if (
       requestRecord.version !== CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION ||
       typeof requestRecord.operation !== "string" ||
@@ -808,13 +825,17 @@ export async function runGitHubActionsChangeExecutor(
     ) {
       throw new GitHubActionsChangeExecutorError();
     }
-    const request = changeRemoteMutationRequest(
-      requestRecord.operation as "issue" | "ready" | "abort",
-      requestRecord.issue,
-      typeof requestRecord.requester === "string" ? requestRecord.requester : undefined,
-    );
+    const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
+    const request =
+      requestRecord.operation === "show"
+        ? changeRemoteReadRequest(requestRecord.issue, requester)
+        : changeRemoteMutationRequest(
+            requestRecord.operation as "issue" | "ready" | "abort",
+            requestRecord.issue,
+            requester,
+          );
     const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
-    const result = await executor.execute(request);
+    const result = request.operation === "show" ? await executor.read(request) : await executor.execute(request);
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error: unknown) {
