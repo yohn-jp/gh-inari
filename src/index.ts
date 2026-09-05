@@ -17,6 +17,7 @@ export * from "./semantic-template.js";
 export * from "./template-resolver.js";
 export * from "./diagnostics.js";
 export * from "./command-contract.js";
+export * from "./change.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,
