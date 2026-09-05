@@ -30,6 +30,11 @@ import {
   type IssueDependencies,
   type IssueReference,
 } from "./contract/issue-reference.js";
+import {
+  effectiveTitleGovernance,
+  validateTitleGovernance,
+  type TitleGovernanceViolation,
+} from "./contract/title.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 import {
   createValidatedRenderedIssueArtifact,
@@ -193,7 +198,11 @@ export interface ExistingArtifactValidationResult {
   readonly valid: boolean;
   readonly classification: ExistingArtifactClassification;
   readonly parse: ExistingArtifactParseResult;
-  readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+  readonly violations: readonly (
+    | ExistingArtifactDiagnostic
+    | SemanticViolation
+    | TitleGovernanceViolation
+  )[];
   /** Template paths tried against a multi-candidate match that produced no single parse. */
   readonly attemptedTemplates?: readonly string[];
 }
@@ -202,13 +211,18 @@ export interface ExistingIssueReader {
   getIssue(issueNumber: number): Promise<{
     readonly body: string | null;
     readonly url: string;
+    readonly title?: string;
     readonly repositoryId?: string;
     readonly repositoryHost?: string;
   }>;
 }
 
 export interface ExistingPullRequestReader {
-  getPullRequest(pullRequestNumber: number): Promise<{ readonly body: string | null; readonly url: string }>;
+  getPullRequest(pullRequestNumber: number): Promise<{
+    readonly body: string | null;
+    readonly url: string;
+    readonly title?: string;
+  }>;
 }
 
 const GITHUB_NO_RESPONSE = "_No response_";
@@ -726,7 +740,7 @@ export function prepareIssueArtifact(contractInput: unknown, input: ArtifactInpu
   requireTrustedProvenance(contractInput);
   const loaded = loadCanonicalArtifact(contractInput, input);
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
-  const title = requiredCreateTitle(input.metadata.title, contractInput.nativeMetadata.title);
+  const title = requiredCreateTitle(input.metadata.title, effectiveTitleGovernance(contractInput));
   const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
   const expectedMetadata: Readonly<Record<string, unknown>> = {
     title,
@@ -758,7 +772,7 @@ export function preparePullRequestArtifact(
   requireTrustedProvenance(contractInput);
   const loaded = loadCanonicalArtifact(contractInput, input);
   if (!loaded.valid) throw new SemanticValidationError(loaded.violations);
-  const title = requiredCreateTitle(input.metadata.title, contractInput.nativeMetadata.title);
+  const title = requiredCreateTitle(input.metadata.title, effectiveTitleGovernance(contractInput));
   const head = requiredMetadataString(input.metadata.head, "head");
   const base = requiredMetadataString(input.metadata.base, "base");
   const body = renderPullRequestBody(contractInput, loaded.canonical);
@@ -868,19 +882,21 @@ export function validateExistingIssueArtifact(
   contractInput: unknown,
   body: string | null | undefined,
   subject?: IssueReference,
+  title?: unknown,
 ): ExistingArtifactValidationResult {
   assertCanonicalContract(contractInput);
   const parse = parseExistingIssueArtifact(contractInput, body);
-  return validateParsedArtifact(contractInput, parse, subject);
+  return validateParsedArtifact(contractInput, parse, subject, title, arguments.length >= 4);
 }
 
 export function validateExistingPullRequestArtifact(
   contractInput: unknown,
   body: string | null | undefined,
+  title?: unknown,
 ): ExistingArtifactValidationResult {
   assertCanonicalContract(contractInput);
   const parse = parseExistingPullRequestArtifact(contractInput, body);
-  return validateParsedArtifact(contractInput, parse);
+  return validateParsedArtifact(contractInput, parse, undefined, title, arguments.length >= 3);
 }
 
 export interface ExistingArtifactCandidate {
@@ -900,7 +916,11 @@ export interface ExistingArtifactProjection {
   readonly fields?: Readonly<Record<string, unknown>>;
   readonly dependencies?: IssueDependencies;
   readonly diagnostics: readonly ExistingArtifactDiagnostic[];
-  readonly violations?: readonly SemanticViolation[];
+  readonly violations?: readonly (
+    | ExistingArtifactDiagnostic
+    | SemanticViolation
+    | TitleGovernanceViolation
+  )[];
   readonly attemptedTemplates?: readonly string[];
 }
 
@@ -913,7 +933,7 @@ export function projectExistingArtifact(result: ExistingArtifactValidationResult
     ...(result.valid ? { fields: result.parse.values } : {}),
     ...(result.valid && result.parse.dependencies !== undefined ? { dependencies: result.parse.dependencies } : {}),
     diagnostics: result.parse.diagnostics,
-    ...(result.classification === "semantic" ? { violations: result.violations as readonly SemanticViolation[] } : {}),
+    ...(result.classification === "semantic" ? { violations: result.violations } : {}),
     ...(result.attemptedTemplates === undefined ? {} : { attemptedTemplates: result.attemptedTemplates }),
   };
 }
@@ -990,11 +1010,19 @@ export async function validateExistingIssueFromAdapter(
   return {
     number: issueNumber,
     url: issue.url,
-    result: validateExistingIssueArtifact(
-      contract,
-      issue.body,
-      issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId, issue.repositoryHost),
-    ),
+    result:
+      issue.title === undefined
+        ? validateExistingIssueArtifact(
+            contract,
+            issue.body,
+            issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId, issue.repositoryHost),
+          )
+        : validateExistingIssueArtifact(
+            contract,
+            issue.body,
+            issueReferenceFromUrl(issue.url, issueNumber, issue.repositoryId, issue.repositoryHost),
+            issue.title,
+          ),
   };
 }
 
@@ -1007,7 +1035,10 @@ export async function validateExistingPullRequestFromAdapter(
   return {
     number: pullRequestNumber,
     url: pullRequest.url,
-    result: validateExistingPullRequestArtifact(contract, pullRequest.body),
+    result:
+      pullRequest.title === undefined
+        ? validateExistingPullRequestArtifact(contract, pullRequest.body)
+        : validateExistingPullRequestArtifact(contract, pullRequest.body, pullRequest.title),
   };
 }
 
@@ -1015,6 +1046,8 @@ function validateParsedArtifact(
   contract: CanonicalContract,
   parse: ExistingArtifactParseResult,
   subject?: IssueReference,
+  title?: unknown,
+  titleProvided = false,
 ): ExistingArtifactValidationResult {
   if (!parse.parsed) {
     const classification = parse.diagnostics.some((diagnostic) => diagnostic.code === "EXISTING_WRONG_TEMPLATE")
@@ -1025,16 +1058,22 @@ function validateParsedArtifact(
   const dependencyInput = parse.dependencyInput ?? parse.dependencies;
   const dependencyValidation =
     contract.artifactKind === "issue" ? validateIssueDependencies(dependencyInput, subject) : undefined;
+  const titleValidation = titleProvided
+    ? validateTitleGovernance(effectiveTitleGovernance(contract), title)
+    : { valid: true, violations: [] as const };
   if (dependencyValidation !== undefined && !dependencyValidation.valid) {
     return {
       valid: false,
       classification: "semantic",
       parse,
-      violations: dependencyValidation.violations.map((violation) => ({
-        code: "INPUT_DEPENDENCY" as const,
-        path: prefixDependencyPath(violation.path),
-        message: violation.message,
-      })),
+      violations: [
+        ...titleValidation.violations,
+        ...dependencyValidation.violations.map((violation) => ({
+          code: "INPUT_DEPENDENCY" as const,
+          path: prefixDependencyPath(violation.path),
+          message: violation.message,
+        })),
+      ],
     };
   }
   const normalizedParse =
@@ -1047,11 +1086,12 @@ function validateParsedArtifact(
     source: "existing",
     dependencies: dependencyValidation?.dependencies ?? parse.dependencies,
   });
+  const violations = [...titleValidation.violations, ...semantic.violations];
   return {
-    valid: semantic.valid,
-    classification: semantic.valid ? "valid" : "semantic",
+    valid: semantic.valid && titleValidation.valid,
+    classification: semantic.valid && titleValidation.valid ? "valid" : "semantic",
     parse: normalizedParse,
-    violations: semantic.violations,
+    violations,
   };
 }
 
@@ -1856,19 +1896,24 @@ function requiredMetadataString(value: unknown, key: string): string {
   return value as string;
 }
 
-function requiredCreateTitle(value: unknown, nativeTitle: string | undefined): string {
-  const title = requiredMetadataString(value, "title");
-  const nativePrefix = nativeTitle?.trim();
-  if (nativePrefix !== undefined && nativePrefix.length > 0 && title.trim() === nativePrefix) {
+function requiredCreateTitle(
+  value: unknown,
+  policy: ReturnType<typeof effectiveTitleGovernance>,
+): string {
+  const validation = validateTitleGovernance(policy.required ? policy : { ...policy, required: true }, value);
+  if (!validation.valid) {
+    const violation = validation.violations[0];
+    if (violation === undefined) throw new Error("Title validation failed without a violation.");
     throwMetadataInputError(
-      title,
+      value,
       "title",
-      "title must contain content beyond the fixed native template prefix.",
-      "invalid",
-      "Provide a title containing caller content beyond the fixed native template prefix.",
+      violation.message,
+      violation.code === "TITLE_REQUIRED" ? "missing" : "invalid",
+      titleRecoveryHint(violation.code),
+      violation,
     );
   }
-  return title;
+  return value as string;
 }
 
 function throwMetadataInputError(
@@ -1877,6 +1922,7 @@ function throwMetadataInputError(
   message: string,
   state: "missing" | "invalid",
   hint: string,
+  titleViolation?: TitleGovernanceViolation,
 ): never {
   const path = `$.${key}`;
   const diagnostic = createArtifactDiagnostic({
@@ -1891,7 +1937,21 @@ function throwMetadataInputError(
   });
   throw new ArtifactInputError("INPUT_METADATA_INVALID", message, path, {
     diagnostics: createArtifactDiagnosticReport([diagnostic]),
+    ...(titleViolation === undefined ? {} : { titleViolation }),
   });
+}
+
+function titleRecoveryHint(code: TitleGovernanceViolation["code"]): string {
+  switch (code) {
+    case "TITLE_REQUIRED":
+      return "Provide a value for title.";
+    case "TITLE_PREFIX_ONLY":
+      return "Provide a title containing caller content beyond the fixed native template prefix.";
+    case "TITLE_TEMPLATE_ONLY":
+      return "Provide a title containing caller content beyond the fixed native title template.";
+    default:
+      return "Provide a title satisfying the canonical title governance policy.";
+  }
 }
 
 function stringArray(value: unknown, key: string): readonly string[] {

@@ -1,3 +1,5 @@
+import type { TitleGovernance } from "./title.js";
+
 /**
  * Versioned, compiler-generated contract representation.
  *
@@ -235,6 +237,8 @@ export interface CanonicalContract {
   readonly artifactKind: ArtifactKind;
   readonly templateIdentity: TemplateIdentity;
   readonly nativeMetadata: NativeContractMetadata;
+  /** Effective title policy retained as artifact metadata, never as a body field. */
+  readonly titleGovernance?: TitleGovernance;
   /** Sections and fields retain source order; their render.order values are checked against those arrays. */
   readonly sections: readonly CanonicalSection[];
   readonly supplementalConstraints: SupplementalConstraints;
@@ -389,6 +393,45 @@ function optionalBoolean(
     return undefined;
   }
   return value;
+}
+
+function validateTitleGovernance(
+  value: unknown,
+  path: string,
+  violations: CanonicalIrViolation[],
+): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    addViolation(violations, "IR_INVALID_CONSTRAINT", path, "Title governance must be an object.");
+    return;
+  }
+  checkUnknownKeys(value, ["required", "prefix", "template", "pattern", "minLength", "maxLength"], path, violations);
+  if (!hasOwn(value, "required") || typeof value.required !== "boolean") {
+    addViolation(violations, "IR_INVALID_CONSTRAINT", `${path}.required`, "Title governance required must be a boolean.");
+  }
+  const prefix = optionalString(value, "prefix", path, violations);
+  const template = optionalString(value, "template", path, violations);
+  const pattern = optionalString(value, "pattern", path, violations);
+  const minLength = optionalNonNegativeInteger(value, "minLength", path, violations);
+  const maxLength = optionalNonNegativeInteger(value, "maxLength", path, violations);
+  for (const [key, marker] of [
+    ["prefix", prefix],
+    ["template", template],
+  ] as const) {
+    if (marker !== undefined && marker.trim().length === 0) {
+      addViolation(violations, "IR_INVALID_CONSTRAINT", `${path}.${key}`, `${key} must be non-empty when present.`);
+    }
+  }
+  if (pattern !== undefined) {
+    try {
+      new RegExp(pattern, "u");
+    } catch {
+      addViolation(violations, "IR_INVALID_CONSTRAINT", `${path}.pattern`, "Title pattern must be a valid regular expression.");
+    }
+  }
+  if (minLength !== undefined && maxLength !== undefined && minLength > maxLength) {
+    addViolation(violations, "IR_INCONSISTENT_CONSTRAINT", path, "Title minLength cannot be greater than maxLength.");
+  }
 }
 
 function optionalStringArray(
@@ -1698,6 +1741,7 @@ export function validateCanonicalContract(input: unknown): CanonicalIrValidation
       "artifactKind",
       "templateIdentity",
       "nativeMetadata",
+      "titleGovernance",
       "sections",
       "supplementalConstraints",
       "provenance",
@@ -1808,6 +1852,7 @@ export function validateCanonicalContract(input: unknown): CanonicalIrValidation
       );
     }
   }
+  validateTitleGovernance(input.titleGovernance, "$.titleGovernance", violations);
   if (artifactKind === "issue" && templateSource !== undefined && templateSource !== "issue_form") {
     addViolation(
       violations,
@@ -2019,6 +2064,24 @@ function canonicalizeContract(contract: CanonicalContract): UnknownRecord {
         : { description: contract.nativeMetadata.description }),
       ...(contract.nativeMetadata.labels === undefined ? {} : { labels: [...contract.nativeMetadata.labels] }),
     },
+    ...(contract.titleGovernance === undefined
+      ? {}
+      : {
+          titleGovernance: {
+            required: contract.titleGovernance.required,
+            ...(contract.titleGovernance.prefix === undefined ? {} : { prefix: contract.titleGovernance.prefix }),
+            ...(contract.titleGovernance.template === undefined
+              ? {}
+              : { template: contract.titleGovernance.template }),
+            ...(contract.titleGovernance.pattern === undefined ? {} : { pattern: contract.titleGovernance.pattern }),
+            ...(contract.titleGovernance.minLength === undefined
+              ? {}
+              : { minLength: contract.titleGovernance.minLength }),
+            ...(contract.titleGovernance.maxLength === undefined
+              ? {}
+              : { maxLength: contract.titleGovernance.maxLength }),
+          },
+        }),
     sections: contract.sections.map(canonicalizeSection),
     supplementalConstraints: {
       fields: contract.supplementalConstraints.fields.map((constraint) => ({

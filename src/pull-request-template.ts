@@ -11,6 +11,7 @@ import {
   type ChecklistItem,
   type StringField,
 } from "./contract/ir.js";
+import { defaultTitleGovernance } from "./contract/title.js";
 import {
   discoverTemplates,
   discoverTemplatesSync,
@@ -158,6 +159,7 @@ export function parsePullRequestTemplate(markdown: string, identity: DiscoveredT
       source: "pull_request_template",
       path: identity.path,
     },
+    titleGovernance: defaultTitleGovernance(),
     sections,
     supplementalConstraints: { fields: [] },
   };

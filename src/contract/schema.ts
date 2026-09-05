@@ -7,10 +7,10 @@ import {
 } from "./ir.js";
 import {
   effectiveFieldConstraints,
-  REQUIRED_STRING_PATTERN,
   schemaMinItems,
   schemaStringPatternProjection,
 } from "./constraints.js";
+import { effectiveTitleGovernance, projectTitleSchema } from "./title.js";
 
 /** JSON Schema values used by the projected public input contract. */
 export type JsonSchemaPrimitive = string | number | boolean | null;
@@ -51,6 +51,7 @@ export interface RenderingProjection {
   readonly artifactKind: CanonicalContract["artifactKind"];
   readonly templateIdentity: CanonicalContract["templateIdentity"];
   readonly nativeMetadata: CanonicalContract["nativeMetadata"];
+  readonly titleGovernance: CanonicalContract["titleGovernance"];
   readonly sections: CanonicalContract["sections"];
   readonly provenance?: ContractProvenance;
 }
@@ -198,11 +199,12 @@ function projectValidatedContractToJsonSchema(contract: CanonicalContract): Json
 
 function projectValidatedArtifactMetadataSchema(contract: CanonicalContract): JsonSchemaDocument {
   const noun = contract.artifactKind === "issue" ? "Issue" : "pull request";
-  const nativeTitle = contract.nativeMetadata.title?.trim();
-  const hasNativeTitle = nativeTitle !== undefined && nativeTitle.length > 0;
-  const titleDescription = hasNativeTitle
+  const titleGovernance = effectiveTitleGovernance(contract);
+  const fixedTitle = titleGovernance.prefix ?? titleGovernance.template;
+  const titleDescription = fixedTitle !== undefined
     ? `Caller-supplied ${noun} title; provide content beyond the fixed native template prefix.`
     : `Caller-supplied ${noun} title.`;
+  const titleSchema = projectTitleSchema(titleGovernance);
   return {
     $schema: JSON_SCHEMA_DIALECT,
     $id: metadataSchemaIdentifier(contract),
@@ -211,14 +213,11 @@ function projectValidatedArtifactMetadataSchema(contract: CanonicalContract): Js
     type: "object",
     properties: {
       title: {
-        title: "Title",
         description: titleDescription,
-        type: "string",
-        minLength: 1,
-        pattern: REQUIRED_STRING_PATTERN,
+        ...titleSchema,
       },
     },
-    required: ["title"],
+    ...(titleGovernance.required ? { required: ["title"] } : {}),
     additionalProperties: false,
   };
 }
@@ -240,6 +239,7 @@ export function projectContract(input: unknown): ContractProjection {
       artifactKind: input.artifactKind,
       templateIdentity: input.templateIdentity,
       nativeMetadata: input.nativeMetadata,
+      titleGovernance: effectiveTitleGovernance(input),
       sections: input.sections,
       ...(input.provenance === undefined ? {} : { provenance: input.provenance }),
     },
