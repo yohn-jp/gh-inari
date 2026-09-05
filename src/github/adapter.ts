@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   ContractViolationError,
   GhNotInstalledError,
@@ -33,6 +36,7 @@ import {
 } from "./types.js";
 
 const DEFAULT_HOSTNAME = "github.com";
+const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
 
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
@@ -52,6 +56,9 @@ const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.fre
   "repository.default_branch": "read",
   "repository.governance.tree": "read",
   "repository.governance.blob": "read",
+  "auth.identity": "auth",
+  "actions.request": "mutation",
+  "actions.artifact.download": "read",
   "issue.read": "read",
   "pull_request.read": "read",
   "issue.create": "mutation",
@@ -125,6 +132,11 @@ export interface GitHubAdapterOptions {
   readonly outputLimitsBytes?: Partial<GhTransportOutputLimits>;
 }
 
+export interface GitHubApiResponse {
+  readonly status: number;
+  readonly body: unknown;
+}
+
 export class GitHubAdapter {
   private readonly cwd: string | undefined;
   private readonly repository: string | undefined;
@@ -156,6 +168,21 @@ export class GitHubAdapter {
     await this.ensureAuthenticated(this.repositoryHostOverride());
   }
 
+  /** Read the login attached to the caller's existing gh session. */
+  async getAuthenticatedUser(): Promise<string> {
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runApi(
+      ["api", "user", "--hostname", context.hostname, "--method", "GET"],
+      "auth.identity",
+    );
+    const record = responseRecord(result, "auth.identity");
+    const login = responseString(record.login, "login", "auth.identity");
+    if (!/^[A-Za-z0-9-]{1,39}$/u.test(login)) {
+      throw new GitHubApiResponseError("auth.identity", "GitHub returned an invalid authenticated user identity.");
+    }
+    return login;
+  }
+
   async resolveRepositoryContext(): Promise<RepositoryContext> {
     if (this.contextPromise === undefined) {
       const pending = this.resolveRepositoryContextOnce();
@@ -169,6 +196,85 @@ export class GitHubAdapter {
 
   async getRepositoryContext(): Promise<RepositoryContext> {
     return this.resolveRepositoryContext();
+  }
+
+  /**
+   * Request the fixed Actions API surface used by the Change transport.
+   * Callers supply only an adapter-owned relative Actions path and bounded form
+   * fields; repository, host, and authentication remain resolved here.
+   */
+  async requestActionsApi(
+    actionsPath: string,
+    method: "GET" | "POST",
+    fields: Readonly<Record<string, string>> = {},
+  ): Promise<unknown> {
+    assertActionsApiPath(actionsPath);
+    const context = await this.resolveRepositoryContext();
+    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/${actionsPath}`, method);
+    for (const [name, value] of Object.entries(fields)) appendRawField(args, name, value);
+    return this.runApi(args, "actions.request");
+  }
+
+  /** Read the bounded repository API surface needed by Change projection. */
+  async requestRepositoryApi(repositoryPath: string, method: "GET" = "GET"): Promise<GitHubApiResponse> {
+    assertRepositoryApiPath(repositoryPath);
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runCommand(
+      [
+        "api",
+        `repos/${context.nameWithOwner}/${repositoryPath}`,
+        "--hostname",
+        context.hostname,
+        "--method",
+        method,
+        "--include",
+      ],
+      "actions.request",
+    );
+    const response = parseIncludedApiResponse(result.stdout, "actions.request");
+    if (response !== undefined) {
+      if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
+        throw new GitHubApiError("actions.request", "GitHub repository read failed.");
+      }
+      return response;
+    }
+    if (result.exitCode !== 0) throw new GitHubApiError("actions.request", "GitHub repository read failed.");
+    throw new GitHubApiResponseError("actions.request", "GitHub returned no API response.");
+  }
+
+  /** Download one bounded Actions artifact archive through the caller's gh session. */
+  async downloadActionsArtifact(artifactId: number): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(artifactId) || artifactId < 1) {
+      throw new ContractViolationError("Actions artifact ID must be a positive integer.", "artifactId");
+    }
+    const context = await this.resolveRepositoryContext();
+    const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-actions-"));
+    const destination = path.join(directory, "artifact.zip");
+    try {
+      const result = await this.runCommand(
+        [
+          "api",
+          `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
+          "--hostname",
+          context.hostname,
+          "--method",
+          "GET",
+          "--output",
+          destination,
+        ],
+        "actions.artifact.download",
+      );
+      if (result.exitCode !== 0) {
+        throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
+      }
+      const metadata = await stat(destination);
+      if (!metadata.isFile() || metadata.size > MAX_ACTIONS_ARTIFACT_BYTES) {
+        throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an oversized Actions artifact.");
+      }
+      return new Uint8Array(await readFile(destination));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   /** Read the target repository metadata used to select the trusted governance ref. */
@@ -634,6 +740,7 @@ function appendBooleanField(args: string[], name: string, value: boolean | undef
 }
 
 function parseJson(value: string, operation: string): unknown {
+  if (value.trim() === "") return undefined;
   try {
     return JSON.parse(value) as unknown;
   } catch (error) {
@@ -643,6 +750,51 @@ function parseJson(value: string, operation: string): unknown {
       { response: summarize(value) },
       error,
     );
+  }
+}
+
+function parseIncludedApiResponse(value: string, operation: string): GitHubApiResponse | undefined {
+  const lines = value.split(/\r?\n/u);
+  let statusIndex = -1;
+  let status = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^HTTP\/[^ ]+\s+(\d{3})(?:\s|$)/u.exec(lines[index] ?? "");
+    if (match !== null) {
+      statusIndex = index;
+      status = Number(match[1]);
+    }
+  }
+  if (statusIndex < 0) return undefined;
+  let separator = statusIndex + 1;
+  while (separator < lines.length && lines[separator] !== "") separator += 1;
+  if (separator >= lines.length) {
+    throw new GitHubApiResponseError(operation, "GitHub returned an incomplete API response.");
+  }
+  return { status, body: parseJson(lines.slice(separator + 1).join("\n"), operation) };
+}
+
+function assertActionsApiPath(value: string): void {
+  if (
+    value.length === 0 ||
+    value.length > 2048 ||
+    value.startsWith("/") ||
+    value.includes("\u0000") ||
+    value.includes("..") ||
+    !/^actions\//u.test(value)
+  ) {
+    throw new ContractViolationError("Actions API path is invalid.", "actionsPath");
+  }
+}
+
+function assertRepositoryApiPath(value: string): void {
+  if (
+    value.length > 2048 ||
+    value.startsWith("/") ||
+    value.includes("\u0000") ||
+    value.includes("..") ||
+    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|git\/)/u.test(value))
+  ) {
+    throw new ContractViolationError("Repository API path is invalid.", "repositoryPath");
   }
 }
 

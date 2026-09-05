@@ -165,15 +165,12 @@ test("abort is routed through the same executor boundary", async () => {
   assert.equal(result.output?.operation, "change.abort");
 });
 
-test("missing remote executor returns a bounded machine-readable remote error", async () => {
+test("unavailable Actions transport returns a bounded machine-readable remote error", async () => {
   const result = await capture(["change", "issue", "42", "--json"]);
 
   assert.equal(result.exitCode, 3);
-  assert.deepEqual(result.output?.error, {
-    code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
-    message: "No remote Change executor is configured for this CLI runtime.",
-    details: { operation: "issue" },
-  });
+  assert.equal((result.output?.error as { code?: string } | undefined)?.code, "CHANGE_REMOTE_DISPATCH_FAILED");
+  assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
 });
 
 test("invalid Change numbers fail before the executor is constructed", async () => {

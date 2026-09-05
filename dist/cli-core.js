@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ArtifactInputError, ArtifactPreparationError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
 import { effectiveFieldConstraints, projectContract, SemanticValidationError, } from "./contract/index.js";
-import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
+import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import { assertPullRequestSyncInputComplete, parsePullRequestSyncInput, projectPullRequestSyncInput, renderPullRequestSyncInputHelp, } from "./pr-sync-input.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
@@ -13,7 +13,7 @@ import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffA
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
-import { changeRemoteMutationRequest, changeRemoteReadRequest, createUnavailableChangeRemoteExecutor, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
+import { changeRemoteMutationRequest, changeRemoteReadRequest, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
@@ -556,7 +556,14 @@ function invalidChangeNumberError(value) {
 function createChangeExecutor(dependencies, root, repository) {
     if (dependencies.changeExecutor !== undefined)
         return dependencies.changeExecutor;
-    const factory = dependencies.createChangeExecutor ?? (() => createUnavailableChangeRemoteExecutor());
+    const factory = dependencies.createChangeExecutor ??
+        ((options) => {
+            const adapter = (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
+                cwd: options.cwd,
+                ...(options.repository === undefined ? {} : { repository: options.repository }),
+            });
+            return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
+        });
     return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
 function projectChangeCommandResult(operation, issue, projection, evidence = undefined) {

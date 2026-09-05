@@ -44,7 +44,7 @@ function validateRequest(request) {
         assertMutation(request.operation);
     return request;
 }
-function normalizeProjection(operation, result) {
+export function normalizeChangeRemoteProjection(operation, result) {
     const validation = validateChangeProjectionResult(result);
     if (!validation.valid || validation.projection === undefined) {
         throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned an invalid bounded projection.", { operation }, validation.diagnostics);
@@ -136,20 +136,23 @@ function normalizeExecutionEvidence(operation, value) {
         ...(failure === undefined ? {} : { failure }),
     };
 }
-function normalizeExecutionResult(operation, result) {
+export function normalizeChangeRemoteExecutionResult(operation, result) {
     if (typeof result === "object" &&
         result !== null &&
         !Array.isArray(result) &&
         Object.prototype.hasOwnProperty.call(result, "projection")) {
         const envelope = result;
-        const projection = normalizeProjection(operation, envelope.projection);
+        if (Object.keys(envelope).some((key) => key !== "projection" && key !== "evidence")) {
+            throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned an invalid bounded execution result.", { operation });
+        }
+        const projection = normalizeChangeRemoteProjection(operation, envelope.projection);
         const evidence = envelope.evidence === undefined ? undefined : normalizeExecutionEvidence(operation, envelope.evidence);
         return Object.freeze({
             projection,
             ...(evidence === undefined ? {} : { evidence }),
         });
     }
-    return { projection: normalizeProjection(operation, result) };
+    return { projection: normalizeChangeRemoteProjection(operation, result) };
 }
 export function changeRemoteMutationRequest(operation, issue, requester) {
     const request = {
@@ -177,11 +180,11 @@ export async function executeChangeRemoteMutation(executor, request) {
 }
 export async function executeChangeRemoteMutationResult(executor, request) {
     validateRequest(request);
-    return normalizeExecutionResult(request.operation, await executor.execute(request));
+    return normalizeChangeRemoteExecutionResult(request.operation, await executor.execute(request));
 }
 export async function readChangeRemoteProjection(executor, request) {
     validateRequest(request);
-    return normalizeProjection(request.operation, await executor.read(request));
+    return normalizeChangeRemoteProjection(request.operation, await executor.read(request));
 }
 /** Default until a repository configures a trusted remote executor. */
 export function createUnavailableChangeRemoteExecutor() {

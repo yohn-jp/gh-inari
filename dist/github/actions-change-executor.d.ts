@@ -71,9 +71,10 @@ export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenc
     private readPullRequests;
     private request;
 }
+export declare function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance>;
 export interface GitHubActionsRuntimeOptions {
     readonly cwd: string;
-    readonly request: ChangeRemoteMutationRequest;
+    readonly request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest;
     readonly environment?: NodeJS.ProcessEnv;
     readonly fetch?: typeof globalThis.fetch;
 }

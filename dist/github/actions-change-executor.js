@@ -8,10 +8,10 @@
 import { createHash, createSign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, } from "../change.js";
+import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, projectChangeFromGitHubEvidence, } from "../change.js";
 import { extractTemplateIdentityMarker } from "../artifact.js";
 import { compileLocalGovernedContract } from "../governance.js";
-import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, changeRemoteMutationRequest, } from "../change-executor.js";
+import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, changeRemoteMutationRequest, changeRemoteReadRequest, } from "../change-executor.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import { GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES, GitHubChangeEffectAdapter, } from "./change-effect-adapter.js";
 import { InariIssuerAppAuthority, assertTrustedExecution, TRUSTED_EXECUTION_EVENTS, } from "./issuer-authority.js";
@@ -549,7 +549,7 @@ export class GitHubActionsEvidenceReader {
         return response.body;
     }
 }
-async function loadBranchGovernance(cwd) {
+export async function loadBranchGovernance(cwd) {
     for (const policyPath of POLICY_PATHS) {
         let source;
         try {
@@ -651,6 +651,14 @@ export async function createGitHubActionsChangeExecutor(options) {
         transport: readTransport,
         cwd: options.cwd,
     });
+    if (options.request.operation === "show") {
+        return {
+            execute: async () => {
+                throw new GitHubActionsChangeExecutorError("Read-only Change execution cannot apply effects.");
+            },
+            read: async (request) => projectChangeFromGitHubEvidence(await reader.read(request)),
+        };
+    }
     const broker = new GitHubActionsCredentialBroker({
         appId: requiredEnvironment(environment, "INARI_ISSUER_APP_ID"),
         installationId: requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID"),
@@ -687,14 +695,24 @@ export async function runGitHubActionsChangeExecutor(environment = process.env, 
             throw new GitHubActionsChangeExecutorError();
         }
         const requestRecord = requestValue;
+        const allowedRequestKeys = new Set(["version", "operation", "issue", "requester"]);
+        if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
+            throw new GitHubActionsChangeExecutorError();
+        }
+        if (requestRecord.requester !== undefined && typeof requestRecord.requester !== "string") {
+            throw new GitHubActionsChangeExecutorError();
+        }
         if (requestRecord.version !== CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION ||
             typeof requestRecord.operation !== "string" ||
             typeof requestRecord.issue !== "number") {
             throw new GitHubActionsChangeExecutorError();
         }
-        const request = changeRemoteMutationRequest(requestRecord.operation, requestRecord.issue, typeof requestRecord.requester === "string" ? requestRecord.requester : undefined);
+        const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
+        const request = requestRecord.operation === "show"
+            ? changeRemoteReadRequest(requestRecord.issue, requester)
+            : changeRemoteMutationRequest(requestRecord.operation, requestRecord.issue, requester);
         const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
-        const result = await executor.execute(request);
+        const result = request.operation === "show" ? await executor.read(request) : await executor.execute(request);
         process.stdout.write(`${JSON.stringify(result)}\n`);
         return 0;
     }

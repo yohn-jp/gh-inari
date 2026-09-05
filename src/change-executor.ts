@@ -89,7 +89,13 @@ export type RemoteChangeExecutor = ChangeRemoteExecutor;
 export type ChangeExecutor = ChangeRemoteExecutor;
 
 export type ChangeRemoteExecutorErrorCode =
-  "CHANGE_REMOTE_REQUEST_INVALID" | "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" | "CHANGE_REMOTE_RESULT_INVALID";
+  | "CHANGE_REMOTE_REQUEST_INVALID"
+  | "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE"
+  | "CHANGE_REMOTE_TRANSPORT_FAILED"
+  | "CHANGE_REMOTE_DISPATCH_FAILED"
+  | "CHANGE_REMOTE_RUN_FAILED"
+  | "CHANGE_REMOTE_CORRELATION_FAILED"
+  | "CHANGE_REMOTE_RESULT_INVALID";
 
 export class ChangeRemoteExecutorError extends Error {
   readonly code: ChangeRemoteExecutorErrorCode;
@@ -155,7 +161,7 @@ function validateRequest(
   return request;
 }
 
-function normalizeProjection(operation: string, result: unknown): ChangeProjectionResult {
+export function normalizeChangeRemoteProjection(operation: string, result: unknown): ChangeProjectionResult {
   const validation = validateChangeProjectionResult(result);
   if (!validation.valid || validation.projection === undefined) {
     throw new ChangeRemoteExecutorError(
@@ -305,7 +311,7 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
   };
 }
 
-function normalizeExecutionResult(operation: string, result: unknown): ChangeRemoteExecutionResult {
+export function normalizeChangeRemoteExecutionResult(operation: string, result: unknown): ChangeRemoteExecutionResult {
   if (
     typeof result === "object" &&
     result !== null &&
@@ -313,7 +319,14 @@ function normalizeExecutionResult(operation: string, result: unknown): ChangeRem
     Object.prototype.hasOwnProperty.call(result, "projection")
   ) {
     const envelope = result as Record<string, unknown>;
-    const projection = normalizeProjection(operation, envelope.projection);
+    if (Object.keys(envelope).some((key) => key !== "projection" && key !== "evidence")) {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "The Change executor returned an invalid bounded execution result.",
+        { operation },
+      );
+    }
+    const projection = normalizeChangeRemoteProjection(operation, envelope.projection);
     const evidence =
       envelope.evidence === undefined ? undefined : normalizeExecutionEvidence(operation, envelope.evidence);
     return Object.freeze({
@@ -321,7 +334,7 @@ function normalizeExecutionResult(operation: string, result: unknown): ChangeRem
       ...(evidence === undefined ? {} : { evidence }),
     });
   }
-  return { projection: normalizeProjection(operation, result) };
+  return { projection: normalizeChangeRemoteProjection(operation, result) };
 }
 
 export function changeRemoteMutationRequest(
@@ -363,7 +376,7 @@ export async function executeChangeRemoteMutationResult(
   request: ChangeRemoteMutationRequest,
 ): Promise<ChangeRemoteExecutionResult> {
   validateRequest(request);
-  return normalizeExecutionResult(request.operation, await executor.execute(request));
+  return normalizeChangeRemoteExecutionResult(request.operation, await executor.execute(request));
 }
 
 export async function readChangeRemoteProjection(
@@ -371,7 +384,7 @@ export async function readChangeRemoteProjection(
   request: ChangeRemoteReadRequest,
 ): Promise<ChangeProjectionResult> {
   validateRequest(request);
-  return normalizeProjection(request.operation, await executor.read(request));
+  return normalizeChangeRemoteProjection(request.operation, await executor.read(request));
 }
 
 /** Default until a repository configures a trusted remote executor. */
