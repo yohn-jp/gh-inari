@@ -36,6 +36,10 @@
       "types": "./dist/change.d.ts",
       "import": "./dist/change.js"
     },
+    "./change-executor": {
+      "types": "./dist/change-executor.d.ts",
+      "import": "./dist/change-executor.js"
+    },
     "./semantic-template": {
       "types": "./dist/semantic-template.d.ts",
       "import": "./dist/semantic-template.js"

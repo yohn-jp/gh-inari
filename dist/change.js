@@ -2314,7 +2314,7 @@ function validateChangeProjectionCandidatePullRequest(input, path, diagnostics) 
         reason,
     };
 }
-function validateChangeProjectionResult(input, path, diagnostics) {
+function parseChangeProjectionResult(input, path, diagnostics) {
     if (!isRecord(input)) {
         addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Projection evidence must be an object.");
         return undefined;
@@ -2420,6 +2420,21 @@ function validateChangeProjectionResult(input, path, diagnostics) {
         diagnostics: projectionDiagnostics,
     };
 }
+/** Validate one bounded projection at a transport or package boundary. */
+export function validateChangeProjectionResult(input) {
+    const diagnostics = [];
+    const projection = parseChangeProjectionResult(input, "$", diagnostics);
+    if (projection === undefined || diagnostics.length > 0) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    return { valid: true, projection, diagnostics: [] };
+}
+/** Assert that an executor returned the bounded Change projection contract. */
+export function assertChangeProjectionResult(input) {
+    const result = validateChangeProjectionResult(input);
+    if (!result.valid || result.projection === undefined)
+        throw new ChangeValidationError(result.diagnostics);
+}
 function validateChangeIssuanceFailureRecord(input, path, diagnostics) {
     if (!isRecord(input)) {
         addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Issuance failure evidence must be an object.");
@@ -2433,7 +2448,7 @@ function validateChangeIssuanceFailureRecord(input, path, diagnostics) {
         addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.projection`, "Property is required.");
     }
     else {
-        projection = validateChangeProjectionResult(input.projection, `${path}.projection`, diagnostics);
+        projection = parseChangeProjectionResult(input.projection, `${path}.projection`, diagnostics);
     }
     if (diagnostics.length > 0 || failure === undefined || projection === undefined)
         return undefined;
@@ -2886,7 +2901,7 @@ function validateChangeIssuanceCompensationOutcome(input, path, diagnostics) {
         addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.evidence`, "Property is required.");
     }
     else {
-        evidence = validateChangeProjectionResult(input.evidence, `${path}.evidence`, diagnostics);
+        evidence = parseChangeProjectionResult(input.evidence, `${path}.evidence`, diagnostics);
     }
     let failure;
     if (hasOwn(input, "failure")) {

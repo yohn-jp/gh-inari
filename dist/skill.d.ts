@@ -1,6 +1,6 @@
 import { type CommandDomain, type CommandId } from "./command-contract.js";
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
-export declare const SKILL_MODEL_VERSION = "1.0.0";
+export declare const SKILL_MODEL_VERSION = "1.1.0";
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
 export declare const MAX_SKILL_OUTPUT_BYTES = 4096;
 export interface SkillWorkflowStep {

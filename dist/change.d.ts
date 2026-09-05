@@ -216,6 +216,11 @@ export interface ChangeProjectionValidationResult {
     readonly projection?: ChangeProjection;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+export interface ChangeProjectionResultValidationResult {
+    readonly valid: boolean;
+    readonly projection?: ChangeProjectionResult;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
 export interface CanonicalBranchIdentityDerivationInput {
     readonly change: Change | ChangeIdentity;
     readonly branchGovernance: PullRequestBranchGovernance;
@@ -580,6 +585,10 @@ export declare const serializeChangeIssuancePlanContract: typeof serializeChange
 export declare class ChangeIssuanceValidationError extends ChangeValidationError {
     constructor(diagnostics: readonly ChangeDiagnostic[]);
 }
+/** Validate one bounded projection at a transport or package boundary. */
+export declare function validateChangeProjectionResult(input: unknown): ChangeProjectionResultValidationResult;
+/** Assert that an executor returned the bounded Change projection contract. */
+export declare function assertChangeProjectionResult(input: unknown): asserts input is ChangeProjectionResult;
 /** Validate and canonicalize an explicit branch-compensation plan. */
 export declare function validateChangeIssuanceCompensationPlan(input: unknown): ChangeIssuanceCompensationPlanValidationResult;
 /** Assert a valid explicit branch-compensation plan at an executor boundary. */

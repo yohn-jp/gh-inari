@@ -14,7 +14,13 @@ const CROSS_PRODUCT_NAMES = ["wabachi", "nawabari", "mottainai"];
 
 test("SKILL_SCENARIOS has a fixed, deterministic order", () => {
   const ids = SKILL_SCENARIOS.map((scenario) => scenario.id);
-  assert.deepEqual(ids, ["author-issue", "author-pr", "inspect-governance", "repair-invalid-artifact"]);
+  assert.deepEqual(ids, [
+    "author-issue",
+    "author-pr",
+    "inspect-governance",
+    "repair-invalid-artifact",
+    "manage-change",
+  ]);
 });
 
 test("index projection preserves scenario order and identity", () => {
