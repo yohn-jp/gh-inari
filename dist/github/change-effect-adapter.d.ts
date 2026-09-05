@@ -43,6 +43,9 @@ export declare const GITHUB_CHANGE_EFFECT_FAILURE_CODES: Readonly<{
     readonly DELETE_BRANCH: "BRANCH_DELETE_FAILED";
 }>;
 export type GitHubChangeEffectFailureCode = (typeof GITHUB_CHANGE_EFFECT_FAILURE_CODES)[ChangeEffectKind];
+export declare const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffectKind, string>>;
+/** Stable bounded failure evidence for a single explicit effect. */
+export declare function changeEffectFailureEvidence(effect: ChangeEffect): ChangeIssuanceFailureEvidence;
 /** Bounded success evidence; GitHub response bodies and URLs are intentionally absent. */
 export type GitHubChangeEffectSuccessEvidence = {
     readonly kind: "CREATE_BRANCH";

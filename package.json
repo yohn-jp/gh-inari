@@ -40,6 +40,10 @@
       "types": "./dist/change-executor.d.ts",
       "import": "./dist/change-executor.js"
     },
+    "./change-trusted-executor": {
+      "types": "./dist/change-trusted-executor.d.ts",
+      "import": "./dist/change-trusted-executor.js"
+    },
     "./semantic-template": {
       "types": "./dist/semantic-template.d.ts",
       "import": "./dist/semantic-template.js"

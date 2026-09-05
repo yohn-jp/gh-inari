@@ -6,13 +6,21 @@ export const GITHUB_CHANGE_EFFECT_FAILURE_CODES = Object.freeze({
     CLOSE_PULL_REQUEST: "PULL_REQUEST_CLOSE_FAILED",
     DELETE_BRANCH: "BRANCH_DELETE_FAILED",
 });
-const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES = Object.freeze({
+export const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES = Object.freeze({
     CREATE_BRANCH: "The branch creation effect failed.",
     CREATE_PULL_REQUEST: "The pull request creation effect failed.",
     MARK_PULL_REQUEST_READY: "The pull request ready effect failed.",
     CLOSE_PULL_REQUEST: "The pull request close effect failed.",
     DELETE_BRANCH: "The branch deletion effect failed.",
 });
+/** Stable bounded failure evidence for a single explicit effect. */
+export function changeEffectFailureEvidence(effect) {
+    return {
+        effect,
+        code: GITHUB_CHANGE_EFFECT_FAILURE_CODES[effect.kind],
+        message: GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind],
+    };
+}
 const READY_FOR_REVIEW_MUTATION = "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { " +
     "markPullRequestReadyForReview(input: $input) { " +
     "pullRequest { id number state isDraft } } }";
@@ -207,11 +215,7 @@ function assertExplicitChangeEffect(input) {
     return input;
 }
 function createFailureEvidence(effect) {
-    return {
-        effect,
-        code: GITHUB_CHANGE_EFFECT_FAILURE_CODES[effect.kind],
-        message: GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind],
-    };
+    return changeEffectFailureEvidence(effect);
 }
 function parseGitReference(value, expectedRef) {
     const record = responseRecord(value);
