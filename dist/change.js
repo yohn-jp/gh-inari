@@ -53,6 +53,10 @@ export const CHANGE_TRANSITION_RULES = Object.freeze([
     { transition: "ready", from: "DRAFT", to: "REVIEW" },
     { transition: "abort", from: "DRAFT", to: "ABORTED" },
     { transition: "abort", from: "REVIEW", to: "ABORTED" },
+    // An already terminated Change is a deterministic no-op on retry. A
+    // RECOVERY_REQUIRED abort may retry only the remaining cleanup effect.
+    { transition: "abort", from: "ABORTED", to: "ABORTED" },
+    { transition: "abort", from: "RECOVERY_REQUIRED", to: "ABORTED" },
 ]);
 export const CHANGE_TRANSITION_MATRIX = CHANGE_TRANSITION_RULES;
 export const CHANGE_EFFECT_KINDS = Object.freeze([
@@ -62,6 +66,8 @@ export const CHANGE_EFFECT_KINDS = Object.freeze([
     "CLOSE_PULL_REQUEST",
     "DELETE_BRANCH",
 ]);
+/** Core-owned abort cleanup policy. Only the canonical branch may be deleted. */
+export const CHANGE_ABORT_CLEANUP_POLICY = "canonical-branch";
 export const CHANGE_PROJECTION_STATUSES = Object.freeze([
     "healthy",
     "absent",
@@ -1026,6 +1032,16 @@ export function projectChangeFromGitHubEvidence(input) {
     const pullRequestNumberCounts = countProjectionValues(pullRequests, (candidate) => String(candidate.number));
     const duplicateCanonicalPullRequestNumbers = pullRequests.some((candidate) => candidate.head === canonicalBranch && (pullRequestNumberCounts.get(String(candidate.number)) ?? 0) > 1);
     const wrongBasePullRequests = pullRequests.filter((candidate) => candidate.head === canonicalBranch && candidate.base !== canonicalBaseBranch);
+    const historicalAbortedPullRequest = canonicalBranches.length === 0 &&
+        canonicalPullRequests.length === 1 &&
+        canonicalPullRequests[0]?.state === "closed" &&
+        canonicalPullRequests[0]?.merged === false &&
+        issue !== undefined;
+    const incompleteAbortedCleanup = canonicalBranches.length === 1 &&
+        canonicalPullRequests.length === 1 &&
+        canonicalPullRequests[0]?.state === "closed" &&
+        canonicalPullRequests[0]?.merged === false &&
+        issue !== undefined;
     const conflictingCandidates = [
         ...candidates.branches.filter((candidate) => candidate.classification === "conflicting"),
         ...candidates.pullRequests.filter((candidate) => candidate.classification === "conflicting"),
@@ -1040,6 +1056,16 @@ export function projectChangeFromGitHubEvidence(input) {
     }
     else if (conflictingCandidates.length > 0) {
         status = "ambiguous";
+    }
+    else if (incompleteAbortedCleanup) {
+        // Under the Core abort policy a closed, unmerged PR with its canonical
+        // branch still present is an incomplete cleanup, not a successful abort.
+        status = "partial";
+    }
+    else if (historicalAbortedPullRequest) {
+        // A closed canonical PR retains the branch identity in GitHub evidence,
+        // so an explicitly deleted branch does not erase historical provenance.
+        status = "healthy";
     }
     else if (canonicalBranches.length === 1 && canonicalPullRequests.length === 1 && issue !== undefined) {
         status = "healthy";
@@ -1547,7 +1573,21 @@ function buildChangeTransitionPlan(request) {
     else if (request.transition === "abort") {
         if (resolved.pullRequest === undefined)
             throw new Error("A valid abort request must resolve a pull request.");
-        effects.push({ kind: "CLOSE_PULL_REQUEST", pullRequest: resolved.pullRequest });
+        if (request.change.state === "ABORTED") {
+            // A historical aborted Change is already fully terminated. In
+            // particular, do not issue duplicate close/delete mutations.
+        }
+        else if (request.change.state === "RECOVERY_REQUIRED") {
+            // Recovery retries only the remaining canonical cleanup effect. The
+            // trusted executor admits this edge only for closed canonical PR
+            // evidence; Core remains the sole effect planner.
+            if (resolved.branch === undefined)
+                throw new Error("A recovery retry must resolve a canonical branch.");
+            effects.push({ kind: "DELETE_BRANCH", branch: resolved.branch });
+        }
+        else {
+            effects.push({ kind: "CLOSE_PULL_REQUEST", pullRequest: resolved.pullRequest }, { kind: "DELETE_BRANCH", branch: resolved.branch });
+        }
     }
     else {
         throw new Error("The merge transition is not currently plannable.");
@@ -3250,7 +3290,225 @@ export function planChangeIssuanceRecovery(input) {
     return plan;
 }
 export const createChangeIssuanceRecoveryPlan = planChangeIssuanceRecovery;
-export const planChangeRecovery = planChangeIssuanceRecovery;
+const CHANGE_TRANSITION_RECOVERY_PLAN_KEYS = new Set([
+    "version",
+    "operation",
+    "transition",
+    "failureEvidence",
+    "effects",
+    "result",
+]);
+const CHANGE_TRANSITION_RECOVERY_RESULT_KEYS = new Set(["status", "state", "change"]);
+function validateTransitionRecoverySemantics(transition, failureEvidence, effects, result, diagnostics) {
+    const attempts = failureEvidence.attemptedEffects;
+    if (attempts.length === 0 || attempts.length > transition.effects.length) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.attemptedEffects", "Transition recovery must record a non-empty ordered prefix of transition effects.");
+    }
+    else {
+        for (let index = 0; index < attempts.length; index += 1) {
+            const expected = transition.effects[index];
+            const attempt = attempts[index];
+            if (expected === undefined || !sameEffect(attempt.effect, expected)) {
+                addRecoverySemanticDiagnostic(diagnostics, `$.failureEvidence.attemptedEffects[${index}].effect`, "Transition recovery effect evidence does not match the planned effect order.");
+            }
+            if (index < attempts.length - 1 && attempt.status !== "succeeded") {
+                addRecoverySemanticDiagnostic(diagnostics, `$.failureEvidence.attemptedEffects[${index}].status`, "Only the final attempted transition effect may fail.");
+            }
+        }
+        if (attempts.at(-1)?.status !== "failed") {
+            addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.attemptedEffects", "Transition recovery must identify the failed final effect.");
+        }
+        if (!sameEffect(attempts.at(-1).effect, failureEvidence.failure.effect)) {
+            addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.failure.effect", "Failure evidence must identify the final failed transition effect.");
+        }
+    }
+    const failedIndex = Math.max(0, attempts.length - 1);
+    if (!canonicalPlanEquals(effects, transition.effects.slice(failedIndex))) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.effects", "Recovery effects must contain the failed effect and every later effect in order.");
+    }
+    if (!sameChangeIdentity(result.change.identity, transition.result.identity)) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.result.change.identity", "Recovery result identity must match the transition.");
+    }
+    if (result.status !== "recovery-required" || result.state !== "RECOVERY_REQUIRED") {
+        addRecoverySemanticDiagnostic(diagnostics, "$.result", "A failed transition must produce RECOVERY_REQUIRED semantics.");
+    }
+    const projection = failureEvidence.projection;
+    if (!projection.valid && projection.status !== "partial") {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.projection", "Transition recovery requires a bounded healthy or partial projection.");
+    }
+    if (projection.change === undefined) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.projection.change", "Transition recovery requires a projected Change snapshot.");
+    }
+    else if (!sameChangeIdentity(projection.change.identity, transition.result.identity)) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.projection.change.identity", "Recovery projection identity must match the transition.");
+    }
+}
+function parseChangeTransitionRecoveryResult(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Transition recovery result must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_TRANSITION_RECOVERY_RESULT_KEYS, path, diagnostics);
+    if (input.status !== "recovery-required") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.status`, "Recovery result status is invalid.");
+    }
+    if (input.state !== "RECOVERY_REQUIRED") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.state`, "Recovery result state is invalid.");
+    }
+    const changeResult = validateChange(input.change);
+    diagnostics.push(...changeResult.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    if (diagnostics.length > 0 || changeResult.change === undefined)
+        return undefined;
+    return { status: "recovery-required", state: "RECOVERY_REQUIRED", change: changeResult.change };
+}
+function parseChangeTransitionRecoveryInput(input, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Transition recovery input must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, new Set(["transition", "attemptedEffects", "failure", "projection"]), "$", diagnostics);
+    let transition;
+    if (!hasOwn(input, "transition")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.transition", "Property is required.");
+    }
+    else {
+        const result = validateChangeTransitionPlan(input.transition);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        transition = result.plan;
+    }
+    const attemptedEffects = validateChangeIssuanceEffectAttempts(input.attemptedEffects, "$.attemptedEffects", diagnostics);
+    const failure = validateChangeIssuanceFailureEvidence(input.failure, "$.failure", diagnostics);
+    let projection;
+    if (!hasOwn(input, "projection")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.projection", "Property is required.");
+    }
+    else {
+        projection = projectChangeFromGitHubEvidence(input.projection);
+    }
+    if (diagnostics.length > 0 || transition === undefined || failure === undefined || projection === undefined) {
+        return undefined;
+    }
+    const failureEvidence = { attemptedEffects, failure, projection };
+    const failedIndex = Math.max(0, attemptedEffects.length - 1);
+    const projectedChange = projection.change;
+    const recoveryChange = {
+        ...transition.result,
+        state: "RECOVERY_REQUIRED",
+        provenance: {
+            ...transition.result.provenance,
+            ...(projectedChange?.provenance ?? {}),
+        },
+        ...(projectedChange?.projection === undefined
+            ? transition.result.projection === undefined
+                ? {}
+                : { projection: transition.result.projection }
+            : { projection: projectedChange.projection }),
+    };
+    const result = {
+        status: "recovery-required",
+        state: "RECOVERY_REQUIRED",
+        change: recoveryChange,
+    };
+    const effects = transition.effects.slice(failedIndex);
+    validateTransitionRecoverySemantics(transition, failureEvidence, effects, result, diagnostics);
+    if (diagnostics.length > 0)
+        return undefined;
+    return { transition, failureEvidence, effects, result };
+}
+function buildChangeTransitionRecoveryPlan(parsed, diagnostics) {
+    const plan = {
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        operation: "recover-transition",
+        transition: parsed.transition,
+        failureEvidence: parsed.failureEvidence,
+        effects: parsed.effects,
+        result: parsed.result,
+    };
+    const validation = validateChangeTransitionRecoveryPlan(plan);
+    if (!validation.valid || validation.plan === undefined) {
+        diagnostics.push(...validation.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        return undefined;
+    }
+    return validation.plan;
+}
+/** Validate the shared recovery plan used by all transition executors. */
+export function validateChangeTransitionRecoveryPlan(input) {
+    const diagnostics = [];
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Transition recovery plan must be an object.");
+        return { valid: false, diagnostics };
+    }
+    addUnknownProperties(input, CHANGE_TRANSITION_RECOVERY_PLAN_KEYS, "$", diagnostics);
+    if (input.version !== CHANGE_TRANSITION_CONTRACT_VERSION) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.version", "Transition recovery plan version is unsupported.");
+    }
+    if (input.operation !== "recover-transition") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.operation", "Transition recovery operation is invalid.");
+    }
+    let transition;
+    if (!hasOwn(input, "transition")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.transition", "Property is required.");
+    }
+    else {
+        const result = validateChangeTransitionPlan(input.transition);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        transition = result.plan;
+    }
+    let failureEvidence;
+    if (!hasOwn(input, "failureEvidence")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.failureEvidence", "Property is required.");
+    }
+    else {
+        failureEvidence = validateChangeIssuanceFailureRecord(input.failureEvidence, "$.failureEvidence", diagnostics);
+    }
+    const effects = validateEffectList(input.effects, "$.effects", diagnostics);
+    let result;
+    if (!hasOwn(input, "result")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.result", "Property is required.");
+    }
+    else {
+        result = parseChangeTransitionRecoveryResult(input.result, "$.result", diagnostics);
+    }
+    if (diagnostics.length > 0 || transition === undefined || failureEvidence === undefined || result === undefined) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    validateTransitionRecoverySemantics(transition, failureEvidence, effects, result, diagnostics);
+    if (diagnostics.length > 0) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    return {
+        valid: true,
+        plan: {
+            version: CHANGE_TRANSITION_CONTRACT_VERSION,
+            operation: "recover-transition",
+            transition,
+            failureEvidence,
+            effects,
+            result,
+        },
+        diagnostics: [],
+    };
+}
+export function planChangeTransitionRecovery(input) {
+    const diagnostics = [];
+    const parsed = parseChangeTransitionRecoveryInput(input, diagnostics);
+    if (parsed === undefined) {
+        throw new ChangeIssuanceRecoveryValidationError(createChangeDiagnosticReport(diagnostics).diagnostics);
+    }
+    const plan = buildChangeTransitionRecoveryPlan(parsed, diagnostics);
+    if (plan === undefined) {
+        throw new ChangeIssuanceRecoveryValidationError(createChangeDiagnosticReport(diagnostics).diagnostics);
+    }
+    return plan;
+}
+export const createChangeTransitionRecoveryPlan = planChangeTransitionRecovery;
+/** Dispatches to the existing issuance recovery or generic transition recovery authority. */
+export function planChangeRecovery(input) {
+    if (isRecord(input) && hasOwn(input, "transition"))
+        return planChangeTransitionRecovery(input);
+    return planChangeIssuanceRecovery(input);
+}
+export const createChangeRecoveryPlan = planChangeRecovery;
 /** Serialize a canonical transport-independent compensation plan. */
 export function serializeChangeIssuanceCompensationPlan(input) {
     const result = validateChangeIssuanceCompensationPlan(input);
@@ -3309,10 +3567,65 @@ export function deserializeChangeIssuanceRecoveryPlan(serialized) {
         throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
     return result.plan;
 }
+/** Serialize the shared transition recovery plan with stable property ordering. */
+export function serializeChangeTransitionRecoveryPlan(input) {
+    const result = validateChangeTransitionRecoveryPlan(input);
+    if (!result.valid || result.plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+    const serialized = JSON.stringify(result.plan);
+    if (serialized === undefined)
+        throw new Error("Change transition recovery plan could not be serialized.");
+    return serialized;
+}
+/** Parse and validate the shared transition recovery plan boundary. */
+export function deserializeChangeTransitionRecoveryPlan(serialized) {
+    let parsed;
+    try {
+        parsed = JSON.parse(serialized);
+    }
+    catch (error) {
+        throw new ChangeIssuanceRecoveryValidationError([
+            createChangeDiagnostic({
+                code: "CHANGE_INVALID_JSON",
+                message: safeMessage(`Change transition recovery plan must be valid JSON: ${error instanceof Error ? error.message : String(error)}`),
+            }),
+        ]);
+    }
+    const result = validateChangeTransitionRecoveryPlan(parsed);
+    if (!result.valid || result.plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+    return result.plan;
+}
+/** Serialize either recovery shape through the shared recovery authority. */
+export function serializeChangeRecoveryPlan(input) {
+    if (isRecord(input) && hasOwn(input, "transition"))
+        return serializeChangeTransitionRecoveryPlan(input);
+    return serializeChangeIssuanceRecoveryPlan(input);
+}
+/** Parse either recovery shape through the shared recovery authority. */
+export function deserializeChangeRecoveryPlan(serialized) {
+    let parsed;
+    try {
+        parsed = JSON.parse(serialized);
+    }
+    catch (error) {
+        throw new ChangeIssuanceRecoveryValidationError([
+            createChangeDiagnostic({
+                code: "CHANGE_INVALID_JSON",
+                message: safeMessage(`Change recovery plan must be valid JSON: ${error instanceof Error ? error.message : String(error)}`),
+            }),
+        ]);
+    }
+    if (isRecord(parsed) && parsed.operation === "recover-transition") {
+        return deserializeChangeTransitionRecoveryPlan(serialized);
+    }
+    return deserializeChangeIssuanceRecoveryPlan(serialized);
+}
 export const parseChangeIssuanceCompensationPlan = deserializeChangeIssuanceCompensationPlan;
 export const parseChangeIssuanceRecoveryPlan = deserializeChangeIssuanceRecoveryPlan;
+export const parseChangeTransitionRecoveryPlan = deserializeChangeTransitionRecoveryPlan;
+export const parseChangeRecoveryPlan = deserializeChangeRecoveryPlan;
 export const serializeChangeCompensationPlan = serializeChangeIssuanceCompensationPlan;
-export const serializeChangeRecoveryPlan = serializeChangeIssuanceRecoveryPlan;
 export class ChangeIssuanceRecoveryValidationError extends ChangeValidationError {
     constructor(diagnostics) {
         super(diagnostics);

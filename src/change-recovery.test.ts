@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ChangeIssuanceRecoveryValidationError,
+  CHANGE_TRANSITION_CONTRACT_VERSION,
+  planChangeRecovery,
   planChangeIssuance,
   planChangeIssuanceCompensation,
   planChangeIssuanceRecovery,
+  planChangeTransition,
   serializeChangeIssuanceRecoveryPlan,
   type ChangeGitHubEvidence,
   type ChangeIssuancePlan,
@@ -255,4 +258,57 @@ test("ambiguous, unavailable, and inconsistent failure evidence fail closed with
       (error: unknown) => error instanceof ChangeIssuanceRecoveryValidationError,
     );
   }
+});
+
+test("shared transition recovery plans retain abort provenance and only the pending cleanup effect", () => {
+  const change = {
+    version: 1 as const,
+    identity,
+    state: "DRAFT" as const,
+    provenance: { requester: "human:sophia", issuer: "app:inari-issuer", implementer: "agent:codex" },
+    projection: { branch: canonicalBranch, pullRequest: 901 },
+  };
+  const transition = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "abort",
+    change,
+  });
+  const projection = projectionInput({
+    issue: issueEvidence(),
+    branches: branchEvidence(),
+    pullRequests: pullRequestEvidence([
+      {
+        number: 901,
+        head: canonicalBranch,
+        base: canonicalBaseBranch,
+        state: "closed",
+        draft: false,
+        merged: false,
+        provenance: { issuer: "app:inari-issuer" },
+      },
+    ]),
+  });
+  const plan = planChangeRecovery({
+    transition,
+    attemptedEffects: [
+      { effect: transition.effects[0]!, status: "succeeded" as const },
+      { effect: transition.effects[1]!, status: "failed" as const },
+    ],
+    failure: {
+      effect: transition.effects[1]!,
+      code: "BRANCH_DELETE_FAILED",
+      message: "The branch deletion effect failed.",
+    },
+    projection,
+  });
+
+  assert.equal(plan.operation, "recover-transition");
+  if (plan.operation !== "recover-transition") throw new Error("expected transition recovery");
+  assert.deepEqual(plan.effects, [{ kind: "DELETE_BRANCH", branch: canonicalBranch }]);
+  assert.equal(plan.result.change.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(plan.result.change.provenance, {
+    requester: "human:sophia",
+    issuer: "app:inari-issuer",
+    implementer: "agent:codex",
+  });
 });

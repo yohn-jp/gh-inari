@@ -92,6 +92,14 @@ export declare const CHANGE_TRANSITION_RULES: readonly [{
     readonly transition: "abort";
     readonly from: "REVIEW";
     readonly to: "ABORTED";
+}, {
+    readonly transition: "abort";
+    readonly from: "ABORTED";
+    readonly to: "ABORTED";
+}, {
+    readonly transition: "abort";
+    readonly from: "RECOVERY_REQUIRED";
+    readonly to: "ABORTED";
 }];
 export declare const CHANGE_TRANSITION_MATRIX: readonly [{
     readonly transition: "issue";
@@ -108,6 +116,14 @@ export declare const CHANGE_TRANSITION_MATRIX: readonly [{
 }, {
     readonly transition: "abort";
     readonly from: "REVIEW";
+    readonly to: "ABORTED";
+}, {
+    readonly transition: "abort";
+    readonly from: "ABORTED";
+    readonly to: "ABORTED";
+}, {
+    readonly transition: "abort";
+    readonly from: "RECOVERY_REQUIRED";
     readonly to: "ABORTED";
 }];
 /**
@@ -129,6 +145,9 @@ export interface ChangeTransitionRequest {
 }
 export declare const CHANGE_EFFECT_KINDS: readonly ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY", "CLOSE_PULL_REQUEST", "DELETE_BRANCH"];
 export type ChangeEffectKind = (typeof CHANGE_EFFECT_KINDS)[number];
+/** Core-owned abort cleanup policy. Only the canonical branch may be deleted. */
+export declare const CHANGE_ABORT_CLEANUP_POLICY: "canonical-branch";
+export type ChangeAbortCleanupPolicy = typeof CHANGE_ABORT_CLEANUP_POLICY;
 /**
  * Effects are declarative capabilities for a later executor.  They contain
  * no GitHub client, credential, workflow, or mutation implementation.
@@ -491,7 +510,27 @@ export interface ChangeIssuanceRecoveryPlan {
     };
     readonly result: ChangeIssuanceRecoveryResult;
 }
-export type ChangeRecoveryPlan = ChangeIssuanceRecoveryPlan;
+/** Generic recovery result for any already-planned lifecycle transition. */
+export interface ChangeTransitionRecoveryResult {
+    readonly status: "recovery-required";
+    readonly state: "RECOVERY_REQUIRED";
+    readonly change: Change;
+}
+/**
+ * Shared transition recovery plan. It is deliberately transition-generic:
+ * abort cleanup reuses this authority instead of introducing an abort-only
+ * recovery state machine.
+ */
+export interface ChangeTransitionRecoveryPlan {
+    readonly version: ChangeTransitionContractVersion;
+    readonly operation: "recover-transition";
+    readonly transition: ChangeTransitionPlan;
+    readonly failureEvidence: ChangeIssuanceFailureRecord;
+    /** Ordered effects still required to retry the failed transition. */
+    readonly effects: readonly ChangeEffect[];
+    readonly result: ChangeTransitionRecoveryResult;
+}
+export type ChangeRecoveryPlan = ChangeIssuanceRecoveryPlan | ChangeTransitionRecoveryPlan;
 export interface ChangeIssuanceCompensationPlanValidationResult {
     readonly valid: boolean;
     readonly plan?: ChangeIssuanceCompensationPlan;
@@ -500,6 +539,11 @@ export interface ChangeIssuanceCompensationPlanValidationResult {
 export interface ChangeIssuanceRecoveryPlanValidationResult {
     readonly valid: boolean;
     readonly plan?: ChangeIssuanceRecoveryPlan;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+export interface ChangeTransitionRecoveryPlanValidationResult {
+    readonly valid: boolean;
+    readonly plan?: ChangeTransitionRecoveryPlan;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
 export declare const MAX_CHANGE_BASE_BRANCH_LENGTH: 255;
@@ -647,7 +691,13 @@ export declare function isChangeIssuanceRecoveryPlan(input: unknown): input is C
  */
 export declare function planChangeIssuanceRecovery(input: unknown): ChangeIssuanceRecoveryPlan;
 export declare const createChangeIssuanceRecoveryPlan: typeof planChangeIssuanceRecovery;
-export declare const planChangeRecovery: typeof planChangeIssuanceRecovery;
+/** Validate the shared recovery plan used by all transition executors. */
+export declare function validateChangeTransitionRecoveryPlan(input: unknown): ChangeTransitionRecoveryPlanValidationResult;
+export declare function planChangeTransitionRecovery(input: unknown): ChangeTransitionRecoveryPlan;
+export declare const createChangeTransitionRecoveryPlan: typeof planChangeTransitionRecovery;
+/** Dispatches to the existing issuance recovery or generic transition recovery authority. */
+export declare function planChangeRecovery(input: unknown): ChangeRecoveryPlan;
+export declare const createChangeRecoveryPlan: typeof planChangeRecovery;
 /** Serialize a canonical transport-independent compensation plan. */
 export declare function serializeChangeIssuanceCompensationPlan(input: unknown): string;
 /** Parse and validate an untrusted compensation plan JSON boundary. */
@@ -656,10 +706,19 @@ export declare function deserializeChangeIssuanceCompensationPlan(serialized: st
 export declare function serializeChangeIssuanceRecoveryPlan(input: unknown): string;
 /** Parse and validate an untrusted recovery plan JSON boundary. */
 export declare function deserializeChangeIssuanceRecoveryPlan(serialized: string): ChangeIssuanceRecoveryPlan;
+/** Serialize the shared transition recovery plan with stable property ordering. */
+export declare function serializeChangeTransitionRecoveryPlan(input: unknown): string;
+/** Parse and validate the shared transition recovery plan boundary. */
+export declare function deserializeChangeTransitionRecoveryPlan(serialized: string): ChangeTransitionRecoveryPlan;
+/** Serialize either recovery shape through the shared recovery authority. */
+export declare function serializeChangeRecoveryPlan(input: unknown): string;
+/** Parse either recovery shape through the shared recovery authority. */
+export declare function deserializeChangeRecoveryPlan(serialized: string): ChangeRecoveryPlan;
 export declare const parseChangeIssuanceCompensationPlan: typeof deserializeChangeIssuanceCompensationPlan;
 export declare const parseChangeIssuanceRecoveryPlan: typeof deserializeChangeIssuanceRecoveryPlan;
+export declare const parseChangeTransitionRecoveryPlan: typeof deserializeChangeTransitionRecoveryPlan;
+export declare const parseChangeRecoveryPlan: typeof deserializeChangeRecoveryPlan;
 export declare const serializeChangeCompensationPlan: typeof serializeChangeIssuanceCompensationPlan;
-export declare const serializeChangeRecoveryPlan: typeof serializeChangeIssuanceRecoveryPlan;
 export declare class ChangeIssuanceRecoveryValidationError extends ChangeValidationError {
     constructor(diagnostics: readonly ChangeDiagnostic[]);
 }

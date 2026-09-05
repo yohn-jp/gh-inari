@@ -64,7 +64,7 @@ test("projects a healthy canonical Draft/Review/Accepted/Merged/Aborted lifecycl
     const result = projectChangeFromGitHubEvidence(
       projectionInput({
         issue: issueEvidence(),
-        branches: branchEvidence(),
+        branches: state === "ABORTED" ? branchEvidence([]) : branchEvidence(),
         pullRequests: pullRequestEvidence([pullRequest]),
       }),
     );
@@ -73,9 +73,57 @@ test("projects a healthy canonical Draft/Review/Accepted/Merged/Aborted lifecycl
     assert.equal(result.change?.version, CHANGE_CONTRACT_VERSION);
     assert.equal(result.change?.state, state);
     assert.deepEqual(result.change?.projection, { branch: canonicalBranch, pullRequest: pullRequest.number });
-    assert.equal(result.candidates.branches[0]?.classification, "canonical");
+    if (state === "ABORTED") assert.equal(result.candidates.branches.length, 0);
+    else assert.equal(result.candidates.branches[0]?.classification, "canonical");
     assert.equal(result.candidates.pullRequests[0]?.classification, "canonical");
   }
+});
+
+test("closed unmerged canonical PR with a retained branch is incomplete abort cleanup", () => {
+  const result = projectChangeFromGitHubEvidence(
+    projectionInput({
+      issue: issueEvidence(),
+      branches: branchEvidence(),
+      pullRequests: pullRequestEvidence([
+        { number: 404, head: canonicalBranch, base: "main", state: "closed", draft: false, merged: false },
+      ]),
+    }),
+  );
+
+  assert.equal(result.valid, false);
+  assert.equal(result.status, "partial");
+  assert.equal(result.change?.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(result.change?.projection, { branch: canonicalBranch, pullRequest: 404 });
+});
+
+test("closed canonical PR without its branch preserves historical aborted provenance", () => {
+  const result = projectChangeFromGitHubEvidence(
+    projectionInput({
+      issue: issueEvidence(),
+      branches: branchEvidence([]),
+      pullRequests: pullRequestEvidence([
+        {
+          number: 404,
+          head: canonicalBranch,
+          base: "main",
+          state: "closed",
+          draft: false,
+          merged: false,
+          provenance: { requester: "human:sophia", issuer: "app:inari-issuer", implementer: "agent:codex" },
+        },
+      ]),
+    }),
+  );
+
+  assert.equal(result.valid, true);
+  assert.equal(result.status, "healthy");
+  assert.equal(result.change?.state, "ABORTED");
+  assert.deepEqual(result.change?.projection, { branch: canonicalBranch, pullRequest: 404 });
+  assert.deepEqual(result.change?.provenance, {
+    requester: "human:sophia",
+    issuer: "app:inari-issuer",
+    implementer: "agent:codex",
+  });
 });
 
 test("projects an existing Issue with no canonical artifacts as defined/absent", () => {
