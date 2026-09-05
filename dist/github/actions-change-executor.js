@@ -400,8 +400,8 @@ export class GitHubActionsEvidenceReader {
             baseBranch,
             evidence: {
                 issue: { status: "available", value: { number: issueNumber, state } },
-                branches: { status: "available", value: branch ? [{ name: derivation.branch }] : [] },
-                pullRequests: { status: "available", value: pullRequests },
+                branches: branch ? { status: "available", value: [{ name: derivation.branch }] } : { status: "absent" },
+                pullRequests: pullRequests.length === 0 ? { status: "absent" } : { status: "available", value: pullRequests },
             },
             ...(readyEvidence === undefined ? {} : { readyEvidence }),
         };
