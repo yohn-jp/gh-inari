@@ -175,7 +175,7 @@ export interface ChangeEffectValidationResult {
     readonly effect?: ChangeEffect;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
-export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN";
+export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN" | "CHANGE_PROJECTION_INVALID_EVIDENCE" | "CHANGE_PROJECTION_EVIDENCE_MISSING" | "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE" | "CHANGE_PROJECTION_ISSUE_MISMATCH" | "CHANGE_PROJECTION_PARTIAL" | "CHANGE_PROJECTION_DUPLICATE" | "CHANGE_PROJECTION_WRONG_BASE" | "CHANGE_PROJECTION_AMBIGUOUS" | "CHANGE_PROJECTION_CONFLICT";
 export interface ChangeDiagnosticInput {
     readonly code: ChangeDiagnosticCode;
     readonly path?: string;
@@ -222,8 +222,92 @@ export interface CanonicalBranchIdentityDerivationResult {
     readonly branch?: string;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+export declare const CHANGE_PROJECTION_STATUSES: readonly ["healthy", "absent", "partial", "duplicate", "wrong-base", "ambiguous", "unavailable"];
+export type ChangeProjectionStatus = (typeof CHANGE_PROJECTION_STATUSES)[number];
+export declare const CHANGE_PROJECTION_CANDIDATE_CLASSES: readonly ["canonical", "noncanonical", "conflicting"];
+export type ChangeProjectionCandidateClass = (typeof CHANGE_PROJECTION_CANDIDATE_CLASSES)[number];
+export declare const CHANGE_EVIDENCE_STATUSES: readonly ["available", "absent", "unavailable"];
+export type ChangeEvidenceStatus = (typeof CHANGE_EVIDENCE_STATUSES)[number];
+/** A read result distinguishes confirmed absence from an unavailable read. */
+export type ChangeEvidenceSource<T> = {
+    readonly status: "available";
+    readonly value: T;
+} | {
+    readonly status: "absent";
+} | {
+    readonly status: "unavailable";
+    readonly reason: string;
+};
+export type ChangeEvidence<T> = ChangeEvidenceSource<T>;
+/** Minimal, normalized Issue evidence required by the pure projection. */
+export interface ChangeIssueEvidence {
+    readonly number: number;
+    readonly state: "open" | "closed";
+}
+/** One bounded remote branch candidate. */
+export interface ChangeBranchEvidence {
+    readonly name: string;
+}
+/**
+ * Minimal, normalized pull-request evidence. `merged` is optional only for
+ * open PRs, where GitHub's open state is sufficient; a closed PR must carry
+ * it so the projection never guesses merged versus aborted.
+ */
+export interface ChangePullRequestEvidence {
+    readonly number: number;
+    readonly head: string;
+    readonly base: string;
+    readonly state: "open" | "closed";
+    readonly draft: boolean;
+    readonly merged?: boolean;
+    /** Optional governed merge-admission evidence for the ACCEPTED state. */
+    readonly accepted?: boolean;
+    /** Optional explicit root-Issue claim; branch identity remains authoritative. */
+    readonly rootIssue?: number;
+    readonly provenance?: ChangeProvenance;
+}
+/** Bounded evidence collected from GitHub; this type has no transport methods. */
+export interface ChangeGitHubEvidence {
+    readonly issue?: ChangeEvidenceSource<ChangeIssueEvidence>;
+    readonly branches?: ChangeEvidenceSource<readonly ChangeBranchEvidence[]>;
+    readonly pullRequests?: ChangeEvidenceSource<readonly ChangePullRequestEvidence[]>;
+}
+export type ChangeProjectionEvidence = ChangeGitHubEvidence;
+export interface ChangeProjectionInput {
+    /** A Change snapshot or identity; its existing state is never trusted. */
+    readonly change: Change | ChangeIdentity;
+    /** Existing repository branch policy consumed by #211's authority. */
+    readonly branchGovernance: PullRequestBranchGovernance;
+    /** Existing governance-resolved branch naming parts consumed by #211. */
+    readonly naming: CanonicalBranchNamingInput;
+    /** Repository-governed target base branch. */
+    readonly baseBranch: string;
+    readonly evidence: ChangeGitHubEvidence;
+    /** Optional known provenance when projecting from an identity rather than a snapshot. */
+    readonly provenance?: ChangeProvenance;
+}
+export interface ChangeProjectionCandidate<T> {
+    readonly candidate: T;
+    readonly classification: ChangeProjectionCandidateClass;
+    readonly reason: string;
+}
+export interface ChangeProjectionCandidates {
+    readonly branches: readonly ChangeProjectionCandidate<ChangeBranchEvidence>[];
+    readonly pullRequests: readonly ChangeProjectionCandidate<ChangePullRequestEvidence>[];
+}
+export interface ChangeProjectionResult {
+    readonly valid: boolean;
+    readonly status: ChangeProjectionStatus;
+    readonly canonicalBranch?: string;
+    readonly canonicalBaseBranch?: string;
+    readonly candidates: ChangeProjectionCandidates;
+    /** Present for a healthy/defined projection or for explicit recovery drift. */
+    readonly change?: Change;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
 export declare const MAX_CHANGE_BASE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_TRANSITION_EFFECTS: 8;
+export declare const MAX_CHANGE_PROJECTION_CANDIDATES: 64;
 /** Create one bounded, versioned machine-readable diagnostic. */
 export declare function createChangeDiagnostic(input: ChangeDiagnosticInput): ChangeDiagnostic;
 /** Sort and bound a diagnostic set for deterministic machine consumption. */
@@ -243,6 +327,14 @@ export declare const projectChangeIdentity: typeof validateChangeIdentity;
  * returns a pure projection; it never creates or updates a Git ref.
  */
 export declare function deriveCanonicalBranchIdentity(input: unknown): CanonicalBranchIdentityDerivationResult;
+/**
+ * Purely project one Change from bounded Issue, branch, and pull-request
+ * evidence. Existing Change state is never used as authority, and no GitHub
+ * client, persistence, mutation, or candidate heuristic is involved.
+ */
+export declare function projectChangeFromGitHubEvidence(input: unknown): ChangeProjectionResult;
+export declare const projectChangeFromEvidence: typeof projectChangeFromGitHubEvidence;
+export declare const deriveChangeProjection: typeof projectChangeFromGitHubEvidence;
 /** Stable identity key; locator changes cannot create a second Change. */
 export declare function changeIdentityKey(input: ChangeIdentity): string;
 /** Validate the five provenance roles without imposing transition policy. */
