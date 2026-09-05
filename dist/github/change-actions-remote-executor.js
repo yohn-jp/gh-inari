@@ -53,8 +53,9 @@ function remoteError(code, operation, reason) {
 function normalizeTransportError(error, operation, code) {
     if (error instanceof ChangeRemoteExecutorError)
         return error;
-    if (isGitHubAdapterError(error) || error instanceof Error)
-        return remoteError(code, operation, "transport");
+    if (isGitHubAdapterError(error) && error.category === "authentication") {
+        return remoteError(code, operation, "authentication");
+    }
     return remoteError(code, operation, "transport");
 }
 function workflowRunsPath() {

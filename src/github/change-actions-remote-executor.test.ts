@@ -13,6 +13,7 @@ import {
   INARI_CHANGE_EXECUTOR_WORKFLOW,
   type GitHubActionsRemoteApi,
 } from "./change-actions-remote-executor.js";
+import { GhUnauthenticatedError } from "./errors.js";
 import type { RepositoryContext } from "./types.js";
 
 const correlation = "123e4567-e89b-42d3-a456-426614174000";
@@ -265,13 +266,14 @@ test("show uses the same remote boundary and does not request requester or issue
 test("auth and repository resolution failures are normalized without raw credentials", async () => {
   const authApi = new FakeActionsApi();
   authApi.getAuthenticatedUser = async () => {
-    throw new Error("Bearer secret-token");
+    throw new GhUnauthenticatedError("github.com", "Bearer secret-token");
   };
   await assert.rejects(
     executor(authApi).execute(changeRemoteMutationRequest("issue", 42)),
     (error: unknown) =>
       error instanceof ChangeRemoteExecutorError &&
       error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" &&
+      (error.details as { reason?: string } | undefined)?.reason === "authentication" &&
       !error.message.includes("secret-token") &&
       !JSON.stringify(error).includes("secret-token"),
   );

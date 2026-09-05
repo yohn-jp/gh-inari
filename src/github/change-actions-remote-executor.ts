@@ -138,7 +138,9 @@ function normalizeTransportError(
     | "CHANGE_REMOTE_RUN_FAILED",
 ): ChangeRemoteExecutorError {
   if (error instanceof ChangeRemoteExecutorError) return error;
-  if (isGitHubAdapterError(error) || error instanceof Error) return remoteError(code, operation, "transport");
+  if (isGitHubAdapterError(error) && error.category === "authentication") {
+    return remoteError(code, operation, "authentication");
+  }
   return remoteError(code, operation, "transport");
 }
 

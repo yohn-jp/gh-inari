@@ -387,7 +387,7 @@ export async function readChangeRemoteProjection(
   return normalizeChangeRemoteProjection(request.operation, await executor.read(request));
 }
 
-/** Default until a repository configures a trusted remote executor. */
+/** Explicit fallback for a runtime that has no remote executor implementation. */
 export function createUnavailableChangeRemoteExecutor(): ChangeRemoteExecutor {
   const unavailable = (operation: string): never => {
     throw new ChangeRemoteExecutorError(

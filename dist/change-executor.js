@@ -186,7 +186,7 @@ export async function readChangeRemoteProjection(executor, request) {
     validateRequest(request);
     return normalizeChangeRemoteProjection(request.operation, await executor.read(request));
 }
-/** Default until a repository configures a trusted remote executor. */
+/** Explicit fallback for a runtime that has no remote executor implementation. */
 export function createUnavailableChangeRemoteExecutor() {
     const unavailable = (operation) => {
         throw new ChangeRemoteExecutorError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "No remote Change executor is configured for this CLI runtime.", { operation });

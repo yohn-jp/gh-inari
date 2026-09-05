@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ContractViolationError, GhNotInstalledError, GhUnauthenticatedError, GitHubApiError, GitHubApiResponseError, GitHubOutputLimitError, GitHubResourceKindMismatchError, GitHubTimeoutError, GitHubTransportError, InvalidRepositoryOverrideError, RepositoryResolutionError, } from "./errors.js";
+import { ContractViolationError, GhNotInstalledError, GhUnauthenticatedError, GitHubAdapterError, GitHubApiError, GitHubApiResponseError, GitHubOutputLimitError, GitHubResourceKindMismatchError, GitHubTimeoutError, GitHubTransportError, InvalidRepositoryOverrideError, RepositoryResolutionError, } from "./errors.js";
 import { isTrustedValidatedRenderedArtifact } from "./capability.js";
 import { DEFAULT_GH_OUTPUT_LIMITS_BYTES, GhTransportOutputLimitError, GhTransportTimeoutError, ProcessGhTransport, } from "./transport.js";
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
@@ -170,6 +171,7 @@ export class GitHubAdapter {
         const context = await this.resolveRepositoryContext();
         const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-actions-"));
         const destination = path.join(directory, "artifact.zip");
+        let handle;
         try {
             const result = await this.runCommand([
                 "api",
@@ -184,14 +186,28 @@ export class GitHubAdapter {
             if (result.exitCode !== 0) {
                 throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
             }
-            const metadata = await stat(destination);
-            if (!metadata.isFile() || metadata.size > MAX_ACTIONS_ARTIFACT_BYTES) {
-                throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an oversized Actions artifact.");
+            try {
+                handle = await open(destination, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+                const metadata = await handle.stat();
+                if (!metadata.isFile() || metadata.size > MAX_ACTIONS_ARTIFACT_BYTES) {
+                    throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
+                }
+                return new Uint8Array(await readBoundedActionsArtifact(handle));
             }
-            return new Uint8Array(await readFile(destination));
+            catch (error) {
+                if (error instanceof GitHubAdapterError)
+                    throw error;
+                throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
+            }
         }
         finally {
-            await rm(directory, { recursive: true, force: true });
+            try {
+                if (handle !== undefined)
+                    await handle.close();
+            }
+            finally {
+                await rm(directory, { recursive: true, force: true });
+            }
         }
     }
     /** Read the target repository metadata used to select the trusted governance ref. */
@@ -568,6 +584,20 @@ function parseJson(value, operation) {
     catch (error) {
         throw new GitHubApiResponseError(operation, `gh returned invalid JSON during ${operation}.`, { response: summarize(value) }, error);
     }
+}
+async function readBoundedActionsArtifact(handle) {
+    const buffer = Buffer.alloc(MAX_ACTIONS_ARTIFACT_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+        const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, null);
+        bytesRead += result.bytesRead;
+        if (result.bytesRead === 0)
+            break;
+    }
+    if (bytesRead > MAX_ACTIONS_ARTIFACT_BYTES) {
+        throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
+    }
+    return buffer.subarray(0, bytesRead);
 }
 function parseIncludedApiResponse(value, operation) {
     const lines = value.split(/\r?\n/u);

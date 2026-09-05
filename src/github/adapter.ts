@@ -1,10 +1,12 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
   ContractViolationError,
   GhNotInstalledError,
   GhUnauthenticatedError,
+  GitHubAdapterError,
   GitHubApiError,
   GitHubApiResponseError,
   GitHubOutputLimitError,
@@ -250,6 +252,7 @@ export class GitHubAdapter {
     const context = await this.resolveRepositoryContext();
     const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-actions-"));
     const destination = path.join(directory, "artifact.zip");
+    let handle: FileHandle | undefined;
     try {
       const result = await this.runCommand(
         [
@@ -267,13 +270,23 @@ export class GitHubAdapter {
       if (result.exitCode !== 0) {
         throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
       }
-      const metadata = await stat(destination);
-      if (!metadata.isFile() || metadata.size > MAX_ACTIONS_ARTIFACT_BYTES) {
-        throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an oversized Actions artifact.");
+      try {
+        handle = await open(destination, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        const metadata = await handle.stat();
+        if (!metadata.isFile() || metadata.size > MAX_ACTIONS_ARTIFACT_BYTES) {
+          throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
+        }
+        return new Uint8Array(await readBoundedActionsArtifact(handle));
+      } catch (error: unknown) {
+        if (error instanceof GitHubAdapterError) throw error;
+        throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
       }
-      return new Uint8Array(await readFile(destination));
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      try {
+        if (handle !== undefined) await handle.close();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     }
   }
 
@@ -751,6 +764,20 @@ function parseJson(value: string, operation: string): unknown {
       error,
     );
   }
+}
+
+async function readBoundedActionsArtifact(handle: FileHandle): Promise<Buffer> {
+  const buffer = Buffer.alloc(MAX_ACTIONS_ARTIFACT_BYTES + 1);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, null);
+    bytesRead += result.bytesRead;
+    if (result.bytesRead === 0) break;
+  }
+  if (bytesRead > MAX_ACTIONS_ARTIFACT_BYTES) {
+    throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
+  }
+  return buffer.subarray(0, bytesRead);
 }
 
 function parseIncludedApiResponse(value: string, operation: string): GitHubApiResponse | undefined {

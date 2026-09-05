@@ -74,6 +74,6 @@ export declare function changeRemoteReadRequest(issue: number, requester?: strin
 export declare function executeChangeRemoteMutation(executor: ChangeRemoteExecutor, request: ChangeRemoteMutationRequest): Promise<ChangeProjectionResult>;
 export declare function executeChangeRemoteMutationResult(executor: ChangeRemoteExecutor, request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult>;
 export declare function readChangeRemoteProjection(executor: ChangeRemoteExecutor, request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult>;
-/** Default until a repository configures a trusted remote executor. */
+/** Explicit fallback for a runtime that has no remote executor implementation. */
 export declare function createUnavailableChangeRemoteExecutor(): ChangeRemoteExecutor;
 export {};

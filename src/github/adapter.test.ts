@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdir, stat as statPath, symlink, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
 import {
   ContractViolationError,
@@ -55,6 +57,69 @@ class StubGhTransport implements GhTransport {
     return response;
   }
 }
+
+class ArtifactGhTransport implements GhTransport {
+  readonly mode: "regular" | "oversized" | "directory" | "symlink";
+  destination: string | undefined;
+
+  constructor(mode: "regular" | "oversized" | "directory" | "symlink") {
+    this.mode = mode;
+  }
+
+  async run(args: readonly string[]): Promise<GhCommandResult> {
+    if (args[0] === "--version") return command(0, "gh version 2.0");
+    if (args[0] === "auth" && args[1] === "status") return command();
+    if (args.includes("--jq")) return command(0, "100000157\n");
+    const outputIndex = args.indexOf("--output");
+    if (outputIndex >= 0) {
+      const destination = args[outputIndex + 1];
+      assert.ok(destination);
+      this.destination = destination;
+      if (this.mode === "directory") await mkdir(destination);
+      else if (this.mode === "symlink") {
+        const target = `${destination}.target`;
+        await writeFile(target, Buffer.from("artifact target"));
+        await symlink(target, destination);
+      } else {
+        await writeFile(destination, this.mode === "oversized" ? Buffer.alloc(1_048_577) : Buffer.from("artifact"));
+      }
+      return command();
+    }
+    throw new Error(`Unexpected gh call: ${args.join(" ")}`);
+  }
+}
+
+async function assertArtifactDirectoryRemoved(transport: ArtifactGhTransport): Promise<void> {
+  assert.ok(transport.destination);
+  await assert.rejects(
+    statPath(path.dirname(transport.destination)),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
+  );
+}
+
+test("reads an Actions artifact through one descriptor and cleans up after success", async () => {
+  const transport = new ArtifactGhTransport("regular");
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  assert.deepEqual(await adapter.downloadActionsArtifact(21), new Uint8Array(Buffer.from("artifact")));
+  await assertArtifactDirectoryRemoved(transport);
+});
+
+test("fails closed for oversized, non-regular, and symlink artifact destinations", async () => {
+  for (const mode of ["oversized", "directory", "symlink"] as const) {
+    const transport = new ArtifactGhTransport(mode);
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    await assert.rejects(
+      adapter.downloadActionsArtifact(21),
+      (error: unknown) =>
+        error instanceof GitHubApiResponseError &&
+        error.code === "GITHUB_API_RESPONSE_INVALID" &&
+        !error.message.includes(transport.destination ?? "unexpected-path"),
+    );
+    await assertArtifactDirectoryRemoved(transport);
+  }
+});
 
 class MissingGhError extends Error {
   readonly code = "ENOENT";
