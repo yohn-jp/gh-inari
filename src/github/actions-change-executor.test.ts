@@ -19,7 +19,12 @@ import type {
   GitHubChangeEffectResponse,
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
-import { CHANGE_TRANSITION_CONTRACT_VERSION, planChangeIssuance, projectChangeFromGitHubEvidence } from "../change.js";
+import {
+  CHANGE_TRANSITION_CONTRACT_VERSION,
+  MAX_CHANGE_ARTIFACT_BODY_LENGTH,
+  planChangeIssuance,
+  projectChangeFromGitHubEvidence,
+} from "../change.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
   INARI_ISSUER_PRINCIPAL,
@@ -94,13 +99,28 @@ test("trusted Actions diagnostics are enumerable, bounded, and non-secret", () =
 class ReadTransport implements GitHubChangeEffectTransport {
   readonly calls: GitHubChangeEffectRequest[] = [];
 
+  constructor(
+    private readonly options: {
+      readonly issueBody?: unknown;
+      readonly issueTitle?: unknown;
+    } = {},
+  ) {}
+
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
     this.calls.push(request);
     if (request.path.endsWith("repos/acme/inari")) {
       return { status: 200, body: { id: 218000001, default_branch: "main" } };
     }
     if (request.path.endsWith("issues/218")) {
-      return { status: 200, body: { number: 218, title: "feat: Execute Change plans safely", state: "open" } };
+      return {
+        status: 200,
+        body: {
+          number: 218,
+          title: this.options.issueTitle ?? "feat: Execute Change plans safely",
+          state: "open",
+          body: this.options.issueBody,
+        },
+      };
     }
     if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
       return { status: 404, body: { message: "Not Found" } };
@@ -109,6 +129,117 @@ class ReadTransport implements GitHubChangeEffectTransport {
     throw new Error("unexpected read");
   }
 }
+
+test("Actions evidence reader accepts multiline Issue bodies while preserving single-line validation", async () => {
+  const transport = new ReadTransport({ issueBody: "## Summary\r\n\r\nfirst paragraph\nsecond paragraph" });
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+
+  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  assert.deepEqual(result.naming, { type: "feat", slug: "execute-change-plans-safely" });
+
+  const invalidTitleReader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+    transport: new ReadTransport({ issueTitle: "feat: invalid\ntitle" }),
+  });
+  await assert.rejects(() => invalidTitleReader.read(changeRemoteMutationRequest("issue", 218)));
+});
+
+class MultilineReadyTransport implements GitHubChangeEffectTransport {
+  readonly calls: GitHubChangeEffectRequest[] = [];
+
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    this.calls.push(request);
+    if (request.path.endsWith("repos/acme/inari")) {
+      return { status: 200, body: { id: 218000001, default_branch: "main" } };
+    }
+    if (request.path.endsWith("issues/239")) {
+      return {
+        status: 200,
+        body: {
+          number: 239,
+          title: "feat: dogfood governed Change lifecycle through trusted Actions",
+          state: "open",
+          body: "## Issue\r\n\r\nline one\nline two",
+        },
+      };
+    }
+    if (request.path.includes("git/ref/heads/feat%2F239-dogfood-governed-change-lifecycle-through-trusted-actions")) {
+      return {
+        status: 200,
+        body: { ref: "refs/heads/feat/239-dogfood-governed-change-lifecycle-through-trusted-actions" },
+      };
+    }
+    if (request.path.includes("pulls?state=all")) {
+      return {
+        status: 200,
+        body: [
+          {
+            number: 2180,
+            head: { ref: "feat/239-dogfood-governed-change-lifecycle-through-trusted-actions" },
+            base: { ref: "main" },
+            state: "open",
+            draft: true,
+            merged_at: null,
+            user: { login: "inari-issuer[bot]" },
+          },
+        ],
+      };
+    }
+    if (request.path.endsWith("pulls/2180")) {
+      return { status: 200, body: { number: 2180, body: "## Pull request\r\n\r\nline one\nline two" } };
+    }
+    if (request.path.includes("git/trees/main?recursive=1")) {
+      return { status: 200, body: { sha: "tree-sha", truncated: false, tree: [] } };
+    }
+    throw new Error(`unexpected read: ${request.path}`);
+  }
+}
+
+test("ready evidence reader reaches multiline PR body through readPullRequestBody", async () => {
+  const transport = new MultilineReadyTransport();
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 239 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    transport,
+    cwd: "/tmp/inari-missing-governance",
+  });
+
+  const result = await reader.read(changeRemoteMutationRequest("ready", 239));
+  assert.deepEqual(result.naming, { type: "feat", slug: "dogfood-governed-change-lifecycle-through-trusted-actions" });
+  assert.equal(result.readyEvidence, undefined);
+  assert.equal(
+    transport.calls.some((request) => request.path.endsWith("pulls/2180")),
+    true,
+  );
+});
+
+test("Issue and PR body validation rejects non-line-break controls and preserves the length bound", async () => {
+  for (const control of ["\u0000", "\u001B"]) {
+    const reader = new GitHubActionsEvidenceReader({
+      repository,
+      identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+      branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+      transport: new ReadTransport({ issueBody: `body${control}` }),
+    });
+    await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)));
+  }
+
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+    transport: new ReadTransport({ issueBody: "x".repeat(MAX_CHANGE_ARTIFACT_BODY_LENGTH + 1) }),
+  });
+  await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)));
+});
 
 test("Actions evidence reader returns only bounded Core projection input", async () => {
   const transport = new ReadTransport();
