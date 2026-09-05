@@ -17,6 +17,8 @@ const EXPECTED_PACKED_FILES = [
   "LICENSE",
   "README.md",
   "package.json",
+  "branch-naming-authority.d.mts",
+  "branch-naming-authority.mjs",
   ".codex-plugin/plugin.json",
   "skills/inari/SKILL.md",
   "dist/artifact.d.ts",

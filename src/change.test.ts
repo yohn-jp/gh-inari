@@ -12,6 +12,7 @@ import {
   createChangeDiagnosticReport,
   deserializeChange,
   deserializeChangeDiagnosticReport,
+  deriveCanonicalBranchIdentity,
   isChange,
   serializeChange,
   serializeChangeDiagnosticReport,
@@ -67,6 +68,75 @@ test("repository and root Issue form one canonical deterministic identity", () =
     changeIdentityKey(result.identity!),
   );
   assert.equal(changeIdentityKey(result.identity!), "github.com#100000210#210");
+});
+
+test("canonical Change branch identity is derived through governed naming and branch policy", () => {
+  const result = deriveCanonicalBranchIdentity({
+    change: validChange,
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "derive-canonical-change-branch-identity" },
+  });
+  assert.deepEqual(result, {
+    valid: true,
+    branch: "feat/210-derive-canonical-change-branch-identity",
+    diagnostics: [],
+  });
+});
+
+test("equivalent governed Change input produces the same canonical branch identity", () => {
+  const naming = { type: "feat", slug: "derive-canonical-change-branch-identity" };
+  const governance = { pattern: "^feat/[0-9]+-[a-z0-9-]+$" };
+  const first = deriveCanonicalBranchIdentity({ change: validChange, branchGovernance: governance, naming });
+  const equivalent = deriveCanonicalBranchIdentity({
+    change: {
+      ...validChange,
+      identity: { ...validChange.identity, repositoryHost: "GITHUB.COM" },
+    },
+    branchGovernance: { ...governance },
+    naming: { ...naming },
+  });
+  assert.deepEqual(equivalent, first);
+  assert.deepEqual(deriveCanonicalBranchIdentity({ change: validChange, branchGovernance: governance, naming }), first);
+});
+
+test("missing or invalid branch governance fails closed with bounded structured diagnostics", () => {
+  const missing = deriveCanonicalBranchIdentity({
+    change: validChange,
+    naming: { type: "feat", slug: "missing-governance" },
+  } as unknown);
+  assert.equal(missing.valid, false);
+  assert.ok(missing.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_MISSING_PROPERTY"));
+
+  const invalid = deriveCanonicalBranchIdentity({
+    change: validChange,
+    branchGovernance: { pattern: "(a+)+$" },
+    naming: { type: "feat", slug: "invalid-governance" },
+  });
+  assert.equal(invalid.valid, false);
+  assert.ok(invalid.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_BRANCH_GOVERNANCE"));
+  assert.ok(invalid.diagnostics.every((diagnostic) => diagnostic.path.length <= MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH));
+  assert.ok(
+    invalid.diagnostics.every((diagnostic) => diagnostic.message.length <= MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH),
+  );
+});
+
+test("a derived branch that does not satisfy repository governance fails closed", () => {
+  const result = deriveCanonicalBranchIdentity({
+    change: validChange,
+    branchGovernance: { pattern: "^fix/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "governance-mismatch" },
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_BRANCH_GOVERNANCE_MISMATCH"));
+});
+
+test("legacy caller-selected branch projections remain valid for compatibility diagnostics", () => {
+  const result = validateChange({
+    ...validChange,
+    projection: { branch: "feat/210-legacy-caller-branch" },
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.change?.projection?.branch, "feat/210-legacy-caller-branch");
 });
 
 test("provenance keeps requester, issuer, implementer, reviewer, and merger distinct", () => {

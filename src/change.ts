@@ -1,16 +1,20 @@
 /**
  * The transport-independent semantic contract for a governed Change.
  *
- * This module intentionally owns only Change data, validation, and
- * canonical serialization.  It does not read or mutate GitHub state, derive
- * branch names, or plan transitions.
+ * This module owns transport-independent Change data, validation, canonical
+ * serialization, and pure canonical branch identity derivation. It does not
+ * read or mutate GitHub state or plan transitions.
  */
+
+import { deriveBranchName } from "../branch-naming-authority.mjs";
 
 import {
   issueReferenceKey,
   normalizeIssueReference,
   type IssueDependencyViolationCode,
 } from "./contract/issue-reference.js";
+import type { PullRequestBranchGovernance } from "./contract/ir.js";
+import { parsePullRequestPolicyOverlay } from "./pr-policy.js";
 
 export const CHANGE_CONTRACT_VERSION = 1 as const;
 export type ChangeContractVersion = typeof CHANGE_CONTRACT_VERSION;
@@ -42,6 +46,13 @@ export const MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH = 160 as const;
 export const MAX_CHANGE_PRINCIPAL_LENGTH = 160 as const;
 export const MAX_CHANGE_BRANCH_LENGTH = 255 as const;
 export const MAX_CHANGE_HOST_LENGTH = 255 as const;
+
+export interface CanonicalBranchNamingInput {
+  /** Repository-governed branch classification, not a complete branch name. */
+  readonly type: string;
+  /** Repository-governed, grammar-compatible branch slug. */
+  readonly slug: string;
+}
 
 /** Stable repository identity plus the root Issue number. */
 export interface ChangeIdentity {
@@ -91,7 +102,10 @@ export type ChangeDiagnosticCode =
   | "CHANGE_INVALID_IDENTITY"
   | "CHANGE_INVALID_STATE"
   | "CHANGE_INVALID_PROVENANCE"
-  | "CHANGE_INVALID_PROJECTION";
+  | "CHANGE_INVALID_PROJECTION"
+  | "CHANGE_INVALID_BRANCH_INPUT"
+  | "CHANGE_INVALID_BRANCH_GOVERNANCE"
+  | "CHANGE_BRANCH_GOVERNANCE_MISMATCH";
 
 export interface ChangeDiagnosticInput {
   readonly code: ChangeDiagnosticCode;
@@ -136,6 +150,18 @@ export interface ChangeProjectionValidationResult {
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
+export interface CanonicalBranchIdentityDerivationInput {
+  readonly change: Change | ChangeIdentity;
+  readonly branchGovernance: PullRequestBranchGovernance;
+  readonly naming: CanonicalBranchNamingInput;
+}
+
+export interface CanonicalBranchIdentityDerivationResult {
+  readonly valid: boolean;
+  readonly branch?: string;
+  readonly diagnostics: readonly ChangeDiagnostic[];
+}
+
 const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_INVALID_JSON",
   "CHANGE_INVALID_ROOT",
@@ -146,12 +172,17 @@ const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_INVALID_STATE",
   "CHANGE_INVALID_PROVENANCE",
   "CHANGE_INVALID_PROJECTION",
+  "CHANGE_INVALID_BRANCH_INPUT",
+  "CHANGE_INVALID_BRANCH_GOVERNANCE",
+  "CHANGE_BRANCH_GOVERNANCE_MISMATCH",
 ];
 
 const CHANGE_KEYS = new Set(["version", "identity", "state", "provenance", "projection"]);
 const IDENTITY_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const PROVENANCE_KEYS = new Set(CHANGE_PROVENANCE_ROLES);
 const PROJECTION_KEYS = new Set(["branch", "pullRequest"]);
+const CANONICAL_BRANCH_DERIVATION_KEYS = new Set(["change", "branchGovernance", "naming"]);
+const BRANCH_NAMING_KEYS = new Set(["type", "slug"]);
 
 type RecordValue = Record<string, unknown>;
 
@@ -369,6 +400,182 @@ export function validateChangeIdentity(input: unknown, path = "$"): ChangeIdenti
 
 export const normalizeChangeIdentity = validateChangeIdentity;
 export const projectChangeIdentity = validateChangeIdentity;
+
+function validateCanonicalBranchChangeIdentity(
+  input: unknown,
+  diagnostics: ChangeDiagnostic[],
+): ChangeIdentity | undefined {
+  if (isRecord(input) && hasOwn(input, "identity")) {
+    const result = validateChange(input);
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    return result.change?.identity;
+  }
+  const result = validateChangeIdentity(input, "$.change");
+  diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+  return result.identity;
+}
+
+function branchGovernanceDiagnosticPath(error: unknown): string {
+  if (error instanceof Error && "path" in error && typeof error.path === "string") {
+    return error.path.replace(/^\$\.branch/u, "$.branchGovernance");
+  }
+  return "$.branchGovernance";
+}
+
+function validateCanonicalBranchGovernance(
+  input: unknown,
+  diagnostics: ChangeDiagnostic[],
+): PullRequestBranchGovernance | undefined {
+  if (!isRecord(input)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_BRANCH_GOVERNANCE",
+      "$.branchGovernance",
+      "Branch governance must be an object.",
+    );
+    return undefined;
+  }
+  try {
+    const parsed = parsePullRequestPolicyOverlay(JSON.stringify({ version: 1, sections: [], branch: input }));
+    if (parsed.branch === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_BRANCH_GOVERNANCE",
+        "$.branchGovernance",
+        "Branch governance must declare a pattern.",
+      );
+      return undefined;
+    }
+    return parsed.branch;
+  } catch (error: unknown) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_BRANCH_GOVERNANCE",
+      branchGovernanceDiagnosticPath(error),
+      `Branch governance is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
+}
+
+function validateCanonicalBranchNaming(
+  input: unknown,
+  diagnostics: ChangeDiagnostic[],
+): CanonicalBranchNamingInput | undefined {
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", "$.naming", "Branch naming input must be an object.");
+    return undefined;
+  }
+  addUnknownProperties(input, BRANCH_NAMING_KEYS, "$.naming", diagnostics);
+  const type = input.type;
+  const slug = input.slug;
+  if (!hasOwn(input, "type")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.naming.type", "Property is required.");
+  } else if (typeof type !== "string" || type.length === 0 || /[\u0000-\u001F\u007F]/u.test(type)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", "$.naming.type", "Branch type is invalid.");
+  }
+  if (!hasOwn(input, "slug")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.naming.slug", "Property is required.");
+  } else if (typeof slug !== "string" || slug.length === 0 || /[\u0000-\u001F\u007F]/u.test(slug)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", "$.naming.slug", "Branch slug is invalid.");
+  }
+  if (diagnostics.some((diagnostic) => diagnostic.path === "$.naming.type" || diagnostic.path === "$.naming.slug")) {
+    return undefined;
+  }
+  return { type: type as string, slug: slug as string };
+}
+
+/**
+ * Derive one canonical branch identity from a validated Change identity,
+ * repository branch governance, and governance-resolved naming parts.
+ *
+ * The branch grammar is owned by the shared branch authority. This function
+ * only supplies the Change Issue number, verifies the repository policy, and
+ * returns a pure projection; it never creates or updates a Git ref.
+ */
+export function deriveCanonicalBranchIdentity(input: unknown): CanonicalBranchIdentityDerivationResult {
+  const diagnostics: ChangeDiagnostic[] = [];
+  if (!isRecord(input)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_BRANCH_INPUT",
+      "$",
+      "Canonical branch derivation input must be an object.",
+    );
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  addUnknownProperties(input, CANONICAL_BRANCH_DERIVATION_KEYS, "$", diagnostics);
+
+  let identity: ChangeIdentity | undefined;
+  if (!hasOwn(input, "change")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.change", "Property is required.");
+  } else {
+    identity = validateCanonicalBranchChangeIdentity(input.change, diagnostics);
+  }
+
+  let governance: PullRequestBranchGovernance | undefined;
+  if (!hasOwn(input, "branchGovernance")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.branchGovernance", "Property is required.");
+  } else {
+    governance = validateCanonicalBranchGovernance(input.branchGovernance, diagnostics);
+  }
+
+  let naming: CanonicalBranchNamingInput | undefined;
+  if (!hasOwn(input, "naming")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.naming", "Property is required.");
+  } else {
+    naming = validateCanonicalBranchNaming(input.naming, diagnostics);
+  }
+
+  if (diagnostics.length > 0 || identity === undefined || governance === undefined || naming === undefined) {
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+
+  let branch: string;
+  try {
+    branch = deriveBranchName({ type: naming.type, issueNumber: identity.rootIssue, slug: naming.slug });
+  } catch (error: unknown) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_BRANCH_INPUT",
+      "$.naming",
+      error instanceof Error ? error.message : String(error),
+    );
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  if (branch.length > MAX_CHANGE_BRANCH_LENGTH) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_BRANCH_INPUT",
+      "$.naming",
+      `Derived branch exceeds its ${MAX_CHANGE_BRANCH_LENGTH}-character bound.`,
+    );
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(governance.pattern, "u");
+  } catch (error: unknown) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_BRANCH_GOVERNANCE",
+      "$.branchGovernance.pattern",
+      `Branch governance is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  if (!pattern.test(branch)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_BRANCH_GOVERNANCE_MISMATCH",
+      "$.branchGovernance.pattern",
+      `Derived branch "${branch}" does not satisfy the repository's branch governance.`,
+    );
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  return { valid: true, branch, diagnostics: [] };
+}
 
 /** Stable identity key; locator changes cannot create a second Change. */
 export function changeIdentityKey(input: ChangeIdentity): string {

@@ -1,10 +1,11 @@
 /**
  * The transport-independent semantic contract for a governed Change.
  *
- * This module intentionally owns only Change data, validation, and
- * canonical serialization.  It does not read or mutate GitHub state, derive
- * branch names, or plan transitions.
+ * This module owns transport-independent Change data, validation, canonical
+ * serialization, and pure canonical branch identity derivation. It does not
+ * read or mutate GitHub state or plan transitions.
  */
+import type { PullRequestBranchGovernance } from "./contract/ir.js";
 export declare const CHANGE_CONTRACT_VERSION: 1;
 export type ChangeContractVersion = typeof CHANGE_CONTRACT_VERSION;
 export declare const CHANGE_STATES: readonly ["DEFINED", "DRAFT", "REVIEW", "ACCEPTED", "MERGED", "ABORTED", "RECOVERY_REQUIRED"];
@@ -18,6 +19,12 @@ export declare const MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH: 160;
 export declare const MAX_CHANGE_PRINCIPAL_LENGTH: 160;
 export declare const MAX_CHANGE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_HOST_LENGTH: 255;
+export interface CanonicalBranchNamingInput {
+    /** Repository-governed branch classification, not a complete branch name. */
+    readonly type: string;
+    /** Repository-governed, grammar-compatible branch slug. */
+    readonly slug: string;
+}
 /** Stable repository identity plus the root Issue number. */
 export interface ChangeIdentity {
     /** Normalized GitHub host/install boundary. */
@@ -53,7 +60,7 @@ export interface Change {
     readonly provenance: ChangeProvenance;
     readonly projection?: ChangeProjection;
 }
-export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION";
+export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH";
 export interface ChangeDiagnosticInput {
     readonly code: ChangeDiagnosticCode;
     readonly path?: string;
@@ -90,6 +97,16 @@ export interface ChangeProjectionValidationResult {
     readonly projection?: ChangeProjection;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+export interface CanonicalBranchIdentityDerivationInput {
+    readonly change: Change | ChangeIdentity;
+    readonly branchGovernance: PullRequestBranchGovernance;
+    readonly naming: CanonicalBranchNamingInput;
+}
+export interface CanonicalBranchIdentityDerivationResult {
+    readonly valid: boolean;
+    readonly branch?: string;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
 /** Create one bounded, versioned machine-readable diagnostic. */
 export declare function createChangeDiagnostic(input: ChangeDiagnosticInput): ChangeDiagnostic;
 /** Sort and bound a diagnostic set for deterministic machine consumption. */
@@ -100,6 +117,15 @@ export declare function deserializeChangeDiagnosticReport(serialized: string): C
 export declare function validateChangeIdentity(input: unknown, path?: string): ChangeIdentityValidationResult;
 export declare const normalizeChangeIdentity: typeof validateChangeIdentity;
 export declare const projectChangeIdentity: typeof validateChangeIdentity;
+/**
+ * Derive one canonical branch identity from a validated Change identity,
+ * repository branch governance, and governance-resolved naming parts.
+ *
+ * The branch grammar is owned by the shared branch authority. This function
+ * only supplies the Change Issue number, verifies the repository policy, and
+ * returns a pure projection; it never creates or updates a Git ref.
+ */
+export declare function deriveCanonicalBranchIdentity(input: unknown): CanonicalBranchIdentityDerivationResult;
 /** Stable identity key; locator changes cannot create a second Change. */
 export declare function changeIdentityKey(input: ChangeIdentity): string;
 /** Validate the five provenance roles without imposing transition policy. */
