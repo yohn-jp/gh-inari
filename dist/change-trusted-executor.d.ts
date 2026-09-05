@@ -36,5 +36,6 @@ export declare class TrustedChangeExecutor implements ChangeRemoteExecutor {
     private executeIssue;
     private recoverIssuance;
     private executeTransition;
+    private recoverTransition;
 }
 export declare const GitHubActionsChangeExecutor: typeof TrustedChangeExecutor;

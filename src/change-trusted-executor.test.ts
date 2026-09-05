@@ -77,6 +77,15 @@ function draftPullRequest() {
   };
 }
 
+function closedPullRequest() {
+  return {
+    ...draftPullRequest(),
+    state: "closed" as const,
+    draft: false,
+    merged: false,
+  };
+}
+
 class MutableReader implements ChangeTrustedEvidenceReader {
   constructor(public current: ChangeProjectionInput) {}
 
@@ -106,8 +115,20 @@ class FakeIssuer {
         ...this.reader.current,
         evidence: evidence([branch], { status: "available", value: [draftPullRequest()] }),
       };
+    } else if (effect.kind === "CLOSE_PULL_REQUEST") {
+      this.reader.current = {
+        ...this.reader.current,
+        evidence: evidence([branch], { status: "available", value: [closedPullRequest()] }),
+      };
     } else if (effect.kind === "DELETE_BRANCH") {
-      this.reader.current = { ...this.reader.current, evidence: evidence([]) };
+      const pullRequests =
+        this.reader.current.evidence.pullRequests?.status === "available"
+          ? this.reader.current.evidence.pullRequests.value
+          : [];
+      this.reader.current = {
+        ...this.reader.current,
+        evidence: evidence([], { status: "available", value: pullRequests }),
+      };
     }
     return {
       version: 1,
@@ -257,5 +278,158 @@ test("post-effect projection verification failure fails closed", async () => {
     }),
     (error: unknown) =>
       error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+  );
+});
+
+test("DRAFT and REVIEW aborts close the canonical PR and delete only the canonical branch", async () => {
+  for (const draft of [true, false]) {
+    const reader = new MutableReader(
+      input(evidence([branch], { status: "available", value: [{ ...draftPullRequest(), draft }] })),
+    );
+    const issuer = new FakeIssuer(reader);
+    const result = await executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+      requester: "agent:aborter",
+    });
+
+    assert.deepEqual(
+      issuer.effects.map((effect) => effect.kind),
+      ["CLOSE_PULL_REQUEST", "DELETE_BRANCH"],
+    );
+    assert.equal(result.evidence?.outcome, "verified");
+    assert.equal(result.projection.change?.state, "ABORTED");
+    assert.equal(result.projection.change?.provenance.requester, "agent:aborter");
+    assert.equal(result.projection.change?.provenance.issuer, INARI_ISSUER_PRINCIPAL);
+  }
+});
+
+test("already-aborted retry performs no duplicate close or delete", async () => {
+  const reader = new MutableReader(input(evidence([], { status: "available", value: [closedPullRequest()] })));
+  const issuer = new FakeIssuer(reader);
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+
+  assert.deepEqual(issuer.effects, []);
+  assert.equal(result.evidence?.outcome, "returned-existing");
+  assert.equal(result.projection.change?.state, "ABORTED");
+});
+
+test("MERGED, noncanonical, and ambiguous projections reject before mutation", async () => {
+  const mergedReader = new MutableReader(
+    input(
+      evidence([branch], {
+        status: "available",
+        value: [{ ...closedPullRequest(), merged: true }],
+      }),
+    ),
+  );
+  const mergedIssuer = new FakeIssuer(mergedReader);
+  await assert.rejects(
+    executor(mergedReader, mergedIssuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+  );
+  assert.deepEqual(mergedIssuer.effects, []);
+
+  const noncanonicalReader = new MutableReader(
+    input({
+      issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+      branches: { status: "available", value: [{ name: "feat/218-arbitrary" }] },
+      pullRequests: {
+        status: "available",
+        value: [{ ...draftPullRequest(), head: "feat/218-arbitrary" }],
+      },
+    }),
+  );
+  const noncanonicalIssuer = new FakeIssuer(noncanonicalReader);
+  await assert.rejects(
+    executor(noncanonicalReader, noncanonicalIssuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+  );
+  assert.deepEqual(noncanonicalIssuer.effects, []);
+
+  const ambiguousReader = new MutableReader(
+    input({
+      issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+      branches: { status: "available", value: [] },
+      pullRequests: {
+        status: "available",
+        value: [
+          { ...draftPullRequest(), number: 2181, head: "feat/218-first", rootIssue: identity.rootIssue },
+          { ...draftPullRequest(), number: 2182, head: "feat/218-second", rootIssue: identity.rootIssue },
+        ],
+      },
+    }),
+  );
+  const ambiguousIssuer = new FakeIssuer(ambiguousReader);
+  await assert.rejects(
+    executor(ambiguousReader, ambiguousIssuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+  );
+  assert.deepEqual(ambiguousIssuer.effects, []);
+
+  const driftedReader = new MutableReader(
+    input({
+      issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+      branches: { status: "available", value: [{ name: branch }] },
+      pullRequests: {
+        status: "available",
+        value: [{ ...draftPullRequest(), base: "develop" }],
+      },
+    }),
+  );
+  const driftedIssuer = new FakeIssuer(driftedReader);
+  await assert.rejects(
+    executor(driftedReader, driftedIssuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+  );
+  assert.deepEqual(driftedIssuer.effects, []);
+});
+
+test("partial abort cleanup returns RECOVERY_REQUIRED and a later retry applies only branch deletion", async () => {
+  const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "DELETE_BRANCH";
+  const failed = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(failed.evidence?.outcome, "recovery-required");
+  assert.equal(failed.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.equal(failed.projection.status, "partial");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CLOSE_PULL_REQUEST", "DELETE_BRANCH"],
+  );
+
+  issuer.fail = undefined;
+  const retry = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+  assert.equal(retry.evidence?.outcome, "verified");
+  assert.equal(retry.projection.change?.state, "ABORTED");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CLOSE_PULL_REQUEST", "DELETE_BRANCH", "DELETE_BRANCH"],
   );
 });

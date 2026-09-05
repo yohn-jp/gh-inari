@@ -294,7 +294,7 @@ test("Core owns the lifecycle matrix and emits explicit issue effects", () => {
   assert.equal(isChangeTransitionPlan(plan), true);
 });
 
-test("ready and abort produce only their declared pull-request effects", () => {
+test("ready and abort produce Core-declared effects", () => {
   const readyPlan = planChangeTransition({
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     transition: "ready",
@@ -308,8 +308,30 @@ test("ready and abort produce only their declared pull-request effects", () => {
     transition: "abort",
     change: { ...validChange, state: "REVIEW" },
   });
-  assert.deepEqual(abortPlan.effects, [{ kind: "CLOSE_PULL_REQUEST", pullRequest: 321 }]);
+  assert.deepEqual(abortPlan.effects, [
+    { kind: "CLOSE_PULL_REQUEST", pullRequest: 321 },
+    { kind: "DELETE_BRANCH", branch: "feat/210-define-canonical-change-domain-contract" },
+  ]);
   assert.equal(abortPlan.to, "ABORTED");
+});
+
+test("abort retries are idempotent and recovery retries only canonical cleanup", () => {
+  const alreadyAborted = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "abort",
+    change: { ...validChange, state: "ABORTED" },
+  });
+  assert.deepEqual(alreadyAborted.effects, []);
+
+  const recovery = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "abort",
+    change: { ...validChange, state: "RECOVERY_REQUIRED" },
+  });
+  assert.deepEqual(recovery.effects, [
+    { kind: "DELETE_BRANCH", branch: "feat/210-define-canonical-change-domain-contract" },
+  ]);
+  assert.equal(recovery.to, "ABORTED");
 });
 
 test("invalid and future transitions fail closed with structured diagnostics", () => {
