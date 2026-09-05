@@ -40,6 +40,10 @@
       "types": "./dist/change-executor.d.ts",
       "import": "./dist/change-executor.js"
     },
+    "./change-trusted-executor": {
+      "types": "./dist/change-trusted-executor.d.ts",
+      "import": "./dist/change-trusted-executor.js"
+    },
     "./semantic-template": {
       "types": "./dist/semantic-template.d.ts",
       "import": "./dist/semantic-template.js"
@@ -87,7 +91,7 @@
     "typescript-eslint": "8.69.0"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=24"
   },
   "packageManager": "pnpm@11.18.0",
   "publishConfig": {

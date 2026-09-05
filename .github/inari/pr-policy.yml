@@ -1,4 +1,6 @@
 version: 1
+branch:
+  pattern: "^(feat|fix|docs|refactor|test|chore)/[0-9]+-[a-z0-9-]+$"
 templates:
   - template: default
     sections:

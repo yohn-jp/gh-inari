@@ -1,0 +1,50 @@
+name: Inari Change executor
+
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: Semantic Inari Change request JSON
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      request:
+        description: Semantic Inari Change request JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  execute:
+    # Only the protected default branch may supply the workflow and Core code.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted executor source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+
+      - name: Install trusted dependencies
+        run: corepack pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Execute Core plan
+        env:
+          INARI_CHANGE_REQUEST: ${{ inputs.request }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INARI_ISSUER_APP_ID: ${{ secrets.INARI_ISSUER_APP_ID }}
+          INARI_ISSUER_INSTALLATION_ID: ${{ secrets.INARI_ISSUER_INSTALLATION_ID }}
+          INARI_ISSUER_APP_PRIVATE_KEY: ${{ secrets.INARI_ISSUER_APP_PRIVATE_KEY }}
+        run: corepack pnpm run build && node dist/github/actions-change-executor.js

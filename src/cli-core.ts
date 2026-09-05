@@ -100,7 +100,7 @@ import {
   changeRemoteMutationRequest,
   changeRemoteReadRequest,
   createUnavailableChangeRemoteExecutor,
-  executeChangeRemoteMutation,
+  executeChangeRemoteMutationResult,
   readChangeRemoteProjection,
   type ChangeRemoteExecutor,
   type ChangeRemoteExecutorOptions,
@@ -217,6 +217,7 @@ interface CliErrorShape {
   readonly details?: unknown;
   readonly violations?: unknown;
   readonly diagnostics?: unknown;
+  readonly evidence?: unknown;
 }
 
 /** The installed gh-inari executable entrypoint. */
@@ -840,6 +841,7 @@ function projectChangeCommandResult(
   operation: string,
   issue: number,
   projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+  evidence: Awaited<ReturnType<typeof executeChangeRemoteMutationResult>>["evidence"] = undefined,
 ): Readonly<Record<string, unknown>> {
   const change = projection.change;
   const changeProjection = change?.projection;
@@ -854,6 +856,7 @@ function projectChangeCommandResult(
     ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
     ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
     ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+    ...(evidence === undefined ? {} : { evidence }),
     projection,
   };
 }
@@ -890,15 +893,20 @@ async function runChangeCommand(
 
   const issue = Number(rest[0]);
   const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
-  const projection =
+  const result =
     definition.operation === "show"
-      ? await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue))
-      : await executeChangeRemoteMutation(
+      ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
+      : await executeChangeRemoteMutationResult(
           executor,
           changeRemoteMutationRequest(definition.operation as ChangeRemoteMutation, issue),
         );
-  console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection)));
-  return projection.valid ? 0 : EXIT_VALIDATION;
+  const projection = result.projection;
+  console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection, result.evidence)));
+  const executionSucceeded =
+    result.evidence === undefined ||
+    result.evidence.outcome === "verified" ||
+    result.evidence.outcome === "returned-existing";
+  return projection.valid && executionSucceeded ? 0 : EXIT_VALIDATION;
 }
 
 async function runArtifactCommand(
@@ -1715,6 +1723,7 @@ function toErrorShape(error: unknown): CliErrorShape {
       ...(typeof error.details === "object" ? { details: error.details } : {}),
       ...(Array.isArray(error.violations) ? { violations: error.violations } : {}),
       ...(Array.isArray(error.diagnostics) ? { diagnostics: error.diagnostics } : {}),
+      ...(typeof error.evidence === "object" && error.evidence !== null ? { evidence: error.evidence } : {}),
     };
   return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
 }
@@ -1760,6 +1769,7 @@ function classifyExitCode(error: unknown): number {
     return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_")) return EXIT_REMOTE;
+  if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
@@ -1816,6 +1826,7 @@ function isObjectWithCode(value: unknown): value is {
   details?: unknown;
   violations?: unknown;
   diagnostics?: unknown;
+  evidence?: unknown;
 } {
   return typeof value === "object" && value !== null && "code" in value && typeof value.code === "string";
 }

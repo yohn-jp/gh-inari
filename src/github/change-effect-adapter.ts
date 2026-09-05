@@ -64,13 +64,22 @@ export const GITHUB_CHANGE_EFFECT_FAILURE_CODES = Object.freeze({
 
 export type GitHubChangeEffectFailureCode = (typeof GITHUB_CHANGE_EFFECT_FAILURE_CODES)[ChangeEffectKind];
 
-const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffectKind, string>> = Object.freeze({
+export const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffectKind, string>> = Object.freeze({
   CREATE_BRANCH: "The branch creation effect failed.",
   CREATE_PULL_REQUEST: "The pull request creation effect failed.",
   MARK_PULL_REQUEST_READY: "The pull request ready effect failed.",
   CLOSE_PULL_REQUEST: "The pull request close effect failed.",
   DELETE_BRANCH: "The branch deletion effect failed.",
 });
+
+/** Stable bounded failure evidence for a single explicit effect. */
+export function changeEffectFailureEvidence(effect: ChangeEffect): ChangeIssuanceFailureEvidence {
+  return {
+    effect,
+    code: GITHUB_CHANGE_EFFECT_FAILURE_CODES[effect.kind],
+    message: GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind],
+  };
+}
 
 const READY_FOR_REVIEW_MUTATION =
   "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { " +
@@ -359,11 +368,7 @@ function assertExplicitChangeEffect(input: unknown): ChangeEffect {
 }
 
 function createFailureEvidence(effect: ChangeEffect): GitHubChangeEffectFailureEvidence {
-  return {
-    effect,
-    code: GITHUB_CHANGE_EFFECT_FAILURE_CODES[effect.kind],
-    message: GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind],
-  };
+  return changeEffectFailureEvidence(effect);
 }
 
 function parseGitReference(value: unknown, expectedRef: string): string {

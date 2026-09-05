@@ -13,7 +13,7 @@ import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffA
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
-import { changeRemoteMutationRequest, changeRemoteReadRequest, createUnavailableChangeRemoteExecutor, executeChangeRemoteMutation, readChangeRemoteProjection, } from "./change-executor.js";
+import { changeRemoteMutationRequest, changeRemoteReadRequest, createUnavailableChangeRemoteExecutor, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
@@ -559,7 +559,7 @@ function createChangeExecutor(dependencies, root, repository) {
     const factory = dependencies.createChangeExecutor ?? (() => createUnavailableChangeRemoteExecutor());
     return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
-function projectChangeCommandResult(operation, issue, projection) {
+function projectChangeCommandResult(operation, issue, projection, evidence = undefined) {
     const change = projection.change;
     const changeProjection = change?.projection;
     return {
@@ -573,6 +573,7 @@ function projectChangeCommandResult(operation, issue, projection) {
         ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
         ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
         ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+        ...(evidence === undefined ? {} : { evidence }),
         projection,
     };
 }
@@ -597,11 +598,15 @@ async function runChangeCommand(command, rest, parsed, root, dependencies, json)
     rejectUnsupportedChangeOptions(definition.operation, parsed.options);
     const issue = Number(rest[0]);
     const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
-    const projection = definition.operation === "show"
-        ? await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue))
-        : await executeChangeRemoteMutation(executor, changeRemoteMutationRequest(definition.operation, issue));
-    console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection)));
-    return projection.valid ? 0 : EXIT_VALIDATION;
+    const result = definition.operation === "show"
+        ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
+        : await executeChangeRemoteMutationResult(executor, changeRemoteMutationRequest(definition.operation, issue));
+    const projection = result.projection;
+    console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection, result.evidence)));
+    const executionSucceeded = result.evidence === undefined ||
+        result.evidence.outcome === "verified" ||
+        result.evidence.outcome === "returned-existing";
+    return projection.valid && executionSucceeded ? 0 : EXIT_VALIDATION;
 }
 async function runArtifactCommand(domain, command, rest, parsed, root, dependencies, json) {
     if (command === "schema") {
@@ -1271,6 +1276,7 @@ function toErrorShape(error) {
             ...(typeof error.details === "object" ? { details: error.details } : {}),
             ...(Array.isArray(error.violations) ? { violations: error.violations } : {}),
             ...(Array.isArray(error.diagnostics) ? { diagnostics: error.diagnostics } : {}),
+            ...(typeof error.evidence === "object" && error.evidence !== null ? { evidence: error.evidence } : {}),
         };
     return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
 }
@@ -1309,6 +1315,8 @@ function classifyExitCode(error) {
     if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN")
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_"))
+        return EXIT_REMOTE;
+    if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_"))
         return EXIT_REMOTE;
     if (isObjectWithCode(error) && error.code.startsWith("CHANGE_"))
         return EXIT_VALIDATION;
