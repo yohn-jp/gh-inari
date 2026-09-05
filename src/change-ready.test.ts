@@ -3,7 +3,10 @@ import { test } from "node:test";
 import {
   CHANGE_CONTRACT_VERSION,
   CHANGE_TRANSITION_CONTRACT_VERSION,
+  planChangeRecovery,
   planChangeIssuance,
+  planChangeReadyTransition,
+  planChangeTransition,
   validateChangeReadyTransition,
   type Change,
   type ChangeProjectionInput,
@@ -315,4 +318,49 @@ test("requester and issuer provenance remain separate through Ready", async () =
   assert.equal(result.projection.change?.provenance.implementer, undefined);
   assert.equal(result.projection.change?.provenance.reviewer, undefined);
   assert.equal(result.projection.change?.version, CHANGE_CONTRACT_VERSION);
+});
+
+test("Ready addition preserves the Abort recovery plan", () => {
+  const change = canonicalChange();
+  const transition = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "abort",
+    change,
+  });
+  const recovery = planChangeRecovery({
+    transition,
+    attemptedEffects: [
+      { effect: transition.effects[0]!, status: "succeeded" as const },
+      { effect: transition.effects[1]!, status: "failed" as const },
+    ],
+    failure: {
+      effect: transition.effects[1]!,
+      code: "BRANCH_DELETE_FAILED",
+      message: "The branch deletion effect failed.",
+    },
+    projection: projectionInput(pullRequest({ state: "closed", draft: false })),
+  });
+
+  assert.equal(recovery.operation, "recover-transition");
+  if (recovery.operation !== "recover-transition") throw new Error("expected Abort transition recovery");
+  assert.deepEqual(recovery.effects, [{ kind: "DELETE_BRANCH", branch }]);
+});
+
+test("Abort addition preserves the healthy Ready retry no-op", () => {
+  const input = projectionInput(pullRequest({ draft: false }));
+  const change = canonicalChange(input);
+  const readyPlan = planChangeReadyTransition(readyInput(input, change));
+
+  assert.deepEqual(readyPlan.effects, []);
+  assert.equal(readyPlan.from, "REVIEW");
+  assert.equal(readyPlan.to, "REVIEW");
+});
+
+test("RECOVERY_REQUIRED and ABORTED Changes cannot enter Ready", () => {
+  for (const state of ["RECOVERY_REQUIRED", "ABORTED"] as const) {
+    const result = validateChangeReadyTransition(readyInput(projectionInput(), { ...canonicalChange(), state }));
+    assert.equal(result.valid, false);
+    assert.ok(result.diagnostics.length > 0);
+    assert.throws(() => planChangeReadyTransition(readyInput(projectionInput(), { ...canonicalChange(), state })));
+  }
 });
