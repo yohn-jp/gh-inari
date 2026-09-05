@@ -127,7 +127,7 @@ export interface ChangeTransitionRequest {
     /** Required for issue; may complete a partial projection for other edges. */
     readonly target?: ChangeTransitionTarget;
 }
-export declare const CHANGE_EFFECT_KINDS: readonly ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY", "CLOSE_PULL_REQUEST"];
+export declare const CHANGE_EFFECT_KINDS: readonly ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY", "CLOSE_PULL_REQUEST", "DELETE_BRANCH"];
 export type ChangeEffectKind = (typeof CHANGE_EFFECT_KINDS)[number];
 /**
  * Effects are declarative capabilities for a later executor.  They contain
@@ -149,6 +149,9 @@ export type ChangeEffect = {
 } | {
     readonly kind: "CLOSE_PULL_REQUEST";
     readonly pullRequest: number;
+} | {
+    readonly kind: "DELETE_BRANCH";
+    readonly branch: string;
 };
 export interface ChangeTransitionPlan {
     readonly version: ChangeTransitionContractVersion;
@@ -353,9 +356,114 @@ export interface ChangeIssuancePlanValidationResult {
     readonly plan?: ChangeIssuancePlan;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+/** Outcomes recorded by a transport-independent issuance effect journal. */
+export declare const CHANGE_ISSUANCE_EFFECT_STATUSES: readonly ["succeeded", "failed"];
+export type ChangeIssuanceEffectStatus = (typeof CHANGE_ISSUANCE_EFFECT_STATUSES)[number];
+/** One bounded effect attempt, including the failed effect when present. */
+export interface ChangeIssuanceEffectAttempt {
+    readonly effect: ChangeEffect;
+    readonly status: ChangeIssuanceEffectStatus;
+}
+export type ChangeIssuanceAttemptedEffect = ChangeIssuanceEffectAttempt;
+/** Bounded executor failure evidence; it contains no transport or credential. */
+export interface ChangeIssuanceFailureEvidence {
+    readonly effect: ChangeEffect;
+    readonly code: string;
+    readonly message: string;
+}
+export declare const CHANGE_ISSUANCE_COMPENSATION_STATUSES: readonly ["required", "succeeded", "failed"];
+export type ChangeIssuanceCompensationStatus = (typeof CHANGE_ISSUANCE_COMPENSATION_STATUSES)[number];
+export declare const CHANGE_ISSUANCE_RECOVERY_STATUSES: readonly ["compensation-required", "compensated", "recovery-required"];
+export type ChangeIssuanceRecoveryStatus = (typeof CHANGE_ISSUANCE_RECOVERY_STATUSES)[number];
+/** Verification authority for the desired post-compensation absent projection. */
+export interface ChangeIssuanceCompensationVerificationExpectation {
+    readonly phase: "post-compensation";
+    readonly status: "absent";
+    readonly canonicalBranch: string;
+    readonly canonicalBaseBranch: string;
+    readonly state: "DEFINED";
+    readonly pullRequest: {
+        readonly required: false;
+    };
+}
+/** Bounded failure evidence retained by a compensation or recovery plan. */
+export interface ChangeIssuanceFailureRecord {
+    readonly attemptedEffects: readonly ChangeIssuanceEffectAttempt[];
+    readonly failure: ChangeIssuanceFailureEvidence;
+    readonly projection: ChangeProjectionResult;
+}
+/** One explicit branch-compensation plan; it is never executed by this module. */
+export interface ChangeIssuanceCompensationPlan {
+    readonly version: ChangeTransitionContractVersion;
+    readonly operation: "compensate-issue";
+    readonly transaction: ChangeIssuanceTransaction;
+    /** The original #214 issuance plan remains the transaction authority. */
+    readonly issuance: ChangeIssuancePlan;
+    readonly failureEvidence: ChangeIssuanceFailureRecord;
+    readonly effects: readonly ChangeEffect[];
+    readonly verification: ChangeIssuanceCompensationVerificationExpectation;
+}
+export type ChangeCompensationPlan = ChangeIssuanceCompensationPlan;
+/** Input evidence for a compensation result. */
+export interface ChangeIssuanceCompensationOutcomeInput {
+    readonly status: Exclude<ChangeIssuanceCompensationStatus, "required">;
+    /** Reuses #213 projection input/evidence authority. */
+    readonly projection: ChangeProjectionInput;
+    readonly failure?: ChangeIssuanceFailureEvidence;
+}
+/** Normalized, bounded compensation outcome retained in a recovery plan. */
+export interface ChangeIssuanceCompensationOutcome {
+    readonly status: Exclude<ChangeIssuanceCompensationStatus, "required">;
+    readonly evidence: ChangeProjectionResult;
+    readonly failure?: ChangeIssuanceFailureEvidence;
+}
+export interface ChangeIssuanceRecoveryResult {
+    readonly status: ChangeIssuanceRecoveryStatus;
+    /** The lifecycle state is explicit even when no valid Change was issued. */
+    readonly state: "DEFINED" | "RECOVERY_REQUIRED";
+    readonly issued: false;
+    readonly change: Change;
+}
+/** Input to pure issuance compensation/recovery planning. */
+export interface ChangeIssuanceRecoveryInput {
+    readonly issuance: ChangeIssuancePlan;
+    readonly attemptedEffects: readonly ChangeIssuanceEffectAttempt[];
+    readonly failure: ChangeIssuanceFailureEvidence;
+    /** The bounded post-failure projection read used to prove a safe delete. */
+    readonly projection: ChangeProjectionInput;
+    readonly compensation?: ChangeIssuanceCompensationOutcomeInput;
+}
+export type ChangeIssuanceCompensationInput = Omit<ChangeIssuanceRecoveryInput, "compensation">;
+/** One deterministic recovery plan retaining all failure and repair evidence. */
+export interface ChangeIssuanceRecoveryPlan {
+    readonly version: ChangeTransitionContractVersion;
+    readonly operation: "recover-issue";
+    readonly transaction: ChangeIssuanceTransaction;
+    readonly issuance: ChangeIssuancePlan;
+    readonly failureEvidence: ChangeIssuanceFailureRecord;
+    readonly compensation: {
+        readonly status: ChangeIssuanceCompensationStatus;
+        readonly plan: ChangeIssuanceCompensationPlan;
+        readonly outcome?: ChangeIssuanceCompensationOutcome;
+    };
+    readonly result: ChangeIssuanceRecoveryResult;
+}
+export type ChangeRecoveryPlan = ChangeIssuanceRecoveryPlan;
+export interface ChangeIssuanceCompensationPlanValidationResult {
+    readonly valid: boolean;
+    readonly plan?: ChangeIssuanceCompensationPlan;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+export interface ChangeIssuanceRecoveryPlanValidationResult {
+    readonly valid: boolean;
+    readonly plan?: ChangeIssuanceRecoveryPlan;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
 export declare const MAX_CHANGE_BASE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_TRANSITION_EFFECTS: 8;
 export declare const MAX_CHANGE_PROJECTION_CANDIDATES: 64;
+export declare const MAX_CHANGE_ISSUANCE_ATTEMPTS: 8;
+export declare const MAX_CHANGE_FAILURE_CODE_LENGTH: 80;
 /** Create one bounded, versioned machine-readable diagnostic. */
 export declare function createChangeDiagnostic(input: ChangeDiagnosticInput): ChangeDiagnostic;
 /** Sort and bound a diagnostic set for deterministic machine consumption. */
@@ -470,5 +578,41 @@ export declare function deserializeChangeIssuancePlan(serialized: string): Chang
 export declare const parseChangeIssuancePlan: typeof deserializeChangeIssuancePlan;
 export declare const serializeChangeIssuancePlanContract: typeof serializeChangeIssuancePlan;
 export declare class ChangeIssuanceValidationError extends ChangeValidationError {
+    constructor(diagnostics: readonly ChangeDiagnostic[]);
+}
+/** Validate and canonicalize an explicit branch-compensation plan. */
+export declare function validateChangeIssuanceCompensationPlan(input: unknown): ChangeIssuanceCompensationPlanValidationResult;
+/** Assert a valid explicit branch-compensation plan at an executor boundary. */
+export declare function assertChangeIssuanceCompensationPlan(input: unknown): asserts input is ChangeIssuanceCompensationPlan;
+export declare function isChangeIssuanceCompensationPlan(input: unknown): input is ChangeIssuanceCompensationPlan;
+/** Plan the only safe compensation for a confirmed branch-created/PR-failed issuance. */
+export declare function planChangeIssuanceCompensation(input: unknown): ChangeIssuanceCompensationPlan;
+export declare const createChangeIssuanceCompensationPlan: typeof planChangeIssuanceCompensation;
+export declare const planChangeCompensation: typeof planChangeIssuanceCompensation;
+/** Validate and canonicalize a deterministic issuance recovery plan. */
+export declare function validateChangeIssuanceRecoveryPlan(input: unknown): ChangeIssuanceRecoveryPlanValidationResult;
+/** Assert a valid deterministic issuance recovery plan at an executor boundary. */
+export declare function assertChangeIssuanceRecoveryPlan(input: unknown): asserts input is ChangeIssuanceRecoveryPlan;
+export declare function isChangeIssuanceRecoveryPlan(input: unknown): input is ChangeIssuanceRecoveryPlan;
+/**
+ * Plan issuance compensation and recovery from bounded effect/projection
+ * evidence. This function is pure and never executes the delete effect.
+ */
+export declare function planChangeIssuanceRecovery(input: unknown): ChangeIssuanceRecoveryPlan;
+export declare const createChangeIssuanceRecoveryPlan: typeof planChangeIssuanceRecovery;
+export declare const planChangeRecovery: typeof planChangeIssuanceRecovery;
+/** Serialize a canonical transport-independent compensation plan. */
+export declare function serializeChangeIssuanceCompensationPlan(input: unknown): string;
+/** Parse and validate an untrusted compensation plan JSON boundary. */
+export declare function deserializeChangeIssuanceCompensationPlan(serialized: string): ChangeIssuanceCompensationPlan;
+/** Serialize a canonical transport-independent recovery plan. */
+export declare function serializeChangeIssuanceRecoveryPlan(input: unknown): string;
+/** Parse and validate an untrusted recovery plan JSON boundary. */
+export declare function deserializeChangeIssuanceRecoveryPlan(serialized: string): ChangeIssuanceRecoveryPlan;
+export declare const parseChangeIssuanceCompensationPlan: typeof deserializeChangeIssuanceCompensationPlan;
+export declare const parseChangeIssuanceRecoveryPlan: typeof deserializeChangeIssuanceRecoveryPlan;
+export declare const serializeChangeCompensationPlan: typeof serializeChangeIssuanceCompensationPlan;
+export declare const serializeChangeRecoveryPlan: typeof serializeChangeIssuanceRecoveryPlan;
+export declare class ChangeIssuanceRecoveryValidationError extends ChangeValidationError {
     constructor(diagnostics: readonly ChangeDiagnostic[]);
 }

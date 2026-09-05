@@ -57,6 +57,7 @@ export const CHANGE_EFFECT_KINDS = Object.freeze([
     "CREATE_PULL_REQUEST",
     "MARK_PULL_REQUEST_READY",
     "CLOSE_PULL_REQUEST",
+    "DELETE_BRANCH",
 ]);
 export const CHANGE_PROJECTION_STATUSES = Object.freeze([
     "healthy",
@@ -72,6 +73,14 @@ export const CHANGE_EVIDENCE_STATUSES = Object.freeze(["available", "absent", "u
 /** The two idempotent issuance outcomes owned by Inari Core. */
 export const CHANGE_ISSUANCE_MODES = Object.freeze(["create", "return-existing"]);
 export const CHANGE_ISSUANCE_SOURCE_STATUSES = Object.freeze(["absent", "healthy"]);
+/** Outcomes recorded by a transport-independent issuance effect journal. */
+export const CHANGE_ISSUANCE_EFFECT_STATUSES = Object.freeze(["succeeded", "failed"]);
+export const CHANGE_ISSUANCE_COMPENSATION_STATUSES = Object.freeze(["required", "succeeded", "failed"]);
+export const CHANGE_ISSUANCE_RECOVERY_STATUSES = Object.freeze([
+    "compensation-required",
+    "compensated",
+    "recovery-required",
+]);
 const DIAGNOSTIC_CODES = [
     "CHANGE_INVALID_JSON",
     "CHANGE_INVALID_ROOT",
@@ -140,6 +149,57 @@ const CHANGE_ISSUANCE_VERIFICATION_KEYS = new Set([
     "pullRequest",
 ]);
 const CHANGE_ISSUANCE_PULL_REQUEST_KEYS = new Set(["required", "number"]);
+const CHANGE_ISSUANCE_ATTEMPT_KEYS = new Set(["effect", "status"]);
+const CHANGE_ISSUANCE_FAILURE_KEYS = new Set(["effect", "code", "message"]);
+const CHANGE_ISSUANCE_FAILURE_RECORD_KEYS = new Set(["attemptedEffects", "failure", "projection"]);
+const CHANGE_ISSUANCE_COMPENSATION_PLAN_KEYS = new Set([
+    "version",
+    "operation",
+    "transaction",
+    "issuance",
+    "failureEvidence",
+    "effects",
+    "verification",
+]);
+const CHANGE_ISSUANCE_COMPENSATION_VERIFICATION_KEYS = new Set([
+    "phase",
+    "status",
+    "canonicalBranch",
+    "canonicalBaseBranch",
+    "state",
+    "pullRequest",
+]);
+const CHANGE_ISSUANCE_RECOVERY_INPUT_KEYS = new Set([
+    "issuance",
+    "attemptedEffects",
+    "failure",
+    "projection",
+    "compensation",
+]);
+const CHANGE_ISSUANCE_COMPENSATION_OUTCOME_INPUT_KEYS = new Set(["status", "projection", "failure"]);
+const CHANGE_ISSUANCE_RECOVERY_PLAN_KEYS = new Set([
+    "version",
+    "operation",
+    "transaction",
+    "issuance",
+    "failureEvidence",
+    "compensation",
+    "result",
+]);
+const CHANGE_ISSUANCE_RECOVERY_COMPENSATION_KEYS = new Set(["status", "plan", "outcome"]);
+const CHANGE_ISSUANCE_COMPENSATION_OUTCOME_KEYS = new Set(["status", "evidence", "failure"]);
+const CHANGE_ISSUANCE_RECOVERY_RESULT_KEYS = new Set(["status", "state", "issued", "change"]);
+const CHANGE_PROJECTION_RESULT_KEYS = new Set([
+    "valid",
+    "status",
+    "canonicalBranch",
+    "canonicalBaseBranch",
+    "candidates",
+    "change",
+    "diagnostics",
+]);
+const CHANGE_PROJECTION_CANDIDATES_KEYS = new Set(["branches", "pullRequests"]);
+const CHANGE_PROJECTION_CANDIDATE_KEYS = new Set(["candidate", "classification", "reason"]);
 const CHANGE_GITHUB_EVIDENCE_KEYS = new Set(["issue", "branches", "pullRequests"]);
 const CHANGE_EVIDENCE_AVAILABLE_KEYS = new Set(["status", "value"]);
 const CHANGE_EVIDENCE_ABSENT_KEYS = new Set(["status"]);
@@ -160,6 +220,8 @@ const CHANGE_PULL_REQUEST_EVIDENCE_KEYS = new Set([
 export const MAX_CHANGE_BASE_BRANCH_LENGTH = MAX_CHANGE_BRANCH_LENGTH;
 export const MAX_CHANGE_TRANSITION_EFFECTS = 8;
 export const MAX_CHANGE_PROJECTION_CANDIDATES = 64;
+export const MAX_CHANGE_ISSUANCE_ATTEMPTS = MAX_CHANGE_TRANSITION_EFFECTS;
+export const MAX_CHANGE_FAILURE_CODE_LENGTH = 80;
 function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1555,6 +1617,15 @@ export function validateChangeEffect(input, path = "$") {
         }
         return { valid: true, effect: { kind, branch, baseBranch, rootIssue, draft: true }, diagnostics: [] };
     }
+    if (kind === "DELETE_BRANCH") {
+        const allowed = new Set(["kind", "branch"]);
+        rejectEffectProperties(input, allowed, path, diagnostics);
+        const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+        if (diagnostics.length > 0 || branch === undefined) {
+            return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+        }
+        return { valid: true, effect: { kind, branch }, diagnostics: [] };
+    }
     const allowed = new Set(["kind", "pullRequest"]);
     rejectEffectProperties(input, allowed, path, diagnostics);
     const pullRequest = requiredEffectNumber(input, "pullRequest", path, diagnostics);
@@ -2142,6 +2213,1056 @@ export class ChangeIssuanceValidationError extends ChangeValidationError {
     constructor(diagnostics) {
         super(diagnostics);
         this.name = "ChangeIssuanceValidationError";
+    }
+}
+function validateChangeIssuanceEffectAttempts(input, path, diagnostics) {
+    if (!Array.isArray(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Attempted effects must be an array.");
+        return [];
+    }
+    if (input.length > MAX_CHANGE_ISSUANCE_ATTEMPTS) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, `At most ${MAX_CHANGE_ISSUANCE_ATTEMPTS} attempted effects are supported.`);
+    }
+    const attempts = [];
+    for (let index = 0; index < input.length && diagnostics.length < MAX_CHANGE_DIAGNOSTICS; index += 1) {
+        const attempt = input[index];
+        const before = diagnostics.length;
+        if (!isRecord(attempt)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}[${index}]`, "Effect attempt must be an object.");
+            continue;
+        }
+        addUnknownProperties(attempt, CHANGE_ISSUANCE_ATTEMPT_KEYS, `${path}[${index}]`, diagnostics);
+        const effectResult = validateChangeEffect(attempt.effect, `${path}[${index}].effect`);
+        diagnostics.push(...effectResult.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        if (!CHANGE_ISSUANCE_EFFECT_STATUSES.includes(attempt.status)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}[${index}].status`, "Effect attempt status is unsupported.");
+        }
+        if (diagnostics.length === before &&
+            effectResult.effect !== undefined &&
+            CHANGE_ISSUANCE_EFFECT_STATUSES.includes(attempt.status)) {
+            attempts.push({ effect: effectResult.effect, status: attempt.status });
+        }
+    }
+    return attempts;
+}
+function validateChangeIssuanceFailureEvidence(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Failure evidence must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_FAILURE_KEYS, path, diagnostics);
+    const effectResult = validateChangeEffect(input.effect, `${path}.effect`);
+    diagnostics.push(...effectResult.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    const code = issuancePlanText(input.code, `${path}.code`, "Failure code", MAX_CHANGE_FAILURE_CODE_LENGTH, diagnostics);
+    const message = issuancePlanText(input.message, `${path}.message`, "Failure message", MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH, diagnostics);
+    if (diagnostics.length > 0 || effectResult.effect === undefined || code === undefined || message === undefined) {
+        return undefined;
+    }
+    return { effect: effectResult.effect, code, message };
+}
+function validateChangeProjectionCandidateBranch(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Branch projection candidate must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_PROJECTION_CANDIDATE_KEYS, path, diagnostics);
+    const candidateDiagnostics = [];
+    const candidate = parseChangeBranchEvidence(input.candidate, `${path}.candidate`, candidateDiagnostics);
+    diagnostics.push(...candidateDiagnostics);
+    const classification = input.classification;
+    if (typeof classification !== "string" ||
+        !CHANGE_PROJECTION_CANDIDATE_CLASSES.includes(classification)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.classification`, "Projection candidate classification is invalid.");
+    }
+    const reason = issuancePlanText(input.reason, `${path}.reason`, "Projection candidate reason", MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH, diagnostics);
+    if (candidate === undefined ||
+        reason === undefined ||
+        typeof classification !== "string" ||
+        !CHANGE_PROJECTION_CANDIDATE_CLASSES.includes(classification)) {
+        return undefined;
+    }
+    return {
+        candidate,
+        classification: classification,
+        reason,
+    };
+}
+function validateChangeProjectionCandidatePullRequest(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Pull-request projection candidate must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_PROJECTION_CANDIDATE_KEYS, path, diagnostics);
+    const candidateDiagnostics = [];
+    const candidate = parseChangePullRequestEvidence(input.candidate, `${path}.candidate`, candidateDiagnostics);
+    diagnostics.push(...candidateDiagnostics);
+    const classification = input.classification;
+    if (typeof classification !== "string" ||
+        !CHANGE_PROJECTION_CANDIDATE_CLASSES.includes(classification)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.classification`, "Projection candidate classification is invalid.");
+    }
+    const reason = issuancePlanText(input.reason, `${path}.reason`, "Projection candidate reason", MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH, diagnostics);
+    if (candidate === undefined ||
+        reason === undefined ||
+        typeof classification !== "string" ||
+        !CHANGE_PROJECTION_CANDIDATE_CLASSES.includes(classification)) {
+        return undefined;
+    }
+    return {
+        candidate,
+        classification: classification,
+        reason,
+    };
+}
+function validateChangeProjectionResult(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Projection evidence must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_PROJECTION_RESULT_KEYS, path, diagnostics);
+    if (typeof input.valid !== "boolean") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.valid`, "Projection evidence validity is invalid.");
+    }
+    if (typeof input.status !== "string" ||
+        !CHANGE_PROJECTION_STATUSES.includes(input.status)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.status`, "Projection evidence status is invalid.");
+    }
+    let canonicalBranch;
+    if (hasOwn(input, "canonicalBranch")) {
+        canonicalBranch = issuancePlanText(input.canonicalBranch, `${path}.canonicalBranch`, "Canonical branch", MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    }
+    let canonicalBaseBranch;
+    if (hasOwn(input, "canonicalBaseBranch")) {
+        canonicalBaseBranch = issuancePlanText(input.canonicalBaseBranch, `${path}.canonicalBaseBranch`, "Canonical base branch", MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
+    }
+    const candidatesValue = input.candidates;
+    let branches = [];
+    let pullRequests = [];
+    if (!isRecord(candidatesValue)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.candidates`, "Projection candidates must be an object.");
+    }
+    else {
+        addUnknownProperties(candidatesValue, CHANGE_PROJECTION_CANDIDATES_KEYS, `${path}.candidates`, diagnostics);
+        if (!Array.isArray(candidatesValue.branches)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.candidates.branches`, "Branch candidates must be an array.");
+        }
+        else if (candidatesValue.branches.length > MAX_CHANGE_PROJECTION_CANDIDATES) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.candidates.branches`, `At most ${MAX_CHANGE_PROJECTION_CANDIDATES} branch candidates are supported.`);
+        }
+        else {
+            for (let index = 0; index < candidatesValue.branches.length; index += 1) {
+                const candidate = validateChangeProjectionCandidateBranch(candidatesValue.branches[index], `${path}.candidates.branches[${index}]`, diagnostics);
+                if (candidate !== undefined)
+                    branches.push(candidate);
+            }
+        }
+        if (!Array.isArray(candidatesValue.pullRequests)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.candidates.pullRequests`, "Pull-request candidates must be an array.");
+        }
+        else if (candidatesValue.pullRequests.length > MAX_CHANGE_PROJECTION_CANDIDATES) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.candidates.pullRequests`, `At most ${MAX_CHANGE_PROJECTION_CANDIDATES} pull-request candidates are supported.`);
+        }
+        else {
+            for (let index = 0; index < candidatesValue.pullRequests.length; index += 1) {
+                const candidate = validateChangeProjectionCandidatePullRequest(candidatesValue.pullRequests[index], `${path}.candidates.pullRequests[${index}]`, diagnostics);
+                if (candidate !== undefined)
+                    pullRequests.push(candidate);
+            }
+        }
+    }
+    let change;
+    if (hasOwn(input, "change")) {
+        const result = validateChange(input.change);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        change = result.change;
+    }
+    let projectionDiagnostics = [];
+    if (!Array.isArray(input.diagnostics) || input.diagnostics.length > MAX_CHANGE_DIAGNOSTICS) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.diagnostics`, "Projection diagnostics are invalid.");
+    }
+    else if (!input.diagnostics.every(isDiagnostic)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.diagnostics`, "Projection diagnostics are invalid.");
+    }
+    else {
+        try {
+            projectionDiagnostics = createChangeDiagnosticReport(input.diagnostics).diagnostics;
+        }
+        catch {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.diagnostics`, "Projection diagnostics exceed their bounds.");
+        }
+    }
+    branches = branches.sort((left, right) => compareText(left.candidate.name, right.candidate.name) ||
+        compareText(left.classification, right.classification) ||
+        compareText(left.reason, right.reason));
+    pullRequests = pullRequests.sort((left, right) => compareChangePullRequestEvidence(left.candidate, right.candidate) ||
+        compareText(left.classification, right.classification) ||
+        compareText(left.reason, right.reason));
+    if (typeof input.valid === "boolean" && typeof input.status === "string") {
+        const status = input.status;
+        if (CHANGE_PROJECTION_STATUSES.includes(status) && input.valid !== (status === "healthy" || status === "absent")) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.valid`, "Projection validity does not match its status.");
+        }
+    }
+    if (diagnostics.length > 0 ||
+        typeof input.valid !== "boolean" ||
+        typeof input.status !== "string" ||
+        !CHANGE_PROJECTION_STATUSES.includes(input.status) ||
+        !Array.isArray(input.diagnostics)) {
+        return undefined;
+    }
+    return {
+        valid: input.valid,
+        status: input.status,
+        ...(canonicalBranch === undefined ? {} : { canonicalBranch }),
+        ...(canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch }),
+        candidates: { branches, pullRequests },
+        ...(change === undefined ? {} : { change }),
+        diagnostics: projectionDiagnostics,
+    };
+}
+function validateChangeIssuanceFailureRecord(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Issuance failure evidence must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_FAILURE_RECORD_KEYS, path, diagnostics);
+    const attemptedEffects = validateChangeIssuanceEffectAttempts(input.attemptedEffects, `${path}.attemptedEffects`, diagnostics);
+    const failure = validateChangeIssuanceFailureEvidence(input.failure, `${path}.failure`, diagnostics);
+    let projection;
+    if (!hasOwn(input, "projection")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.projection`, "Property is required.");
+    }
+    else {
+        projection = validateChangeProjectionResult(input.projection, `${path}.projection`, diagnostics);
+    }
+    if (diagnostics.length > 0 || failure === undefined || projection === undefined)
+        return undefined;
+    return { attemptedEffects, failure, projection };
+}
+function validateChangeIssuanceCompensationVerification(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Compensation verification expectation must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_COMPENSATION_VERIFICATION_KEYS, path, diagnostics);
+    if (input.phase !== "post-compensation") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.phase`, "Compensation verification phase is invalid.");
+    }
+    if (input.status !== "absent") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.status`, "Compensation verification must prove absence.");
+    }
+    const canonicalBranch = issuancePlanText(input.canonicalBranch, `${path}.canonicalBranch`, "Canonical branch", MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    const canonicalBaseBranch = issuancePlanText(input.canonicalBaseBranch, `${path}.canonicalBaseBranch`, "Canonical base branch", MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
+    if (input.state !== "DEFINED") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.state`, "Compensation verification state must be DEFINED.");
+    }
+    if (!isRecord(input.pullRequest)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.pullRequest`, "Pull-request verification must be an object.");
+    }
+    else {
+        const allowed = new Set(["required"]);
+        rejectEffectProperties(input.pullRequest, allowed, `${path}.pullRequest`, diagnostics);
+        if (input.pullRequest.required !== false) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.pullRequest.required`, "Compensation verification must not require a pull request.");
+        }
+    }
+    if (diagnostics.length > 0 || canonicalBranch === undefined || canonicalBaseBranch === undefined)
+        return undefined;
+    return {
+        phase: "post-compensation",
+        status: "absent",
+        canonicalBranch,
+        canonicalBaseBranch,
+        state: "DEFINED",
+        pullRequest: { required: false },
+    };
+}
+function sameChangeIdentity(left, right) {
+    return canonicalPlanEquals(left, right);
+}
+function sameEffect(left, right) {
+    return canonicalPlanEquals(left, right);
+}
+function sameFailureEvidence(left, right) {
+    return canonicalPlanEquals(left, right);
+}
+function addRecoverySemanticDiagnostic(diagnostics, path, message) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, message);
+}
+function validateCreateIssuanceFailureSemantics(issuance, attemptedEffects, failure, diagnostics) {
+    if (issuance.mode !== "create" || issuance.sourceStatus !== "absent") {
+        addRecoverySemanticDiagnostic(diagnostics, "$.issuance", "Compensation is only valid for a create issuance from an absent Change.");
+    }
+    if (issuance.effects.length !== 2) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.issuance.effects", "A compensable issuance must contain the ordered branch and Draft pull-request effects.");
+        return;
+    }
+    if (attemptedEffects.length !== 2) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.attemptedEffects", "A compensable issuance must record both ordered effect attempts.");
+    }
+    else {
+        const [branchAttempt, pullRequestAttempt] = attemptedEffects;
+        if (!sameEffect(branchAttempt.effect, issuance.effects[0]) || branchAttempt.status !== "succeeded") {
+            addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.attemptedEffects[0]", "Canonical branch creation must be the first successful attempted effect.");
+        }
+        if (!sameEffect(pullRequestAttempt.effect, issuance.effects[1]) || pullRequestAttempt.status !== "failed") {
+            addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.attemptedEffects[1]", "Canonical Draft pull-request creation must be the failed second effect.");
+        }
+    }
+    if (!sameEffect(failure.effect, issuance.effects[1])) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence.failure.effect", "Failure evidence must identify the canonical Draft pull-request effect.");
+    }
+}
+function validateFailureProjectionIdentity(issuance, projection, path, diagnostics) {
+    const expectedBranch = issuance.verification.canonicalBranch;
+    const expectedBaseBranch = issuance.verification.canonicalBaseBranch;
+    if (projection.canonicalBranch !== expectedBranch) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.canonicalBranch`, "Projection evidence branch does not match issuance.");
+    }
+    if (projection.canonicalBaseBranch !== expectedBaseBranch) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.canonicalBaseBranch`, "Projection evidence base branch does not match issuance.");
+    }
+    if (projection.change !== undefined &&
+        !sameChangeIdentity(projection.change.identity, issuance.transaction.identity)) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.change.identity`, "Projection evidence identity does not match issuance.");
+    }
+}
+function validateCompensationPlanEffects(effects, expectedBranch, path, diagnostics) {
+    if (effects.length !== 1 || effects[0]?.kind !== "DELETE_BRANCH" || effects[0].branch !== expectedBranch) {
+        addRecoverySemanticDiagnostic(diagnostics, path, "Compensation must contain exactly one delete effect for the canonical branch.");
+    }
+}
+function validateFailureProjectionShape(projection, expectedBranch, expectedBaseBranch, rootIssue, path, diagnostics) {
+    if (projection.status !== "partial") {
+        addRecoverySemanticDiagnostic(diagnostics, path, "Branch compensation requires a confirmed partial branch-only projection.");
+    }
+    if (projection.change?.state !== "RECOVERY_REQUIRED") {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.change.state`, "A branch-only failed issuance must be represented as RECOVERY_REQUIRED before compensation.");
+    }
+    if (projection.change?.projection?.branch !== expectedBranch ||
+        projection.change?.projection?.pullRequest !== undefined) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.change.projection`, "Failure projection must retain only the canonical branch and no pull request.");
+    }
+    if (projection.candidates.branches.filter((candidate) => candidate.candidate.name === expectedBranch).length !== 1) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.candidates.branches`, "Failure projection must contain exactly one canonical branch candidate.");
+    }
+    if (projection.candidates.pullRequests.some((candidate) => candidate.classification === "canonical")) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.candidates.pullRequests`, "Failure projection must not contain a canonical pull request.");
+    }
+    if (projection.candidates.branches.some((candidate) => candidate.classification === "conflicting")) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.candidates.branches`, "Conflicting branch evidence cannot be compensated automatically.");
+    }
+    if (projection.candidates.pullRequests.some((candidate) => candidate.classification === "conflicting")) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.candidates.pullRequests`, "Conflicting pull-request evidence cannot be compensated automatically.");
+    }
+    const plausibleNoncanonicalPullRequests = projection.candidates.pullRequests.filter((candidate) => candidate.candidate.rootIssue === rootIssue && candidate.candidate.head !== expectedBranch);
+    if (plausibleNoncanonicalPullRequests.length > 1) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.candidates.pullRequests`, "Multiple plausible noncanonical pull requests make compensation ambiguous.");
+    }
+    if (projection.canonicalBranch !== expectedBranch || projection.canonicalBaseBranch !== expectedBaseBranch) {
+        addRecoverySemanticDiagnostic(diagnostics, path, "Failure projection canonical identities do not match issuance.");
+    }
+}
+function projectionInputSource(input, key) {
+    if (!isRecord(input) || !isRecord(input.evidence))
+        return undefined;
+    const source = input.evidence[key];
+    return isRecord(source) ? source : undefined;
+}
+function projectionInputSourceIsAvailable(input, key) {
+    return projectionInputSource(input, key)?.status === "available";
+}
+function projectionInputSourceIsConfirmedEmpty(input, key) {
+    const source = projectionInputSource(input, key);
+    if (source === undefined || source.status === "absent")
+        return source !== undefined;
+    return source.status === "available" && Array.isArray(source.value) && source.value.length === 0;
+}
+function projectionInputIssueIsOpen(input) {
+    const source = projectionInputSource(input, "issue");
+    return source?.status === "available" && isRecord(source.value) && source.value.state === "open";
+}
+function validateSafeFailureProjection(projectionInput, projection, issuance, path, diagnostics) {
+    const before = diagnostics.length;
+    validateFailureProjectionShape(projection, issuance.verification.canonicalBranch, issuance.verification.canonicalBaseBranch, issuance.transaction.identity.rootIssue, path, diagnostics);
+    if (!projectionInputIssueIsOpen(projectionInput)) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.evidence.issue`, "Failure evidence must confirm an open root Issue.");
+    }
+    for (const key of ["branches", "pullRequests"]) {
+        if (!projectionInputSourceIsAvailable(projectionInput, key)) {
+            addRecoverySemanticDiagnostic(diagnostics, `${path}.evidence.${key}`, "Compensation requires a complete available artifact read; unavailable or absent evidence is unsafe.");
+        }
+    }
+    return diagnostics.length === before;
+}
+function validateSafeAbsentProjection(projectionInput, projection, issuance, path, diagnostics) {
+    const before = diagnostics.length;
+    if (projection.status !== "absent" || !projection.valid || projection.change?.state !== "DEFINED") {
+        addRecoverySemanticDiagnostic(diagnostics, path, "Successful compensation requires a confirmed absent projection.");
+    }
+    if (projection.change?.projection !== undefined) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.change.projection`, "An absent projection cannot retain artifacts.");
+    }
+    if (projection.canonicalBranch !== issuance.verification.canonicalBranch) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.canonicalBranch`, "Compensation evidence branch does not match issuance.");
+    }
+    if (projection.canonicalBaseBranch !== issuance.verification.canonicalBaseBranch) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.canonicalBaseBranch`, "Compensation evidence base branch does not match issuance.");
+    }
+    if (!projectionInputIssueIsOpen(projectionInput)) {
+        addRecoverySemanticDiagnostic(diagnostics, `${path}.evidence.issue`, "Compensation evidence must confirm an open root Issue.");
+    }
+    for (const key of ["branches", "pullRequests"]) {
+        if (!projectionInputSourceIsConfirmedEmpty(projectionInput, key)) {
+            addRecoverySemanticDiagnostic(diagnostics, `${path}.evidence.${key}`, "Successful compensation requires confirmed absence of every canonical artifact.");
+        }
+    }
+    return diagnostics.length === before;
+}
+function parseChangeIssuanceRecoveryInput(input, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Issuance recovery input must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_RECOVERY_INPUT_KEYS, "$", diagnostics);
+    let issuance;
+    if (!hasOwn(input, "issuance")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.issuance", "Property is required.");
+    }
+    else {
+        const result = validateChangeIssuancePlan(input.issuance);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        issuance = result.plan;
+    }
+    const attemptedEffects = validateChangeIssuanceEffectAttempts(input.attemptedEffects, "$.attemptedEffects", diagnostics);
+    const failure = validateChangeIssuanceFailureEvidence(input.failure, "$.failure", diagnostics);
+    let projection;
+    let projectionInput;
+    if (!hasOwn(input, "projection")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.projection", "Property is required.");
+        projectionInput = undefined;
+    }
+    else {
+        projectionInput = input.projection;
+        projection = projectChangeFromGitHubEvidence(projectionInput);
+    }
+    let compensation;
+    if (hasOwn(input, "compensation")) {
+        if (!isRecord(input.compensation)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation", "Compensation outcome must be an object.");
+        }
+        else {
+            addUnknownProperties(input.compensation, CHANGE_ISSUANCE_COMPENSATION_OUTCOME_INPUT_KEYS, "$.compensation", diagnostics);
+            const status = input.compensation.status;
+            if (typeof status !== "string" ||
+                !CHANGE_ISSUANCE_COMPENSATION_STATUSES.includes(status) ||
+                status === "required") {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation.status", "Compensation outcome status is invalid.");
+            }
+            let compensationProjection;
+            if (!hasOwn(input.compensation, "projection")) {
+                addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.compensation.projection", "Property is required.");
+            }
+            else {
+                compensationProjection = projectChangeFromGitHubEvidence(input.compensation.projection);
+            }
+            let compensationFailure;
+            if (hasOwn(input.compensation, "failure")) {
+                compensationFailure = validateChangeIssuanceFailureEvidence(input.compensation.failure, "$.compensation.failure", diagnostics);
+            }
+            if (status === "succeeded" && compensationFailure !== undefined) {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation.failure", "A successful compensation cannot contain failure evidence.");
+            }
+            if (status === "failed" && compensationFailure === undefined && !hasOwn(input.compensation, "failure")) {
+                addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.compensation.failure", "A failed compensation must preserve failure evidence.");
+            }
+            if (compensationProjection !== undefined &&
+                typeof status === "string" &&
+                (status === "succeeded" || status === "failed")) {
+                compensation = {
+                    status,
+                    projectionInput: input.compensation.projection,
+                    projection: compensationProjection,
+                    ...(compensationFailure === undefined ? {} : { failure: compensationFailure }),
+                };
+            }
+        }
+    }
+    if (diagnostics.length > 0 ||
+        issuance === undefined ||
+        failure === undefined ||
+        projection === undefined ||
+        projectionInput === undefined) {
+        return undefined;
+    }
+    validateFailureProjectionIdentity(issuance, projection, "$.projection", diagnostics);
+    if (compensation !== undefined) {
+        validateFailureProjectionIdentity(issuance, compensation.projection, "$.compensation.projection", diagnostics);
+    }
+    return { issuance, attemptedEffects, failure, projectionInput, projection, compensation };
+}
+function recoveryChangeFromProjection(issuance, projection) {
+    const observed = projection.change?.projection;
+    return {
+        version: CHANGE_CONTRACT_VERSION,
+        identity: issuance.transaction.identity,
+        state: "RECOVERY_REQUIRED",
+        provenance: projection.change?.provenance ?? issuance.result.provenance,
+        ...(observed === undefined ? {} : { projection: observed }),
+    };
+}
+function definedChangeAfterCompensation(issuance) {
+    return {
+        version: CHANGE_CONTRACT_VERSION,
+        identity: issuance.transaction.identity,
+        state: "DEFINED",
+        provenance: issuance.result.provenance,
+    };
+}
+function compensationVerification(issuance) {
+    return {
+        phase: "post-compensation",
+        status: "absent",
+        canonicalBranch: issuance.verification.canonicalBranch,
+        canonicalBaseBranch: issuance.verification.canonicalBaseBranch,
+        state: "DEFINED",
+        pullRequest: { required: false },
+    };
+}
+function buildChangeIssuanceCompensationPlan(parsed, diagnostics) {
+    validateCreateIssuanceFailureSemantics(parsed.issuance, parsed.attemptedEffects, parsed.failure, diagnostics);
+    validateSafeFailureProjection(parsed.projectionInput, parsed.projection, parsed.issuance, "$.projection", diagnostics);
+    if (diagnostics.length > 0)
+        return undefined;
+    const plan = {
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        operation: "compensate-issue",
+        transaction: parsed.issuance.transaction,
+        issuance: parsed.issuance,
+        failureEvidence: {
+            attemptedEffects: parsed.attemptedEffects,
+            failure: parsed.failure,
+            projection: parsed.projection,
+        },
+        effects: [
+            {
+                kind: "DELETE_BRANCH",
+                branch: parsed.issuance.verification.canonicalBranch,
+            },
+        ],
+        verification: compensationVerification(parsed.issuance),
+    };
+    const result = validateChangeIssuanceCompensationPlan(plan);
+    if (!result.valid || result.plan === undefined) {
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        return undefined;
+    }
+    return result.plan;
+}
+/** Validate and canonicalize an explicit branch-compensation plan. */
+export function validateChangeIssuanceCompensationPlan(input) {
+    const diagnostics = [];
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Change issuance compensation plan must be an object.");
+        return { valid: false, diagnostics };
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_COMPENSATION_PLAN_KEYS, "$", diagnostics);
+    if (input.version !== CHANGE_TRANSITION_CONTRACT_VERSION) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.version", "Compensation plan version is unsupported.");
+    }
+    if (input.operation !== "compensate-issue") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.operation", "Compensation plan operation is invalid.");
+    }
+    let transaction;
+    if (!hasOwn(input, "transaction")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.transaction", "Property is required.");
+    }
+    else {
+        transaction = validateChangeIssuanceTransaction(input.transaction, "$.transaction", diagnostics);
+    }
+    let issuance;
+    if (!hasOwn(input, "issuance")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.issuance", "Property is required.");
+    }
+    else {
+        const result = validateChangeIssuancePlan(input.issuance);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        issuance = result.plan;
+    }
+    let failureEvidence;
+    if (!hasOwn(input, "failureEvidence")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.failureEvidence", "Property is required.");
+    }
+    else {
+        failureEvidence = validateChangeIssuanceFailureRecord(input.failureEvidence, "$.failureEvidence", diagnostics);
+    }
+    let effects = [];
+    if (!hasOwn(input, "effects")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.effects", "Property is required.");
+    }
+    else {
+        effects = validateEffectList(input.effects, "$.effects", diagnostics);
+    }
+    let verification;
+    if (!hasOwn(input, "verification")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.verification", "Property is required.");
+    }
+    else {
+        verification = validateChangeIssuanceCompensationVerification(input.verification, "$.verification", diagnostics);
+    }
+    if (diagnostics.length > 0 ||
+        transaction === undefined ||
+        issuance === undefined ||
+        failureEvidence === undefined ||
+        verification === undefined) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    if (!sameChangeIdentity(transaction.identity, issuance.transaction.identity)) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.transaction.identity", "Compensation transaction identity must match issuance.");
+    }
+    if (transaction.idempotencyKey !== issuance.transaction.idempotencyKey) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.transaction.idempotencyKey", "Compensation must reuse issuance idempotency.");
+    }
+    validateCreateIssuanceFailureSemantics(issuance, failureEvidence.attemptedEffects, failureEvidence.failure, diagnostics);
+    validateFailureProjectionIdentity(issuance, failureEvidence.projection, "$.failureEvidence.projection", diagnostics);
+    validateFailureProjectionShape(failureEvidence.projection, issuance.verification.canonicalBranch, issuance.verification.canonicalBaseBranch, issuance.transaction.identity.rootIssue, "$.failureEvidence.projection", diagnostics);
+    validateCompensationPlanEffects(effects, issuance.verification.canonicalBranch, "$.effects", diagnostics);
+    if (!canonicalPlanEquals(verification, compensationVerification(issuance))) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.verification", "Compensation verification does not match issuance.");
+    }
+    if (diagnostics.length > 0) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    return {
+        valid: true,
+        plan: {
+            version: CHANGE_TRANSITION_CONTRACT_VERSION,
+            operation: "compensate-issue",
+            transaction: issuance.transaction,
+            issuance,
+            failureEvidence,
+            effects,
+            verification,
+        },
+        diagnostics: [],
+    };
+}
+/** Assert a valid explicit branch-compensation plan at an executor boundary. */
+export function assertChangeIssuanceCompensationPlan(input) {
+    const result = validateChangeIssuanceCompensationPlan(input);
+    if (!result.valid)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+}
+export function isChangeIssuanceCompensationPlan(input) {
+    return validateChangeIssuanceCompensationPlan(input).valid;
+}
+/** Plan the only safe compensation for a confirmed branch-created/PR-failed issuance. */
+export function planChangeIssuanceCompensation(input) {
+    const diagnostics = [];
+    const parsed = parseChangeIssuanceRecoveryInput(input, diagnostics);
+    if (parsed === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(createChangeDiagnosticReport(diagnostics).diagnostics);
+    const plan = buildChangeIssuanceCompensationPlan(parsed, diagnostics);
+    if (plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(createChangeDiagnosticReport(diagnostics).diagnostics);
+    return plan;
+}
+export const createChangeIssuanceCompensationPlan = planChangeIssuanceCompensation;
+export const planChangeCompensation = planChangeIssuanceCompensation;
+function validateChangeIssuanceCompensationOutcome(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Compensation outcome must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_COMPENSATION_OUTCOME_KEYS, path, diagnostics);
+    const status = input.status;
+    if (typeof status !== "string" ||
+        !CHANGE_ISSUANCE_COMPENSATION_STATUSES.includes(status) ||
+        status === "required") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.status`, "Compensation outcome status is invalid.");
+    }
+    let evidence;
+    if (!hasOwn(input, "evidence")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.evidence`, "Property is required.");
+    }
+    else {
+        evidence = validateChangeProjectionResult(input.evidence, `${path}.evidence`, diagnostics);
+    }
+    let failure;
+    if (hasOwn(input, "failure")) {
+        failure = validateChangeIssuanceFailureEvidence(input.failure, `${path}.failure`, diagnostics);
+    }
+    if (status === "succeeded" && failure !== undefined) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.failure`, "A successful compensation cannot contain failure evidence.");
+    }
+    if (status === "failed" && failure === undefined && !hasOwn(input, "failure")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.failure`, "A failed compensation must preserve failure evidence.");
+    }
+    if (diagnostics.length > 0 || evidence === undefined || (status !== "succeeded" && status !== "failed")) {
+        return undefined;
+    }
+    return {
+        status,
+        evidence,
+        ...(failure === undefined ? {} : { failure }),
+    };
+}
+function validateChangeIssuanceRecoveryResult(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Issuance recovery result must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_RECOVERY_RESULT_KEYS, path, diagnostics);
+    const status = input.status;
+    if (typeof status !== "string" ||
+        !CHANGE_ISSUANCE_RECOVERY_STATUSES.includes(status)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.status`, "Issuance recovery result status is invalid.");
+    }
+    if (input.state !== "DEFINED" && input.state !== "RECOVERY_REQUIRED") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.state`, "Issuance recovery result state is invalid.");
+    }
+    if (input.issued !== false) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.issued`, "Recovery results must state that no Change is issued.");
+    }
+    let change;
+    if (!hasOwn(input, "change")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.change`, "Property is required.");
+    }
+    else {
+        const result = validateChange(input.change);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        change = result.change;
+    }
+    if (diagnostics.length > 0 ||
+        change === undefined ||
+        (status !== "compensation-required" && status !== "compensated" && status !== "recovery-required") ||
+        (input.state !== "DEFINED" && input.state !== "RECOVERY_REQUIRED")) {
+        return undefined;
+    }
+    return {
+        status: status,
+        state: input.state,
+        issued: false,
+        change,
+    };
+}
+function buildChangeIssuanceRecoveryPlan(parsed, diagnostics) {
+    const compensationPlan = buildChangeIssuanceCompensationPlan(parsed, diagnostics);
+    if (compensationPlan === undefined)
+        return undefined;
+    let compensationStatus = "required";
+    let outcome;
+    let result = {
+        status: "compensation-required",
+        state: "RECOVERY_REQUIRED",
+        issued: false,
+        change: recoveryChangeFromProjection(parsed.issuance, parsed.projection),
+    };
+    if (parsed.compensation !== undefined) {
+        compensationStatus = parsed.compensation.status;
+        outcome = {
+            status: parsed.compensation.status,
+            evidence: parsed.compensation.projection,
+            ...(parsed.compensation.failure === undefined ? {} : { failure: parsed.compensation.failure }),
+        };
+        if (parsed.compensation.status === "succeeded") {
+            validateSafeAbsentProjection(parsed.compensation.projectionInput, parsed.compensation.projection, parsed.issuance, "$.compensation.projection", diagnostics);
+            if (diagnostics.length === 0) {
+                result = {
+                    status: "compensated",
+                    state: "DEFINED",
+                    issued: false,
+                    change: definedChangeAfterCompensation(parsed.issuance),
+                };
+            }
+        }
+        else {
+            if (parsed.compensation.failure === undefined) {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation.failure", "A failed compensation must preserve failure evidence.");
+            }
+            else if (!sameEffect(parsed.compensation.failure.effect, compensationPlan.effects[0])) {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation.failure.effect", "Compensation failure evidence must identify the branch delete effect.");
+            }
+            result = {
+                status: "recovery-required",
+                state: "RECOVERY_REQUIRED",
+                issued: false,
+                change: recoveryChangeFromProjection(parsed.issuance, parsed.compensation.projection),
+            };
+        }
+    }
+    if (diagnostics.length > 0)
+        return undefined;
+    const plan = {
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        operation: "recover-issue",
+        transaction: parsed.issuance.transaction,
+        issuance: parsed.issuance,
+        failureEvidence: compensationPlan.failureEvidence,
+        compensation: {
+            status: compensationStatus,
+            plan: compensationPlan,
+            ...(outcome === undefined ? {} : { outcome }),
+        },
+        result,
+    };
+    const validation = validateChangeIssuanceRecoveryPlan(plan);
+    if (!validation.valid || validation.plan === undefined) {
+        diagnostics.push(...validation.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        return undefined;
+    }
+    return validation.plan;
+}
+/** Validate and canonicalize a deterministic issuance recovery plan. */
+export function validateChangeIssuanceRecoveryPlan(input) {
+    const diagnostics = [];
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Change issuance recovery plan must be an object.");
+        return { valid: false, diagnostics };
+    }
+    addUnknownProperties(input, CHANGE_ISSUANCE_RECOVERY_PLAN_KEYS, "$", diagnostics);
+    if (input.version !== CHANGE_TRANSITION_CONTRACT_VERSION) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.version", "Recovery plan version is unsupported.");
+    }
+    if (input.operation !== "recover-issue") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.operation", "Recovery plan operation is invalid.");
+    }
+    let transaction;
+    if (!hasOwn(input, "transaction")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.transaction", "Property is required.");
+    }
+    else {
+        transaction = validateChangeIssuanceTransaction(input.transaction, "$.transaction", diagnostics);
+    }
+    let issuance;
+    if (!hasOwn(input, "issuance")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.issuance", "Property is required.");
+    }
+    else {
+        const result = validateChangeIssuancePlan(input.issuance);
+        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+        issuance = result.plan;
+    }
+    let failureEvidence;
+    if (!hasOwn(input, "failureEvidence")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.failureEvidence", "Property is required.");
+    }
+    else {
+        failureEvidence = validateChangeIssuanceFailureRecord(input.failureEvidence, "$.failureEvidence", diagnostics);
+    }
+    let compensationStatus;
+    let compensationPlan;
+    let outcome;
+    if (!hasOwn(input, "compensation")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.compensation", "Property is required.");
+    }
+    else if (!isRecord(input.compensation)) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation", "Recovery compensation must be an object.");
+    }
+    else {
+        addUnknownProperties(input.compensation, CHANGE_ISSUANCE_RECOVERY_COMPENSATION_KEYS, "$.compensation", diagnostics);
+        const status = input.compensation.status;
+        if (!CHANGE_ISSUANCE_COMPENSATION_STATUSES.includes(status)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.compensation.status", "Recovery compensation status is invalid.");
+        }
+        else {
+            compensationStatus = status;
+        }
+        if (!hasOwn(input.compensation, "plan")) {
+            addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.compensation.plan", "Property is required.");
+        }
+        else {
+            const result = validateChangeIssuanceCompensationPlan(input.compensation.plan);
+            diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+            compensationPlan = result.plan;
+        }
+        if (hasOwn(input.compensation, "outcome")) {
+            outcome = validateChangeIssuanceCompensationOutcome(input.compensation.outcome, "$.compensation.outcome", diagnostics);
+        }
+    }
+    let result;
+    if (!hasOwn(input, "result")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.result", "Property is required.");
+    }
+    else {
+        result = validateChangeIssuanceRecoveryResult(input.result, "$.result", diagnostics);
+    }
+    if (diagnostics.length > 0 ||
+        transaction === undefined ||
+        issuance === undefined ||
+        failureEvidence === undefined ||
+        compensationStatus === undefined ||
+        compensationPlan === undefined ||
+        result === undefined) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    if (!sameChangeIdentity(transaction.identity, issuance.transaction.identity)) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.transaction.identity", "Recovery transaction identity must match issuance.");
+    }
+    if (transaction.idempotencyKey !== issuance.transaction.idempotencyKey) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.transaction.idempotencyKey", "Recovery must reuse issuance idempotency.");
+    }
+    if (!canonicalPlanEquals(failureEvidence, compensationPlan.failureEvidence)) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.failureEvidence", "Recovery must retain the compensation failure evidence unchanged.");
+    }
+    if (compensationStatus === "required" && outcome !== undefined) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome", "A pending compensation cannot contain an outcome.");
+    }
+    if (compensationStatus !== "required") {
+        if (outcome === undefined) {
+            addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome", "A completed compensation must retain its outcome.");
+        }
+        else if (outcome.status !== compensationStatus) {
+            addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome.status", "Compensation status must match its outcome.");
+        }
+    }
+    if (outcome !== undefined) {
+        validateFailureProjectionIdentity(issuance, outcome.evidence, "$.compensation.outcome.evidence", diagnostics);
+        if (outcome.status === "succeeded") {
+            if (outcome.failure !== undefined) {
+                addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome.failure", "Successful compensation cannot retain failure evidence.");
+            }
+            if (outcome.evidence.status !== "absent" || !outcome.evidence.valid) {
+                addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome.evidence", "Successful compensation must prove an absent projection.");
+            }
+        }
+        else if (outcome.failure === undefined) {
+            addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome.failure", "Failed compensation must retain failure evidence.");
+        }
+        else if (!sameEffect(outcome.failure.effect, compensationPlan.effects[0])) {
+            addRecoverySemanticDiagnostic(diagnostics, "$.compensation.outcome.failure.effect", "Compensation failure evidence must identify the branch delete effect.");
+        }
+    }
+    const expectedResultState = compensationStatus === "succeeded" ? "DEFINED" : "RECOVERY_REQUIRED";
+    const expectedResultStatus = compensationStatus === "required"
+        ? "compensation-required"
+        : compensationStatus === "succeeded"
+            ? "compensated"
+            : "recovery-required";
+    if (result.status !== expectedResultStatus || result.state !== expectedResultState) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.result", "Recovery result does not match compensation outcome.");
+    }
+    if (result.change.state !== expectedResultState) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.result.change.state", "Recovery Change state does not match compensation outcome.");
+    }
+    if (!sameChangeIdentity(result.change.identity, issuance.transaction.identity)) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.result.change.identity", "Recovery result identity must match issuance.");
+    }
+    if (compensationStatus === "succeeded" && result.change.projection !== undefined) {
+        addRecoverySemanticDiagnostic(diagnostics, "$.result.change.projection", "Compensation success must return no issued Change projection.");
+    }
+    if (diagnostics.length > 0) {
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    return {
+        valid: true,
+        plan: {
+            version: CHANGE_TRANSITION_CONTRACT_VERSION,
+            operation: "recover-issue",
+            transaction: issuance.transaction,
+            issuance,
+            failureEvidence,
+            compensation: {
+                status: compensationStatus,
+                plan: compensationPlan,
+                ...(outcome === undefined ? {} : { outcome }),
+            },
+            result,
+        },
+        diagnostics: [],
+    };
+}
+/** Assert a valid deterministic issuance recovery plan at an executor boundary. */
+export function assertChangeIssuanceRecoveryPlan(input) {
+    const result = validateChangeIssuanceRecoveryPlan(input);
+    if (!result.valid)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+}
+export function isChangeIssuanceRecoveryPlan(input) {
+    return validateChangeIssuanceRecoveryPlan(input).valid;
+}
+/**
+ * Plan issuance compensation and recovery from bounded effect/projection
+ * evidence. This function is pure and never executes the delete effect.
+ */
+export function planChangeIssuanceRecovery(input) {
+    const diagnostics = [];
+    const parsed = parseChangeIssuanceRecoveryInput(input, diagnostics);
+    if (parsed === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(createChangeDiagnosticReport(diagnostics).diagnostics);
+    const plan = buildChangeIssuanceRecoveryPlan(parsed, diagnostics);
+    if (plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(createChangeDiagnosticReport(diagnostics).diagnostics);
+    return plan;
+}
+export const createChangeIssuanceRecoveryPlan = planChangeIssuanceRecovery;
+export const planChangeRecovery = planChangeIssuanceRecovery;
+/** Serialize a canonical transport-independent compensation plan. */
+export function serializeChangeIssuanceCompensationPlan(input) {
+    const result = validateChangeIssuanceCompensationPlan(input);
+    if (!result.valid || result.plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+    const serialized = JSON.stringify(result.plan);
+    if (serialized === undefined)
+        throw new Error("Change issuance compensation plan could not be serialized.");
+    return serialized;
+}
+/** Parse and validate an untrusted compensation plan JSON boundary. */
+export function deserializeChangeIssuanceCompensationPlan(serialized) {
+    let parsed;
+    try {
+        parsed = JSON.parse(serialized);
+    }
+    catch (error) {
+        throw new ChangeIssuanceRecoveryValidationError([
+            createChangeDiagnostic({
+                code: "CHANGE_INVALID_JSON",
+                message: safeMessage(`Change issuance compensation plan must be valid JSON: ${error instanceof Error ? error.message : String(error)}`),
+            }),
+        ]);
+    }
+    const result = validateChangeIssuanceCompensationPlan(parsed);
+    if (!result.valid || result.plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+    return result.plan;
+}
+/** Serialize a canonical transport-independent recovery plan. */
+export function serializeChangeIssuanceRecoveryPlan(input) {
+    const result = validateChangeIssuanceRecoveryPlan(input);
+    if (!result.valid || result.plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+    const serialized = JSON.stringify(result.plan);
+    if (serialized === undefined)
+        throw new Error("Change issuance recovery plan could not be serialized.");
+    return serialized;
+}
+/** Parse and validate an untrusted recovery plan JSON boundary. */
+export function deserializeChangeIssuanceRecoveryPlan(serialized) {
+    let parsed;
+    try {
+        parsed = JSON.parse(serialized);
+    }
+    catch (error) {
+        throw new ChangeIssuanceRecoveryValidationError([
+            createChangeDiagnostic({
+                code: "CHANGE_INVALID_JSON",
+                message: safeMessage(`Change issuance recovery plan must be valid JSON: ${error instanceof Error ? error.message : String(error)}`),
+            }),
+        ]);
+    }
+    const result = validateChangeIssuanceRecoveryPlan(parsed);
+    if (!result.valid || result.plan === undefined)
+        throw new ChangeIssuanceRecoveryValidationError(result.diagnostics);
+    return result.plan;
+}
+export const parseChangeIssuanceCompensationPlan = deserializeChangeIssuanceCompensationPlan;
+export const parseChangeIssuanceRecoveryPlan = deserializeChangeIssuanceRecoveryPlan;
+export const serializeChangeCompensationPlan = serializeChangeIssuanceCompensationPlan;
+export const serializeChangeRecoveryPlan = serializeChangeIssuanceRecoveryPlan;
+export class ChangeIssuanceRecoveryValidationError extends ChangeValidationError {
+    constructor(diagnostics) {
+        super(diagnostics);
+        this.name = "ChangeIssuanceRecoveryValidationError";
     }
 }
 //# sourceMappingURL=change.js.map
