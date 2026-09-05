@@ -3521,12 +3521,11 @@ export function validateChangeMergeAdmission(input) {
         projection = result;
     }
     else {
-        const projectionDiagnostics = [];
-        projection = validateChangeProjectionResult(projectionSource, "$.projection", projectionDiagnostics);
-        diagnostics.push(...projectionDiagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
-        if (projection !== undefined) {
+        const result = validateChangeProjectionResult(projectionSource);
+        appendAdmissionDiagnostics(diagnostics, result.diagnostics, "$.projection");
+        projection = result.projection;
+        if (projection !== undefined)
             appendAdmissionDiagnostics(diagnostics, projection.diagnostics, "$.projection.result");
-        }
     }
     // #214 remains the issuance authority even when an adapter passes only the
     // #213 projection input. Planning is pure and has no GitHub side effect.
