@@ -47,6 +47,7 @@ export const MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH = 160 as const;
 export const MAX_CHANGE_PRINCIPAL_LENGTH = 160 as const;
 export const MAX_CHANGE_BRANCH_LENGTH = 255 as const;
 export const MAX_CHANGE_HOST_LENGTH = 255 as const;
+export const MAX_CHANGE_IDEMPOTENCY_KEY_LENGTH = 512 as const;
 
 export interface CanonicalBranchNamingInput {
   /** Repository-governed branch classification, not a complete branch name. */
@@ -229,7 +230,8 @@ export type ChangeDiagnosticCode =
   | "CHANGE_PROJECTION_DUPLICATE"
   | "CHANGE_PROJECTION_WRONG_BASE"
   | "CHANGE_PROJECTION_AMBIGUOUS"
-  | "CHANGE_PROJECTION_CONFLICT";
+  | "CHANGE_PROJECTION_CONFLICT"
+  | "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT";
 
 export interface ChangeDiagnosticInput {
   readonly code: ChangeDiagnosticCode;
@@ -386,6 +388,59 @@ export interface ChangeProjectionResult {
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
+/** The two idempotent issuance outcomes owned by Inari Core. */
+export const CHANGE_ISSUANCE_MODES = Object.freeze(["create", "return-existing"] as const);
+export type ChangeIssuanceMode = (typeof CHANGE_ISSUANCE_MODES)[number];
+
+export const CHANGE_ISSUANCE_SOURCE_STATUSES = Object.freeze(["absent", "healthy"] as const);
+export type ChangeIssuanceSourceStatus = (typeof CHANGE_ISSUANCE_SOURCE_STATUSES)[number];
+export type ChangeIssuanceHealthyState = Exclude<ChangeState, "DEFINED" | "RECOVERY_REQUIRED">;
+
+/** The transport-neutral identity of one logical issuance transaction. */
+export interface ChangeIssuanceTransaction {
+  readonly operation: "issue";
+  readonly identity: ChangeIdentity;
+  /** Stable identity-derived key; it is not a workflow or request identifier. */
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Machine-readable evidence an executor must verify after applying effects.
+ * A create plan cannot know the PR number in advance, so `number` is omitted
+ * there while `required` remains explicit.
+ */
+export interface ChangeIssuanceVerificationExpectation {
+  readonly phase: "post-effect";
+  readonly status: "healthy";
+  readonly canonicalBranch: string;
+  readonly canonicalBaseBranch: string;
+  readonly state: ChangeIssuanceHealthyState;
+  readonly pullRequest: {
+    readonly required: true;
+    readonly number?: number;
+  };
+}
+
+/** One logical, transport-independent Change issuance transaction. */
+export interface ChangeIssuancePlan {
+  readonly version: ChangeTransitionContractVersion;
+  readonly operation: "issue";
+  readonly mode: ChangeIssuanceMode;
+  readonly sourceStatus: ChangeIssuanceSourceStatus;
+  readonly transaction: ChangeIssuanceTransaction;
+  /** Expected semantic Change after the declared effects or existing return. */
+  readonly result: Change;
+  /** Ordered effects for the one transaction; empty for return-existing. */
+  readonly effects: readonly ChangeEffect[];
+  readonly verification: ChangeIssuanceVerificationExpectation;
+}
+
+export interface ChangeIssuancePlanValidationResult {
+  readonly valid: boolean;
+  readonly plan?: ChangeIssuancePlan;
+  readonly diagnostics: readonly ChangeDiagnostic[];
+}
+
 const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_INVALID_JSON",
   "CHANGE_INVALID_ROOT",
@@ -414,6 +469,7 @@ const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_PROJECTION_WRONG_BASE",
   "CHANGE_PROJECTION_AMBIGUOUS",
   "CHANGE_PROJECTION_CONFLICT",
+  "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT",
 ];
 
 const CHANGE_KEYS = new Set(["version", "identity", "state", "provenance", "projection"]);
@@ -434,6 +490,26 @@ const CHANGE_PROJECTION_INPUT_KEYS = new Set([
   "evidence",
   "provenance",
 ]);
+const CHANGE_ISSUANCE_PLAN_KEYS = new Set([
+  "version",
+  "operation",
+  "mode",
+  "sourceStatus",
+  "transaction",
+  "result",
+  "effects",
+  "verification",
+]);
+const CHANGE_ISSUANCE_TRANSACTION_KEYS = new Set(["operation", "identity", "idempotencyKey"]);
+const CHANGE_ISSUANCE_VERIFICATION_KEYS = new Set([
+  "phase",
+  "status",
+  "canonicalBranch",
+  "canonicalBaseBranch",
+  "state",
+  "pullRequest",
+]);
+const CHANGE_ISSUANCE_PULL_REQUEST_KEYS = new Set(["required", "number"]);
 const CHANGE_GITHUB_EVIDENCE_KEYS = new Set(["issue", "branches", "pullRequests"]);
 const CHANGE_EVIDENCE_AVAILABLE_KEYS = new Set(["status", "value"]);
 const CHANGE_EVIDENCE_ABSENT_KEYS = new Set(["status"]);
@@ -2540,3 +2616,563 @@ export const parseChangeTransitionRequest = deserializeChangeTransitionRequest;
 export const parseChangeTransitionPlan = deserializeChangeTransitionPlan;
 export const serializeChangeTransitionRequestContract = serializeChangeTransitionRequest;
 export const serializeChangeTransitionPlanContract = serializeChangeTransitionPlan;
+
+/** Issuance consumes the existing canonical projection request unchanged. */
+export type ChangeIssuanceRequest = ChangeProjectionInput;
+
+function isChangeIssuanceHealthyState(value: unknown): value is ChangeIssuanceHealthyState {
+  return value === "DRAFT" || value === "REVIEW" || value === "ACCEPTED" || value === "MERGED" || value === "ABORTED";
+}
+
+function issuancePlanText(
+  value: unknown,
+  path: string,
+  label: string,
+  maxLength: number,
+  diagnostics: ChangeDiagnostic[],
+): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    /[\u0000-\u001F\u007F]/u.test(value)
+  ) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, `${label} is invalid.`);
+    return undefined;
+  }
+  return value;
+}
+
+function validateChangeIssuanceTransaction(
+  input: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): ChangeIssuanceTransaction | undefined {
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Issuance transaction must be an object.");
+    return undefined;
+  }
+  addUnknownProperties(input, CHANGE_ISSUANCE_TRANSACTION_KEYS, path, diagnostics);
+
+  if (input.operation !== "issue") {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.operation`, "Issuance operation must be issue.");
+  }
+
+  let identity: ChangeIdentity | undefined;
+  if (!hasOwn(input, "identity")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.identity`, "Property is required.");
+  } else {
+    const result = validateChangeIdentity(input.identity, `${path}.identity`);
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    identity = result.identity;
+  }
+
+  const idempotencyKey = issuancePlanText(
+    input.idempotencyKey,
+    `${path}.idempotencyKey`,
+    "Idempotency key",
+    MAX_CHANGE_IDEMPOTENCY_KEY_LENGTH,
+    diagnostics,
+  );
+  if (diagnostics.length > 0 || identity === undefined || idempotencyKey === undefined) return undefined;
+  return { operation: "issue", identity, idempotencyKey };
+}
+
+function validateChangeIssuanceVerification(
+  input: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): ChangeIssuanceVerificationExpectation | undefined {
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Issuance verification expectation must be an object.");
+    return undefined;
+  }
+  addUnknownProperties(input, CHANGE_ISSUANCE_VERIFICATION_KEYS, path, diagnostics);
+  if (input.phase !== "post-effect") {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.phase`, "Verification phase must be post-effect.");
+  }
+  if (input.status !== "healthy") {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.status`, "Verification status must be healthy.");
+  }
+  const canonicalBranch = issuancePlanText(
+    input.canonicalBranch,
+    `${path}.canonicalBranch`,
+    "Canonical branch",
+    MAX_CHANGE_BRANCH_LENGTH,
+    diagnostics,
+  );
+  const canonicalBaseBranch = issuancePlanText(
+    input.canonicalBaseBranch,
+    `${path}.canonicalBaseBranch`,
+    "Canonical base branch",
+    MAX_CHANGE_BASE_BRANCH_LENGTH,
+    diagnostics,
+  );
+  let state: ChangeIssuanceHealthyState | undefined;
+  if (!isChangeIssuanceHealthyState(input.state)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.state`, "Verification state is not healthy.");
+  } else {
+    state = input.state;
+  }
+
+  let pullRequestNumber: number | undefined;
+  if (!hasOwn(input, "pullRequest")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.pullRequest`, "Property is required.");
+  } else if (!isRecord(input.pullRequest)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_PLAN",
+      `${path}.pullRequest`,
+      "Pull-request expectation must be an object.",
+    );
+  } else {
+    addUnknownProperties(input.pullRequest, CHANGE_ISSUANCE_PULL_REQUEST_KEYS, `${path}.pullRequest`, diagnostics);
+    if (input.pullRequest.required !== true) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        `${path}.pullRequest.required`,
+        "Pull-request expectation must require a canonical pull request.",
+      );
+    }
+    if (hasOwn(input.pullRequest, "number")) {
+      if (
+        typeof input.pullRequest.number !== "number" ||
+        !Number.isSafeInteger(input.pullRequest.number) ||
+        input.pullRequest.number < 1
+      ) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_INVALID_PLAN",
+          `${path}.pullRequest.number`,
+          "Expected pull-request number must be a positive safe integer.",
+        );
+      } else {
+        pullRequestNumber = input.pullRequest.number;
+      }
+    }
+  }
+
+  if (
+    diagnostics.length > 0 ||
+    canonicalBranch === undefined ||
+    canonicalBaseBranch === undefined ||
+    state === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    phase: "post-effect",
+    status: "healthy",
+    canonicalBranch,
+    canonicalBaseBranch,
+    state,
+    pullRequest: {
+      required: true,
+      ...(pullRequestNumber === undefined ? {} : { number: pullRequestNumber }),
+    },
+  };
+}
+
+function buildChangeIssuanceVerification(
+  result: Change,
+  canonicalBranch: string,
+  canonicalBaseBranch: string,
+): ChangeIssuanceVerificationExpectation {
+  if (!isChangeIssuanceHealthyState(result.state)) {
+    throw new Error("Issuance verification requires a healthy Change state.");
+  }
+  const pullRequest = result.projection?.pullRequest;
+  return {
+    phase: "post-effect",
+    status: "healthy",
+    canonicalBranch,
+    canonicalBaseBranch,
+    state: result.state,
+    pullRequest: {
+      required: true,
+      ...(pullRequest === undefined ? {} : { number: pullRequest }),
+    },
+  };
+}
+
+function buildChangeIssuancePlan(projection: ChangeProjectionResult): ChangeIssuancePlan {
+  if (
+    (projection.status !== "absent" && projection.status !== "healthy") ||
+    !projection.valid ||
+    projection.change === undefined ||
+    projection.canonicalBranch === undefined ||
+    projection.canonicalBaseBranch === undefined
+  ) {
+    throw new Error("A valid absent or healthy Change projection is required for issuance planning.");
+  }
+
+  const sourceStatus = projection.status;
+  const transactionIdentity = projection.change.identity;
+  const transaction: ChangeIssuanceTransaction = {
+    operation: "issue",
+    identity: transactionIdentity,
+    idempotencyKey: changeIdentityKey(transactionIdentity),
+  };
+
+  if (sourceStatus === "absent") {
+    const transitionPlan = planChangeTransition({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      transition: "issue",
+      change: projection.change,
+      target: {
+        branch: projection.canonicalBranch,
+        baseBranch: projection.canonicalBaseBranch,
+      },
+    });
+    return {
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      mode: "create",
+      sourceStatus,
+      transaction,
+      result: transitionPlan.result,
+      effects: transitionPlan.effects,
+      verification: buildChangeIssuanceVerification(
+        transitionPlan.result,
+        projection.canonicalBranch,
+        projection.canonicalBaseBranch,
+      ),
+    };
+  }
+
+  return {
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    mode: "return-existing",
+    sourceStatus,
+    transaction,
+    result: projection.change,
+    effects: [],
+    verification: buildChangeIssuanceVerification(
+      projection.change,
+      projection.canonicalBranch,
+      projection.canonicalBaseBranch,
+    ),
+  };
+}
+
+function issuanceFailureDiagnostics(projection: ChangeProjectionResult): readonly ChangeDiagnostic[] {
+  if (projection.diagnostics.length > 0) return projection.diagnostics;
+  if (projection.status === "absent" && projection.change === undefined) {
+    return [
+      createChangeDiagnostic({
+        code: "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT",
+        path: "$.evidence.issue",
+        message: "Change issuance requires confirmed root Issue evidence.",
+      }),
+    ];
+  }
+  return [
+    createChangeDiagnostic({
+      code: "CHANGE_INVALID_PLAN",
+      path: "$.projection",
+      message: "Change projection cannot produce an issuance plan.",
+    }),
+  ];
+}
+
+/**
+ * Plan idempotent Change issuance from the canonical #213 projection.
+ * This function is pure: it does not invoke GitHub, Actions, an App, a CLI,
+ * credentials, or any effect executor.
+ */
+export function planChangeIssuance(input: unknown): ChangeIssuancePlan {
+  const projection = projectChangeFromGitHubEvidence(input);
+  if (
+    !projection.valid ||
+    (projection.status !== "absent" && projection.status !== "healthy") ||
+    projection.change === undefined ||
+    projection.canonicalBranch === undefined ||
+    projection.canonicalBaseBranch === undefined
+  ) {
+    throw new ChangeIssuanceValidationError(issuanceFailureDiagnostics(projection));
+  }
+
+  const plan = buildChangeIssuancePlan(projection);
+  const result = validateChangeIssuancePlan(plan);
+  if (!result.valid || result.plan === undefined) throw new ChangeIssuanceValidationError(result.diagnostics);
+  return result.plan;
+}
+
+export const createChangeIssuancePlan = planChangeIssuance;
+export const planIdempotentChangeIssuance = planChangeIssuance;
+
+/** Validate and canonicalize a transport-independent issuance plan. */
+export function validateChangeIssuancePlan(input: unknown): ChangeIssuancePlanValidationResult {
+  const diagnostics: ChangeDiagnostic[] = [];
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Change issuance plan must be a JSON object.");
+    return { valid: false, diagnostics };
+  }
+  addUnknownProperties(input, CHANGE_ISSUANCE_PLAN_KEYS, "$", diagnostics);
+
+  if (!hasOwn(input, "version")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.version", "Property is required.");
+  } else if (input.version !== CHANGE_TRANSITION_CONTRACT_VERSION) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_UNSUPPORTED_VERSION",
+      "$.version",
+      "Change issuance plan version is unsupported.",
+    );
+  }
+  if (input.operation !== "issue") {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.operation", "Issuance operation must be issue.");
+  }
+
+  let mode: ChangeIssuanceMode | undefined;
+  if (!hasOwn(input, "mode")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.mode", "Property is required.");
+  } else if (!CHANGE_ISSUANCE_MODES.includes(input.mode as ChangeIssuanceMode)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.mode", "Issuance mode is unsupported.");
+  } else {
+    mode = input.mode as ChangeIssuanceMode;
+  }
+
+  let sourceStatus: ChangeIssuanceSourceStatus | undefined;
+  if (!hasOwn(input, "sourceStatus")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.sourceStatus", "Property is required.");
+  } else if (!CHANGE_ISSUANCE_SOURCE_STATUSES.includes(input.sourceStatus as ChangeIssuanceSourceStatus)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.sourceStatus", "Issuance source status is unsupported.");
+  } else {
+    sourceStatus = input.sourceStatus as ChangeIssuanceSourceStatus;
+  }
+
+  let transaction: ChangeIssuanceTransaction | undefined;
+  if (!hasOwn(input, "transaction")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.transaction", "Property is required.");
+  } else {
+    transaction = validateChangeIssuanceTransaction(input.transaction, "$.transaction", diagnostics);
+  }
+
+  let resultChange: Change | undefined;
+  if (!hasOwn(input, "result")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.result", "Property is required.");
+  } else {
+    const result = validateChange(input.result);
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    resultChange = result.change;
+  }
+
+  let effects: ChangeEffect[] = [];
+  if (!hasOwn(input, "effects")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.effects", "Property is required.");
+  } else {
+    effects = validateEffectList(input.effects, "$.effects", diagnostics);
+  }
+
+  let verification: ChangeIssuanceVerificationExpectation | undefined;
+  if (!hasOwn(input, "verification")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.verification", "Property is required.");
+  } else {
+    verification = validateChangeIssuanceVerification(input.verification, "$.verification", diagnostics);
+  }
+
+  if (
+    diagnostics.length > 0 ||
+    mode === undefined ||
+    sourceStatus === undefined ||
+    transaction === undefined ||
+    resultChange === undefined ||
+    verification === undefined
+  ) {
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+
+  const expectedIdempotencyKey = changeIdentityKey(resultChange.identity);
+  if (!canonicalPlanEquals(transaction.identity, resultChange.identity)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_PLAN",
+      "$.transaction.identity",
+      "Transaction identity must match the result.",
+    );
+  }
+  if (transaction.idempotencyKey !== expectedIdempotencyKey) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_PLAN",
+      "$.transaction.idempotencyKey",
+      "Idempotency key must be derived from the Change identity.",
+    );
+  }
+  if ((mode === "create" && sourceStatus !== "absent") || (mode === "return-existing" && sourceStatus !== "healthy")) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.sourceStatus", "Issuance mode does not match source status.");
+  }
+  if (verification.state !== resultChange.state) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_PLAN",
+      "$.verification.state",
+      "Verification state must match the result.",
+    );
+  }
+  if (verification.canonicalBranch !== resultChange.projection?.branch) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_PLAN",
+      "$.verification.canonicalBranch",
+      "Verification branch must match the result projection.",
+    );
+  }
+
+  if (mode === "create") {
+    if (resultChange.state !== "DRAFT" || resultChange.projection?.pullRequest !== undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        "$.result",
+        "A create issuance result must be a Draft Change without a preassigned pull request.",
+      );
+    }
+    if (verification.pullRequest.number !== undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        "$.verification.pullRequest.number",
+        "A create issuance plan cannot preassign a pull-request number.",
+      );
+    }
+    const definedChange: Change = {
+      version: CHANGE_CONTRACT_VERSION,
+      identity: resultChange.identity,
+      state: "DEFINED",
+      provenance: resultChange.provenance,
+    };
+    let expectedTransition: ChangeTransitionPlan | undefined;
+    try {
+      expectedTransition = planChangeTransition({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        transition: "issue",
+        change: definedChange,
+        target: {
+          branch: verification.canonicalBranch,
+          baseBranch: verification.canonicalBaseBranch,
+        },
+      });
+    } catch (error: unknown) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        "$.result",
+        `Create issuance transition is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (expectedTransition !== undefined) {
+      if (!canonicalPlanEquals(resultChange, expectedTransition.result)) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_INVALID_PLAN",
+          "$.result",
+          "Create result does not match the issue transition.",
+        );
+      }
+      if (!canonicalPlanEquals(effects, expectedTransition.effects)) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_INVALID_PLAN",
+          "$.effects",
+          "Create effects do not match the issue transition.",
+        );
+      }
+    }
+  } else {
+    if (!isChangeIssuanceHealthyState(resultChange.state) || resultChange.projection?.pullRequest === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        "$.result",
+        "A return-existing result must be a healthy canonical Change.",
+      );
+    }
+    if (verification.pullRequest.number !== resultChange.projection?.pullRequest) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        "$.verification.pullRequest.number",
+        "Existing verification must identify the returned canonical pull request.",
+      );
+    }
+    if (effects.length !== 0) {
+      addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.effects", "Return-existing issuance must have no effects.");
+    }
+  }
+
+  if (diagnostics.length > 0) {
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+
+  return {
+    valid: true,
+    plan: {
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      mode,
+      sourceStatus,
+      transaction: {
+        operation: "issue",
+        identity: resultChange.identity,
+        idempotencyKey: expectedIdempotencyKey,
+      },
+      result: resultChange,
+      effects,
+      verification,
+    },
+    diagnostics: [],
+  };
+}
+
+/** Assert a valid declarative issuance plan at an executor boundary. */
+export function assertChangeIssuancePlan(input: unknown): asserts input is ChangeIssuancePlan {
+  const result = validateChangeIssuancePlan(input);
+  if (!result.valid) throw new ChangeIssuanceValidationError(result.diagnostics);
+}
+
+export function isChangeIssuancePlan(input: unknown): input is ChangeIssuancePlan {
+  return validateChangeIssuancePlan(input).valid;
+}
+
+/** Serialize a canonical issuance plan with stable property ordering. */
+export function serializeChangeIssuancePlan(input: unknown): string {
+  const result = validateChangeIssuancePlan(input);
+  if (!result.valid || result.plan === undefined) throw new ChangeIssuanceValidationError(result.diagnostics);
+  const serialized = JSON.stringify(result.plan);
+  if (serialized === undefined) throw new Error("Change issuance plan could not be serialized.");
+  return serialized;
+}
+
+/** Parse and validate an untrusted issuance plan JSON boundary. */
+export function deserializeChangeIssuancePlan(serialized: string): ChangeIssuancePlan {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch (error) {
+    throw new ChangeIssuanceValidationError([
+      createChangeDiagnostic({
+        code: "CHANGE_INVALID_JSON",
+        message: safeMessage(
+          `Change issuance plan must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      }),
+    ]);
+  }
+  const result = validateChangeIssuancePlan(parsed);
+  if (!result.valid || result.plan === undefined) throw new ChangeIssuanceValidationError(result.diagnostics);
+  return result.plan;
+}
+
+export const parseChangeIssuancePlan = deserializeChangeIssuancePlan;
+export const serializeChangeIssuancePlanContract = serializeChangeIssuancePlan;
+
+export class ChangeIssuanceValidationError extends ChangeValidationError {
+  constructor(diagnostics: readonly ChangeDiagnostic[]) {
+    super(diagnostics);
+    this.name = "ChangeIssuanceValidationError";
+  }
+}
