@@ -55,6 +55,20 @@ function pullRequest(
   };
 }
 
+function readyPullRequest(number: number, draft: boolean): unknown {
+  return { number, state: "open", draft, node_id: "MDExOlB1bGxSZXF1ZXN0OTA=" };
+}
+
+function readyMutationResponse(number: number, nodeId = "MDExOlB1bGxSZXF1ZXN0OTA="): unknown {
+  return {
+    data: {
+      markPullRequestReadyForReview: {
+        pullRequest: { id: nodeId, number, state: "OPEN", isDraft: false },
+      },
+    },
+  };
+}
+
 function adapter(transport: GitHubChangeEffectTransport): GitHubChangeEffectAdapter {
   return new GitHubChangeEffectAdapter({ repository, transport });
 }
@@ -135,10 +149,11 @@ test("CREATE_PULL_REQUEST maps rootIssue to GitHub's issue conversion field with
   });
 });
 
-test("MARK_PULL_REQUEST_READY maps to the explicit pull request and draft false", async () => {
+test("MARK_PULL_REQUEST_READY uses GitHub's explicit ready-for-review mutation", async () => {
   const effect = { kind: "MARK_PULL_REQUEST_READY", pullRequest: 901 } as const;
   const transport = new StubChangeEffectTransport([
-    response(200, pullRequest(901, "Feature/Exact_Name", "main", false)),
+    response(200, readyPullRequest(901, true)),
+    response(200, readyMutationResponse(901)),
   ]);
 
   const result = await adapter(transport).execute(effect);
@@ -146,9 +161,19 @@ test("MARK_PULL_REQUEST_READY maps to the explicit pull request and draft false"
   assert.deepEqual(transport.calls, [
     {
       hostname: "github.com",
-      method: "PATCH",
+      method: "GET",
       path: "repos/acme/inari/pulls/901",
-      body: { draft: false },
+    },
+    {
+      hostname: "github.com",
+      method: "POST",
+      path: "graphql",
+      body: {
+        operationName: "PullRequestReadyForReview",
+        query:
+          "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { pullRequest { id number state isDraft } } }",
+        variables: { input: { pullRequestId: "MDExOlB1bGxSZXF1ZXN0OTA=" } },
+      },
     },
   ]);
   assert.deepEqual(result, {
@@ -156,6 +181,34 @@ test("MARK_PULL_REQUEST_READY maps to the explicit pull request and draft false"
     effect,
     evidence: { kind: "MARK_PULL_REQUEST_READY", pullRequest: 901 },
   });
+});
+
+test("MARK_PULL_REQUEST_READY fails closed for GitHub failures and malformed responses", async () => {
+  const effect = { kind: "MARK_PULL_REQUEST_READY", pullRequest: 901 } as const;
+  const apiFailure = await adapter(
+    new StubChangeEffectTransport([
+      response(200, readyPullRequest(901, true)),
+      response(200, { errors: [{ message: "denied" }] }),
+    ]),
+  ).execute(effect);
+  const malformedResponse = await adapter(
+    new StubChangeEffectTransport([
+      response(200, readyPullRequest(901, true)),
+      response(200, readyMutationResponse(901, "other")),
+    ]),
+  ).execute(effect);
+
+  assert.equal(apiFailure.status, "failed");
+  assert.equal(malformedResponse.status, "failed");
+  if (apiFailure.status !== "failed" || malformedResponse.status !== "failed") {
+    throw new Error("expected failure results");
+  }
+  assert.deepEqual(apiFailure.failure, {
+    effect,
+    code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.MARK_PULL_REQUEST_READY,
+    message: "The pull request ready effect failed.",
+  });
+  assert.deepEqual(malformedResponse.failure, apiFailure.failure);
 });
 
 test("CLOSE_PULL_REQUEST maps to the explicit pull request and closed state", async () => {

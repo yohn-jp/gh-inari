@@ -17,12 +17,22 @@ export interface GitHubChangeEffectRepository {
 
 export type GitHubChangeEffectHttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
+export type GitHubChangeEffectJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly GitHubChangeEffectJsonValue[]
+  | { readonly [key: string]: GitHubChangeEffectJsonValue };
+
+export type GitHubChangeEffectJsonObject = { readonly [key: string]: GitHubChangeEffectJsonValue };
+
 /** API request data owned by the GitHub adapter boundary. */
 export interface GitHubChangeEffectRequest {
   readonly hostname: string;
   readonly method: GitHubChangeEffectHttpMethod;
   readonly path: string;
-  readonly body?: Readonly<Record<string, string | number | boolean>>;
+  readonly body?: GitHubChangeEffectJsonObject;
 }
 
 /** The transport returns an opaque response which is consumed and discarded by the adapter. */
@@ -61,6 +71,11 @@ const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffectKind, s
   CLOSE_PULL_REQUEST: "The pull request close effect failed.",
   DELETE_BRANCH: "The branch deletion effect failed.",
 });
+
+const READY_FOR_REVIEW_MUTATION =
+  "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { " +
+  "markPullRequestReadyForReview(input: $input) { " +
+  "pullRequest { id number state isDraft } } }";
 
 /** Bounded success evidence; GitHub response bodies and URLs are intentionally absent. */
 export type GitHubChangeEffectSuccessEvidence =
@@ -128,7 +143,7 @@ export class GitHubChangeEffectConfigurationError extends Error {
 }
 
 /**
- * Thin projection of one explicit Core effect onto GitHub's REST resources.
+ * Thin projection of one explicit Core effect onto GitHub's API resources.
  * It deliberately executes no plan, retry, idempotency, lifecycle, naming, or
  * compensation logic.
  */
@@ -234,16 +249,44 @@ export class GitHubChangeEffectAdapter {
   private async markPullRequestReady(
     effect: Extract<ChangeEffect, { readonly kind: "MARK_PULL_REQUEST_READY" }>,
   ): Promise<GitHubChangeEffectSuccessEvidence> {
+    const current = responseRecord(
+      await this.request(
+        {
+          method: "GET",
+          path: `${this.repositoryPath()}/pulls/${effect.pullRequest}`,
+        },
+        200,
+      ),
+    );
+    if (responseNumber(current.number) !== effect.pullRequest || current.state !== "open" || current.draft !== true) {
+      throw new InvalidGitHubResponseError();
+    }
+    const nodeId = responseBoundedString(current.node_id);
+
     const response = await this.request(
       {
-        method: "PATCH",
-        path: `${this.repositoryPath()}/pulls/${effect.pullRequest}`,
-        body: { draft: false },
+        method: "POST",
+        path: "graphql",
+        body: {
+          operationName: "PullRequestReadyForReview",
+          query: READY_FOR_REVIEW_MUTATION,
+          variables: { input: { pullRequestId: nodeId } },
+        },
       },
       200,
     );
-    const record = responseRecord(response);
-    if (responseNumber(record.number) !== effect.pullRequest || record.state !== "open" || record.draft !== false) {
+    const envelope = responseRecord(response);
+    if (envelope.errors !== undefined || !isRecord(envelope.data)) {
+      throw new InvalidGitHubResponseError();
+    }
+    const mutation = responseRecord(envelope.data.markPullRequestReadyForReview);
+    const record = responseRecord(mutation.pullRequest);
+    if (
+      record.id !== nodeId ||
+      responseNumber(record.number) !== effect.pullRequest ||
+      record.state !== "OPEN" ||
+      record.isDraft !== false
+    ) {
       throw new InvalidGitHubResponseError();
     }
     return { kind: effect.kind, pullRequest: effect.pullRequest };

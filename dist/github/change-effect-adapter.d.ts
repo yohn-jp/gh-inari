@@ -6,12 +6,18 @@ export interface GitHubChangeEffectRepository {
     readonly name: string;
 }
 export type GitHubChangeEffectHttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
+export type GitHubChangeEffectJsonValue = string | number | boolean | null | readonly GitHubChangeEffectJsonValue[] | {
+    readonly [key: string]: GitHubChangeEffectJsonValue;
+};
+export type GitHubChangeEffectJsonObject = {
+    readonly [key: string]: GitHubChangeEffectJsonValue;
+};
 /** API request data owned by the GitHub adapter boundary. */
 export interface GitHubChangeEffectRequest {
     readonly hostname: string;
     readonly method: GitHubChangeEffectHttpMethod;
     readonly path: string;
-    readonly body?: Readonly<Record<string, string | number | boolean>>;
+    readonly body?: GitHubChangeEffectJsonObject;
 }
 /** The transport returns an opaque response which is consumed and discarded by the adapter. */
 export interface GitHubChangeEffectResponse {
@@ -82,7 +88,7 @@ export declare class GitHubChangeEffectConfigurationError extends Error {
     constructor();
 }
 /**
- * Thin projection of one explicit Core effect onto GitHub's REST resources.
+ * Thin projection of one explicit Core effect onto GitHub's API resources.
  * It deliberately executes no plan, retry, idempotency, lifecycle, naming, or
  * compensation logic.
  */
