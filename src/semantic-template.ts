@@ -11,6 +11,7 @@ import {
   type CanonicalSection,
 } from "./contract/ir.js";
 import { compileIssueFormYaml, type IssueFormTemplateIdentity } from "./contract/issue-form.js";
+import { completeTitleGovernance, effectiveTitleGovernance, type TitleGovernanceInput } from "./contract/title.js";
 import { parsePullRequestTemplate, renderPullRequestTemplate } from "./pull-request-template.js";
 import { type TemplateIdentity, type TemplateSelector } from "./template-discovery.js";
 import {
@@ -65,6 +66,8 @@ export interface SemanticTemplateSource {
   readonly name: string;
   readonly description?: string;
   readonly title?: string;
+  /** Artifact metadata policy; never rendered as a body field. */
+  readonly titleGovernance?: TitleGovernanceInput;
   readonly labels?: readonly string[];
   readonly sections: readonly SemanticSection[];
 }
@@ -322,6 +325,7 @@ export function normalizeSemanticTemplate(value: unknown, sourcePath = "$"): Sem
       "name",
       "description",
       "title",
+      "titleGovernance",
       "labels",
       "sections",
       "fields",
@@ -350,12 +354,23 @@ export function normalizeSemanticTemplate(value: unknown, sourcePath = "$"): Sem
   if (template !== undefined)
     assertKeys(
       template,
-      ["kind", "artifactKind", "id", "name", "description", "title", "labels", "sections", "fields"],
+      [
+        "kind",
+        "artifactKind",
+        "id",
+        "name",
+        "description",
+        "title",
+        "titleGovernance",
+        "labels",
+        "sections",
+        "fields",
+      ],
       `${sourcePath}.template`,
       violations,
     );
   if (metadata !== undefined)
-    assertKeys(metadata, ["description", "title", "labels"], `${sourcePath}.metadata`, violations);
+    assertKeys(metadata, ["description", "title", "titleGovernance", "labels"], `${sourcePath}.metadata`, violations);
 
   const version = value.version ?? template?.version;
   if (version !== SEMANTIC_TEMPLATE_VERSION)
@@ -381,7 +396,14 @@ export function normalizeSemanticTemplate(value: unknown, sourcePath = "$"): Sem
     `${sourcePath}.description`,
     violations,
   );
-  const title = optionalString(value.title ?? metadata?.title ?? template?.title, `${sourcePath}.title`, violations);
+  const rawTitle = value.title ?? metadata?.title ?? template?.title;
+  const title = isRecord(rawTitle) ? undefined : optionalString(rawTitle, `${sourcePath}.title`, violations);
+  const rawTitleGovernance =
+    value.titleGovernance ??
+    metadata?.titleGovernance ??
+    template?.titleGovernance ??
+    (isRecord(rawTitle) ? rawTitle : undefined);
+  const titleGovernance = normalizeTitleGovernance(rawTitleGovernance, `${sourcePath}.titleGovernance`, violations);
   const labels = optionalStringList(
     value.labels ?? metadata?.labels ?? template?.labels,
     `${sourcePath}.labels`,
@@ -424,6 +446,7 @@ export function normalizeSemanticTemplate(value: unknown, sourcePath = "$"): Sem
     name: name as string,
     ...(description === undefined ? {} : { description }),
     ...(title === undefined ? {} : { title }),
+    ...(titleGovernance === undefined ? {} : { titleGovernance }),
     ...(labels === undefined ? {} : { labels }),
     sections: sections as SemanticSection[],
   };
@@ -500,7 +523,13 @@ export function renderSemanticCompactSchema(contract: unknown): unknown {
       properties[field.id] = entry;
     }
   }
-  return { version: SEMANTIC_TEMPLATE_VERSION, kind: contract.artifactKind, fields: properties, required };
+  return {
+    version: SEMANTIC_TEMPLATE_VERSION,
+    kind: contract.artifactKind,
+    fields: properties,
+    required,
+    metadata: { title: effectiveTitleGovernance(contract) },
+  };
 }
 
 export async function syncSemanticTemplates(
@@ -664,6 +693,7 @@ export function semanticSourceFromContract(contractInput: unknown): SemanticTemp
       ? {}
       : { description: contractInput.nativeMetadata.description }),
     ...(contractInput.nativeMetadata.title === undefined ? {} : { title: contractInput.nativeMetadata.title }),
+    titleGovernance: effectiveTitleGovernance(contractInput),
     ...(contractInput.nativeMetadata.labels === undefined ? {} : { labels: contractInput.nativeMetadata.labels }),
     sections,
   };
@@ -849,6 +879,7 @@ function applySemanticIdentityAndConstraints(
       ...(source.title === undefined ? {} : { title: source.title }),
       ...(source.labels === undefined ? {} : { labels: source.labels }),
     },
+    titleGovernance: completeTitleGovernance(source.titleGovernance, source.title),
     sections,
     supplementalConstraints: { fields: supplemental },
   };
@@ -1316,6 +1347,61 @@ function optionalString(
   if (typeof value === "string") return value;
   addViolation(violations, "SEMANTIC_TEMPLATE_INVALID_VALUE", pathPrefix, "Value must be a string.");
   return undefined;
+}
+
+function normalizeTitleGovernance(
+  value: unknown,
+  pathPrefix: string,
+  violations: SemanticTemplateViolation[],
+): TitleGovernanceInput | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    addViolation(violations, "SEMANTIC_TEMPLATE_INVALID_VALUE", pathPrefix, "titleGovernance must be an object.");
+    return undefined;
+  }
+  assertKeys(value, ["required", "prefix", "template", "pattern", "minLength", "maxLength"], pathPrefix, violations);
+  const required = optionalBoolean(value.required, `${pathPrefix}.required`, violations);
+  const prefix = optionalString(value.prefix, `${pathPrefix}.prefix`, violations);
+  const template = optionalString(value.template, `${pathPrefix}.template`, violations);
+  const pattern = optionalString(value.pattern, `${pathPrefix}.pattern`, violations);
+  const minLength = optionalInteger(value.minLength, `${pathPrefix}.minLength`, violations);
+  const maxLength = optionalInteger(value.maxLength, `${pathPrefix}.maxLength`, violations);
+  for (const [key, marker] of [
+    ["prefix", prefix],
+    ["template", template],
+  ] as const) {
+    if (marker !== undefined && marker.trim().length === 0) {
+      addViolation(violations, "SEMANTIC_TEMPLATE_INVALID_VALUE", `${pathPrefix}.${key}`, `${key} must be non-empty.`);
+    }
+  }
+  if (pattern !== undefined) {
+    try {
+      new RegExp(pattern, "u");
+    } catch {
+      addViolation(
+        violations,
+        "SEMANTIC_TEMPLATE_INVALID_VALUE",
+        `${pathPrefix}.pattern`,
+        "pattern must be a valid regular expression.",
+      );
+    }
+  }
+  if (minLength !== undefined && maxLength !== undefined && minLength > maxLength) {
+    addViolation(
+      violations,
+      "SEMANTIC_TEMPLATE_INVALID_VALUE",
+      pathPrefix,
+      "minLength cannot exceed maxLength.",
+    );
+  }
+  return {
+    ...(required === undefined ? {} : { required }),
+    ...(prefix === undefined ? {} : { prefix }),
+    ...(template === undefined ? {} : { template }),
+    ...(pattern === undefined ? {} : { pattern }),
+    ...(minLength === undefined ? {} : { minLength }),
+    ...(maxLength === undefined ? {} : { maxLength }),
+  };
 }
 
 function optionalStringList(

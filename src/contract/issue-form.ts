@@ -24,6 +24,7 @@ import {
   type TemplateIdentity as DiscoveredTemplateIdentity,
   type TemplateSelector,
 } from "../template-discovery.js";
+import { completeTitleGovernance } from "./title.js";
 
 type UnknownRecord = Record<string, unknown>;
 type Position = { readonly line: number; readonly column: number };
@@ -207,6 +208,10 @@ export function compileIssueFormYaml(source: string, template: IssueFormTemplate
     artifactKind: "issue",
     templateIdentity,
     nativeMetadata,
+    titleGovernance: completeTitleGovernance(
+      metadata?.title === undefined ? undefined : { prefix: metadata.title },
+      metadata?.title,
+    ),
     sections: compiledSections,
     supplementalConstraints: { fields: [] },
   };
