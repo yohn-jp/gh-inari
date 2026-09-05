@@ -11,14 +11,23 @@ import { type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js"
 import { type GitHubChangeEffectRepository, type GitHubChangeEffectRequest, type GitHubChangeEffectResponse, type GitHubChangeEffectTransport } from "./change-effect-adapter.js";
 import { type IssuerCredentialRequest, type IssuerScopedMutationCapability, type TrustedInstallationCredentialBroker, type IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { PullRequestBranchGovernance } from "../contract/ir.js";
+/** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
+export declare const TRUSTED_ACTIONS_FAILURE_STAGES: readonly ["repository-evidence", "trusted-execution", "branch-governance", "issuer-configuration", "installation-token", "installation-scope", "projection-execution"];
+export type TrustedActionsFailureStage = (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
+export interface TrustedActionsFailureDiagnostic {
+    readonly stage: TrustedActionsFailureStage;
+}
+export declare function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage;
 export declare class GitHubActionsChangeExecutorError extends Error {
     readonly code: "CHANGE_ACTIONS_RUNTIME_INVALID";
-    constructor(message?: string);
+    readonly details?: TrustedActionsFailureDiagnostic;
+    constructor(message?: string, stage?: TrustedActionsFailureStage);
 }
 export interface GitHubActionsApiTransportOptions {
     readonly apiUrl?: string;
     readonly token: string;
     readonly fetch?: typeof globalThis.fetch;
+    readonly failureStage?: TrustedActionsFailureStage;
 }
 /** A bounded credential-bound transport. The bearer never appears in results. */
 export declare class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
@@ -61,6 +70,7 @@ export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenc
     #private;
     constructor(options: GitHubActionsEvidenceReaderOptions);
     read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput>;
+    private readInternal;
     private readReadyEvidence;
     private readPullRequestBody;
     private readGovernanceTree;

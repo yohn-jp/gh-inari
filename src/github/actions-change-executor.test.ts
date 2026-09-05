@@ -5,8 +5,12 @@ import {
   GitHubActionsApiTransport,
   GitHubActionsCredentialBroker,
   GitHubActionsEvidenceReader,
+  GitHubActionsChangeExecutorError,
+  TRUSTED_ACTIONS_FAILURE_STAGES,
   createGitHubActionsChangeExecutor,
   deriveChangeNamingFromIssueTitle,
+  isTrustedActionsFailureStage,
+  runGitHubActionsChangeExecutor,
 } from "./actions-change-executor.js";
 import type {
   GitHubChangeEffectRequest,
@@ -27,6 +31,28 @@ const target: IssuerRepositoryIdentity = {
   nameWithOwner: "acme/inari",
 };
 
+function issuerCredentialRequest(): IssuerCredentialRequest {
+  return {
+    version: 1,
+    authority: "issuer",
+    app: { kind: "github-app", slug: "inari-issuer", appId: "218", principal: INARI_ISSUER_PRINCIPAL },
+    execution: {
+      version: 1,
+      runtime: "github-actions",
+      event: "workflow_dispatch",
+      repository: target,
+      workflowRef: "refs/heads/main",
+      workflowSha: "a".repeat(40),
+      workflowTrust: "protected",
+      codeExecution: "trusted-only",
+      fork: false,
+      pullRequest: false,
+    },
+    target,
+    permissions: { contents: "write" },
+  };
+}
+
 test("Issue title naming is resolved by the executable runtime and not by workflow YAML", () => {
   assert.deepEqual(deriveChangeNamingFromIssueTitle("feat: Execute Change plans safely"), {
     type: "feat",
@@ -37,6 +63,25 @@ test("Issue title naming is resolved by the executable runtime and not by workfl
     slug: "normalize-cafe-input",
   });
   assert.throws(() => deriveChangeNamingFromIssueTitle("unclassified work"));
+});
+
+test("trusted Actions diagnostics are enumerable, bounded, and non-secret", () => {
+  assert.deepEqual(TRUSTED_ACTIONS_FAILURE_STAGES, [
+    "repository-evidence",
+    "trusted-execution",
+    "branch-governance",
+    "issuer-configuration",
+    "installation-token",
+    "installation-scope",
+    "projection-execution",
+  ]);
+  for (const stage of TRUSTED_ACTIONS_FAILURE_STAGES) {
+    const error = new GitHubActionsChangeExecutorError("Bearer secret-token", stage);
+    assert.deepEqual(error.details, { stage });
+    assert.equal(isTrustedActionsFailureStage(stage), true);
+    assert.equal(JSON.stringify(error.details).includes("secret-token"), false);
+  }
+  assert.equal(isTrustedActionsFailureStage("arbitrary-provider-error"), false);
 });
 
 class ReadTransport implements GitHubChangeEffectTransport {
@@ -115,25 +160,7 @@ test("App installation token is confined to the broker transport and never its s
     target,
     fetch,
   });
-  const request: IssuerCredentialRequest = {
-    version: 1,
-    authority: "issuer",
-    app: { kind: "github-app", slug: "inari-issuer", appId: "218", principal: INARI_ISSUER_PRINCIPAL },
-    execution: {
-      version: 1,
-      runtime: "github-actions",
-      event: "workflow_dispatch",
-      repository: target,
-      workflowRef: "refs/heads/main",
-      workflowSha: "a".repeat(40),
-      workflowTrust: "protected",
-      codeExecution: "trusted-only",
-      fork: false,
-      pullRequest: false,
-    },
-    target,
-    permissions: { contents: "write" },
-  };
+  const request = issuerCredentialRequest();
   let capabilityScope: unknown;
   await broker.withScopedInstallationCredential(request, async (capability) => {
     capabilityScope = capability.scope;
@@ -160,6 +187,25 @@ test("API transport does not return credential-bearing headers or unbounded resp
   assert.match(JSON.stringify(received?.headers), /Bearer read-token/u);
 });
 
+test("API transport failures expose only the bounded projection boundary", async () => {
+  const transport = new GitHubActionsApiTransport({
+    token: "read-token",
+    failureStage: "projection-execution",
+    fetch: async () => {
+      throw new Error("Authorization: Bearer secret-token; /private/path");
+    },
+  });
+  await assert.rejects(
+    transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari" }),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError &&
+      error.details?.stage === "projection-execution" &&
+      !error.message.includes("secret-token") &&
+      !JSON.stringify(error).includes("secret-token") &&
+      !JSON.stringify(error).includes("/private/path"),
+  );
+});
+
 function trustedEnvironment(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
     GITHUB_REPOSITORY: "acme/inari",
@@ -181,6 +227,122 @@ function repositoryOnlyFetch(fork: boolean): typeof globalThis.fetch {
       status: 200,
     })) as unknown as typeof globalThis.fetch;
 }
+
+test("runtime setup exposes the bounded stage at each setup boundary", async () => {
+  const cases: readonly {
+    readonly name: string;
+    readonly environment: NodeJS.ProcessEnv;
+    readonly cwd?: string;
+    readonly stage: (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
+  }[] = [
+    {
+      name: "repository evidence",
+      environment: trustedEnvironment({ GITHUB_REPOSITORY: undefined }),
+      stage: "repository-evidence",
+    },
+    {
+      name: "trusted execution",
+      environment: trustedEnvironment({ GITHUB_REF: "refs/heads/feature-x" }),
+      stage: "trusted-execution",
+    },
+    {
+      name: "branch governance",
+      environment: trustedEnvironment(),
+      cwd: "/tmp/inari-missing-governance",
+      stage: "branch-governance",
+    },
+    {
+      name: "issuer configuration",
+      environment: trustedEnvironment({ INARI_ISSUER_APP_ID: undefined }),
+      stage: "issuer-configuration",
+    },
+  ];
+  for (const testCase of cases) {
+    await assert.rejects(
+      createGitHubActionsChangeExecutor({
+        cwd: testCase.cwd ?? process.cwd(),
+        request: changeRemoteMutationRequest("issue", 218),
+        environment: testCase.environment,
+        fetch: repositoryOnlyFetch(false),
+      }),
+      (error: unknown) => error instanceof GitHubActionsChangeExecutorError && error.details?.stage === testCase.stage,
+      testCase.name,
+    );
+  }
+});
+
+test("workflow entrypoint emits the bounded diagnostic and no exception payload", async () => {
+  const writes: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    const exitCode = await runGitHubActionsChangeExecutor(
+      trustedEnvironment({
+        INARI_CHANGE_REQUEST: JSON.stringify({ version: 1, operation: "issue", issue: 218 }),
+        GITHUB_REPOSITORY: undefined,
+      }),
+      process.cwd(),
+    );
+    assert.equal(exitCode, 1);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  const output = JSON.parse(writes.join("")) as { error?: Record<string, unknown> };
+  assert.deepEqual(output.error, {
+    code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+    message: "Trusted Change execution failed closed.",
+    details: { stage: "repository-evidence" },
+  });
+  assert.doesNotMatch(JSON.stringify(output), /privateKey|token|exception|\/home/iu);
+});
+
+test("credential issuance and scope validation keep separate bounded stages", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const brokerOptions = {
+    appId: "218",
+    installationId: "219",
+    privateKeyPem,
+    repository,
+    target,
+  } as const;
+  const request = issuerCredentialRequest();
+
+  const tokenFailure = new GitHubActionsCredentialBroker({
+    ...brokerOptions,
+    fetch: async () => new Response("provider-secret", { status: 503 }),
+  });
+  await assert.rejects(
+    tokenFailure.withScopedInstallationCredential(request, async () => undefined),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "installation-token",
+  );
+
+  const scopeFailure = new GitHubActionsCredentialBroker({
+    ...brokerOptions,
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          token: "installation-secret-token",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          permissions: { contents: "write" },
+          repositories: [],
+        }),
+        { status: 201 },
+      ),
+  });
+  await assert.rejects(
+    scopeFailure.withScopedInstallationCredential(request, async () => undefined),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError &&
+      error.details?.stage === "installation-scope" &&
+      !error.message.includes("installation-secret-token") &&
+      !JSON.stringify(error).includes("installation-secret-token"),
+  );
+});
 
 test("Trusted executor construction rejects a workflow_ref naming a different workflow file", async () => {
   await assert.rejects(

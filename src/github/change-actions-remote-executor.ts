@@ -14,7 +14,12 @@ import {
   type ChangeRemoteReadRequest,
 } from "../change-executor.js";
 import { GitHubAdapter } from "./adapter.js";
-import { GitHubActionsEvidenceReader, loadBranchGovernance } from "./actions-change-executor.js";
+import {
+  GitHubActionsEvidenceReader,
+  isTrustedActionsFailureStage,
+  loadBranchGovernance,
+  type TrustedActionsFailureDiagnostic,
+} from "./actions-change-executor.js";
 import type {
   GitHubChangeEffectRequest,
   GitHubChangeEffectResponse,
@@ -80,6 +85,7 @@ interface WorkflowArtifact {
 interface ActionResultEnvelope {
   readonly value: unknown;
   readonly failed: boolean;
+  readonly diagnostic?: TrustedActionsFailureDiagnostic;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -112,6 +118,7 @@ function remoteError(
   code: ConstructorParameters<typeof ChangeRemoteExecutorError>[0],
   operation: string,
   reason: string,
+  diagnostic?: TrustedActionsFailureDiagnostic,
 ): ChangeRemoteExecutorError {
   const messages: Record<string, string> = {
     CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Actions Change executor is unavailable.",
@@ -125,6 +132,7 @@ function remoteError(
   return new ChangeRemoteExecutorError(code, messages[code] ?? "The Change remote operation failed.", {
     operation,
     reason,
+    ...(diagnostic === undefined ? {} : { stage: diagnostic.stage }),
   });
 }
 
@@ -154,6 +162,15 @@ function artifactsPath(name: string): string {
 
 function dispatchPath(): string {
   return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/dispatches`;
+}
+
+function parseFailureDiagnostic(value: unknown): TrustedActionsFailureDiagnostic | undefined {
+  if (value === undefined) return undefined;
+  const details = record(value);
+  if (Object.keys(details).some((key) => key !== "stage") || !isTrustedActionsFailureStage(details.stage)) {
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+  }
+  return Object.freeze({ stage: details.stage });
 }
 
 function parseRuns(value: unknown): readonly WorkflowRun[] {
@@ -301,9 +318,19 @@ function resultFromArchive(archive: Uint8Array): ActionResultEnvelope {
     const result = record(value);
     if (result.ok === false) {
       const failure = record(result.error);
-      boundedText(failure.code, 120);
+      if (Object.keys(failure).some((key) => !["code", "message", "details"].includes(key))) {
+        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+      }
+      if (failure.code !== "CHANGE_ACTIONS_RUNTIME_INVALID") {
+        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+      }
       boundedText(failure.message, 240);
-      return { value: undefined, failed: true };
+      const diagnostic = parseFailureDiagnostic(failure.details);
+      return {
+        value: undefined,
+        failed: true,
+        ...(diagnostic === undefined ? {} : { diagnostic }),
+      };
     }
     if (result.ok !== undefined) {
       throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
@@ -366,7 +393,12 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
     const semanticRequest = await this.withRequester(canonicalMutationRequest(request));
     const result = await this.dispatchAndCollect(semanticRequest);
     if (result.failed) {
-      throw remoteError("CHANGE_REMOTE_RUN_FAILED", `change.${request.operation}`, "workflow-failed");
+      throw remoteError(
+        "CHANGE_REMOTE_RUN_FAILED",
+        `change.${request.operation}`,
+        "workflow-failed",
+        result.diagnostic,
+      );
     }
     return normalizeChangeRemoteExecutionResult(request.operation, result.value);
   }
@@ -505,7 +537,7 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
         }
         const result = resultFromArchive(archive);
         if (run.conclusion !== "success") {
-          throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "workflow-conclusion");
+          throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "workflow-conclusion", result.diagnostic);
         }
         return result;
       }

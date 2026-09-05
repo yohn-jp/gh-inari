@@ -66,7 +66,7 @@ jobs:
             node dist/github/actions-change-executor.js > "$RUNNER_TEMP/inari-change-result/result.json"
             execution_status=$?
           else
-            printf '%s\n' '{"ok":false,"error":{"code":"CHANGE_ACTIONS_RUNTIME_FAILED","message":"Trusted Change execution failed closed."}}' > "$RUNNER_TEMP/inari-change-result/result.json"
+            printf '%s\n' '{"ok":false,"error":{"code":"CHANGE_ACTIONS_RUNTIME_INVALID","message":"Trusted Change execution failed closed.","details":{"stage":"trusted-execution"}}}' > "$RUNNER_TEMP/inari-change-result/result.json"
             execution_status=$build_status
           fi
           exit "$execution_status"
