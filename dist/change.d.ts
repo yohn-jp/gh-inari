@@ -6,7 +6,7 @@
  * transition matrix, and pure effect planning. It does not read or mutate
  * GitHub state or execute effects.
  */
-import type { PullRequestBranchGovernance } from "./contract/ir.js";
+import { type CanonicalContract, type PullRequestBranchGovernance } from "./contract/ir.js";
 export declare const CHANGE_CONTRACT_VERSION: 1;
 export type ChangeContractVersion = typeof CHANGE_CONTRACT_VERSION;
 export declare const CHANGE_STATES: readonly ["DEFINED", "DRAFT", "REVIEW", "ACCEPTED", "MERGED", "ABORTED", "RECOVERY_REQUIRED"];
@@ -179,7 +179,7 @@ export interface ChangeEffectValidationResult {
     readonly effect?: ChangeEffect;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
-export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN" | "CHANGE_PROJECTION_INVALID_EVIDENCE" | "CHANGE_PROJECTION_EVIDENCE_MISSING" | "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE" | "CHANGE_PROJECTION_ISSUE_MISMATCH" | "CHANGE_PROJECTION_PARTIAL" | "CHANGE_PROJECTION_DUPLICATE" | "CHANGE_PROJECTION_WRONG_BASE" | "CHANGE_PROJECTION_AMBIGUOUS" | "CHANGE_PROJECTION_CONFLICT" | "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT";
+export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN" | "CHANGE_PROJECTION_INVALID_EVIDENCE" | "CHANGE_PROJECTION_EVIDENCE_MISSING" | "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE" | "CHANGE_PROJECTION_ISSUE_MISMATCH" | "CHANGE_PROJECTION_PARTIAL" | "CHANGE_PROJECTION_DUPLICATE" | "CHANGE_PROJECTION_WRONG_BASE" | "CHANGE_PROJECTION_AMBIGUOUS" | "CHANGE_PROJECTION_CONFLICT" | "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT" | "CHANGE_PROVENANCE_INVALID_INPUT" | "CHANGE_PROVENANCE_IDENTITY_MISMATCH" | "CHANGE_PROVENANCE_ROOT_ISSUE_MISMATCH" | "CHANGE_PROVENANCE_BRANCH_MISMATCH" | "CHANGE_PROVENANCE_BASE_MISMATCH" | "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH" | "CHANGE_PROVENANCE_INVALID_ISSUER" | "CHANGE_PROVENANCE_ISSUER_MISMATCH" | "CHANGE_PROVENANCE_INVALID_PR_CONTRACT" | "CHANGE_PROVENANCE_CONFLICT";
 export interface ChangeDiagnosticInput {
     readonly code: ChangeDiagnosticCode;
     readonly path?: string;
@@ -314,6 +314,44 @@ export interface ChangeProjectionResult {
     readonly change?: Change;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+/** The governed PR body/contract pair checked at merge admission. */
+export interface ChangeMergeAdmissionPullRequest {
+    /** A repository-governed canonical PR contract, not a caller-authored schema. */
+    readonly contract: CanonicalContract;
+    /** The physical PR body read from GitHub. */
+    readonly body: string | null;
+}
+/**
+ * Inputs to the pure merge-admission provenance validator.
+ *
+ * `change` is the already-issued canonical snapshot. `projection` is the
+ * bounded #213 evidence input and is deliberately separate from the physical
+ * PR body. `issuance` is optional for callers that retain the #214 transaction
+ * record; when present it is checked as an additional canonical authority.
+ */
+export interface ChangeMergeAdmissionInput {
+    readonly change: Change;
+    readonly projection: ChangeProjectionInput | ChangeProjectionResult;
+    readonly issuance?: ChangeIssuancePlan;
+    readonly pullRequest: ChangeMergeAdmissionPullRequest;
+    /** Optional explicit issuer assertion from the trusted caller. */
+    readonly issuer?: string;
+}
+/** Result consumed by a later required-check projection. */
+export interface ChangeMergeAdmissionValidationResult {
+    readonly valid: boolean;
+    /** Present only for a valid canonical Change admission. */
+    readonly change?: Change;
+    /** The fresh #213 projection used for the decision. */
+    readonly projection?: ChangeProjectionResult;
+    /** Physical evidence; this is never promoted to canonical identity. */
+    readonly physicalPullRequest?: ChangePullRequestEvidence;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
+/** Naming aliases for adapters that describe the same admission boundary. */
+export type ChangeProvenanceValidationInput = ChangeMergeAdmissionInput;
+export type ChangeCanonicalProvenanceInput = ChangeMergeAdmissionInput;
+export type ChangeCanonicalProvenanceValidationResult = ChangeMergeAdmissionValidationResult;
 /** The two idempotent issuance outcomes owned by Inari Core. */
 export declare const CHANGE_ISSUANCE_MODES: readonly ["create", "return-existing"];
 export type ChangeIssuanceMode = (typeof CHANGE_ISSUANCE_MODES)[number];
@@ -625,3 +663,14 @@ export declare const serializeChangeRecoveryPlan: typeof serializeChangeIssuance
 export declare class ChangeIssuanceRecoveryValidationError extends ChangeValidationError {
     constructor(diagnostics: readonly ChangeDiagnostic[]);
 }
+/**
+ * Validate one canonical Change for merge admission.
+ *
+ * The canonical snapshot and (when supplied) issuance plan establish the
+ * governed identity. The #213 projection is recomputed from bounded physical
+ * evidence, and the selected physical PR is checked without ever promoting
+ * it to canonical identity merely because its intent looks similar.
+ */
+export declare function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissionValidationResult;
+export declare const validateCanonicalChangeProvenance: typeof validateChangeMergeAdmission;
+export declare const validateChangeProvenanceForMergeAdmission: typeof validateChangeMergeAdmission;

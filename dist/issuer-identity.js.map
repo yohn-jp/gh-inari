@@ -1,0 +1,1 @@
+{"version":3,"file":"issuer-identity.js","sourceRoot":"","sources":["../src/issuer-identity.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,MAAM,CAAC,MAAM,qBAAqB,GAAG,YAAqB,CAAC;AAC3D,MAAM,CAAC,MAAM,qBAAqB,GAAG,cAAuB,CAAC;AAC7D,MAAM,CAAC,MAAM,sBAAsB,GAAG,kBAA2B,CAAC;AAIlE,MAAM,UAAU,6BAA6B,CAAC,KAAc;IAC1D,OAAO,KAAK,KAAK,sBAAsB,CAAC;AAC1C,CAAC"}

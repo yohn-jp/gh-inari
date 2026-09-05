@@ -8,13 +8,15 @@
  */
 
 import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 
+import { validateExistingPullRequestArtifact, type ExistingArtifactValidationResult } from "./artifact.js";
 import {
   issueReferenceKey,
   normalizeIssueReference,
   type IssueDependencyViolationCode,
 } from "./contract/issue-reference.js";
-import type { PullRequestBranchGovernance } from "./contract/ir.js";
+import { validateCanonicalContract, type CanonicalContract, type PullRequestBranchGovernance } from "./contract/ir.js";
 import { parsePullRequestPolicyOverlay } from "./pr-policy.js";
 
 export const CHANGE_CONTRACT_VERSION = 1 as const;
@@ -236,7 +238,17 @@ export type ChangeDiagnosticCode =
   | "CHANGE_PROJECTION_WRONG_BASE"
   | "CHANGE_PROJECTION_AMBIGUOUS"
   | "CHANGE_PROJECTION_CONFLICT"
-  | "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT";
+  | "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT"
+  | "CHANGE_PROVENANCE_INVALID_INPUT"
+  | "CHANGE_PROVENANCE_IDENTITY_MISMATCH"
+  | "CHANGE_PROVENANCE_ROOT_ISSUE_MISMATCH"
+  | "CHANGE_PROVENANCE_BRANCH_MISMATCH"
+  | "CHANGE_PROVENANCE_BASE_MISMATCH"
+  | "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH"
+  | "CHANGE_PROVENANCE_INVALID_ISSUER"
+  | "CHANGE_PROVENANCE_ISSUER_MISMATCH"
+  | "CHANGE_PROVENANCE_INVALID_PR_CONTRACT"
+  | "CHANGE_PROVENANCE_CONFLICT";
 
 export interface ChangeDiagnosticInput {
   readonly code: ChangeDiagnosticCode;
@@ -398,6 +410,48 @@ export interface ChangeProjectionResult {
   readonly change?: Change;
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
+
+/** The governed PR body/contract pair checked at merge admission. */
+export interface ChangeMergeAdmissionPullRequest {
+  /** A repository-governed canonical PR contract, not a caller-authored schema. */
+  readonly contract: CanonicalContract;
+  /** The physical PR body read from GitHub. */
+  readonly body: string | null;
+}
+
+/**
+ * Inputs to the pure merge-admission provenance validator.
+ *
+ * `change` is the already-issued canonical snapshot. `projection` is the
+ * bounded #213 evidence input and is deliberately separate from the physical
+ * PR body. `issuance` is optional for callers that retain the #214 transaction
+ * record; when present it is checked as an additional canonical authority.
+ */
+export interface ChangeMergeAdmissionInput {
+  readonly change: Change;
+  readonly projection: ChangeProjectionInput | ChangeProjectionResult;
+  readonly issuance?: ChangeIssuancePlan;
+  readonly pullRequest: ChangeMergeAdmissionPullRequest;
+  /** Optional explicit issuer assertion from the trusted caller. */
+  readonly issuer?: string;
+}
+
+/** Result consumed by a later required-check projection. */
+export interface ChangeMergeAdmissionValidationResult {
+  readonly valid: boolean;
+  /** Present only for a valid canonical Change admission. */
+  readonly change?: Change;
+  /** The fresh #213 projection used for the decision. */
+  readonly projection?: ChangeProjectionResult;
+  /** Physical evidence; this is never promoted to canonical identity. */
+  readonly physicalPullRequest?: ChangePullRequestEvidence;
+  readonly diagnostics: readonly ChangeDiagnostic[];
+}
+
+/** Naming aliases for adapters that describe the same admission boundary. */
+export type ChangeProvenanceValidationInput = ChangeMergeAdmissionInput;
+export type ChangeCanonicalProvenanceInput = ChangeMergeAdmissionInput;
+export type ChangeCanonicalProvenanceValidationResult = ChangeMergeAdmissionValidationResult;
 
 /** The two idempotent issuance outcomes owned by Inari Core. */
 export const CHANGE_ISSUANCE_MODES = Object.freeze(["create", "return-existing"] as const);
@@ -607,6 +661,16 @@ const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_PROJECTION_AMBIGUOUS",
   "CHANGE_PROJECTION_CONFLICT",
   "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT",
+  "CHANGE_PROVENANCE_INVALID_INPUT",
+  "CHANGE_PROVENANCE_IDENTITY_MISMATCH",
+  "CHANGE_PROVENANCE_ROOT_ISSUE_MISMATCH",
+  "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+  "CHANGE_PROVENANCE_BASE_MISMATCH",
+  "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+  "CHANGE_PROVENANCE_INVALID_ISSUER",
+  "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+  "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+  "CHANGE_PROVENANCE_CONFLICT",
 ];
 
 const CHANGE_KEYS = new Set(["version", "identity", "state", "provenance", "projection"]);
@@ -696,6 +760,32 @@ const CHANGE_PROJECTION_RESULT_KEYS = new Set([
   "change",
   "diagnostics",
 ]);
+const CHANGE_MERGE_ADMISSION_INPUT_KEYS = new Set([
+  "change",
+  "projection",
+  "issuance",
+  "pullRequest",
+  "issuer",
+  "canonicalChange",
+  "canonical",
+  "projectionInput",
+  "projectionResult",
+  "issuancePlan",
+  "governedPullRequest",
+  "pullRequestContract",
+  "pullRequestBody",
+  "prContract",
+  "prBody",
+  "contract",
+  "body",
+  "expectedIssuer",
+  "branchGovernance",
+  "naming",
+  "baseBranch",
+  "evidence",
+  "provenance",
+]);
+const CHANGE_MERGE_ADMISSION_PULL_REQUEST_KEYS = new Set(["contract", "body"]);
 const CHANGE_PROJECTION_CANDIDATES_KEYS = new Set(["branches", "pullRequests"]);
 const CHANGE_PROJECTION_CANDIDATE_KEYS = new Set(["candidate", "classification", "reason"]);
 const CHANGE_GITHUB_EVIDENCE_KEYS = new Set(["issue", "branches", "pullRequests"]);
@@ -4998,3 +5088,715 @@ export class ChangeIssuanceRecoveryValidationError extends ChangeValidationError
     this.name = "ChangeIssuanceRecoveryValidationError";
   }
 }
+
+interface ParsedChangeMergeAdmissionPullRequest {
+  readonly contract?: unknown;
+  readonly body?: unknown;
+  readonly hasContract: boolean;
+  readonly hasBody: boolean;
+}
+
+interface ChangeMergeAdmissionAlias {
+  readonly present: boolean;
+  readonly value?: unknown;
+}
+
+function readChangeMergeAdmissionAlias(
+  input: RecordValue,
+  keys: readonly string[],
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): ChangeMergeAdmissionAlias {
+  const present = keys.filter((key) => hasOwn(input, key));
+  if (present.length > 1) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_CONFLICT",
+      path,
+      `Ambiguous input uses multiple aliases: ${present.join(", ")}.`,
+    );
+  }
+  const key = present[0];
+  return key === undefined ? { present: false } : { present: true, value: input[key] };
+}
+
+function admissionDiagnosticPath(prefix: string, path: string): string {
+  return path === "$" ? prefix : `${prefix}${path.slice(1)}`;
+}
+
+function appendAdmissionDiagnostics(
+  diagnostics: ChangeDiagnostic[],
+  source: readonly ChangeDiagnostic[],
+  prefix: string,
+): void {
+  for (const diagnostic of source) {
+    addDiagnostic(diagnostics, diagnostic.code, admissionDiagnosticPath(prefix, diagnostic.path), diagnostic.message);
+    if (diagnostics.length >= MAX_CHANGE_DIAGNOSTICS) return;
+  }
+}
+
+function parseChangeMergeAdmissionPullRequest(
+  input: unknown,
+  diagnostics: ChangeDiagnostic[],
+): ParsedChangeMergeAdmissionPullRequest | undefined {
+  if (!isRecord(input)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_INVALID_INPUT",
+      "$.pullRequest",
+      "Merge-admission pull-request evidence must be an object.",
+    );
+    return undefined;
+  }
+  addUnknownProperties(input, CHANGE_MERGE_ADMISSION_PULL_REQUEST_KEYS, "$.pullRequest", diagnostics);
+  const hasContract = hasOwn(input, "contract");
+  const hasBody = hasOwn(input, "body");
+  if (!hasContract) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.pullRequest.contract", "Property is required.");
+  }
+  if (!hasBody) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.pullRequest.body", "Property is required.");
+  }
+  return {
+    ...(hasContract ? { contract: input.contract } : {}),
+    ...(hasBody ? { body: input.body } : {}),
+    hasContract,
+    hasBody,
+  };
+}
+
+function admissionIssuer(value: unknown, path: string, diagnostics: ChangeDiagnostic[]): string | undefined {
+  const result = validateChangeProvenance({ issuer: value });
+  if (!result.valid || result.provenance?.issuer === undefined) {
+    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_ISSUER", path, "Issuer provenance is invalid.");
+    return undefined;
+  }
+  return result.provenance.issuer;
+}
+
+function validateAdmissionPullRequestContract(
+  contractInput: unknown,
+  bodyInput: unknown,
+  identity: ChangeIdentity | undefined,
+  baseBranch: string | undefined,
+  diagnostics: ChangeDiagnostic[],
+): boolean {
+  const before = diagnostics.length;
+  const contractResult = validateCanonicalContract(contractInput);
+  if (!contractResult.valid) {
+    for (const violation of contractResult.violations) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+        admissionDiagnosticPath("$.pullRequest.contract", violation.path),
+        violation.message,
+      );
+    }
+  } else {
+    const contract = contractInput as CanonicalContract;
+    if (contract.artifactKind !== "pull_request") {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+        "$.pullRequest.contract.artifactKind",
+        "The governed contract must be a pull-request contract.",
+      );
+    }
+    const provenance = contract.provenance;
+    if (provenance === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+        "$.pullRequest.contract.provenance",
+        "The pull-request contract must carry trusted repository provenance.",
+      );
+    } else {
+      if (identity !== undefined && provenance.repository.host.toLowerCase() !== identity.repositoryHost) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+          "$.pullRequest.contract.provenance.repository.host",
+          "The pull-request contract belongs to a different repository host.",
+        );
+      }
+      if (identity !== undefined && provenance.repository.repositoryId !== identity.repositoryId) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+          "$.pullRequest.contract.provenance.repository.repositoryId",
+          "The pull-request contract does not identify the Change repository.",
+        );
+      }
+      if (provenance.repository.repositoryId === undefined) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+          "$.pullRequest.contract.provenance.repository.repositoryId",
+          "The governed pull-request contract must carry a repository database identity.",
+        );
+      }
+      if (baseBranch !== undefined && provenance.ref !== baseBranch) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_BASE_MISMATCH",
+          "$.pullRequest.contract.provenance.ref",
+          "The governed pull-request contract was not resolved from the canonical base branch.",
+        );
+      }
+    }
+
+    if (typeof bodyInput !== "string" && bodyInput !== null) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+        "$.pullRequest.body",
+        "Physical pull-request body must be a string or null.",
+      );
+    } else {
+      let existing: ExistingArtifactValidationResult;
+      try {
+        existing = validateExistingPullRequestArtifact(contract, bodyInput);
+      } catch (error: unknown) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+          "$.pullRequest.body",
+          `Governed pull-request contract validation failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return diagnostics.length === before;
+      }
+      if (!existing.valid) {
+        const violations = existing.violations.length > 0 ? existing.violations : existing.parse.diagnostics;
+        for (const violation of violations) {
+          const path = "path" in violation && typeof violation.path === "string" ? violation.path : "$.body";
+          const message =
+            "message" in violation && typeof violation.message === "string" ? violation.message : "invalid";
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+            admissionDiagnosticPath("$.pullRequest.body", path),
+            message,
+          );
+        }
+        if (violations.length === 0) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+            "$.pullRequest.body",
+            "Physical pull-request body does not satisfy the governed contract.",
+          );
+        }
+      }
+    }
+  }
+  return diagnostics.length === before;
+}
+
+function validateAdmissionIssuance(
+  issuance: ChangeIssuancePlan,
+  canonical: Change,
+  canonicalBranch: string | undefined,
+  canonicalBaseBranch: string | undefined,
+  canonicalPullRequest: number | undefined,
+  expectedIssuer: string | undefined,
+  diagnostics: ChangeDiagnostic[],
+): void {
+  if (!sameChangeIdentity(issuance.transaction.identity, canonical.identity)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_IDENTITY_MISMATCH",
+      "$.issuance.transaction.identity",
+      "Issuance transaction identity does not match the canonical Change.",
+    );
+  }
+  if (!sameChangeIdentity(issuance.result.identity, canonical.identity)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_IDENTITY_MISMATCH",
+      "$.issuance.result.identity",
+      "Issuance result identity does not match the canonical Change.",
+    );
+  }
+  if (canonicalBranch !== undefined) {
+    if (issuance.verification.canonicalBranch !== canonicalBranch) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+        "$.issuance.verification.canonicalBranch",
+        "Issuance verification does not identify the canonical branch.",
+      );
+    }
+    if (issuance.result.projection?.branch !== canonicalBranch) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+        "$.issuance.result.projection.branch",
+        "Issuance result does not identify the canonical branch.",
+      );
+    }
+  }
+  if (canonicalBaseBranch !== undefined && issuance.verification.canonicalBaseBranch !== canonicalBaseBranch) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_BASE_MISMATCH",
+      "$.issuance.verification.canonicalBaseBranch",
+      "Issuance verification does not identify the canonical base branch.",
+    );
+  }
+  const issuanceIssuer = issuance.result.provenance.issuer;
+  if (issuanceIssuer === undefined) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_INVALID_ISSUER",
+      "$.issuance.result.provenance.issuer",
+      "Issuance result must identify its issuer.",
+    );
+  } else if (
+    !isTrustedInariIssuerPrincipal(issuanceIssuer) ||
+    expectedIssuer === undefined ||
+    issuanceIssuer !== expectedIssuer
+  ) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+      "$.issuance.result.provenance.issuer",
+      "Issuance issuer provenance does not match the canonical issuer.",
+    );
+  }
+  if (canonicalPullRequest !== undefined) {
+    if (issuance.mode === "return-existing" && issuance.result.projection?.pullRequest !== canonicalPullRequest) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+        "$.issuance.result.projection.pullRequest",
+        "Issuance does not identify the canonical pull request.",
+      );
+    }
+    if (
+      issuance.verification.pullRequest.number !== undefined &&
+      issuance.verification.pullRequest.number !== canonicalPullRequest
+    ) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+        "$.issuance.verification.pullRequest.number",
+        "Issuance verification does not identify the canonical pull request.",
+      );
+    }
+  }
+}
+
+/**
+ * Validate one canonical Change for merge admission.
+ *
+ * The canonical snapshot and (when supplied) issuance plan establish the
+ * governed identity. The #213 projection is recomputed from bounded physical
+ * evidence, and the selected physical PR is checked without ever promoting
+ * it to canonical identity merely because its intent looks similar.
+ */
+export function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissionValidationResult {
+  const diagnostics: ChangeDiagnostic[] = [];
+  if (!isRecord(input)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_INVALID_INPUT",
+      "$",
+      "Change merge-admission input must be a JSON object.",
+    );
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  addUnknownProperties(input, CHANGE_MERGE_ADMISSION_INPUT_KEYS, "$", diagnostics);
+
+  let issuance: ChangeIssuancePlan | undefined;
+  const issuanceInput = readChangeMergeAdmissionAlias(input, ["issuance", "issuancePlan"], "$.issuance", diagnostics);
+  if (issuanceInput.present) {
+    const result = validateChangeIssuancePlan(issuanceInput.value);
+    appendAdmissionDiagnostics(diagnostics, result.diagnostics, "$.issuance");
+    issuance = result.plan;
+  }
+
+  const canonicalInput = readChangeMergeAdmissionAlias(
+    input,
+    ["change", "canonicalChange", "canonical"],
+    "$.change",
+    diagnostics,
+  );
+  let canonical: Change | undefined;
+  if (!canonicalInput.present) {
+    if (issuance?.result !== undefined) canonical = issuance.result;
+    else addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.change", "Property is required.");
+  } else {
+    const result = validateChange(canonicalInput.value);
+    appendAdmissionDiagnostics(diagnostics, result.diagnostics, "$.change");
+    canonical = result.change;
+  }
+
+  const projectionInputAlias = readChangeMergeAdmissionAlias(
+    input,
+    ["projection", "projectionInput", "projectionResult"],
+    "$.projection",
+    diagnostics,
+  );
+  let projection: ChangeProjectionResult | undefined;
+  let projectionSource = projectionInputAlias.value;
+  const flattenedProjection =
+    !projectionInputAlias.present &&
+    ["branchGovernance", "naming", "baseBranch", "evidence", "provenance"].some((key) => hasOwn(input, key));
+  if (flattenedProjection) {
+    projectionSource = {
+      change: canonicalInput.value ?? canonical,
+      branchGovernance: input.branchGovernance,
+      naming: input.naming,
+      baseBranch: input.baseBranch,
+      evidence: input.evidence,
+      ...(hasOwn(input, "provenance") ? { provenance: input.provenance } : {}),
+    };
+  }
+  const projectionIsRawInput = isRecord(projectionSource) && hasOwn(projectionSource, "evidence");
+  if (!projectionInputAlias.present && !flattenedProjection) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.projection", "Property is required.");
+  } else if (projectionIsRawInput) {
+    const result = projectChangeFromGitHubEvidence(projectionSource);
+    appendAdmissionDiagnostics(diagnostics, result.diagnostics, "$.projection");
+    projection = result;
+  } else {
+    const result = validateChangeProjectionResult(projectionSource);
+    appendAdmissionDiagnostics(diagnostics, result.diagnostics, "$.projection");
+    projection = result.projection;
+    if (projection !== undefined)
+      appendAdmissionDiagnostics(diagnostics, projection.diagnostics, "$.projection.result");
+  }
+
+  // #214 remains the issuance authority even when an adapter passes only the
+  // #213 projection input. Planning is pure and has no GitHub side effect.
+  if (issuance === undefined && projectionIsRawInput) {
+    try {
+      issuance = planChangeIssuance(projectionSource);
+    } catch {
+      // The projection diagnostics already describe the fail-closed state.
+    }
+  }
+
+  const pullRequestAlias = readChangeMergeAdmissionAlias(
+    input,
+    ["pullRequest", "governedPullRequest"],
+    "$.pullRequest",
+    diagnostics,
+  );
+  let pullRequest: ParsedChangeMergeAdmissionPullRequest | undefined;
+  if (pullRequestAlias.present) {
+    pullRequest = parseChangeMergeAdmissionPullRequest(pullRequestAlias.value, diagnostics);
+  } else {
+    const contractAlias = readChangeMergeAdmissionAlias(
+      input,
+      ["pullRequestContract", "prContract", "contract"],
+      "$.pullRequest.contract",
+      diagnostics,
+    );
+    const bodyAlias = readChangeMergeAdmissionAlias(
+      input,
+      ["pullRequestBody", "prBody", "body"],
+      "$.pullRequest.body",
+      diagnostics,
+    );
+    if (contractAlias.present || bodyAlias.present) {
+      pullRequest = parseChangeMergeAdmissionPullRequest(
+        {
+          ...(contractAlias.present ? { contract: contractAlias.value } : {}),
+          ...(bodyAlias.present ? { body: bodyAlias.value } : {}),
+        },
+        diagnostics,
+      );
+    }
+  }
+  if (pullRequest === undefined && !pullRequestAlias.present) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.pullRequest", "Property is required.");
+  }
+
+  const issuerAlias = readChangeMergeAdmissionAlias(input, ["issuer", "expectedIssuer"], "$.issuer", diagnostics);
+  let explicitIssuer: string | undefined;
+  if (issuerAlias.present) explicitIssuer = admissionIssuer(issuerAlias.value, "$.issuer", diagnostics);
+
+  const canonicalIssuer = canonical?.provenance.issuer;
+  if (canonical !== undefined && canonicalIssuer === undefined) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_INVALID_ISSUER",
+      "$.change.provenance.issuer",
+      "A canonical Change must identify its issuer.",
+    );
+  } else if (canonicalIssuer !== undefined && !isTrustedInariIssuerPrincipal(canonicalIssuer)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+      "$.change.provenance.issuer",
+      "Canonical Change issuer provenance is not anchored to the trusted Inari issuer authority.",
+    );
+  }
+  if (explicitIssuer !== undefined && !isTrustedInariIssuerPrincipal(explicitIssuer)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+      "$.issuer",
+      "Explicit issuer provenance is not anchored to the trusted Inari issuer authority.",
+    );
+  }
+  if (explicitIssuer !== undefined && canonicalIssuer !== undefined && explicitIssuer !== canonicalIssuer) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+      "$.issuer",
+      "Explicit issuer provenance does not match the canonical Change.",
+    );
+  }
+  const expectedIssuer = explicitIssuer ?? canonicalIssuer;
+
+  if (canonical !== undefined && projection !== undefined) {
+    const projectedIssuer = projection.change?.provenance.issuer;
+    if (projectedIssuer === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_ISSUER",
+        "$.projection.change.provenance.issuer",
+        "Projected canonical Change must identify its issuer.",
+      );
+    } else if (!isTrustedInariIssuerPrincipal(projectedIssuer) || projectedIssuer !== expectedIssuer) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+        "$.projection.change.provenance.issuer",
+        "Projected Change issuer provenance does not match the trusted canonical issuer.",
+      );
+    }
+    if (!sameChangeIdentity(canonical.identity, projection.change?.identity ?? canonical.identity)) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_IDENTITY_MISMATCH",
+        "$.projection.change.identity",
+        "Projection identity does not match the canonical Change.",
+      );
+    }
+    if (!isChangeIssuanceHealthyState(canonical.state)) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_INPUT",
+        "$.change.state",
+        "Only a healthy canonical Change can pass merge admission.",
+      );
+    }
+    const canonicalBranch = canonical.projection?.branch;
+    const canonicalPullRequest = canonical.projection?.pullRequest;
+    if (canonicalBranch === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+        "$.change.projection.branch",
+        "Canonical Change must identify its canonical branch.",
+      );
+    }
+    if (canonicalPullRequest === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+        "$.change.projection.pullRequest",
+        "Canonical Change must identify its canonical pull request.",
+      );
+    }
+
+    if (projection.status !== "healthy" || !projection.valid) {
+      if (projection.diagnostics.length === 0) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_CONFLICT",
+          "$.projection.status",
+          "Only a healthy Change projection can pass merge admission.",
+        );
+      }
+    } else {
+      const canonicalBranchCandidates = projection.candidates.branches.filter(
+        (candidate) => candidate.classification === "canonical",
+      );
+      const canonicalPullRequestCandidates = projection.candidates.pullRequests.filter(
+        (candidate) => candidate.classification === "canonical",
+      );
+      const conflictingCandidates = [...projection.candidates.branches, ...projection.candidates.pullRequests].filter(
+        (candidate) => candidate.classification === "conflicting",
+      );
+      if (canonicalBranchCandidates.length !== 1 || canonicalPullRequestCandidates.length !== 1) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_CONFLICT",
+          "$.projection.candidates",
+          "A healthy projection must contain exactly one canonical branch and pull request candidate.",
+        );
+      }
+      if (conflictingCandidates.length > 0) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_CONFLICT",
+          "$.projection.candidates",
+          "A healthy projection cannot contain conflicting candidates.",
+        );
+      }
+      if (canonicalBranch !== undefined && projection.canonicalBranch !== canonicalBranch) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+          "$.projection.canonicalBranch",
+          "Projection branch does not match the canonical Change.",
+        );
+      }
+      if (projection.change === undefined) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_CONFLICT",
+          "$.projection.change",
+          "A healthy projection must contain a canonical Change snapshot.",
+        );
+      } else {
+        if (projection.change.state !== canonical.state) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_CONFLICT",
+            "$.projection.change.state",
+            "Projection lifecycle state does not match the canonical Change.",
+          );
+        }
+        if (canonicalBranch !== undefined && projection.change.projection?.branch !== canonicalBranch) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+            "$.projection.change.projection.branch",
+            "Projected Change does not identify the canonical branch.",
+          );
+        }
+        if (canonicalPullRequest !== undefined && projection.change.projection?.pullRequest !== canonicalPullRequest) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+            "$.projection.change.projection.pullRequest",
+            "Projected Change does not identify the canonical pull request.",
+          );
+        }
+      }
+    }
+
+    if (canonicalPullRequest !== undefined) {
+      const physicalCandidates = projection.candidates.pullRequests.filter(
+        (candidate) => candidate.candidate.number === canonicalPullRequest,
+      );
+      if (physicalCandidates.length !== 1) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+          "$.projection.candidates.pullRequests",
+          "The pre-established canonical pull-request identity is not present exactly once in physical evidence.",
+        );
+      } else {
+        const physical = physicalCandidates[0] as ChangeProjectionCandidate<ChangePullRequestEvidence>;
+        if (physical.classification !== "canonical") {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_CONFLICT",
+            "$.projection.candidates.pullRequests",
+            "The physical pull request is not a canonical projection candidate.",
+          );
+        }
+        const candidate = physical.candidate;
+        if (canonicalBranch !== undefined && candidate.head !== canonicalBranch) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_BRANCH_MISMATCH",
+            "$.projection.candidates.pullRequests",
+            "Physical pull-request head does not match the canonical branch.",
+          );
+        }
+        if (projection.canonicalBaseBranch !== undefined && candidate.base !== projection.canonicalBaseBranch) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_BASE_MISMATCH",
+            "$.projection.candidates.pullRequests",
+            "Physical pull-request base does not match the canonical base branch.",
+          );
+        }
+        if (candidate.rootIssue !== undefined && candidate.rootIssue !== canonical.identity.rootIssue) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_ROOT_ISSUE_MISMATCH",
+            "$.projection.candidates.pullRequests",
+            "Physical pull-request root Issue claim does not match the canonical Change.",
+          );
+        }
+        const physicalIssuer = candidate.provenance?.issuer;
+        if (physicalIssuer === undefined) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_INVALID_ISSUER",
+            "$.projection.candidates.pullRequests",
+            "The canonical physical pull request has no issuer provenance.",
+          );
+        } else if (
+          !isTrustedInariIssuerPrincipal(physicalIssuer) ||
+          expectedIssuer === undefined ||
+          physicalIssuer !== expectedIssuer
+        ) {
+          addDiagnostic(
+            diagnostics,
+            "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+            "$.projection.candidates.pullRequests",
+            "Physical pull-request issuer provenance does not match the canonical issuer.",
+          );
+        }
+      }
+    }
+
+    if (issuance !== undefined) {
+      validateAdmissionIssuance(
+        issuance,
+        canonical,
+        canonicalBranch,
+        projection.canonicalBaseBranch,
+        canonicalPullRequest,
+        expectedIssuer,
+        diagnostics,
+      );
+    }
+
+    if (pullRequest !== undefined && pullRequest.hasContract && pullRequest.hasBody) {
+      validateAdmissionPullRequestContract(
+        pullRequest.contract,
+        pullRequest.body,
+        canonical.identity,
+        projection.canonicalBaseBranch,
+        diagnostics,
+      );
+    }
+  }
+
+  const normalizedDiagnostics = createChangeDiagnosticReport(diagnostics).diagnostics;
+  const valid =
+    normalizedDiagnostics.length === 0 &&
+    canonical !== undefined &&
+    projection !== undefined &&
+    projection.valid &&
+    projection.status === "healthy" &&
+    pullRequest !== undefined &&
+    pullRequest.hasContract &&
+    pullRequest.hasBody;
+  const physicalPullRequest =
+    canonical?.projection?.pullRequest === undefined || projection === undefined
+      ? undefined
+      : projection.candidates.pullRequests.find(
+          (candidate) => candidate.candidate.number === canonical.projection?.pullRequest,
+        )?.candidate;
+  return {
+    valid,
+    ...(valid && canonical !== undefined ? { change: canonical } : {}),
+    ...(projection === undefined ? {} : { projection }),
+    ...(physicalPullRequest === undefined ? {} : { physicalPullRequest }),
+    diagnostics: normalizedDiagnostics,
+  };
+}
+
+export const validateCanonicalChangeProvenance = validateChangeMergeAdmission;
+export const validateChangeProvenanceForMergeAdmission = validateChangeMergeAdmission;

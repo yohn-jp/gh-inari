@@ -18,13 +18,17 @@ import {
   type ChangeEffect,
   type ChangeEffectKind,
 } from "../change.js";
+import { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
+
+export {
+  INARI_ISSUER_APP_KIND,
+  INARI_ISSUER_APP_SLUG,
+  INARI_ISSUER_PRINCIPAL,
+  type InariIssuerPrincipal,
+} from "../issuer-identity.js";
 
 export const ISSUER_AUTHORITY_CONTRACT_VERSION = 1 as const;
 export type IssuerAuthorityContractVersion = typeof ISSUER_AUTHORITY_CONTRACT_VERSION;
-
-export const INARI_ISSUER_APP_KIND = "github-app" as const;
-export const INARI_ISSUER_APP_SLUG = "inari-issuer" as const;
-export const INARI_ISSUER_PRINCIPAL = "app:inari-issuer" as const;
 
 export const TRUSTED_EXECUTION_RUNTIME = "github-actions" as const;
 export const TRUSTED_EXECUTION_EVENTS = Object.freeze(["workflow_dispatch", "workflow_call"] as const);
