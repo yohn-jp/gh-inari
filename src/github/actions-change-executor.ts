@@ -34,11 +34,13 @@ import {
 import {
   InariIssuerAppAuthority,
   assertTrustedExecution,
+  TRUSTED_EXECUTION_EVENTS,
   type IssuerInstallationScope,
   type IssuerCredentialRequest,
   type IssuerScopedMutationCapability,
   type TrustedInstallationCredentialBroker,
   type IssuerRepositoryIdentity,
+  type TrustedExecutionEvent,
 } from "./issuer-authority.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
@@ -158,7 +160,9 @@ export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
   readonly #fetch: typeof globalThis.fetch;
 
   constructor(options: GitHubActionsApiTransportOptions) {
-    this.#apiUrl = (options.apiUrl ?? DEFAULT_API_URL).replace(/\/+$/u, "");
+    // Bound the input length before the trailing-slash regex runs, so it cannot be handed an
+    // unbounded string (CodeQL polynomial-regex guard).
+    this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
     this.#token = boundedString(options.token, 4096);
     this.#fetch = options.fetch ?? globalThis.fetch;
   }
@@ -257,7 +261,7 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
     ) {
       throw new GitHubActionsChangeExecutorError();
     }
-    const apiUrl = (this.#options.apiUrl ?? DEFAULT_API_URL).replace(/\/+$/u, "");
+    const apiUrl = boundedString(this.#options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
     const response = await this.#fetch(`${apiUrl}/app/installations/${this.#options.installationId}/access_tokens`, {
       method: "POST",
       headers: {
@@ -304,6 +308,9 @@ function issuerPrincipal(login: string): string {
 }
 
 function deriveNaming(title: string): CanonicalBranchNamingInput {
+  // Bound the input length before the regex runs (CodeQL polynomial-regex guard); callers
+  // within this module already pass a title bounded to MAX_TITLE_LENGTH.
+  if (title.length > MAX_TITLE_LENGTH) throw new GitHubActionsChangeExecutorError();
   const match = ISSUE_TITLE_PATTERN.exec(title);
   if (match === null) throw new GitHubActionsChangeExecutorError();
   const type = match[1].toLowerCase();
@@ -481,24 +488,48 @@ export async function createGitHubActionsChangeExecutor(
   const repositoryBody = record(repositoryResponse.body);
   const repositoryId = String(repositoryBody.id);
   if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) throw new GitHubActionsChangeExecutorError();
+  if (typeof repositoryBody.fork !== "boolean") throw new GitHubActionsChangeExecutorError();
   const target: IssuerRepositoryIdentity = {
     repositoryHost: repository.hostname,
     repositoryId,
     nameWithOwner: repositoryNameWithOwner,
   };
-  const workflowRef = requiredEnvironment(environment, "GITHUB_WORKFLOW_REF").split("@").at(-1);
+
+  const event = requiredEnvironment(environment, "GITHUB_EVENT_NAME");
+  if (!TRUSTED_EXECUTION_EVENTS.includes(event as TrustedExecutionEvent)) {
+    throw new GitHubActionsChangeExecutorError();
+  }
+
+  // GITHUB_REF constrains the target ref only. Under workflow_call this reflects the
+  // *caller's* context, so it cannot alone prove the trusted-executor source — see below.
+  if (requiredEnvironment(environment, "GITHUB_REF") !== "refs/heads/main") {
+    throw new GitHubActionsChangeExecutorError();
+  }
+
+  // GITHUB_WORKFLOW_REF names the workflow FILE actually executing (owner/repo/path@ref).
+  // Unlike GITHUB_REF it cannot be substituted by a workflow_call caller, so an exact match
+  // against this repository's protected executor workflow is the real trust proof: only this
+  // check licenses workflowTrust: "protected" / codeExecution: "trusted-only" below.
+  const expectedWorkflowRef = `${repositoryNameWithOwner}/.github/workflows/inari-change-executor.yml@refs/heads/main`;
+  if (requiredEnvironment(environment, "GITHUB_WORKFLOW_REF") !== expectedWorkflowRef) {
+    throw new GitHubActionsChangeExecutorError();
+  }
+  const workflowRef = "refs/heads/main";
   const workflowSha = requiredEnvironment(environment, "GITHUB_WORKFLOW_SHA");
+
   const execution = assertTrustedExecution({
     version: 1,
     runtime: "github-actions",
-    event: requiredEnvironment(environment, "GITHUB_EVENT_NAME"),
+    event,
     repository: target,
     workflowRef,
     workflowSha,
     workflowTrust: "protected",
     codeExecution: "trusted-only",
-    fork: false,
-    pullRequest: false,
+    // repositoryBody.fork is an auxiliary scope check on the target repository identity;
+    // the primary proof against untrusted/forked execution is the workflow-ref match above.
+    fork: repositoryBody.fork,
+    pullRequest: event === "pull_request" || event === "pull_request_target",
     ...(environment.GITHUB_ACTOR === undefined ? {} : { requester: environment.GITHUB_ACTOR }),
   });
   const branchGovernance = await loadBranchGovernance(options.cwd);

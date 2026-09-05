@@ -16,6 +16,6 @@ jobs:
   ci:
     uses: yohn-jp/.github/.github/workflows/typescript-cli-ci.yml@main
     with:
-      node-version: "22"
+      node-version: "24"
       committed-dist: true
       run-governance: true

@@ -5,6 +5,7 @@ import {
   GitHubActionsApiTransport,
   GitHubActionsCredentialBroker,
   GitHubActionsEvidenceReader,
+  createGitHubActionsChangeExecutor,
   deriveChangeNamingFromIssueTitle,
 } from "./actions-change-executor.js";
 import type {
@@ -157,4 +158,108 @@ test("API transport does not return credential-bearing headers or unbounded resp
   assert.deepEqual(result, { status: 200, body: { ok: true } });
   assert.equal(JSON.stringify(result).includes(token), false);
   assert.match(JSON.stringify(received?.headers), /Bearer read-token/u);
+});
+
+function trustedEnvironment(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+  return {
+    GITHUB_REPOSITORY: "acme/inari",
+    GITHUB_TOKEN: "read-token",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/inari-change-executor.yml@refs/heads/main",
+    GITHUB_WORKFLOW_SHA: "a".repeat(40),
+    INARI_ISSUER_APP_ID: "218",
+    INARI_ISSUER_INSTALLATION_ID: "219",
+    INARI_ISSUER_APP_PRIVATE_KEY: "unused-in-these-tests",
+    ...overrides,
+  };
+}
+
+function repositoryOnlyFetch(fork: boolean): typeof globalThis.fetch {
+  return (async () =>
+    new Response(JSON.stringify({ id: 218000001, default_branch: "main", fork }), {
+      status: 200,
+    })) as unknown as typeof globalThis.fetch;
+}
+
+test("Trusted executor construction rejects a workflow_ref naming a different workflow file", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({
+        GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/other.yml@refs/heads/main",
+      }),
+      fetch: repositoryOnlyFetch(false),
+    }),
+  );
+});
+
+test("Trusted executor construction rejects a workflow_ref off the protected main branch", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({
+        GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/inari-change-executor.yml@refs/heads/feature-x",
+      }),
+      fetch: repositoryOnlyFetch(false),
+    }),
+  );
+});
+
+test("Trusted executor construction rejects a workflow_ref from a different repository (cross-repo workflow_call)", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({
+        GITHUB_WORKFLOW_REF: "other-org/other-repo/.github/workflows/inari-change-executor.yml@refs/heads/main",
+      }),
+      fetch: repositoryOnlyFetch(false),
+    }),
+  );
+});
+
+test("Trusted executor construction rejects a caller ref that is not the protected main branch", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({ GITHUB_REF: "refs/heads/feature-x" }),
+      fetch: repositoryOnlyFetch(false),
+    }),
+  );
+});
+
+test("Trusted executor construction rejects a pull-request-triggered ref", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({ GITHUB_REF: "refs/pull/1/merge" }),
+      fetch: repositoryOnlyFetch(false),
+    }),
+  );
+});
+
+test("Trusted executor construction rejects a forked target repository", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment(),
+      fetch: repositoryOnlyFetch(true),
+    }),
+  );
+});
+
+test("Trusted executor construction succeeds when the workflow ref, target ref, and repository identity are all proven", async () => {
+  const executor = await createGitHubActionsChangeExecutor({
+    cwd: process.cwd(),
+    request: changeRemoteMutationRequest("issue", 218),
+    environment: trustedEnvironment(),
+    fetch: repositoryOnlyFetch(false),
+  });
+  assert.ok(executor);
 });
