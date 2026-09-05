@@ -12,6 +12,8 @@ import { type ChangeRemoteExecutionEvidence, type ChangeRemoteExecutionResult, t
 export interface ChangeTrustedEvidenceReader {
     /** Returns bounded Core projection input; it never returns a GitHub response. */
     read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput>;
+    /** Production readers may require the governed root-Issue proof for issuance. */
+    readonly requiresGovernedIssueValidation?: boolean;
 }
 export interface ChangeTrustedExecutorOptions {
     readonly reader: ChangeTrustedEvidenceReader;
