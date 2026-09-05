@@ -15,6 +15,7 @@ import {
 import { renderPullRequestArtifact } from "./artifact.js";
 import { pullRequestContractFixture } from "./contract/fixtures.js";
 import type { CanonicalContract } from "./contract/ir.js";
+import { INARI_ISSUER_PRINCIPAL } from "./github/issuer-authority.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -25,7 +26,7 @@ const canonicalBranch = "feat/220-enforce-canonical-change-provenance";
 const canonicalBaseBranch = "main";
 const branchGovernance = { pattern: "^feat/[0-9]+-[a-z0-9-]+$" };
 const naming = { type: "feat", slug: "enforce-canonical-change-provenance" };
-const issuer = "app:inari-issuer";
+const issuer = INARI_ISSUER_PRINCIPAL;
 
 const governedPullRequestContract: CanonicalContract = {
   ...pullRequestContractFixture,
@@ -77,10 +78,14 @@ function pullRequest(number = 500, overrides: Partial<ChangePullRequestEvidence>
   };
 }
 
-function projectionInput(evidence: ChangeGitHubEvidence, withProvenance = true): ChangeProjectionInput {
+function projectionInput(
+  evidence: ChangeGitHubEvidence,
+  withProvenance = true,
+  provenanceIssuer: string = issuer,
+): ChangeProjectionInput {
   return {
     change: identity,
-    ...(withProvenance ? { provenance: { issuer } } : {}),
+    ...(withProvenance ? { provenance: { issuer: provenanceIssuer } } : {}),
     branchGovernance,
     naming,
     baseBranch: canonicalBaseBranch,
@@ -96,12 +101,12 @@ function canonicalProjectionInput(): ChangeProjectionInput {
   });
 }
 
-function canonicalIssuance(): ChangeIssuancePlan {
-  return planChangeIssuance(canonicalProjectionInput());
+function canonicalIssuance(input: ChangeProjectionInput = canonicalProjectionInput()): ChangeIssuancePlan {
+  return planChangeIssuance(input);
 }
 
-function canonicalChange(): Change {
-  return canonicalIssuance().result;
+function canonicalChange(input: ChangeProjectionInput = canonicalProjectionInput()): Change {
+  return canonicalIssuance(input).result;
 }
 
 function admissionInput(
@@ -241,6 +246,68 @@ test("missing or noncanonical issuer provenance fails closed", () => {
     ),
   );
   assertDiagnostic(nonissuer, "CHANGE_PROVENANCE_ISSUER_MISMATCH");
+});
+
+test("a matching human issuer cannot establish canonical provenance", () => {
+  const untrustedIssuer = "human:manual";
+  const projection = projectionInput(
+    {
+      issue: issueEvidence(),
+      branches: branchEvidence(),
+      pullRequests: { status: "available", value: [pullRequest(500, { provenance: { issuer: untrustedIssuer } })] },
+    },
+    true,
+    untrustedIssuer,
+  );
+  const result = validateChangeMergeAdmission(
+    admissionInput(projection, canonicalChange(projection), canonicalIssuance(projection)),
+  );
+
+  assertDiagnostic(result, "CHANGE_PROVENANCE_ISSUER_MISMATCH");
+});
+
+test("an arbitrary identical issuer cannot establish canonical provenance", () => {
+  const untrustedIssuer = "workflow:caller-controlled";
+  const projection = projectionInput(
+    {
+      issue: issueEvidence(),
+      branches: branchEvidence(),
+      pullRequests: { status: "available", value: [pullRequest(500, { provenance: { issuer: untrustedIssuer } })] },
+    },
+    true,
+    untrustedIssuer,
+  );
+  const result = validateChangeMergeAdmission(
+    admissionInput(projection, canonicalChange(projection), canonicalIssuance(projection)),
+  );
+
+  assertDiagnostic(result, "CHANGE_PROVENANCE_ISSUER_MISMATCH");
+});
+
+test("missing canonical issuer provenance fails closed even with trusted physical evidence", () => {
+  const result = validateChangeMergeAdmission(
+    admissionInput(undefined, { ...canonicalChange(), provenance: {} }, canonicalIssuance()),
+  );
+
+  assertDiagnostic(result, "CHANGE_PROVENANCE_INVALID_ISSUER");
+});
+
+test("trusted issuer mismatch across projection, issuance, and physical PR fails closed", () => {
+  const mismatchedIssuer = "app:other-issuer";
+  const projection = projectionInput(
+    {
+      issue: issueEvidence(),
+      branches: branchEvidence(),
+      pullRequests: { status: "available", value: [pullRequest(500, { provenance: { issuer: mismatchedIssuer } })] },
+    },
+    true,
+    mismatchedIssuer,
+  );
+  const result = validateChangeMergeAdmission(
+    admissionInput(projection, canonicalChange(), canonicalIssuance(projection)),
+  );
+
+  assertDiagnostic(result, "CHANGE_PROVENANCE_ISSUER_MISMATCH");
 });
 
 test("invalid governed PR contract fails closed", () => {

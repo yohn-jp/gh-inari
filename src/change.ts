@@ -8,6 +8,7 @@
  */
 
 import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 
 import { validateExistingPullRequestArtifact, type ExistingArtifactValidationResult } from "./artifact.js";
 import {
@@ -5343,7 +5344,18 @@ function validateAdmissionIssuance(
     );
   }
   const issuanceIssuer = issuance.result.provenance.issuer;
-  if (expectedIssuer !== undefined && issuanceIssuer !== undefined && issuanceIssuer !== expectedIssuer) {
+  if (issuanceIssuer === undefined) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_INVALID_ISSUER",
+      "$.issuance.result.provenance.issuer",
+      "Issuance result must identify its issuer.",
+    );
+  } else if (
+    !isTrustedInariIssuerPrincipal(issuanceIssuer) ||
+    expectedIssuer === undefined ||
+    issuanceIssuer !== expectedIssuer
+  ) {
     addDiagnostic(
       diagnostics,
       "CHANGE_PROVENANCE_ISSUER_MISMATCH",
@@ -5514,6 +5526,21 @@ export function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissi
       "$.change.provenance.issuer",
       "A canonical Change must identify its issuer.",
     );
+  } else if (canonicalIssuer !== undefined && !isTrustedInariIssuerPrincipal(canonicalIssuer)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+      "$.change.provenance.issuer",
+      "Canonical Change issuer provenance is not anchored to the trusted Inari issuer authority.",
+    );
+  }
+  if (explicitIssuer !== undefined && !isTrustedInariIssuerPrincipal(explicitIssuer)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+      "$.issuer",
+      "Explicit issuer provenance is not anchored to the trusted Inari issuer authority.",
+    );
   }
   if (explicitIssuer !== undefined && canonicalIssuer !== undefined && explicitIssuer !== canonicalIssuer) {
     addDiagnostic(
@@ -5526,6 +5553,22 @@ export function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissi
   const expectedIssuer = explicitIssuer ?? canonicalIssuer;
 
   if (canonical !== undefined && projection !== undefined) {
+    const projectedIssuer = projection.change?.provenance.issuer;
+    if (projectedIssuer === undefined) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_INVALID_ISSUER",
+        "$.projection.change.provenance.issuer",
+        "Projected canonical Change must identify its issuer.",
+      );
+    } else if (!isTrustedInariIssuerPrincipal(projectedIssuer) || projectedIssuer !== expectedIssuer) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+        "$.projection.change.provenance.issuer",
+        "Projected Change issuer provenance does not match the trusted canonical issuer.",
+      );
+    }
     if (!sameChangeIdentity(canonical.identity, projection.change?.identity ?? canonical.identity)) {
       addDiagnostic(
         diagnostics,
@@ -5693,7 +5736,11 @@ export function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissi
             "$.projection.candidates.pullRequests",
             "The canonical physical pull request has no issuer provenance.",
           );
-        } else if (expectedIssuer === undefined || physicalIssuer !== expectedIssuer) {
+        } else if (
+          !isTrustedInariIssuerPrincipal(physicalIssuer) ||
+          expectedIssuer === undefined ||
+          physicalIssuer !== expectedIssuer
+        ) {
           addDiagnostic(
             diagnostics,
             "CHANGE_PROVENANCE_ISSUER_MISMATCH",

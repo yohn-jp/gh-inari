@@ -7,6 +7,7 @@
  * GitHub state or execute effects.
  */
 import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { validateExistingPullRequestArtifact } from "./artifact.js";
 import { issueReferenceKey, normalizeIssueReference, } from "./contract/issue-reference.js";
 import { validateCanonicalContract } from "./contract/ir.js";
@@ -3442,7 +3443,12 @@ function validateAdmissionIssuance(issuance, canonical, canonicalBranch, canonic
         addDiagnostic(diagnostics, "CHANGE_PROVENANCE_BASE_MISMATCH", "$.issuance.verification.canonicalBaseBranch", "Issuance verification does not identify the canonical base branch.");
     }
     const issuanceIssuer = issuance.result.provenance.issuer;
-    if (expectedIssuer !== undefined && issuanceIssuer !== undefined && issuanceIssuer !== expectedIssuer) {
+    if (issuanceIssuer === undefined) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_ISSUER", "$.issuance.result.provenance.issuer", "Issuance result must identify its issuer.");
+    }
+    else if (!isTrustedInariIssuerPrincipal(issuanceIssuer) ||
+        expectedIssuer === undefined ||
+        issuanceIssuer !== expectedIssuer) {
         addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ISSUER_MISMATCH", "$.issuance.result.provenance.issuer", "Issuance issuer provenance does not match the canonical issuer.");
     }
     if (canonicalPullRequest !== undefined) {
@@ -3558,11 +3564,24 @@ export function validateChangeMergeAdmission(input) {
     if (canonical !== undefined && canonicalIssuer === undefined) {
         addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_ISSUER", "$.change.provenance.issuer", "A canonical Change must identify its issuer.");
     }
+    else if (canonicalIssuer !== undefined && !isTrustedInariIssuerPrincipal(canonicalIssuer)) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ISSUER_MISMATCH", "$.change.provenance.issuer", "Canonical Change issuer provenance is not anchored to the trusted Inari issuer authority.");
+    }
+    if (explicitIssuer !== undefined && !isTrustedInariIssuerPrincipal(explicitIssuer)) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ISSUER_MISMATCH", "$.issuer", "Explicit issuer provenance is not anchored to the trusted Inari issuer authority.");
+    }
     if (explicitIssuer !== undefined && canonicalIssuer !== undefined && explicitIssuer !== canonicalIssuer) {
         addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ISSUER_MISMATCH", "$.issuer", "Explicit issuer provenance does not match the canonical Change.");
     }
     const expectedIssuer = explicitIssuer ?? canonicalIssuer;
     if (canonical !== undefined && projection !== undefined) {
+        const projectedIssuer = projection.change?.provenance.issuer;
+        if (projectedIssuer === undefined) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_ISSUER", "$.projection.change.provenance.issuer", "Projected canonical Change must identify its issuer.");
+        }
+        else if (!isTrustedInariIssuerPrincipal(projectedIssuer) || projectedIssuer !== expectedIssuer) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ISSUER_MISMATCH", "$.projection.change.provenance.issuer", "Projected Change issuer provenance does not match the trusted canonical issuer.");
+        }
         if (!sameChangeIdentity(canonical.identity, projection.change?.identity ?? canonical.identity)) {
             addDiagnostic(diagnostics, "CHANGE_PROVENANCE_IDENTITY_MISMATCH", "$.projection.change.identity", "Projection identity does not match the canonical Change.");
         }
@@ -3634,7 +3653,9 @@ export function validateChangeMergeAdmission(input) {
                 if (physicalIssuer === undefined) {
                     addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_ISSUER", "$.projection.candidates.pullRequests", "The canonical physical pull request has no issuer provenance.");
                 }
-                else if (expectedIssuer === undefined || physicalIssuer !== expectedIssuer) {
+                else if (!isTrustedInariIssuerPrincipal(physicalIssuer) ||
+                    expectedIssuer === undefined ||
+                    physicalIssuer !== expectedIssuer) {
                     addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ISSUER_MISMATCH", "$.projection.candidates.pullRequests", "Physical pull-request issuer provenance does not match the canonical issuer.");
                 }
             }

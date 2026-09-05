@@ -11,10 +11,9 @@
  * the token nor the App private key appears in any public type or result.
  */
 import { CHANGE_EFFECT_KINDS, MAX_CHANGE_TRANSITION_EFFECTS, validateChangeEffect, } from "../change.js";
+import { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
+export { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL, } from "../issuer-identity.js";
 export const ISSUER_AUTHORITY_CONTRACT_VERSION = 1;
-export const INARI_ISSUER_APP_KIND = "github-app";
-export const INARI_ISSUER_APP_SLUG = "inari-issuer";
-export const INARI_ISSUER_PRINCIPAL = "app:inari-issuer";
 export const TRUSTED_EXECUTION_RUNTIME = "github-actions";
 export const TRUSTED_EXECUTION_EVENTS = Object.freeze(["workflow_dispatch", "workflow_call"]);
 export const ISSUER_PERMISSION_NAMES = Object.freeze(["contents", "pull_requests", "metadata"]);
