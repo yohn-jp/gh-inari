@@ -220,7 +220,16 @@ export type ChangeDiagnosticCode =
   | "CHANGE_TRANSITION_NOT_ALLOWED"
   | "CHANGE_INVALID_TRANSITION_TARGET"
   | "CHANGE_INVALID_EFFECT"
-  | "CHANGE_INVALID_PLAN";
+  | "CHANGE_INVALID_PLAN"
+  | "CHANGE_PROJECTION_INVALID_EVIDENCE"
+  | "CHANGE_PROJECTION_EVIDENCE_MISSING"
+  | "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE"
+  | "CHANGE_PROJECTION_ISSUE_MISMATCH"
+  | "CHANGE_PROJECTION_PARTIAL"
+  | "CHANGE_PROJECTION_DUPLICATE"
+  | "CHANGE_PROJECTION_WRONG_BASE"
+  | "CHANGE_PROJECTION_AMBIGUOUS"
+  | "CHANGE_PROJECTION_CONFLICT";
 
 export interface ChangeDiagnosticInput {
   readonly code: ChangeDiagnosticCode;
@@ -277,6 +286,106 @@ export interface CanonicalBranchIdentityDerivationResult {
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
+export const CHANGE_PROJECTION_STATUSES = Object.freeze([
+  "healthy",
+  "absent",
+  "partial",
+  "duplicate",
+  "wrong-base",
+  "ambiguous",
+  "unavailable",
+] as const);
+export type ChangeProjectionStatus = (typeof CHANGE_PROJECTION_STATUSES)[number];
+
+export const CHANGE_PROJECTION_CANDIDATE_CLASSES = Object.freeze(["canonical", "noncanonical", "conflicting"] as const);
+export type ChangeProjectionCandidateClass = (typeof CHANGE_PROJECTION_CANDIDATE_CLASSES)[number];
+
+export const CHANGE_EVIDENCE_STATUSES = Object.freeze(["available", "absent", "unavailable"] as const);
+export type ChangeEvidenceStatus = (typeof CHANGE_EVIDENCE_STATUSES)[number];
+
+/** A read result distinguishes confirmed absence from an unavailable read. */
+export type ChangeEvidenceSource<T> =
+  | { readonly status: "available"; readonly value: T }
+  | { readonly status: "absent" }
+  | { readonly status: "unavailable"; readonly reason: string };
+
+export type ChangeEvidence<T> = ChangeEvidenceSource<T>;
+
+/** Minimal, normalized Issue evidence required by the pure projection. */
+export interface ChangeIssueEvidence {
+  readonly number: number;
+  readonly state: "open" | "closed";
+}
+
+/** One bounded remote branch candidate. */
+export interface ChangeBranchEvidence {
+  readonly name: string;
+}
+
+/**
+ * Minimal, normalized pull-request evidence. `merged` is optional only for
+ * open PRs, where GitHub's open state is sufficient; a closed PR must carry
+ * it so the projection never guesses merged versus aborted.
+ */
+export interface ChangePullRequestEvidence {
+  readonly number: number;
+  readonly head: string;
+  readonly base: string;
+  readonly state: "open" | "closed";
+  readonly draft: boolean;
+  readonly merged?: boolean;
+  /** Optional governed merge-admission evidence for the ACCEPTED state. */
+  readonly accepted?: boolean;
+  /** Optional explicit root-Issue claim; branch identity remains authoritative. */
+  readonly rootIssue?: number;
+  readonly provenance?: ChangeProvenance;
+}
+
+/** Bounded evidence collected from GitHub; this type has no transport methods. */
+export interface ChangeGitHubEvidence {
+  readonly issue?: ChangeEvidenceSource<ChangeIssueEvidence>;
+  readonly branches?: ChangeEvidenceSource<readonly ChangeBranchEvidence[]>;
+  readonly pullRequests?: ChangeEvidenceSource<readonly ChangePullRequestEvidence[]>;
+}
+
+export type ChangeProjectionEvidence = ChangeGitHubEvidence;
+
+export interface ChangeProjectionInput {
+  /** A Change snapshot or identity; its existing state is never trusted. */
+  readonly change: Change | ChangeIdentity;
+  /** Existing repository branch policy consumed by #211's authority. */
+  readonly branchGovernance: PullRequestBranchGovernance;
+  /** Existing governance-resolved branch naming parts consumed by #211. */
+  readonly naming: CanonicalBranchNamingInput;
+  /** Repository-governed target base branch. */
+  readonly baseBranch: string;
+  readonly evidence: ChangeGitHubEvidence;
+  /** Optional known provenance when projecting from an identity rather than a snapshot. */
+  readonly provenance?: ChangeProvenance;
+}
+
+export interface ChangeProjectionCandidate<T> {
+  readonly candidate: T;
+  readonly classification: ChangeProjectionCandidateClass;
+  readonly reason: string;
+}
+
+export interface ChangeProjectionCandidates {
+  readonly branches: readonly ChangeProjectionCandidate<ChangeBranchEvidence>[];
+  readonly pullRequests: readonly ChangeProjectionCandidate<ChangePullRequestEvidence>[];
+}
+
+export interface ChangeProjectionResult {
+  readonly valid: boolean;
+  readonly status: ChangeProjectionStatus;
+  readonly canonicalBranch?: string;
+  readonly canonicalBaseBranch?: string;
+  readonly candidates: ChangeProjectionCandidates;
+  /** Present for a healthy/defined projection or for explicit recovery drift. */
+  readonly change?: Change;
+  readonly diagnostics: readonly ChangeDiagnostic[];
+}
+
 const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_INVALID_JSON",
   "CHANGE_INVALID_ROOT",
@@ -296,6 +405,15 @@ const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_INVALID_TRANSITION_TARGET",
   "CHANGE_INVALID_EFFECT",
   "CHANGE_INVALID_PLAN",
+  "CHANGE_PROJECTION_INVALID_EVIDENCE",
+  "CHANGE_PROJECTION_EVIDENCE_MISSING",
+  "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE",
+  "CHANGE_PROJECTION_ISSUE_MISMATCH",
+  "CHANGE_PROJECTION_PARTIAL",
+  "CHANGE_PROJECTION_DUPLICATE",
+  "CHANGE_PROJECTION_WRONG_BASE",
+  "CHANGE_PROJECTION_AMBIGUOUS",
+  "CHANGE_PROJECTION_CONFLICT",
 ];
 
 const CHANGE_KEYS = new Set(["version", "identity", "state", "provenance", "projection"]);
@@ -308,9 +426,35 @@ const TRANSITION_REQUEST_KEYS = new Set(["version", "transition", "change", "tar
 const TRANSITION_TARGET_KEYS = new Set(["branch", "baseBranch", "pullRequest"]);
 const TRANSITION_PLAN_KEYS = new Set(["version", "request", "from", "to", "result", "effects"]);
 const EFFECT_KEYS = new Set(["kind", "branch", "baseBranch", "rootIssue", "draft", "pullRequest"]);
+const CHANGE_PROJECTION_INPUT_KEYS = new Set([
+  "change",
+  "branchGovernance",
+  "naming",
+  "baseBranch",
+  "evidence",
+  "provenance",
+]);
+const CHANGE_GITHUB_EVIDENCE_KEYS = new Set(["issue", "branches", "pullRequests"]);
+const CHANGE_EVIDENCE_AVAILABLE_KEYS = new Set(["status", "value"]);
+const CHANGE_EVIDENCE_ABSENT_KEYS = new Set(["status"]);
+const CHANGE_EVIDENCE_UNAVAILABLE_KEYS = new Set(["status", "reason"]);
+const CHANGE_ISSUE_EVIDENCE_KEYS = new Set(["number", "state"]);
+const CHANGE_BRANCH_EVIDENCE_KEYS = new Set(["name"]);
+const CHANGE_PULL_REQUEST_EVIDENCE_KEYS = new Set([
+  "number",
+  "head",
+  "base",
+  "state",
+  "draft",
+  "merged",
+  "accepted",
+  "rootIssue",
+  "provenance",
+]);
 
 export const MAX_CHANGE_BASE_BRANCH_LENGTH = MAX_CHANGE_BRANCH_LENGTH;
 export const MAX_CHANGE_TRANSITION_EFFECTS = 8 as const;
+export const MAX_CHANGE_PROJECTION_CANDIDATES = 64 as const;
 
 type RecordValue = Record<string, unknown>;
 
@@ -704,6 +848,777 @@ export function deriveCanonicalBranchIdentity(input: unknown): CanonicalBranchId
   }
   return { valid: true, branch, diagnostics: [] };
 }
+
+interface ChangeProjectionEvidenceRead<T> {
+  readonly status: "available" | "absent" | "unavailable";
+  readonly value?: T;
+}
+
+type NormalizedChangePullRequestEvidence = Omit<ChangePullRequestEvidence, "merged"> & {
+  readonly merged: boolean;
+};
+
+function projectionEvidenceUnavailableResult(
+  diagnostics: ChangeDiagnostic[],
+  canonicalBranch?: string,
+  canonicalBaseBranch?: string,
+): ChangeProjectionResult {
+  return {
+    valid: false,
+    status: "unavailable",
+    ...(canonicalBranch === undefined ? {} : { canonicalBranch }),
+    ...(canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch }),
+    candidates: { branches: [], pullRequests: [] },
+    diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics,
+  };
+}
+
+function projectionText(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+  label: string,
+  maxLength: number,
+): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    /[\u0000-\u001F\u007F]/u.test(value)
+  ) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, `${label} is invalid.`);
+    return undefined;
+  }
+  return value;
+}
+
+function projectionNumber(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+  label: string,
+): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, `${label} must be a positive safe integer.`);
+    return undefined;
+  }
+  return value;
+}
+
+function readChangeProjectionEvidenceSource<T>(
+  input: unknown,
+  path: string,
+  parseValue: (value: unknown, path: string, diagnostics: ChangeDiagnostic[]) => T | undefined,
+  diagnostics: ChangeDiagnostic[],
+): ChangeProjectionEvidenceRead<T> {
+  if (input === undefined) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_EVIDENCE_MISSING", path, "Evidence is required.");
+    return { status: "unavailable" };
+  }
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, "Evidence source must be an object.");
+    return { status: "unavailable" };
+  }
+  const status = input.status;
+  if (status === "absent") {
+    addUnknownProperties(input, CHANGE_EVIDENCE_ABSENT_KEYS, path, diagnostics);
+    return { status: "absent" };
+  }
+  if (status === "available") {
+    addUnknownProperties(input, CHANGE_EVIDENCE_AVAILABLE_KEYS, path, diagnostics);
+    if (!hasOwn(input, "value")) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROJECTION_EVIDENCE_MISSING",
+        `${path}.value`,
+        "Available evidence must contain a value.",
+      );
+      return { status: "unavailable" };
+    }
+    const value = parseValue(input.value, `${path}.value`, diagnostics);
+    return value === undefined ? { status: "unavailable" } : { status: "available", value };
+  }
+  if (status === "unavailable") {
+    addUnknownProperties(input, CHANGE_EVIDENCE_UNAVAILABLE_KEYS, path, diagnostics);
+    if (!hasOwn(input, "reason")) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROJECTION_EVIDENCE_MISSING",
+        `${path}.reason`,
+        "Unavailable evidence must declare a reason.",
+      );
+      return { status: "unavailable" };
+    }
+    const reason = input.reason;
+    if (
+      typeof reason !== "string" ||
+      reason.length === 0 ||
+      reason.length > MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH ||
+      /[\u0000-\u001F\u007F]/u.test(reason)
+    ) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROJECTION_INVALID_EVIDENCE",
+        `${path}.reason`,
+        "Unavailable evidence reason is invalid.",
+      );
+      return { status: "unavailable" };
+    }
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE", path, `Evidence is unavailable: ${reason}`);
+    return { status: "unavailable" };
+  }
+  addDiagnostic(
+    diagnostics,
+    "CHANGE_PROJECTION_INVALID_EVIDENCE",
+    `${path}.status`,
+    "Evidence source status is unsupported.",
+  );
+  return { status: "unavailable" };
+}
+
+function parseChangeIssueEvidence(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): ChangeIssueEvidence | undefined {
+  const before = diagnostics.length;
+  if (!isRecord(value)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, "Issue evidence must be an object.");
+    return undefined;
+  }
+  addUnknownProperties(value, CHANGE_ISSUE_EVIDENCE_KEYS, path, diagnostics);
+  const number = projectionNumber(value.number, `${path}.number`, diagnostics, "Issue number");
+  const state = value.state;
+  if (state !== "open" && state !== "closed") {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", `${path}.state`, "Issue state is invalid.");
+  }
+  if (diagnostics.length !== before && number === undefined) return undefined;
+  if (number === undefined || (state !== "open" && state !== "closed")) return undefined;
+  return { number, state };
+}
+
+function parseChangeBranchEvidence(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): ChangeBranchEvidence | undefined {
+  const before = diagnostics.length;
+  if (!isRecord(value)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, "Branch evidence must be an object.");
+    return undefined;
+  }
+  addUnknownProperties(value, CHANGE_BRANCH_EVIDENCE_KEYS, path, diagnostics);
+  const name = projectionText(value.name, `${path}.name`, diagnostics, "Branch name", MAX_CHANGE_BRANCH_LENGTH);
+  return diagnostics.length === before && name !== undefined ? { name } : undefined;
+}
+
+function parseChangeBranchEvidenceList(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): readonly ChangeBranchEvidence[] | undefined {
+  if (!Array.isArray(value)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, "Branch evidence value must be an array.");
+    return undefined;
+  }
+  if (value.length > MAX_CHANGE_PROJECTION_CANDIDATES) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_INVALID_EVIDENCE",
+      path,
+      `At most ${MAX_CHANGE_PROJECTION_CANDIDATES} branch candidates are supported.`,
+    );
+    return undefined;
+  }
+  const branches: ChangeBranchEvidence[] = [];
+  for (const [index, candidate] of value.entries()) {
+    const parsed = parseChangeBranchEvidence(candidate, `${path}[${index}]`, diagnostics);
+    if (parsed !== undefined) branches.push(parsed);
+  }
+  if (branches.length !== value.length) return undefined;
+  return branches.sort((left, right) => compareText(left.name, right.name));
+}
+
+function parseChangePullRequestEvidence(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): NormalizedChangePullRequestEvidence | undefined {
+  const before = diagnostics.length;
+  if (!isRecord(value)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, "Pull-request evidence must be an object.");
+    return undefined;
+  }
+  addUnknownProperties(value, CHANGE_PULL_REQUEST_EVIDENCE_KEYS, path, diagnostics);
+
+  const number = projectionNumber(value.number, `${path}.number`, diagnostics, "Pull-request number");
+  const head = projectionText(value.head, `${path}.head`, diagnostics, "Pull-request head", MAX_CHANGE_BRANCH_LENGTH);
+  const base = projectionText(
+    value.base,
+    `${path}.base`,
+    diagnostics,
+    "Pull-request base",
+    MAX_CHANGE_BASE_BRANCH_LENGTH,
+  );
+  const state = value.state;
+  if (state !== "open" && state !== "closed") {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", `${path}.state`, "Pull-request state is invalid.");
+  }
+  const draft = value.draft;
+  if (typeof draft !== "boolean") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_INVALID_EVIDENCE",
+      `${path}.draft`,
+      "Pull-request draft state is invalid.",
+    );
+  }
+
+  let merged: boolean | undefined;
+  if (hasOwn(value, "merged")) {
+    if (typeof value.merged !== "boolean") {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROJECTION_INVALID_EVIDENCE",
+        `${path}.merged`,
+        "Pull-request merged state is invalid.",
+      );
+    } else {
+      merged = value.merged;
+    }
+  } else if (state === "closed") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_EVIDENCE_MISSING",
+      `${path}.merged`,
+      "Closed pull-request evidence must distinguish merged from aborted.",
+    );
+  } else if (state === "open") {
+    merged = false;
+  }
+
+  let accepted: boolean | undefined;
+  if (hasOwn(value, "accepted")) {
+    if (typeof value.accepted !== "boolean") {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_PROJECTION_INVALID_EVIDENCE",
+        `${path}.accepted`,
+        "Pull-request acceptance evidence is invalid.",
+      );
+    } else {
+      accepted = value.accepted;
+    }
+  }
+
+  let rootIssue: number | undefined;
+  if (hasOwn(value, "rootIssue")) {
+    rootIssue = projectionNumber(value.rootIssue, `${path}.rootIssue`, diagnostics, "Root Issue number");
+  }
+
+  let provenance: ChangeProvenance | undefined;
+  if (hasOwn(value, "provenance")) {
+    const result = validateChangeProvenance(value.provenance, `${path}.provenance`);
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    provenance = result.provenance;
+  }
+
+  if (state === "open" && merged === true) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_CONFLICT",
+      `${path}.merged`,
+      "An open pull request cannot be projected as merged.",
+    );
+  }
+  if (draft === true && accepted === true) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_CONFLICT",
+      `${path}.accepted`,
+      "A draft pull request cannot be projected as accepted.",
+    );
+  }
+
+  if (
+    diagnostics.length !== before ||
+    number === undefined ||
+    head === undefined ||
+    base === undefined ||
+    (state !== "open" && state !== "closed") ||
+    typeof draft !== "boolean" ||
+    merged === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    number,
+    head,
+    base,
+    state,
+    draft,
+    merged,
+    ...(accepted === undefined ? {} : { accepted }),
+    ...(rootIssue === undefined ? {} : { rootIssue }),
+    ...(provenance === undefined ? {} : { provenance }),
+  };
+}
+
+function parseChangePullRequestEvidenceList(
+  value: unknown,
+  path: string,
+  diagnostics: ChangeDiagnostic[],
+): readonly NormalizedChangePullRequestEvidence[] | undefined {
+  if (!Array.isArray(value)) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_INVALID_EVIDENCE",
+      path,
+      "Pull-request evidence value must be an array.",
+    );
+    return undefined;
+  }
+  if (value.length > MAX_CHANGE_PROJECTION_CANDIDATES) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_INVALID_EVIDENCE",
+      path,
+      `At most ${MAX_CHANGE_PROJECTION_CANDIDATES} pull-request candidates are supported.`,
+    );
+    return undefined;
+  }
+  const pullRequests: NormalizedChangePullRequestEvidence[] = [];
+  for (const [index, candidate] of value.entries()) {
+    const parsed = parseChangePullRequestEvidence(candidate, `${path}[${index}]`, diagnostics);
+    if (parsed !== undefined) pullRequests.push(parsed);
+  }
+  if (pullRequests.length !== value.length) return undefined;
+  return pullRequests.sort(compareChangePullRequestEvidence);
+}
+
+function compareOptionalNumber(left: number | undefined, right: number | undefined): number {
+  if (left === undefined && right === undefined) return 0;
+  if (left === undefined) return -1;
+  if (right === undefined) return 1;
+  return left - right;
+}
+
+function compareOptionalBoolean(left: boolean | undefined, right: boolean | undefined): number {
+  if (left === undefined && right === undefined) return 0;
+  if (left === undefined) return -1;
+  if (right === undefined) return 1;
+  return Number(left) - Number(right);
+}
+
+function compareChangePullRequestEvidence(
+  left: NormalizedChangePullRequestEvidence,
+  right: NormalizedChangePullRequestEvidence,
+): number {
+  return (
+    left.number - right.number ||
+    compareText(left.head, right.head) ||
+    compareText(left.base, right.base) ||
+    compareText(left.state, right.state) ||
+    Number(left.draft) - Number(right.draft) ||
+    Number(left.merged) - Number(right.merged) ||
+    compareOptionalBoolean(left.accepted, right.accepted) ||
+    compareOptionalNumber(left.rootIssue, right.rootIssue) ||
+    compareText(left.provenance?.issuer ?? "", right.provenance?.issuer ?? "") ||
+    compareText(left.provenance?.implementer ?? "", right.provenance?.implementer ?? "") ||
+    compareText(left.provenance?.reviewer ?? "", right.provenance?.reviewer ?? "") ||
+    compareText(left.provenance?.merger ?? "", right.provenance?.merger ?? "") ||
+    compareText(left.provenance?.requester ?? "", right.provenance?.requester ?? "")
+  );
+}
+
+function projectionSourceValue<T>(read: ChangeProjectionEvidenceRead<T>, empty: T): T {
+  return read.status === "available" && read.value !== undefined ? read.value : empty;
+}
+
+function countProjectionValues<T>(values: readonly T[], key: (value: T) => string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const valueKey = key(value);
+    counts.set(valueKey, (counts.get(valueKey) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function classifyChangeBranchCandidates(
+  branches: readonly ChangeBranchEvidence[],
+  canonicalBranch: string,
+): readonly ChangeProjectionCandidate<ChangeBranchEvidence>[] {
+  const counts = countProjectionValues(branches, (candidate) => candidate.name);
+  return branches.map((candidate) => {
+    const count = counts.get(candidate.name) ?? 0;
+    if (count > 1) {
+      return {
+        candidate,
+        classification: "conflicting",
+        reason: "The same branch candidate was reported more than once.",
+      };
+    }
+    if (candidate.name === canonicalBranch) {
+      return { candidate, classification: "canonical", reason: "Branch matches the derived canonical identity." };
+    }
+    return {
+      candidate,
+      classification: "noncanonical",
+      reason: "Branch does not match the derived canonical identity.",
+    };
+  });
+}
+
+function projectionPullRequestIdentityMatches(
+  candidate: NormalizedChangePullRequestEvidence,
+  canonicalBranch: string,
+  canonicalBaseBranch: string,
+  rootIssue: number,
+): boolean {
+  return (
+    candidate.head === canonicalBranch &&
+    candidate.base === canonicalBaseBranch &&
+    (candidate.rootIssue === undefined || candidate.rootIssue === rootIssue)
+  );
+}
+
+function classifyChangePullRequestCandidates(
+  pullRequests: readonly NormalizedChangePullRequestEvidence[],
+  canonicalBranch: string,
+  canonicalBaseBranch: string,
+  rootIssue: number,
+): readonly ChangeProjectionCandidate<ChangePullRequestEvidence>[] {
+  const numberCounts = countProjectionValues(pullRequests, (candidate) => String(candidate.number));
+  return pullRequests.map((candidate) => {
+    if ((numberCounts.get(String(candidate.number)) ?? 0) > 1) {
+      return {
+        candidate,
+        classification: "conflicting",
+        reason: "The same pull-request number was reported more than once.",
+      };
+    }
+    if (candidate.head === canonicalBranch && candidate.base !== canonicalBaseBranch) {
+      return {
+        candidate,
+        classification: "conflicting",
+        reason: "Pull-request base does not match the canonical base branch.",
+      };
+    }
+    if (candidate.head === canonicalBranch && candidate.rootIssue !== undefined && candidate.rootIssue !== rootIssue) {
+      return {
+        candidate,
+        classification: "conflicting",
+        reason: "Pull-request root Issue claim conflicts with the projected Change identity.",
+      };
+    }
+    if (projectionPullRequestIdentityMatches(candidate, canonicalBranch, canonicalBaseBranch, rootIssue)) {
+      return {
+        candidate,
+        classification: "canonical",
+        reason: "Pull request matches the canonical branch, base, and Change identity.",
+      };
+    }
+    return {
+      candidate,
+      classification: "noncanonical",
+      reason: "Pull request does not match the canonical branch projection.",
+    };
+  });
+}
+
+function mergeChangeProvenance(base: ChangeProvenance, candidate: ChangeProvenance | undefined): ChangeProvenance {
+  if (candidate === undefined) return base;
+  return {
+    ...base,
+    ...candidate,
+  };
+}
+
+function createProjectedChange(
+  identity: ChangeIdentity,
+  provenance: ChangeProvenance,
+  state: ChangeState,
+  branch: string | undefined,
+  pullRequest: number | undefined,
+): Change {
+  const projection: ChangeProjection = {
+    ...(branch === undefined ? {} : { branch }),
+    ...(pullRequest === undefined ? {} : { pullRequest }),
+  };
+  return {
+    version: CHANGE_CONTRACT_VERSION,
+    identity,
+    state,
+    provenance,
+    ...(Object.keys(projection).length === 0 ? {} : { projection }),
+  };
+}
+
+function changeStateFromPullRequest(candidate: NormalizedChangePullRequestEvidence): ChangeState {
+  if (candidate.state === "closed") return candidate.merged ? "MERGED" : "ABORTED";
+  if (candidate.draft) return "DRAFT";
+  if (candidate.accepted === true) return "ACCEPTED";
+  return "REVIEW";
+}
+
+function projectionStatusDiagnostic(status: ChangeProjectionStatus, diagnostics: ChangeDiagnostic[]): void {
+  if (status === "partial") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_PARTIAL",
+      "$.evidence",
+      "Canonical branch and pull request evidence do not form a complete Change projection.",
+    );
+  } else if (status === "duplicate") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_DUPLICATE",
+      "$.evidence",
+      "More than one candidate claims the canonical Change projection.",
+    );
+  } else if (status === "wrong-base") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_WRONG_BASE",
+      "$.evidence.pullRequests",
+      "A canonical-branch pull request targets the wrong base branch.",
+    );
+  } else if (status === "ambiguous") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_AMBIGUOUS",
+      "$.evidence",
+      "Multiple plausible Change candidates exist; no heuristic candidate selection is allowed.",
+    );
+  }
+}
+
+/**
+ * Purely project one Change from bounded Issue, branch, and pull-request
+ * evidence. Existing Change state is never used as authority, and no GitHub
+ * client, persistence, mutation, or candidate heuristic is involved.
+ */
+export function projectChangeFromGitHubEvidence(input: unknown): ChangeProjectionResult {
+  const diagnostics: ChangeDiagnostic[] = [];
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_ROOT", "$", "Change projection input must be a JSON object.");
+    return projectionEvidenceUnavailableResult(diagnostics);
+  }
+  addUnknownProperties(input, CHANGE_PROJECTION_INPUT_KEYS, "$", diagnostics);
+
+  let identity: ChangeIdentity | undefined;
+  let provenance: ChangeProvenance = {};
+  if (!hasOwn(input, "change")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.change", "Property is required.");
+  } else if (isRecord(input.change) && hasOwn(input.change, "identity")) {
+    const result = validateChange(input.change);
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    identity = result.change?.identity;
+    provenance = result.change?.provenance ?? {};
+  } else {
+    const result = validateChangeIdentity(input.change, "$.change");
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    identity = result.identity;
+  }
+
+  if (hasOwn(input, "provenance")) {
+    const result = validateChangeProvenance(input.provenance, "$.provenance");
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    if (result.provenance !== undefined) provenance = result.provenance;
+  }
+
+  let canonicalBranch: string | undefined;
+  if (identity !== undefined) {
+    const derivationInput: RecordValue = { change: identity };
+    if (hasOwn(input, "branchGovernance")) derivationInput.branchGovernance = input.branchGovernance;
+    if (hasOwn(input, "naming")) derivationInput.naming = input.naming;
+    const result = deriveCanonicalBranchIdentity(derivationInput);
+    diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+    canonicalBranch = result.branch;
+  }
+
+  let canonicalBaseBranch: string | undefined;
+  if (!hasOwn(input, "baseBranch")) {
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.baseBranch", "Property is required.");
+  } else {
+    canonicalBaseBranch = projectionText(
+      input.baseBranch,
+      "$.baseBranch",
+      diagnostics,
+      "Canonical base branch",
+      MAX_CHANGE_BASE_BRANCH_LENGTH,
+    );
+  }
+
+  let evidence: RecordValue | undefined;
+  if (!hasOwn(input, "evidence")) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_EVIDENCE_MISSING", "$.evidence", "Evidence is required.");
+  } else if (!isRecord(input.evidence)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", "$.evidence", "Evidence must be an object.");
+  } else {
+    evidence = input.evidence;
+    addUnknownProperties(evidence, CHANGE_GITHUB_EVIDENCE_KEYS, "$.evidence", diagnostics);
+  }
+
+  if (
+    identity === undefined ||
+    canonicalBranch === undefined ||
+    canonicalBaseBranch === undefined ||
+    evidence === undefined ||
+    diagnostics.length > 0
+  ) {
+    return projectionEvidenceUnavailableResult(diagnostics, canonicalBranch, canonicalBaseBranch);
+  }
+
+  const issueRead = readChangeProjectionEvidenceSource(
+    hasOwn(evidence, "issue") ? evidence.issue : undefined,
+    "$.evidence.issue",
+    parseChangeIssueEvidence,
+    diagnostics,
+  );
+  const branchRead = readChangeProjectionEvidenceSource(
+    hasOwn(evidence, "branches") ? evidence.branches : undefined,
+    "$.evidence.branches",
+    parseChangeBranchEvidenceList,
+    diagnostics,
+  );
+  const pullRequestRead = readChangeProjectionEvidenceSource(
+    hasOwn(evidence, "pullRequests") ? evidence.pullRequests : undefined,
+    "$.evidence.pullRequests",
+    parseChangePullRequestEvidenceList,
+    diagnostics,
+  );
+
+  if (diagnostics.length > 0) {
+    return projectionEvidenceUnavailableResult(diagnostics, canonicalBranch, canonicalBaseBranch);
+  }
+
+  const branches = projectionSourceValue(branchRead, [] as readonly ChangeBranchEvidence[]);
+  const pullRequests = projectionSourceValue(pullRequestRead, [] as readonly NormalizedChangePullRequestEvidence[]);
+  const candidates: ChangeProjectionCandidates = {
+    branches: classifyChangeBranchCandidates(branches, canonicalBranch),
+    pullRequests: classifyChangePullRequestCandidates(
+      pullRequests,
+      canonicalBranch,
+      canonicalBaseBranch,
+      identity.rootIssue,
+    ),
+  };
+
+  const issue = issueRead.status === "available" ? issueRead.value : undefined;
+  if (issueRead.status === "available" && issue === undefined) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_INVALID_EVIDENCE",
+      "$.evidence.issue",
+      "Issue evidence is incomplete.",
+    );
+    return projectionEvidenceUnavailableResult(diagnostics, canonicalBranch, canonicalBaseBranch);
+  }
+  if (issue !== undefined && issue.number !== identity.rootIssue) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_ISSUE_MISMATCH",
+      "$.evidence.issue.number",
+      "Issue evidence does not match the projected Change root Issue.",
+    );
+    return {
+      valid: false,
+      status: "unavailable",
+      canonicalBranch,
+      canonicalBaseBranch,
+      candidates,
+      diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics,
+    };
+  }
+
+  const canonicalBranches = candidates.branches.filter((candidate) => candidate.candidate.name === canonicalBranch);
+  const canonicalPullRequests = pullRequests.filter((candidate) =>
+    projectionPullRequestIdentityMatches(candidate, canonicalBranch, canonicalBaseBranch, identity.rootIssue),
+  );
+  const pullRequestNumberCounts = countProjectionValues(pullRequests, (candidate) => String(candidate.number));
+  const duplicateCanonicalPullRequestNumbers = pullRequests.some(
+    (candidate) =>
+      candidate.head === canonicalBranch && (pullRequestNumberCounts.get(String(candidate.number)) ?? 0) > 1,
+  );
+  const wrongBasePullRequests = pullRequests.filter(
+    (candidate) => candidate.head === canonicalBranch && candidate.base !== canonicalBaseBranch,
+  );
+  const conflictingCandidates = [
+    ...candidates.branches.filter((candidate) => candidate.classification === "conflicting"),
+    ...candidates.pullRequests.filter((candidate) => candidate.classification === "conflicting"),
+  ];
+  const plausibleNoncanonicalPullRequests = pullRequests.filter(
+    (candidate) => candidate.rootIssue === identity.rootIssue && candidate.head !== canonicalBranch,
+  );
+
+  let status: ChangeProjectionStatus;
+  if (canonicalBranches.length > 1 || canonicalPullRequests.length > 1 || duplicateCanonicalPullRequestNumbers) {
+    status = "duplicate";
+  } else if (wrongBasePullRequests.length > 0) {
+    status = "wrong-base";
+  } else if (conflictingCandidates.length > 0) {
+    status = "ambiguous";
+  } else if (canonicalBranches.length === 1 && canonicalPullRequests.length === 1 && issue !== undefined) {
+    status = "healthy";
+  } else if (canonicalBranches.length === 1 || canonicalPullRequests.length === 1) {
+    status = "partial";
+  } else if (plausibleNoncanonicalPullRequests.length > 1) {
+    status = "ambiguous";
+  } else if (issueRead.status === "absent" && (canonicalBranches.length > 0 || canonicalPullRequests.length > 0)) {
+    status = "partial";
+  } else {
+    status = "absent";
+  }
+
+  if (status === "absent") {
+    const change =
+      issue === undefined ? undefined : createProjectedChange(identity, provenance, "DEFINED", undefined, undefined);
+    return {
+      valid: true,
+      status,
+      canonicalBranch,
+      canonicalBaseBranch,
+      candidates,
+      ...(change === undefined ? {} : { change }),
+      diagnostics: [],
+    };
+  }
+
+  const canonicalPullRequest = canonicalPullRequests.length === 1 ? canonicalPullRequests[0] : undefined;
+  const knownBranch =
+    canonicalBranches.length === 1 || pullRequests.some((candidate) => candidate.head === canonicalBranch);
+  const projectedBranch = knownBranch ? canonicalBranch : undefined;
+  const projectedPullRequest = canonicalPullRequest?.number;
+  const projectedProvenance = mergeChangeProvenance(provenance, canonicalPullRequest?.provenance);
+  const state =
+    status === "healthy"
+      ? changeStateFromPullRequest(canonicalPullRequest as NormalizedChangePullRequestEvidence)
+      : "RECOVERY_REQUIRED";
+  const change = createProjectedChange(identity, projectedProvenance, state, projectedBranch, projectedPullRequest);
+
+  if (conflictingCandidates.length > 0 && status !== "duplicate" && status !== "wrong-base") {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_PROJECTION_CONFLICT",
+      "$.evidence",
+      "Conflicting candidates claim part of the canonical Change projection.",
+    );
+  }
+  projectionStatusDiagnostic(status, diagnostics);
+  return {
+    valid: status === "healthy",
+    status,
+    canonicalBranch,
+    canonicalBaseBranch,
+    candidates,
+    change,
+    diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics,
+  };
+}
+
+export const projectChangeFromEvidence = projectChangeFromGitHubEvidence;
+export const deriveChangeProjection = projectChangeFromGitHubEvidence;
 
 /** Stable identity key; locator changes cannot create a second Change. */
 export function changeIdentityKey(input: ChangeIdentity): string {
