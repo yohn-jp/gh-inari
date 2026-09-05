@@ -3,6 +3,7 @@ import { createArtifactDiagnostic, createArtifactDiagnosticReport, createFieldEv
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { EMPTY_ISSUE_DEPENDENCIES, validateIssueDependencies, } from "./contract/issue-reference.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
+import { classifyBranchName } from "./branch-governance.js";
 export class ArtifactInputError extends Error {
     code;
     path;
@@ -563,10 +564,37 @@ export function validateExistingIssueArtifact(contractInput, body, subject) {
     const parse = parseExistingIssueArtifact(contractInput, body);
     return validateParsedArtifact(contractInput, parse, subject);
 }
-export function validateExistingPullRequestArtifact(contractInput, body) {
+export function validateExistingPullRequestArtifact(contractInput, body, head) {
     assertCanonicalContract(contractInput);
     const parse = parseExistingPullRequestArtifact(contractInput, body);
-    return validateParsedArtifact(contractInput, parse);
+    const result = validateParsedArtifact(contractInput, parse);
+    if (head === undefined)
+        return result;
+    const branchViolation = validateExistingPullRequestBranch(contractInput, head);
+    if (branchViolation === undefined)
+        return result;
+    return {
+        ...result,
+        valid: false,
+        classification: result.classification === "valid" ? "semantic" : result.classification,
+        parse: { ...result.parse, diagnostics: [...result.parse.diagnostics, branchViolation] },
+        violations: [...result.violations, branchViolation],
+    };
+}
+/** Validate the observed PR head against the branch policy carried by compiled IR. */
+export function validateExistingPullRequestBranch(contractInput, head) {
+    assertCanonicalContract(contractInput);
+    if (contractInput.artifactKind !== "pull_request" || head === undefined)
+        return undefined;
+    const result = classifyBranchName(head, contractInput.provenance?.branchGovernance);
+    const violation = result.violations[0];
+    if (violation === undefined)
+        return undefined;
+    return {
+        code: "EXISTING_BRANCH_INVALID",
+        path: violation.path,
+        message: violation.message,
+    };
 }
 /** Project only validated semantic values; invalid artifacts never expose parsed fields. */
 export function projectExistingArtifact(result) {
@@ -650,7 +678,7 @@ export async function validateExistingPullRequestFromAdapter(reader, contract, p
     return {
         number: pullRequestNumber,
         url: pullRequest.url,
-        result: validateExistingPullRequestArtifact(contract, pullRequest.body),
+        result: validateExistingPullRequestArtifact(contract, pullRequest.body, pullRequest.head),
     };
 }
 function validateParsedArtifact(contract, parse, subject) {

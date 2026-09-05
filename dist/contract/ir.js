@@ -177,7 +177,7 @@ function validateBranchGovernance(value, path, violations) {
         addViolation(violations, "IR_INVALID_PROVENANCE", path, "Branch governance must be an object.");
         return;
     }
-    checkUnknownKeys(value, ["pattern"], path, violations);
+    checkUnknownKeys(value, ["pattern", "release", "exemptions"], path, violations);
     const pattern = requiredString(value, "pattern", path, violations);
     if (pattern !== undefined) {
         try {
@@ -185,6 +185,30 @@ function validateBranchGovernance(value, path, violations) {
         }
         catch {
             addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.pattern`, "Pattern must be a valid regular expression.");
+        }
+    }
+    if (hasOwn(value, "release")) {
+        const release = requiredRecord(value, "release", path, violations);
+        if (release !== undefined) {
+            checkUnknownKeys(release, ["pattern"], `${path}.release`, violations);
+            const releasePattern = requiredString(release, "pattern", `${path}.release`, violations);
+            if (releasePattern !== undefined) {
+                try {
+                    new RegExp(releasePattern, "u");
+                }
+                catch {
+                    addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.release.pattern`, "Release pattern must be a valid regular expression.");
+                }
+            }
+        }
+    }
+    if (hasOwn(value, "exemptions")) {
+        const exemptions = value.exemptions;
+        if (!Array.isArray(exemptions) || exemptions.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+            addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.exemptions`, "Branch exemptions must be an array of non-empty strings.");
+        }
+        else if (new Set(exemptions).size !== exemptions.length) {
+            addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.exemptions`, "Branch exemptions must not contain duplicates.");
         }
     }
 }

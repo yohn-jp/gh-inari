@@ -31,6 +31,7 @@ import {
 } from "./contract/index.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 import { compilePullRequestPolicyOverlay, parsePullRequestPolicyOverlay } from "./pr-policy.js";
+import { DEFAULT_RELEASE_BRANCH_PATTERN } from "./branch-governance.js";
 import {
   compilePullRequestTemplate,
   compilePullRequestTemplatesSync,
@@ -950,7 +951,11 @@ test("PR policy overlay parses an optional repository branch rule alongside sect
   const overlay = parsePullRequestPolicyOverlay(
     `version: 1\ntemplate: default\nsections: []\nbranch:\n  pattern: "^(feat|fix)/\\\\d+-[a-z0-9-]+$"\n`,
   );
-  assert.deepEqual(overlay.branch, { pattern: "^(feat|fix)/\\d+-[a-z0-9-]+$" });
+  assert.deepEqual(overlay.branch, {
+    pattern: "^(feat|fix)/\\d+-[a-z0-9-]+$",
+    release: { pattern: DEFAULT_RELEASE_BRANCH_PATTERN },
+    exemptions: [],
+  });
 });
 
 test("a repository PR policy with no branch key declares no branch governance", () => {

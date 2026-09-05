@@ -10,14 +10,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, projectChangeFromGitHubEvidence, validateGovernedRootIssueEvidence, } from "../change.js";
 import { extractTemplateIdentityMarker, renderIssueArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, } from "../artifact.js";
-import { compileLocalGovernedContract } from "../governance.js";
+import { compileLocalBranchGovernance, compileLocalGovernedContract } from "../governance.js";
+import { classifyBranchName, effectiveBranchGovernance, parseCanonicalChangeBranchName } from "../branch-governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, changeRemoteMutationRequest, changeRemoteReadRequest, } from "../change-executor.js";
 import { ChangeTrustedExecutorError, TrustedChangeExecutor, } from "../change-trusted-executor.js";
 import { GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES, GitHubChangeEffectAdapter, } from "./change-effect-adapter.js";
 import { InariIssuerAppAuthority, assertTrustedExecution, TRUSTED_EXECUTION_EVENTS, IssuerAuthorityError, } from "./issuer-authority.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
-import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_PULL_REQUESTS = 100;
@@ -27,7 +27,6 @@ const MAX_LOGIN_LENGTH = 160;
 const DEFAULT_API_URL = "https://api.github.com";
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
-const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
     "repository-evidence",
@@ -383,23 +382,18 @@ function deriveNaming(title) {
 }
 /** Recognize only repository-governed branch names carrying this root Issue. */
 function branchBelongsToRootIssue(branch, rootIssue, branchGovernance) {
-    const match = /^(feat|fix|docs|refactor|test|chore)\/(\d+)-([a-z0-9-]+)$/u.exec(branch);
-    if (match === null || Number(match[2]) !== rootIssue || !CANONICAL_BRANCH_TYPES.has(match[1]))
+    const parsed = parseCanonicalChangeBranchName(branch);
+    if (parsed === undefined || parsed.issueNumber !== rootIssue)
         return false;
-    if (branchGovernance === undefined)
-        return true;
-    try {
-        return new RegExp(branchGovernance.pattern, "u").test(branch);
-    }
-    catch {
-        return false;
-    }
+    const classification = classifyBranchName(branch, branchGovernance);
+    return (classification.valid &&
+        (classification.classification === "ordinary" || classification.classification === "unclassified"));
 }
 function namingFromBranch(branch, rootIssue) {
-    const match = /^(feat|fix|docs|refactor|test|chore)\/([0-9]+)-([a-z0-9-]+)$/u.exec(branch);
-    if (match === null || Number(match[2]) !== rootIssue)
+    const parsed = parseCanonicalChangeBranchName(branch);
+    if (parsed === undefined || parsed.issueNumber !== rootIssue)
         return undefined;
-    return { type: match[1] ?? "", slug: match[3] ?? "" };
+    return { type: parsed.type, slug: parsed.slug };
 }
 export const deriveChangeNamingFromIssueTitle = deriveNaming;
 /** Converts only bounded GitHub fields into the #213 Core evidence contract. */
@@ -480,7 +474,7 @@ export class GitHubActionsEvidenceReader {
             : undefined;
         return {
             change: this.#options.identity,
-            branchGovernance: this.#options.branchGovernance,
+            ...(this.#options.branchGovernance === undefined ? {} : { branchGovernance: this.#options.branchGovernance }),
             naming,
             baseBranch,
             evidence: {
@@ -716,7 +710,9 @@ export class GitHubActionsEvidenceReader {
                             .digest("hex"),
                     },
                 }),
-            ...(domain === "pr" ? { branchGovernance: this.#options.branchGovernance } : {}),
+            ...(domain === "pr" && this.#options.branchGovernance !== undefined
+                ? { branchGovernance: effectiveBranchGovernance(this.#options.branchGovernance) }
+                : {}),
         };
         return { ...contract, provenance };
     }
@@ -833,20 +829,7 @@ export class GitHubActionsEvidenceReader {
 }
 export async function loadBranchGovernance(cwd) {
     try {
-        for (const policyPath of POLICY_PATHS) {
-            let source;
-            try {
-                source = await readFile(path.join(cwd, policyPath), "utf8");
-            }
-            catch {
-                // Continue only when this repository-native policy path is absent.
-                continue;
-            }
-            const overlay = parsePullRequestPolicyOverlay(source);
-            // A repository-native policy with no branch rule declares no branch precondition.
-            return overlay.branch;
-        }
-        throw new GitHubActionsChangeExecutorError();
+        return await compileLocalBranchGovernance(cwd);
     }
     catch (error) {
         throw withFailureStage(error, "branch-governance");

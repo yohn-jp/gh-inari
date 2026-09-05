@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateExistingPullRequestArtifact, validateRequiredMetadataString } from "../src/artifact.ts";
-import { compileLocalGovernedContract } from "../src/governance.ts";
+import { compileLocalBranchGovernance, compileLocalGovernedContract } from "../src/governance.ts";
+import { classifyBranchName } from "../src/branch-governance.ts";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -14,8 +15,20 @@ const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)
  * template parsing, policy compilation, body reconstruction, and semantic
  * validation remain in the product library used by the CLI.
  */
-export async function validatePullRequest({ title, body, root = REPOSITORY_ROOT, template, contract }) {
-  const compiled = contract ?? (await compileLocalGovernedContract("pr", root, template));
+export async function validatePullRequest({ title, body, root = REPOSITORY_ROOT, template, branch, contract }) {
+  const branchGovernance = contract?.provenance?.branchGovernance ?? (await compileLocalBranchGovernance(root));
+  const branchResult = classifyBranchName(branch, branchGovernance);
+  if (!branchResult.valid) {
+    return {
+      valid: false,
+      branchClassification: branchResult.classification,
+      ...(branchResult.version === undefined ? {} : { branchVersion: branchResult.version }),
+      violations: branchResult.violations,
+      errors: branchResult.violations.map((violation) => violation.message),
+    };
+  }
+  const routedTemplate = branchResult.classification === "release" ? "release" : template;
+  const compiled = contract ?? (await compileLocalGovernedContract("pr", root, routedTemplate));
   const result = validateExistingPullRequestArtifact(compiled, body);
   const violations = [...result.violations];
   const titleViolation = validateRequiredMetadataString(title, "title");
@@ -23,6 +36,8 @@ export async function validatePullRequest({ title, body, root = REPOSITORY_ROOT,
   return {
     valid: violations.length === 0,
     contract: compiled,
+    branchClassification: branchResult.classification,
+    ...(branchResult.version === undefined ? {} : { branchVersion: branchResult.version }),
     result,
     violations,
     errors: violations.map((violation) => violation.message),
@@ -39,17 +54,21 @@ async function main() {
   if (!pullRequest) throw new Error("event has no pull_request");
 
   const template = optionValue("--template");
+  const branch = optionValue("--branch") ?? pullRequest.head?.ref;
   const report = await validatePullRequest({
     title: pullRequest.title ?? "",
     body: pullRequest.body ?? "",
     root: process.cwd(),
     ...(template === undefined ? {} : { template }),
+    ...(branch === undefined ? {} : { branch }),
   });
   console.log(
     JSON.stringify({
       valid: report.valid,
-      template: report.contract.templateIdentity,
-      classification: report.result.classification,
+      ...(report.branchClassification === undefined ? {} : { branchClassification: report.branchClassification }),
+      ...(report.branchVersion === undefined ? {} : { branchVersion: report.branchVersion }),
+      ...(report.contract === undefined ? {} : { template: report.contract.templateIdentity }),
+      ...(report.result === undefined ? {} : { classification: report.result.classification }),
       violations: report.violations,
     }),
   );

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   compileIssueFormTemplate,
@@ -11,6 +11,7 @@ import {
   type CanonicalContract,
   type ContractProvenance,
   type ContractProvenanceSource,
+  type EffectivePullRequestBranchGovernance,
   type PullRequestBranchGovernance,
 } from "./contract/ir.js";
 import {
@@ -27,6 +28,7 @@ import {
   compilePullRequestPolicyOverlay,
   parsePullRequestPolicyOverlay,
 } from "./pr-policy.js";
+import { classifyBranchName } from "./branch-governance.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
 import {
   compileSemanticTemplate,
@@ -167,6 +169,20 @@ export async function compileLocalGovernedContract(
   return compilePullRequestPolicyFile(contract, selectedPolicy, {
     templateIdentities: discovery.pullRequestTemplates,
   });
+}
+
+/**
+ * Compile the repository-declared branch policy independently of PR template
+ * selection. Branch naming applies to the observed head ref, not to a body
+ * template, so trusted Change paths must not parse policy YAML themselves.
+ */
+export async function compileLocalBranchGovernance(
+  root: string,
+): Promise<EffectivePullRequestBranchGovernance | undefined> {
+  const selectedPolicy = await resolveLocalPolicyPath(root, undefined);
+  if (selectedPolicy === undefined) return undefined;
+  const source = await readFile(selectedPolicy, "utf8");
+  return parsePullRequestPolicyOverlay(source).branch;
 }
 
 /** Compile every repository-native Issue Form with the shared compiler. */
@@ -338,7 +354,7 @@ async function compileRepositoryGovernedContractFromSource(
   }
 
   let policySource: ContractProvenanceSource | undefined;
-  let branchGovernance: PullRequestBranchGovernance | undefined;
+  let branchGovernance: EffectivePullRequestBranchGovernance | undefined;
   const repositoryPolicy = domain === "pr" ? await policySourceLoader() : undefined;
   if (repositoryPolicy !== undefined) {
     const overlay = parsePullRequestPolicyOverlay(repositoryPolicy.source);
@@ -395,7 +411,7 @@ async function compileRepositorySemanticContractFromSource(
   }
   let contract = compileSemanticTemplateSource(semanticSource, identity.generatedPath);
   let policySource: ContractProvenanceSource | undefined;
-  let branchGovernance: PullRequestBranchGovernance | undefined;
+  let branchGovernance: EffectivePullRequestBranchGovernance | undefined;
   if (semanticSource.kind === "pull_request") {
     const repositoryPolicy = await createRepositoryPolicySourceLoader(adapter, source)();
     if (repositoryPolicy !== undefined) {
@@ -640,30 +656,26 @@ export async function updateGovernedIssue(
 function assertBranchGovernance(artifact: ValidatedRenderedPullRequestArtifact): void {
   const branchGovernance = artifact.provenance.branchGovernance;
   if (branchGovernance === undefined) return;
-  let pattern: RegExp;
-  try {
-    pattern = new RegExp(branchGovernance.pattern, "u");
-  } catch (cause: unknown) {
-    throw new GovernanceError(
-      "GOVERNANCE_SOURCE_INVALID",
-      "The target repository's branch governance pattern is not a valid regular expression.",
-      {
-        repository: artifact.provenance.repository.nameWithOwner,
-        pattern: branchGovernance.pattern,
-        reason: "invalid branch governance pattern",
-      },
-      { cause },
-    );
+  const classification = classifyBranchName(artifact.head, branchGovernance);
+  if (classification.valid) return;
+  const violation = classification.violations[0];
+  if (violation?.code === "BRANCH_POLICY_INVALID") {
+    throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", violation.message, {
+      repository: artifact.provenance.repository.nameWithOwner,
+      pattern: branchGovernance.pattern,
+      reason: violation.code,
+    });
   }
-  if (pattern.test(artifact.head)) return;
   throw new GovernanceError(
     "GOVERNANCE_BRANCH_INVALID",
-    `Pull request head branch "${artifact.head}" does not satisfy the target repository's branch governance.`,
+    violation?.message ??
+      `Pull request head branch "${artifact.head}" does not satisfy the target repository's branch governance.`,
     {
       repository: artifact.provenance.repository.nameWithOwner,
       head: artifact.head,
       pattern: branchGovernance.pattern,
-      reason: "head branch does not match required pattern",
+      classification: classification.classification,
+      reason: violation?.code ?? "branch governance violation",
     },
   );
 }

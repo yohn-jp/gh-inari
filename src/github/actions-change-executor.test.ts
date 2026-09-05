@@ -592,12 +592,6 @@ test("runtime setup exposes the bounded stage at each setup boundary", async () 
       stage: "trusted-execution",
     },
     {
-      name: "branch governance",
-      environment: trustedEnvironment(),
-      cwd: "/tmp/inari-missing-governance",
-      stage: "branch-governance",
-    },
-    {
       name: "issuer configuration",
       environment: trustedEnvironment({ INARI_ISSUER_APP_ID: undefined }),
       stage: "issuer-configuration",
@@ -615,6 +609,16 @@ test("runtime setup exposes the bounded stage at each setup boundary", async () 
       testCase.name,
     );
   }
+});
+
+test("runtime setup permits a repository with no branch governance rule", async () => {
+  const executor = await createGitHubActionsChangeExecutor({
+    cwd: "/tmp/inari-missing-governance",
+    request: changeRemoteMutationRequest("issue", 218),
+    environment: trustedEnvironment(),
+    fetch: repositoryOnlyFetch(false),
+  });
+  assert.ok(executor);
 });
 
 test("repository-evidence bootstrap failures are distinguishable by bounded fixed reason", async () => {

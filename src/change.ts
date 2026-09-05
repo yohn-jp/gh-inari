@@ -7,7 +7,7 @@
  * GitHub state or execute effects.
  */
 
-import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { classifyBranchName, deriveBranchName, effectiveBranchGovernance } from "./branch-governance.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 
 import {
@@ -1323,24 +1323,16 @@ export function deriveCanonicalBranchIdentity(input: unknown): CanonicalBranchId
   }
 
   if (governance !== undefined) {
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(governance.pattern, "u");
-    } catch (error: unknown) {
+    const classification = classifyBranchName(branch, effectiveBranchGovernance(governance));
+    if (!classification.valid) {
+      const violation = classification.violations[0];
       addDiagnostic(
         diagnostics,
-        "CHANGE_INVALID_BRANCH_GOVERNANCE",
-        "$.branchGovernance.pattern",
-        `Branch governance is invalid: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
-    }
-    if (!pattern.test(branch)) {
-      addDiagnostic(
-        diagnostics,
-        "CHANGE_BRANCH_GOVERNANCE_MISMATCH",
-        "$.branchGovernance.pattern",
-        `Derived branch "${branch}" does not satisfy the repository's branch governance.`,
+        violation?.code === "BRANCH_POLICY_INVALID"
+          ? "CHANGE_INVALID_BRANCH_GOVERNANCE"
+          : "CHANGE_BRANCH_GOVERNANCE_MISMATCH",
+        violation?.code === "BRANCH_POLICY_INVALID" ? "$.branchGovernance" : "$.branchGovernance.pattern",
+        violation?.message ?? `Derived branch "${branch}" does not satisfy the repository's branch governance.`,
       );
       return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
     }

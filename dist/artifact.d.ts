@@ -88,7 +88,7 @@ export interface PreparedPullRequestArtifact {
     readonly artifact: ValidatedRenderedPullRequestArtifact;
 }
 export type ExistingArtifactClassification = "valid" | "semantic" | "wrong-template" | "unparseable" | "ambiguous";
-export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE" | "EXISTING_NON_CANONICAL" | "EXISTING_TEMPLATE_COMPILE_FAILED" | "EXISTING_TEMPLATE_MARKER_INVALID";
+export type ExistingArtifactDiagnosticCode = "EXISTING_WRONG_TEMPLATE" | "EXISTING_UNPARSEABLE" | "EXISTING_EXTRA_CONTENT" | "EXISTING_UNKNOWN_CHECKLIST_ITEM" | "EXISTING_AMBIGUOUS_TEMPLATE" | "EXISTING_NON_CANONICAL" | "EXISTING_TEMPLATE_COMPILE_FAILED" | "EXISTING_TEMPLATE_MARKER_INVALID" | "EXISTING_BRANCH_INVALID";
 export interface ExistingArtifactDiagnostic {
     readonly code: ExistingArtifactDiagnosticCode;
     readonly path: string;
@@ -116,7 +116,7 @@ export interface ExistingArtifactValidationResult {
     readonly valid: boolean;
     readonly classification: ExistingArtifactClassification;
     readonly parse: ExistingArtifactParseResult;
-    readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+    readonly violations: readonly (ExistingArtifactDiagnostic | SemanticViolation)[];
     /** Template paths tried against a multi-candidate match that produced no single parse. */
     readonly attemptedTemplates?: readonly string[];
 }
@@ -132,6 +132,7 @@ export interface ExistingPullRequestReader {
     getPullRequest(pullRequestNumber: number): Promise<{
         readonly body: string | null;
         readonly url: string;
+        readonly head?: string | null;
     }>;
 }
 /**
@@ -237,7 +238,9 @@ export declare function parseExistingPullRequestArtifact(contractInput: unknown,
  */
 export declare function recoverExistingArtifactValues(contractInput: unknown, body: string | null | undefined): RecoverableArtifactValues;
 export declare function validateExistingIssueArtifact(contractInput: unknown, body: string | null | undefined, subject?: IssueReference): ExistingArtifactValidationResult;
-export declare function validateExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined): ExistingArtifactValidationResult;
+export declare function validateExistingPullRequestArtifact(contractInput: unknown, body: string | null | undefined, head?: string | null): ExistingArtifactValidationResult;
+/** Validate the observed PR head against the branch policy carried by compiled IR. */
+export declare function validateExistingPullRequestBranch(contractInput: unknown, head: string | null | undefined): ExistingArtifactDiagnostic | undefined;
 export interface ExistingArtifactCandidate {
     readonly contract: CanonicalContract;
     readonly result: ExistingArtifactValidationResult;

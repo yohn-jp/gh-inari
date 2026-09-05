@@ -1,4 +1,4 @@
-import { type CanonicalContract, type ContractProvenance } from "./contract/ir.js";
+import { type CanonicalContract, type ContractProvenance, type EffectivePullRequestBranchGovernance } from "./contract/ir.js";
 import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
 import { type TemplateResolverDependencies } from "./template-resolver.js";
@@ -39,6 +39,12 @@ export declare function rejectGovernedPolicyOverride(policyPath: string | boolea
  * the product compiler rather than by handwritten workflow scripts.
  */
 export declare function compileLocalGovernedContract(domain: GovernedArtifactDomain, root: string, selector?: string | TemplateSelector, policyPath?: string | boolean, options?: GovernedContractCompileOptions): Promise<CanonicalContract>;
+/**
+ * Compile the repository-declared branch policy independently of PR template
+ * selection. Branch naming applies to the observed head ref, not to a body
+ * template, so trusted Change paths must not parse policy YAML themselves.
+ */
+export declare function compileLocalBranchGovernance(root: string): Promise<EffectivePullRequestBranchGovernance | undefined>;
 /** Compile every repository-native Issue Form with the shared compiler. */
 export declare function compileLocalIssueFormContracts(root: string): Promise<readonly CanonicalContract[]>;
 /**

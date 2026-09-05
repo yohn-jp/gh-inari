@@ -62,7 +62,22 @@ export interface ContractProvenanceSource {
  * rule has no branch precondition to preflight.
  */
 export interface PullRequestBranchGovernance {
+  /** Ordinary development branch rule. */
   readonly pattern: string;
+  /** Release branches are a separate operational classification. */
+  readonly release?: {
+    readonly pattern: string;
+  };
+  /** Explicit branch names exempt from the ordinary rule. */
+  readonly exemptions?: readonly string[];
+}
+
+/** Effective branch policy carried by a compiled pull-request IR. */
+export interface EffectivePullRequestBranchGovernance extends PullRequestBranchGovernance {
+  readonly release: {
+    readonly pattern: string;
+  };
+  readonly exemptions: readonly string[];
 }
 
 export interface ContractProvenance {
@@ -82,7 +97,7 @@ export interface ContractProvenance {
   /** Template selection configuration observed at compile time; defaults apply only when the selector is omitted. */
   readonly templateResolution?: ContractProvenanceSource;
   /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
-  readonly branchGovernance?: PullRequestBranchGovernance;
+  readonly branchGovernance?: EffectivePullRequestBranchGovernance;
 }
 
 export interface NativeContractMetadata {
@@ -545,7 +560,7 @@ function validateBranchGovernance(value: unknown, path: string, violations: Cano
     addViolation(violations, "IR_INVALID_PROVENANCE", path, "Branch governance must be an object.");
     return;
   }
-  checkUnknownKeys(value, ["pattern"], path, violations);
+  checkUnknownKeys(value, ["pattern", "release", "exemptions"], path, violations);
   const pattern = requiredString(value, "pattern", path, violations);
   if (pattern !== undefined) {
     try {
@@ -556,6 +571,43 @@ function validateBranchGovernance(value: unknown, path: string, violations: Cano
         "IR_INVALID_PROVENANCE",
         `${path}.pattern`,
         "Pattern must be a valid regular expression.",
+      );
+    }
+  }
+  if (hasOwn(value, "release")) {
+    const release = requiredRecord(value, "release", path, violations);
+    if (release !== undefined) {
+      checkUnknownKeys(release, ["pattern"], `${path}.release`, violations);
+      const releasePattern = requiredString(release, "pattern", `${path}.release`, violations);
+      if (releasePattern !== undefined) {
+        try {
+          new RegExp(releasePattern, "u");
+        } catch {
+          addViolation(
+            violations,
+            "IR_INVALID_PROVENANCE",
+            `${path}.release.pattern`,
+            "Release pattern must be a valid regular expression.",
+          );
+        }
+      }
+    }
+  }
+  if (hasOwn(value, "exemptions")) {
+    const exemptions = value.exemptions;
+    if (!Array.isArray(exemptions) || exemptions.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.exemptions`,
+        "Branch exemptions must be an array of non-empty strings.",
+      );
+    } else if (new Set(exemptions).size !== exemptions.length) {
+      addViolation(
+        violations,
+        "IR_INVALID_PROVENANCE",
+        `${path}.exemptions`,
+        "Branch exemptions must not contain duplicates.",
       );
     }
   }

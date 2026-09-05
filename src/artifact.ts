@@ -35,6 +35,7 @@ import {
   createValidatedRenderedIssueArtifact,
   createValidatedRenderedPullRequestArtifact,
 } from "./github/capability.js";
+import { classifyBranchName } from "./branch-governance.js";
 
 export interface ArtifactInputMetadata {
   readonly title?: string;
@@ -161,7 +162,8 @@ export type ExistingArtifactDiagnosticCode =
   | "EXISTING_AMBIGUOUS_TEMPLATE"
   | "EXISTING_NON_CANONICAL"
   | "EXISTING_TEMPLATE_COMPILE_FAILED"
-  | "EXISTING_TEMPLATE_MARKER_INVALID";
+  | "EXISTING_TEMPLATE_MARKER_INVALID"
+  | "EXISTING_BRANCH_INVALID";
 
 export interface ExistingArtifactDiagnostic {
   readonly code: ExistingArtifactDiagnosticCode;
@@ -193,7 +195,7 @@ export interface ExistingArtifactValidationResult {
   readonly valid: boolean;
   readonly classification: ExistingArtifactClassification;
   readonly parse: ExistingArtifactParseResult;
-  readonly violations: readonly ExistingArtifactDiagnostic[] | readonly SemanticViolation[];
+  readonly violations: readonly (ExistingArtifactDiagnostic | SemanticViolation)[];
   /** Template paths tried against a multi-candidate match that produced no single parse. */
   readonly attemptedTemplates?: readonly string[];
 }
@@ -208,7 +210,11 @@ export interface ExistingIssueReader {
 }
 
 export interface ExistingPullRequestReader {
-  getPullRequest(pullRequestNumber: number): Promise<{ readonly body: string | null; readonly url: string }>;
+  getPullRequest(pullRequestNumber: number): Promise<{
+    readonly body: string | null;
+    readonly url: string;
+    readonly head?: string | null;
+  }>;
 }
 
 const GITHUB_NO_RESPONSE = "_No response_";
@@ -877,10 +883,38 @@ export function validateExistingIssueArtifact(
 export function validateExistingPullRequestArtifact(
   contractInput: unknown,
   body: string | null | undefined,
+  head?: string | null,
 ): ExistingArtifactValidationResult {
   assertCanonicalContract(contractInput);
   const parse = parseExistingPullRequestArtifact(contractInput, body);
-  return validateParsedArtifact(contractInput, parse);
+  const result = validateParsedArtifact(contractInput, parse);
+  if (head === undefined) return result;
+  const branchViolation = validateExistingPullRequestBranch(contractInput, head);
+  if (branchViolation === undefined) return result;
+  return {
+    ...result,
+    valid: false,
+    classification: result.classification === "valid" ? "semantic" : result.classification,
+    parse: { ...result.parse, diagnostics: [...result.parse.diagnostics, branchViolation] },
+    violations: [...result.violations, branchViolation],
+  };
+}
+
+/** Validate the observed PR head against the branch policy carried by compiled IR. */
+export function validateExistingPullRequestBranch(
+  contractInput: unknown,
+  head: string | null | undefined,
+): ExistingArtifactDiagnostic | undefined {
+  assertCanonicalContract(contractInput);
+  if (contractInput.artifactKind !== "pull_request" || head === undefined) return undefined;
+  const result = classifyBranchName(head, contractInput.provenance?.branchGovernance);
+  const violation = result.violations[0];
+  if (violation === undefined) return undefined;
+  return {
+    code: "EXISTING_BRANCH_INVALID",
+    path: violation.path,
+    message: violation.message,
+  };
 }
 
 export interface ExistingArtifactCandidate {
@@ -1007,7 +1041,7 @@ export async function validateExistingPullRequestFromAdapter(
   return {
     number: pullRequestNumber,
     url: pullRequest.url,
-    result: validateExistingPullRequestArtifact(contract, pullRequest.body),
+    result: validateExistingPullRequestArtifact(contract, pullRequest.body, pullRequest.head),
   };
 }
 

@@ -1,3 +1,4 @@
+import { effectiveBranchGovernance } from "../branch-governance.js";
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
 const trustedArtifacts = new WeakSet();
 /** Internal compiler-to-adapter boundary; intentionally not part of the public exports. */
@@ -44,7 +45,9 @@ function cloneProvenance(provenance) {
         treeSha: provenance.treeSha,
         template: { ...provenance.template },
         ...(provenance.policy === undefined ? {} : { policy: { ...provenance.policy } }),
-        ...(provenance.branchGovernance === undefined ? {} : { branchGovernance: { ...provenance.branchGovernance } }),
+        ...(provenance.branchGovernance === undefined
+            ? {}
+            : { branchGovernance: effectiveBranchGovernance(provenance.branchGovernance) }),
     };
 }
 function deepFreeze(value) {

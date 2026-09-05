@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { assertCanonicalContract, } from "./contract/ir.js";
+import { effectiveBranchGovernance } from "./branch-governance.js";
 export const PULL_REQUEST_POLICY_VERSION = 1;
 export class PullRequestPolicyError extends Error {
     code;
@@ -117,13 +118,41 @@ export function parsePullRequestPolicyOverlay(source) {
 function parseBranchRule(value, path) {
     if (!isRecord(value))
         throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch must be an object.", path);
-    assertKeys(value, ["pattern"], path);
+    assertKeys(value, ["pattern", "release", "exemptions"], path);
     const pattern = optionalString(value, "pattern", path);
     if (pattern === undefined || pattern.trim().length === 0) {
         throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch.pattern must be a non-empty string.", `${path}.pattern`);
     }
     validatePatternSafety(pattern, `${path}.pattern`);
-    return { pattern };
+    let release;
+    if (value.release !== undefined) {
+        if (!isRecord(value.release)) {
+            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch.release must be an object.", `${path}.release`);
+        }
+        assertKeys(value.release, ["pattern"], `${path}.release`);
+        const releasePattern = optionalString(value.release, "pattern", `${path}.release`);
+        if (releasePattern === undefined || releasePattern.trim().length === 0) {
+            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch.release.pattern must be a non-empty string.", `${path}.release.pattern`);
+        }
+        validatePatternSafety(releasePattern, `${path}.release.pattern`);
+        release = { pattern: releasePattern };
+    }
+    let exemptions;
+    if (value.exemptions !== undefined) {
+        if (!Array.isArray(value.exemptions) ||
+            value.exemptions.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch.exemptions must be an array of non-empty strings.", `${path}.exemptions`);
+        }
+        if (new Set(value.exemptions).size !== value.exemptions.length) {
+            throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch.exemptions must not contain duplicates.", `${path}.exemptions`);
+        }
+        exemptions = [...value.exemptions];
+    }
+    return effectiveBranchGovernance({
+        pattern,
+        ...(release === undefined ? {} : { release }),
+        ...(exemptions === undefined ? {} : { exemptions }),
+    });
 }
 function parseTemplateEntry(value, path) {
     if (!isRecord(value)) {

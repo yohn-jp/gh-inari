@@ -54,7 +54,21 @@ export interface ContractProvenanceSource {
  * rule has no branch precondition to preflight.
  */
 export interface PullRequestBranchGovernance {
+    /** Ordinary development branch rule. */
     readonly pattern: string;
+    /** Release branches are a separate operational classification. */
+    readonly release?: {
+        readonly pattern: string;
+    };
+    /** Explicit branch names exempt from the ordinary rule. */
+    readonly exemptions?: readonly string[];
+}
+/** Effective branch policy carried by a compiled pull-request IR. */
+export interface EffectivePullRequestBranchGovernance extends PullRequestBranchGovernance {
+    readonly release: {
+        readonly pattern: string;
+    };
+    readonly exemptions: readonly string[];
 }
 export interface ContractProvenance {
     readonly authority: "repository-default-branch";
@@ -73,7 +87,7 @@ export interface ContractProvenance {
     /** Template selection configuration observed at compile time; defaults apply only when the selector is omitted. */
     readonly templateResolution?: ContractProvenanceSource;
     /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
-    readonly branchGovernance?: PullRequestBranchGovernance;
+    readonly branchGovernance?: EffectivePullRequestBranchGovernance;
 }
 export interface NativeContractMetadata {
     readonly source: TemplateSource;

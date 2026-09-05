@@ -36,6 +36,10 @@
       "types": "./dist/change.d.ts",
       "import": "./dist/change.js"
     },
+    "./branch-governance": {
+      "types": "./dist/branch-governance.d.ts",
+      "import": "./dist/branch-governance.js"
+    },
     "./change-executor": {
       "types": "./dist/change-executor.d.ts",
       "import": "./dist/change-executor.js"

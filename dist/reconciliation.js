@@ -255,7 +255,7 @@ export async function readGovernedExistingArtifact(adapter, domain, number, sele
         contract,
         result: domain === "issue"
             ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, number))
-            : validateExistingPullRequestArtifact(contract, remote.body),
+            : validateExistingPullRequestArtifact(contract, remote.body, remote.head),
     }));
     const selected = selectExistingArtifactCandidate(candidates);
     if (selector !== undefined && candidates[0] !== undefined && !candidates[0].result.parse.parsed) {
@@ -353,7 +353,7 @@ function resolveExistingArtifactByMarker(domain, remote, contracts, failedTempla
     }
     const result = domain === "issue"
         ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, remote.number))
-        : validateExistingPullRequestArtifact(contract, remote.body);
+        : validateExistingPullRequestArtifact(contract, remote.body, remote.head);
     return { remote, contract, result };
 }
 /** Classify the current artifact and prove whether a canonical body can preserve its semantics. */

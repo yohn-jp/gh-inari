@@ -408,7 +408,7 @@ export async function readGovernedExistingArtifact(
     result:
       domain === "issue"
         ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, number))
-        : validateExistingPullRequestArtifact(contract, remote.body),
+        : validateExistingPullRequestArtifact(contract, remote.body, (remote as GitHubPullRequest).head),
   }));
   const selected = selectExistingArtifactCandidate(candidates);
 
@@ -527,7 +527,7 @@ function resolveExistingArtifactByMarker(
   const result =
     domain === "issue"
       ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, remote.number))
-      : validateExistingPullRequestArtifact(contract, remote.body);
+      : validateExistingPullRequestArtifact(contract, remote.body, (remote as GitHubPullRequest).head);
   return { remote, contract, result };
 }
 

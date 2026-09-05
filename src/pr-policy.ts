@@ -4,8 +4,11 @@ import {
   assertCanonicalContract,
   type CanonicalContract,
   type CanonicalField,
+  type EffectivePullRequestBranchGovernance,
+  type PullRequestBranchGovernance,
   type SupplementalFieldConstraint,
 } from "./contract/ir.js";
+import { effectiveBranchGovernance } from "./branch-governance.js";
 import type { TemplateIdentity } from "./template-discovery.js";
 
 export const PULL_REQUEST_POLICY_VERSION = 1 as const;
@@ -48,12 +51,10 @@ export interface PullRequestPolicyOverlay {
    * name. Applies regardless of which native PR template is selected, since
    * branch naming is a property of the branch, not the body template.
    */
-  readonly branch?: PullRequestPolicyBranchRule;
+  readonly branch?: EffectivePullRequestBranchGovernance;
 }
 
-export interface PullRequestPolicyBranchRule {
-  readonly pattern: string;
-}
+export type PullRequestPolicyBranchRule = PullRequestBranchGovernance;
 
 export interface PullRequestPolicyTemplateSelector {
   readonly id?: string;
@@ -232,9 +233,9 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
   };
 }
 
-function parseBranchRule(value: unknown, path: string): PullRequestPolicyBranchRule {
+function parseBranchRule(value: unknown, path: string): EffectivePullRequestBranchGovernance {
   if (!isRecord(value)) throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch must be an object.", path);
-  assertKeys(value, ["pattern"], path);
+  assertKeys(value, ["pattern", "release", "exemptions"], path);
   const pattern = optionalString(value, "pattern", path);
   if (pattern === undefined || pattern.trim().length === 0) {
     throw new PullRequestPolicyError(
@@ -244,7 +245,53 @@ function parseBranchRule(value: unknown, path: string): PullRequestPolicyBranchR
     );
   }
   validatePatternSafety(pattern, `${path}.pattern`);
-  return { pattern };
+  let release: { readonly pattern: string } | undefined;
+  if (value.release !== undefined) {
+    if (!isRecord(value.release)) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_INVALID_VALUE",
+        "branch.release must be an object.",
+        `${path}.release`,
+      );
+    }
+    assertKeys(value.release, ["pattern"], `${path}.release`);
+    const releasePattern = optionalString(value.release, "pattern", `${path}.release`);
+    if (releasePattern === undefined || releasePattern.trim().length === 0) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_INVALID_VALUE",
+        "branch.release.pattern must be a non-empty string.",
+        `${path}.release.pattern`,
+      );
+    }
+    validatePatternSafety(releasePattern, `${path}.release.pattern`);
+    release = { pattern: releasePattern };
+  }
+  let exemptions: readonly string[] | undefined;
+  if (value.exemptions !== undefined) {
+    if (
+      !Array.isArray(value.exemptions) ||
+      value.exemptions.some((entry) => typeof entry !== "string" || entry.length === 0)
+    ) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_INVALID_VALUE",
+        "branch.exemptions must be an array of non-empty strings.",
+        `${path}.exemptions`,
+      );
+    }
+    if (new Set(value.exemptions).size !== value.exemptions.length) {
+      throw new PullRequestPolicyError(
+        "PR_POLICY_INVALID_VALUE",
+        "branch.exemptions must not contain duplicates.",
+        `${path}.exemptions`,
+      );
+    }
+    exemptions = [...value.exemptions] as string[];
+  }
+  return effectiveBranchGovernance({
+    pattern,
+    ...(release === undefined ? {} : { release }),
+    ...(exemptions === undefined ? {} : { exemptions }),
+  });
 }
 
 function parseTemplateEntry(value: unknown, path: string): PullRequestPolicyTemplateEntry {

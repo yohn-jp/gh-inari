@@ -1,4 +1,4 @@
-import { type CanonicalContract } from "./contract/ir.js";
+import { type CanonicalContract, type EffectivePullRequestBranchGovernance, type PullRequestBranchGovernance } from "./contract/ir.js";
 import type { TemplateIdentity } from "./template-discovery.js";
 export declare const PULL_REQUEST_POLICY_VERSION: 1;
 export type PullRequestPolicyErrorCode = "PR_POLICY_INVALID_YAML" | "PR_POLICY_INVALID_ROOT" | "PR_POLICY_UNSUPPORTED_VERSION" | "PR_POLICY_UNKNOWN_PROPERTY" | "PR_POLICY_INVALID_VALUE" | "PR_POLICY_TEMPLATE_MISMATCH" | "PR_POLICY_UNKNOWN_REFERENCE" | "PR_POLICY_AMBIGUOUS_REFERENCE" | "PR_POLICY_UNSUPPORTED_CONSTRAINT" | "PR_POLICY_CONFLICT";
@@ -22,11 +22,9 @@ export interface PullRequestPolicyOverlay {
      * name. Applies regardless of which native PR template is selected, since
      * branch naming is a property of the branch, not the body template.
      */
-    readonly branch?: PullRequestPolicyBranchRule;
+    readonly branch?: EffectivePullRequestBranchGovernance;
 }
-export interface PullRequestPolicyBranchRule {
-    readonly pattern: string;
-}
+export type PullRequestPolicyBranchRule = PullRequestBranchGovernance;
 export interface PullRequestPolicyTemplateSelector {
     readonly id?: string;
     readonly path?: string;

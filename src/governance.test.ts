@@ -17,6 +17,7 @@ import { prepareIssueArtifact, preparePullRequestArtifact } from "./artifact.js"
 import { runCli } from "./cli.js";
 import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 import { PullRequestPolicyError } from "./pr-policy.js";
+import { DEFAULT_RELEASE_BRANCH_PATTERN } from "./branch-governance.js";
 
 class StubGovernanceTransport implements GhTransport {
   readonly calls: readonly string[][];
@@ -450,7 +451,11 @@ test("createGovernedPullRequest proceeds through the existing mutation path when
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
-  assert.deepEqual(contract.provenance?.branchGovernance, { pattern: "^feat/[0-9]+-[a-z0-9-]+$" });
+  assert.deepEqual(contract.provenance?.branchGovernance, {
+    pattern: "^feat/[0-9]+-[a-z0-9-]+$",
+    release: { pattern: DEFAULT_RELEASE_BRANCH_PATTERN },
+    exemptions: [],
+  });
   const prepared = preparePullRequestArtifact(contract, {
     fields: { summary: "A summary" },
     metadata: { title: "PR title", head: "feat/42-add-branch-preflight", base: "main" },
