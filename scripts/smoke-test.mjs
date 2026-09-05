@@ -235,8 +235,15 @@ function main() {
     fs.mkdirSync(ghConfigDirectory, { recursive: true });
     const installedExtension = path.join(installedPackageDirectory, "gh-inari");
     if (!fs.existsSync(installedExtension)) fail("installed package did not expose the gh-inari extension executable");
+    // The canonical-invocation diagnostic below shells out to a bare "inari"
+    // on PATH. Nothing installs that globally on a clean CI runner, so
+    // prepend the locally-installed package's own node_modules/.bin (created
+    // above) ahead of the inherited PATH — the same launcher already proven
+    // to work is what canonical resolution should find.
+    const canonicalBinPath = `${binDirectory}${path.delimiter}${process.env.PATH ?? ""}`;
     const ghExtensionEnvironment = {
       ...process.env,
+      PATH: canonicalBinPath,
       GH_CONFIG_DIR: ghConfigDirectory,
       XDG_DATA_HOME: path.join(smokeRootDirectory, "gh-data"),
       XDG_STATE_HOME: path.join(smokeRootDirectory, "gh-state"),
