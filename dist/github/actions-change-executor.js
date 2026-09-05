@@ -36,25 +36,49 @@ export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
     "installation-scope",
     "projection-execution",
 ]);
+/**
+ * Bounded, secret-safe reasons within the `repository-evidence` stage. Fixed at the
+ * exact repository-bootstrap boundary that failed so #239-class dogfood failures no
+ * longer collapse into one undifferentiated stage (issue #244).
+ */
+export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
+    "repository-configuration",
+    "repository-request",
+    "repository-status",
+    "repository-body",
+    "repository-id",
+    "repository-fork",
+]);
+export function isRepositoryEvidenceFailureReason(value) {
+    return REPOSITORY_EVIDENCE_FAILURE_REASONS.includes(value);
+}
 export function isTrustedActionsFailureStage(value) {
     return TRUSTED_ACTIONS_FAILURE_STAGES.includes(value);
 }
-function failureDiagnostic(stage) {
-    return Object.freeze({ stage });
+function failureDiagnostic(stage, reason) {
+    return Object.freeze(reason === undefined ? { stage } : { stage, reason });
 }
 export class GitHubActionsChangeExecutorError extends Error {
     code = "CHANGE_ACTIONS_RUNTIME_INVALID";
     details;
-    constructor(message = "Trusted Change Actions runtime configuration is invalid.", stage) {
+    constructor(message = "Trusted Change Actions runtime configuration is invalid.", stage, reason) {
         super(message);
         this.name = "GitHubActionsChangeExecutorError";
-        this.details = stage === undefined ? undefined : failureDiagnostic(stage);
+        this.details = stage === undefined ? undefined : failureDiagnostic(stage, reason);
     }
 }
 function withFailureStage(error, stage) {
     if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined)
         return error;
     return new GitHubActionsChangeExecutorError(undefined, stage);
+}
+function atRepositoryEvidenceReason(reason) {
+    return (error) => {
+        const hasOwnReason = error instanceof GitHubActionsChangeExecutorError &&
+            error.details !== undefined &&
+            (error.details.stage !== "repository-evidence" || error.details.reason !== undefined);
+        throw hasOwnReason ? error : new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason);
+    };
 }
 async function atFailureStage(stage, operation) {
     try {
@@ -119,7 +143,7 @@ function parseRepository(value, hostname = "github.com") {
         };
     }
     catch (error) {
-        throw withFailureStage(error, "repository-evidence");
+        throw atRepositoryEvidenceReason("repository-configuration")(error);
     }
 }
 function repositoryName(repository) {
@@ -700,19 +724,14 @@ function asTrustedActionsFailure(error, issuerStage) {
 /** Build the trusted executor from GitHub Actions runtime claims and secrets. */
 export async function createGitHubActionsChangeExecutor(options) {
     const environment = options.environment ?? process.env;
-    const repositoryNameWithOwner = requiredEnvironment(environment, "GITHUB_REPOSITORY", "repository-evidence");
+    let repositoryNameWithOwner;
     let hostname = "github.com";
-    if (environment.GITHUB_SERVER_URL !== undefined) {
-        try {
-            hostname = new URL(environment.GITHUB_SERVER_URL).hostname;
-        }
-        catch {
-            throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence");
-        }
-    }
-    const repository = parseRepository(repositoryNameWithOwner, hostname);
     let readTransport;
     try {
+        repositoryNameWithOwner = requiredEnvironment(environment, "GITHUB_REPOSITORY", "repository-evidence");
+        if (environment.GITHUB_SERVER_URL !== undefined) {
+            hostname = new URL(environment.GITHUB_SERVER_URL).hostname;
+        }
         readTransport = new GitHubActionsApiTransport({
             apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
             token: requiredEnvironment(environment, "GITHUB_TOKEN", "repository-evidence"),
@@ -721,27 +740,32 @@ export async function createGitHubActionsChangeExecutor(options) {
         });
     }
     catch (error) {
-        throw withFailureStage(error, "repository-evidence");
+        throw atRepositoryEvidenceReason("repository-configuration")(error);
     }
-    const repositoryResponse = await atFailureStage("repository-evidence", () => readTransport.request({
+    const repository = parseRepository(repositoryNameWithOwner, hostname);
+    const repositoryResponse = await readTransport
+        .request({
         hostname: repository.hostname,
         method: "GET",
         path: apiPath(repository, ""),
-    }));
+    })
+        .catch(atRepositoryEvidenceReason("repository-request"));
+    if (repositoryResponse.status !== 200) {
+        throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-status");
+    }
     let repositoryBody;
-    let repositoryId;
     try {
-        if (repositoryResponse.status !== 200)
-            throw new GitHubActionsChangeExecutorError();
         repositoryBody = record(repositoryResponse.body);
-        repositoryId = String(repositoryBody.id);
-        if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId))
-            throw new GitHubActionsChangeExecutorError();
-        if (typeof repositoryBody.fork !== "boolean")
-            throw new GitHubActionsChangeExecutorError();
     }
     catch (error) {
-        throw withFailureStage(error, "repository-evidence");
+        throw atRepositoryEvidenceReason("repository-body")(error);
+    }
+    const repositoryId = String(repositoryBody.id);
+    if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) {
+        throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-id");
+    }
+    if (typeof repositoryBody.fork !== "boolean") {
+        throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-fork");
     }
     const target = {
         repositoryHost: repository.hostname,

@@ -6,9 +6,11 @@ import {
   GitHubActionsCredentialBroker,
   GitHubActionsEvidenceReader,
   GitHubActionsChangeExecutorError,
+  REPOSITORY_EVIDENCE_FAILURE_REASONS,
   TRUSTED_ACTIONS_FAILURE_STAGES,
   createGitHubActionsChangeExecutor,
   deriveChangeNamingFromIssueTitle,
+  isRepositoryEvidenceFailureReason,
   isTrustedActionsFailureStage,
   runGitHubActionsChangeExecutor,
 } from "./actions-change-executor.js";
@@ -355,7 +357,7 @@ test("runtime setup exposes the bounded stage at each setup boundary", async () 
     readonly stage: (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
   }[] = [
     {
-      name: "repository evidence",
+      name: "repository configuration",
       environment: trustedEnvironment({ GITHUB_REPOSITORY: undefined }),
       stage: "repository-evidence",
     },
@@ -390,6 +392,85 @@ test("runtime setup exposes the bounded stage at each setup boundary", async () 
   }
 });
 
+test("repository-evidence bootstrap failures are distinguishable by bounded fixed reason", async () => {
+  assert.deepEqual(REPOSITORY_EVIDENCE_FAILURE_REASONS, [
+    "repository-configuration",
+    "repository-request",
+    "repository-status",
+    "repository-body",
+    "repository-id",
+    "repository-fork",
+  ]);
+  for (const reason of REPOSITORY_EVIDENCE_FAILURE_REASONS) {
+    assert.equal(isRepositoryEvidenceFailureReason(reason), true);
+  }
+  assert.equal(isRepositoryEvidenceFailureReason("provider-specific"), false);
+
+  const cases: readonly {
+    readonly name: string;
+    readonly reason: (typeof REPOSITORY_EVIDENCE_FAILURE_REASONS)[number];
+    readonly fetch: typeof globalThis.fetch;
+  }[] = [
+    {
+      name: "transport request failure",
+      reason: "repository-request",
+      fetch: (async () => {
+        throw new Error("Authorization: Bearer secret-token; ECONNRESET /private/path");
+      }) as unknown as typeof globalThis.fetch,
+    },
+    {
+      name: "non-200 status",
+      reason: "repository-status",
+      fetch: (async () =>
+        new Response(JSON.stringify({ message: "provider-secret-error-body" }), {
+          status: 403,
+        })) as unknown as typeof globalThis.fetch,
+    },
+    {
+      name: "malformed body",
+      reason: "repository-body",
+      fetch: (async () =>
+        new Response(JSON.stringify([1, 2, 3]), { status: 200 })) as unknown as typeof globalThis.fetch,
+    },
+    {
+      name: "invalid repository id",
+      reason: "repository-id",
+      fetch: (async () =>
+        new Response(JSON.stringify({ id: "not-a-number", default_branch: "main", fork: false }), {
+          status: 200,
+        })) as unknown as typeof globalThis.fetch,
+    },
+    {
+      name: "missing fork evidence",
+      reason: "repository-fork",
+      fetch: (async () =>
+        new Response(JSON.stringify({ id: 218000001, default_branch: "main" }), {
+          status: 200,
+        })) as unknown as typeof globalThis.fetch,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await assert.rejects(
+      createGitHubActionsChangeExecutor({
+        cwd: process.cwd(),
+        request: changeRemoteMutationRequest("issue", 218),
+        environment: trustedEnvironment(),
+        fetch: testCase.fetch,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubActionsChangeExecutorError, testCase.name);
+        assert.deepEqual(error.details, { stage: "repository-evidence", reason: testCase.reason }, testCase.name);
+        assert.equal(JSON.stringify(error).includes("secret-token"), false, testCase.name);
+        assert.equal(JSON.stringify(error).includes("provider-secret-error-body"), false, testCase.name);
+        assert.equal(JSON.stringify(error).includes("/private/path"), false, testCase.name);
+        return true;
+      },
+      testCase.name,
+    );
+  }
+});
+
 test("workflow entrypoint emits the bounded diagnostic and no exception payload", async () => {
   const writes: string[] = [];
   const originalWrite = process.stdout.write;
@@ -413,7 +494,7 @@ test("workflow entrypoint emits the bounded diagnostic and no exception payload"
   assert.deepEqual(output.error, {
     code: "CHANGE_ACTIONS_RUNTIME_INVALID",
     message: "Trusted Change execution failed closed.",
-    details: { stage: "repository-evidence" },
+    details: { stage: "repository-evidence", reason: "repository-configuration" },
   });
   assert.doesNotMatch(JSON.stringify(output), /privateKey|token|exception|\/home/iu);
 });

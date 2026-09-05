@@ -16,6 +16,7 @@ import {
 import { GitHubAdapter } from "./adapter.js";
 import {
   GitHubActionsEvidenceReader,
+  isRepositoryEvidenceFailureReason,
   isTrustedActionsFailureStage,
   loadBranchGovernance,
   type TrustedActionsFailureDiagnostic,
@@ -132,7 +133,12 @@ function remoteError(
   return new ChangeRemoteExecutorError(code, messages[code] ?? "The Change remote operation failed.", {
     operation,
     reason,
-    ...(diagnostic === undefined ? {} : { stage: diagnostic.stage }),
+    ...(diagnostic === undefined
+      ? {}
+      : {
+          stage: diagnostic.stage,
+          ...(diagnostic.reason === undefined ? {} : { stageReason: diagnostic.reason }),
+        }),
   });
 }
 
@@ -167,10 +173,16 @@ function dispatchPath(): string {
 function parseFailureDiagnostic(value: unknown): TrustedActionsFailureDiagnostic | undefined {
   if (value === undefined) return undefined;
   const details = record(value);
-  if (Object.keys(details).some((key) => key !== "stage") || !isTrustedActionsFailureStage(details.stage)) {
+  if (
+    Object.keys(details).some((key) => key !== "stage" && key !== "reason") ||
+    !isTrustedActionsFailureStage(details.stage) ||
+    (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason))
+  ) {
     throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
   }
-  return Object.freeze({ stage: details.stage });
+  return Object.freeze(
+    details.reason === undefined ? { stage: details.stage } : { stage: details.stage, reason: details.reason },
+  );
 }
 
 function parseRuns(value: unknown): readonly WorkflowRun[] {

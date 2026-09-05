@@ -14,14 +14,23 @@ import type { PullRequestBranchGovernance } from "../contract/ir.js";
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export declare const TRUSTED_ACTIONS_FAILURE_STAGES: readonly ["repository-evidence", "trusted-execution", "branch-governance", "issuer-configuration", "installation-token", "installation-scope", "projection-execution"];
 export type TrustedActionsFailureStage = (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
+/**
+ * Bounded, secret-safe reasons within the `repository-evidence` stage. Fixed at the
+ * exact repository-bootstrap boundary that failed so #239-class dogfood failures no
+ * longer collapse into one undifferentiated stage (issue #244).
+ */
+export declare const REPOSITORY_EVIDENCE_FAILURE_REASONS: readonly ["repository-configuration", "repository-request", "repository-status", "repository-body", "repository-id", "repository-fork"];
+export type RepositoryEvidenceFailureReason = (typeof REPOSITORY_EVIDENCE_FAILURE_REASONS)[number];
+export declare function isRepositoryEvidenceFailureReason(value: unknown): value is RepositoryEvidenceFailureReason;
 export interface TrustedActionsFailureDiagnostic {
     readonly stage: TrustedActionsFailureStage;
+    readonly reason?: RepositoryEvidenceFailureReason;
 }
 export declare function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage;
 export declare class GitHubActionsChangeExecutorError extends Error {
     readonly code: "CHANGE_ACTIONS_RUNTIME_INVALID";
     readonly details?: TrustedActionsFailureDiagnostic;
-    constructor(message?: string, stage?: TrustedActionsFailureStage);
+    constructor(message?: string, stage?: TrustedActionsFailureStage, reason?: RepositoryEvidenceFailureReason);
 }
 export interface GitHubActionsApiTransportOptions {
     readonly apiUrl?: string;

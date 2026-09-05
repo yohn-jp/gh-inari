@@ -3,7 +3,7 @@ import { inflateRawSync } from "node:zlib";
 import { projectChangeFromGitHubEvidence } from "../change.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
 import { GitHubAdapter } from "./adapter.js";
-import { GitHubActionsEvidenceReader, isTrustedActionsFailureStage, loadBranchGovernance, } from "./actions-change-executor.js";
+import { GitHubActionsEvidenceReader, isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage, loadBranchGovernance, } from "./actions-change-executor.js";
 import { isGitHubAdapterError } from "./errors.js";
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml";
@@ -48,7 +48,12 @@ function remoteError(code, operation, reason, diagnostic) {
     return new ChangeRemoteExecutorError(code, messages[code] ?? "The Change remote operation failed.", {
         operation,
         reason,
-        ...(diagnostic === undefined ? {} : { stage: diagnostic.stage }),
+        ...(diagnostic === undefined
+            ? {}
+            : {
+                stage: diagnostic.stage,
+                ...(diagnostic.reason === undefined ? {} : { stageReason: diagnostic.reason }),
+            }),
     });
 }
 function normalizeTransportError(error, operation, code) {
@@ -72,10 +77,12 @@ function parseFailureDiagnostic(value) {
     if (value === undefined)
         return undefined;
     const details = record(value);
-    if (Object.keys(details).some((key) => key !== "stage") || !isTrustedActionsFailureStage(details.stage)) {
+    if (Object.keys(details).some((key) => key !== "stage" && key !== "reason") ||
+        !isTrustedActionsFailureStage(details.stage) ||
+        (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason))) {
         throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
     }
-    return Object.freeze({ stage: details.stage });
+    return Object.freeze(details.reason === undefined ? { stage: details.stage } : { stage: details.stage, reason: details.reason });
 }
 function parseRuns(value) {
     const payload = record(value);
