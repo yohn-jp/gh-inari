@@ -20,6 +20,7 @@ export declare const MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH: 160;
 export declare const MAX_CHANGE_PRINCIPAL_LENGTH: 160;
 export declare const MAX_CHANGE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_HOST_LENGTH: 255;
+export declare const MAX_CHANGE_IDEMPOTENCY_KEY_LENGTH: 512;
 export interface CanonicalBranchNamingInput {
     /** Repository-governed branch classification, not a complete branch name. */
     readonly type: string;
@@ -175,7 +176,7 @@ export interface ChangeEffectValidationResult {
     readonly effect?: ChangeEffect;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
-export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN" | "CHANGE_PROJECTION_INVALID_EVIDENCE" | "CHANGE_PROJECTION_EVIDENCE_MISSING" | "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE" | "CHANGE_PROJECTION_ISSUE_MISMATCH" | "CHANGE_PROJECTION_PARTIAL" | "CHANGE_PROJECTION_DUPLICATE" | "CHANGE_PROJECTION_WRONG_BASE" | "CHANGE_PROJECTION_AMBIGUOUS" | "CHANGE_PROJECTION_CONFLICT";
+export type ChangeDiagnosticCode = "CHANGE_INVALID_JSON" | "CHANGE_INVALID_ROOT" | "CHANGE_MISSING_PROPERTY" | "CHANGE_UNKNOWN_PROPERTY" | "CHANGE_UNSUPPORTED_VERSION" | "CHANGE_INVALID_IDENTITY" | "CHANGE_INVALID_STATE" | "CHANGE_INVALID_PROVENANCE" | "CHANGE_INVALID_PROJECTION" | "CHANGE_INVALID_BRANCH_INPUT" | "CHANGE_INVALID_BRANCH_GOVERNANCE" | "CHANGE_BRANCH_GOVERNANCE_MISMATCH" | "CHANGE_INVALID_TRANSITION" | "CHANGE_UNSUPPORTED_TRANSITION" | "CHANGE_TRANSITION_NOT_ALLOWED" | "CHANGE_INVALID_TRANSITION_TARGET" | "CHANGE_INVALID_EFFECT" | "CHANGE_INVALID_PLAN" | "CHANGE_PROJECTION_INVALID_EVIDENCE" | "CHANGE_PROJECTION_EVIDENCE_MISSING" | "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE" | "CHANGE_PROJECTION_ISSUE_MISMATCH" | "CHANGE_PROJECTION_PARTIAL" | "CHANGE_PROJECTION_DUPLICATE" | "CHANGE_PROJECTION_WRONG_BASE" | "CHANGE_PROJECTION_AMBIGUOUS" | "CHANGE_PROJECTION_CONFLICT" | "CHANGE_ISSUANCE_ROOT_ISSUE_ABSENT";
 export interface ChangeDiagnosticInput {
     readonly code: ChangeDiagnosticCode;
     readonly path?: string;
@@ -305,6 +306,53 @@ export interface ChangeProjectionResult {
     readonly change?: Change;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+/** The two idempotent issuance outcomes owned by Inari Core. */
+export declare const CHANGE_ISSUANCE_MODES: readonly ["create", "return-existing"];
+export type ChangeIssuanceMode = (typeof CHANGE_ISSUANCE_MODES)[number];
+export declare const CHANGE_ISSUANCE_SOURCE_STATUSES: readonly ["absent", "healthy"];
+export type ChangeIssuanceSourceStatus = (typeof CHANGE_ISSUANCE_SOURCE_STATUSES)[number];
+export type ChangeIssuanceHealthyState = Exclude<ChangeState, "DEFINED" | "RECOVERY_REQUIRED">;
+/** The transport-neutral identity of one logical issuance transaction. */
+export interface ChangeIssuanceTransaction {
+    readonly operation: "issue";
+    readonly identity: ChangeIdentity;
+    /** Stable identity-derived key; it is not a workflow or request identifier. */
+    readonly idempotencyKey: string;
+}
+/**
+ * Machine-readable evidence an executor must verify after applying effects.
+ * A create plan cannot know the PR number in advance, so `number` is omitted
+ * there while `required` remains explicit.
+ */
+export interface ChangeIssuanceVerificationExpectation {
+    readonly phase: "post-effect";
+    readonly status: "healthy";
+    readonly canonicalBranch: string;
+    readonly canonicalBaseBranch: string;
+    readonly state: ChangeIssuanceHealthyState;
+    readonly pullRequest: {
+        readonly required: true;
+        readonly number?: number;
+    };
+}
+/** One logical, transport-independent Change issuance transaction. */
+export interface ChangeIssuancePlan {
+    readonly version: ChangeTransitionContractVersion;
+    readonly operation: "issue";
+    readonly mode: ChangeIssuanceMode;
+    readonly sourceStatus: ChangeIssuanceSourceStatus;
+    readonly transaction: ChangeIssuanceTransaction;
+    /** Expected semantic Change after the declared effects or existing return. */
+    readonly result: Change;
+    /** Ordered effects for the one transaction; empty for return-existing. */
+    readonly effects: readonly ChangeEffect[];
+    readonly verification: ChangeIssuanceVerificationExpectation;
+}
+export interface ChangeIssuancePlanValidationResult {
+    readonly valid: boolean;
+    readonly plan?: ChangeIssuancePlan;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
 export declare const MAX_CHANGE_BASE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_TRANSITION_EFFECTS: 8;
 export declare const MAX_CHANGE_PROJECTION_CANDIDATES: 64;
@@ -400,3 +448,27 @@ export declare const parseChangeTransitionRequest: typeof deserializeChangeTrans
 export declare const parseChangeTransitionPlan: typeof deserializeChangeTransitionPlan;
 export declare const serializeChangeTransitionRequestContract: typeof serializeChangeTransitionRequest;
 export declare const serializeChangeTransitionPlanContract: typeof serializeChangeTransitionPlan;
+/** Issuance consumes the existing canonical projection request unchanged. */
+export type ChangeIssuanceRequest = ChangeProjectionInput;
+/**
+ * Plan idempotent Change issuance from the canonical #213 projection.
+ * This function is pure: it does not invoke GitHub, Actions, an App, a CLI,
+ * credentials, or any effect executor.
+ */
+export declare function planChangeIssuance(input: unknown): ChangeIssuancePlan;
+export declare const createChangeIssuancePlan: typeof planChangeIssuance;
+export declare const planIdempotentChangeIssuance: typeof planChangeIssuance;
+/** Validate and canonicalize a transport-independent issuance plan. */
+export declare function validateChangeIssuancePlan(input: unknown): ChangeIssuancePlanValidationResult;
+/** Assert a valid declarative issuance plan at an executor boundary. */
+export declare function assertChangeIssuancePlan(input: unknown): asserts input is ChangeIssuancePlan;
+export declare function isChangeIssuancePlan(input: unknown): input is ChangeIssuancePlan;
+/** Serialize a canonical issuance plan with stable property ordering. */
+export declare function serializeChangeIssuancePlan(input: unknown): string;
+/** Parse and validate an untrusted issuance plan JSON boundary. */
+export declare function deserializeChangeIssuancePlan(serialized: string): ChangeIssuancePlan;
+export declare const parseChangeIssuancePlan: typeof deserializeChangeIssuancePlan;
+export declare const serializeChangeIssuancePlanContract: typeof serializeChangeIssuancePlan;
+export declare class ChangeIssuanceValidationError extends ChangeValidationError {
+    constructor(diagnostics: readonly ChangeDiagnostic[]);
+}
