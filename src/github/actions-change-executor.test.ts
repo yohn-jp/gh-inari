@@ -125,6 +125,7 @@ class ReadTransport implements GitHubChangeEffectTransport {
     if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
       return { status: 404, body: { message: "Not Found" } };
     }
+    if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
     if (request.path.includes("pulls?state=all")) return { status: 200, body: [] };
     throw new Error("unexpected read");
   }
@@ -176,6 +177,7 @@ class MultilineReadyTransport implements GitHubChangeEffectTransport {
         body: { ref: "refs/heads/feat/239-dogfood-governed-change-lifecycle-through-trusted-actions" },
       };
     }
+    if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
     if (request.path.includes("pulls?state=all")) {
       return {
         status: 200,
@@ -301,6 +303,7 @@ class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
           }
         : { status: 404, body: { message: "Not Found" } };
     }
+    if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
     if (request.path.includes("pulls?state=all")) {
       return {
         status: 200,
@@ -391,6 +394,78 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
   assert.equal(result.evidence?.outcome, "verified");
   assert.equal(result.projection.change?.state, "DRAFT");
   assert.equal(result.projection.change?.projection?.pullRequest, 2180);
+});
+
+class TitleEditedIssuedTransport implements GitHubChangeEffectTransport {
+  readonly oldBranch = "feat/239-before-title-edit";
+
+  constructor(readonly title = "feat: after title edit") {}
+
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    if (request.path.endsWith("repos/acme/inari")) {
+      return { status: 200, body: { id: 218000001, default_branch: "main" } };
+    }
+    if (request.path.endsWith("issues/239")) {
+      return { status: 200, body: { number: 239, title: this.title, state: "open" } };
+    }
+    if (request.path.includes("git/ref/heads/feat%2F239-after-title-edit")) {
+      return { status: 404, body: { message: "Not Found" } };
+    }
+    if (request.path.includes("git/matching-refs/heads/")) {
+      return {
+        status: 200,
+        body: [{ ref: `refs/heads/${this.oldBranch}` }],
+      };
+    }
+    if (request.path.includes("pulls?state=all")) {
+      return {
+        status: 200,
+        body: [
+          {
+            number: 2181,
+            head: { ref: this.oldBranch },
+            base: { ref: "main" },
+            state: "open",
+            draft: true,
+            merged_at: null,
+            user: { login: "inari-issuer[bot]" },
+          },
+        ],
+      };
+    }
+    throw new Error("unexpected read");
+  }
+}
+
+test("Actions evidence anchors an issued branch and PR after a root Issue title edit", async () => {
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 239 },
+    branchGovernance: { pattern: "^(feat|fix|docs|refactor|test|chore)/[0-9]+-[a-z0-9-]+$" },
+    transport: new TitleEditedIssuedTransport(),
+  });
+  const input = await reader.read(changeRemoteMutationRequest("issue", 239));
+  const projection = projectChangeFromGitHubEvidence(input);
+
+  assert.equal(projection.valid, true);
+  assert.equal(projection.status, "healthy");
+  assert.equal(projection.canonicalBranch, "feat/239-before-title-edit");
+  assert.deepEqual(projection.change?.projection, { branch: "feat/239-before-title-edit", pullRequest: 2181 });
+  const plan = planChangeIssuance(input);
+  assert.equal(plan.mode, "return-existing");
+  assert.deepEqual(plan.effects, []);
+});
+
+test("issued evidence survives a title edit that no longer matches pre-issuance naming", async () => {
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 239 },
+    branchGovernance: { pattern: "^(feat|fix|docs|refactor|test|chore)/[0-9]+-[a-z0-9-]+$" },
+    transport: new TitleEditedIssuedTransport("renamed descriptive title"),
+  });
+  const projection = projectChangeFromGitHubEvidence(await reader.read(changeRemoteMutationRequest("issue", 239)));
+  assert.equal(projection.valid, true);
+  assert.equal(projection.canonicalBranch, "feat/239-before-title-edit");
 });
 
 test("App installation token is confined to the broker transport and never its scope/result", async () => {

@@ -97,6 +97,7 @@ export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenc
     private readLocalGovernanceFile;
     private readMatchingGovernanceFile;
     private readBranch;
+    private readBranches;
     private readPullRequests;
     private request;
 }

@@ -304,6 +304,58 @@ test("projection ordering is deterministic and does not depend on evidence order
   assert.deepEqual(reordered, first);
 });
 
+test("issued evidence anchors the canonical branch after the Issue title changes", () => {
+  const oldBranch = "feat/213-before-title-edit";
+  const result = projectChangeFromGitHubEvidence({
+    ...projectionInput({
+      issue: issueEvidence(),
+      branches: { status: "available", value: [{ name: oldBranch, rootIssue: 213 }] },
+      pullRequests: {
+        status: "available",
+        value: [
+          {
+            number: 405,
+            head: oldBranch,
+            base: "main",
+            state: "open",
+            draft: true,
+            merged: false,
+            rootIssue: 213,
+          },
+        ],
+      },
+    }),
+    naming: { type: "feat", slug: "after-title-edit" },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.status, "healthy");
+  assert.equal(result.canonicalBranch, oldBranch);
+  assert.deepEqual(result.change?.projection, { branch: oldBranch, pullRequest: 405 });
+});
+
+test("multiple issued branch candidates for one Issue are ambiguous", () => {
+  const result = projectChangeFromGitHubEvidence({
+    ...projectionInput({
+      issue: issueEvidence(),
+      branches: {
+        status: "available",
+        value: [
+          { name: "feat/213-first-title", rootIssue: 213 },
+          { name: "fix/213-second-title", rootIssue: 213 },
+        ],
+      },
+      pullRequests: { status: "available", value: [] },
+    }),
+    naming: { type: "feat", slug: "after-title-edit" },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.change?.state, "RECOVERY_REQUIRED");
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_PROJECTION_AMBIGUOUS"));
+});
+
 test("missing evidence is not interpreted as an empty projection", () => {
   const result = projectChangeFromGitHubEvidence(
     projectionInput({

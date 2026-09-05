@@ -289,6 +289,13 @@ export interface ChangeIssueEvidence {
 /** One bounded remote branch candidate. */
 export interface ChangeBranchEvidence {
     readonly name: string;
+    /**
+     * The root Issue claim established by the trusted GitHub reader.  Branch
+     * names are otherwise intentionally opaque to Core; this bounded claim lets
+     * reconstruction distinguish a historical Change branch from an unrelated
+     * branch without introducing a persistence authority.
+     */
+    readonly rootIssue?: number;
 }
 /**
  * Minimal, normalized pull-request evidence. `merged` is optional only for

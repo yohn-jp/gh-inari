@@ -290,7 +290,7 @@ const CHANGE_EVIDENCE_AVAILABLE_KEYS = new Set(["status", "value"]);
 const CHANGE_EVIDENCE_ABSENT_KEYS = new Set(["status"]);
 const CHANGE_EVIDENCE_UNAVAILABLE_KEYS = new Set(["status", "reason"]);
 const CHANGE_ISSUE_EVIDENCE_KEYS = new Set(["number", "state"]);
-const CHANGE_BRANCH_EVIDENCE_KEYS = new Set(["name"]);
+const CHANGE_BRANCH_EVIDENCE_KEYS = new Set(["name", "rootIssue"]);
 const CHANGE_PULL_REQUEST_EVIDENCE_KEYS = new Set([
     "number",
     "head",
@@ -700,7 +700,13 @@ function parseChangeBranchEvidence(value, path, diagnostics) {
     }
     addUnknownProperties(value, CHANGE_BRANCH_EVIDENCE_KEYS, path, diagnostics);
     const name = projectionText(value.name, `${path}.name`, diagnostics, "Branch name", MAX_CHANGE_BRANCH_LENGTH);
-    return diagnostics.length === before && name !== undefined ? { name } : undefined;
+    let rootIssue;
+    if (hasOwn(value, "rootIssue")) {
+        rootIssue = projectionNumber(value.rootIssue, `${path}.rootIssue`, diagnostics, "Root Issue number");
+    }
+    if (diagnostics.length !== before || name === undefined)
+        return undefined;
+    return rootIssue === undefined ? { name } : { name, rootIssue };
 }
 function parseChangeBranchEvidenceList(value, path, diagnostics) {
     if (!Array.isArray(value)) {
@@ -719,7 +725,7 @@ function parseChangeBranchEvidenceList(value, path, diagnostics) {
     }
     if (branches.length !== value.length)
         return undefined;
-    return branches.sort((left, right) => compareText(left.name, right.name));
+    return branches.sort((left, right) => compareText(left.name, right.name) || compareOptionalNumber(left.rootIssue, right.rootIssue));
 }
 function parseChangePullRequestEvidence(value, path, diagnostics) {
     const before = diagnostics.length;
@@ -863,7 +869,7 @@ function countProjectionValues(values, key) {
     }
     return counts;
 }
-function classifyChangeBranchCandidates(branches, canonicalBranch) {
+function classifyChangeBranchCandidates(branches, canonicalBranch, rootIssue) {
     const counts = countProjectionValues(branches, (candidate) => candidate.name);
     return branches.map((candidate) => {
         const count = counts.get(candidate.name) ?? 0;
@@ -872,6 +878,13 @@ function classifyChangeBranchCandidates(branches, canonicalBranch) {
                 candidate,
                 classification: "conflicting",
                 reason: "The same branch candidate was reported more than once.",
+            };
+        }
+        if (rootIssue !== undefined && candidate.rootIssue !== undefined && candidate.rootIssue !== rootIssue) {
+            return {
+                candidate,
+                classification: "conflicting",
+                reason: "Branch root Issue claim conflicts with the projected Change identity.",
             };
         }
         if (candidate.name === canonicalBranch) {
@@ -1013,7 +1026,7 @@ export function projectChangeFromGitHubEvidence(input) {
         if (result.provenance !== undefined)
             provenance = result.provenance;
     }
-    let canonicalBranch;
+    let derivedCanonicalBranch;
     if (identity !== undefined) {
         const derivationInput = { change: identity };
         if (hasOwn(input, "branchGovernance"))
@@ -1022,7 +1035,7 @@ export function projectChangeFromGitHubEvidence(input) {
             derivationInput.naming = input.naming;
         const result = deriveCanonicalBranchIdentity(derivationInput);
         diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
-        canonicalBranch = result.branch;
+        derivedCanonicalBranch = result.branch;
     }
     let canonicalBaseBranch;
     if (!hasOwn(input, "baseBranch")) {
@@ -1043,22 +1056,39 @@ export function projectChangeFromGitHubEvidence(input) {
         addUnknownProperties(evidence, CHANGE_GITHUB_EVIDENCE_KEYS, "$.evidence", diagnostics);
     }
     if (identity === undefined ||
-        canonicalBranch === undefined ||
+        derivedCanonicalBranch === undefined ||
         canonicalBaseBranch === undefined ||
         evidence === undefined ||
         diagnostics.length > 0) {
-        return projectionEvidenceUnavailableResult(diagnostics, canonicalBranch, canonicalBaseBranch);
+        return projectionEvidenceUnavailableResult(diagnostics, derivedCanonicalBranch, canonicalBaseBranch);
     }
     const issueRead = readChangeProjectionEvidenceSource(hasOwn(evidence, "issue") ? evidence.issue : undefined, "$.evidence.issue", parseChangeIssueEvidence, diagnostics);
     const branchRead = readChangeProjectionEvidenceSource(hasOwn(evidence, "branches") ? evidence.branches : undefined, "$.evidence.branches", parseChangeBranchEvidenceList, diagnostics);
     const pullRequestRead = readChangeProjectionEvidenceSource(hasOwn(evidence, "pullRequests") ? evidence.pullRequests : undefined, "$.evidence.pullRequests", parseChangePullRequestEvidenceList, diagnostics);
     if (diagnostics.length > 0) {
-        return projectionEvidenceUnavailableResult(diagnostics, canonicalBranch, canonicalBaseBranch);
+        return projectionEvidenceUnavailableResult(diagnostics, derivedCanonicalBranch, canonicalBaseBranch);
     }
     const branches = projectionSourceValue(branchRead, []);
     const pullRequests = projectionSourceValue(pullRequestRead, []);
+    // Once the trusted reader has found GitHub evidence explicitly claiming this
+    // root Issue, that evidence anchors the canonical branch.  Mutable Issue
+    // naming remains the authority only while no issued candidate exists.
+    const anchoredBranchNames = new Set();
+    for (const branch of branches) {
+        if (branch.rootIssue === identity.rootIssue)
+            anchoredBranchNames.add(branch.name);
+    }
+    for (const pullRequest of pullRequests) {
+        if (pullRequest.rootIssue === identity.rootIssue)
+            anchoredBranchNames.add(pullRequest.head);
+    }
+    const canonicalBranch = anchoredBranchNames.size === 1 ? [...anchoredBranchNames][0] : derivedCanonicalBranch;
+    const hasAmbiguousAnchoredBranches = anchoredBranchNames.size > 1;
+    if (canonicalBranch === undefined) {
+        return projectionEvidenceUnavailableResult(diagnostics, derivedCanonicalBranch, canonicalBaseBranch);
+    }
     const candidates = {
-        branches: classifyChangeBranchCandidates(branches, canonicalBranch),
+        branches: classifyChangeBranchCandidates(branches, canonicalBranch, identity.rootIssue),
         pullRequests: classifyChangePullRequestCandidates(pullRequests, canonicalBranch, canonicalBaseBranch, identity.rootIssue),
     };
     const issue = issueRead.status === "available" ? issueRead.value : undefined;
@@ -1103,6 +1133,9 @@ export function projectChangeFromGitHubEvidence(input) {
     }
     else if (wrongBasePullRequests.length > 0) {
         status = "wrong-base";
+    }
+    else if (hasAmbiguousAnchoredBranches) {
+        status = "ambiguous";
     }
     else if (conflictingCandidates.length > 0) {
         status = "ambiguous";

@@ -197,6 +197,9 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
     if (path.startsWith("git/ref/heads/")) {
       return { status: 200, body: { ref: "refs/heads/feat/42-remote-change" } };
     }
+    if (path.startsWith("git/matching-refs/heads/")) {
+      return { status: 200, body: [] };
+    }
     if (path.startsWith("pulls?")) {
       return {
         status: 200,
