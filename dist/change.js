@@ -8,7 +8,7 @@
  */
 import { deriveBranchName } from "../branch-naming-authority.mjs";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
-import { validateExistingPullRequestArtifact } from "./artifact.js";
+import { validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { issueReferenceKey, normalizeIssueReference, } from "./contract/issue-reference.js";
 import { validateCanonicalContract } from "./contract/ir.js";
 import { parsePullRequestPolicyOverlay } from "./pr-policy.js";
@@ -51,6 +51,9 @@ export const CHANGE_IMPLEMENTED_TRANSITIONS = Object.freeze(["issue", "ready", "
 export const CHANGE_TRANSITION_RULES = Object.freeze([
     { transition: "issue", from: "DEFINED", to: "DRAFT" },
     { transition: "ready", from: "DRAFT", to: "REVIEW" },
+    // A healthy REVIEW projection is a safe retry result, not a second
+    // lifecycle mutation.  The plan for this edge is intentionally empty.
+    { transition: "ready", from: "REVIEW", to: "REVIEW" },
     { transition: "abort", from: "DRAFT", to: "ABORTED" },
     { transition: "abort", from: "REVIEW", to: "ABORTED" },
     // An already terminated Change is a deterministic no-op on retry. A
@@ -147,6 +150,7 @@ const CHANGE_PROJECTION_INPUT_KEYS = new Set([
     "baseBranch",
     "evidence",
     "provenance",
+    "readyEvidence",
 ]);
 const CHANGE_ISSUANCE_PLAN_KEYS = new Set([
     "version",
@@ -243,6 +247,39 @@ const CHANGE_MERGE_ADMISSION_INPUT_KEYS = new Set([
     "provenance",
 ]);
 const CHANGE_MERGE_ADMISSION_PULL_REQUEST_KEYS = new Set(["contract", "body"]);
+const CHANGE_READY_INPUT_KEYS = new Set([
+    "change",
+    "projection",
+    "issue",
+    "rootIssue",
+    "issueArtifact",
+    "rootIssueArtifact",
+    "pullRequest",
+    "governedPullRequest",
+    "issuer",
+    "expectedIssuer",
+    "canonicalChange",
+    "canonical",
+    "projectionInput",
+    "projectionResult",
+    "issueContract",
+    "rootIssueContract",
+    "issueBody",
+    "rootIssueBody",
+    "pullRequestContract",
+    "prContract",
+    "pullRequestBody",
+    "prBody",
+    "contract",
+    "body",
+    "branchGovernance",
+    "naming",
+    "baseBranch",
+    "evidence",
+    "provenance",
+    "readyEvidence",
+]);
+const CHANGE_READY_ARTIFACT_KEYS = new Set(["contract", "body"]);
 const CHANGE_PROJECTION_CANDIDATES_KEYS = new Set(["branches", "pullRequests"]);
 const CHANGE_PROJECTION_CANDIDATE_KEYS = new Set(["candidate", "classification", "reason"]);
 const CHANGE_GITHUB_EVIDENCE_KEYS = new Set(["issue", "branches", "pullRequests"]);
@@ -267,6 +304,8 @@ export const MAX_CHANGE_TRANSITION_EFFECTS = 8;
 export const MAX_CHANGE_PROJECTION_CANDIDATES = 64;
 export const MAX_CHANGE_ISSUANCE_ATTEMPTS = MAX_CHANGE_TRANSITION_EFFECTS;
 export const MAX_CHANGE_FAILURE_CODE_LENGTH = 80;
+/** Bodies are read through a bounded transport before entering Core. */
+export const MAX_CHANGE_ARTIFACT_BODY_LENGTH = 1_048_576;
 function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1568,7 +1607,9 @@ function buildChangeTransitionPlan(request) {
     else if (request.transition === "ready") {
         if (resolved.pullRequest === undefined)
             throw new Error("A valid ready request must resolve a pull request.");
-        effects.push({ kind: "MARK_PULL_REQUEST_READY", pullRequest: resolved.pullRequest });
+        if (rule.from === "DRAFT") {
+            effects.push({ kind: "MARK_PULL_REQUEST_READY", pullRequest: resolved.pullRequest });
+        }
     }
     else if (request.transition === "abort") {
         if (resolved.pullRequest === undefined)
@@ -3713,13 +3754,16 @@ function validateAdmissionPullRequestContract(contractInput, bodyInput, identity
         if (typeof bodyInput !== "string" && bodyInput !== null) {
             addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.pullRequest.body", "Physical pull-request body must be a string or null.");
         }
+        else if (bodyInput !== null && bodyInput.length > MAX_CHANGE_ARTIFACT_BODY_LENGTH) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.pullRequest.body", "Physical pull-request body exceeds the bounded evidence limit.");
+        }
         else {
             let existing;
             try {
                 existing = validateExistingPullRequestArtifact(contract, bodyInput);
             }
-            catch (error) {
-                addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.pullRequest.body", `Governed pull-request contract validation failed: ${error instanceof Error ? error.message : String(error)}`);
+            catch {
+                addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.pullRequest.body", "Governed pull-request contract validation failed.");
                 return diagnostics.length === before;
             }
             if (!existing.valid) {
@@ -4001,4 +4045,256 @@ export function validateChangeMergeAdmission(input) {
 }
 export const validateCanonicalChangeProvenance = validateChangeMergeAdmission;
 export const validateChangeProvenanceForMergeAdmission = validateChangeMergeAdmission;
+function parseChangeReadyArtifactEvidence(input, path, diagnostics) {
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_INPUT", path, "Ready artifact evidence must be an object.");
+        return undefined;
+    }
+    addUnknownProperties(input, CHANGE_READY_ARTIFACT_KEYS, path, diagnostics);
+    const hasContract = hasOwn(input, "contract");
+    const hasBody = hasOwn(input, "body");
+    if (!hasContract)
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.contract`, "Property is required.");
+    if (!hasBody)
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.body`, "Property is required.");
+    return {
+        ...(hasContract ? { contract: input.contract } : {}),
+        ...(hasBody ? { body: input.body } : {}),
+        hasContract,
+        hasBody,
+    };
+}
+function validateReadyArtifactBody(contract, bodyInput, path, diagnostics, subject) {
+    if (typeof bodyInput !== "string" && bodyInput !== null) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", path, "Artifact body must be a string or null.");
+        return;
+    }
+    if (bodyInput !== null && bodyInput.length > MAX_CHANGE_ARTIFACT_BODY_LENGTH) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", path, "Artifact body exceeds the bounded evidence limit.");
+        return;
+    }
+    try {
+        const existing = contract.artifactKind === "issue"
+            ? validateExistingIssueArtifact(contract, bodyInput, subject)
+            : validateExistingPullRequestArtifact(contract, bodyInput);
+        if (existing.valid)
+            return;
+        const violations = existing.violations.length > 0 ? existing.violations : existing.parse.diagnostics;
+        for (const violation of violations) {
+            const violationPath = "path" in violation && typeof violation.path === "string" ? violation.path : "$.body";
+            const message = "message" in violation && typeof violation.message === "string" ? violation.message : "invalid";
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", admissionDiagnosticPath(path, violationPath), message);
+        }
+        if (violations.length === 0) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", path, "Artifact body does not satisfy the governed contract.");
+        }
+    }
+    catch {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", path, "Governed artifact contract validation failed.");
+    }
+}
+function validateReadyIssueArtifact(input, identity, baseBranch, diagnostics) {
+    if (input === undefined || !input.hasContract || !input.hasBody)
+        return;
+    const contractResult = validateCanonicalContract(input.contract);
+    if (!contractResult.valid) {
+        for (const violation of contractResult.violations) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", admissionDiagnosticPath("$.issue.contract", violation.path), violation.message);
+        }
+        return;
+    }
+    const contract = input.contract;
+    if (contract.artifactKind !== "issue") {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.issue.contract.artifactKind", "The root Issue contract must be an Issue contract.");
+        return;
+    }
+    const provenance = contract.provenance;
+    if (provenance === undefined) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.issue.contract.provenance", "The root Issue contract must carry trusted repository provenance.");
+    }
+    else {
+        if (identity !== undefined && provenance.repository.host.toLowerCase() !== identity.repositoryHost) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.issue.contract.provenance.repository.host", "The root Issue contract belongs to a different repository host.");
+        }
+        if (identity !== undefined && provenance.repository.repositoryId !== identity.repositoryId) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.issue.contract.provenance.repository.repositoryId", "The root Issue contract does not identify the Change repository.");
+        }
+        if (provenance.repository.repositoryId === undefined) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", "$.issue.contract.provenance.repository.repositoryId", "The root Issue contract must carry a repository database identity.");
+        }
+        if (baseBranch !== undefined && provenance.ref !== baseBranch) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_BASE_MISMATCH", "$.issue.contract.provenance.ref", "The root Issue contract was not resolved from the canonical base branch.");
+        }
+    }
+    if (identity !== undefined) {
+        validateReadyArtifactBody(contract, input.body, "$.issue.body", diagnostics, {
+            repositoryHost: identity.repositoryHost,
+            repositoryId: identity.repositoryId,
+            number: identity.rootIssue,
+        });
+    }
+    else {
+        validateReadyArtifactBody(contract, input.body, "$.issue.body", diagnostics);
+    }
+}
+function validateReadyRootIssueEvidence(projectionInput, identity, diagnostics) {
+    if (!isRecord(projectionInput) || !hasOwn(projectionInput, "evidence") || !isRecord(projectionInput.evidence)) {
+        addDiagnostic(diagnostics, "CHANGE_PROJECTION_EVIDENCE_MISSING", "$.projection.evidence.issue", "Ready validation requires fresh root Issue evidence.");
+        return;
+    }
+    const evidence = projectionInput.evidence;
+    if (!hasOwn(evidence, "issue") || !isRecord(evidence.issue) || evidence.issue.status !== "available") {
+        addDiagnostic(diagnostics, "CHANGE_PROJECTION_EVIDENCE_MISSING", "$.projection.evidence.issue", "Ready validation requires an available root Issue read.");
+        return;
+    }
+    const issueSource = evidence.issue;
+    if (!isRecord(issueSource.value)) {
+        addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", "$.projection.evidence.issue.value", "Root Issue evidence is invalid.");
+        return;
+    }
+    if (issueSource.value.state !== "open") {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_ROOT_ISSUE_MISMATCH", "$.projection.evidence.issue.value.state", "The root Issue must remain open for the Ready transition.");
+    }
+    if (identity !== undefined && issueSource.value.number !== identity.rootIssue) {
+        addDiagnostic(diagnostics, "CHANGE_PROJECTION_ISSUE_MISMATCH", "$.projection.evidence.issue.value.number", "Root Issue evidence does not match the canonical Change identity.");
+    }
+}
+function readyAdmissionInput(input, diagnostics) {
+    const admission = {};
+    const canonical = readChangeMergeAdmissionAlias(input, ["change", "canonicalChange", "canonical"], "$.change", diagnostics);
+    if (canonical.present)
+        admission.change = canonical.value;
+    const projection = readChangeMergeAdmissionAlias(input, ["projection", "projectionInput", "projectionResult"], "$.projection", diagnostics);
+    if (projection.present) {
+        admission.projection = projection.value;
+    }
+    else if (["branchGovernance", "naming", "baseBranch", "evidence", "provenance"].some((key) => hasOwn(input, key))) {
+        admission.projection = {
+            change: canonical.value,
+            branchGovernance: input.branchGovernance,
+            naming: input.naming,
+            baseBranch: input.baseBranch,
+            evidence: input.evidence,
+            ...(hasOwn(input, "provenance") ? { provenance: input.provenance } : {}),
+        };
+    }
+    const pullRequest = readChangeMergeAdmissionAlias(input, ["pullRequest", "governedPullRequest"], "$.pullRequest", diagnostics);
+    if (pullRequest.present) {
+        admission.pullRequest = pullRequest.value;
+    }
+    else {
+        const contract = readChangeMergeAdmissionAlias(input, ["pullRequestContract", "prContract", "contract"], "$.pullRequest.contract", diagnostics);
+        const body = readChangeMergeAdmissionAlias(input, ["pullRequestBody", "prBody", "body"], "$.pullRequest.body", diagnostics);
+        if (contract.present || body.present) {
+            admission.pullRequest = {
+                ...(contract.present ? { contract: contract.value } : {}),
+                ...(body.present ? { body: body.value } : {}),
+            };
+        }
+    }
+    const issuer = readChangeMergeAdmissionAlias(input, ["issuer", "expectedIssuer"], "$.issuer", diagnostics);
+    if (issuer.present)
+        admission.issuer = issuer.value;
+    return admission;
+}
+function readyIssueEvidence(input, diagnostics) {
+    const nested = isRecord(input.readyEvidence) ? input.readyEvidence : undefined;
+    if (nested !== undefined) {
+        addUnknownProperties(nested, new Set(["issue", "rootIssue", "pullRequest"]), "$.readyEvidence", diagnostics);
+    }
+    const direct = readChangeMergeAdmissionAlias(input, ["issue", "rootIssue", "issueArtifact", "rootIssueArtifact"], "$.issue", diagnostics);
+    if (direct.present)
+        return parseChangeReadyArtifactEvidence(direct.value, "$.issue", diagnostics);
+    if (nested !== undefined) {
+        const nestedIssue = readChangeMergeAdmissionAlias(nested, ["issue", "rootIssue"], "$.readyEvidence.issue", diagnostics);
+        if (nestedIssue.present)
+            return parseChangeReadyArtifactEvidence(nestedIssue.value, "$.issue", diagnostics);
+    }
+    const contract = readChangeMergeAdmissionAlias(input, ["issueContract", "rootIssueContract"], "$.issue.contract", diagnostics);
+    const body = readChangeMergeAdmissionAlias(input, ["issueBody", "rootIssueBody"], "$.issue.body", diagnostics);
+    if (contract.present || body.present) {
+        return parseChangeReadyArtifactEvidence({
+            ...(contract.present ? { contract: contract.value } : {}),
+            ...(body.present ? { body: body.value } : {}),
+        }, "$.issue", diagnostics);
+    }
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.issue", "Root Issue governance evidence is required.");
+    return undefined;
+}
+function readyPullRequestInput(input) {
+    if (hasOwn(input, "pullRequest") || hasOwn(input, "governedPullRequest"))
+        return undefined;
+    const nested = isRecord(input.readyEvidence) ? input.readyEvidence : undefined;
+    if (nested !== undefined && (hasOwn(nested, "pullRequest") || hasOwn(nested, "governedPullRequest"))) {
+        return nested.pullRequest ?? nested.governedPullRequest;
+    }
+    return undefined;
+}
+/** Validate every semantic precondition before a Ready effect can be planned. */
+export function validateChangeReadyTransition(input) {
+    const diagnostics = [];
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_INPUT", "$", "Ready transition input must be an object.");
+        return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    addUnknownProperties(input, CHANGE_READY_INPUT_KEYS, "$", diagnostics);
+    const admissionInput = readyAdmissionInput(input, diagnostics);
+    const nestedReadyPullRequest = readyPullRequestInput(input);
+    if (nestedReadyPullRequest !== undefined && !hasOwn(admissionInput, "pullRequest")) {
+        admissionInput.pullRequest = nestedReadyPullRequest;
+    }
+    const admission = validateChangeMergeAdmission(admissionInput);
+    appendAdmissionDiagnostics(diagnostics, admission.diagnostics, "$");
+    const canonicalValue = admissionInput.change;
+    const canonicalResult = validateChange(canonicalValue);
+    const identity = canonicalResult.change?.identity;
+    const projectionValue = admissionInput.projection;
+    validateReadyRootIssueEvidence(projectionValue, identity, diagnostics);
+    const issueEvidence = readyIssueEvidence(input, diagnostics);
+    const baseBranch = admission.projection?.canonicalBaseBranch;
+    validateReadyIssueArtifact(issueEvidence, identity, baseBranch, diagnostics);
+    let idempotent = false;
+    if (admission.valid && admission.change !== undefined) {
+        if (admission.change.state !== "DRAFT" && admission.change.state !== "REVIEW") {
+            addDiagnostic(diagnostics, "CHANGE_TRANSITION_NOT_ALLOWED", "$.change.state", `Ready transition is only allowed from DRAFT or REVIEW, not ${admission.change.state}.`);
+        }
+        else {
+            idempotent = admission.change.state === "REVIEW";
+        }
+    }
+    const normalizedDiagnostics = createChangeDiagnosticReport(diagnostics).diagnostics;
+    const valid = admission.valid && normalizedDiagnostics.length === 0;
+    return {
+        valid,
+        ...(valid && admission.change !== undefined ? { change: admission.change } : {}),
+        ...(admission.projection === undefined ? {} : { projection: admission.projection }),
+        ...(admission.physicalPullRequest === undefined ? {} : { physicalPullRequest: admission.physicalPullRequest }),
+        ...(valid ? { idempotent } : {}),
+        diagnostics: normalizedDiagnostics,
+    };
+}
+export class ChangeReadyTransitionValidationError extends ChangeTransitionValidationError {
+    constructor(diagnostics) {
+        super(diagnostics);
+        this.name = "ChangeReadyTransitionValidationError";
+    }
+}
+/** Plan Ready only after the Core-owned precondition gate succeeds. */
+export function planChangeReadyTransition(input) {
+    const result = validateChangeReadyTransition(input);
+    if (!result.valid || result.change === undefined) {
+        throw new ChangeReadyTransitionValidationError(result.diagnostics);
+    }
+    return planChangeTransition({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        transition: "ready",
+        change: result.change,
+        target: {
+            branch: result.change.projection?.branch,
+            pullRequest: result.change.projection?.pullRequest,
+        },
+    });
+}
+export const validateReadyTransition = validateChangeReadyTransition;
+export const planReadyTransition = planChangeReadyTransition;
 //# sourceMappingURL=change.js.map

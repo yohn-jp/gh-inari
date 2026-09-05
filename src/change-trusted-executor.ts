@@ -13,8 +13,10 @@ import {
   planChangeIssuance,
   planChangeIssuanceRecovery,
   planChangeRecovery,
+  planChangeReadyTransition,
   planChangeTransition,
   projectChangeFromGitHubEvidence,
+  validateChangeReadyTransition,
   type Change,
   type ChangeDiagnostic,
   type ChangeEffect,
@@ -60,6 +62,7 @@ export interface ChangeTrustedExecutorOptions {
 
 export type ChangeTrustedExecutorErrorCode =
   | "CHANGE_EXECUTION_READ_FAILED"
+  | "CHANGE_EXECUTION_PRECONDITION_FAILED"
   | "CHANGE_EXECUTION_EFFECT_FAILED"
   | "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED"
   | "CHANGE_EXECUTION_RECOVERY_REQUIRED";
@@ -141,6 +144,27 @@ function executionEvidence(
 
 function projectionFor(input: ChangeProjectionInput): ChangeProjectionResult {
   return projectChangeFromGitHubEvidence(input);
+}
+
+function readyInput(
+  input: ChangeProjectionInput,
+  change: Change | undefined,
+  requester: string | undefined,
+): Record<string, unknown> {
+  const provenance =
+    change === undefined
+      ? undefined
+      : {
+          ...change.provenance,
+          ...(requester === undefined ? {} : { requester }),
+        };
+  const evidence = input.readyEvidence;
+  return {
+    ...(change === undefined ? {} : { change: { ...change, provenance } }),
+    projection: input,
+    ...(evidence?.issue === undefined ? {} : { issue: evidence.issue }),
+    ...(evidence?.pullRequest === undefined ? {} : { pullRequest: evidence.pullRequest }),
+  };
 }
 
 function sameIdentity(left: Change | undefined, right: Change | undefined): boolean {
@@ -313,6 +337,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
     const input = await this.readInput(request);
     if (request.operation === "issue") return this.executeIssue(request, input);
     const current = projectionFor(input);
+    if (request.operation === "ready") return this.executeReady(request, input, current);
     const recoveryRetry = request.operation === "abort" && isAbortCleanupRecoveryProjection(current);
     if ((!current.valid || current.change === undefined) && !recoveryRetry) {
       throw new ChangeTrustedExecutorError(
@@ -359,6 +384,104 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
       },
     });
     return this.executeTransition(request, plan, input);
+  }
+
+  private async executeReady(
+    request: ChangeRemoteMutationRequest,
+    input: ChangeProjectionInput,
+    current: ChangeProjectionResult,
+  ): Promise<ChangeRemoteExecutionResult> {
+    const preconditionInput = readyInput(input, current.change, request.requester);
+    const precondition = validateChangeReadyTransition(preconditionInput);
+    if (!precondition.valid) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Ready transition preconditions failed.",
+        precondition.diagnostics,
+      );
+    }
+
+    // The plan is produced only after all semantic preconditions pass.  Core
+    // also guarantees that a mutating Ready plan contains exactly this effect.
+    const plan = planChangeReadyTransition(preconditionInput);
+    if (
+      plan.effects.length > 1 ||
+      (plan.effects[0] !== undefined && plan.effects[0].kind !== "MARK_PULL_REQUEST_READY")
+    ) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+        "Ready transition produced an invalid effect plan.",
+      );
+    }
+
+    if (plan.effects.length === 0) {
+      const afterInput = await this.readInput(request);
+      const after = projectionFor(afterInput);
+      this.verifyReadyProjection(request, afterInput, after, plan);
+      return {
+        projection: after,
+        evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+      };
+    }
+
+    const effect = plan.effects[0];
+    try {
+      await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+    } catch {
+      let after: ChangeProjectionResult;
+      try {
+        after = projectionFor(await this.readInput(request));
+      } catch {
+        throw new ChangeTrustedExecutorError(
+          "CHANGE_EXECUTION_READ_FAILED",
+          "Trusted Change evidence read failed after the Ready effect failed.",
+        );
+      }
+      return {
+        projection: after,
+        evidence: executionEvidence(
+          request.operation,
+          "failed",
+          request.requester,
+          [{ kind: effect.kind, status: "failed" }],
+          "not-required",
+          failureFor(effect),
+        ),
+      };
+    }
+
+    const afterInput = await this.readInput(request);
+    const after = projectionFor(afterInput);
+    this.verifyReadyProjection(request, afterInput, after, plan);
+    return {
+      projection: after,
+      evidence: executionEvidence(request.operation, "verified", request.requester, [
+        { kind: effect.kind, status: "succeeded" },
+      ]),
+    };
+  }
+
+  private verifyReadyProjection(
+    request: ChangeRemoteMutationRequest,
+    input: ChangeProjectionInput,
+    projection: ChangeProjectionResult,
+    plan: ChangeTransitionPlan,
+  ): void {
+    if (projection.change === undefined) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+        "Post-effect Change projection verification failed.",
+      );
+    }
+    const validation = validateChangeReadyTransition(readyInput(input, projection.change, request.requester));
+    if (!validation.valid || projection.change.state !== "REVIEW") {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+        "Post-effect Ready projection verification failed.",
+        validation.diagnostics,
+      );
+    }
+    verifyProjection(plan, projection);
   }
 
   private async readInput(
