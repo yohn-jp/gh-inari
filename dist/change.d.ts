@@ -256,7 +256,8 @@ export interface ChangeProjectionResultValidationResult {
 }
 export interface CanonicalBranchIdentityDerivationInput {
     readonly change: Change | ChangeIdentity;
-    readonly branchGovernance: PullRequestBranchGovernance;
+    /** Absent when the repository's PR policy declares no branch rule; the canonical branch grammar still applies. */
+    readonly branchGovernance?: PullRequestBranchGovernance;
     readonly naming: CanonicalBranchNamingInput;
 }
 export interface CanonicalBranchIdentityDerivationResult {
@@ -325,8 +326,8 @@ export type ChangeProjectionEvidence = ChangeGitHubEvidence;
 export interface ChangeProjectionInput {
     /** A Change snapshot or identity; its existing state is never trusted. */
     readonly change: Change | ChangeIdentity;
-    /** Existing repository branch policy consumed by #211's authority. */
-    readonly branchGovernance: PullRequestBranchGovernance;
+    /** Existing repository branch policy consumed by #211's authority; absent when the repository declares no branch rule. */
+    readonly branchGovernance?: PullRequestBranchGovernance;
     /** Existing governance-resolved branch naming parts consumed by #211. */
     readonly naming: CanonicalBranchNamingInput;
     /** Repository-governed target base branch. */
