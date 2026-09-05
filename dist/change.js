@@ -8,7 +8,7 @@
  */
 import { deriveBranchName } from "../branch-naming-authority.mjs";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
-import { validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
+import { renderIssueArtifact, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { issueReferenceKey, normalizeIssueReference, } from "./contract/issue-reference.js";
 import { validateCanonicalContract } from "./contract/ir.js";
 import { parsePullRequestPolicyOverlay } from "./pr-policy.js";
@@ -153,6 +153,7 @@ const CHANGE_PROJECTION_INPUT_KEYS = new Set([
     "evidence",
     "provenance",
     "readyEvidence",
+    "governedIssue",
 ]);
 const CHANGE_ISSUANCE_PLAN_KEYS = new Set([
     "version",
@@ -2157,6 +2158,19 @@ function issuanceFailureDiagnostics(projection) {
  * credentials, or any effect executor.
  */
 export function planChangeIssuance(input) {
+    if (isRecord(input) && hasOwn(input, "governedIssue")) {
+        const candidate = input.change;
+        const rawIdentity = isRecord(candidate) && hasOwn(candidate, "identity") ? candidate.identity : candidate;
+        const identity = isRecord(rawIdentity) &&
+            typeof rawIdentity.repositoryHost === "string" &&
+            typeof rawIdentity.repositoryId === "string" &&
+            Number.isSafeInteger(rawIdentity.rootIssue)
+            ? rawIdentity
+            : undefined;
+        const diagnostics = validateGovernedRootIssueEvidence(input.governedIssue, identity, input.baseBranch);
+        if (diagnostics.length > 0)
+            throw new ChangeIssuanceValidationError(diagnostics);
+    }
     const projection = projectChangeFromGitHubEvidence(input);
     if (!projection.valid ||
         (projection.status !== "absent" && projection.status !== "healthy") ||
@@ -4137,6 +4151,94 @@ function validateReadyArtifactBody(contract, bodyInput, path, diagnostics, subje
     catch {
         addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", path, "Governed artifact contract validation failed.");
     }
+}
+/**
+ * Validate the root Issue artifact required by Change issuance.
+ *
+ * The contract/body pair is intentionally checked through the existing
+ * artifact parser and canonical renderer.  Change does not define a second
+ * Issue grammar, and a structurally parseable but non-canonical body is not
+ * sufficient authorization for creating a branch or pull request.
+ */
+export function validateGovernedRootIssueEvidence(input, identity, baseBranch) {
+    const diagnostics = [];
+    const path = "$.governedIssue";
+    if (!isRecord(input)) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_INPUT", path, "Governed root Issue evidence must be an object.");
+        return createChangeDiagnosticReport(diagnostics).diagnostics;
+    }
+    addUnknownProperties(input, new Set(["contract", "body"]), path, diagnostics);
+    if (!hasOwn(input, "contract")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.contract`, "Property is required.");
+    }
+    if (!hasOwn(input, "body")) {
+        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.body`, "Property is required.");
+    }
+    const contractResult = validateCanonicalContract(input.contract);
+    if (!contractResult.valid) {
+        for (const violation of contractResult.violations) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", admissionDiagnosticPath(`${path}.contract`, violation.path), violation.message);
+        }
+        return createChangeDiagnosticReport(diagnostics).diagnostics;
+    }
+    const contract = input.contract;
+    if (contract.artifactKind !== "issue") {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.contract.artifactKind`, "The governed root contract must be an Issue contract.");
+    }
+    const provenance = contract.provenance;
+    if (provenance === undefined) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.contract.provenance`, "The governed root Issue contract must carry trusted repository provenance.");
+    }
+    else {
+        if (identity !== undefined && provenance.repository.host.toLowerCase() !== identity.repositoryHost.toLowerCase()) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.contract.provenance.repository.host`, "The governed root Issue contract belongs to a different repository host.");
+        }
+        if (identity !== undefined && provenance.repository.repositoryId !== identity.repositoryId) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.contract.provenance.repository.repositoryId`, "The governed root Issue contract does not identify the Change repository.");
+        }
+        if (provenance.repository.repositoryId === undefined) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.contract.provenance.repository.repositoryId`, "The governed root Issue contract must carry a repository database identity.");
+        }
+        if (baseBranch !== undefined && provenance.ref !== baseBranch) {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_BASE_MISMATCH", `${path}.contract.provenance.ref`, "The governed root Issue contract was not resolved from the canonical base branch.");
+        }
+    }
+    const body = input.body;
+    if (typeof body !== "string") {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.body`, "The governed root Issue body must be a string.");
+    }
+    else if (body.length > MAX_CHANGE_ARTIFACT_BODY_LENGTH) {
+        addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.body`, "The governed root Issue body exceeds the bounded evidence limit.");
+    }
+    else if (contract.artifactKind === "issue") {
+        try {
+            const existing = validateExistingIssueArtifact(contract, body);
+            if (!existing.valid) {
+                const violations = existing.violations.length > 0 ? existing.violations : existing.parse.diagnostics;
+                for (const violation of violations) {
+                    const violationPath = "path" in violation && typeof violation.path === "string" ? violation.path : "$.body";
+                    const message = "message" in violation && typeof violation.message === "string" ? violation.message : "invalid";
+                    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", admissionDiagnosticPath(`${path}.body`, violationPath), message);
+                }
+                if (violations.length === 0) {
+                    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.body`, "The governed root Issue body does not satisfy the repository contract.");
+                }
+            }
+            else {
+                const canonical = renderIssueArtifact(contract, {
+                    fields: existing.parse.values,
+                    ...(existing.parse.dependencies === undefined ? {} : { dependencies: existing.parse.dependencies }),
+                });
+                if (canonical !== body) {
+                    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.body`, "The governed root Issue body is not the canonical rendered representation.");
+                }
+            }
+        }
+        catch {
+            addDiagnostic(diagnostics, "CHANGE_PROVENANCE_INVALID_PR_CONTRACT", `${path}.body`, "Governed root Issue contract validation failed.");
+        }
+    }
+    return createChangeDiagnosticReport(diagnostics).diagnostics;
 }
 function validateReadyIssueArtifact(input, identity, baseBranch, diagnostics) {
     if (input === undefined || !input.hasContract || !input.hasBody)

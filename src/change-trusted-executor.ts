@@ -16,10 +16,12 @@ import {
   planChangeReadyTransition,
   planChangeTransition,
   projectChangeFromGitHubEvidence,
+  validateGovernedRootIssueEvidence,
   validateChangeReadyTransition,
   type Change,
   type ChangeDiagnostic,
   type ChangeEffect,
+  type ChangeIdentity,
   type ChangeIssuanceEffectAttempt,
   type ChangeIssuanceFailureEvidence,
   type ChangeIssuancePlan,
@@ -51,6 +53,8 @@ import {
 export interface ChangeTrustedEvidenceReader {
   /** Returns bounded Core projection input; it never returns a GitHub response. */
   read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput>;
+  /** Production readers may require the governed root-Issue proof for issuance. */
+  readonly requiresGovernedIssueValidation?: boolean;
 }
 
 export interface ChangeTrustedExecutorOptions {
@@ -108,6 +112,21 @@ function requestWithProvenance(
 
 function issueProjectionInput(input: ChangeProjectionInput, requester: string | undefined): ChangeProjectionInput {
   return requestWithProvenance(input, requester, INARI_ISSUER_PRINCIPAL);
+}
+
+function projectionIdentity(input: ChangeProjectionInput): ChangeIdentity | undefined {
+  const candidate: unknown = input.change;
+  const raw =
+    typeof candidate === "object" && candidate !== null && "identity" in candidate
+      ? (candidate as { readonly identity?: unknown }).identity
+      : candidate;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const value = raw as Record<string, unknown>;
+  return typeof value.repositoryHost === "string" &&
+    typeof value.repositoryId === "string" &&
+    Number.isSafeInteger(value.rootIssue)
+    ? (raw as ChangeIdentity)
+    : undefined;
 }
 
 function effectEvidence(attempts: readonly ChangeIssuanceEffectAttempt[]): readonly ChangeRemoteEffectEvidence[] {
@@ -334,8 +353,8 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
   }
 
   async execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+    if (request.operation === "issue") return this.executeIssue(request);
     const input = await this.readInput(request);
-    if (request.operation === "issue") return this.executeIssue(request, input);
     const current = projectionFor(input);
     if (request.operation === "ready") return this.executeReady(request, input, current);
     const recoveryRetry = request.operation === "abort" && isAbortCleanupRecoveryProjection(current);
@@ -506,11 +525,56 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
     }
   }
 
-  private async executeIssue(
-    request: ChangeRemoteMutationRequest,
-    input: ChangeProjectionInput,
-  ): Promise<ChangeRemoteExecutionResult> {
-    const plan = planChangeIssuance(issueProjectionInput(input, request.requester));
+  private async executeIssue(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+    const input = await this.readInput(request);
+    const rootIssueDiagnostics =
+      this.#reader.requiresGovernedIssueValidation || input.governedIssue !== undefined
+        ? validateGovernedRootIssueEvidence(input.governedIssue, projectionIdentity(input), input.baseBranch)
+        : [];
+    if (rootIssueDiagnostics.length > 0) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Governed root Issue validation failed before Change issuance planning.",
+        rootIssueDiagnostics,
+      );
+    }
+
+    // Re-read the complete trusted evidence immediately before planning. The
+    // contract provenance carries the governance generation; a changed
+    // template/native source therefore cannot authorize the first effect.
+    const freshInput = await this.readInput(request);
+    const freshRootIssueDiagnostics =
+      this.#reader.requiresGovernedIssueValidation || freshInput.governedIssue !== undefined
+        ? validateGovernedRootIssueEvidence(
+            freshInput.governedIssue,
+            projectionIdentity(freshInput),
+            freshInput.baseBranch,
+          )
+        : [];
+    if (freshRootIssueDiagnostics.length > 0) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Governed root Issue validation changed before Change issuance planning.",
+        freshRootIssueDiagnostics,
+      );
+    }
+    const validatedGeneration = input.governedIssue?.contract.provenance?.treeSha;
+    const freshGeneration = freshInput.governedIssue?.contract.provenance?.treeSha;
+    if (validatedGeneration !== undefined && freshGeneration !== validatedGeneration) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Repository governance changed before Change issuance planning.",
+        [
+          diagnostic(
+            "CHANGE_PROVENANCE_CONFLICT",
+            "$.governedIssue.contract.provenance.treeSha",
+            "The validated root Issue governance generation changed before issuance.",
+          ),
+        ],
+      );
+    }
+    const plannedInput = freshInput;
+    const plan = planChangeIssuance(issueProjectionInput(plannedInput, request.requester));
     if (plan.mode === "return-existing") {
       const after = projectionFor(await this.readInput(request));
       verifyProjection(plan, after);

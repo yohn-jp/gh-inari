@@ -6,7 +6,7 @@
  * only. Naming, lifecycle validity, idempotency, compensation, and projection
  * semantics remain delegated to the existing Core authorities.
  */
-import { CHANGE_TRANSITION_CONTRACT_VERSION, createChangeDiagnostic, planChangeIssuance, planChangeIssuanceRecovery, planChangeRecovery, planChangeReadyTransition, planChangeTransition, projectChangeFromGitHubEvidence, validateChangeReadyTransition, } from "./change.js";
+import { CHANGE_TRANSITION_CONTRACT_VERSION, createChangeDiagnostic, planChangeIssuance, planChangeIssuanceRecovery, planChangeRecovery, planChangeReadyTransition, planChangeTransition, projectChangeFromGitHubEvidence, validateGovernedRootIssueEvidence, validateChangeReadyTransition, } from "./change.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { changeEffectFailureEvidence } from "./github/change-effect-adapter.js";
 import { ISSUER_AUTHORITY_CONTRACT_VERSION, INARI_ISSUER_PRINCIPAL, } from "./github/issuer-authority.js";
@@ -37,6 +37,20 @@ function requestWithProvenance(input, requester, issuer) {
 }
 function issueProjectionInput(input, requester) {
     return requestWithProvenance(input, requester, INARI_ISSUER_PRINCIPAL);
+}
+function projectionIdentity(input) {
+    const candidate = input.change;
+    const raw = typeof candidate === "object" && candidate !== null && "identity" in candidate
+        ? candidate.identity
+        : candidate;
+    if (typeof raw !== "object" || raw === null)
+        return undefined;
+    const value = raw;
+    return typeof value.repositoryHost === "string" &&
+        typeof value.repositoryId === "string" &&
+        Number.isSafeInteger(value.rootIssue)
+        ? raw
+        : undefined;
 }
 function effectEvidence(attempts) {
     return attempts.map((attempt) => ({ kind: attempt.effect.kind, status: attempt.status }));
@@ -183,9 +197,9 @@ export class TrustedChangeExecutor {
         }
     }
     async execute(request) {
-        const input = await this.readInput(request);
         if (request.operation === "issue")
-            return this.executeIssue(request, input);
+            return this.executeIssue(request);
+        const input = await this.readInput(request);
         const current = projectionFor(input);
         if (request.operation === "ready")
             return this.executeReady(request, input, current);
@@ -294,8 +308,33 @@ export class TrustedChangeExecutor {
             throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_READ_FAILED", "Trusted Change evidence read failed closed.");
         }
     }
-    async executeIssue(request, input) {
-        const plan = planChangeIssuance(issueProjectionInput(input, request.requester));
+    async executeIssue(request) {
+        const input = await this.readInput(request);
+        const rootIssueDiagnostics = this.#reader.requiresGovernedIssueValidation || input.governedIssue !== undefined
+            ? validateGovernedRootIssueEvidence(input.governedIssue, projectionIdentity(input), input.baseBranch)
+            : [];
+        if (rootIssueDiagnostics.length > 0) {
+            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Governed root Issue validation failed before Change issuance planning.", rootIssueDiagnostics);
+        }
+        // Re-read the complete trusted evidence immediately before planning. The
+        // contract provenance carries the governance generation; a changed
+        // template/native source therefore cannot authorize the first effect.
+        const freshInput = await this.readInput(request);
+        const freshRootIssueDiagnostics = this.#reader.requiresGovernedIssueValidation || freshInput.governedIssue !== undefined
+            ? validateGovernedRootIssueEvidence(freshInput.governedIssue, projectionIdentity(freshInput), freshInput.baseBranch)
+            : [];
+        if (freshRootIssueDiagnostics.length > 0) {
+            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Governed root Issue validation changed before Change issuance planning.", freshRootIssueDiagnostics);
+        }
+        const validatedGeneration = input.governedIssue?.contract.provenance?.treeSha;
+        const freshGeneration = freshInput.governedIssue?.contract.provenance?.treeSha;
+        if (validatedGeneration !== undefined && freshGeneration !== validatedGeneration) {
+            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Repository governance changed before Change issuance planning.", [
+                diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.governedIssue.contract.provenance.treeSha", "The validated root Issue governance generation changed before issuance."),
+            ]);
+        }
+        const plannedInput = freshInput;
+        const plan = planChangeIssuance(issueProjectionInput(plannedInput, request.requester));
         if (plan.mode === "return-existing") {
             const after = projectionFor(await this.readInput(request));
             verifyProjection(plan, after);

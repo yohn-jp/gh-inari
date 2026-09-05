@@ -329,6 +329,13 @@ export interface ChangeProjectionInput {
     readonly provenance?: ChangeProvenance;
     /** Additional bounded artifact evidence consumed only by Ready validation. */
     readonly readyEvidence?: ChangeReadyEvidence;
+    /**
+     * The root Issue artifact validated against repository governance before
+     * trusted Change issuance.  This is deliberately separate from generic
+     * Issue evidence so projection cannot mistake a title/state read for a
+     * governed artifact proof.
+     */
+    readonly governedIssue?: ChangeReadyArtifactEvidence;
 }
 export interface ChangeProjectionCandidate<T> {
     readonly candidate: T;
@@ -779,6 +786,15 @@ export declare class ChangeIssuanceRecoveryValidationError extends ChangeValidat
 export declare function validateChangeMergeAdmission(input: unknown): ChangeMergeAdmissionValidationResult;
 export declare const validateCanonicalChangeProvenance: typeof validateChangeMergeAdmission;
 export declare const validateChangeProvenanceForMergeAdmission: typeof validateChangeMergeAdmission;
+/**
+ * Validate the root Issue artifact required by Change issuance.
+ *
+ * The contract/body pair is intentionally checked through the existing
+ * artifact parser and canonical renderer.  Change does not define a second
+ * Issue grammar, and a structurally parseable but non-canonical body is not
+ * sufficient authorization for creating a branch or pull request.
+ */
+export declare function validateGovernedRootIssueEvidence(input: unknown, identity?: ChangeIdentity, baseBranch?: string): readonly ChangeDiagnostic[];
 /** Validate every semantic precondition before a Ready effect can be planned. */
 export declare function validateChangeReadyTransition(input: unknown): ChangeReadyTransitionValidationResult;
 export declare class ChangeReadyTransitionValidationError extends ChangeTransitionValidationError {

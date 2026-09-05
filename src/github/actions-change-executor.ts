@@ -13,13 +13,21 @@ import {
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
   deriveCanonicalBranchIdentity,
   projectChangeFromGitHubEvidence,
+  validateGovernedRootIssueEvidence,
   type CanonicalBranchNamingInput,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
   type ChangeReadyEvidence,
 } from "../change.js";
-import { extractTemplateIdentityMarker } from "../artifact.js";
+import {
+  extractTemplateIdentityMarker,
+  renderIssueArtifact,
+  selectExistingArtifactCandidate,
+  validateExistingIssueArtifact,
+  type ExistingArtifactCandidate,
+} from "../artifact.js";
 import { compileLocalGovernedContract } from "../governance.js";
+import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
   changeRemoteMutationRequest,
@@ -490,10 +498,12 @@ interface GovernanceTree {
 
 /** Converts only bounded GitHub fields into the #213 Core evidence contract. */
 export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader {
+  readonly requiresGovernedIssueValidation: boolean;
   readonly #options: GitHubActionsEvidenceReaderOptions;
 
   constructor(options: GitHubActionsEvidenceReaderOptions) {
     this.#options = options;
+    this.requiresGovernedIssueValidation = options.cwd !== undefined;
   }
 
   async read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput> {
@@ -519,8 +529,8 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       200,
     );
     const issue = record(issueResponse);
-    // GitHub represents an Issue converted to a pull request by adding this
-    // field to the Issue response. A Change must retain two distinct artifacts.
+    // GitHub's Issues endpoint also returns pull-request resources. Presence of
+    // the marker is authoritative, and a Change must retain two distinct artifacts.
     if (Object.prototype.hasOwnProperty.call(issue, "pull_request")) {
       throw new GitHubActionsChangeExecutorError();
     }
@@ -538,6 +548,10 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     if (!derivation.valid || derivation.branch === undefined) throw new GitHubActionsChangeExecutorError();
     const branch = await this.readBranch(derivation.branch);
     const pullRequests = await this.readPullRequests(derivation.branch);
+    const governedIssue =
+      request.operation === "issue" && this.#options.cwd !== undefined
+        ? await this.readGovernedIssue(issueBody, baseBranch)
+        : undefined;
     const readyEvidence =
       request.operation === "ready"
         ? await this.readReadyEvidence(baseBranch, issueBody, pullRequests, derivation.branch)
@@ -552,6 +566,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
         branches: branch ? { status: "available", value: [{ name: derivation.branch }] } : { status: "absent" },
         pullRequests: pullRequests.length === 0 ? { status: "absent" } : { status: "available", value: pullRequests },
       },
+      ...(governedIssue === undefined ? {} : { governedIssue }),
       ...(readyEvidence === undefined ? {} : { readyEvidence }),
     };
   }
@@ -570,13 +585,99 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     const pullRequestBody = await this.readPullRequestBody(pullRequest.number);
     if (pullRequestBody === undefined || pullRequestBody === null) return undefined;
     const generation = await this.readGovernanceTree(baseBranch);
-    const issueContract = await this.readGovernedContract("issue", issueBody, baseBranch, generation);
-    const pullRequestContract = await this.readGovernedContract("pr", pullRequestBody, baseBranch, generation);
+    const issueMarker = extractTemplateIdentityMarker(issueBody);
+    const issueContract =
+      issueMarker.status === "valid" && issueMarker.marker !== undefined
+        ? await this.readGovernedContract("issue", baseBranch, generation, issueMarker.marker.path)
+        : undefined;
+    const pullRequestMarker = extractTemplateIdentityMarker(pullRequestBody);
+    const pullRequestContract =
+      pullRequestMarker.status === "valid" && pullRequestMarker.marker !== undefined
+        ? await this.readGovernedContract("pr", baseBranch, generation, pullRequestMarker.marker.path)
+        : undefined;
     if (issueContract === undefined || pullRequestContract === undefined) return undefined;
     return {
       issue: { contract: issueContract, body: issueBody },
       pullRequest: { contract: pullRequestContract, body: pullRequestBody },
     };
+  }
+
+  /**
+   * Resolve the root Issue against every authoritative Issue template when no
+   * marker is present, or against the marker's exact identity when present.
+   * Selection and validation remain delegated to the shared artifact parser.
+   */
+  private async readGovernedIssue(
+    body: string | null | undefined,
+    ref: string,
+  ): Promise<{ readonly contract: CanonicalContract; readonly body: string }> {
+    if (body === undefined || body === null) throw new GitHubActionsChangeExecutorError();
+    const generation = await this.readGovernanceTree(ref);
+    const marker = extractTemplateIdentityMarker(body);
+    if (marker.status !== "absent") {
+      if (marker.status !== "valid" || marker.marker === undefined || marker.marker.kind !== "issue") {
+        throw new GitHubActionsChangeExecutorError();
+      }
+      const contract = await this.readGovernedContract("issue", ref, generation, marker.marker.path);
+      if (contract === undefined) throw new GitHubActionsChangeExecutorError();
+      this.assertGovernedIssue(contract, body);
+      return { contract, body };
+    }
+
+    const selectors = await this.issueTemplateSelectors(generation);
+    const candidates: ExistingArtifactCandidate[] = [];
+    for (const selector of selectors) {
+      const contract = await this.readGovernedContract("issue", ref, generation, selector);
+      if (contract === undefined) continue;
+      candidates.push({ contract, result: validateExistingIssueArtifact(contract, body) });
+    }
+    const selected = selectExistingArtifactCandidate(candidates);
+    if (selected.contract === undefined || !selected.result.valid) {
+      throw new GitHubActionsChangeExecutorError();
+    }
+    this.assertCanonicalIssueBody(selected.contract, body, selected.result);
+    return { contract: selected.contract, body };
+  }
+
+  private async issueTemplateSelectors(generation: GovernanceTree): Promise<readonly string[]> {
+    const cwd = this.#options.cwd;
+    if (cwd === undefined) throw new GitHubActionsChangeExecutorError();
+    const remotePaths = generation.entries
+      .filter((entry) => entry.type === "blob")
+      .map((entry) => entry.path)
+      .filter((entryPath) => entryPath.startsWith(".github/ISSUE_TEMPLATE/"));
+    const native = discoverTemplatesFromPaths(remotePaths).issueTemplates.map((template) => template.path);
+    if (native.length > 0) return [...new Set(native)].sort();
+
+    // Semantic-only repositories may not have generated native files.  Their
+    // source identities are still compiled by the same local compiler seam.
+    const semanticPaths = generation.entries
+      .filter((entry) => entry.type === "blob")
+      .map((entry) => entry.path)
+      .filter((entryPath) => /^\.github\/inari\/issues\/[^/]+\.json$/u.test(entryPath));
+    if (semanticPaths.length === 0) throw new GitHubActionsChangeExecutorError();
+    return [...new Set(semanticPaths)].sort();
+  }
+
+  private assertGovernedIssue(contract: CanonicalContract, body: string): void {
+    const diagnostics = validateGovernedRootIssueEvidence({ contract, body });
+    if (diagnostics.length > 0) throw new GitHubActionsChangeExecutorError();
+  }
+
+  private assertCanonicalIssueBody(
+    contract: CanonicalContract,
+    body: string,
+    result: ReturnType<typeof validateExistingIssueArtifact>,
+  ): void {
+    try {
+      const canonical = renderIssueArtifact(contract, {
+        fields: result.parse.values,
+        ...(result.parse.dependencies === undefined ? {} : { dependencies: result.parse.dependencies }),
+      });
+      if (canonical !== body) throw new GitHubActionsChangeExecutorError();
+    } catch {
+      throw new GitHubActionsChangeExecutorError();
+    }
   }
 
   private async readPullRequestBody(number: number): Promise<string | null | undefined> {
@@ -613,19 +714,15 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
 
   private async readGovernedContract(
     domain: "issue" | "pr",
-    body: string,
     ref: string,
     generation: GovernanceTree,
+    selector: string,
   ): Promise<CanonicalContract | undefined> {
-    const marker = extractTemplateIdentityMarker(body);
-    if (marker.status !== "valid" || marker.marker === undefined) return undefined;
-    const expectedKind = domain === "issue" ? "issue" : "pull_request";
-    if (marker.marker.kind !== expectedKind) return undefined;
     const cwd = this.#options.cwd;
     if (cwd === undefined) return undefined;
     let contract: CanonicalContract;
     try {
-      contract = await compileLocalGovernedContract(domain, cwd, marker.marker.path);
+      contract = await compileLocalGovernedContract(domain, cwd, selector);
     } catch {
       return undefined;
     }

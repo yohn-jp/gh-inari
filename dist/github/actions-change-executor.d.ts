@@ -77,10 +77,20 @@ export interface GitHubActionsEvidenceReaderOptions {
 /** Converts only bounded GitHub fields into the #213 Core evidence contract. */
 export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader {
     #private;
+    readonly requiresGovernedIssueValidation: boolean;
     constructor(options: GitHubActionsEvidenceReaderOptions);
     read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput>;
     private readInternal;
     private readReadyEvidence;
+    /**
+     * Resolve the root Issue against every authoritative Issue template when no
+     * marker is present, or against the marker's exact identity when present.
+     * Selection and validation remain delegated to the shared artifact parser.
+     */
+    private readGovernedIssue;
+    private issueTemplateSelectors;
+    private assertGovernedIssue;
+    private assertCanonicalIssueBody;
     private readPullRequestBody;
     private readGovernanceTree;
     private readGovernedContract;
