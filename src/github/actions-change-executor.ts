@@ -75,6 +75,7 @@ const MAX_LOGIN_LENGTH = 160;
 const DEFAULT_API_URL = "https://api.github.com";
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
+const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
 
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
@@ -480,6 +481,27 @@ function deriveNaming(title: string): CanonicalBranchNamingInput {
   return { type, slug };
 }
 
+/** Recognize only repository-governed branch names carrying this root Issue. */
+function branchBelongsToRootIssue(
+  branch: string,
+  rootIssue: number,
+  branchGovernance: PullRequestBranchGovernance,
+): boolean {
+  const match = /^(feat|fix|docs|refactor|test|chore)\/(\d+)-([a-z0-9-]+)$/u.exec(branch);
+  if (match === null || Number(match[2]) !== rootIssue || !CANONICAL_BRANCH_TYPES.has(match[1])) return false;
+  try {
+    return new RegExp(branchGovernance.pattern, "u").test(branch);
+  } catch {
+    return false;
+  }
+}
+
+function namingFromBranch(branch: string, rootIssue: number): CanonicalBranchNamingInput | undefined {
+  const match = /^(feat|fix|docs|refactor|test|chore)\/([0-9]+)-([a-z0-9-]+)$/u.exec(branch);
+  if (match === null || Number(match[2]) !== rootIssue) return undefined;
+  return { type: match[1] ?? "", slug: match[3] ?? "" };
+}
+
 export const deriveChangeNamingFromIssueTitle = deriveNaming;
 
 export interface GitHubActionsEvidenceReaderOptions {
@@ -539,22 +561,47 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     const state = issue.state === "open" || issue.state === "closed" ? issue.state : undefined;
     if (issueNumber !== request.issue || state === undefined) throw new GitHubActionsChangeExecutorError();
     const issueBody = boundedArtifactBody(issue.body);
-    const naming = deriveNaming(title);
-    const derivation = deriveCanonicalBranchIdentity({
-      change: this.#options.identity,
-      branchGovernance: this.#options.branchGovernance,
-      naming,
-    });
-    if (!derivation.valid || derivation.branch === undefined) throw new GitHubActionsChangeExecutorError();
-    const branch = await this.readBranch(derivation.branch);
-    const pullRequests = await this.readPullRequests(derivation.branch);
+    let naming: CanonicalBranchNamingInput | undefined;
+    try {
+      naming = deriveNaming(title);
+    } catch {
+      // A title can be edited into a non-governed descriptive value after
+      // issuance. Existing GitHub evidence remains authoritative in that
+      // case; absence still fails closed below.
+    }
+    const derivation =
+      naming === undefined
+        ? undefined
+        : deriveCanonicalBranchIdentity({
+            change: this.#options.identity,
+            branchGovernance: this.#options.branchGovernance,
+            naming,
+          });
+    const derivedBranch = derivation?.valid === true ? derivation.branch : undefined;
+    const branches = await this.readBranches(derivedBranch);
+    const pullRequests = await this.readPullRequests(
+      derivedBranch,
+      branches.some((candidate) => candidate.rootIssue !== undefined),
+    );
+    const anchoredBranches = new Set<string>([
+      ...branches.filter((candidate) => candidate.rootIssue === request.issue).map((candidate) => candidate.name),
+      ...pullRequests.filter((candidate) => candidate.rootIssue === request.issue).map((candidate) => candidate.head),
+    ]);
+    if (anchoredBranches.size > 1) throw new GitHubActionsChangeExecutorError();
+    const canonicalBranch = anchoredBranches.size === 1 ? [...anchoredBranches][0] : derivedBranch;
+    if (naming === undefined && canonicalBranch !== undefined) {
+      naming = namingFromBranch(canonicalBranch, request.issue);
+    }
+    if (naming === undefined || canonicalBranch === undefined) {
+      throw new GitHubActionsChangeExecutorError();
+    }
     const governedIssue =
       request.operation === "issue" && this.#options.cwd !== undefined
         ? await this.readGovernedIssue(issueBody, baseBranch)
         : undefined;
     const readyEvidence =
       request.operation === "ready"
-        ? await this.readReadyEvidence(baseBranch, issueBody, pullRequests, derivation.branch)
+        ? await this.readReadyEvidence(baseBranch, issueBody, pullRequests, canonicalBranch)
         : undefined;
     return {
       change: this.#options.identity,
@@ -563,7 +610,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       baseBranch,
       evidence: {
         issue: { status: "available", value: { number: issueNumber, state } },
-        branches: branch ? { status: "available", value: [{ name: derivation.branch }] } : { status: "absent" },
+        branches: branches.length === 0 ? { status: "absent" } : { status: "available", value: branches },
         pullRequests: pullRequests.length === 0 ? { status: "absent" } : { status: "available", value: pullRequests },
       },
       ...(governedIssue === undefined ? {} : { governedIssue }),
@@ -846,19 +893,50 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     return true;
   }
 
-  private async readPullRequests(branch: string): Promise<readonly ChangePullRequestEvidence[]> {
+  private async readBranches(
+    derivedBranch: string | undefined,
+  ): Promise<readonly { name: string; rootIssue?: number }[]> {
+    const names = new Set<string>();
+    if (derivedBranch !== undefined && (await this.readBranch(derivedBranch))) names.add(derivedBranch);
     const response = await this.#options.transport.request({
       hostname: this.#options.repository.hostname,
       method: "GET",
-      path: apiPath(
-        this.#options.repository,
-        `pulls?state=all&head=${encodeURIComponent(`${this.#options.repository.owner}:${branch}`)}&per_page=${MAX_PULL_REQUESTS}`,
-      ),
+      path: apiPath(this.#options.repository, "git/matching-refs/heads/"),
+    });
+    if (response.status === 404) return [...names].map((name) => ({ name }));
+    if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
+      throw new GitHubActionsChangeExecutorError();
+    }
+    for (const candidate of response.body) {
+      const value = record(candidate);
+      const ref = boundedString(value.ref, 512);
+      const prefix = "refs/heads/";
+      if (!ref.startsWith(prefix)) throw new GitHubActionsChangeExecutorError();
+      const name = ref.slice(prefix.length);
+      if (branchBelongsToRootIssue(name, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
+        names.add(name);
+      }
+    }
+    const orderedNames = [...names].sort();
+    const hasHistoricalCandidate = orderedNames.some((name) => name !== derivedBranch);
+    return orderedNames.map((name) =>
+      hasHistoricalCandidate ? { name, rootIssue: this.#options.identity.rootIssue } : { name },
+    );
+  }
+
+  private async readPullRequests(
+    derivedBranch: string | undefined,
+    hasHistoricalBranch: boolean,
+  ): Promise<readonly ChangePullRequestEvidence[]> {
+    const response = await this.#options.transport.request({
+      hostname: this.#options.repository.hostname,
+      method: "GET",
+      path: apiPath(this.#options.repository, `pulls?state=all&per_page=${MAX_PULL_REQUESTS}`),
     });
     if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
       throw new GitHubActionsChangeExecutorError();
     }
-    return response.body.map((candidate): ChangePullRequestEvidence => {
+    const pullRequests = response.body.flatMap((candidate): ChangePullRequestEvidence[] => {
       const value = record(candidate);
       const head = record(value.head);
       const base = record(value.base);
@@ -866,16 +944,35 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
       if (state === undefined || typeof value.draft !== "boolean") throw new GitHubActionsChangeExecutorError();
       const login = boundedString(user.login, MAX_LOGIN_LENGTH);
-      return {
-        number: positiveNumber(value.number),
-        head: boundedString(head.ref, 255),
-        base: boundedString(base.ref, 255),
-        state,
-        draft: value.draft,
-        ...(state === "closed" ? { merged: value.merged_at !== null } : { merged: false }),
-        provenance: { issuer: issuerPrincipal(login) },
-      };
+      const headName = boundedString(head.ref, 255);
+      if (head.repo !== undefined && head.repo !== null) {
+        const headRepository = record(head.repo);
+        if (headRepository.full_name !== `${this.#options.repository.owner}/${this.#options.repository.name}`) {
+          return [];
+        }
+      }
+      if (!branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
+        return [];
+      }
+      return [
+        {
+          number: positiveNumber(value.number),
+          head: headName,
+          base: boundedString(base.ref, 255),
+          state,
+          draft: value.draft,
+          ...(state === "closed" ? { merged: value.merged_at !== null } : { merged: false }),
+          provenance: { issuer: issuerPrincipal(login) },
+        },
+      ];
     });
+    const hasHistoricalCandidate =
+      hasHistoricalBranch || pullRequests.some((candidate) => candidate.head !== derivedBranch);
+    return pullRequests.map((candidate) =>
+      hasHistoricalCandidate || candidate.head !== derivedBranch
+        ? { ...candidate, rootIssue: this.#options.identity.rootIssue }
+        : candidate,
+    );
   }
 
   private async request(request: Omit<GitHubChangeEffectRequest, "hostname">, expected: number): Promise<unknown> {
