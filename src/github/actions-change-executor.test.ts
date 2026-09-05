@@ -17,7 +17,7 @@ import type {
   GitHubChangeEffectResponse,
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
-import { CHANGE_TRANSITION_CONTRACT_VERSION, projectChangeFromGitHubEvidence } from "../change.js";
+import { CHANGE_TRANSITION_CONTRACT_VERSION, planChangeIssuance, projectChangeFromGitHubEvidence } from "../change.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
   INARI_ISSUER_PRINCIPAL,
@@ -135,12 +135,18 @@ class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
     if (request.path.endsWith("repos/acme/inari/")) {
       return { status: 200, body: { id: 218000001, default_branch: "main" } };
     }
-    if (request.path.endsWith("issues/218")) {
-      return { status: 200, body: { number: 218, title: "feat: Execute Change plans safely", state: "open" } };
+    if (request.path.endsWith("issues/239")) {
+      return {
+        status: 200,
+        body: { number: 239, title: "feat: dogfood governed Change lifecycle through trusted Actions", state: "open" },
+      };
     }
-    if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
+    if (request.path.includes("git/ref/heads/feat%2F239-dogfood-governed-change-lifecycle-through-trusted-actions")) {
       return this.branch
-        ? { status: 200, body: { ref: "refs/heads/feat/218-execute-change-plans-safely" } }
+        ? {
+            status: 200,
+            body: { ref: "refs/heads/feat/239-dogfood-governed-change-lifecycle-through-trusted-actions" },
+          }
         : { status: 404, body: { message: "Not Found" } };
     }
     if (request.path.includes("pulls?state=all")) {
@@ -150,7 +156,7 @@ class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
           ? [
               {
                 number: 2180,
-                head: { ref: "feat/218-execute-change-plans-safely" },
+                head: { ref: "feat/239-dogfood-governed-change-lifecycle-through-trusted-actions" },
                 base: { ref: "main" },
                 state: "open",
                 draft: true,
@@ -169,16 +175,22 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
   const transport = new MutablePreIssuanceTransport();
   const reader = new GitHubActionsEvidenceReader({
     repository,
-    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 239 },
     branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
     transport,
   });
-  const request = changeRemoteMutationRequest("issue", 218);
+  const request = changeRemoteMutationRequest("issue", 239);
   const initial = await reader.read(request);
   const initialProjection = projectChangeFromGitHubEvidence(initial);
   assert.equal(initialProjection.valid, true);
   assert.equal(initialProjection.status, "absent");
   assert.equal(initialProjection.change?.state, "DEFINED");
+  const plan = planChangeIssuance(initial);
+  assert.equal(plan.mode, "create");
+  assert.deepEqual(
+    plan.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+  );
 
   const effects: string[] = [];
   const target: IssuerRepositoryIdentity = {
@@ -220,7 +232,7 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
   const result = await executor.execute({
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     operation: "issue",
-    issue: 218,
+    issue: 239,
   });
 
   assert.deepEqual(effects, ["CREATE_BRANCH", "CREATE_PULL_REQUEST"]);
