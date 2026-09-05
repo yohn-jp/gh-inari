@@ -5,8 +5,8 @@
  * option mechanics only; inverse option scopes are derived from commands so
  * the command surface has one authority.
  */
-export declare const COMMAND_CONTRACT_VERSION: "1.0.0";
-export declare const COMMAND_CONTRACT_ID: "urn:inari:command-contract:1.0.0";
+export declare const COMMAND_CONTRACT_VERSION: "1.1.0";
+export declare const COMMAND_CONTRACT_ID: "urn:inari:command-contract:1.1.0";
 export declare const AGENT_INVOCATION_CONTRACT: {
     readonly canonical: "inari";
     readonly compatibility: "gh inari";
@@ -17,10 +17,10 @@ export declare const AGENT_INVOCATION_CONTRACT: {
 };
 export declare const RUNTIME_CAPABILITIES: readonly ["canonical-invocation", "machine-readable-version", "capability-diagnostics", "extension-bootstrap"];
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
-export type CommandDomain = "root" | "issue" | "pr" | "template" | "skill";
+export type CommandDomain = "root" | "issue" | "pr" | "template" | "change" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
-export type CommandId = "root.help" | "root.version" | "root.diagnose" | "root.doctor" | "issue.schema" | "issue.validate" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync" | "pr.schema" | "pr.validate" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync" | "template.list" | "template.sync" | "template.import" | "skill.index" | "skill.scenario";
+export type CommandId = "root.help" | "root.version" | "root.diagnose" | "root.doctor" | "issue.schema" | "issue.validate" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync" | "pr.schema" | "pr.validate" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync" | "template.list" | "template.sync" | "template.import" | "change.issue" | "change.show" | "change.ready" | "change.abort" | "skill.index" | "skill.scenario";
 export type OptionId = "help" | "json" | "version" | "diagnose" | "doctor" | "from" | "field" | "template" | "policy" | "repository" | "title" | "head" | "base" | "to" | "requireCapability" | "minimumVersion" | "compact" | "check" | "dryRun" | "draft" | "maintainerCanModify" | "rawBody";
 export interface CommandOptionDefinition {
     readonly id: OptionId;
@@ -95,7 +95,7 @@ export declare function commandExample(id: CommandId): string;
 export declare function commandUsageInvocation(id: CommandId): string;
 export declare function commandRecoveryInvocation(id: "issue.create" | "pr.create"): string;
 export declare function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string;
-export declare function helpInvocation(domain: "issue" | "pr" | "template" | "skill"): string;
+export declare function helpInvocation(domain: "issue" | "pr" | "template" | "change" | "skill"): string;
 export interface CommandDiscoveryOption {
     readonly id: OptionId;
     readonly key: string;

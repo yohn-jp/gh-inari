@@ -474,10 +474,10 @@ test("skill --json lists the same scenarios as a versioned JSON projection", asy
   const { exitCode, output } = await captureOutput(["skill", "--json"]);
   assert.equal(exitCode, 0);
   const parsed = JSON.parse(output);
-  assert.equal(parsed.version, "1.0.0");
+  assert.equal(parsed.version, "1.1.0");
   assert.deepEqual(
     parsed.scenarios.map((entry: { id: string }) => entry.id),
-    ["author-issue", "author-pr", "inspect-governance", "repair-invalid-artifact"],
+    ["author-issue", "author-pr", "inspect-governance", "repair-invalid-artifact", "manage-change"],
   );
 });
 
@@ -493,7 +493,7 @@ test("skill <scenario> --json prints the same playbook as a versioned JSON proje
   const { exitCode, output } = await captureOutput(["skill", "author-issue", "--json"]);
   assert.equal(exitCode, 0);
   const parsed = JSON.parse(output);
-  assert.equal(parsed.version, "1.0.0");
+  assert.equal(parsed.version, "1.1.0");
   assert.equal(parsed.id, "author-issue");
   assert.ok(Array.isArray(parsed.workflow) && parsed.workflow.length > 0);
   assert.ok(Array.isArray(parsed.invariants) && parsed.invariants.length > 0);
@@ -1031,7 +1031,7 @@ test("machine-readable version reports the invocation contract and capabilities"
     assert.equal(output.name, "gh-inari");
     assert.equal(output.version, "0.3.0");
     assert.equal(output.protocol, 1);
-    assert.equal(output.commandContractVersion, "1.0.0");
+    assert.equal(output.commandContractVersion, "1.1.0");
     assert.deepEqual(output.invocation, {
       canonical: "inari",
       compatibility: "gh inari",
@@ -1060,7 +1060,7 @@ test("diagnose reports canonical runtime readiness independently from a missing 
         status: 0,
         stdout: JSON.stringify({
           version: "0.3.0",
-          commandContractVersion: "1.0.0",
+          commandContractVersion: "1.1.0",
           capabilities: [
             "canonical-invocation",
             "machine-readable-version",
@@ -1102,7 +1102,7 @@ test("diagnose reports stale extension capability health separately from the rea
         status: 0,
         stdout: JSON.stringify({
           version: "0.3.0",
-          commandContractVersion: "1.0.0",
+          commandContractVersion: "1.1.0",
           capabilities: [
             "canonical-invocation",
             "machine-readable-version",
@@ -1123,7 +1123,7 @@ test("diagnose reports stale extension capability health separately from the rea
                 name: "gh-inari",
                 version: "0.2.0",
                 protocol: 1,
-                commandContractVersion: "1.0.0",
+                commandContractVersion: "1.1.0",
                 capabilities: ["canonical-invocation"],
                 invocation: { canonical: "inari", direct: "gh-inari", fallback: "npx --yes gh-inari" },
               }),

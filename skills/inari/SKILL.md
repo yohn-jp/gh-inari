@@ -1,7 +1,7 @@
 ---
 name: inari
 description: |
-  Governed GitHub Issue, pull request, and template workflows for this
+  Governed GitHub Issue, pull request, Change, and template workflows for this
   repository. Use when creating or editing an Issue/PR that must satisfy
   repository governance, or when inspecting/repairing an existing Issue/PR's
   governance state. Prefer this over raw `gh` for those operations.
@@ -27,6 +27,8 @@ Prefer `inari` over raw `gh` for:
 - Reading the governance classification of an existing Issue or PR.
 - Repairing an invalid or non-normalized Issue or PR.
 - Syncing semantic template contracts to their GitHub-native projections.
+- Issuing, inspecting, reviewing, or stopping a governed Change through the
+  semantic Change command surface.
 
 Raw `gh` remains fine for anything outside that surface (e.g. listing,
 searching, commenting, or other operations Inari does not govern). Inari
@@ -42,6 +44,7 @@ inari skill              # list bounded operational playbooks (scenarios)
 inari skill <scenario>   # print one playbook's exact workflow and invariants
 inari issue --help       # exact Issue subcommand syntax
 inari pr --help          # exact PR subcommand syntax
+inari change --help      # exact Change subcommand syntax
 inari template --help    # exact template subcommand syntax
 ```
 

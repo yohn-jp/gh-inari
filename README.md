@@ -174,6 +174,10 @@ inari issue normalize <number> [--dry-run]
 inari pr normalize <number> [--dry-run]
 inari issue sync <number> --from desired.json [--dry-run]
 inari pr sync <number> --from desired.json [--dry-run]
+inari change issue <number> [--repository <owner/name>] --json
+inari change show <number> [--repository <owner/name>] --json
+inari change ready <number> [--repository <owner/name>] --json
+inari change abort <number> [--repository <owner/name>] --json
 ```
 
 `--from -` reads JSON from stdin. Create input uses an envelope when mutation metadata is needed:
@@ -194,6 +198,13 @@ The `fields` object is the semantic input contract shown by `schema`; the same s
 and a valid `syncInput.minimalExample`.
 `issue sync --from` overlays supplied semantic fields and metadata onto the
 current artifact, preserving values omitted from the input.
+
+Change commands use the semantic Change contract and return bounded JSON
+projections. Mutation commands request a configured remote executor; workflow
+names, dispatch inputs, Actions jobs, and privileged App credentials are not
+CLI inputs. `change show` is read-only. Existing Issue/PR artifact-level
+commands remain available as explicit migration-compatible direct mutation
+paths while the Change workflow is rolled out.
 
 Schema and validation output is JSON. `--json` makes render and create output JSON as well. Validation failures return exit status `2`; usage errors return `1`; GitHub/transport failures return `3`. Error objects contain stable `code`, `path` where applicable, and ordered `violations`.
 

@@ -1,4 +1,5 @@
 import { GitHubAdapter } from "./github/index.js";
+import { type ChangeRemoteExecutor, type ChangeRemoteExecutorOptions } from "./change-executor.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 interface PackageMetadata {
     readonly name: string;
@@ -18,6 +19,10 @@ export interface CliDependencies {
     readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
     readonly runGhFallback?: (argv: readonly string[]) => number;
     readonly templateResolver?: TemplateResolverDependencies;
+    /** Injectable semantic executor; it never carries App credentials. */
+    readonly changeExecutor?: ChangeRemoteExecutor;
+    /** Factory seam for a repository-scoped transport implementation. */
+    readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
 }
 /** The installed gh-inari executable entrypoint. */
 export declare function runCli(argv: string[], dependencies?: CliDependencies): Promise<number>;

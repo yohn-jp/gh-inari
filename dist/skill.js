@@ -1,6 +1,6 @@
 import { commandExample, commandInvocation, helpInvocation, } from "./command-contract.js";
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
-export const SKILL_MODEL_VERSION = "1.0.0";
+export const SKILL_MODEL_VERSION = "1.1.0";
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
 export const MAX_SKILL_OUTPUT_BYTES = 4096;
 const HELP_DISCLAIMER = "This playbook does not restate exact flags; run the help pointer below for precise syntax.";
@@ -100,6 +100,26 @@ export const SKILL_SCENARIOS = [
         ],
         canonicalCommandId: "issue.normalize",
         helpDomain: "issue",
+    }),
+    skillScenario({
+        id: "manage-change",
+        title: "Manage a governed Change",
+        whenToUse: "Use when implementation work must be issued, inspected, admitted to review, or intentionally stopped.",
+        workflow: [
+            ["Issue the semantic Change for the root Issue before implementation begins.", "change.issue"],
+            ["Read the bounded Change projection without requesting a mutation.", "change.show"],
+            ["Request the governed transition to review after implementation evidence is ready.", "change.ready"],
+            ["Request governed termination when the active Change should be stopped.", "change.abort"],
+        ],
+        invariants: [
+            "Use semantic Change commands; do not create refs or pull requests as a substitute for Change issuance.",
+            "Change show is read-only and does not require privileged mutation authority.",
+            "Transport details and issuer credentials are never CLI inputs.",
+            "Existing artifact-level Issue/PR mutation commands remain migration-compatible paths during rollout.",
+            HELP_DISCLAIMER,
+        ],
+        canonicalCommandId: "change.issue",
+        helpDomain: "change",
     }),
 ];
 export function findSkillScenario(id) {

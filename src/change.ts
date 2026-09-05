@@ -281,6 +281,12 @@ export interface ChangeProjectionValidationResult {
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
+export interface ChangeProjectionResultValidationResult {
+  readonly valid: boolean;
+  readonly projection?: ChangeProjectionResult;
+  readonly diagnostics: readonly ChangeDiagnostic[];
+}
+
 export interface CanonicalBranchIdentityDerivationInput {
   readonly change: Change | ChangeIdentity;
   readonly branchGovernance: PullRequestBranchGovernance;
@@ -3544,7 +3550,7 @@ function validateChangeProjectionCandidatePullRequest(
   };
 }
 
-function validateChangeProjectionResult(
+function parseChangeProjectionResult(
   input: unknown,
   path: string,
   diagnostics: ChangeDiagnostic[],
@@ -3714,6 +3720,22 @@ function validateChangeProjectionResult(
   };
 }
 
+/** Validate one bounded projection at a transport or package boundary. */
+export function validateChangeProjectionResult(input: unknown): ChangeProjectionResultValidationResult {
+  const diagnostics: ChangeDiagnostic[] = [];
+  const projection = parseChangeProjectionResult(input, "$", diagnostics);
+  if (projection === undefined || diagnostics.length > 0) {
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  return { valid: true, projection, diagnostics: [] };
+}
+
+/** Assert that an executor returned the bounded Change projection contract. */
+export function assertChangeProjectionResult(input: unknown): asserts input is ChangeProjectionResult {
+  const result = validateChangeProjectionResult(input);
+  if (!result.valid || result.projection === undefined) throw new ChangeValidationError(result.diagnostics);
+}
+
 function validateChangeIssuanceFailureRecord(
   input: unknown,
   path: string,
@@ -3734,7 +3756,7 @@ function validateChangeIssuanceFailureRecord(
   if (!hasOwn(input, "projection")) {
     addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.projection`, "Property is required.");
   } else {
-    projection = validateChangeProjectionResult(input.projection, `${path}.projection`, diagnostics);
+    projection = parseChangeProjectionResult(input.projection, `${path}.projection`, diagnostics);
   }
   if (diagnostics.length > 0 || failure === undefined || projection === undefined) return undefined;
   return { attemptedEffects, failure, projection };
@@ -4488,7 +4510,7 @@ function validateChangeIssuanceCompensationOutcome(
   if (!hasOwn(input, "evidence")) {
     addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", `${path}.evidence`, "Property is required.");
   } else {
-    evidence = validateChangeProjectionResult(input.evidence, `${path}.evidence`, diagnostics);
+    evidence = parseChangeProjectionResult(input.evidence, `${path}.evidence`, diagnostics);
   }
   let failure: ChangeIssuanceFailureEvidence | undefined;
   if (hasOwn(input, "failure")) {

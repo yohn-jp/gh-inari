@@ -13,6 +13,7 @@ import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffA
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
+import { changeRemoteMutationRequest, changeRemoteReadRequest, createUnavailableChangeRemoteExecutor, executeChangeRemoteMutation, readChangeRemoteProjection, } from "./change-executor.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
@@ -97,6 +98,9 @@ export async function runCli(argv, dependencies = {}) {
         }
         if (domain === "template" && command === "import") {
             return await runTemplateImport(root, rest, parsed, json);
+        }
+        if (domain === "change") {
+            return await runChangeCommand(command, rest, parsed, root, dependencies, json);
         }
         if (domain === "issue" || domain === "pr") {
             return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
@@ -542,6 +546,62 @@ async function runTemplateImport(root, rest, parsed, json) {
             console.error(`warning: ${imported.warning}`);
     }
     return 0;
+}
+function invalidChangeNumberError(value) {
+    const message = value === undefined
+        ? "A Change root Issue number is required."
+        : `"${value}" is not a valid Change root Issue number. Use a positive integer.`;
+    return new CliError("INVALID_CHANGE_NUMBER", message, "$argv[1]", { value });
+}
+function createChangeExecutor(dependencies, root, repository) {
+    if (dependencies.changeExecutor !== undefined)
+        return dependencies.changeExecutor;
+    const factory = dependencies.createChangeExecutor ?? (() => createUnavailableChangeRemoteExecutor());
+    return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
+}
+function projectChangeCommandResult(operation, issue, projection) {
+    const change = projection.change;
+    const changeProjection = change?.projection;
+    return {
+        ok: projection.valid,
+        operation: `change.${operation}`,
+        change: change?.identity.rootIssue ?? issue,
+        issue,
+        status: projection.status,
+        ...(change === undefined ? {} : { state: change.state }),
+        ...(projection.canonicalBranch === undefined ? {} : { canonicalBranch: projection.canonicalBranch }),
+        ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
+        ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
+        ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+        projection,
+    };
+}
+function rejectUnsupportedChangeOptions(command, options) {
+    const definition = getCommandForPositionals(["change", command]);
+    if (definition === undefined)
+        return;
+    const unsupported = Object.keys(options).find((id) => !definition.optionIds.includes(id));
+    if (unsupported === undefined)
+        return;
+    const option = getOption(unsupported);
+    throw new CliError("INVALID_OPTION", `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by change ${command}.`, "$argv", { command: `change ${command}`, option: option.id });
+}
+async function runChangeCommand(command, rest, parsed, root, dependencies, json) {
+    void json;
+    const definition = command === undefined ? undefined : getCommandForPositionals(["change", command]);
+    if (definition === undefined || definition.domain !== "change") {
+        throw new CliError("UNKNOWN_COMMAND", `Unknown change command "${command ?? ""}".`);
+    }
+    if (rest.length !== 1 || !isPositiveInteger(rest[0]))
+        throw invalidChangeNumberError(rest[0]);
+    rejectUnsupportedChangeOptions(definition.operation, parsed.options);
+    const issue = Number(rest[0]);
+    const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
+    const projection = definition.operation === "show"
+        ? await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue))
+        : await executeChangeRemoteMutation(executor, changeRemoteMutationRequest(definition.operation, issue));
+    console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection)));
+    return projection.valid ? 0 : EXIT_VALIDATION;
 }
 async function runArtifactCommand(domain, command, rest, parsed, root, dependencies, json) {
     if (command === "schema") {
@@ -1210,6 +1270,7 @@ function toErrorShape(error) {
             ...(typeof error.path === "string" ? { path: error.path } : {}),
             ...(typeof error.details === "object" ? { details: error.details } : {}),
             ...(Array.isArray(error.violations) ? { violations: error.violations } : {}),
+            ...(Array.isArray(error.diagnostics) ? { diagnostics: error.diagnostics } : {}),
         };
     return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
 }
@@ -1238,6 +1299,7 @@ function classifyExitCode(error) {
         (error.code === "INPUT_INVALID_JSON" ||
             error.code === "INPUT_TOO_LARGE" ||
             error.code === "INVALID_ARTIFACT_NUMBER" ||
+            error.code === "INVALID_CHANGE_NUMBER" ||
             error.code === "UNKNOWN_SKILL_SCENARIO" ||
             error.code === "SKILL_OUTPUT_EXCEEDS_BUDGET" ||
             error.code === "FIELD_UNKNOWN" ||
@@ -1245,6 +1307,10 @@ function classifyExitCode(error) {
             error.code === "FIELD_CONFLICT"))
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN")
+        return EXIT_VALIDATION;
+    if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_"))
+        return EXIT_REMOTE;
+    if (isObjectWithCode(error) && error.code.startsWith("CHANGE_"))
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_"))
         return EXIT_REMOTE;
@@ -1269,7 +1335,9 @@ function isOwnedInvocation(argv) {
     if (argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor"))
         return true;
     const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
-    if (helpRequested && (first === "issue" || first === "pr" || first === "template") && positionals.length === 1)
+    if (helpRequested &&
+        (first === "issue" || first === "pr" || first === "template" || first === "change") &&
+        positionals.length === 1)
         return true;
     return getCommandForPositionals(positionals) !== undefined;
 }
@@ -1324,6 +1392,7 @@ const DOMAIN_PASSTHROUGH_EXAMPLE = {
     issue: "issue list",
     pr: "pr checks",
     template: "template view",
+    change: "change list",
 };
 /** Dispatches to root, domain, or leaf help from the canonical command model. */
 function printHelpFor(positionals, helpValue) {
@@ -1332,7 +1401,7 @@ function printHelpFor(positionals, helpValue) {
     if (helpValue === "full")
         return printFullHelp();
     const [domain, command] = positionals;
-    if (domain === "issue" || domain === "pr") {
+    if (domain === "issue" || domain === "pr" || domain === "change") {
         const definition = command === undefined ? undefined : getCommandForPositionals([domain, command]);
         if (definition !== undefined && definition.domain === domain)
             return printLeafHelp(definition);
@@ -1359,6 +1428,7 @@ Domains:
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
   template   Semantic template authoring and native template sync
+  change     Semantic Change projection and authoritative lifecycle requests
   skill      Bounded operational playbooks for common governed workflows
 
 All other commands (e.g. repo, auth, pr list, issue view) are passed through to gh.
@@ -1420,8 +1490,7 @@ ${options}
 Run \`inari --help=full\` for the complete option reference.`);
 }
 function printFullHelp() {
-    const commands = ["template", "issue", "pr"]
-        .flatMap((domain) => INARI_COMMANDS.filter((entry) => entry.domain === domain))
+    const commands = INARI_COMMANDS.filter((entry) => entry.domain !== "root" && entry.domain !== "skill")
         .map((entry) => `  ${commandUsage(entry)}`)
         .join("\n");
     const options = Object.values(COMMAND_OPTIONS)
@@ -1438,6 +1507,7 @@ ${options}
 
 Create always validates and renders before invoking gh. Schema, validate, render, check, and --dry-run remediation never mutate GitHub.
 Edit is the primary patch path: it preserves omitted fields and metadata, validates the complete result, and renders canonical Markdown before mutation. Normalize preserves existing semantic values; issue sync preserves omitted current values; pr sync reconciles a complete desired semantic state.
+Change commands request semantic lifecycle operations through the configured remote executor; transport and privileged credentials are not CLI inputs. Existing issue/pr artifact commands remain available as migration-compatible direct mutation paths.
 
 All other commands pass through to the real gh binary unchanged.
 

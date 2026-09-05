@@ -5,7 +5,7 @@
  * option mechanics only; inverse option scopes are derived from commands so
  * the command surface has one authority.
  */
-export const COMMAND_CONTRACT_VERSION = "1.0.0";
+export const COMMAND_CONTRACT_VERSION = "1.1.0";
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}`;
 export const AGENT_INVOCATION_CONTRACT = {
     canonical: "inari",
@@ -26,6 +26,7 @@ const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"];
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"];
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"];
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"];
+const CHANGE_OPTIONS = ["help", "json", "repository"];
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"];
 const PR_CREATE_OPTIONS = [
     "help",
@@ -132,6 +133,10 @@ export const INARI_COMMANDS = [
     ]),
     command("template.sync", "template", "sync", ["template", "sync"], "Regenerate native templates from semantic contracts.", ["help", "json", "check"]),
     command("template.import", "template", "import", ["template", "import"], "Import a native template into a semantic contract.", ["help", "json", "from", "to"]),
+    command("change.issue", "change", "issue", ["change", "issue"], "Request authoritative issuance of a governed Change for an Issue.", CHANGE_OPTIONS, "<number>"),
+    command("change.show", "change", "show", ["change", "show"], "Read a bounded machine-readable projection of a governed Change.", CHANGE_OPTIONS, "<number>"),
+    command("change.ready", "change", "ready", ["change", "ready"], "Request the governed transition of a Change from Draft to review.", CHANGE_OPTIONS, "<number>"),
+    command("change.abort", "change", "abort", ["change", "abort"], "Request authoritative termination of a governed Change.", CHANGE_OPTIONS, "<number>"),
     command("skill.index", "skill", "index", ["skill"], "List bounded operational playbooks.", ["help", "json"]),
     command("skill.scenario", "skill", "scenario", ["skill"], "Print one bounded operational playbook.", ["help", "json"], "[scenario]"),
 ];
@@ -304,7 +309,7 @@ export function projectCommandHelp(positionals) {
         return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
     }
     const domain = positionals[0];
-    if (domain === "issue" || domain === "pr")
+    if (domain === "issue" || domain === "pr" || domain === "change")
         return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
     if (domain === "template")
         return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };
