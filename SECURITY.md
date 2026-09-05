@@ -37,3 +37,9 @@ commands invoke the remote mutation only after compilation, semantic
 validation, and canonical rendering have succeeded. Review input paths
 before running Inari with untrusted arguments, and use the
 least-privileged `gh` authentication available for the target repository.
+
+The governed Change architecture adds a separate Inari GitHub App issuer
+boundary. The App private key and short-lived installation tokens are confined
+to trusted execution and are never caller- or agent-facing; repository and
+installation scope mismatches fail closed. See
+[the issuer authority contract](docs/INARI_ISSUER_APP.md).
