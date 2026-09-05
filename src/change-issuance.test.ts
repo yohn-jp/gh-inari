@@ -78,6 +78,8 @@ test("issuance state table plans one ordered create transaction for an absent Ch
       branch: canonicalBranch,
       baseBranch: canonicalBaseBranch,
       rootIssue: 214,
+      title: "Change #214",
+      body: "Closes #214",
       draft: true,
     },
   ]);

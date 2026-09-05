@@ -21,6 +21,8 @@ export declare const MAX_CHANGE_PRINCIPAL_LENGTH: 160;
 export declare const MAX_CHANGE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_HOST_LENGTH: 255;
 export declare const MAX_CHANGE_IDEMPOTENCY_KEY_LENGTH: 512;
+export declare const MAX_CHANGE_PR_TITLE_LENGTH: 255;
+export declare const MAX_CHANGE_PR_BODY_LENGTH: 65536;
 export interface CanonicalBranchNamingInput {
     /** Repository-governed branch classification, not a complete branch name. */
     readonly type: string;
@@ -169,6 +171,10 @@ export type ChangeEffect = {
     readonly branch: string;
     readonly baseBranch: string;
     readonly rootIssue: number;
+    /** Core-owned deterministic GitHub pull-request title. */
+    readonly title: string;
+    /** Core-owned deterministic initial body; never an Issue-conversion request. */
+    readonly body: string;
     readonly draft: true;
 } | {
     readonly kind: "MARK_PULL_REQUEST_READY";

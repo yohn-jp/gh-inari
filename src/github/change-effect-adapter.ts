@@ -235,7 +235,8 @@ export class GitHubChangeEffectAdapter {
         body: {
           head: effect.branch,
           base: effect.baseBranch,
-          issue: effect.rootIssue,
+          title: effect.title,
+          body: effect.body,
           draft: effect.draft,
         },
       },
@@ -243,6 +244,10 @@ export class GitHubChangeEffectAdapter {
     );
     const record = responseRecord(response);
     const pullRequest = responseNumber(record.number);
+    // GitHub Issue and pull-request numbers share a namespace. Equality here
+    // is the observable signature of Issue-to-PR conversion, never a valid
+    // Change issuance result.
+    if (pullRequest === effect.rootIssue) throw new InvalidGitHubResponseError();
     if (record.state !== "open" || record.draft !== true) throw new InvalidGitHubResponseError();
     responseBranch(record.head, effect.branch);
     responseBranch(record.base, effect.baseBranch);

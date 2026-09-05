@@ -260,6 +260,25 @@ test("Actions evidence reader returns only bounded Core projection input", async
   assert.equal(JSON.stringify(result).includes("Not Found"), false);
 });
 
+test("Actions evidence reader rejects an Issue response that is already a pull request", async () => {
+  const transport = new ReadTransport();
+  const original = transport.request.bind(transport);
+  transport.request = async (request) => {
+    const response = await original(request);
+    if (request.path.endsWith("issues/218") && response.status === 200 && response.body !== undefined) {
+      return { ...response, body: { ...(response.body as Record<string, unknown>), pull_request: {} } };
+    }
+    return response;
+  };
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+  await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)), GitHubActionsChangeExecutorError);
+});
+
 class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
   branch = false;
   pullRequest = false;
