@@ -28,7 +28,11 @@ import {
   type ChangeRemoteMutationRequest,
   type ChangeRemoteReadRequest,
 } from "../change-executor.js";
-import { TrustedChangeExecutor, type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
+import {
+  ChangeTrustedExecutorError,
+  TrustedChangeExecutor,
+  type ChangeTrustedEvidenceReader,
+} from "../change-trusted-executor.js";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   GitHubChangeEffectAdapter,
@@ -47,6 +51,8 @@ import {
   type TrustedInstallationCredentialBroker,
   type IssuerRepositoryIdentity,
   type TrustedExecutionEvent,
+  type TrustedExecutionContext,
+  IssuerAuthorityError,
 } from "./issuer-authority.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
@@ -62,12 +68,54 @@ const DEFAULT_API_URL = "https://api.github.com";
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 
+/** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
+export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
+  "repository-evidence",
+  "trusted-execution",
+  "branch-governance",
+  "issuer-configuration",
+  "installation-token",
+  "installation-scope",
+  "projection-execution",
+] as const);
+export type TrustedActionsFailureStage = (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
+
+export interface TrustedActionsFailureDiagnostic {
+  readonly stage: TrustedActionsFailureStage;
+}
+
+export function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage {
+  return TRUSTED_ACTIONS_FAILURE_STAGES.includes(value as TrustedActionsFailureStage);
+}
+
+function failureDiagnostic(stage: TrustedActionsFailureStage): TrustedActionsFailureDiagnostic {
+  return Object.freeze({ stage });
+}
+
 export class GitHubActionsChangeExecutorError extends Error {
   readonly code = "CHANGE_ACTIONS_RUNTIME_INVALID" as const;
+  readonly details?: TrustedActionsFailureDiagnostic;
 
-  constructor(message = "Trusted Change Actions runtime configuration is invalid.") {
+  constructor(
+    message = "Trusted Change Actions runtime configuration is invalid.",
+    stage?: TrustedActionsFailureStage,
+  ) {
     super(message);
     this.name = "GitHubActionsChangeExecutorError";
+    this.details = stage === undefined ? undefined : failureDiagnostic(stage);
+  }
+}
+
+function withFailureStage(error: unknown, stage: TrustedActionsFailureStage): GitHubActionsChangeExecutorError {
+  if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error;
+  return new GitHubActionsChangeExecutorError(undefined, stage);
+}
+
+async function atFailureStage<T>(stage: TrustedActionsFailureStage, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error: unknown) {
+    throw withFailureStage(error, stage);
   }
 }
 
@@ -121,13 +169,17 @@ function positiveNumber(value: unknown): number {
 }
 
 function parseRepository(value: string, hostname = "github.com"): GitHubChangeEffectRepository {
-  const parts = value.split("/");
-  if (parts.length !== 2) throw new GitHubActionsChangeExecutorError();
-  return {
-    hostname: boundedString(hostname, 255),
-    owner: boundedString(parts[0], 255),
-    name: boundedString(parts[1], 255),
-  };
+  try {
+    const parts = value.split("/");
+    if (parts.length !== 2) throw new GitHubActionsChangeExecutorError();
+    return {
+      hostname: boundedString(hostname, 255),
+      owner: boundedString(parts[0], 255),
+      name: boundedString(parts[1], 255),
+    };
+  } catch (error: unknown) {
+    throw withFailureStage(error, "repository-evidence");
+  }
 }
 
 function repositoryName(repository: GitHubChangeEffectRepository): string {
@@ -175,6 +227,7 @@ export interface GitHubActionsApiTransportOptions {
   readonly apiUrl?: string;
   readonly token: string;
   readonly fetch?: typeof globalThis.fetch;
+  readonly failureStage?: TrustedActionsFailureStage;
 }
 
 /** A bounded credential-bound transport. The bearer never appears in results. */
@@ -182,6 +235,7 @@ export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
   readonly #apiUrl: string;
   readonly #token: string;
   readonly #fetch: typeof globalThis.fetch;
+  readonly #failureStage: TrustedActionsFailureStage;
 
   constructor(options: GitHubActionsApiTransportOptions) {
     // Bound the input length before the trailing-slash regex runs, so it cannot be handed an
@@ -189,6 +243,7 @@ export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
     this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
     this.#token = boundedString(options.token, 4096);
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#failureStage = options.failureStage ?? "repository-evidence";
   }
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
@@ -205,7 +260,7 @@ export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
       });
       return { status: response.status, body: await boundedBody(response) };
     } catch {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, this.#failureStage);
     }
   }
 }
@@ -245,11 +300,15 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
   readonly #fetch: typeof globalThis.fetch;
 
   constructor(options: GitHubActionsCredentialBrokerOptions) {
-    this.#options = options;
-    this.#fetch = options.fetch ?? globalThis.fetch;
-    boundedString(options.appId, 20);
-    boundedString(options.installationId, 20);
-    boundedSecret(options.privateKeyPem, 16_384);
+    try {
+      this.#options = options;
+      this.#fetch = options.fetch ?? globalThis.fetch;
+      boundedString(options.appId, 20);
+      boundedString(options.installationId, 20);
+      boundedSecret(options.privateKeyPem, 16_384);
+    } catch (error: unknown) {
+      throw withFailureStage(error, "issuer-configuration");
+    }
   }
 
   async withScopedInstallationCredential(
@@ -261,6 +320,7 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
       apiUrl: this.#options.apiUrl,
       token: credential.token,
       fetch: this.#fetch,
+      failureStage: "projection-execution",
     });
     const adapter = new GitHubChangeEffectAdapter({ repository: this.#options.repository, transport });
     const capability: IssuerScopedMutationCapability = {
@@ -273,7 +333,11 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
         }
       },
     };
-    await operation(capability);
+    try {
+      await operation(capability);
+    } catch (error: unknown) {
+      throw withFailureStage(error, "projection-execution");
+    }
   }
 
   private async issueInstallationToken(request: IssuerCredentialRequest): Promise<InstallationTokenResponse> {
@@ -283,34 +347,51 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
       request.target.nameWithOwner !== this.#options.target.nameWithOwner ||
       repositoryName(this.#options.repository) !== this.#options.target.nameWithOwner
     ) {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, "installation-scope");
     }
     const apiUrl = boundedString(this.#options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
-    const response = await this.#fetch(`${apiUrl}/app/installations/${this.#options.installationId}/access_tokens`, {
-      method: "POST",
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${createAppJwt(this.#options.appId, this.#options.privateKeyPem)}`,
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: JSON.stringify({
-        repositories: [this.#options.repository.name],
-        permissions: request.permissions,
-      }),
-    });
-    if (response.status !== 201) throw new GitHubActionsChangeExecutorError();
-    const body = record(await boundedBody(response));
-    const token = boundedString(body.token, 4096);
-    const expiresAt = boundedString(body.expires_at, 64);
-    const permissions = record(body.permissions);
+    let response: Response;
+    try {
+      response = await this.#fetch(`${apiUrl}/app/installations/${this.#options.installationId}/access_tokens`, {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${createAppJwt(this.#options.appId, this.#options.privateKeyPem)}`,
+          "Content-Type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        body: JSON.stringify({
+          repositories: [this.#options.repository.name],
+          permissions: request.permissions,
+        }),
+      });
+    } catch (error: unknown) {
+      throw withFailureStage(error, "installation-token");
+    }
+    if (response.status !== 201) throw new GitHubActionsChangeExecutorError(undefined, "installation-token");
+    let body: Record<string, unknown>;
+    try {
+      body = record(await boundedBody(response));
+    } catch (error: unknown) {
+      throw withFailureStage(error, "installation-token");
+    }
+    let token: string;
+    let expiresAt: string;
+    let permissions: Record<string, unknown>;
+    try {
+      token = boundedString(body.token, 4096);
+      expiresAt = boundedString(body.expires_at, 64);
+      permissions = record(body.permissions);
+    } catch (error: unknown) {
+      throw withFailureStage(error, "installation-token");
+    }
     const repositories = Array.isArray(body.repositories) ? body.repositories : [];
     const selected = repositories.some((candidate) => {
       if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
       const value = candidate as Record<string, unknown>;
       return String(value.id) === request.target.repositoryId && value.full_name === request.target.nameWithOwner;
     });
-    if (!selected) throw new GitHubActionsChangeExecutorError();
+    if (!selected) throw new GitHubActionsChangeExecutorError(undefined, "installation-scope");
     const scope: IssuerInstallationScope = {
       app: request.app,
       installation: {
@@ -373,6 +454,16 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
   }
 
   async read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput> {
+    try {
+      return await this.readInternal(request);
+    } catch (error: unknown) {
+      throw withFailureStage(error, "repository-evidence");
+    }
+  }
+
+  private async readInternal(
+    request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest,
+  ): Promise<ChangeProjectionInput> {
     if (request.issue !== this.#options.identity.rootIssue) {
       throw new GitHubActionsChangeExecutorError();
     }
@@ -653,25 +744,81 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
 }
 
 export async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance> {
-  for (const policyPath of POLICY_PATHS) {
-    let source: string;
-    try {
-      source = await readFile(path.join(cwd, policyPath), "utf8");
-    } catch {
-      // Continue only when this repository-native policy path is absent.
-      continue;
+  try {
+    for (const policyPath of POLICY_PATHS) {
+      let source: string;
+      try {
+        source = await readFile(path.join(cwd, policyPath), "utf8");
+      } catch {
+        // Continue only when this repository-native policy path is absent.
+        continue;
+      }
+      const overlay = parsePullRequestPolicyOverlay(source);
+      if (overlay.branch === undefined) throw new GitHubActionsChangeExecutorError();
+      return overlay.branch;
     }
-    const overlay = parsePullRequestPolicyOverlay(source);
-    if (overlay.branch === undefined) throw new GitHubActionsChangeExecutorError();
-    return overlay.branch;
+    throw new GitHubActionsChangeExecutorError();
+  } catch (error: unknown) {
+    throw withFailureStage(error, "branch-governance");
   }
-  throw new GitHubActionsChangeExecutorError();
 }
 
-function requiredEnvironment(environment: NodeJS.ProcessEnv, key: string): string {
+function requiredEnvironment(
+  environment: NodeJS.ProcessEnv,
+  key: string,
+  stage: TrustedActionsFailureStage = "trusted-execution",
+): string {
   const value = environment[key];
-  if (value === undefined) throw new GitHubActionsChangeExecutorError();
-  return boundedString(value, 16_384);
+  if (value === undefined) throw new GitHubActionsChangeExecutorError(undefined, stage);
+  try {
+    return boundedString(value, 16_384);
+  } catch (error: unknown) {
+    throw withFailureStage(error, stage);
+  }
+}
+
+function issuerFailureStage(error: unknown): TrustedActionsFailureStage {
+  if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error.details.stage;
+  if (error instanceof IssuerAuthorityError) {
+    if (["ISSUER_INVALID_EXECUTION", "ISSUER_UNTRUSTED_EXECUTION", "ISSUER_UNSUPPORTED_EVENT"].includes(error.code)) {
+      return "trusted-execution";
+    }
+    if (
+      [
+        "ISSUER_INVALID_SCOPE",
+        "ISSUER_PERMISSION_MISMATCH",
+        "ISSUER_SCOPE_MISMATCH",
+        "ISSUER_CREDENTIAL_EXPIRED",
+      ].includes(error.code)
+    ) {
+      return "installation-scope";
+    }
+    if (["ISSUER_INVALID_EFFECT", "ISSUER_UNSUPPORTED_EFFECT", "ISSUER_MUTATION_FAILED"].includes(error.code)) {
+      return "projection-execution";
+    }
+  }
+  return "installation-token";
+}
+
+function trustedFailureStage(
+  error: unknown,
+  issuerStage: TrustedActionsFailureStage | undefined,
+): TrustedActionsFailureStage {
+  if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error.details.stage;
+  if (error instanceof ChangeTrustedExecutorError) {
+    if (error.code === "CHANGE_EXECUTION_READ_FAILED") return "repository-evidence";
+    return issuerStage ?? "projection-execution";
+  }
+  if (error instanceof IssuerAuthorityError) return issuerFailureStage(error);
+  return issuerStage ?? "projection-execution";
+}
+
+function asTrustedActionsFailure(
+  error: unknown,
+  issuerStage: TrustedActionsFailureStage | undefined,
+): GitHubActionsChangeExecutorError {
+  if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error;
+  return new GitHubActionsChangeExecutorError(undefined, trustedFailureStage(error, issuerStage));
 }
 
 export interface GitHubActionsRuntimeOptions {
@@ -686,46 +833,60 @@ export async function createGitHubActionsChangeExecutor(
   options: GitHubActionsRuntimeOptions,
 ): Promise<ChangeRemoteExecutor> {
   const environment = options.environment ?? process.env;
-  const repositoryNameWithOwner = requiredEnvironment(environment, "GITHUB_REPOSITORY");
+  const repositoryNameWithOwner = requiredEnvironment(environment, "GITHUB_REPOSITORY", "repository-evidence");
   let hostname = "github.com";
   if (environment.GITHUB_SERVER_URL !== undefined) {
     try {
       hostname = new URL(environment.GITHUB_SERVER_URL).hostname;
     } catch {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence");
     }
   }
   const repository = parseRepository(repositoryNameWithOwner, hostname);
-  const readTransport = new GitHubActionsApiTransport({
-    apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
-    token: requiredEnvironment(environment, "GITHUB_TOKEN"),
-    fetch: options.fetch,
-  });
-  const repositoryResponse = await readTransport.request({
-    hostname: repository.hostname,
-    method: "GET",
-    path: apiPath(repository, ""),
-  });
-  if (repositoryResponse.status !== 200) throw new GitHubActionsChangeExecutorError();
-  const repositoryBody = record(repositoryResponse.body);
-  const repositoryId = String(repositoryBody.id);
-  if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) throw new GitHubActionsChangeExecutorError();
-  if (typeof repositoryBody.fork !== "boolean") throw new GitHubActionsChangeExecutorError();
+  let readTransport: GitHubActionsApiTransport;
+  try {
+    readTransport = new GitHubActionsApiTransport({
+      apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
+      token: requiredEnvironment(environment, "GITHUB_TOKEN", "repository-evidence"),
+      fetch: options.fetch,
+      failureStage: "repository-evidence",
+    });
+  } catch (error: unknown) {
+    throw withFailureStage(error, "repository-evidence");
+  }
+  const repositoryResponse = await atFailureStage("repository-evidence", () =>
+    readTransport.request({
+      hostname: repository.hostname,
+      method: "GET",
+      path: apiPath(repository, ""),
+    }),
+  );
+  let repositoryBody: Record<string, unknown>;
+  let repositoryId: string;
+  try {
+    if (repositoryResponse.status !== 200) throw new GitHubActionsChangeExecutorError();
+    repositoryBody = record(repositoryResponse.body);
+    repositoryId = String(repositoryBody.id);
+    if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) throw new GitHubActionsChangeExecutorError();
+    if (typeof repositoryBody.fork !== "boolean") throw new GitHubActionsChangeExecutorError();
+  } catch (error: unknown) {
+    throw withFailureStage(error, "repository-evidence");
+  }
   const target: IssuerRepositoryIdentity = {
     repositoryHost: repository.hostname,
     repositoryId,
     nameWithOwner: repositoryNameWithOwner,
   };
 
-  const event = requiredEnvironment(environment, "GITHUB_EVENT_NAME");
+  const event = requiredEnvironment(environment, "GITHUB_EVENT_NAME", "trusted-execution");
   if (!TRUSTED_EXECUTION_EVENTS.includes(event as TrustedExecutionEvent)) {
-    throw new GitHubActionsChangeExecutorError();
+    throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
   }
 
   // GITHUB_REF constrains the target ref only. Under workflow_call this reflects the
   // *caller's* context, so it cannot alone prove the trusted-executor source — see below.
-  if (requiredEnvironment(environment, "GITHUB_REF") !== "refs/heads/main") {
-    throw new GitHubActionsChangeExecutorError();
+  if (requiredEnvironment(environment, "GITHUB_REF", "trusted-execution") !== "refs/heads/main") {
+    throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
   }
 
   // GITHUB_WORKFLOW_REF names the workflow FILE actually executing (owner/repo/path@ref).
@@ -733,28 +894,33 @@ export async function createGitHubActionsChangeExecutor(
   // against this repository's protected executor workflow is the real trust proof: only this
   // check licenses workflowTrust: "protected" / codeExecution: "trusted-only" below.
   const expectedWorkflowRef = `${repositoryNameWithOwner}/.github/workflows/inari-change-executor.yml@refs/heads/main`;
-  if (requiredEnvironment(environment, "GITHUB_WORKFLOW_REF") !== expectedWorkflowRef) {
-    throw new GitHubActionsChangeExecutorError();
+  if (requiredEnvironment(environment, "GITHUB_WORKFLOW_REF", "trusted-execution") !== expectedWorkflowRef) {
+    throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
   }
   const workflowRef = "refs/heads/main";
-  const workflowSha = requiredEnvironment(environment, "GITHUB_WORKFLOW_SHA");
+  const workflowSha = requiredEnvironment(environment, "GITHUB_WORKFLOW_SHA", "trusted-execution");
 
-  const execution = assertTrustedExecution({
-    version: 1,
-    runtime: "github-actions",
-    event,
-    repository: target,
-    workflowRef,
-    workflowSha,
-    workflowTrust: "protected",
-    codeExecution: "trusted-only",
-    // repositoryBody.fork is an auxiliary scope check on the target repository identity;
-    // the primary proof against untrusted/forked execution is the workflow-ref match above.
-    fork: repositoryBody.fork,
-    pullRequest: event === "pull_request" || event === "pull_request_target",
-    ...(environment.GITHUB_ACTOR === undefined ? {} : { requester: environment.GITHUB_ACTOR }),
-  });
-  const branchGovernance = await loadBranchGovernance(options.cwd);
+  let execution: TrustedExecutionContext;
+  try {
+    execution = assertTrustedExecution({
+      version: 1,
+      runtime: "github-actions",
+      event,
+      repository: target,
+      workflowRef,
+      workflowSha,
+      workflowTrust: "protected",
+      codeExecution: "trusted-only",
+      // repositoryBody.fork is an auxiliary scope check on the target repository identity;
+      // the primary proof against untrusted/forked execution is the workflow-ref match above.
+      fork: repositoryBody.fork,
+      pullRequest: event === "pull_request" || event === "pull_request_target",
+      ...(environment.GITHUB_ACTOR === undefined ? {} : { requester: environment.GITHUB_ACTOR }),
+    });
+  } catch (error: unknown) {
+    throw withFailureStage(error, "trusted-execution");
+  }
+  const branchGovernance = await atFailureStage("branch-governance", () => loadBranchGovernance(options.cwd));
   const reader = new GitHubActionsEvidenceReader({
     repository,
     identity: { repositoryHost: repository.hostname, repositoryId, rootIssue: options.request.issue },
@@ -765,35 +931,80 @@ export async function createGitHubActionsChangeExecutor(
   if (options.request.operation === "show") {
     return {
       execute: async () => {
-        throw new GitHubActionsChangeExecutorError("Read-only Change execution cannot apply effects.");
+        throw new GitHubActionsChangeExecutorError(
+          "Read-only Change execution cannot apply effects.",
+          "projection-execution",
+        );
       },
-      read: async (request) => projectChangeFromGitHubEvidence(await reader.read(request)),
+      read: async (request) => {
+        try {
+          return projectChangeFromGitHubEvidence(await reader.read(request));
+        } catch (error: unknown) {
+          throw withFailureStage(error, "projection-execution");
+        }
+      },
     };
   }
-  const broker = new GitHubActionsCredentialBroker({
-    appId: requiredEnvironment(environment, "INARI_ISSUER_APP_ID"),
-    installationId: requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID"),
-    privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
-    repository,
+  let broker: GitHubActionsCredentialBroker;
+  let authority: InariIssuerAppAuthority;
+  try {
+    const appId = requiredEnvironment(environment, "INARI_ISSUER_APP_ID", "issuer-configuration");
+    const installationId = requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID", "issuer-configuration");
+    broker = new GitHubActionsCredentialBroker({
+      appId,
+      installationId,
+      privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
+      repository,
+      target,
+      apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
+      fetch: options.fetch,
+    });
+    authority = new InariIssuerAppAuthority({ appId, broker });
+  } catch (error: unknown) {
+    throw withFailureStage(error, "issuer-configuration");
+  }
+  let issuerStage: TrustedActionsFailureStage | undefined;
+  const stagedAuthority: Pick<InariIssuerAppAuthority, "applyEffects"> = {
+    applyEffects: async (input) => {
+      try {
+        return await authority.applyEffects(input);
+      } catch (error: unknown) {
+        issuerStage = issuerFailureStage(error);
+        throw error;
+      }
+    },
+  };
+  const trustedExecutor = new TrustedChangeExecutor({
+    reader,
+    issuerAuthority: stagedAuthority,
+    execution,
     target,
-    apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
-    fetch: options.fetch,
   });
-  const authority = new InariIssuerAppAuthority({
-    appId: requiredEnvironment(environment, "INARI_ISSUER_APP_ID"),
-    broker,
-  });
-  return new TrustedChangeExecutor({ reader, issuerAuthority: authority, execution, target });
+  return {
+    execute: async (request) => {
+      issuerStage = undefined;
+      try {
+        return await trustedExecutor.execute(request);
+      } catch (error: unknown) {
+        throw asTrustedActionsFailure(error, issuerStage);
+      }
+    },
+    read: async (request) => {
+      try {
+        return await trustedExecutor.read(request);
+      } catch (error: unknown) {
+        throw asTrustedActionsFailure(error, undefined);
+      }
+    },
+  };
 }
 
 function sanitizedFailure(error: unknown): Record<string, unknown> {
-  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
-    const value = error as { code: string; message?: unknown; diagnostics?: unknown; evidence?: unknown };
+  if (error instanceof GitHubActionsChangeExecutorError) {
     return {
-      code: value.code,
-      message: typeof value.message === "string" ? value.message : "Trusted Change execution failed.",
-      ...(Array.isArray(value.diagnostics) ? { diagnostics: value.diagnostics } : {}),
-      ...(typeof value.evidence === "object" && value.evidence !== null ? { evidence: value.evidence } : {}),
+      code: error.code,
+      message: "Trusted Change execution failed closed.",
+      ...(error.details === undefined ? {} : { details: error.details }),
     };
   }
   return { code: "CHANGE_ACTIONS_RUNTIME_INVALID", message: "Trusted Change execution failed closed." };
@@ -805,25 +1016,33 @@ export async function runGitHubActionsChangeExecutor(
   cwd = process.cwd(),
 ): Promise<number> {
   try {
-    const serialized = requiredEnvironment(environment, "INARI_CHANGE_REQUEST");
-    const requestValue = JSON.parse(serialized) as unknown;
+    const serialized = requiredEnvironment(environment, "INARI_CHANGE_REQUEST", "trusted-execution");
+    let requestValue: unknown;
+    try {
+      requestValue = JSON.parse(serialized) as unknown;
+    } catch {
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
     if (typeof requestValue !== "object" || requestValue === null || Array.isArray(requestValue)) {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     const requestRecord = requestValue as Record<string, unknown>;
     const allowedRequestKeys = new Set(["version", "operation", "issue", "requester"]);
     if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     if (requestRecord.requester !== undefined && typeof requestRecord.requester !== "string") {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     if (
       requestRecord.version !== CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION ||
       typeof requestRecord.operation !== "string" ||
       typeof requestRecord.issue !== "number"
     ) {
-      throw new GitHubActionsChangeExecutorError();
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
+    if (requestRecord.operation !== "show" && !["issue", "ready", "abort"].includes(requestRecord.operation)) {
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
     const request =

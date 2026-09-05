@@ -3,7 +3,7 @@ import { inflateRawSync } from "node:zlib";
 import { projectChangeFromGitHubEvidence } from "../change.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
 import { GitHubAdapter } from "./adapter.js";
-import { GitHubActionsEvidenceReader, loadBranchGovernance } from "./actions-change-executor.js";
+import { GitHubActionsEvidenceReader, isTrustedActionsFailureStage, loadBranchGovernance, } from "./actions-change-executor.js";
 import { isGitHubAdapterError } from "./errors.js";
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml";
@@ -35,7 +35,7 @@ function positiveInteger(value) {
     }
     return value;
 }
-function remoteError(code, operation, reason) {
+function remoteError(code, operation, reason, diagnostic) {
     const messages = {
         CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Actions Change executor is unavailable.",
         CHANGE_REMOTE_TRANSPORT_FAILED: "The GitHub Actions Change transport failed.",
@@ -48,6 +48,7 @@ function remoteError(code, operation, reason) {
     return new ChangeRemoteExecutorError(code, messages[code] ?? "The Change remote operation failed.", {
         operation,
         reason,
+        ...(diagnostic === undefined ? {} : { stage: diagnostic.stage }),
     });
 }
 function normalizeTransportError(error, operation, code) {
@@ -66,6 +67,15 @@ function artifactsPath(name) {
 }
 function dispatchPath() {
     return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/dispatches`;
+}
+function parseFailureDiagnostic(value) {
+    if (value === undefined)
+        return undefined;
+    const details = record(value);
+    if (Object.keys(details).some((key) => key !== "stage") || !isTrustedActionsFailureStage(details.stage)) {
+        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    }
+    return Object.freeze({ stage: details.stage });
 }
 function parseRuns(value) {
     const payload = record(value);
@@ -205,9 +215,19 @@ function resultFromArchive(archive) {
         const result = record(value);
         if (result.ok === false) {
             const failure = record(result.error);
-            boundedText(failure.code, 120);
+            if (Object.keys(failure).some((key) => !["code", "message", "details"].includes(key))) {
+                throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+            }
+            if (failure.code !== "CHANGE_ACTIONS_RUNTIME_INVALID") {
+                throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+            }
             boundedText(failure.message, 240);
-            return { value: undefined, failed: true };
+            const diagnostic = parseFailureDiagnostic(failure.details);
+            return {
+                value: undefined,
+                failed: true,
+                ...(diagnostic === undefined ? {} : { diagnostic }),
+            };
         }
         if (result.ok !== undefined) {
             throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
@@ -268,7 +288,7 @@ export class GitHubActionsChangeRemoteExecutor {
         const semanticRequest = await this.withRequester(canonicalMutationRequest(request));
         const result = await this.dispatchAndCollect(semanticRequest);
         if (result.failed) {
-            throw remoteError("CHANGE_REMOTE_RUN_FAILED", `change.${request.operation}`, "workflow-failed");
+            throw remoteError("CHANGE_REMOTE_RUN_FAILED", `change.${request.operation}`, "workflow-failed", result.diagnostic);
         }
         return normalizeChangeRemoteExecutionResult(request.operation, result.value);
     }
@@ -398,7 +418,7 @@ export class GitHubActionsChangeRemoteExecutor {
                 }
                 const result = resultFromArchive(archive);
                 if (run.conclusion !== "success") {
-                    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "workflow-conclusion");
+                    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "workflow-conclusion", result.diagnostic);
                 }
                 return result;
             }

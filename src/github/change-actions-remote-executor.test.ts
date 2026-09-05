@@ -322,6 +322,42 @@ test("dispatch, run, ambiguous, stale, and malformed result failures fail closed
   }
 });
 
+test("workflow failure artifacts preserve only an enumerated diagnostic stage", async () => {
+  const api = new FakeActionsApi();
+  api.archiveValue = {
+    ok: false,
+    error: {
+      code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+      message: "Bearer installation-secret-token /private/provider/path",
+      details: { stage: "installation-token" },
+    },
+  };
+  await assert.rejects(
+    executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeRemoteExecutorError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "workflow-failed", stage: "installation-token" }) &&
+      !JSON.stringify(error).includes("installation-secret-token") &&
+      !JSON.stringify(error).includes("/private/provider/path"),
+  );
+});
+
+test("unknown or malformed workflow diagnostic stages remain fail closed", async () => {
+  for (const details of [{ stage: "provider-specific" }, { stage: "installation-token", token: "secret" }]) {
+    const api = new FakeActionsApi();
+    api.archiveValue = {
+      ok: false,
+      error: { code: "CHANGE_ACTIONS_RUNTIME_INVALID", message: "failure", details },
+    };
+    await assert.rejects(
+      executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+      (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RESULT_INVALID",
+    );
+  }
+});
+
 test("effect and workflow injection cannot enter the semantic dispatch request", async () => {
   const api = new FakeActionsApi();
   const request = {

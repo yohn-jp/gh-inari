@@ -13,6 +13,7 @@ import {
 } from "./command-contract.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+  ChangeRemoteExecutorError,
   createUnavailableChangeRemoteExecutor,
   type ChangeRemoteExecutor,
   type ChangeRemoteMutationRequest,
@@ -212,6 +213,30 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
     requester: "github:octocat",
   });
   assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
+});
+
+test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {
+  const result = await capture(["change", "issue", "42", "--json"], {
+    changeExecutor: {
+      async execute() {
+        throw new ChangeRemoteExecutorError(
+          "CHANGE_REMOTE_RUN_FAILED",
+          "The trusted Change workflow did not produce a successful result.",
+          { operation: "change.issue", reason: "workflow-failed", stage: "installation-token" },
+        );
+      },
+      async read() {
+        throw new Error("unreachable");
+      },
+    },
+  });
+
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(result.output?.error, {
+    code: "CHANGE_REMOTE_RUN_FAILED",
+    message: "The trusted Change workflow did not produce a successful result.",
+    details: { operation: "change.issue", reason: "workflow-failed", stage: "installation-token" },
+  });
 });
 
 test("caller authentication failure is distinct from an unconfigured executor", async () => {
