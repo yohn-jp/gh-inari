@@ -6,6 +6,7 @@ import type { RepositoryContext } from "./types.js";
 import {
   GitHubIssueRelationObservationAdapter,
   type IssueRelationApiReader,
+  type IssueRelationCapabilities,
 } from "./issue-relation-observation-adapter.js";
 
 const CONTEXT: RepositoryContext = Object.freeze({
@@ -17,6 +18,9 @@ const CONTEXT: RepositoryContext = Object.freeze({
   url: "https://github.com/yohn-jp/gh-inari",
   repositoryId: "100000157",
 });
+
+const SUPPORTED: IssueRelationCapabilities = Object.freeze({ parent: true, blockedBy: true });
+const UNSUPPORTED: IssueRelationCapabilities = Object.freeze({ parent: false, blockedBy: false });
 
 interface RecordedCall {
   readonly repositoryPath: string;
@@ -49,16 +53,20 @@ function issueBody(number: number, repository = "yohn-jp/gh-inari", host = "api.
   };
 }
 
+function page(count: number, start: number): Record<string, unknown>[] {
+  return Array.from({ length: count }, (_unused, index) => issueBody(start + index));
+}
+
 test("observeParent requests the bounded parent read seam", async () => {
   const reader = new StubReader([{ status: 200, body: issueBody(278) }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   await adapter.observeParent(288);
   assert.deepEqual(reader.calls, [{ repositoryPath: "issues/288/parent" }]);
 });
 
 test("observeParent returns present with a normalized IssueReference", async () => {
   const reader = new StubReader([{ status: 200, body: issueBody(278) }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.deepEqual(observation, {
     kind: "present",
@@ -67,16 +75,25 @@ test("observeParent returns present with a normalized IssueReference", async () 
   });
 });
 
-test("observeParent returns empty on 404 (no parent set)", async () => {
+test("observeParent returns empty on 404 when the capability is supported (no parent set)", async () => {
   const reader = new StubReader([{ status: 404, body: undefined }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.deepEqual(observation, { kind: "empty", reference: undefined, diagnostics: [] });
 });
 
+test("observeParent returns unavailable without a network call when the capability is unsupported", async () => {
+  const reader = new StubReader([]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, UNSUPPORTED);
+  const observation = await adapter.observeParent(288);
+  assert.equal(observation.kind, "unavailable");
+  assert.equal(observation.diagnostics[0]?.code, "RELATION_CAPABILITY_UNSUPPORTED");
+  assert.equal(reader.calls.length, 0);
+});
+
 test("observeParent returns malformed when the response body is not an object", async () => {
   const reader = new StubReader([{ status: 200, body: "not-an-object" }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "malformed");
   assert.equal(observation.reference, undefined);
@@ -86,7 +103,7 @@ test("observeParent returns malformed when the response body is not an object", 
 
 test("observeParent returns malformed when the Issue number is invalid", async () => {
   const reader = new StubReader([{ status: 200, body: { ...issueBody(278), number: -1 } }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "malformed");
   assert.equal(observation.diagnostics[0]?.code, "RELATION_ENTRY_MALFORMED");
@@ -94,7 +111,7 @@ test("observeParent returns malformed when the Issue number is invalid", async (
 
 test("observeParent returns unavailable when the parent belongs to a different repository", async () => {
   const reader = new StubReader([{ status: 200, body: issueBody(9, "yohn-jp/other-repo") }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "unavailable");
   assert.equal(observation.reference, undefined);
@@ -105,7 +122,7 @@ test("observeParent returns unavailable when repository_url is missing", async (
   const body = issueBody(9);
   delete body.repository_url;
   const reader = new StubReader([{ status: 200, body }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "unavailable");
 });
@@ -113,51 +130,69 @@ test("observeParent returns unavailable when repository_url is missing", async (
 test("observeParent returns unavailable when the repository context lacks a repositoryId", async () => {
   const contextWithoutId: RepositoryContext = { ...CONTEXT, repositoryId: undefined };
   const reader = new StubReader([{ status: 200, body: issueBody(278) }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, contextWithoutId);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, contextWithoutId, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "unavailable");
 });
 
 test("observeParent returns unavailable when the read itself fails", async () => {
   const reader = new StubReader([new Error("gh: transport failed")]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "unavailable");
   assert.equal(observation.diagnostics[0]?.code, "RELATION_READ_FAILED");
   assert.equal(observation.diagnostics[0]?.message, "gh: transport failed");
 });
 
+test("observeParent bounds an overlong read-failure message in its diagnostic", async () => {
+  const reader = new StubReader([new Error(`x${"y".repeat(1000)}`)]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeParent(288);
+  const message = observation.diagnostics[0]?.message ?? "";
+  assert.ok(message.length <= 501);
+  assert.ok(message.endsWith("…"));
+});
+
 test("observeParent rejects an invalid Issue number before reading", async () => {
   const reader = new StubReader([]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   await assert.rejects(() => adapter.observeParent(0), ContractViolationError);
   assert.equal(reader.calls.length, 0);
 });
 
 test("observeBlockedBy requests the bounded dependency read seam", async () => {
   const reader = new StubReader([{ status: 200, body: [] }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   await adapter.observeBlockedBy(288);
-  assert.deepEqual(reader.calls, [{ repositoryPath: "issues/288/dependencies/blocked_by?per_page=100" }]);
+  assert.deepEqual(reader.calls, [{ repositoryPath: "issues/288/dependencies/blocked_by?per_page=100&page=1" }]);
 });
 
-test("observeBlockedBy returns empty on 404", async () => {
+test("observeBlockedBy returns unavailable without a network call when the capability is unsupported", async () => {
+  const reader = new StubReader([]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, UNSUPPORTED);
+  const observation = await adapter.observeBlockedBy(288);
+  assert.equal(observation.kind, "unavailable");
+  assert.equal(observation.diagnostics[0]?.code, "RELATION_CAPABILITY_UNSUPPORTED");
+  assert.equal(reader.calls.length, 0);
+});
+
+test("observeBlockedBy returns empty on 404 (first page) when the capability is supported", async () => {
   const reader = new StubReader([{ status: 404, body: undefined }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.deepEqual(observation, { kind: "empty", references: [], diagnostics: [] });
 });
 
 test("observeBlockedBy returns empty on a valid empty array", async () => {
   const reader = new StubReader([{ status: 200, body: [] }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.deepEqual(observation, { kind: "empty", references: [], diagnostics: [] });
 });
 
 test("observeBlockedBy returns present with every normalized IssueReference", async () => {
   const reader = new StubReader([{ status: 200, body: [issueBody(10), issueBody(11)] }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.equal(observation.kind, "present");
   assert.deepEqual(observation.diagnostics, []);
@@ -171,9 +206,47 @@ test("observeBlockedBy returns present with every normalized IssueReference", as
   }
 });
 
+test("observeBlockedBy paginates across multiple full pages and aggregates all entries", async () => {
+  const reader = new StubReader([
+    { status: 200, body: page(100, 1) },
+    { status: 200, body: page(1, 101) },
+  ]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeBlockedBy(288);
+  assert.equal(observation.kind, "present");
+  assert.equal(observation.references.length, 101);
+  assert.deepEqual(reader.calls, [
+    { repositoryPath: "issues/288/dependencies/blocked_by?per_page=100&page=1" },
+    { repositoryPath: "issues/288/dependencies/blocked_by?per_page=100&page=2" },
+  ]);
+});
+
+test("observeBlockedBy returns unavailable (truncated) when the result exceeds the bounded page limit", async () => {
+  const responses: GitHubApiResponse[] = Array.from({ length: 10 }, (_unused, index) => ({
+    status: 200,
+    body: page(100, index * 100 + 1),
+  }));
+  const reader = new StubReader(responses);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeBlockedBy(288);
+  assert.equal(observation.kind, "unavailable");
+  assert.deepEqual(observation.references, []);
+  assert.equal(observation.diagnostics[0]?.code, "RELATION_RESULT_TRUNCATED");
+  assert.equal(reader.calls.length, 10);
+});
+
+test("observeBlockedBy returns unavailable when a later page unexpectedly 404s", async () => {
+  const reader = new StubReader([{ status: 200, body: page(100, 1) }, { status: 404, body: undefined }]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeBlockedBy(288);
+  assert.equal(observation.kind, "unavailable");
+  assert.deepEqual(observation.references, []);
+  assert.equal(observation.diagnostics[0]?.code, "RELATION_RESULT_TRUNCATED");
+});
+
 test("observeBlockedBy returns malformed when the response body is not an array", async () => {
   const reader = new StubReader([{ status: 200, body: { not: "an array" } }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.equal(observation.kind, "malformed");
   assert.deepEqual(observation.references, []);
@@ -182,7 +255,7 @@ test("observeBlockedBy returns malformed when the response body is not an array"
 
 test("observeBlockedBy returns malformed when any entry is malformed, even alongside valid entries", async () => {
   const reader = new StubReader([{ status: 200, body: [issueBody(10), { number: "not-a-number" }] }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.equal(observation.kind, "malformed");
   assert.deepEqual(observation.references, []);
@@ -193,7 +266,7 @@ test("observeBlockedBy returns malformed when any entry is malformed, even along
 
 test("observeBlockedBy returns unavailable when an entry's repository cannot be resolved", async () => {
   const reader = new StubReader([{ status: 200, body: [issueBody(10), issueBody(20, "yohn-jp/other-repo")] }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.equal(observation.kind, "unavailable");
   assert.deepEqual(observation.references, []);
@@ -204,7 +277,7 @@ test("observeBlockedBy returns unavailable when an entry's repository cannot be 
 
 test("observeBlockedBy returns unavailable when the read itself fails", async () => {
   const reader = new StubReader([new Error("gh: not authenticated")]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.equal(observation.kind, "unavailable");
   assert.equal(observation.diagnostics[0]?.code, "RELATION_READ_FAILED");
@@ -212,7 +285,7 @@ test("observeBlockedBy returns unavailable when the read itself fails", async ()
 
 test("observeBlockedBy rejects an invalid Issue number before reading", async () => {
   const reader = new StubReader([]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   await assert.rejects(() => adapter.observeBlockedBy(1.5), ContractViolationError);
   assert.equal(reader.calls.length, 0);
 });

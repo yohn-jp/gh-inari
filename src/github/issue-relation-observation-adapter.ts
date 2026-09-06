@@ -25,22 +25,42 @@ export interface IssueRelationApiReader {
 }
 
 /**
- * `empty` — GitHub confirmed zero relations (404, or a present-but-empty set).
+ * Whether the target GitHub capability set is known to support each native
+ * relation for the observed repository. A GitHub host that predates, or has
+ * not enabled, sub-issues/issue-dependencies answers a relation's endpoint
+ * with the same bare 404 whether an Issue has no relation set or the
+ * endpoint does not exist at all, so this module cannot infer support from
+ * a response alone. The caller — which already knows the target host/plan —
+ * must state support explicitly; declaring `false` short-circuits to
+ * `unavailable` without a network call instead of guessing.
+ */
+export interface IssueRelationCapabilities {
+  readonly parent: boolean;
+  readonly blockedBy: boolean;
+}
+
+/**
+ * `empty` — GitHub confirmed zero relations (404 on a supported capability,
+ *   or a present-but-empty set).
  * `present` — every related Issue resolved to a stable identity.
- * `unavailable` — GitHub evidence exists (or the read itself failed) but a
- *   stable identity could not be established, e.g. the read seam cannot
- *   resolve a cross-repository relation's repository database ID, or the
- *   read failed outright.
+ * `unavailable` — evidence exists (or a read/capability precondition failed)
+ *   but a complete, stable identity set could not be established, e.g. the
+ *   read seam cannot resolve a cross-repository relation's repository
+ *   database ID, the result set could not be confirmed complete within the
+ *   bounded page limit, the target capability is not supported, or the read
+ *   itself failed.
  * `malformed` — GitHub returned a response that does not match the expected
  *   Issue relation shape.
  */
 export type IssueRelationEvidenceKind = "empty" | "present" | "unavailable" | "malformed";
 
 export type IssueRelationDiagnosticCode =
+  | "RELATION_CAPABILITY_UNSUPPORTED"
   | "RELATION_READ_FAILED"
   | "RELATION_RESPONSE_MALFORMED"
   | "RELATION_ENTRY_MALFORMED"
-  | "RELATION_REPOSITORY_UNRESOLVED";
+  | "RELATION_REPOSITORY_UNRESOLVED"
+  | "RELATION_RESULT_TRUNCATED";
 
 export interface IssueRelationDiagnostic {
   readonly code: IssueRelationDiagnosticCode;
@@ -61,6 +81,9 @@ export interface IssueBlockedByObservation {
 }
 
 const BLOCKED_BY_PAGE_SIZE = 100;
+/** Bounded page limit for blocked_by pagination; caps evidence at 1,000 entries per read. */
+const BLOCKED_BY_MAX_PAGES = 10;
+const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 500;
 
 /**
  * Observes GitHub-native Issue `parent` and `blocked_by` relationships for
@@ -70,15 +93,21 @@ const BLOCKED_BY_PAGE_SIZE = 100;
 export class GitHubIssueRelationObservationAdapter {
   private readonly reader: IssueRelationApiReader;
   private readonly context: RepositoryContext;
+  private readonly capabilities: IssueRelationCapabilities;
 
-  constructor(reader: IssueRelationApiReader, context: RepositoryContext) {
+  constructor(reader: IssueRelationApiReader, context: RepositoryContext, capabilities: IssueRelationCapabilities) {
     this.reader = reader;
     this.context = context;
+    this.capabilities = capabilities;
   }
 
   /** Observe the native parent relationship for one Issue. */
   async observeParent(issueNumber: number): Promise<IssueParentObservation> {
     assertIssueNumber(issueNumber);
+    if (!this.capabilities.parent) {
+      return { kind: "unavailable", reference: undefined, diagnostics: [capabilityUnsupportedDiagnostic("parent")] };
+    }
+
     let response: GitHubApiResponse;
     try {
       response = await this.reader.requestRepositoryApi(`issues/${issueNumber}/parent`);
@@ -105,46 +134,95 @@ export class GitHubIssueRelationObservationAdapter {
     };
   }
 
-  /** Observe the native `blocked_by` dependency set for one Issue. */
+  /**
+   * Observe the native `blocked_by` dependency set for one Issue.
+   *
+   * Pages through the bounded read seam up to {@link BLOCKED_BY_MAX_PAGES};
+   * hitting that bound with a still-full page means completeness cannot be
+   * confirmed, so the result is reported `unavailable` rather than returned
+   * as a silently truncated `present` set.
+   */
   async observeBlockedBy(issueNumber: number): Promise<IssueBlockedByObservation> {
     assertIssueNumber(issueNumber);
-    let response: GitHubApiResponse;
-    try {
-      response = await this.reader.requestRepositoryApi(
-        `issues/${issueNumber}/dependencies/blocked_by?per_page=${BLOCKED_BY_PAGE_SIZE}`,
-      );
-    } catch (error) {
-      return { kind: "unavailable", references: [], diagnostics: [readFailedDiagnostic(error)] };
+    if (!this.capabilities.blockedBy) {
+      return { kind: "unavailable", references: [], diagnostics: [capabilityUnsupportedDiagnostic("blocked_by")] };
     }
-    if (response.status === 404) return { kind: "empty", references: [], diagnostics: [] };
-    if (!Array.isArray(response.body)) {
-      return {
-        kind: "malformed",
-        references: [],
-        diagnostics: [responseMalformedDiagnostic("GitHub returned a non-array blocked_by response.")],
-      };
-    }
-    if (response.body.length === 0) return { kind: "empty", references: [], diagnostics: [] };
 
-    const references: IssueReference[] = [];
-    const diagnostics: IssueRelationDiagnostic[] = [];
-    let malformedCount = 0;
-    let unresolvedCount = 0;
-    response.body.forEach((entry, index) => {
-      const resolved = resolveRelatedIssue(entry, this.context, `$[${index}]`);
-      if (resolved.status === "resolved") {
-        references.push(resolved.reference);
-        return;
+    const entries: unknown[] = [];
+    for (let page = 1; page <= BLOCKED_BY_MAX_PAGES; page += 1) {
+      let response: GitHubApiResponse;
+      try {
+        response = await this.reader.requestRepositoryApi(
+          `issues/${issueNumber}/dependencies/blocked_by?per_page=${BLOCKED_BY_PAGE_SIZE}&page=${page}`,
+        );
+      } catch (error) {
+        return { kind: "unavailable", references: [], diagnostics: [readFailedDiagnostic(error)] };
       }
-      diagnostics.push(resolved.diagnostic);
-      if (resolved.status === "malformed") malformedCount += 1;
-      else unresolvedCount += 1;
-    });
-
-    if (malformedCount > 0) return { kind: "malformed", references: [], diagnostics };
-    if (unresolvedCount > 0) return { kind: "unavailable", references: [], diagnostics };
-    return { kind: "present", references, diagnostics: [] };
+      if (response.status === 404) {
+        if (page === 1) return { kind: "empty", references: [], diagnostics: [] };
+        return {
+          kind: "unavailable",
+          references: [],
+          diagnostics: [
+            {
+              code: "RELATION_RESULT_TRUNCATED",
+              path: "$",
+              message: `GitHub returned 404 while paginating blocked_by at page ${page}; the accumulated evidence cannot be confirmed complete.`,
+            },
+          ],
+        };
+      }
+      if (!Array.isArray(response.body)) {
+        return {
+          kind: "malformed",
+          references: [],
+          diagnostics: [responseMalformedDiagnostic("GitHub returned a non-array blocked_by response.")],
+        };
+      }
+      entries.push(...response.body);
+      if (response.body.length < BLOCKED_BY_PAGE_SIZE) {
+        return classifyBlockedByEntries(entries, this.context);
+      }
+      if (page === BLOCKED_BY_MAX_PAGES) {
+        return {
+          kind: "unavailable",
+          references: [],
+          diagnostics: [
+            {
+              code: "RELATION_RESULT_TRUNCATED",
+              path: "$",
+              message: `GitHub returned at least ${BLOCKED_BY_MAX_PAGES * BLOCKED_BY_PAGE_SIZE} blocked_by entries; the bounded read seam cannot confirm completeness beyond this limit.`,
+            },
+          ],
+        };
+      }
+    }
+    /* c8 ignore next */
+    return classifyBlockedByEntries(entries, this.context);
   }
+}
+
+function classifyBlockedByEntries(entries: readonly unknown[], context: RepositoryContext): IssueBlockedByObservation {
+  if (entries.length === 0) return { kind: "empty", references: [], diagnostics: [] };
+
+  const references: IssueReference[] = [];
+  const diagnostics: IssueRelationDiagnostic[] = [];
+  let malformedCount = 0;
+  let unresolvedCount = 0;
+  entries.forEach((entry, index) => {
+    const resolved = resolveRelatedIssue(entry, context, `$[${index}]`);
+    if (resolved.status === "resolved") {
+      references.push(resolved.reference);
+      return;
+    }
+    diagnostics.push(resolved.diagnostic);
+    if (resolved.status === "malformed") malformedCount += 1;
+    else unresolvedCount += 1;
+  });
+
+  if (malformedCount > 0) return { kind: "malformed", references: [], diagnostics };
+  if (unresolvedCount > 0) return { kind: "unavailable", references: [], diagnostics };
+  return { kind: "present", references, diagnostics: [] };
 }
 
 type RelatedIssueResolution =
@@ -232,6 +310,14 @@ function parseRepositoryUrl(value: unknown): { readonly host: string; readonly n
   return { host, nameWithOwner: `${match[1]}/${match[2]}` };
 }
 
+function capabilityUnsupportedDiagnostic(relation: "parent" | "blocked_by"): IssueRelationDiagnostic {
+  return {
+    code: "RELATION_CAPABILITY_UNSUPPORTED",
+    path: "$",
+    message: `The target GitHub capability set does not support reading the native ${relation} relation.`,
+  };
+}
+
 function responseMalformedDiagnostic(message: string): IssueRelationDiagnostic {
   return { code: "RELATION_RESPONSE_MALFORMED", path: "$", message };
 }
@@ -240,8 +326,15 @@ function readFailedDiagnostic(error: unknown): IssueRelationDiagnostic {
   return {
     code: "RELATION_READ_FAILED",
     path: "$",
-    message: error instanceof Error ? error.message : "GitHub Issue relation read failed.",
+    message: boundedMessage(error instanceof Error ? error.message : "GitHub Issue relation read failed."),
   };
+}
+
+function boundedMessage(value: string): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length > MAX_DIAGNOSTIC_MESSAGE_LENGTH
+    ? `${normalized.slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH)}…`
+    : normalized;
 }
 
 function assertIssueNumber(value: number): asserts value is number {
