@@ -19,6 +19,7 @@ import {
   type GitHubIssue,
   type GitHubPullRequest,
   type RepositoryContext,
+  type RepositoryTree,
   type RepositoryTreeEntry,
   type ValidatedRenderedIssueArtifact,
   type ValidatedRenderedPullRequestArtifact,
@@ -63,6 +64,18 @@ export type GovernedArtifactDomain = "issue" | "pr";
 
 export interface GovernedContractCompileOptions {
   readonly templateResolver?: TemplateResolverDependencies;
+}
+
+/**
+ * Repository-default-branch governance source operations shared by provider
+ * adapters.  Keeping this seam structural lets read-only transports reuse the
+ * same repository source authority without consulting a local checkout.
+ */
+export interface RepositoryGovernanceSourceReader {
+  resolveRepositoryContext(): Promise<RepositoryContext>;
+  getRepositoryDefaultBranch(): Promise<string>;
+  getRepositoryTree(ref: string): Promise<RepositoryTree>;
+  getRepositoryBlob(sha: string): Promise<string>;
 }
 
 export type GovernanceErrorCode =
@@ -319,6 +332,21 @@ export async function compileRepositoryGovernedContracts(
   return outcomes;
 }
 
+/**
+ * Resolve the target repository's branch governance from its authoritative
+ * default-branch generation.  A repository with no policy, or with a policy
+ * that declares no branch rule, intentionally returns undefined; source
+ * acquisition and policy parse failures remain fail-closed errors.
+ */
+export async function resolveRepositoryBranchGovernance(
+  adapter: RepositoryGovernanceSourceReader,
+): Promise<PullRequestBranchGovernance | undefined> {
+  const source = await readRepositoryGovernanceSource(adapter);
+  const policy = await readRepositoryPolicySource(adapter, source);
+  if (policy === undefined) return undefined;
+  return parsePullRequestPolicyOverlay(policy.source).branch;
+}
+
 async function compileRepositoryGovernedContractFromSource(
   adapter: GitHubAdapter,
   source: RepositoryGovernanceSource,
@@ -452,7 +480,7 @@ interface RepositoryPolicySource {
 }
 
 function createRepositoryPolicySourceLoader(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   source: RepositoryGovernanceSource,
 ): () => Promise<RepositoryPolicySource | undefined> {
   let pending: Promise<RepositoryPolicySource | undefined> | undefined;
@@ -465,7 +493,7 @@ function createRepositoryPolicySourceLoader(
 }
 
 async function readRepositoryPolicySource(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   source: RepositoryGovernanceSource,
 ): Promise<RepositoryPolicySource | undefined> {
   const policyEntry = findPolicy(source.tree);
@@ -729,7 +757,9 @@ interface RepositoryGovernanceSource {
   readonly templateResolutionEntry?: RepositoryTreeEntry;
 }
 
-async function readRepositoryGovernanceSource(adapter: GitHubAdapter): Promise<RepositoryGovernanceSource> {
+async function readRepositoryGovernanceSource(
+  adapter: RepositoryGovernanceSourceReader,
+): Promise<RepositoryGovernanceSource> {
   const context = await adapter.resolveRepositoryContext();
   const ref = await readGovernedValue("repository.default_branch", context, undefined, () =>
     adapter.getRepositoryDefaultBranch(),

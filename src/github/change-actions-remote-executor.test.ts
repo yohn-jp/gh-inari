@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { test } from "node:test";
+import os from "node:os";
+import path from "node:path";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
   ChangeRemoteExecutorError,
@@ -14,7 +17,7 @@ import {
   type GitHubActionsRemoteApi,
 } from "./change-actions-remote-executor.js";
 import { GhUnauthenticatedError } from "./errors.js";
-import type { RepositoryContext } from "./types.js";
+import type { RepositoryContext, RepositoryTree } from "./types.js";
 
 const correlation = "123e4567-e89b-42d3-a456-426614174000";
 const repository: RepositoryContext = {
@@ -102,6 +105,10 @@ function archive(value: unknown): Uint8Array {
   return new Uint8Array(Buffer.concat([local, central, end]));
 }
 
+function branchPolicySource(pattern: string): string {
+  return ["version: 1", "sections: []", "branch:", `  pattern: \"${pattern}\"`, ""].join("\n");
+}
+
 class FakeActionsApi implements GitHubActionsRemoteApi {
   readonly calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
   readonly baselineRunId = 10;
@@ -113,6 +120,10 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   runState: "pending" | "success" | "failure" = "success";
   artifactMode: "valid" | "malformed" | "stale" | "ambiguous" | "missing" = "valid";
   archiveValue: unknown = { projection: this.result };
+  governanceTree: RepositoryTree = { sha: "remote-governance-generation", entries: [] };
+  governanceBlobs = new Map<string, string>();
+  governanceReads = 0;
+  governanceUnavailable = false;
   private runReads = 0;
 
   async getRepositoryContext(): Promise<RepositoryContext> {
@@ -122,6 +133,27 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   async getAuthenticatedUser(): Promise<string> {
     this.authenticatedUserReads += 1;
     return this.authenticatedUser;
+  }
+
+  async getRepositoryDefaultBranch(): Promise<string> {
+    this.governanceReads += 1;
+    if (this.governanceUnavailable) throw new Error("remote governance unavailable");
+    return "main";
+  }
+
+  async getRepositoryTree(ref: string): Promise<RepositoryTree> {
+    assert.equal(ref, "main");
+    this.governanceReads += 1;
+    if (this.governanceUnavailable) throw new Error("remote governance unavailable");
+    return this.governanceTree;
+  }
+
+  async getRepositoryBlob(sha: string): Promise<string> {
+    this.governanceReads += 1;
+    if (this.governanceUnavailable) throw new Error("remote governance unavailable");
+    const source = this.governanceBlobs.get(sha);
+    if (source === undefined) throw new Error(`unknown governance blob ${sha}`);
+    return source;
   }
 
   async requestActionsApi(
@@ -226,9 +258,9 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   }
 }
 
-function executor(api: FakeActionsApi) {
+function executor(api: FakeActionsApi, cwd = process.cwd()) {
   return createGitHubActionsChangeRemoteExecutor({
-    cwd: process.cwd(),
+    cwd,
     api,
     randomUUID: () => correlation,
     pollIntervalMs: 0,
@@ -264,6 +296,76 @@ test("show uses the same remote boundary and does not request requester or issue
   assert.deepEqual(result, api.result);
   assert.equal(api.calls.filter((call) => call.method === "POST").length, 0);
   assert.equal(api.authenticatedUserReads, 0);
+});
+
+test("show derives branch governance from the target default-branch generation, ignoring foreign local policy", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "gh-inari-change-show-"));
+  try {
+    const localPolicy = path.join(cwd, ".github/inari/pr-policy.yml");
+    await mkdir(path.dirname(localPolicy), { recursive: true });
+    await writeFile(localPolicy, branchPolicySource("^fix/[0-9]+-[a-z0-9-]+$"), "utf8");
+
+    const api = new FakeActionsApi();
+    api.governanceTree = {
+      sha: "target-governance-generation",
+      entries: [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: "target-policy-sha" }],
+    };
+    api.governanceBlobs.set("target-policy-sha", branchPolicySource("^feat/[0-9]+-[a-z0-9-]+$"));
+
+    const result = await executor(api, cwd).read(changeRemoteReadRequest(42));
+    assert.deepEqual(result, api.result);
+    assert.equal(api.governanceReads, 3);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("show remains remote-authoritative when the local checkout matches the target policy", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "gh-inari-change-show-"));
+  try {
+    const policy = branchPolicySource("^feat/[0-9]+-[a-z0-9-]+$");
+    const localPolicy = path.join(cwd, ".github/inari/pr-policy.yml");
+    await mkdir(path.dirname(localPolicy), { recursive: true });
+    await writeFile(localPolicy, policy, "utf8");
+
+    const api = new FakeActionsApi();
+    api.governanceTree = {
+      sha: "matching-governance-generation",
+      entries: [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: "matching-policy-sha" }],
+    };
+    api.governanceBlobs.set("matching-policy-sha", policy);
+
+    assert.deepEqual(await executor(api, cwd).read(changeRemoteReadRequest(42)), api.result);
+    // Matching local content is not reused; the authoritative target generation
+    // is still read through the repository governance primitives.
+    assert.equal(api.governanceReads, 3);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("show distinguishes a target repository with no branch policy from unavailable remote governance", async () => {
+  const noPolicyApi = new FakeActionsApi();
+  const noPolicyCwd = await mkdtemp(path.join(os.tmpdir(), "gh-inari-change-show-"));
+  try {
+    const localPolicy = path.join(noPolicyCwd, ".github/inari/pr-policy.yml");
+    await mkdir(path.dirname(localPolicy), { recursive: true });
+    await writeFile(localPolicy, branchPolicySource("^fix/[0-9]+-[a-z0-9-]+$"), "utf8");
+    assert.deepEqual(await executor(noPolicyApi, noPolicyCwd).read(changeRemoteReadRequest(42)), noPolicyApi.result);
+
+    const unavailableApi = new FakeActionsApi();
+    unavailableApi.governanceUnavailable = true;
+    await assert.rejects(
+      executor(unavailableApi).read(changeRemoteReadRequest(42)),
+      (error: unknown) =>
+        error instanceof ChangeRemoteExecutorError &&
+        error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" &&
+        JSON.stringify(error.details) ===
+          JSON.stringify({ operation: "change.show", reason: "remote-governance-unavailable" }),
+    );
+  } finally {
+    await rm(noPolicyCwd, { recursive: true, force: true });
+  }
 });
 
 test("auth and repository resolution failures are normalized without raw credentials", async () => {

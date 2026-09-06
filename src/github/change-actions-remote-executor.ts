@@ -19,7 +19,6 @@ import {
   GitHubActionsEvidenceReader,
   isRepositoryEvidenceFailureReason,
   isTrustedActionsFailureStage,
-  loadBranchGovernance,
   type TrustedActionsFailureDiagnostic,
 } from "./actions-change-executor.js";
 import type {
@@ -28,7 +27,8 @@ import type {
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import { isGitHubAdapterError } from "./errors.js";
-import type { RepositoryContext } from "./types.js";
+import { resolveRepositoryBranchGovernance, type RepositoryGovernanceSourceReader } from "../governance.js";
+import type { RepositoryContext, RepositoryTree } from "./types.js";
 
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml" as const;
@@ -43,6 +43,10 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 
 export interface GitHubActionsRemoteApi {
   getRepositoryContext(): Promise<RepositoryContext>;
+  /** Repository-default-branch governance primitives; GitHubAdapter supplies these. */
+  getRepositoryDefaultBranch(): Promise<string>;
+  getRepositoryTree(ref: string): Promise<RepositoryTree>;
+  getRepositoryBlob(sha: string): Promise<string>;
   getAuthenticatedUser(): Promise<string>;
   requestActionsApi(
     actionsPath: string,
@@ -441,7 +445,13 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
       if (context.repositoryId === undefined) {
         throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "repository-identity-unavailable");
       }
-      const branchGovernance = await loadBranchGovernance(this.#cwd);
+      let branchGovernance;
+      try {
+        branchGovernance = await resolveRepositoryBranchGovernance(remoteGovernanceSourceReader(this.#api, context));
+      } catch (error: unknown) {
+        if (error instanceof ChangeRemoteExecutorError) throw error;
+        throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "remote-governance-unavailable");
+      }
       const reader = new GitHubActionsEvidenceReader({
         repository: { hostname: context.hostname, owner: context.owner, name: context.name },
         identity: { repositoryHost: context.hostname, repositoryId: context.repositoryId, rootIssue: request.issue },
@@ -587,6 +597,23 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
     }
     return parseArtifacts(value, name, repositoryId);
   }
+}
+
+/**
+ * Adapt the read-only Change transport to the shared repository governance
+ * authority. The same direct primitives are used by GitHubAdapter and by the
+ * injectable remote seam, without consulting cwd.
+ */
+function remoteGovernanceSourceReader(
+  api: GitHubActionsRemoteApi,
+  context: RepositoryContext,
+): RepositoryGovernanceSourceReader {
+  return {
+    resolveRepositoryContext: async () => context,
+    getRepositoryDefaultBranch: () => api.getRepositoryDefaultBranch(),
+    getRepositoryTree: (ref) => api.getRepositoryTree(ref),
+    getRepositoryBlob: (sha) => api.getRepositoryBlob(sha),
+  };
 }
 
 class GitHubRepositoryReadTransport implements GitHubChangeEffectTransport {

@@ -133,6 +133,19 @@ test("change show reads a bounded projection without invoking mutation", async (
   assert.equal(result.output?.operation, "change.show");
 });
 
+test("change show forwards an explicit repository target to its executor factory", async () => {
+  let factoryOptions: Record<string, unknown> | undefined;
+  const result = await capture(["change", "show", "42", "--repository", "acme/target", "--json"], {
+    createChangeExecutor: (options) => {
+      factoryOptions = { ...options };
+      return executor([]);
+    },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(factoryOptions, { cwd: process.cwd(), repository: "acme/target" });
+});
+
 test("authoritative Change commands use semantic executor requests only", async () => {
   const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
   const factoryCalls: Record<string, unknown>[] = [];
