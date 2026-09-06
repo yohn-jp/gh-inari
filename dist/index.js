@@ -22,6 +22,7 @@ export * from "./change-trusted-executor.js";
 export * from "./semantic-pr-projection.js";
 export * from "./semantic-issue-projection.js";
 export * from "./semantic-branch-projection.js";
+export * from "./semantic-pr-executor.js";
 export * from "./artifact-contract-governance.js";
 export { discoverTemplates, discoverTemplatesSync, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, selectTemplate, selectIssueTemplate, selectPullRequestTemplate, TemplateDiscoveryError, TemplateFilesystemError, TemplateNotFoundError, TemplateSelectionAmbiguousError, TemplateNameConflictError, InvalidTemplateSelectorError, } from "./template-discovery.js";
 let invokedPath;
