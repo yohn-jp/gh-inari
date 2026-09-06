@@ -1,4 +1,4 @@
-import type { ContractProvenance } from "../contract/ir.js";
+import type { ArtifactContractProvenance, ContractProvenance } from "../contract/ir.js";
 
 export const VALIDATED_RENDERED_PHASE = "validated-rendered" as const;
 
@@ -35,6 +35,24 @@ export interface ValidatedRenderedPullRequestArtifact {
 }
 
 export type ValidatedRenderedArtifact = ValidatedRenderedIssueArtifact | ValidatedRenderedPullRequestArtifact;
+
+/**
+ * Opaque provider handoff for a v2 Semantic PR projection.
+ *
+ * This remains separate from the native-template artifact type because an
+ * Artifact Contract provenance has no native template fields.
+ */
+export interface ValidatedSemanticPullRequestArtifact {
+  readonly phase: "validated-semantic";
+  readonly kind: "pull_request";
+  readonly title: string;
+  readonly body: string;
+  readonly provenance: ArtifactContractProvenance;
+  readonly head: string;
+  readonly base: string;
+  readonly draft?: boolean;
+  readonly maintainerCanModify?: boolean;
+}
 
 export interface RepositoryContext {
   readonly hostname: string;

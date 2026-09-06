@@ -3,11 +3,12 @@ import { mkdtemp, open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ContractViolationError, GhNotInstalledError, GhUnauthenticatedError, GitHubAdapterError, GitHubApiError, GitHubApiResponseError, GitHubOutputLimitError, GitHubResourceKindMismatchError, GitHubTimeoutError, GitHubTransportError, InvalidRepositoryOverrideError, RepositoryResolutionError, } from "./errors.js";
-import { isTrustedValidatedRenderedArtifact } from "./capability.js";
+import { isTrustedSemanticPullRequestArtifact, isTrustedValidatedRenderedArtifact } from "./capability.js";
 import { DEFAULT_GH_OUTPUT_LIMITS_BYTES, GhTransportOutputLimitError, GhTransportTimeoutError, ProcessGhTransport, } from "./transport.js";
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
 const DEFAULT_HOSTNAME = "github.com";
 const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
+const MAX_PULL_REQUEST_LIST_ITEMS = 100;
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
 export const DEFAULT_GH_TIMEOUTS_MS = Object.freeze({
     auth: 10_000,
@@ -272,6 +273,31 @@ export class GitHubAdapter {
     async readPullRequest(pullRequestNumber) {
         return this.getPullRequest(pullRequestNumber);
     }
+    /**
+     * Read the bounded set of pull requests targeting one head/base pair.
+     *
+     * This is an adapter-owned observation primitive for plan preconditions;
+     * callers do not construct GitHub API paths or parse provider responses.
+     */
+    async listPullRequests(head, base) {
+        assertPullRequestRef(head, "head");
+        assertPullRequestRef(base, "base");
+        const context = await this.resolveRepositoryContext();
+        const query = `pulls?head=${encodeURIComponent(`${context.owner}:${head}`)}` +
+            `&base=${encodeURIComponent(base)}&state=all&per_page=${MAX_PULL_REQUEST_LIST_ITEMS}`;
+        const response = await this.requestRepositoryApi(query, "GET");
+        if (response.status === 404)
+            return [];
+        if (response.status < 200 || response.status >= 300) {
+            throw new GitHubApiError("pull_request.list", "GitHub pull request target lookup failed.");
+        }
+        if (!Array.isArray(response.body) || response.body.length > MAX_PULL_REQUEST_LIST_ITEMS) {
+            throw new GitHubApiResponseError("pull_request.list", "GitHub returned an invalid pull request target list.", {
+                path: "body",
+            });
+        }
+        return response.body.map((entry) => parsePullRequest(entry, "pull_request.list"));
+    }
     async createIssue(artifact) {
         assertValidatedRenderedIssueArtifact(artifact);
         const context = await this.resolveRepositoryContext();
@@ -304,6 +330,21 @@ export class GitHubAdapter {
         assertValidatedRenderedPullRequestArtifact(artifact);
         const context = await this.resolveRepositoryContext();
         assertArtifactRepository(artifact, context);
+        const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
+        appendRawField(args, "title", artifact.title);
+        appendRawField(args, "body", artifact.body);
+        appendRawField(args, "head", artifact.head);
+        appendRawField(args, "base", artifact.base);
+        appendBooleanField(args, "draft", artifact.draft);
+        appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
+        const result = await this.runApi(args, "pull_request.create");
+        return parsePullRequest(result, "pull_request.create");
+    }
+    /** Apply a Core-projected v2 Semantic PR through the existing GitHub seam. */
+    async createSemanticPullRequest(artifact) {
+        assertTrustedSemanticPullRequestArtifact(artifact);
+        const context = await this.resolveRepositoryContext();
+        assertArtifactContractRepository(artifact, context);
         const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
         appendRawField(args, "title", artifact.title);
         appendRawField(args, "body", artifact.body);
@@ -505,6 +546,23 @@ export function assertValidatedRenderedPullRequestArtifact(artifact) {
     assertOptionalBoolean(artifact.draft, "draft");
     assertOptionalBoolean(artifact.maintainerCanModify, "maintainerCanModify");
 }
+export function assertTrustedSemanticPullRequestArtifact(artifact) {
+    if (!isTrustedSemanticPullRequestArtifact(artifact)) {
+        throw new ContractViolationError("Mutation requires an opaque Semantic PR artifact produced by Core.", "artifact");
+    }
+    if (!isRecord(artifact))
+        throw new ContractViolationError("Mutation requires a Semantic PR artifact.");
+    if (artifact.phase !== "validated-semantic" || artifact.kind !== "pull_request") {
+        throw new ContractViolationError("Mutation requires a validated Semantic PR artifact.", "artifact");
+    }
+    assertString(artifact.title, "title");
+    assertString(artifact.body, "body");
+    assertString(artifact.head, "head");
+    assertString(artifact.base, "base");
+    assertArtifactContractProvenance(artifact.provenance);
+    assertOptionalBoolean(artifact.draft, "draft");
+    assertOptionalBoolean(artifact.maintainerCanModify, "maintainerCanModify");
+}
 function assertArtifactBase(artifact, kind) {
     if (!isTrustedValidatedRenderedArtifact(artifact)) {
         throw new ContractViolationError("Mutation requires an opaque artifact produced by Inari's trusted preparation boundary.", "artifact");
@@ -533,6 +591,16 @@ function assertArtifactRepository(artifact, context) {
         throw new ContractViolationError("Mutation artifact provenance does not match the target repository.", "provenance.repository");
     }
 }
+function assertArtifactContractRepository(artifact, context) {
+    const provenance = artifact.provenance;
+    const hostMatches = provenance.repository.host.toLowerCase() === context.hostname.toLowerCase();
+    const identityMatches = provenance.repository.repositoryId !== undefined &&
+        context.repositoryId !== undefined &&
+        provenance.repository.repositoryId === context.repositoryId;
+    if (!hostMatches || !identityMatches) {
+        throw new ContractViolationError("Mutation artifact provenance does not match the target repository.", "provenance.repository");
+    }
+}
 function assertProvenance(value) {
     if (!isRecord(value)) {
         throw new ContractViolationError("Mutation requires trusted repository/ref provenance.", "provenance");
@@ -543,6 +611,26 @@ function assertProvenance(value) {
         typeof value.repository.repositoryId !== "string" ||
         !/^[1-9][0-9]{0,19}$/u.test(value.repository.repositoryId)) {
         throw new ContractViolationError("Mutation requires trusted repository/ref provenance.", "provenance.repository");
+    }
+}
+function assertArtifactContractProvenance(value) {
+    if (!isRecord(value) || value.authority !== "repository-default-branch") {
+        throw new ContractViolationError("Mutation requires trusted Semantic PR provenance.", "provenance");
+    }
+    if (!isRecord(value.repository) || !isRecord(value.source)) {
+        throw new ContractViolationError("Mutation requires trusted Semantic PR provenance.", "provenance");
+    }
+    if (typeof value.repository.host !== "string" ||
+        typeof value.repository.nameWithOwner !== "string" ||
+        typeof value.repository.repositoryId !== "string" ||
+        !/^[1-9][0-9]{0,19}$/u.test(value.repository.repositoryId) ||
+        typeof value.ref !== "string" ||
+        typeof value.treeSha !== "string" ||
+        typeof value.source.path !== "string" ||
+        typeof value.source.ref !== "string" ||
+        typeof value.source.sha !== "string" ||
+        typeof value.source.digest !== "string") {
+        throw new ContractViolationError("Mutation requires trusted Semantic PR provenance.", "provenance");
     }
 }
 function assertString(value, path) {
@@ -812,6 +900,11 @@ function responseRef(value, path, operation) {
 function assertRepositoryRef(value) {
     if (typeof value !== "string" || value.trim().length === 0) {
         throw new ContractViolationError("Repository governance ref must be a non-empty string.", "ref");
+    }
+}
+function assertPullRequestRef(value, path) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 255 || /[\u0000-\u001F\u007F]/u.test(value)) {
+        throw new ContractViolationError("Pull request ref must be a bounded non-empty string.", path);
     }
 }
 function parseRepositoryTree(value, operation) {

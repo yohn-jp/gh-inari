@@ -17,6 +17,7 @@ import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, pro
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
 import { tryPlanSemanticPullRequest } from "./semantic-pr-projection.js";
+import { SemanticPullRequestExecutor, SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION, } from "./semantic-pr-executor.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
 const EXIT_REMOTE = 3;
@@ -752,7 +753,7 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
     throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
 function semanticPullRequestOperation(command, rest) {
-    if (command === "contract" || command === "materialize" || command === "plan") {
+    if (command === "contract" || command === "materialize" || command === "plan" || command === "execute") {
         return { operation: command, rest };
     }
     if (command !== "semantic")
@@ -764,6 +765,8 @@ function semanticPullRequestOperation(command, rest) {
         return { operation: "materialize", rest: rest.slice(1) };
     if (nested === "plan")
         return { operation: "plan", rest: rest.slice(1) };
+    if (nested === "execute")
+        return { operation: "execute", rest: rest.slice(1) };
     throw new CliError("UNKNOWN_COMMAND", `Unknown PR semantic command "${nested ?? ""}".`);
 }
 function rejectSemanticPullRequestOptions(operation, parsed) {
@@ -845,6 +848,36 @@ async function runSemanticPullRequestCommand(operation, rest, parsed, root, depe
     if (!plan.valid || plan.plan === undefined) {
         console.log(JSON.stringify(semanticFailure("projection", plan.violations, effectiveContract)));
         return EXIT_VALIDATION;
+    }
+    if (operation === "execute") {
+        const executor = dependencies.semanticPullRequestExecutor ??
+            (dependencies.createSemanticPullRequestExecutor ?? ((options) => new SemanticPullRequestExecutor(options)))({
+                adapter: createAdapter(dependencies, root, parsed.options.repository),
+                ...(selector === undefined ? {} : { selector }),
+                capabilities: effectiveContract.capabilities,
+            });
+        const execution = await executor.execute({
+            version: SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION,
+            plan: plan.plan,
+            artifact: materialization.artifact,
+            input,
+            ...(selector === undefined ? {} : { selector }),
+            capabilities: effectiveContract.capabilities,
+        });
+        console.log(JSON.stringify({
+            ok: true,
+            valid: true,
+            effectiveContract,
+            artifact: materialization.artifact,
+            plan: execution.plan,
+            projection: execution.projection,
+            evidence: execution.evidence,
+            provenance: execution.plan.provenance,
+            generation: execution.plan.generation,
+            preview: false,
+            mutation: true,
+        }));
+        return 0;
     }
     console.log(JSON.stringify({
         ok: true,
@@ -1459,6 +1492,11 @@ function classifyExitCode(error) {
         return EXIT_REMOTE;
     if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_"))
         return EXIT_REMOTE;
+    if (isObjectWithCode(error) &&
+        (error.code === "SEMANTIC_PR_EXECUTION_EFFECT_FAILED" || error.code === "SEMANTIC_PR_EXECUTION_READ_FAILED"))
+        return EXIT_REMOTE;
+    if (isObjectWithCode(error) && error.code.startsWith("SEMANTIC_PR_EXECUTION_"))
+        return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code.startsWith("CHANGE_"))
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_"))

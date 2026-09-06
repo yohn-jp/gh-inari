@@ -120,10 +120,12 @@ export const INARI_COMMANDS = [
     command("pr.validate", "pr", "validate", ["pr", "validate"], "Validate local or existing PR input against its selected contract.", [...LOCAL_ARTIFACT_INPUT_OPTIONS], "[<number>]"),
     command("pr.materialize", "pr", "materialize", ["pr", "materialize"], "Materialize semantic PR input through the Core Effective Contract.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.plan", "pr", "plan", ["pr", "plan"], "Preview the deterministic Core PR Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.execute", "pr", "execute", ["pr", "execute"], "Execute a versioned Core PR Mutation Plan through the bounded local Executor.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.semantic.schema", "pr", "semantic-schema", ["pr", "semantic", "schema"], "Resolve and print the Core Effective PR Artifact Contract and caller input schema.", ["help", "json", "template", "repository", "capability"], "[template]"),
     command("pr.semantic.validate", "pr", "semantic-validate", ["pr", "semantic", "validate"], "Validate and materialize semantic PR input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.semantic.materialize", "pr", "semantic-materialize", ["pr", "semantic", "materialize"], "Materialize semantic PR input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.semantic.plan", "pr", "semantic-plan", ["pr", "semantic", "plan"], "Preview the deterministic Core PR Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.semantic.execute", "pr", "semantic-execute", ["pr", "semantic", "execute"], "Execute a versioned Core PR Mutation Plan through the bounded local Executor.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [
         ...LOCAL_ARTIFACT_INPUT_OPTIONS,
     ]),

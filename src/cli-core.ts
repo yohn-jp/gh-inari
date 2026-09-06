@@ -109,6 +109,12 @@ import {
 } from "./change-executor.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest } from "./semantic-pr-projection.js";
+import {
+  SemanticPullRequestExecutor,
+  type SemanticPullRequestExecutionPort,
+  type SemanticPullRequestExecutorOptions,
+  SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION,
+} from "./semantic-pr-executor.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -170,6 +176,12 @@ export interface CliDependencies {
   readonly changeExecutor?: ChangeRemoteExecutor;
   /** Factory seam for a repository-scoped transport implementation. */
   readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+  /** Injectable local Semantic PR Executor; it never carries App credentials. */
+  readonly semanticPullRequestExecutor?: SemanticPullRequestExecutionPort;
+  /** Factory seam for a repository-scoped Semantic PR Executor. */
+  readonly createSemanticPullRequestExecutor?: (
+    options: SemanticPullRequestExecutorOptions,
+  ) => SemanticPullRequestExecutionPort;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -1087,13 +1099,13 @@ async function runArtifactCommand(
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
 
-type SemanticPullRequestOperation = "contract" | "materialize" | "plan";
+type SemanticPullRequestOperation = "contract" | "materialize" | "plan" | "execute";
 
 function semanticPullRequestOperation(
   command: string | undefined,
   rest: readonly string[],
 ): { readonly operation: SemanticPullRequestOperation; readonly rest: readonly string[] } | undefined {
-  if (command === "contract" || command === "materialize" || command === "plan") {
+  if (command === "contract" || command === "materialize" || command === "plan" || command === "execute") {
     return { operation: command, rest };
   }
   if (command !== "semantic") return undefined;
@@ -1101,6 +1113,7 @@ function semanticPullRequestOperation(
   if (nested === "schema") return { operation: "contract", rest: rest.slice(1) };
   if (nested === "validate" || nested === "materialize") return { operation: "materialize", rest: rest.slice(1) };
   if (nested === "plan") return { operation: "plan", rest: rest.slice(1) };
+  if (nested === "execute") return { operation: "execute", rest: rest.slice(1) };
   throw new CliError("UNKNOWN_COMMAND", `Unknown PR semantic command "${nested ?? ""}".`);
 }
 
@@ -1211,6 +1224,39 @@ async function runSemanticPullRequestCommand(
   if (!plan.valid || plan.plan === undefined) {
     console.log(JSON.stringify(semanticFailure("projection", plan.violations, effectiveContract)));
     return EXIT_VALIDATION;
+  }
+  if (operation === "execute") {
+    const executor =
+      dependencies.semanticPullRequestExecutor ??
+      (dependencies.createSemanticPullRequestExecutor ?? ((options) => new SemanticPullRequestExecutor(options)))({
+        adapter: createAdapter(dependencies, root, parsed.options.repository),
+        ...(selector === undefined ? {} : { selector }),
+        capabilities: effectiveContract.capabilities,
+      });
+    const execution = await executor.execute({
+      version: SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION,
+      plan: plan.plan,
+      artifact: materialization.artifact,
+      input,
+      ...(selector === undefined ? {} : { selector }),
+      capabilities: effectiveContract.capabilities,
+    });
+    console.log(
+      JSON.stringify({
+        ok: true,
+        valid: true,
+        effectiveContract,
+        artifact: materialization.artifact,
+        plan: execution.plan,
+        projection: execution.projection,
+        evidence: execution.evidence,
+        provenance: execution.plan.provenance,
+        generation: execution.plan.generation,
+        preview: false,
+        mutation: true,
+      }),
+    );
+    return 0;
   }
   console.log(
     JSON.stringify({
@@ -1950,6 +1996,12 @@ function classifyExitCode(error: unknown): number {
   if (isObjectWithCode(error) && error.code.startsWith("ARTIFACT_CONTRACT_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_")) return EXIT_REMOTE;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "SEMANTIC_PR_EXECUTION_EFFECT_FAILED" || error.code === "SEMANTIC_PR_EXECUTION_READ_FAILED")
+  )
+    return EXIT_REMOTE;
+  if (isObjectWithCode(error) && error.code.startsWith("SEMANTIC_PR_EXECUTION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;

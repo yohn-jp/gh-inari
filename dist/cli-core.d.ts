@@ -1,6 +1,7 @@
 import { GitHubAdapter } from "./github/index.js";
 import { type ChangeRemoteExecutor, type ChangeRemoteExecutorOptions } from "./change-executor.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
+import { type SemanticPullRequestExecutionPort, type SemanticPullRequestExecutorOptions } from "./semantic-pr-executor.js";
 interface PackageMetadata {
     readonly name: string;
     readonly version: string;
@@ -23,6 +24,10 @@ export interface CliDependencies {
     readonly changeExecutor?: ChangeRemoteExecutor;
     /** Factory seam for a repository-scoped transport implementation. */
     readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+    /** Injectable local Semantic PR Executor; it never carries App credentials. */
+    readonly semanticPullRequestExecutor?: SemanticPullRequestExecutionPort;
+    /** Factory seam for a repository-scoped Semantic PR Executor. */
+    readonly createSemanticPullRequestExecutor?: (options: SemanticPullRequestExecutorOptions) => SemanticPullRequestExecutionPort;
 }
 /** The installed gh-inari executable entrypoint. */
 export declare function runCli(argv: string[], dependencies?: CliDependencies): Promise<number>;

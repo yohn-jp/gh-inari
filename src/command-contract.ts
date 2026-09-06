@@ -49,10 +49,12 @@ export type CommandId =
   | "pr.validate"
   | "pr.materialize"
   | "pr.plan"
+  | "pr.execute"
   | "pr.semantic.schema"
   | "pr.semantic.validate"
   | "pr.semantic.materialize"
   | "pr.semantic.plan"
+  | "pr.semantic.execute"
   | "pr.render"
   | "pr.create"
   | "pr.explain"
@@ -500,6 +502,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "[template]",
   ),
   command(
+    "pr.execute",
+    "pr",
+    "execute",
+    ["pr", "execute"],
+    "Execute a versioned Core PR Mutation Plan through the bounded local Executor.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
+  ),
+  command(
     "pr.semantic.schema",
     "pr",
     "semantic-schema",
@@ -532,6 +543,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "semantic-plan",
     ["pr", "semantic", "plan"],
     "Preview the deterministic Core PR Mutation Plan without GitHub mutation.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
+  ),
+  command(
+    "pr.semantic.execute",
+    "pr",
+    "semantic-execute",
+    ["pr", "semantic", "execute"],
+    "Execute a versioned Core PR Mutation Plan through the bounded local Executor.",
     ["help", "json", "template", "repository", "from", "capability"],
     "[template]",
   ),
