@@ -82,6 +82,12 @@ export interface GitHubActionsEvidenceReaderOptions {
         readonly repositoryId: string;
         readonly rootIssue: number;
     };
+    /**
+     * Pull request currently being evaluated at a repository merge boundary.
+     * The target PR is retained even when its head is not a Change-shaped branch
+     * so the admission adapter cannot silently classify it as unrelated.
+     */
+    readonly pullRequestNumber?: number;
     /** Absent when the repository's PR policy declares no branch rule; the canonical branch grammar still applies. */
     readonly branchGovernance?: PullRequestBranchGovernance;
     readonly transport: GitHubChangeEffectTransport;

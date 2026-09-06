@@ -647,6 +647,12 @@ export const deriveChangeNamingFromIssueTitle = deriveNaming;
 export interface GitHubActionsEvidenceReaderOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly identity: { readonly repositoryHost: string; readonly repositoryId: string; readonly rootIssue: number };
+  /**
+   * Pull request currently being evaluated at a repository merge boundary.
+   * The target PR is retained even when its head is not a Change-shaped branch
+   * so the admission adapter cannot silently classify it as unrelated.
+   */
+  readonly pullRequestNumber?: number;
   /** Absent when the repository's PR policy declares no branch rule; the canonical branch grammar still applies. */
   readonly branchGovernance?: PullRequestBranchGovernance;
   readonly transport: GitHubChangeEffectTransport;
@@ -1107,6 +1113,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       const user = record(value.user);
       const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
       if (state === undefined || typeof value.draft !== "boolean") throw new GitHubActionsChangeExecutorError();
+      const number = positiveNumber(value.number);
       const login = boundedString(user.login, MAX_LOGIN_LENGTH);
       const headName = boundedString(head.ref, 255);
       if (head.repo !== undefined && head.repo !== null) {
@@ -1115,18 +1122,23 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
           return [];
         }
       }
-      if (!branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
+      const isObservedPullRequest = number === this.#options.pullRequestNumber;
+      if (
+        !isObservedPullRequest &&
+        !branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)
+      ) {
         return [];
       }
       return [
         {
-          number: positiveNumber(value.number),
+          number,
           head: headName,
           base: boundedString(base.ref, 255),
           state,
           draft: value.draft,
           ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
           provenance: { issuer: issuerPrincipal(login) },
+          ...(isObservedPullRequest ? { rootIssue: this.#options.identity.rootIssue } : {}),
         },
       ];
     });

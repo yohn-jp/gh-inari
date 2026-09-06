@@ -1,0 +1,41 @@
+name: Change provenance
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: change-provenance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  change-provenance:
+    name: Change provenance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+
+      - name: Install trusted dependencies
+        run: corepack pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Validate Change merge admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: node --import tsx scripts/validate-change-merge-admission.mjs --event "$GITHUB_EVENT_PATH"

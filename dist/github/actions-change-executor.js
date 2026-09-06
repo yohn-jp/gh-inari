@@ -930,6 +930,7 @@ export class GitHubActionsEvidenceReader {
             const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
             if (state === undefined || typeof value.draft !== "boolean")
                 throw new GitHubActionsChangeExecutorError();
+            const number = positiveNumber(value.number);
             const login = boundedString(user.login, MAX_LOGIN_LENGTH);
             const headName = boundedString(head.ref, 255);
             if (head.repo !== undefined && head.repo !== null) {
@@ -938,18 +939,21 @@ export class GitHubActionsEvidenceReader {
                     return [];
                 }
             }
-            if (!branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
+            const isObservedPullRequest = number === this.#options.pullRequestNumber;
+            if (!isObservedPullRequest &&
+                !branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
                 return [];
             }
             return [
                 {
-                    number: positiveNumber(value.number),
+                    number,
                     head: headName,
                     base: boundedString(base.ref, 255),
                     state,
                     draft: value.draft,
                     ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
                     provenance: { issuer: issuerPrincipal(login) },
+                    ...(isObservedPullRequest ? { rootIssue: this.#options.identity.rootIssue } : {}),
                 },
             ];
         });
