@@ -1,10 +1,12 @@
 import {
   MAX_CHANGE_BRANCH_LENGTH,
+  MAX_CHANGE_COMMIT_SHA_LENGTH,
   MAX_CHANGE_HOST_LENGTH,
   validateChangeEffect,
   type ChangeDiagnostic,
   type ChangeEffect,
   type ChangeEffectKind,
+  type ChangeEffectSuccessEvidence,
   type ChangeIssuanceFailureEvidence,
 } from "../change.js";
 
@@ -47,7 +49,29 @@ export interface GitHubChangeEffectResponse {
  */
 export interface GitHubChangeEffectTransport {
   request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse>;
+  /**
+   * Provider-native compare-and-delete. REST GitHub does not implement this
+   * operation; the Actions transport supplies the GraphQL equivalent when
+   * available. It is never emulated by a GET followed by an unconditional
+   * DELETE.
+   */
+  readonly compareAndDeleteBranch?: (
+    request: GitHubChangeEffectCompareAndDeleteRequest,
+  ) => Promise<GitHubChangeEffectCompareAndDeleteOutcome>;
 }
+
+export interface GitHubChangeEffectCompareAndDeleteRequest {
+  readonly branch: string;
+  readonly expectedCommitSha: string;
+}
+
+export const GITHUB_CHANGE_EFFECT_COMPARE_AND_DELETE_OUTCOMES = Object.freeze([
+  "deleted",
+  "absent",
+  "mismatch",
+] as const);
+export type GitHubChangeEffectCompareAndDeleteOutcome =
+  (typeof GITHUB_CHANGE_EFFECT_COMPARE_AND_DELETE_OUTCOMES)[number];
 
 export interface GitHubChangeEffectAdapterOptions {
   readonly repository: GitHubChangeEffectRepository;
@@ -87,31 +111,7 @@ const READY_FOR_REVIEW_MUTATION =
   "pullRequest { id number state isDraft } } }";
 
 /** Bounded success evidence; GitHub response bodies and URLs are intentionally absent. */
-export type GitHubChangeEffectSuccessEvidence =
-  | {
-      readonly kind: "CREATE_BRANCH";
-      readonly branch: string;
-      readonly baseBranch: string;
-    }
-  | {
-      readonly kind: "CREATE_PULL_REQUEST";
-      readonly branch: string;
-      readonly baseBranch: string;
-      readonly rootIssue: number;
-      readonly pullRequest: number;
-    }
-  | {
-      readonly kind: "MARK_PULL_REQUEST_READY";
-      readonly pullRequest: number;
-    }
-  | {
-      readonly kind: "CLOSE_PULL_REQUEST";
-      readonly pullRequest: number;
-    }
-  | {
-      readonly kind: "DELETE_BRANCH";
-      readonly branch: string;
-    };
+export type GitHubChangeEffectSuccessEvidence = ChangeEffectSuccessEvidence;
 
 export type GitHubChangeEffectFailureEvidence = ChangeIssuanceFailureEvidence;
 
@@ -221,8 +221,8 @@ export class GitHubChangeEffectAdapter {
       },
       201,
     );
-    parseGitReference(createdReference, `refs/heads/${effect.branch}`);
-    return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch };
+    const createdCommitSha = parseGitReference(createdReference, `refs/heads/${effect.branch}`);
+    return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch, createdCommitSha };
   }
 
   private async createPullRequest(
@@ -360,6 +360,8 @@ export class GitHubChangeEffectAdapter {
   private async deleteBranch(
     effect: Extract<ChangeEffect, { readonly kind: "DELETE_BRANCH" }>,
   ): Promise<GitHubChangeEffectSuccessEvidence> {
+    const expectedCommitSha = effect.expectedCommitSha;
+    if (expectedCommitSha !== undefined) return this.deleteBranchIfUnchanged({ ...effect, expectedCommitSha });
     const response = await this.request(
       {
         method: "DELETE",
@@ -369,6 +371,51 @@ export class GitHubChangeEffectAdapter {
     );
     if (response !== undefined && response !== null && response !== "") throw new InvalidGitHubResponseError();
     return { kind: effect.kind, branch: effect.branch };
+  }
+
+  private async deleteBranchIfUnchanged(
+    effect: Extract<ChangeEffect, { readonly kind: "DELETE_BRANCH" }> & { readonly expectedCommitSha: string },
+  ): Promise<GitHubChangeEffectSuccessEvidence> {
+    const currentCommitSha = await this.readBranchCommitSha(effect.branch);
+    if (currentCommitSha === undefined) {
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        expectedCommitSha: effect.expectedCommitSha,
+        outcome: "absent",
+      };
+    }
+    if (currentCommitSha !== effect.expectedCommitSha) throw new InvalidGitHubResponseError();
+
+    if (typeof this.transport.compareAndDeleteBranch !== "function") throw new InvalidGitHubResponseError();
+    const outcome = await this.transport.compareAndDeleteBranch({
+      branch: effect.branch,
+      expectedCommitSha: effect.expectedCommitSha,
+    });
+    if (outcome !== "deleted" && outcome !== "absent") throw new InvalidGitHubResponseError();
+    return {
+      kind: effect.kind,
+      branch: effect.branch,
+      expectedCommitSha: effect.expectedCommitSha,
+      outcome,
+    };
+  }
+
+  private async readBranchCommitSha(branch: string): Promise<string | undefined> {
+    let response: GitHubChangeEffectResponse;
+    try {
+      response = await this.transport.request({
+        hostname: this.repository.hostname,
+        method: "GET",
+        path: `${this.repositoryPath()}/git/ref/heads/${encodeURIComponent(branch)}`,
+      });
+    } catch {
+      throw new InvalidGitHubResponseError();
+    }
+    if (!isRecord(response) || !isHttpStatus(response.status)) throw new InvalidGitHubResponseError();
+    if (response.status === 404) return undefined;
+    if (response.status !== 200) throw new InvalidGitHubResponseError();
+    return parseGitReference(response.body, `refs/heads/${branch}`);
   }
 
   private async request(
@@ -414,7 +461,7 @@ function parseGitReference(value: unknown, expectedRef: string): string {
   if (record.ref !== expectedRef || !isRecord(record.object) || record.object.type !== "commit") {
     throw new InvalidGitHubResponseError();
   }
-  return responseBoundedString(record.object.sha);
+  return responseCommitSha(record.object.sha);
 }
 
 function responseBranch(value: unknown, expected: string): void {
@@ -443,6 +490,13 @@ function responseBoundedString(value: unknown): string {
     throw new InvalidGitHubResponseError();
   }
   return value;
+}
+
+function responseCommitSha(value: unknown): string {
+  if (typeof value !== "string" || value.length !== MAX_CHANGE_COMMIT_SHA_LENGTH || !/^[0-9a-f]{40}$/iu.test(value)) {
+    throw new InvalidGitHubResponseError();
+  }
+  return value.toLowerCase();
 }
 
 function responseStringSet(value: unknown, property: string, expected: readonly string[]): void {

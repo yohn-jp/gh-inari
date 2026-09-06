@@ -17,6 +17,7 @@ import {
   projectChangeFromGitHubEvidence,
   validateGovernedRootIssueEvidence,
   type CanonicalBranchNamingInput,
+  type ChangeBranchEvidence,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
   type ChangeReadyEvidence,
@@ -47,9 +48,11 @@ import {
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   GitHubChangeEffectAdapter,
+  type GitHubChangeEffectCompareAndDeleteOutcome,
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
+  type GitHubChangeEffectSuccessEvidence,
   type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import {
@@ -82,10 +85,13 @@ const MAX_LOGIN_LENGTH = 160;
 const MAX_TIMESTAMP_LENGTH = 64;
 const DEFAULT_API_URL = "https://api.github.com";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/iu;
+const EMPTY_COMMIT_SHA = "0".repeat(40);
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
 const GITHUB_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
+const CONDITIONAL_DELETE_REF_MUTATION =
+  "mutation ConditionalDeleteRef($input: UpdateRefsInput!) { " + "updateRefs(input: $input) { clientMutationId } }";
 
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
@@ -263,6 +269,14 @@ function positiveNumber(value: unknown): number {
   return value;
 }
 
+function optionalCommitSha(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const object = value as Record<string, unknown>;
+  return object.type === "commit" && typeof object.sha === "string" && COMMIT_SHA_PATTERN.test(object.sha)
+    ? object.sha.toLowerCase()
+    : undefined;
+}
+
 function parseRepository(value: string, hostname = "github.com"): GitHubChangeEffectRepository {
   try {
     const parts = value.split("/");
@@ -322,6 +336,8 @@ async function boundedBody(response: Response): Promise<unknown> {
 export interface GitHubActionsApiTransportOptions {
   readonly apiUrl?: string;
   readonly token: string;
+  /** GraphQL repository node ID used by the atomic conditional ref update. */
+  readonly repositoryNodeId?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly failureStage?: TrustedActionsFailureStage;
 }
@@ -329,7 +345,9 @@ export interface GitHubActionsApiTransportOptions {
 /** A bounded credential-bound transport. The bearer never appears in results. */
 export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
   readonly #apiUrl: string;
+  readonly #graphqlApiUrl: string;
   readonly #token: string;
+  readonly #repositoryNodeId: string | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #failureStage: TrustedActionsFailureStage;
 
@@ -337,14 +355,23 @@ export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
     // Bound the input length before the trailing-slash regex runs, so it cannot be handed an
     // unbounded string (CodeQL polynomial-regex guard).
     this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
+    this.#graphqlApiUrl = this.#apiUrl.endsWith("/api/v3")
+      ? `${this.#apiUrl.slice(0, -7)}/api/graphql`
+      : `${this.#apiUrl}/graphql`;
     this.#token = boundedString(options.token, 4096);
+    this.#repositoryNodeId =
+      options.repositoryNodeId === undefined ? undefined : boundedString(options.repositoryNodeId, 255);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#failureStage = options.failureStage ?? "repository-evidence";
   }
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    return this.requestAt(this.#apiUrl, request);
+  }
+
+  private async requestAt(baseUrl: string, request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
     try {
-      const response = await this.#fetch(`${this.#apiUrl}/${request.path}`, {
+      const response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
         method: request.method,
         headers: {
           Accept: "application/vnd.github+json",
@@ -358,6 +385,71 @@ export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
     } catch {
       throw new GitHubActionsChangeExecutorError(undefined, this.#failureStage);
     }
+  }
+
+  /**
+   * Delete only when GitHub's GraphQL ref update still points at the expected
+   * OID. A missing node ID or any GraphQL error is a safe mismatch; callers
+   * must not emulate this with a REST GET followed by DELETE.
+   */
+  async compareAndDeleteBranch(request: {
+    readonly branch: string;
+    readonly expectedCommitSha: string;
+  }): Promise<GitHubChangeEffectCompareAndDeleteOutcome> {
+    if (
+      this.#repositoryNodeId === undefined ||
+      typeof request.branch !== "string" ||
+      request.branch.length === 0 ||
+      request.branch.length > 255 ||
+      /[\u0000-\u001F\u007F]/u.test(request.branch) ||
+      typeof request.expectedCommitSha !== "string" ||
+      !COMMIT_SHA_PATTERN.test(request.expectedCommitSha)
+    ) {
+      return "mismatch";
+    }
+    const response = await this.requestAt(this.#graphqlApiUrl, {
+      hostname: "github.com",
+      method: "POST",
+      path: "",
+      body: {
+        query: CONDITIONAL_DELETE_REF_MUTATION,
+        variables: {
+          input: {
+            repositoryId: this.#repositoryNodeId,
+            refUpdates: [
+              {
+                name: `refs/heads/${request.branch}`,
+                beforeOid: request.expectedCommitSha.toLowerCase(),
+                afterOid: EMPTY_COMMIT_SHA,
+                force: true,
+              },
+            ],
+          },
+        },
+      },
+    });
+    if (
+      response.status !== 200 ||
+      typeof response.body !== "object" ||
+      response.body === null ||
+      Array.isArray(response.body)
+    ) {
+      return "mismatch";
+    }
+    const body = response.body as Record<string, unknown>;
+    if (body.errors !== undefined) return "mismatch";
+    const data = body.data;
+    if (
+      typeof data !== "object" ||
+      data === null ||
+      Array.isArray(data) ||
+      typeof (data as Record<string, unknown>).updateRefs !== "object" ||
+      (data as Record<string, unknown>).updateRefs === null ||
+      Array.isArray((data as Record<string, unknown>).updateRefs)
+    ) {
+      return "mismatch";
+    }
+    return "deleted";
   }
 }
 
@@ -386,6 +478,7 @@ export interface GitHubActionsCredentialBrokerOptions {
   readonly privateKeyPem: string;
   readonly repository: GitHubChangeEffectRepository;
   readonly target: IssuerRepositoryIdentity;
+  readonly repositoryNodeId?: string;
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
 }
@@ -415,6 +508,7 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
     const transport = new GitHubActionsApiTransport({
       apiUrl: this.#options.apiUrl,
       token: credential.token,
+      repositoryNodeId: this.#options.repositoryNodeId,
       fetch: this.#fetch,
       failureStage: "projection-execution",
     });
@@ -427,6 +521,7 @@ export class GitHubActionsCredentialBroker implements TrustedInstallationCredent
           // #217 deliberately sanitizes this provider failure at its boundary.
           throw new GitHubActionsChangeExecutorError(GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind]);
         }
+        return result.evidence as GitHubChangeEffectSuccessEvidence;
       },
     };
     try {
@@ -939,30 +1034,33 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     return source !== undefined && gitBlobSha(source) === expectedSha ? source : undefined;
   }
 
-  private async readBranch(branch: string): Promise<boolean> {
+  private async readBranch(branch: string): Promise<ChangeBranchEvidence | undefined> {
     const response = await this.#options.transport.request({
       hostname: this.#options.repository.hostname,
       method: "GET",
       path: apiPath(this.#options.repository, `git/ref/heads/${encodeURIComponent(branch)}`),
     });
-    if (response.status === 404) return false;
+    if (response.status === 404) return undefined;
     if (response.status !== 200) throw new GitHubActionsChangeExecutorError();
     const value = record(response.body);
     if (value.ref !== `refs/heads/${branch}`) throw new GitHubActionsChangeExecutorError();
-    return true;
+    const sha = optionalCommitSha(value.object);
+    return { name: branch, ...(sha === undefined ? {} : { sha }) };
   }
 
-  private async readBranches(
-    derivedBranch: string | undefined,
-  ): Promise<readonly { name: string; rootIssue?: number }[]> {
-    const names = new Set<string>();
-    if (derivedBranch !== undefined && (await this.readBranch(derivedBranch))) names.add(derivedBranch);
+  private async readBranches(derivedBranch: string | undefined): Promise<readonly ChangeBranchEvidence[]> {
+    const branches = new Map<string, string | undefined>();
+    if (derivedBranch !== undefined) {
+      const observed = await this.readBranch(derivedBranch);
+      if (observed !== undefined) branches.set(observed.name, observed.sha);
+    }
     const response = await this.#options.transport.request({
       hostname: this.#options.repository.hostname,
       method: "GET",
       path: apiPath(this.#options.repository, "git/matching-refs/heads/"),
     });
-    if (response.status === 404) return [...names].map((name) => ({ name }));
+    if (response.status === 404)
+      return [...branches].map(([name, sha]) => ({ name, ...(sha === undefined ? {} : { sha }) }));
     if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
       throw new GitHubActionsChangeExecutorError();
     }
@@ -973,13 +1071,20 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       if (!ref.startsWith(prefix)) throw new GitHubActionsChangeExecutorError();
       const name = ref.slice(prefix.length);
       if (branchBelongsToRootIssue(name, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
-        names.add(name);
+        const sha = optionalCommitSha(value.object);
+        if (!branches.has(name) || sha !== undefined) branches.set(name, sha);
       }
     }
-    const orderedNames = [...names].sort();
+    const orderedNames = [...branches.keys()].sort();
     const hasHistoricalCandidate = orderedNames.some((name) => name !== derivedBranch);
     return orderedNames.map((name) =>
-      hasHistoricalCandidate ? { name, rootIssue: this.#options.identity.rootIssue } : { name },
+      hasHistoricalCandidate
+        ? {
+            name,
+            ...(branches.get(name) === undefined ? {} : { sha: branches.get(name) }),
+            rootIssue: this.#options.identity.rootIssue,
+          }
+        : { name, ...(branches.get(name) === undefined ? {} : { sha: branches.get(name) }) },
     );
   }
 
@@ -1215,6 +1320,13 @@ export async function createGitHubActionsChangeExecutor(
   if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) {
     throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-id");
   }
+  const repositoryNodeId =
+    typeof repositoryBody.node_id === "string" &&
+    repositoryBody.node_id.length > 0 &&
+    repositoryBody.node_id.length <= 255 &&
+    !/[\u0000-\u001F\u007F]/u.test(repositoryBody.node_id)
+      ? repositoryBody.node_id
+      : undefined;
   if (typeof repositoryBody.fork !== "boolean") {
     throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-fork");
   }
@@ -1307,6 +1419,7 @@ export async function createGitHubActionsChangeExecutor(
       privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
       repository,
       target,
+      repositoryNodeId,
       apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
       fetch: options.fetch,
     });

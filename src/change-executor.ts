@@ -2,6 +2,7 @@ import {
   CHANGE_EFFECT_KINDS,
   CHANGE_IMPLEMENTED_TRANSITIONS,
   CHANGE_TRANSITION_CONTRACT_VERSION,
+  MAX_CHANGE_COMMIT_SHA_LENGTH,
   validateChangeProjectionResult,
   type ChangeDiagnostic,
   type ChangeEffectKind,
@@ -52,6 +53,7 @@ export interface ChangeRemoteReadRequest extends ChangeRemoteRequestBase {
 export interface ChangeRemoteEffectEvidence {
   readonly kind: ChangeEffectKind;
   readonly status: "succeeded" | "failed";
+  readonly createdCommitSha?: string;
 }
 
 export const CHANGE_REMOTE_EXECUTION_OUTCOMES = Object.freeze([
@@ -263,7 +265,7 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
       typeof effect !== "object" ||
       effect === null ||
       Array.isArray(effect) ||
-      Object.keys(effect).some((key) => key !== "kind" && key !== "status")
+      Object.keys(effect).some((key) => key !== "kind" && key !== "status" && key !== "createdCommitSha")
     ) {
       throw new ChangeRemoteExecutorError(
         "CHANGE_REMOTE_RESULT_INVALID",
@@ -286,7 +288,33 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
         { operation },
       );
     }
-    effects.push({ kind: entry.kind as ChangeEffectKind, status: entry.status });
+    let createdCommitSha: string | undefined;
+    if (Object.prototype.hasOwnProperty.call(entry, "createdCommitSha")) {
+      if (entry.kind !== "CREATE_BRANCH" || entry.status !== "succeeded") {
+        throw new ChangeRemoteExecutorError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "The Change executor returned invalid bounded execution evidence.",
+          { operation },
+        );
+      }
+      if (
+        typeof entry.createdCommitSha !== "string" ||
+        entry.createdCommitSha.length !== MAX_CHANGE_COMMIT_SHA_LENGTH ||
+        !/^[0-9a-f]{40}$/iu.test(entry.createdCommitSha)
+      ) {
+        throw new ChangeRemoteExecutorError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "The Change executor returned invalid bounded execution evidence.",
+          { operation },
+        );
+      }
+      createdCommitSha = entry.createdCommitSha.toLowerCase();
+    }
+    effects.push({
+      kind: entry.kind as ChangeEffectKind,
+      status: entry.status,
+      ...(createdCommitSha === undefined ? {} : { createdCommitSha }),
+    });
   }
   const requester = candidate.requester === undefined ? undefined : candidate.requester;
   const issuer = candidate.issuer === undefined ? undefined : candidate.issuer;

@@ -10,6 +10,7 @@ import {
   planChangeTransition,
   serializeChangeIssuanceRecoveryPlan,
   type ChangeGitHubEvidence,
+  type ChangeEffectSuccessEvidence,
   type ChangeIssuancePlan,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
@@ -22,6 +23,7 @@ const identity = {
 } as const;
 const canonicalBranch = "feat/215-define-change-compensation-recovery-plans";
 const canonicalBaseBranch = "main";
+const createdCommitSha = "0123456789abcdef0123456789abcdef01234567";
 const branchGovernance = { pattern: "^feat/[0-9]+-[a-z0-9-]+$" };
 const naming = { type: "feat", slug: "define-change-compensation-recovery-plans" };
 
@@ -30,7 +32,10 @@ function issueEvidence(): ChangeGitHubEvidence["issue"] {
 }
 
 function branchEvidence(names: readonly string[] = [canonicalBranch]): ChangeGitHubEvidence["branches"] {
-  return { status: "available", value: names.map((name) => ({ name })) };
+  return {
+    status: "available",
+    value: names.map((name) => ({ name, ...(name === canonicalBranch ? { sha: createdCommitSha } : {}) })),
+  };
 }
 
 function pullRequestEvidence(
@@ -63,7 +68,16 @@ function branchCreatedPrFailed(plan = issuancePlan()) {
   return {
     issuance: plan,
     attemptedEffects: [
-      { effect: plan.effects[0]!, status: "succeeded" as const },
+      {
+        effect: plan.effects[0]!,
+        status: "succeeded" as const,
+        evidence: {
+          kind: "CREATE_BRANCH",
+          branch: canonicalBranch,
+          baseBranch: canonicalBaseBranch,
+          createdCommitSha,
+        } satisfies ChangeEffectSuccessEvidence,
+      },
       { effect: plan.effects[1]!, status: "failed" as const },
     ],
     failure: {
@@ -82,7 +96,9 @@ function branchCreatedPrFailed(plan = issuancePlan()) {
 test("branch creation success followed by PR creation failure yields explicit branch compensation", () => {
   const plan = planChangeIssuanceCompensation(branchCreatedPrFailed());
 
-  assert.deepEqual(plan.effects, [{ kind: "DELETE_BRANCH", branch: canonicalBranch }]);
+  assert.deepEqual(plan.effects, [
+    { kind: "DELETE_BRANCH", branch: canonicalBranch, expectedCommitSha: createdCommitSha },
+  ]);
   assert.deepEqual(plan.transaction, plan.issuance.transaction);
   assert.deepEqual(
     plan.failureEvidence.attemptedEffects.map((attempt) => attempt.status),
@@ -134,7 +150,7 @@ test("failed compensation yields RECOVERY_REQUIRED and preserves bounded repair 
       status: "failed",
       projection: input.projection,
       failure: {
-        effect: { kind: "DELETE_BRANCH", branch: canonicalBranch },
+        effect: { kind: "DELETE_BRANCH", branch: canonicalBranch, expectedCommitSha: createdCommitSha },
         code: "BRANCH_DELETE_FAILED",
         message: "The branch compensation effect failed.",
       },
@@ -239,16 +255,7 @@ test("ambiguous, unavailable, and inconsistent failure evidence fail closed with
       pullRequests: { status: "unavailable", reason: "permission denied" },
     }),
   };
-  const inconsistent = {
-    ...base,
-    projection: projectionInput({
-      issue: issueEvidence(),
-      branches: branchEvidence([]),
-      pullRequests: pullRequestEvidence([]),
-    }),
-  };
-
-  for (const input of [ambiguous, unavailable, inconsistent]) {
+  for (const input of [ambiguous, unavailable]) {
     assert.throws(
       () => planChangeIssuanceCompensation(input),
       (error: unknown) => error instanceof ChangeIssuanceRecoveryValidationError,
@@ -258,6 +265,92 @@ test("ambiguous, unavailable, and inconsistent failure evidence fail closed with
       (error: unknown) => error instanceof ChangeIssuanceRecoveryValidationError,
     );
   }
+});
+
+test("already-absent branch compensation is idempotent and retains the created generation", () => {
+  const input = {
+    ...branchCreatedPrFailed(),
+    projection: projectionInput({
+      issue: issueEvidence(),
+      branches: branchEvidence([]),
+      pullRequests: pullRequestEvidence([]),
+    }),
+  };
+  const compensation = planChangeIssuanceCompensation(input);
+  assert.deepEqual(compensation.effects, [
+    { kind: "DELETE_BRANCH", branch: canonicalBranch, expectedCommitSha: createdCommitSha },
+  ]);
+  const recovered = planChangeIssuanceRecovery({
+    ...input,
+    compensation: {
+      status: "succeeded",
+      projection: input.projection,
+    },
+  });
+  assert.equal(recovered.result.status, "compensated");
+  assert.equal(recovered.result.state, "DEFINED");
+});
+
+test("advanced, malformed, or stale generation evidence never produces a deletion plan", () => {
+  const base = branchCreatedPrFailed();
+  const advanced = {
+    ...base,
+    projection: projectionInput({
+      issue: issueEvidence(),
+      branches: {
+        status: "available",
+        value: [{ name: canonicalBranch, sha: "fedcba9876543210fedcba9876543210fedcba98" }],
+      },
+      pullRequests: pullRequestEvidence([]),
+    }),
+  };
+  const missingEvidence = {
+    ...base,
+    attemptedEffects: [{ effect: base.issuance.effects[0]!, status: "succeeded" as const }, base.attemptedEffects[1]!],
+  };
+  const malformedEvidence = {
+    ...base,
+    attemptedEffects: [
+      {
+        ...base.attemptedEffects[0]!,
+        evidence: {
+          kind: "CREATE_BRANCH",
+          branch: canonicalBranch,
+          baseBranch: canonicalBaseBranch,
+          createdCommitSha: "not-a-sha",
+        },
+      },
+      base.attemptedEffects[1]!,
+    ],
+  };
+  for (const candidate of [advanced, missingEvidence, malformedEvidence]) {
+    assert.throws(
+      () => planChangeIssuanceCompensation(candidate),
+      (error: unknown) => error instanceof ChangeIssuanceRecoveryValidationError,
+    );
+  }
+});
+
+test("repeated recovery planning is deterministic and keeps compensation conditional", () => {
+  const input = branchCreatedPrFailed();
+  const recoveryInput = {
+    ...input,
+    compensation: {
+      status: "failed" as const,
+      projection: input.projection,
+      failure: {
+        effect: { kind: "DELETE_BRANCH" as const, branch: canonicalBranch, expectedCommitSha: createdCommitSha },
+        code: "BRANCH_DELETE_FAILED",
+        message: "The branch compensation effect failed.",
+      },
+    },
+  };
+  const first = planChangeIssuanceRecovery(recoveryInput);
+  const second = planChangeIssuanceRecovery(recoveryInput);
+  assert.deepEqual(second, first);
+  assert.deepEqual(first.compensation.plan.effects, [
+    { kind: "DELETE_BRANCH", branch: canonicalBranch, expectedCommitSha: createdCommitSha },
+  ]);
 });
 
 test("shared transition recovery plans retain abort provenance and only the pending cleanup effect", () => {

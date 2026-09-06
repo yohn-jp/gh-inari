@@ -29,6 +29,8 @@ import {
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
   planChangeIssuance,
   projectChangeFromGitHubEvidence,
+  type ChangeEffect,
+  type ChangeEffectSuccessEvidence,
 } from "../change.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
@@ -48,6 +50,33 @@ const target: IssuerRepositoryIdentity = {
   nameWithOwner: "acme/inari",
 };
 const checkedOutSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+function effectSuccessEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
+  switch (effect.kind) {
+    case "CREATE_BRANCH":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        baseBranch: effect.baseBranch,
+        createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
+      };
+    case "CREATE_PULL_REQUEST":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        baseBranch: effect.baseBranch,
+        rootIssue: effect.rootIssue,
+        pullRequest: 2180,
+      };
+    case "MARK_PULL_REQUEST_READY":
+    case "CLOSE_PULL_REQUEST":
+      return { kind: effect.kind, pullRequest: effect.pullRequest };
+    case "DELETE_BRANCH":
+      return effect.expectedCommitSha === undefined
+        ? { kind: effect.kind, branch: effect.branch }
+        : { kind: effect.kind, branch: effect.branch, expectedCommitSha: effect.expectedCommitSha, outcome: "deleted" };
+  }
+}
 
 function issuerCredentialRequest(): IssuerCredentialRequest {
   return {
@@ -111,6 +140,7 @@ class ReadTransport implements GitHubChangeEffectTransport {
       readonly issueTitle?: unknown;
       readonly pullRequests?: readonly unknown[];
       readonly branchPresent?: boolean;
+      readonly branchSha?: string;
     } = {},
   ) {}
 
@@ -132,7 +162,15 @@ class ReadTransport implements GitHubChangeEffectTransport {
     }
     if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
       return this.options.branchPresent
-        ? { status: 200, body: { ref: "refs/heads/feat/218-execute-change-plans-safely" } }
+        ? {
+            status: 200,
+            body: {
+              ref: "refs/heads/feat/218-execute-change-plans-safely",
+              ...(this.options.branchSha === undefined
+                ? {}
+                : { object: { type: "commit", sha: this.options.branchSha } }),
+            },
+          }
         : { status: 404, body: { message: "Not Found" } };
     }
     if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
@@ -142,6 +180,22 @@ class ReadTransport implements GitHubChangeEffectTransport {
     throw new Error("unexpected read");
   }
 }
+
+test("Actions evidence reader retains the observed canonical branch generation", async () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const transport = new ReadTransport({ branchPresent: true, branchSha: sha });
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  assert.deepEqual(result.evidence.branches, {
+    status: "available",
+    value: [{ name: "feat/218-execute-change-plans-safely", sha }],
+  });
+});
 
 test("Actions evidence reader accepts multiline Issue bodies while preserving single-line validation", async () => {
   const transport = new ReadTransport({ issueBody: "## Summary\r\n\r\nfirst paragraph\nsecond paragraph" });
@@ -478,7 +532,13 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
         repository: target,
         installation: { appId: "218", installationId: "219", repositoryHost: "github.com" },
         permissions: {},
-        effects: [{ kind: effect.kind, status: "applied" }],
+        effects: [
+          {
+            kind: effect.kind,
+            status: "applied",
+            evidence: effectSuccessEvidence(effect),
+          },
+        ],
       };
     },
   };
@@ -630,6 +690,54 @@ test("API transport does not return credential-bearing headers or unbounded resp
   assert.deepEqual(result, { status: 200, body: { ok: true } });
   assert.equal(JSON.stringify(result).includes(token), false);
   assert.match(JSON.stringify(received?.headers), /Bearer read-token/u);
+});
+
+test("API transport uses GitHub GraphQL updateRefs as an atomic conditional branch delete", async () => {
+  let receivedUrl: string | undefined;
+  let receivedInit: RequestInit | undefined;
+  const transport = new GitHubActionsApiTransport({
+    token: "issuer-token",
+    repositoryNodeId: "R_kgDO218000001",
+    fetch: async (input, init) => {
+      receivedUrl = String(input);
+      receivedInit = init;
+      return new Response(JSON.stringify({ data: { updateRefs: { clientMutationId: null } } }), { status: 200 });
+    },
+  });
+
+  const result = await transport.compareAndDeleteBranch({
+    branch: "feat/218-execute-change-plans-safely",
+    expectedCommitSha: "0123456789abcdef0123456789abcdef01234567",
+  });
+
+  assert.equal(result, "deleted");
+  assert.equal(receivedUrl, "https://api.github.com/graphql");
+  const body = JSON.parse(String(receivedInit?.body)) as {
+    readonly variables: {
+      readonly input: {
+        readonly repositoryId: string;
+        readonly refUpdates: readonly [
+          {
+            readonly name: string;
+            readonly beforeOid: string;
+            readonly afterOid: string;
+            readonly force: boolean;
+          },
+        ];
+      };
+    };
+  };
+  assert.deepEqual(body.variables.input, {
+    repositoryId: "R_kgDO218000001",
+    refUpdates: [
+      {
+        name: "refs/heads/feat/218-execute-change-plans-safely",
+        beforeOid: "0123456789abcdef0123456789abcdef01234567",
+        afterOid: "0000000000000000000000000000000000000000",
+        force: true,
+      },
+    ],
+  });
 });
 
 test("API transport failures expose only the bounded projection boundary", async () => {

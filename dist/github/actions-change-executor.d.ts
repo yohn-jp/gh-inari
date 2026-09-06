@@ -8,7 +8,7 @@
 import { type CanonicalBranchNamingInput, type ChangeProjectionInput } from "../change.js";
 import { type ChangeRemoteExecutor, type ChangeRemoteMutationRequest, type ChangeRemoteReadRequest } from "../change-executor.js";
 import { type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
-import { type GitHubChangeEffectRepository, type GitHubChangeEffectRequest, type GitHubChangeEffectResponse, type GitHubChangeEffectTransport } from "./change-effect-adapter.js";
+import { type GitHubChangeEffectCompareAndDeleteOutcome, type GitHubChangeEffectRepository, type GitHubChangeEffectRequest, type GitHubChangeEffectResponse, type GitHubChangeEffectTransport } from "./change-effect-adapter.js";
 import { type IssuerCredentialRequest, type IssuerScopedMutationCapability, type TrustedInstallationCredentialBroker, type IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { PullRequestBranchGovernance } from "../contract/ir.js";
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
@@ -35,6 +35,8 @@ export declare class GitHubActionsChangeExecutorError extends Error {
 export interface GitHubActionsApiTransportOptions {
     readonly apiUrl?: string;
     readonly token: string;
+    /** GraphQL repository node ID used by the atomic conditional ref update. */
+    readonly repositoryNodeId?: string;
     readonly fetch?: typeof globalThis.fetch;
     readonly failureStage?: TrustedActionsFailureStage;
 }
@@ -43,6 +45,16 @@ export declare class GitHubActionsApiTransport implements GitHubChangeEffectTran
     #private;
     constructor(options: GitHubActionsApiTransportOptions);
     request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse>;
+    private requestAt;
+    /**
+     * Delete only when GitHub's GraphQL ref update still points at the expected
+     * OID. A missing node ID or any GraphQL error is a safe mismatch; callers
+     * must not emulate this with a REST GET followed by DELETE.
+     */
+    compareAndDeleteBranch(request: {
+        readonly branch: string;
+        readonly expectedCommitSha: string;
+    }): Promise<GitHubChangeEffectCompareAndDeleteOutcome>;
 }
 export interface GitHubActionsCredentialBrokerOptions {
     readonly appId: string;
@@ -50,6 +62,7 @@ export interface GitHubActionsCredentialBrokerOptions {
     readonly privateKeyPem: string;
     readonly repository: GitHubChangeEffectRepository;
     readonly target: IssuerRepositoryIdentity;
+    readonly repositoryNodeId?: string;
     readonly apiUrl?: string;
     readonly fetch?: typeof globalThis.fetch;
 }

@@ -53,7 +53,11 @@ function projectionIdentity(input) {
         : undefined;
 }
 function effectEvidence(attempts) {
-    return attempts.map((attempt) => ({ kind: attempt.effect.kind, status: attempt.status }));
+    return attempts.map((attempt) => ({
+        kind: attempt.effect.kind,
+        status: attempt.status,
+        ...(attempt.evidence?.kind === "CREATE_BRANCH" ? { createdCommitSha: attempt.evidence.createdCommitSha } : {}),
+    }));
 }
 function executionEvidence(operation, outcome, requester, effects, compensation = "not-required", failure) {
     return {
@@ -130,6 +134,15 @@ function recoveryProjection(projection, change) {
         status: "partial",
         change,
         diagnostics,
+    };
+}
+function recoveryChangeForProjection(issuance, projection) {
+    return {
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        identity: issuance.transaction.identity,
+        state: "RECOVERY_REQUIRED",
+        provenance: projection.change?.provenance ?? issuance.result.provenance,
+        ...(projection.change?.projection === undefined ? {} : { projection: projection.change.projection }),
     };
 }
 function verifyProjection(plan, projection) {
@@ -371,8 +384,9 @@ export class TrustedChangeExecutor {
         const attempts = [];
         for (const effect of plan.effects) {
             try {
-                await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
-                attempts.push({ effect, status: "succeeded" });
+                const mutation = await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+                const evidence = mutation.effects[0]?.evidence;
+                attempts.push({ effect, status: "succeeded", ...(evidence === undefined ? {} : { evidence }) });
             }
             catch {
                 attempts.push({ effect, status: "failed" });
@@ -397,12 +411,22 @@ export class TrustedChangeExecutor {
         catch {
             throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_RECOVERY_REQUIRED", "Issuance failed and its partial projection could not be bounded for recovery.", [], executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), "failed", failure));
         }
-        let recovery = planChangeIssuanceRecovery({
-            issuance,
-            attemptedEffects: attempts,
-            failure,
-            projection: failedProjectionInput,
-        });
+        let recovery;
+        try {
+            recovery = planChangeIssuanceRecovery({
+                issuance,
+                attemptedEffects: attempts,
+                failure,
+                projection: failedProjectionInput,
+            });
+        }
+        catch {
+            const projection = projectionFor(failedProjectionInput);
+            return {
+                projection: recoveryProjection(projection, recoveryChangeForProjection(issuance, projection)),
+                evidence: executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), "failed", failure),
+            };
+        }
         const compensationEffect = recovery.compensation.plan.effects[0];
         if (compensationEffect === undefined) {
             throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_RECOVERY_REQUIRED", "Issuance recovery did not produce an explicit compensation effect.", [], executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), "failed", failure));
@@ -423,18 +447,26 @@ export class TrustedChangeExecutor {
         catch {
             throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_RECOVERY_REQUIRED", "Issuance compensation completed without bounded post-compensation evidence.", [], executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure));
         }
-        recovery = planChangeIssuanceRecovery({
-            issuance,
-            attemptedEffects: attempts,
-            failure,
-            projection: failedProjectionInput,
-            compensation: {
-                status: compensationStatus,
-                projection: compensatedProjectionInput,
-                ...(compensationFailure === undefined ? {} : { failure: compensationFailure }),
-            },
-        });
         const projection = projectionFor(compensatedProjectionInput);
+        try {
+            recovery = planChangeIssuanceRecovery({
+                issuance,
+                attemptedEffects: attempts,
+                failure,
+                projection: failedProjectionInput,
+                compensation: {
+                    status: compensationStatus,
+                    projection: compensatedProjectionInput,
+                    ...(compensationFailure === undefined ? {} : { failure: compensationFailure }),
+                },
+            });
+        }
+        catch {
+            return {
+                projection: recoveryProjection(projection, recoveryChangeForProjection(issuance, projection)),
+                evidence: executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure),
+            };
+        }
         const evidence = executionEvidence(request.operation, compensationStatus === "succeeded" ? "compensated" : "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure);
         return { projection, evidence };
     }
