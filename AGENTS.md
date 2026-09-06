@@ -14,6 +14,7 @@ It is not a project encyclopedia. Product architecture and exact governance rule
 ## 2. Implementation never happens on the protected default branch
 
 - Never create, modify, delete, stage, or commit implementation changes on `main` or `master`.
+- The sole exception is CI's own `dist-sync` workflow, which mechanically syncs generated `dist/**` after merge; this does not authorize agent-initiated direct commits.
 - Use the task branch/worktree already supplied by the environment or task when one exists.
 - Otherwise create or use an appropriate Issue/task branch and isolated worktree according to the repository's executable policy and available tooling.
 - If already inside the correct Issue/task worktree, keep using it; do not create another one.

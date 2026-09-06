@@ -38,7 +38,9 @@ the release tag.
 
 1. **Land changes through PR.** Every change to `main` goes through a
    pull request with a linked Issue and a passing `CI` + `Governance` +
-   `CodeQL` run (see `CONTRIBUTING.md`). No direct pushes to `main`.
+   `CodeQL` run (see `CONTRIBUTING.md`). No direct pushes to `main` —
+   with one narrow, machine-enforced exception: see "Trusted dist sync"
+   below.
 2. **Update the release notes.** Add `docs/releases/<version>.md`
    (this file's sibling) in the same PR or a follow-up PR, following the
    structure of [`0.1.0.md`](0.1.0.md): Summary, Highlights, Fixed,
@@ -104,6 +106,32 @@ inari` extension.
      do not error).
    - Any `npm warn publish` output is treated as a failure even if `npm
 publish` itself exits 0.
+
+## Trusted dist sync
+
+`dist/**` is generated output, tracked in git so that `gh extension
+install`/`gh extension upgrade` have a runnable artifact without a build
+step. Regenerating and committing it is not a PR author's
+responsibility (see `CONTRIBUTING.md`).
+
+[`.github/workflows/dist-sync.yml`](../../.github/workflows/dist-sync.yml)
+is the sole permitted direct-push path to `main`: it runs after a merge
+lands, rebuilds from canonical source, and — only if `dist/**` actually
+changed — commits and pushes that diff directly to `main`. Its write
+scope is mechanically limited to `dist/**`; it never touches source or
+configuration.
+
+This is enforced by a GitHub Ruleset bypass scoped narrowly to the
+`github-actions[bot]` actor on the `main` branch pattern, not by
+anything tracked in this repository (there is no Rulesets-as-code file
+here). No human or agent identity holds equivalent bypass authority.
+Because Ruleset bypass is scoped per-actor rather than per-workflow,
+any other workflow that requested `contents: write` would also be able
+to push directly to `main` — every other workflow in this repository is
+expected to declare `contents: read`, and `CODEOWNERS` requires
+`@yohnark` review on all of `/.github/`, so any future addition of
+`contents: write` to a workflow file should be treated as
+security-sensitive during review.
 
 ## What this buys
 

@@ -2,3 +2,7 @@
 /.github/ @yohnark
 /scripts/validate-*.mjs @yohnark
 /package.json @yohnark
+
+# Generated dist output is CI-owned; any hand-edit sneaking into a PR
+# requires explicit review (see docs/releases/GOVERNANCE.md).
+/dist/ @yohnark

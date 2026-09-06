@@ -36,6 +36,16 @@ pnpm run verify
 4. Run `pnpm run verify` before opening a PR.
 5. Update `README.md` in the same PR as any user-visible behavior change.
 
+## Generated `dist/` output
+
+`dist/**` is generated output owned exclusively by CI
+([`.github/workflows/dist-sync.yml`](.github/workflows/dist-sync.yml)),
+which rebuilds and commits it to `main` automatically after a PR merges.
+Do not stage or commit `dist/**` changes as part of a PR — PRs contain
+source and configuration changes only. `pnpm run build` above is still
+expected locally to verify your change compiles, but its `dist/` output
+should not be included in your commits.
+
 ## Commit messages
 
 This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
