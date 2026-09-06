@@ -48,6 +48,80 @@ class SemanticPrTransport implements GhTransport {
   }
 }
 
+class SemanticObservationTransport implements GhTransport {
+  readonly calls: string[][] = [];
+  private readonly responses: GhCommandResult[];
+
+  constructor(kind: "issue" | "branch" | "pull_request", source: string) {
+    const resource =
+      kind === "issue"
+        ? {
+            number: 42,
+            title: "MCP Issue",
+            body: "Issue through Core",
+            state: "open",
+            html_url: "https://github.com/acme/repository-b/issues/42",
+            labels: [],
+            assignees: [],
+            milestone: null,
+          }
+        : kind === "pull_request"
+          ? {
+              number: 43,
+              title: "feat: native-mcp-semantic-pr",
+              body: "Closes #285",
+              state: "open",
+              html_url: "https://github.com/acme/repository-b/pull/43",
+              draft: false,
+              maintainer_can_modify: true,
+              head: { ref: "feat/native-mcp-semantic-pr" },
+              base: { ref: "main" },
+              labels: [],
+              assignees: [],
+              milestone: null,
+            }
+          : {
+              ref: "refs/heads/feat/mcp",
+              object: { type: "commit", sha: "a".repeat(40) },
+            };
+    this.responses = [
+      command("gh version 2.0"),
+      command(),
+      command("100000200\n"),
+      command(JSON.stringify({ default_branch: "main" })),
+      command(
+        JSON.stringify({
+          sha: "tree-sha-semantic-observation-mcp",
+          truncated: false,
+          tree: [
+            {
+              path:
+                kind === "issue"
+                  ? ".github/inari/issues/default.json"
+                  : kind === "branch"
+                    ? ".github/inari/branches/default.json"
+                    : ".github/inari/pull-requests/default.json",
+              type: "blob",
+              sha: "canon-sha",
+            },
+          ],
+        }),
+      ),
+      blobResponse("canon-sha", source),
+      kind === "branch"
+        ? command(`HTTP/1.1 200 OK\ncontent-type: application/json\n\n${JSON.stringify(resource)}`)
+        : command(JSON.stringify(resource)),
+    ];
+  }
+
+  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+    this.calls.push([...args]);
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
+    return response;
+  }
+}
+
 const derivedCanon = JSON.stringify({
   version: "1",
   kind: "pull_request",
@@ -154,12 +228,18 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
         "inari_issue_contract",
         "inari_issue_materialize",
         "inari_issue_plan",
+        "inari_issue_observe",
+        "inari_issue_drift",
         "inari_branch_contract",
         "inari_branch_materialize",
         "inari_branch_plan",
+        "inari_branch_observe",
+        "inari_branch_drift",
         "inari_pr_contract",
         "inari_pr_materialize",
         "inari_pr_plan",
+        "inari_pr_observe",
+        "inari_pr_drift",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -284,6 +364,48 @@ test("native MCP exposes Issue and Branch catalogs through the same Core boundar
     const branchPlanContent = structuredContent(branchPlan.structuredContent);
     assert.equal(branchPlanContent.valid, true);
     assert.equal(branchPlanContent.mutation, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("native MCP exposes bounded observation tools for Issue, Branch, and PR", async () => {
+  const sources = { issue: semanticIssueCanon, branch: semanticBranchCanon, pull_request: derivedCanon } as const;
+  const transports: SemanticObservationTransport[] = [];
+  const server = createInariMcpServer({
+    repository: "acme/repository-b",
+    createAdapter: (options) => {
+      const kind = transports.length === 0 ? "issue" : transports.length === 1 ? "branch" : "pull_request";
+      const transport = new SemanticObservationTransport(kind, sources[kind]);
+      transports.push(transport);
+      return new GitHubAdapter({ ...options, transport });
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-observation-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const issue = await client.callTool({ name: "inari_issue_observe", arguments: { number: 42 } });
+    assert.equal(record(issue.structuredContent).valid, true);
+    assert.equal(record(issue.structuredContent).kind, undefined);
+    assert.equal(record(record(issue.structuredContent).observed).kind, "issue");
+
+    const branch = await client.callTool({
+      name: "inari_branch_observe",
+      arguments: { name: "feat/mcp", source: "main" },
+    });
+    assert.equal(record(branch.structuredContent).valid, true);
+    assert.equal(record(record(branch.structuredContent).observed).kind, "branch");
+
+    const pullRequest = await client.callTool({ name: "inari_pr_observe", arguments: { number: 43 } });
+    assert.equal(record(pullRequest.structuredContent).valid, true);
+    assert.equal(record(record(pullRequest.structuredContent).observed).kind, "pull_request");
+
+    assert.equal(transports.length, 3);
+    assert.ok(transports.every((transport) => transport.calls.every((args) => !args.includes("POST"))));
   } finally {
     await client.close();
     await server.close();

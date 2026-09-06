@@ -32,17 +32,27 @@ import {
   tryPlanSemanticBranch,
   type SemanticBranchMutationPlan,
 } from "../semantic-branch-projection.js";
+import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "../semantic-branch-observation.js";
 import {
   SemanticIssueProjectionError,
   tryPlanSemanticIssue,
   type SemanticIssueMutationPlan,
 } from "../semantic-issue-projection.js";
+import { compareSemanticIssueProjection, tryObserveSemanticIssue } from "../semantic-issue-observation.js";
 import {
   SemanticPullRequestProjectionError,
   tryPlanSemanticPullRequest,
   type SemanticPullRequestMutationPlan,
 } from "../semantic-pr-projection.js";
-import { GitHubAdapter, isGitHubAdapterError, type GitHubAdapterOptions } from "../github/index.js";
+import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
+import {
+  GitHubAdapter,
+  GitHubIssueRelationObservationAdapter,
+  isGitHubAdapterError,
+  type GitHubAdapterOptions,
+  type IssueRelationDiagnostic,
+} from "../github/index.js";
+import { GITHUB_ISSUE_PROJECTION_CAPABILITIES } from "../semantic-issue-projection.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
@@ -51,12 +61,18 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_issue_contract",
   "inari_issue_materialize",
   "inari_issue_plan",
+  "inari_issue_observe",
+  "inari_issue_drift",
   "inari_branch_contract",
   "inari_branch_materialize",
   "inari_branch_plan",
+  "inari_branch_observe",
+  "inari_branch_drift",
   "inari_pr_contract",
   "inari_pr_materialize",
   "inari_pr_plan",
+  "inari_pr_observe",
+  "inari_pr_drift",
 ] as const);
 
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
@@ -77,6 +93,14 @@ function boundedString(description: string): z.ZodString {
 const repositorySchema = boundedString("Optional GitHub repository override.");
 const templateSchema = boundedString("Optional repository Canon/template selector.");
 const capabilitySchema = boundedString("Opaque target capability identifier.");
+const artifactNumberSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(2_147_483_647)
+  .describe("GitHub Issue or pull-request number.");
+const branchNameSchema = boundedString("Git branch name to observe.");
+const branchSourceSchema = boundedString("Explicit Git branch source evidence.");
 
 const inputValueSchema = z
   .record(z.string().min(1).max(MAX_STRING_LENGTH), z.unknown())
@@ -114,6 +138,35 @@ export const semanticBranchContractInputSchema = z.strictObject(commonRequestSha
 export const semanticBranchMaterializeInputSchema = z.strictObject({ ...commonRequestShape, input: inputValueSchema });
 export const semanticBranchPlanInputSchema = z.strictObject({ ...commonRequestShape, input: inputValueSchema });
 
+/** Input schemas for bounded provider observation and Core drift comparison. */
+export const semanticIssueObserveInputSchema = z.strictObject({
+  ...commonRequestShape,
+  number: artifactNumberSchema,
+});
+export const semanticIssueDriftInputSchema = z.strictObject({
+  ...commonRequestShape,
+  number: artifactNumberSchema,
+  input: inputValueSchema,
+});
+export const semanticBranchObserveInputSchema = z.strictObject({
+  ...commonRequestShape,
+  name: branchNameSchema,
+  source: branchSourceSchema,
+});
+export const semanticBranchDriftInputSchema = z.strictObject({
+  ...commonRequestShape,
+  input: inputValueSchema,
+});
+export const semanticPullRequestObserveInputSchema = z.strictObject({
+  ...commonRequestShape,
+  number: artifactNumberSchema,
+});
+export const semanticPullRequestDriftInputSchema = z.strictObject({
+  ...commonRequestShape,
+  number: artifactNumberSchema,
+  input: inputValueSchema,
+});
+
 export type SemanticPullRequestContractInput = z.infer<typeof semanticPullRequestContractInputSchema>;
 export type SemanticPullRequestMaterializeInput = z.infer<typeof semanticPullRequestMaterializeInputSchema>;
 export type SemanticPullRequestPlanInput = z.infer<typeof semanticPullRequestPlanInputSchema>;
@@ -123,6 +176,12 @@ export type SemanticIssuePlanInput = z.infer<typeof semanticIssuePlanInputSchema
 export type SemanticBranchContractInput = z.infer<typeof semanticBranchContractInputSchema>;
 export type SemanticBranchMaterializeInput = z.infer<typeof semanticBranchMaterializeInputSchema>;
 export type SemanticBranchPlanInput = z.infer<typeof semanticBranchPlanInputSchema>;
+export type SemanticIssueObserveInput = z.infer<typeof semanticIssueObserveInputSchema>;
+export type SemanticIssueDriftInput = z.infer<typeof semanticIssueDriftInputSchema>;
+export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInputSchema>;
+export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
+export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
+export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
 
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
@@ -154,7 +213,7 @@ export const semanticPullRequestOutputSchema = z
   .object({
     ok: z.boolean(),
     valid: z.boolean(),
-    phase: z.enum(["contract", "materialization", "projection"]).optional(),
+    phase: z.enum(["contract", "materialization", "projection", "observation", "comparison"]).optional(),
     version: z.string().optional(),
     artifactContractVersion: z.string().optional(),
     kind: z.string().optional(),
@@ -170,6 +229,11 @@ export const semanticPullRequestOutputSchema = z
     capabilities: z.unknown().optional(),
     artifact: z.unknown().optional(),
     plan: z.unknown().optional(),
+    desired: z.unknown().optional(),
+    observed: z.unknown().optional(),
+    comparison: z.unknown().optional(),
+    drift: z.array(z.unknown()).optional(),
+    observationDiagnostics: z.array(z.unknown()).optional(),
     provenance: z.unknown().optional(),
     generation: z.unknown().optional(),
     diagnostics: z.array(z.unknown()).optional(),
@@ -216,6 +280,14 @@ async function resolveSemanticArtifactContract(
   dependencies: NativeSemanticArtifactDependencies,
 ): Promise<EffectiveArtifactContract> {
   const adapter = adapterFor(input.repository, dependencies);
+  return compileSemanticArtifactContract(kind, input, adapter);
+}
+
+async function compileSemanticArtifactContract(
+  kind: "issue" | "branch" | "pull_request",
+  input: { readonly template?: string; readonly capabilities?: readonly string[] },
+  adapter: GitHubAdapter,
+): Promise<EffectiveArtifactContract> {
   const options: RepositoryEffectiveArtifactContractOptions =
     input.capabilities === undefined ? {} : { capabilities: input.capabilities };
   if (kind === "issue") return compileRepositoryEffectiveIssueContract(adapter, input.template, options);
@@ -301,7 +373,7 @@ function diagnosticsForError(error: unknown): unknown[] {
 }
 
 function failure(
-  phase: "contract" | "materialization" | "projection",
+  phase: "contract" | "materialization" | "projection" | "observation" | "comparison",
   diagnostics: readonly unknown[] | unknown,
 ): SemanticPullRequestMcpOutput {
   const normalized = Array.isArray(diagnostics) ? boundedDiagnostics(diagnostics) : diagnosticsForError(diagnostics);
@@ -319,6 +391,376 @@ function result(data: SemanticPullRequestMcpOutput, summary: string): CallToolRe
     structuredContent: data,
     content: [{ type: "text", text: summary }],
   };
+}
+
+function observationRepository(
+  context: Awaited<ReturnType<GitHubAdapter["resolveRepositoryContext"]>>,
+): Record<string, string> {
+  return {
+    host: context.hostname,
+    ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
+    repository: context.nameWithOwner,
+  };
+}
+
+function issueRelationCapabilities(effectiveContract: EffectiveArtifactContract): {
+  readonly parent: boolean;
+  readonly blockedBy: boolean;
+} {
+  const capabilities = new Set(effectiveContract.capabilities);
+  return {
+    parent: capabilities.has(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation),
+    blockedBy:
+      capabilities.has(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeBlockedByRelation) ||
+      capabilities.has(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation),
+  };
+}
+
+interface IssueObservationEnvelope {
+  readonly result: ReturnType<typeof tryObserveSemanticIssue>;
+  readonly observationDiagnostics: readonly IssueRelationDiagnostic[];
+}
+
+async function observeIssueFromGitHub(
+  adapter: GitHubAdapter,
+  effectiveContract: EffectiveArtifactContract,
+  number: number,
+): Promise<IssueObservationEnvelope> {
+  const [issue, context] = await Promise.all([adapter.readIssue(number), adapter.resolveRepositoryContext()]);
+  const relations = new GitHubIssueRelationObservationAdapter(
+    adapter,
+    context,
+    issueRelationCapabilities(effectiveContract),
+  );
+  const [parent, dependsOn] = await Promise.all([relations.observeParent(number), relations.observeBlockedBy(number)]);
+  const nativeRelations: Record<string, unknown> = {};
+  if (parent.kind === "present" && parent.reference !== undefined)
+    nativeRelations.parent = { native: parent.reference };
+  if (dependsOn.kind === "present") nativeRelations.dependsOn = { native: dependsOn.references };
+  const observed = tryObserveSemanticIssue({
+    issue,
+    repository: observationRepository(context),
+    ...(Object.keys(nativeRelations).length === 0 ? {} : { relations: nativeRelations }),
+  });
+  return {
+    result: observed,
+    observationDiagnostics: [...parent.diagnostics, ...dependsOn.diagnostics],
+  };
+}
+
+interface PullRequestObservationEnvelope {
+  readonly result: ReturnType<typeof tryObserveSemanticPullRequest>;
+}
+
+async function observePullRequestFromGitHub(
+  adapter: GitHubAdapter,
+  number: number,
+): Promise<PullRequestObservationEnvelope> {
+  const [pullRequest, context] = await Promise.all([
+    adapter.readPullRequest(number),
+    adapter.resolveRepositoryContext(),
+  ]);
+  return {
+    result: tryObserveSemanticPullRequest({
+      pullRequest,
+      repository: observationRepository(context),
+    }),
+  };
+}
+
+async function handleIssueObserve(
+  input: SemanticIssueObserveInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  let effectiveContract: EffectiveArtifactContract | undefined;
+  try {
+    effectiveContract = await compileSemanticArtifactContract("issue", input, adapter);
+    const envelope = await observeIssueFromGitHub(adapter, effectiveContract, input.number);
+    if (!envelope.result.valid || envelope.result.projection === undefined) {
+      return result(
+        {
+          ...failure("observation", envelope.result.violations),
+          effectiveContract,
+          ...(envelope.observationDiagnostics.length === 0
+            ? {}
+            : { observationDiagnostics: [...envelope.observationDiagnostics] }),
+        },
+        "Semantic Issue observation failed; see diagnostics.",
+      );
+    }
+    return result(
+      {
+        ok: true,
+        valid: true,
+        effectiveContract,
+        observed: envelope.result.projection,
+        ...(envelope.observationDiagnostics.length === 0
+          ? {}
+          : { observationDiagnostics: [...envelope.observationDiagnostics] }),
+      },
+      "Observed the semantic Issue through the bounded GitHub adapter.",
+    );
+  } catch (error: unknown) {
+    return result(
+      { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
+      "Semantic Issue observation failed; see diagnostics.",
+    );
+  }
+}
+
+async function handleIssueDrift(
+  input: SemanticIssueDriftInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  let effectiveContract: EffectiveArtifactContract | undefined;
+  try {
+    effectiveContract = await compileSemanticArtifactContract("issue", input, adapter);
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input.input);
+    if (!materialization.valid || materialization.artifact === undefined)
+      return result(
+        { ...failure("materialization", materialization.violations), effectiveContract },
+        "Semantic Issue materialization failed; see diagnostics.",
+      );
+    const planned = tryPlanSemanticIssue({
+      artifact: materialization.artifact,
+      capabilities: effectiveContract.capabilities,
+    });
+    if (!planned.valid || planned.plan === undefined)
+      return result(
+        { ...failure("projection", planned.violations), effectiveContract, artifact: materialization.artifact },
+        "Semantic Issue projection failed; see diagnostics.",
+      );
+    const envelope = await observeIssueFromGitHub(adapter, effectiveContract, input.number);
+    if (!envelope.result.valid || envelope.result.projection === undefined)
+      return result(
+        {
+          ...failure("observation", envelope.result.violations),
+          effectiveContract,
+          desired: planned.plan.desired,
+          artifact: materialization.artifact,
+          ...(envelope.observationDiagnostics.length === 0
+            ? {}
+            : { observationDiagnostics: [...envelope.observationDiagnostics] }),
+        },
+        "Semantic Issue observation failed; see diagnostics.",
+      );
+    const comparison = compareSemanticIssueProjection(planned.plan.desired, envelope.result.projection);
+    return result(
+      {
+        ok: comparison.valid,
+        valid: comparison.valid,
+        phase: "comparison",
+        effectiveContract,
+        artifact: materialization.artifact,
+        desired: planned.plan.desired,
+        observed: envelope.result.projection,
+        comparison,
+        drift: [...comparison.drift],
+        ...(envelope.observationDiagnostics.length === 0
+          ? {}
+          : { observationDiagnostics: [...envelope.observationDiagnostics] }),
+      },
+      comparison.valid ? "Semantic Issue has no observed drift." : "Semantic Issue drift detected; see comparison.",
+    );
+  } catch (error: unknown) {
+    return result(
+      { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
+      "Semantic Issue drift observation failed; see diagnostics.",
+    );
+  }
+}
+
+async function handlePullRequestObserve(
+  input: SemanticPullRequestObserveInput,
+  dependencies: NativeSemanticPullRequestDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  let effectiveContract: EffectiveArtifactContract | undefined;
+  try {
+    effectiveContract = await compileSemanticArtifactContract("pull_request", input, adapter);
+    const envelope = await observePullRequestFromGitHub(adapter, input.number);
+    if (!envelope.result.valid || envelope.result.projection === undefined)
+      return result(
+        { ...failure("observation", envelope.result.violations), effectiveContract },
+        "Semantic PR observation failed; see diagnostics.",
+      );
+    return result(
+      { ok: true, valid: true, effectiveContract, observed: envelope.result.projection },
+      "Observed the semantic PR through the bounded GitHub adapter.",
+    );
+  } catch (error: unknown) {
+    return result(
+      { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
+      "Semantic PR observation failed; see diagnostics.",
+    );
+  }
+}
+
+async function handlePullRequestDrift(
+  input: SemanticPullRequestDriftInput,
+  dependencies: NativeSemanticPullRequestDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  let effectiveContract: EffectiveArtifactContract | undefined;
+  try {
+    effectiveContract = await compileSemanticArtifactContract("pull_request", input, adapter);
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input.input);
+    if (!materialization.valid || materialization.artifact === undefined)
+      return result(
+        { ...failure("materialization", materialization.violations), effectiveContract },
+        "Semantic PR materialization failed; see diagnostics.",
+      );
+    const planned = tryPlanSemanticPullRequest({
+      artifact: materialization.artifact,
+      capabilities: effectiveContract.capabilities,
+    });
+    if (!planned.valid || planned.plan === undefined)
+      return result(
+        { ...failure("projection", planned.violations), effectiveContract, artifact: materialization.artifact },
+        "Semantic PR projection failed; see diagnostics.",
+      );
+    const envelope = await observePullRequestFromGitHub(adapter, input.number);
+    if (!envelope.result.valid || envelope.result.projection === undefined)
+      return result(
+        {
+          ...failure("observation", envelope.result.violations),
+          effectiveContract,
+          desired: planned.plan.desired,
+          artifact: materialization.artifact,
+        },
+        "Semantic PR observation failed; see diagnostics.",
+      );
+    const comparison = compareSemanticPullRequestProjection(planned.plan.desired, envelope.result.projection);
+    return result(
+      {
+        ok: comparison.valid,
+        valid: comparison.valid,
+        phase: "comparison",
+        effectiveContract,
+        artifact: materialization.artifact,
+        desired: planned.plan.desired,
+        observed: envelope.result.projection,
+        comparison,
+        drift: [...comparison.drift],
+      },
+      comparison.valid ? "Semantic PR has no observed drift." : "Semantic PR drift detected; see comparison.",
+    );
+  } catch (error: unknown) {
+    return result(
+      { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
+      "Semantic PR drift observation failed; see diagnostics.",
+    );
+  }
+}
+
+async function handleBranchObserve(
+  input: SemanticBranchObserveInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  let effectiveContract: EffectiveArtifactContract | undefined;
+  try {
+    effectiveContract = await compileSemanticArtifactContract("branch", input, adapter);
+    const branch = await adapter.findBranch(input.name);
+    if (branch === undefined)
+      return result(
+        {
+          ...failure("observation", new Error(`Branch "${input.name}" was not found.`)),
+          effectiveContract,
+        },
+        "Semantic Branch observation failed; see diagnostics.",
+      );
+    const observed = tryObserveSemanticBranch({
+      ref: { ref: branch.ref, object: { type: "commit", sha: branch.sha } },
+      source: input.source,
+      generation: effectiveContract.generation,
+    });
+    if (!observed.valid || observed.projection === undefined)
+      return result(
+        { ...failure("observation", observed.violations), effectiveContract },
+        "Semantic Branch observation failed; see diagnostics.",
+      );
+    return result(
+      { ok: true, valid: true, effectiveContract, observed: observed.projection },
+      "Observed the semantic Branch through the bounded GitHub adapter.",
+    );
+  } catch (error: unknown) {
+    return result(
+      { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
+      "Semantic Branch observation failed; see diagnostics.",
+    );
+  }
+}
+
+async function handleBranchDrift(
+  input: SemanticBranchDriftInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  let effectiveContract: EffectiveArtifactContract | undefined;
+  try {
+    effectiveContract = await compileSemanticArtifactContract("branch", input, adapter);
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input.input);
+    if (!materialization.valid || materialization.artifact === undefined)
+      return result(
+        { ...failure("materialization", materialization.violations), effectiveContract },
+        "Semantic Branch materialization failed; see diagnostics.",
+      );
+    const planned = tryPlanSemanticBranch({ artifact: materialization.artifact });
+    if (!planned.valid || planned.plan === undefined)
+      return result(
+        { ...failure("projection", planned.violations), effectiveContract, artifact: materialization.artifact },
+        "Semantic Branch projection failed; see diagnostics.",
+      );
+    const branch = await adapter.findBranch(planned.plan.desired.name);
+    if (branch === undefined)
+      return result(
+        {
+          ...failure("observation", new Error(`Branch "${planned.plan.desired.name}" was not found.`)),
+          effectiveContract,
+          artifact: materialization.artifact,
+          desired: planned.plan.desired,
+        },
+        "Semantic Branch observation failed; see diagnostics.",
+      );
+    const observed = tryObserveSemanticBranch({
+      ref: { ref: branch.ref, object: { type: "commit", sha: branch.sha } },
+      source: planned.plan.desired.source,
+      generation: effectiveContract.generation,
+    });
+    if (!observed.valid || observed.projection === undefined)
+      return result(
+        {
+          ...failure("observation", observed.violations),
+          effectiveContract,
+          artifact: materialization.artifact,
+          desired: planned.plan.desired,
+        },
+        "Semantic Branch observation failed; see diagnostics.",
+      );
+    const comparison = compareSemanticBranchProjection(planned.plan.desired, observed.projection);
+    return result(
+      {
+        ok: comparison.valid,
+        valid: comparison.valid,
+        phase: "comparison",
+        effectiveContract,
+        artifact: materialization.artifact,
+        desired: planned.plan.desired,
+        observed: observed.projection,
+        comparison,
+        drift: [...comparison.drift],
+      },
+      comparison.valid ? "Semantic Branch has no observed drift." : "Semantic Branch drift detected; see comparison.",
+    );
+  } catch (error: unknown) {
+    return result(
+      { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
+      "Semantic Branch drift observation failed; see diagnostics.",
+    );
+  }
 }
 
 async function handleContract(
@@ -453,7 +895,31 @@ export function registerSemanticPullRequestTools(
     },
     async (input: SemanticPullRequestPlanInput) => handlePlan(input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan]);
+  const observe = server.registerTool(
+    "inari_pr_observe",
+    {
+      title: "Observe semantic PR",
+      description:
+        "Observe one GitHub pull request through the bounded adapter and normalize it with the Core semantic observer.",
+      inputSchema: semanticPullRequestObserveInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticPullRequestObserveInput) => handlePullRequestObserve(input, dependencies),
+  );
+  const drift = server.registerTool(
+    "inari_pr_drift",
+    {
+      title: "Compare semantic PR drift",
+      description:
+        "Materialize and project semantic PR input, observe the bounded GitHub state, and compare both through Inari Core without mutation.",
+      inputSchema: semanticPullRequestDriftInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticPullRequestDriftInput) => handlePullRequestDrift(input, dependencies),
+  );
+  return Object.freeze([contract, materialize, plan, observe, drift]);
 }
 
 type SemanticArtifactKind = "issue" | "branch";
@@ -603,7 +1069,31 @@ export function registerSemanticIssueTools(
     },
     async (input: SemanticIssuePlanInput) => handleArtifactPlan("issue", input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan]);
+  const observe = server.registerTool(
+    "inari_issue_observe",
+    {
+      title: "Observe semantic Issue",
+      description:
+        "Observe one GitHub Issue through the bounded adapter and normalize it with the Core semantic observer.",
+      inputSchema: semanticIssueObserveInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticIssueObserveInput) => handleIssueObserve(input, dependencies),
+  );
+  const drift = server.registerTool(
+    "inari_issue_drift",
+    {
+      title: "Compare semantic Issue drift",
+      description:
+        "Materialize and project semantic Issue input, observe the bounded GitHub state, and compare both through Inari Core without mutation.",
+      inputSchema: semanticIssueDriftInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticIssueDriftInput) => handleIssueDrift(input, dependencies),
+  );
+  return Object.freeze([contract, materialize, plan, observe, drift]);
 }
 
 /** Register the typed Branch semantic artifact catalog without adding policy. */
@@ -644,7 +1134,31 @@ export function registerSemanticBranchTools(
     },
     async (input: SemanticBranchPlanInput) => handleArtifactPlan("branch", input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan]);
+  const observe = server.registerTool(
+    "inari_branch_observe",
+    {
+      title: "Observe semantic Branch",
+      description:
+        "Observe one GitHub branch ref through the bounded adapter and normalize it with the Core semantic observer.",
+      inputSchema: semanticBranchObserveInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticBranchObserveInput) => handleBranchObserve(input, dependencies),
+  );
+  const drift = server.registerTool(
+    "inari_branch_drift",
+    {
+      title: "Compare semantic Branch drift",
+      description:
+        "Materialize and project semantic Branch input, observe the bounded GitHub ref, and compare both through Inari Core without mutation.",
+      inputSchema: semanticBranchDriftInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticBranchDriftInput) => handleBranchDrift(input, dependencies),
+  );
+  return Object.freeze([contract, materialize, plan, observe, drift]);
 }
 
 /** Publicly expose the protocol annotations without allowing mutation. */

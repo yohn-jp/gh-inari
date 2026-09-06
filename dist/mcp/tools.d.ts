@@ -12,7 +12,7 @@ import { type EffectiveArtifactContract } from "../contract/effective-artifact-c
 import { GitHubAdapter, type GitHubAdapterOptions } from "../github/index.js";
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export declare const INARI_MCP_TOOL_CONTRACT_VERSION: "1";
-export declare const INARI_MCP_TOOL_NAMES: readonly ["inari_issue_contract", "inari_issue_materialize", "inari_issue_plan", "inari_branch_contract", "inari_branch_materialize", "inari_branch_plan", "inari_pr_contract", "inari_pr_materialize", "inari_pr_plan"];
+export declare const INARI_MCP_TOOL_NAMES: readonly ["inari_issue_contract", "inari_issue_materialize", "inari_issue_plan", "inari_issue_observe", "inari_issue_drift", "inari_branch_contract", "inari_branch_materialize", "inari_branch_plan", "inari_branch_observe", "inari_branch_drift", "inari_pr_contract", "inari_pr_materialize", "inari_pr_plan", "inari_pr_observe", "inari_pr_drift"];
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
 /** Input schema shared by contract discovery and the two semantic operations. */
 export declare const semanticPullRequestContractInputSchema: z.ZodObject<{
@@ -69,6 +69,46 @@ export declare const semanticBranchPlanInputSchema: z.ZodObject<{
     template: z.ZodOptional<z.ZodString>;
     capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strict>;
+/** Input schemas for bounded provider observation and Core drift comparison. */
+export declare const semanticIssueObserveInputSchema: z.ZodObject<{
+    number: z.ZodNumber;
+    repository: z.ZodOptional<z.ZodString>;
+    template: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
+export declare const semanticIssueDriftInputSchema: z.ZodObject<{
+    number: z.ZodNumber;
+    input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+    repository: z.ZodOptional<z.ZodString>;
+    template: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
+export declare const semanticBranchObserveInputSchema: z.ZodObject<{
+    name: z.ZodString;
+    source: z.ZodString;
+    repository: z.ZodOptional<z.ZodString>;
+    template: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
+export declare const semanticBranchDriftInputSchema: z.ZodObject<{
+    input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+    repository: z.ZodOptional<z.ZodString>;
+    template: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
+export declare const semanticPullRequestObserveInputSchema: z.ZodObject<{
+    number: z.ZodNumber;
+    repository: z.ZodOptional<z.ZodString>;
+    template: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
+export declare const semanticPullRequestDriftInputSchema: z.ZodObject<{
+    number: z.ZodNumber;
+    input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+    repository: z.ZodOptional<z.ZodString>;
+    template: z.ZodOptional<z.ZodString>;
+    capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strict>;
 export type SemanticPullRequestContractInput = z.infer<typeof semanticPullRequestContractInputSchema>;
 export type SemanticPullRequestMaterializeInput = z.infer<typeof semanticPullRequestMaterializeInputSchema>;
 export type SemanticPullRequestPlanInput = z.infer<typeof semanticPullRequestPlanInputSchema>;
@@ -78,6 +118,12 @@ export type SemanticIssuePlanInput = z.infer<typeof semanticIssuePlanInputSchema
 export type SemanticBranchContractInput = z.infer<typeof semanticBranchContractInputSchema>;
 export type SemanticBranchMaterializeInput = z.infer<typeof semanticBranchMaterializeInputSchema>;
 export type SemanticBranchPlanInput = z.infer<typeof semanticBranchPlanInputSchema>;
+export type SemanticIssueObserveInput = z.infer<typeof semanticIssueObserveInputSchema>;
+export type SemanticIssueDriftInput = z.infer<typeof semanticIssueDriftInputSchema>;
+export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInputSchema>;
+export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
+export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
+export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
     /** Local repository working directory used for GitHubAdapter resolution. */
@@ -104,6 +150,8 @@ export declare const semanticPullRequestOutputSchema: z.ZodObject<{
         contract: "contract";
         projection: "projection";
         materialization: "materialization";
+        observation: "observation";
+        comparison: "comparison";
     }>>;
     version: z.ZodOptional<z.ZodString>;
     artifactContractVersion: z.ZodOptional<z.ZodString>;
@@ -120,6 +168,11 @@ export declare const semanticPullRequestOutputSchema: z.ZodObject<{
     capabilities: z.ZodOptional<z.ZodUnknown>;
     artifact: z.ZodOptional<z.ZodUnknown>;
     plan: z.ZodOptional<z.ZodUnknown>;
+    desired: z.ZodOptional<z.ZodUnknown>;
+    observed: z.ZodOptional<z.ZodUnknown>;
+    comparison: z.ZodOptional<z.ZodUnknown>;
+    drift: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
+    observationDiagnostics: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
     provenance: z.ZodOptional<z.ZodUnknown>;
     generation: z.ZodOptional<z.ZodUnknown>;
     diagnostics: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
@@ -137,6 +190,8 @@ export declare const semanticIssueOutputSchema: z.ZodObject<{
         contract: "contract";
         projection: "projection";
         materialization: "materialization";
+        observation: "observation";
+        comparison: "comparison";
     }>>;
     version: z.ZodOptional<z.ZodString>;
     artifactContractVersion: z.ZodOptional<z.ZodString>;
@@ -153,6 +208,11 @@ export declare const semanticIssueOutputSchema: z.ZodObject<{
     capabilities: z.ZodOptional<z.ZodUnknown>;
     artifact: z.ZodOptional<z.ZodUnknown>;
     plan: z.ZodOptional<z.ZodUnknown>;
+    desired: z.ZodOptional<z.ZodUnknown>;
+    observed: z.ZodOptional<z.ZodUnknown>;
+    comparison: z.ZodOptional<z.ZodUnknown>;
+    drift: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
+    observationDiagnostics: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
     provenance: z.ZodOptional<z.ZodUnknown>;
     generation: z.ZodOptional<z.ZodUnknown>;
     diagnostics: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
@@ -167,6 +227,8 @@ export declare const semanticBranchOutputSchema: z.ZodObject<{
         contract: "contract";
         projection: "projection";
         materialization: "materialization";
+        observation: "observation";
+        comparison: "comparison";
     }>>;
     version: z.ZodOptional<z.ZodString>;
     artifactContractVersion: z.ZodOptional<z.ZodString>;
@@ -183,6 +245,11 @@ export declare const semanticBranchOutputSchema: z.ZodObject<{
     capabilities: z.ZodOptional<z.ZodUnknown>;
     artifact: z.ZodOptional<z.ZodUnknown>;
     plan: z.ZodOptional<z.ZodUnknown>;
+    desired: z.ZodOptional<z.ZodUnknown>;
+    observed: z.ZodOptional<z.ZodUnknown>;
+    comparison: z.ZodOptional<z.ZodUnknown>;
+    drift: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
+    observationDiagnostics: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
     provenance: z.ZodOptional<z.ZodUnknown>;
     generation: z.ZodOptional<z.ZodUnknown>;
     diagnostics: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
