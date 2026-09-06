@@ -5,7 +5,7 @@
  * option mechanics only; inverse option scopes are derived from commands so
  * the command surface has one authority.
  */
-export const COMMAND_CONTRACT_VERSION = "1.2.0";
+export const COMMAND_CONTRACT_VERSION = "1.3.0";
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}`;
 export const AGENT_INVOCATION_CONTRACT = {
     canonical: "inari",
@@ -115,11 +115,12 @@ export const INARI_COMMANDS = [
     command("issue.semantic.validate", "issue", "semantic-validate", ["issue", "semantic", "validate"], "Validate and materialize semantic Issue input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("issue.semantic.materialize", "issue", "semantic-materialize", ["issue", "semantic", "materialize"], "Materialize semantic Issue input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("issue.semantic.plan", "issue", "semantic-plan", ["issue", "semantic", "plan"], "Preview the deterministic Core Issue Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("issue.semantic.check", "issue", "semantic-check", ["issue", "semantic", "check"], "Compare a desired semantic Issue projection with bounded GitHub observation.", ["help", "json", "template", "repository", "from", "capability"], "<number>"),
     command("issue.render", "issue", "render", ["issue", "render"], "Render validated Issue input into canonical Markdown.", [...LOCAL_ARTIFACT_INPUT_OPTIONS]),
     command("issue.create", "issue", "create", ["issue", "create"], "Validate, render, and create a governed Issue.", ISSUE_CREATE_OPTIONS),
     command("issue.explain", "issue", "explain", ["issue", "explain"], "Explain the governance state of an existing Issue.", [...EXISTING_OPTIONS], "<number>"),
     command("issue.get", "issue", "get", ["issue", "get"], "Project an existing Issue as canonical semantic JSON.", [...EXISTING_OPTIONS], "<number>"),
-    command("issue.check", "issue", "check", ["issue", "check"], "Check whether an existing Issue is canonical and normalizable.", [...EXISTING_OPTIONS], "<number>"),
+    command("issue.check", "issue", "check", ["issue", "check"], "Check whether an existing Issue is canonical and normalizable.", [...EXISTING_OPTIONS, "from", "capability"], "<number>"),
     command("issue.edit", "issue", "edit", ["issue", "edit"], "Apply a semantic or metadata patch to an existing Issue; omitted fields and metadata are preserved.", [...REMEDIATION_OPTIONS, "title"], "<number>"),
     command("issue.normalize", "issue", "normalize", ["issue", "normalize"], "Repair an existing Issue's native projection.", ["help", "json", "repository", "template", "policy", "dryRun"], "<number>"),
     command("issue.sync", "issue", "sync", ["issue", "sync"], "Reconcile an existing Issue to a desired semantic state, preserving fields and metadata omitted from the input.", [...REMEDIATION_OPTIONS], "<number>"),
@@ -134,16 +135,19 @@ export const INARI_COMMANDS = [
     command("pr.semantic.materialize", "pr", "semantic-materialize", ["pr", "semantic", "materialize"], "Materialize semantic PR input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.semantic.plan", "pr", "semantic-plan", ["pr", "semantic", "plan"], "Preview the deterministic Core PR Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.semantic.execute", "pr", "semantic-execute", ["pr", "semantic", "execute"], "Execute a versioned Core PR Mutation Plan through the bounded local Executor.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.semantic.check", "pr", "semantic-check", ["pr", "semantic", "check"], "Compare a desired semantic PR projection with bounded GitHub observation.", ["help", "json", "template", "repository", "from", "capability"], "<number>"),
     command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [
         ...LOCAL_ARTIFACT_INPUT_OPTIONS,
     ]),
     command("pr.create", "pr", "create", ["pr", "create"], "Validate, render, and create a governed PR.", PR_CREATE_OPTIONS),
     command("pr.explain", "pr", "explain", ["pr", "explain"], "Explain the governance state of an existing PR.", [...EXISTING_OPTIONS], "<number>"),
     command("pr.get", "pr", "get", ["pr", "get"], "Project an existing PR as canonical semantic JSON.", [...EXISTING_OPTIONS], "<number>"),
-    command("pr.check", "pr", "check", ["pr", "check"], "Check whether an existing PR is canonical and normalizable.", [...EXISTING_OPTIONS], "<number>"),
+    command("pr.check", "pr", "check", ["pr", "check"], "Check whether an existing PR is canonical and normalizable.", [...EXISTING_OPTIONS, "from", "capability"], "<number>"),
     command("pr.edit", "pr", "edit", ["pr", "edit"], "Apply a semantic or metadata patch to an existing PR; omitted fields and metadata are preserved. --draft is unsupported for edit and is rejected.", [...REMEDIATION_OPTIONS, "title", "base", "head", "maintainerCanModify"], "<number>"),
     command("pr.normalize", "pr", "normalize", ["pr", "normalize"], "Repair an existing PR's native projection.", ["help", "json", "repository", "template", "policy", "dryRun"], "<number>"),
     command("pr.sync", "pr", "sync", ["pr", "sync"], "Reconcile an existing PR to a desired semantic state.", [...REMEDIATION_OPTIONS], "<number>"),
+    command("branch.check", "branch", "check", ["branch", "check"], "Compare a desired semantic Branch projection with bounded GitHub observation.", ["help", "json", "template", "repository", "from"], "<name>"),
+    command("branch.semantic.check", "branch", "semantic-check", ["branch", "semantic", "check"], "Compare a desired semantic Branch projection with bounded GitHub observation.", ["help", "json", "template", "repository", "from"], "<name>"),
     command("template.list", "template", "list", ["template", "list"], "List discovered native and semantic templates.", [
         "help",
         "json",
@@ -328,7 +332,7 @@ export function projectCommandHelp(positionals) {
         return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
     }
     const domain = positionals[0];
-    if (domain === "issue" || domain === "pr" || domain === "change" || domain === "mcp")
+    if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp")
         return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
     if (domain === "template")
         return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };
@@ -346,6 +350,10 @@ export function commandUsage(entry) {
         const optionDefinition = getOption(id);
         const required = ((entry.id === "issue.create" || entry.id === "pr.create") &&
             (id === "title" || (entry.id === "pr.create" && (id === "head" || id === "base")))) ||
+            ((entry.id === "issue.semantic.check" ||
+                entry.id === "pr.semantic.check" ||
+                entry.id === "branch.semantic.check") &&
+                id === "from") ||
             (entry.id === "template.import" && id === "from");
         const syntax = optionSyntax(optionDefinition);
         return required ? syntax : `[${syntax}]`;

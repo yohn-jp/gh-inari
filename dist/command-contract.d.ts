@@ -5,8 +5,8 @@
  * option mechanics only; inverse option scopes are derived from commands so
  * the command surface has one authority.
  */
-export declare const COMMAND_CONTRACT_VERSION: "1.2.0";
-export declare const COMMAND_CONTRACT_ID: "urn:inari:command-contract:1.2.0";
+export declare const COMMAND_CONTRACT_VERSION: "1.3.0";
+export declare const COMMAND_CONTRACT_ID: "urn:inari:command-contract:1.3.0";
 export declare const AGENT_INVOCATION_CONTRACT: {
     readonly canonical: "inari";
     readonly compatibility: "gh inari";
@@ -17,10 +17,10 @@ export declare const AGENT_INVOCATION_CONTRACT: {
 };
 export declare const RUNTIME_CAPABILITIES: readonly ["canonical-invocation", "machine-readable-version", "capability-diagnostics", "extension-bootstrap"];
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
-export type CommandDomain = "root" | "issue" | "pr" | "template" | "change" | "mcp" | "skill";
+export type CommandDomain = "root" | "issue" | "pr" | "branch" | "template" | "change" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
-export type CommandId = "root.help" | "root.version" | "root.diagnose" | "root.doctor" | "issue.schema" | "issue.contract" | "issue.validate" | "issue.materialize" | "issue.plan" | "issue.semantic.schema" | "issue.semantic.validate" | "issue.semantic.materialize" | "issue.semantic.plan" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync" | "pr.schema" | "pr.contract" | "pr.validate" | "pr.materialize" | "pr.plan" | "pr.execute" | "pr.semantic.schema" | "pr.semantic.validate" | "pr.semantic.materialize" | "pr.semantic.plan" | "pr.semantic.execute" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync" | "template.list" | "template.sync" | "template.import" | "change.issue" | "change.show" | "change.ready" | "change.abort" | "mcp.serve" | "skill.index" | "skill.scenario";
+export type CommandId = "root.help" | "root.version" | "root.diagnose" | "root.doctor" | "issue.schema" | "issue.contract" | "issue.validate" | "issue.materialize" | "issue.plan" | "issue.semantic.schema" | "issue.semantic.validate" | "issue.semantic.materialize" | "issue.semantic.plan" | "issue.semantic.check" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync" | "pr.schema" | "pr.contract" | "pr.validate" | "pr.materialize" | "pr.plan" | "pr.execute" | "pr.semantic.schema" | "pr.semantic.validate" | "pr.semantic.materialize" | "pr.semantic.plan" | "pr.semantic.execute" | "pr.semantic.check" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync" | "branch.check" | "branch.semantic.check" | "template.list" | "template.sync" | "template.import" | "change.issue" | "change.show" | "change.ready" | "change.abort" | "mcp.serve" | "skill.index" | "skill.scenario";
 export type OptionId = "help" | "json" | "version" | "diagnose" | "doctor" | "from" | "field" | "template" | "policy" | "repository" | "title" | "head" | "base" | "to" | "requireCapability" | "minimumVersion" | "compact" | "check" | "dryRun" | "draft" | "maintainerCanModify" | "rawBody" | "capability";
 export interface CommandOptionDefinition {
     readonly id: OptionId;
@@ -96,7 +96,7 @@ export declare function commandExample(id: CommandId): string;
 export declare function commandUsageInvocation(id: CommandId): string;
 export declare function commandRecoveryInvocation(id: "issue.create" | "pr.create"): string;
 export declare function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string;
-export declare function helpInvocation(domain: "issue" | "pr" | "template" | "change" | "mcp" | "skill"): string;
+export declare function helpInvocation(domain: "issue" | "pr" | "branch" | "template" | "change" | "mcp" | "skill"): string;
 export interface CommandDiscoveryOption {
     readonly id: OptionId;
     readonly key: string;

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ArtifactInputError, ArtifactPreparationError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
-import { compileRepositoryEffectiveIssueContract, compileRepositoryEffectivePullRequestContract, } from "./artifact-contract-governance.js";
+import { compileRepositoryEffectiveIssueContract, compileRepositoryEffectiveBranchContract, compileRepositoryEffectivePullRequestContract, } from "./artifact-contract-governance.js";
 import { effectiveFieldConstraints, projectContract, SemanticValidationError, } from "./contract/index.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
@@ -16,8 +16,13 @@ import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactS
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
-import { tryPlanSemanticPullRequest } from "./semantic-pr-projection.js";
-import { tryPlanSemanticIssue } from "./semantic-issue-projection.js";
+import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
+import { GITHUB_ISSUE_PROJECTION_CAPABILITIES, tryPlanSemanticIssue, tryProjectSemanticIssue, } from "./semantic-issue-projection.js";
+import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
+import { compareSemanticIssueProjection, tryObserveSemanticIssue, } from "./semantic-issue-observation.js";
+import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "./semantic-pr-observation.js";
+import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
+import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import { SemanticPullRequestExecutor, SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION, } from "./semantic-pr-executor.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -112,6 +117,9 @@ export async function runCli(argv, dependencies = {}) {
         }
         if (domain === "issue" || domain === "pr") {
             return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
+        }
+        if (domain === "branch") {
+            return await runSemanticBranchObservationCommand(command, rest, parsed, root, dependencies);
         }
         if (domain === "skill") {
             return runSkillCommand(command, json);
@@ -652,6 +660,12 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             return runSemanticPullRequestCommand(semantic.operation, semantic.rest, parsed, root, dependencies, json);
         }
     }
+    if (command === "check" &&
+        typeof parsed.options.from === "string" &&
+        rest.length === 1 &&
+        isPositiveInteger(rest[0])) {
+        return runSemanticObservationCheckCommand(domain, Number(rest[0]), parsed, root, dependencies);
+    }
     if (parsed.capabilities.length > 0) {
         throw new CliError("INVALID_OPTION", "Option --capability is only supported by semantic artifact commands.", "--capability");
     }
@@ -791,10 +805,14 @@ function semanticIssueOperation(command, rest) {
         return { operation: "materialize", rest: rest.slice(1) };
     if (nested === "plan")
         return { operation: "plan", rest: rest.slice(1) };
+    if (nested === "check")
+        return { operation: "check", rest: rest.slice(1) };
     throw new CliError("UNKNOWN_COMMAND", `Unknown Issue semantic command "${nested ?? ""}".`);
 }
 function rejectSemanticIssueOptions(operation, parsed) {
-    const allowed = new Set(operation === "contract" ? ["json", "template", "repository"] : ["json", "template", "repository", "from"]);
+    const allowed = new Set(operation === "contract"
+        ? ["json", "template", "repository"]
+        : ["json", "template", "repository", "from", "capability"]);
     const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
     if (unsupported !== undefined) {
         const option = getOption(unsupported);
@@ -808,6 +826,11 @@ async function runSemanticIssueCommand(operation, rest, parsed, root, dependenci
     rejectSemanticIssueOptions(operation, parsed);
     if (rest.length > 1) {
         throw new CliError("UNKNOWN_COMMAND", `Unexpected Issue semantic argument "${rest[1] ?? ""}".`);
+    }
+    if (operation === "check") {
+        if (rest.length !== 1 || !isPositiveInteger(rest[0]))
+            throw invalidArtifactNumberError("issue", rest[0]);
+        return runSemanticObservationCheckCommand("issue", Number(rest[0]), parsed, root, dependencies);
     }
     const selector = templateSelector(parsed, rest[0]);
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
@@ -889,10 +912,14 @@ function semanticPullRequestOperation(command, rest) {
         return { operation: "plan", rest: rest.slice(1) };
     if (nested === "execute")
         return { operation: "execute", rest: rest.slice(1) };
+    if (nested === "check")
+        return { operation: "check", rest: rest.slice(1) };
     throw new CliError("UNKNOWN_COMMAND", `Unknown PR semantic command "${nested ?? ""}".`);
 }
 function rejectSemanticPullRequestOptions(operation, parsed) {
-    const allowed = new Set(operation === "contract" ? ["json", "template", "repository"] : ["json", "template", "repository", "from"]);
+    const allowed = new Set(operation === "contract"
+        ? ["json", "template", "repository"]
+        : ["json", "template", "repository", "from", "capability"]);
     const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
     if (unsupported !== undefined) {
         const option = getOption(unsupported);
@@ -918,6 +945,11 @@ async function runSemanticPullRequestCommand(operation, rest, parsed, root, depe
     rejectSemanticPullRequestOptions(operation, parsed);
     if (rest.length > 1) {
         throw new CliError("UNKNOWN_COMMAND", `Unexpected PR semantic argument "${rest[1] ?? ""}".`);
+    }
+    if (operation === "check") {
+        if (rest.length !== 1 || !isPositiveInteger(rest[0]))
+            throw invalidArtifactNumberError("pr", rest[0]);
+        return runSemanticObservationCheckCommand("pr", Number(rest[0]), parsed, root, dependencies);
     }
     const selector = templateSelector(parsed, rest[0]);
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
@@ -1013,6 +1045,176 @@ async function runSemanticPullRequestCommand(operation, rest, parsed, root, depe
         mutation: false,
     }));
     return 0;
+}
+function semanticObservationRepository(context) {
+    return {
+        host: context.hostname,
+        repositoryId: context.repositoryId,
+        repository: context.nameWithOwner,
+    };
+}
+function projectSemanticObservationFailure(phase, diagnostics, effectiveContract, artifact, desired) {
+    return {
+        ok: false,
+        valid: false,
+        phase,
+        effectiveContract,
+        ...(artifact === undefined ? {} : { artifact }),
+        ...(desired === undefined ? {} : { desired }),
+        diagnostics,
+        violations: diagnostics,
+    };
+}
+async function runSemanticObservationCheckCommand(domain, number, parsed, root, dependencies) {
+    const input = await readJsonValue(parsed.options.from);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    const selector = templateSelector(parsed, undefined);
+    const effectiveContract = domain === "issue"
+        ? await compileRepositoryEffectiveIssueContract(adapter, selector, { capabilities: parsed.capabilities })
+        : await compileRepositoryEffectivePullRequestContract(adapter, selector, {
+            capabilities: parsed.capabilities,
+        });
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input);
+    if (!materialization.valid || materialization.artifact === undefined) {
+        console.log(JSON.stringify(projectSemanticObservationFailure("materialization", materialization.violations, effectiveContract)));
+        return EXIT_VALIDATION;
+    }
+    const artifact = materialization.artifact;
+    const desiredResult = domain === "issue"
+        ? tryProjectSemanticIssue({ artifact, capabilities: effectiveContract.capabilities })
+        : tryProjectSemanticPullRequest({ artifact, capabilities: effectiveContract.capabilities });
+    if (!desiredResult.valid || desiredResult.projection === undefined) {
+        console.log(JSON.stringify(projectSemanticObservationFailure("projection", desiredResult.violations, effectiveContract, artifact)));
+        return EXIT_VALIDATION;
+    }
+    const context = await adapter.getRepositoryContext();
+    const repository = semanticObservationRepository(context);
+    let observedResult;
+    const observationDiagnostics = [];
+    if (domain === "issue") {
+        const issue = await adapter.readIssue(number);
+        const relationAdapter = new GitHubIssueRelationObservationAdapter(adapter, context, {
+            parent: effectiveContract.capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation),
+            blockedBy: effectiveContract.capabilities.some((capability) => capability === GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeBlockedByRelation ||
+                capability === GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation),
+        });
+        const relationEvidence = {};
+        if (effectiveContract.capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation)) {
+            const parent = await relationAdapter.observeParent(number);
+            observationDiagnostics.push(...parent.diagnostics);
+            if (parent.kind === "present" && parent.reference !== undefined)
+                relationEvidence.parent = { native: parent.reference };
+            else if (parent.kind === "empty")
+                relationEvidence.parent = { native: [] };
+        }
+        if (effectiveContract.capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeBlockedByRelation) ||
+            effectiveContract.capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation)) {
+            const dependsOn = await relationAdapter.observeBlockedBy(number);
+            observationDiagnostics.push(...dependsOn.diagnostics);
+            if (dependsOn.kind === "present" || dependsOn.kind === "empty")
+                relationEvidence.dependsOn = { native: dependsOn.references };
+        }
+        observedResult = tryObserveSemanticIssue({ issue, repository, relations: relationEvidence });
+    }
+    else {
+        const pullRequest = await adapter.readPullRequest(number);
+        observedResult = tryObserveSemanticPullRequest({ pullRequest, repository });
+    }
+    if (!observedResult.valid || observedResult.projection === undefined) {
+        const output = projectSemanticObservationFailure("observation", observedResult.violations, effectiveContract, artifact, desiredResult.projection);
+        console.log(JSON.stringify({
+            ...output,
+            number,
+            operation: `${domain}.semantic.check`,
+            ...(observationDiagnostics.length === 0 ? {} : { observationDiagnostics }),
+        }));
+        return EXIT_VALIDATION;
+    }
+    const comparison = domain === "issue"
+        ? compareSemanticIssueProjection(desiredResult.projection, observedResult.projection)
+        : compareSemanticPullRequestProjection(desiredResult.projection, observedResult.projection);
+    console.log(JSON.stringify({
+        ok: comparison.valid,
+        valid: comparison.valid,
+        operation: `${domain}.semantic.check`,
+        kind: domain === "issue" ? "issue" : "pull_request",
+        number,
+        effectiveContract,
+        artifact,
+        desired: desiredResult.projection,
+        observed: observedResult.projection,
+        diagnostics: comparison.diagnostics,
+        drift: comparison.drift,
+        ...(observationDiagnostics.length === 0 ? {} : { observationDiagnostics }),
+    }));
+    return comparison.valid ? 0 : EXIT_VALIDATION;
+}
+async function runSemanticBranchObservationCommand(command, rest, parsed, root, dependencies) {
+    const branchCheck = command === "check" ? rest : command === "semantic" && rest[0] === "check" ? rest.slice(1) : undefined;
+    if (branchCheck === undefined) {
+        throw new CliError("UNKNOWN_COMMAND", `Unknown branch command "${command ?? ""}".`);
+    }
+    if (branchCheck.length !== 1)
+        throw new CliError("INVALID_BRANCH_NAME", "Branch name is required.", "$argv[2]");
+    const branchName = branchCheck[0];
+    const operation = command === "check" ? "branch.check" : "branch.semantic.check";
+    if (branchName.length === 0 || branchName.length > 512 || /[\u0000-\u001F\u007F]/u.test(branchName)) {
+        throw new CliError("INVALID_BRANCH_NAME", "Branch name is invalid.", "$argv[2]");
+    }
+    const unsupported = Object.keys(parsed.options).find((key) => !["json", "template", "repository", "from"].includes(key));
+    if (unsupported !== undefined) {
+        const option = getOption(unsupported);
+        throw new CliError("INVALID_OPTION", `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by semantic Branch check.`, "$argv");
+    }
+    if (parsed.capabilities.length > 0 || parsed.fields.length > 0) {
+        throw new CliError("INVALID_OPTION", "Semantic Branch check does not accept capability or field input.", "$argv");
+    }
+    const input = await readJsonValue(parsed.options.from);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    const effectiveContract = await compileRepositoryEffectiveBranchContract(adapter, templateSelector(parsed, undefined));
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input);
+    if (!materialization.valid || materialization.artifact === undefined) {
+        console.log(JSON.stringify(projectSemanticObservationFailure("materialization", materialization.violations, effectiveContract)));
+        return EXIT_VALIDATION;
+    }
+    const artifact = materialization.artifact;
+    const desiredResult = tryProjectSemanticBranch({ artifact });
+    if (!desiredResult.valid || desiredResult.projection === undefined) {
+        console.log(JSON.stringify(projectSemanticObservationFailure("projection", desiredResult.violations, effectiveContract, artifact)));
+        return EXIT_VALIDATION;
+    }
+    const branch = await adapter.findBranch(branchName);
+    const observedResult = branch === undefined
+        ? tryObserveSemanticBranch(undefined)
+        : tryObserveSemanticBranch({
+            ref: { ref: branch.ref, object: { type: "commit", sha: branch.sha } },
+            source: desiredResult.projection.source,
+            generation: effectiveContract.generation,
+        });
+    if (!observedResult.valid || observedResult.projection === undefined) {
+        console.log(JSON.stringify({
+            ...projectSemanticObservationFailure("observation", observedResult.violations, effectiveContract, artifact, desiredResult.projection),
+            operation,
+            kind: "branch",
+            branch: branchName,
+        }));
+        return EXIT_VALIDATION;
+    }
+    const comparison = compareSemanticBranchProjection(desiredResult.projection, observedResult.projection);
+    console.log(JSON.stringify({
+        ok: comparison.valid,
+        valid: comparison.valid,
+        operation,
+        kind: "branch",
+        branch: branchName,
+        effectiveContract,
+        artifact,
+        desired: desiredResult.projection,
+        observed: observedResult.projection,
+        diagnostics: comparison.diagnostics,
+        drift: comparison.drift,
+    }));
+    return comparison.valid ? 0 : EXIT_VALIDATION;
 }
 async function runExistingValidation(domain, number, parsed, root, dependencies, json) {
     rejectGovernedPolicyOverride(parsed.options.policy);
@@ -1645,7 +1847,12 @@ function isOwnedInvocation(argv) {
         return true;
     const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
     if (helpRequested &&
-        (first === "issue" || first === "pr" || first === "template" || first === "change" || first === "mcp") &&
+        (first === "issue" ||
+            first === "pr" ||
+            first === "branch" ||
+            first === "template" ||
+            first === "change" ||
+            first === "mcp") &&
         positionals.length === 1)
         return true;
     return getCommandForPositionals(positionals) !== undefined;
@@ -1700,6 +1907,7 @@ async function readStdin() {
 const DOMAIN_PASSTHROUGH_EXAMPLE = {
     issue: "issue list",
     pr: "pr checks",
+    branch: "branch list",
     template: "template view",
     change: "change list",
     mcp: "mcp serve",
@@ -1711,7 +1919,7 @@ function printHelpFor(positionals, helpValue) {
     if (helpValue === "full")
         return printFullHelp();
     const [domain, command] = positionals;
-    if (domain === "issue" || domain === "pr" || domain === "change" || domain === "mcp") {
+    if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp") {
         const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
         if (definition !== undefined && definition.domain === domain)
             return printLeafHelp(definition);
@@ -1737,6 +1945,7 @@ with the original argv and exit status.
 Domains:
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
+  branch     Semantic Branch observation and drift checks
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
   mcp        Native semantic MCP server over local stdio

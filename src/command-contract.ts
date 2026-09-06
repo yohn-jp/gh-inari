@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.2.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.3.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -26,7 +26,7 @@ export const RUNTIME_CAPABILITIES = [
 ] as const;
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
-export type CommandDomain = "root" | "issue" | "pr" | "template" | "change" | "mcp" | "skill";
+export type CommandDomain = "root" | "issue" | "pr" | "branch" | "template" | "change" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -43,6 +43,7 @@ export type CommandId =
   | "issue.semantic.validate"
   | "issue.semantic.materialize"
   | "issue.semantic.plan"
+  | "issue.semantic.check"
   | "issue.render"
   | "issue.create"
   | "issue.explain"
@@ -62,6 +63,7 @@ export type CommandId =
   | "pr.semantic.materialize"
   | "pr.semantic.plan"
   | "pr.semantic.execute"
+  | "pr.semantic.check"
   | "pr.render"
   | "pr.create"
   | "pr.explain"
@@ -70,6 +72,8 @@ export type CommandId =
   | "pr.edit"
   | "pr.normalize"
   | "pr.sync"
+  | "branch.check"
+  | "branch.semantic.check"
   | "template.list"
   | "template.sync"
   | "template.import"
@@ -459,6 +463,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "[template]",
   ),
   command(
+    "issue.semantic.check",
+    "issue",
+    "semantic-check",
+    ["issue", "semantic", "check"],
+    "Compare a desired semantic Issue projection with bounded GitHub observation.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "<number>",
+  ),
+  command(
     "issue.render",
     "issue",
     "render",
@@ -498,7 +511,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "check",
     ["issue", "check"],
     "Check whether an existing Issue is canonical and normalizable.",
-    [...EXISTING_OPTIONS],
+    [...EXISTING_OPTIONS, "from", "capability"],
     "<number>",
   ),
   command(
@@ -627,6 +640,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["help", "json", "template", "repository", "from", "capability"],
     "[template]",
   ),
+  command(
+    "pr.semantic.check",
+    "pr",
+    "semantic-check",
+    ["pr", "semantic", "check"],
+    "Compare a desired semantic PR projection with bounded GitHub observation.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "<number>",
+  ),
   command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [
     ...LOCAL_ARTIFACT_INPUT_OPTIONS,
   ]),
@@ -662,7 +684,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "check",
     ["pr", "check"],
     "Check whether an existing PR is canonical and normalizable.",
-    [...EXISTING_OPTIONS],
+    [...EXISTING_OPTIONS, "from", "capability"],
     "<number>",
   ),
   command(
@@ -691,6 +713,24 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Reconcile an existing PR to a desired semantic state.",
     [...REMEDIATION_OPTIONS],
     "<number>",
+  ),
+  command(
+    "branch.check",
+    "branch",
+    "check",
+    ["branch", "check"],
+    "Compare a desired semantic Branch projection with bounded GitHub observation.",
+    ["help", "json", "template", "repository", "from"],
+    "<name>",
+  ),
+  command(
+    "branch.semantic.check",
+    "branch",
+    "semantic-check",
+    ["branch", "semantic", "check"],
+    "Compare a desired semantic Branch projection with bounded GitHub observation.",
+    ["help", "json", "template", "repository", "from"],
+    "<name>",
   ),
   command("template.list", "template", "list", ["template", "list"], "List discovered native and semantic templates.", [
     "help",
@@ -917,7 +957,7 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string 
   return `${commandInvocation(id)} <template>`;
 }
 
-export function helpInvocation(domain: "issue" | "pr" | "template" | "change" | "mcp" | "skill"): string {
+export function helpInvocation(domain: "issue" | "pr" | "branch" | "template" | "change" | "mcp" | "skill"): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
 
@@ -995,7 +1035,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
   }
   const domain = positionals[0];
-  if (domain === "issue" || domain === "pr" || domain === "change" || domain === "mcp")
+  if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp")
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
   if (domain === "template") return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };
   if (domain === "skill") return { ...full, commands: full.commands.filter((entry) => entry.domain === "skill") };
@@ -1013,6 +1053,10 @@ export function commandUsage(entry: CommandDefinition): string {
       const required =
         ((entry.id === "issue.create" || entry.id === "pr.create") &&
           (id === "title" || (entry.id === "pr.create" && (id === "head" || id === "base")))) ||
+        ((entry.id === "issue.semantic.check" ||
+          entry.id === "pr.semantic.check" ||
+          entry.id === "branch.semantic.check") &&
+          id === "from") ||
         (entry.id === "template.import" && id === "from");
       const syntax = optionSyntax(optionDefinition);
       return required ? syntax : `[${syntax}]`;
