@@ -20,8 +20,8 @@ export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
 export type CommandDomain = "root" | "issue" | "pr" | "template" | "change" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
-export type CommandId = "root.help" | "root.version" | "root.diagnose" | "root.doctor" | "issue.schema" | "issue.validate" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync" | "pr.schema" | "pr.validate" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync" | "template.list" | "template.sync" | "template.import" | "change.issue" | "change.show" | "change.ready" | "change.abort" | "skill.index" | "skill.scenario";
-export type OptionId = "help" | "json" | "version" | "diagnose" | "doctor" | "from" | "field" | "template" | "policy" | "repository" | "title" | "head" | "base" | "to" | "requireCapability" | "minimumVersion" | "compact" | "check" | "dryRun" | "draft" | "maintainerCanModify" | "rawBody";
+export type CommandId = "root.help" | "root.version" | "root.diagnose" | "root.doctor" | "issue.schema" | "issue.validate" | "issue.render" | "issue.create" | "issue.explain" | "issue.get" | "issue.check" | "issue.edit" | "issue.normalize" | "issue.sync" | "pr.schema" | "pr.contract" | "pr.validate" | "pr.materialize" | "pr.plan" | "pr.semantic.schema" | "pr.semantic.validate" | "pr.semantic.materialize" | "pr.semantic.plan" | "pr.render" | "pr.create" | "pr.explain" | "pr.get" | "pr.check" | "pr.edit" | "pr.normalize" | "pr.sync" | "template.list" | "template.sync" | "template.import" | "change.issue" | "change.show" | "change.ready" | "change.abort" | "skill.index" | "skill.scenario";
+export type OptionId = "help" | "json" | "version" | "diagnose" | "doctor" | "from" | "field" | "template" | "policy" | "repository" | "title" | "head" | "base" | "to" | "requireCapability" | "minimumVersion" | "compact" | "check" | "dryRun" | "draft" | "maintainerCanModify" | "rawBody" | "capability";
 export interface CommandOptionDefinition {
     readonly id: OptionId;
     readonly key: string;
@@ -67,6 +67,7 @@ export declare const COMMAND_OPTIONS: {
     draft: CommandOptionDefinition;
     maintainerCanModify: CommandOptionDefinition;
     rawBody: CommandOptionDefinition;
+    capability: CommandOptionDefinition;
 };
 export declare const INARI_COMMANDS: readonly CommandDefinition[];
 export declare function getCommand(id: CommandId): CommandDefinition;

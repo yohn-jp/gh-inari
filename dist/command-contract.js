@@ -76,6 +76,7 @@ export const COMMAND_OPTIONS = {
     draft: option("draft", "draft", ["--draft"], "boolean", "none", "Create the PR as a draft."),
     maintainerCanModify: option("maintainerCanModify", "maintainer-can-modify", ["--maintainer-can-modify"], "boolean", "none", "Allow maintainer edits on the PR."),
     rawBody: option("rawBody", "body", ["--body", "--body-file", "-b", "-F"], "raw-input", "required", "Upstream gh raw Markdown input; rejected for governed create operations.", "value"),
+    capability: option("capability", "capability", ["--capability"], "string", "required", "Declared target capability for Core PR projection; repeat for multiple capabilities.", "id", true),
 };
 const COMMAND_OPTIONS_BY_ID = COMMAND_OPTIONS;
 const command = (id, domain, operation, path, summary, optionIds, positionalSyntax, argumentExample) => ({
@@ -115,7 +116,14 @@ export const INARI_COMMANDS = [
     command("issue.normalize", "issue", "normalize", ["issue", "normalize"], "Repair an existing Issue's native projection.", ["help", "json", "repository", "template", "policy", "dryRun"], "<number>"),
     command("issue.sync", "issue", "sync", ["issue", "sync"], "Reconcile an existing Issue to a desired semantic state, preserving fields and metadata omitted from the input.", [...REMEDIATION_OPTIONS], "<number>"),
     command("pr.schema", "pr", "schema", ["pr", "schema"], "Print the selected PR template's semantic and metadata schema.", [...ARTIFACT_OPTIONS, "compact"], "[template]"),
+    command("pr.contract", "pr", "contract", ["pr", "contract"], "Resolve and print the Core Effective PR Artifact Contract and caller input schema.", ["help", "json", "template", "repository", "capability"], "[template]"),
     command("pr.validate", "pr", "validate", ["pr", "validate"], "Validate local or existing PR input against its selected contract.", [...LOCAL_ARTIFACT_INPUT_OPTIONS], "[<number>]"),
+    command("pr.materialize", "pr", "materialize", ["pr", "materialize"], "Materialize semantic PR input through the Core Effective Contract.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.plan", "pr", "plan", ["pr", "plan"], "Preview the deterministic Core PR Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.semantic.schema", "pr", "semantic-schema", ["pr", "semantic", "schema"], "Resolve and print the Core Effective PR Artifact Contract and caller input schema.", ["help", "json", "template", "repository", "capability"], "[template]"),
+    command("pr.semantic.validate", "pr", "semantic-validate", ["pr", "semantic", "validate"], "Validate and materialize semantic PR input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.semantic.materialize", "pr", "semantic-materialize", ["pr", "semantic", "materialize"], "Materialize semantic PR input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("pr.semantic.plan", "pr", "semantic-plan", ["pr", "semantic", "plan"], "Preview the deterministic Core PR Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("pr.render", "pr", "render", ["pr", "render"], "Render validated PR input into canonical Markdown.", [
         ...LOCAL_ARTIFACT_INPUT_OPTIONS,
     ]),
