@@ -163,6 +163,8 @@ export interface IssueDependencyMarkerExtraction {
     /** Body with a recognized trailing dependency marker removed. */
     readonly body: string;
 }
+/** Render the bounded compatibility marker used for Issue dependency projections. */
+export declare function renderIssueDependencyMarker(dependencies: IssueDependencies): string;
 /**
  * Read only the reserved trailing dependency marker emitted by Inari.  No
  * ordinary Markdown is interpreted as a relationship declaration.
