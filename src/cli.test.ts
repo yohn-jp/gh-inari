@@ -2058,7 +2058,7 @@ test("issue check is read-only and classifies a canonical artifact as current", 
       {
         number: 80,
         title: "feat: remediation",
-        body: `${REMOTE_ISSUE_BODY.replace("- [ ] The behavior", "\\- [ ] The behavior")}\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`,
+        body: `${REMOTE_ISSUE_BODY}\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`,
         state: "open",
         html_url: "https://github.com/acme/inari/issues/80",
         labels: [],
@@ -3066,9 +3066,9 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
     JSON.stringify({ fields: { ...desiredFields, problem: "A converged problem" }, title: "feat: synced" }),
     "utf8",
   );
-  const convergedBody = `${REMOTE_ISSUE_BODY.replace("A reproducible problem", "A converged problem").replace(
-    "- [ ] The behavior is covered",
-    "\\- [ ] The behavior is covered",
+  const convergedBody = `${REMOTE_ISSUE_BODY.replace(
+    "A reproducible problem",
+    "A converged problem",
   )}\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`;
 
   const firstTransport = new CliStubTransport([

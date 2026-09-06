@@ -72,6 +72,8 @@ test("Issue validation and rendering are deterministic and reversible", () => {
   const second = renderIssueArtifact(issueContractFixture, input);
   assert.equal(first, second);
   assert.match(first, /\\# heading/);
+  assert.match(first, /\n- \[ \] user content(\n|$)/);
+  assert.doesNotMatch(first, /\\- \[ \] user content/);
   assert.doesNotMatch(first, /Describe the smallest useful outcome\./);
 
   const parsed = parseExistingIssueArtifact(issueContractFixture, first);
@@ -497,9 +499,95 @@ body:
   });
 
   assert.deepEqual(prepared.validation.values, { acceptance: "- [ ]" });
+  assert.match(prepared.artifact.body, /### Acceptance criteria\n\n- \[ \]\n/);
+  assert.doesNotMatch(prepared.artifact.body, /\\- \[ \]/);
   const parsed = parseExistingIssueArtifact(contract, prepared.artifact.body);
   assert.equal(parsed.parsed, true);
   assert.deepEqual(parsed.values, prepared.validation.values);
+});
+
+test("free-form string/textarea fields render intentional task-list Markdown as real GitHub task lists (#275)", () => {
+  const contract = governedFixture(
+    compileSemanticTemplateSource(
+      normalizeSemanticTemplate({
+        version: 1,
+        kind: "issue",
+        id: "feature",
+        name: "Feature",
+        description: "New capability or extension to an existing capability",
+        title: "feat: ",
+        labels: ["enhancement"],
+        sections: [
+          {
+            id: "acceptance",
+            kind: "input",
+            type: "string",
+            label: "Acceptance criteria",
+            description: "Verifiable completion criteria",
+            required: true,
+            element: "textarea",
+            defaultValue: "- [ ] ",
+          },
+        ],
+      }),
+      ".github/inari/issues/feature.json",
+    ),
+  );
+  const values = { acceptance: "- [ ] Tests\n- [x] Build\n- [ ] Docs" };
+
+  const issueBody = renderIssueArtifact(contract, values);
+  assert.match(issueBody, /### Acceptance criteria\n\n- \[ \] Tests\n- \[x\] Build\n- \[ \] Docs\n/);
+  assert.doesNotMatch(issueBody, /\\- \[/);
+  const parsedIssue = parseExistingIssueArtifact(contract, issueBody);
+  assert.equal(parsedIssue.parsed, true);
+  assert.deepEqual(parsedIssue.values, values);
+
+  const prContract = governedFixture(
+    parsePullRequestTemplate("## Summary\n<!-- Explain the change. -->\n", {
+      id: "pull-request-default:.github/PULL_REQUEST_TEMPLATE.md",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "default",
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+    }),
+  );
+  const prValues = { summary: values.acceptance };
+  const prPrepared = preparePullRequestArtifact(prContract, {
+    fields: prValues,
+    metadata: { title: "fix: task list", head: "feature", base: "main" },
+  });
+  assert.match(prPrepared.artifact.body, /- \[ \] Tests\n- \[x\] Build\n- \[ \] Docs/);
+  assert.doesNotMatch(prPrepared.artifact.body, /\\- \[/);
+  assert.deepEqual(parseExistingPullRequestArtifact(prContract, prPrepared.artifact.body).values, prValues);
+});
+
+test("checklist item labels still escape an embedded task-list-look-alike line", () => {
+  // Unlike a free-form string/textarea field, a checklist item's rendered
+  // lines are re-split by task-list prefix during parsing (one entry per
+  // line), so an embedded look-alike line must stay escaped or it would be
+  // misread as a separate checklist entry rather than part of this label.
+  const contract = compileIssueFormYaml(
+    `name: Native form
+description: Checklist label structural protection fixture
+body:
+  - type: checkboxes
+    id: agreement
+    attributes:
+      label: Agreement
+      options:
+        - label: "Multi\\n- [ ] not a separate item"
+`,
+    {
+      id: "issue-form:native.yml",
+      type: "issue-form",
+      kind: "issue",
+      name: "native",
+      path: ".github/ISSUE_TEMPLATE/native.yml",
+    },
+  );
+  const body = renderIssueArtifact(contract, { agreement: ["Multi---not-a-separate-item"] });
+  assert.doesNotMatch(body, /\n- \[ \] not a separate item/);
+  assert.match(body, /\n\\- \[ \] not a separate item/);
 });
 
 test("native textarea render output uses and parses GitHub code fences", () => {
