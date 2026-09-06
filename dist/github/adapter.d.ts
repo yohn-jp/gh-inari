@@ -1,5 +1,5 @@
 import { type GhTransport, type GhTransportOutputLimits } from "./transport.js";
-import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact, type ValidatedSemanticPullRequestArtifact, type ValidatedSemanticIssueArtifact } from "./types.js";
+import { type GitHubIssue, type GitHubBranch, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact, type ValidatedSemanticPullRequestArtifact, type ValidatedSemanticIssueArtifact } from "./types.js";
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
 export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
 export declare const DEFAULT_GH_TIMEOUTS_MS: Readonly<Record<GhOperationClass, number>>;
@@ -66,6 +66,10 @@ export declare class GitHubAdapter {
      * callers do not construct GitHub API paths or parse provider responses.
      */
     listPullRequests(head: string, base: string): Promise<readonly GitHubPullRequest[]>;
+    /** Read one explicit branch ref; a missing ref is represented as undefined. */
+    findBranch(branch: string): Promise<GitHubBranch | undefined>;
+    /** Create exactly the branch and source refs supplied by a trusted Core plan. */
+    createBranch(branch: string, source: string): Promise<GitHubBranch>;
     createIssue(artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
     /** Apply a Core-projected v2 Semantic Issue through the trusted adapter seam. */
     createSemanticIssue(artifact: ValidatedSemanticIssueArtifact): Promise<GitHubIssue>;
