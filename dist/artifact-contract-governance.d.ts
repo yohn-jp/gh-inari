@@ -10,8 +10,8 @@
  * delegated to the same repository governance authority every other
  * governed artifact uses (`governance.ts`, `template-resolver.ts`).
  */
-import { type ArtifactContract, type EffectiveArtifactContract } from "./contract/index.js";
-import { GitHubAdapter, type RepositoryTreeEntry } from "./github/index.js";
+import { type EffectiveArtifactContract } from "./contract/index.js";
+import { GitHubAdapter } from "./github/index.js";
 export type RepositoryEffectiveArtifactKind = "issue" | "branch" | "pull_request";
 export type ArtifactContractResolutionErrorCode = "ARTIFACT_CONTRACT_NOT_FOUND" | "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS" | "ARTIFACT_CONTRACT_SOURCE_INVALID" | "ARTIFACT_CONTRACT_KIND_INVALID";
 export interface ArtifactContractResolutionDiagnostic {
@@ -30,22 +30,6 @@ export declare class ArtifactContractResolutionError extends Error {
 export interface RepositoryEffectiveArtifactContractOptions {
     readonly capabilities?: readonly string[];
 }
-/** Repository Canon identity used by the Artifact Contract resolver. */
-export interface RepositoryArtifactContractIdentity {
-    readonly id: string;
-    readonly kind: ArtifactContract["kind"];
-    readonly name: string;
-    readonly sourcePath: string;
-    readonly generatedPath: string;
-}
-/**
- * Discover Artifact Contract Canons without reading their content.
- *
- * Issue and pull-request paths retain the existing semantic-template
- * discovery authority. Branch contracts use the bounded Canon paths reserved
- * for branch artifacts; no arbitrary repository JSON is interpreted here.
- */
-export declare function createRemoteArtifactContractIdentities(tree: readonly RepositoryTreeEntry[]): readonly RepositoryArtifactContractIdentity[];
 /**
  * Resolve the authoritative Artifact Contract Canon and compile its Effective
  * Artifact Contract. All repository identity and generation fields come from

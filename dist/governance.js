@@ -530,6 +530,62 @@ export function createRemoteSemanticIdentities(tree) {
     }
     return identities.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath, "en-US"));
 }
+/**
+ * Discover all repository-owned Artifact Contract Canons from the shared
+ * governance source. Location and identity rules live here so CLI, MCP, and
+ * other adapters consume one repository policy authority.
+ */
+export function createRemoteArtifactContractIdentities(tree) {
+    const identities = createRemoteSemanticIdentities(tree).map((identity) => ({
+        ...identity,
+        kind: identity.kind,
+    }));
+    for (const entry of tree) {
+        if (entry.type !== "blob" || !entry.path.endsWith(".json"))
+            continue;
+        if (entry.path === ".github/inari/branch.json") {
+            identities.push({
+                id: "branch",
+                kind: "branch",
+                name: "Branch",
+                sourcePath: entry.path,
+                generatedPath: "refs/heads/<name>",
+            });
+        }
+        else if (entry.path.startsWith(".github/inari/branches/") && entry.path.split("/").length === 4) {
+            const id = entry.path.slice(".github/inari/branches/".length, -".json".length);
+            if (id.length > 0) {
+                identities.push({
+                    id,
+                    kind: "branch",
+                    name: id,
+                    sourcePath: entry.path,
+                    generatedPath: "refs/heads/<name>",
+                });
+            }
+        }
+    }
+    return identities.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath, "en-US"));
+}
+/** Resolve an Artifact Contract identity with the shared template selector semantics. */
+export async function resolveRemoteArtifactContractIdentity(tree, kind, selector) {
+    const candidates = createRemoteArtifactContractIdentities(tree)
+        .filter((identity) => identity.kind === kind)
+        .map(repositoryArtifactContractResolutionCandidate);
+    return resolveTemplate({ candidates, selector });
+}
+function repositoryArtifactContractResolutionCandidate(identity) {
+    return {
+        id: identity.id,
+        kind: identity.kind === "issue" ? "issue" : "pr",
+        name: identity.name,
+        paths: [identity.sourcePath, identity.generatedPath],
+        ...(identity.kind === "pull_request" && identity.generatedPath === ".github/PULL_REQUEST_TEMPLATE.md"
+            ? { nameAliases: ["default"] }
+            : {}),
+        value: identity,
+    };
+}
 function createRemoteDiscovery(context, tree) {
     for (const entry of tree) {
         const isContainer = isTemplateContainerPath(entry.path);

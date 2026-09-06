@@ -21,8 +21,8 @@ import {
   type ArtifactContractProvenance,
 } from "./contract/index.js";
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
-import { createRemoteSemanticIdentities } from "./governance.js";
-import { resolveTemplate, TemplateResolutionError } from "./template-resolver.js";
+import { resolveRemoteArtifactContractIdentity, type RepositoryArtifactContractIdentity } from "./governance.js";
+import { TemplateResolutionError } from "./template-resolver.js";
 
 export type RepositoryEffectiveArtifactKind = "issue" | "branch" | "pull_request";
 
@@ -65,15 +65,6 @@ export interface RepositoryEffectiveArtifactContractOptions {
   readonly capabilities?: readonly string[];
 }
 
-/** Repository Canon identity used by the Artifact Contract resolver. */
-export interface RepositoryArtifactContractIdentity {
-  readonly id: string;
-  readonly kind: ArtifactContract["kind"];
-  readonly name: string;
-  readonly sourcePath: string;
-  readonly generatedPath: string;
-}
-
 /**
  * Resolve the authoritative Artifact Contract Canon identity using the same
  * repository governance discovery and template-resolution precedence as every
@@ -87,65 +78,12 @@ async function selectCanonIdentity(
   context: RepositoryContext,
   ref: string,
 ): Promise<RepositoryArtifactContractIdentity> {
-  const candidates = createRemoteArtifactContractIdentities(tree).filter((identity) => identity.kind === kind);
   try {
-    return await resolveTemplate({
-      candidates: candidates.map((identity) => ({
-        id: identity.id,
-        kind: identity.kind === "issue" ? "issue" : "pr",
-        name: identity.name,
-        paths: [identity.sourcePath, identity.generatedPath],
-        ...(identity.kind === "pull_request" && identity.generatedPath === ".github/PULL_REQUEST_TEMPLATE.md"
-          ? { nameAliases: ["default"] }
-          : {}),
-        value: identity,
-      })),
-      selector,
-    });
+    return await resolveRemoteArtifactContractIdentity(tree, kind, selector);
   } catch (error: unknown) {
     if (!(error instanceof TemplateResolutionError)) throw error;
     throw artifactContractResolutionErrorFromTemplateResolution(error, context, ref);
   }
-}
-
-/**
- * Discover Artifact Contract Canons without reading their content.
- *
- * Issue and pull-request paths retain the existing semantic-template
- * discovery authority. Branch contracts use the bounded Canon paths reserved
- * for branch artifacts; no arbitrary repository JSON is interpreted here.
- */
-export function createRemoteArtifactContractIdentities(
-  tree: readonly RepositoryTreeEntry[],
-): readonly RepositoryArtifactContractIdentity[] {
-  const identities: RepositoryArtifactContractIdentity[] = createRemoteSemanticIdentities(tree).map((identity) => ({
-    ...identity,
-    kind: identity.kind,
-  }));
-  for (const entry of tree) {
-    if (entry.type !== "blob" || !entry.path.endsWith(".json")) continue;
-    if (entry.path === ".github/inari/branch.json") {
-      identities.push({
-        id: "branch",
-        kind: "branch",
-        name: "Branch",
-        sourcePath: entry.path,
-        generatedPath: "refs/heads/<name>",
-      });
-    } else if (entry.path.startsWith(".github/inari/branches/") && entry.path.split("/").length === 4) {
-      const id = entry.path.slice(".github/inari/branches/".length, -".json".length);
-      if (id.length > 0) {
-        identities.push({
-          id,
-          kind: "branch",
-          name: id,
-          sourcePath: entry.path,
-          generatedPath: "refs/heads/<name>",
-        });
-      }
-    }
-  }
-  return identities.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath, "en-US"));
 }
 
 function artifactContractResolutionErrorFromTemplateResolution(
