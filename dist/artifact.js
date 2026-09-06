@@ -3,6 +3,10 @@ import { createArtifactDiagnostic, createArtifactDiagnosticReport, createFieldEv
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { EMPTY_ISSUE_DEPENDENCIES, validateIssueDependencies, } from "./contract/issue-reference.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
+// v1 artifact APIs remain available during migration. Their explicit
+// convergence adapter is re-exported here so callers do not need a second
+// legacy-specific package entrypoint.
+export { artifactContractFromLegacyCanonical, compileLegacyEffectiveArtifactContract, convergeLegacyArtifactInput, mapLegacyArtifactCandidate, materializeLegacyArtifact, tryMaterializeLegacyArtifact, validateLegacyBranchProjection, } from "./legacy-artifact-convergence.js";
 export class ArtifactInputError extends Error {
     code;
     path;

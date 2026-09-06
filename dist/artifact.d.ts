@@ -3,6 +3,8 @@ import { type ArtifactDiagnostic, type ArtifactDiagnosticReport } from "./diagno
 import { type ArtifactKind, type CanonicalContract } from "./contract/ir.js";
 import { type IssueDependencies, type IssueReference } from "./contract/issue-reference.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
+export { artifactContractFromLegacyCanonical, compileLegacyEffectiveArtifactContract, convergeLegacyArtifactInput, mapLegacyArtifactCandidate, materializeLegacyArtifact, tryMaterializeLegacyArtifact, validateLegacyBranchProjection, } from "./legacy-artifact-convergence.js";
+export type { LegacyArtifactCompatibilitySource, LegacyArtifactConvergenceCode, LegacyArtifactConvergenceDiagnostic, LegacyArtifactConvergenceOptions, LegacyArtifactConvergenceResult, LegacyLinkedIssueRepository, LegacySemanticArtifactMaterializationResult, } from "./legacy-artifact-convergence.js";
 export interface ArtifactInputMetadata {
     readonly title?: string;
     readonly labels?: readonly string[];
