@@ -49,7 +49,6 @@ export type SemanticArtifactMaterializationViolationCode =
   | "INPUT_MIN_ITEMS"
   | "INPUT_MAX_ITEMS"
   | "INPUT_CHECKLIST_REQUIRED"
-  | "INPUT_PLATFORM_UNRESOLVED"
   | "DERIVATION_UNRESOLVED"
   | "DERIVATION_INVALID"
   | "DERIVATION_UNSUPPORTED"
@@ -809,14 +808,10 @@ function materializeResult(effectiveInput: unknown, input: unknown): SemanticArt
     if (declaration.presence === "unused") continue;
     const authority = declaration.authority;
     if (authority.kind === "platform") {
-      if (declaration.presence === "required" && !hasOwn(input, name)) {
-        addViolation(
-          violations,
-          "INPUT_PLATFORM_UNRESOLVED",
-          path,
-          `Required platform value "${name}" is unavailable to Core.`,
-        );
-      }
+      // `platform` is never caller input and Core never synthesizes it, so an
+      // unresolved required platform value stays outside the materialized
+      // desired value set. Satisfaction against observed state is a later
+      // observation/projection/reconciliation/admission boundary concern.
       continue;
     }
     if (authority.kind === "fixed") {

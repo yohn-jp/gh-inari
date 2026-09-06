@@ -243,6 +243,45 @@ test("does not synthesize platform values and materializes fixed values", () => 
   assert.deepEqual(codes({ platformNote: "override" }, contract), ["INPUT_AUTHORITY"]);
 });
 
+test("materializes successfully when a required platform property or field is unresolved", () => {
+  const contract = effective({
+    version: "1",
+    kind: "issue",
+    id: "required-platform",
+    properties: {
+      labels: { presence: "required", authority: { kind: "platform" } },
+      assignees: { presence: "optional", authority: { kind: "fixed", value: ["sophia"] } },
+    },
+    fields: [
+      {
+        id: "platformSummary",
+        primitive: "text",
+        presence: "required",
+        authority: { kind: "platform" },
+      },
+      {
+        id: "fixedNote",
+        primitive: "text",
+        presence: "optional",
+        authority: { kind: "fixed", value: "repository" },
+      },
+    ],
+  });
+
+  const result = tryMaterializeSemanticArtifact(contract, {});
+  assert.equal(result.valid, true);
+  const artifact = result.artifact;
+  assert.ok(artifact);
+  assert.deepEqual(artifact.values, { assignees: ["sophia"] });
+  assert.deepEqual(artifact.fields, { fixedNote: "repository" });
+  assert.equal(Object.hasOwn(artifact.values, "labels"), false);
+  assert.equal(Object.hasOwn(artifact.fields, "platformSummary"), false);
+
+  // Caller override of a required platform value still fails closed.
+  assert.deepEqual(codes({ labels: ["override"] }, contract), ["INPUT_AUTHORITY"]);
+  assert.deepEqual(codes({ platformSummary: "override" }, contract), ["INPUT_AUTHORITY"]);
+});
+
 test("rejects a missing required derived value when its optional dependency is unavailable", () => {
   const contract = parseArtifactContract({
     version: "1",

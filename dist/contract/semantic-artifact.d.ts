@@ -12,7 +12,7 @@ import type { ArtifactContractProvenance } from "./ir.js";
 export declare const SEMANTIC_ARTIFACT_VERSION: "1";
 export type SemanticArtifactVersion = typeof SEMANTIC_ARTIFACT_VERSION;
 /** Stable failures at the Effective Contract and caller-input boundaries. */
-export type SemanticArtifactMaterializationViolationCode = "EFFECTIVE_CONTRACT_INVALID" | "INPUT_NOT_OBJECT" | "INPUT_UNKNOWN_FIELD" | "INPUT_AUTHORITY" | "INPUT_REQUIRED" | "INPUT_TYPE" | "INPUT_ENUM" | "INPUT_OPTION" | "INPUT_DUPLICATE" | "INPUT_MIN_LENGTH" | "INPUT_MAX_LENGTH" | "INPUT_PATTERN" | "INPUT_MIN_ITEMS" | "INPUT_MAX_ITEMS" | "INPUT_CHECKLIST_REQUIRED" | "INPUT_PLATFORM_UNRESOLVED" | "DERIVATION_UNRESOLVED" | "DERIVATION_INVALID" | "DERIVATION_UNSUPPORTED" | "OUTPUT_INVALID";
+export type SemanticArtifactMaterializationViolationCode = "EFFECTIVE_CONTRACT_INVALID" | "INPUT_NOT_OBJECT" | "INPUT_UNKNOWN_FIELD" | "INPUT_AUTHORITY" | "INPUT_REQUIRED" | "INPUT_TYPE" | "INPUT_ENUM" | "INPUT_OPTION" | "INPUT_DUPLICATE" | "INPUT_MIN_LENGTH" | "INPUT_MAX_LENGTH" | "INPUT_PATTERN" | "INPUT_MIN_ITEMS" | "INPUT_MAX_ITEMS" | "INPUT_CHECKLIST_REQUIRED" | "DERIVATION_UNRESOLVED" | "DERIVATION_INVALID" | "DERIVATION_UNSUPPORTED" | "OUTPUT_INVALID";
 export interface SemanticArtifactMaterializationViolation {
     readonly code: SemanticArtifactMaterializationViolationCode;
     readonly path: string;
