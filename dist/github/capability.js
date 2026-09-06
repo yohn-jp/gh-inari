@@ -85,6 +85,7 @@ function cloneProvenance(provenance) {
         ref: provenance.ref,
         treeSha: provenance.treeSha,
         template: { ...provenance.template },
+        ...(provenance.semanticSource === undefined ? {} : { semanticSource: { ...provenance.semanticSource } }),
         ...(provenance.policy === undefined ? {} : { policy: { ...provenance.policy } }),
         ...(provenance.branchGovernance === undefined ? {} : { branchGovernance: { ...provenance.branchGovernance } }),
     };

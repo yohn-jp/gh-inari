@@ -35,6 +35,7 @@ import {
   discoverSemanticTemplates,
   readSemanticTemplate,
   normalizeSemanticTemplate,
+  renderSemanticNative,
   type SemanticTemplateIdentity,
 } from "./semantic-template.js";
 import {
@@ -395,6 +396,18 @@ async function compileRepositorySemanticContractFromSource(
       error instanceof Error ? error.message : "semantic source is invalid",
     );
   }
+  const expectedNativeSource = renderSemanticNative(semanticSource, identity.generatedPath);
+  const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
+  const nativeSource = await readGovernedValue("repository.governance.blob", context, ref, () =>
+    adapter.getRepositoryBlob(nativeEntry.sha),
+  );
+  if (nativeSource !== expectedNativeSource) {
+    throw invalidSource(
+      context,
+      identity.generatedPath,
+      "generated native projection does not match the deterministic semantic source projection",
+    );
+  }
   let contract = compileSemanticTemplateSource(semanticSource, identity.generatedPath);
   let policySource: ContractProvenanceSource | undefined;
   let branchGovernance: PullRequestBranchGovernance | undefined;
@@ -409,10 +422,6 @@ async function compileRepositorySemanticContractFromSource(
       branchGovernance = overlay.branch;
     }
   }
-  const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
-  const nativeSource = await readGovernedValue("repository.governance.blob", context, ref, () =>
-    adapter.getRepositoryBlob(nativeEntry.sha),
-  );
   const bound: CanonicalContract = {
     ...contract,
     provenance: {
@@ -427,6 +436,7 @@ async function compileRepositorySemanticContractFromSource(
       ref,
       treeSha: source.treeSha,
       template: sourceIdentity(nativeEntry, ref, nativeSource),
+      semanticSource: sourceIdentity(sourceEntry, ref, serialized),
       ...(policySource === undefined ? {} : { policy: policySource }),
       ...(templateResolutionSource === undefined ? {} : { templateResolution: templateResolutionSource }),
       ...(branchGovernance === undefined ? {} : { branchGovernance }),
@@ -517,6 +527,16 @@ function assessGovernanceFreshness(
   const templateEntry = source.tree.find((entry) => entry.path === provenance.template.path);
   if (templateEntry === undefined || templateEntry.type !== "blob" || templateEntry.sha !== provenance.template.sha) {
     return { fresh: false, reason: "template governance input changed" };
+  }
+  if (provenance.semanticSource !== undefined) {
+    const semanticEntry = source.tree.find((entry) => entry.path === provenance.semanticSource?.path);
+    if (
+      semanticEntry === undefined ||
+      semanticEntry.type !== "blob" ||
+      semanticEntry.sha !== provenance.semanticSource.sha
+    ) {
+      return { fresh: false, reason: "semantic source governance input changed" };
+    }
   }
   const currentPolicyEntry = findPolicy(source.tree);
   if (provenance.policy === undefined) {

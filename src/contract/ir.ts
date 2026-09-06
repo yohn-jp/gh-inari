@@ -78,6 +78,8 @@ export interface ContractProvenance {
    */
   readonly treeSha: string;
   readonly template: ContractProvenanceSource;
+  /** Semantic source fingerprint when the native template is a generated projection. */
+  readonly semanticSource?: ContractProvenanceSource;
   readonly policy?: ContractProvenanceSource;
   /** Template selection configuration observed at compile time; defaults apply only when the selector is omitted. */
   readonly templateResolution?: ContractProvenanceSource;
@@ -493,7 +495,17 @@ function validateProvenance(
   }
   checkUnknownKeys(
     value,
-    ["authority", "repository", "ref", "treeSha", "template", "policy", "templateResolution", "branchGovernance"],
+    [
+      "authority",
+      "repository",
+      "ref",
+      "treeSha",
+      "template",
+      "semanticSource",
+      "policy",
+      "templateResolution",
+      "branchGovernance",
+    ],
     path,
     violations,
   );
@@ -550,6 +562,9 @@ function validateProvenance(
       `${path}.template.path`,
       "Template provenance path must match templateIdentity.path.",
     );
+  }
+  if (hasOwn(value, "semanticSource")) {
+    validateProvenanceSource(value.semanticSource, `${path}.semanticSource`, ref, violations);
   }
   if (hasOwn(value, "policy")) {
     if (artifactKind !== "pull_request") {
@@ -2030,6 +2045,7 @@ function canonicalizeProvenance(provenance: ContractProvenance): UnknownRecord {
     ref: provenance.ref,
     treeSha: provenance.treeSha,
     template: source(provenance.template),
+    ...(provenance.semanticSource === undefined ? {} : { semanticSource: source(provenance.semanticSource) }),
     ...(provenance.policy === undefined ? {} : { policy: source(provenance.policy) }),
     ...(provenance.templateResolution === undefined
       ? {}

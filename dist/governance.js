@@ -5,7 +5,7 @@ import { compileIssueFormTemplate, compileIssueFormYaml, } from "./contract/issu
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { compilePullRequestPolicyFile, compilePullRequestPolicyOverlay, parsePullRequestPolicyOverlay, } from "./pr-policy.js";
 import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
-import { compileSemanticTemplate, compileSemanticTemplateSource, discoverSemanticTemplates, readSemanticTemplate, normalizeSemanticTemplate, } from "./semantic-template.js";
+import { compileSemanticTemplate, compileSemanticTemplateSource, discoverSemanticTemplates, readSemanticTemplate, normalizeSemanticTemplate, renderSemanticNative, } from "./semantic-template.js";
 import { discoverTemplates, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, TemplateNotFoundError, } from "./template-discovery.js";
 import { nativeTemplateResolutionCandidate, parseTemplateResolutionConfig, readTemplateResolutionConfig, resolveTemplate, semanticTemplateResolutionCandidate, TEMPLATE_RESOLUTION_CONFIG_PATH, } from "./template-resolver.js";
 /** Stable, machine-readable failures for repository governance acquisition. */
@@ -242,6 +242,12 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
     catch (error) {
         throw invalidSource(context, identity.sourcePath, error instanceof Error ? error.message : "semantic source is invalid");
     }
+    const expectedNativeSource = renderSemanticNative(semanticSource, identity.generatedPath);
+    const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
+    const nativeSource = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(nativeEntry.sha));
+    if (nativeSource !== expectedNativeSource) {
+        throw invalidSource(context, identity.generatedPath, "generated native projection does not match the deterministic semantic source projection");
+    }
     let contract = compileSemanticTemplateSource(semanticSource, identity.generatedPath);
     let policySource;
     let branchGovernance;
@@ -256,8 +262,6 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
             branchGovernance = overlay.branch;
         }
     }
-    const nativeEntry = findBlob(tree, identity.generatedPath, context, ref);
-    const nativeSource = await readGovernedValue("repository.governance.blob", context, ref, () => adapter.getRepositoryBlob(nativeEntry.sha));
     const bound = {
         ...contract,
         provenance: {
@@ -272,6 +276,7 @@ async function compileRepositorySemanticContractFromSource(adapter, source, iden
             ref,
             treeSha: source.treeSha,
             template: sourceIdentity(nativeEntry, ref, nativeSource),
+            semanticSource: sourceIdentity(sourceEntry, ref, serialized),
             ...(policySource === undefined ? {} : { policy: policySource }),
             ...(templateResolutionSource === undefined ? {} : { templateResolution: templateResolutionSource }),
             ...(branchGovernance === undefined ? {} : { branchGovernance }),
@@ -339,6 +344,14 @@ function assessGovernanceFreshness(source, provenance) {
     const templateEntry = source.tree.find((entry) => entry.path === provenance.template.path);
     if (templateEntry === undefined || templateEntry.type !== "blob" || templateEntry.sha !== provenance.template.sha) {
         return { fresh: false, reason: "template governance input changed" };
+    }
+    if (provenance.semanticSource !== undefined) {
+        const semanticEntry = source.tree.find((entry) => entry.path === provenance.semanticSource?.path);
+        if (semanticEntry === undefined ||
+            semanticEntry.type !== "blob" ||
+            semanticEntry.sha !== provenance.semanticSource.sha) {
+            return { fresh: false, reason: "semantic source governance input changed" };
+        }
     }
     const currentPolicyEntry = findPolicy(source.tree);
     if (provenance.policy === undefined) {

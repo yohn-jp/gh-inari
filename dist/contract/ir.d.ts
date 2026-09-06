@@ -69,6 +69,8 @@ export interface ContractProvenance {
      */
     readonly treeSha: string;
     readonly template: ContractProvenanceSource;
+    /** Semantic source fingerprint when the native template is a generated projection. */
+    readonly semanticSource?: ContractProvenanceSource;
     readonly policy?: ContractProvenanceSource;
     /** Template selection configuration observed at compile time; defaults apply only when the selector is omitted. */
     readonly templateResolution?: ContractProvenanceSource;
