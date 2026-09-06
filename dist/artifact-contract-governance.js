@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { ArtifactContractValidationError, parseArtifactContract, compileEffectiveArtifactContract, } from "./contract/index.js";
 import { createRemoteSemanticIdentities } from "./governance.js";
-import { resolveTemplate, semanticTemplateResolutionCandidate, TemplateResolutionError, } from "./template-resolver.js";
+import { resolveTemplate, semanticTemplateResolutionCandidate, TemplateResolutionError } from "./template-resolver.js";
 /** Stable machine-readable failure for repository Canon resolution. */
 export class ArtifactContractResolutionError extends Error {
     code;

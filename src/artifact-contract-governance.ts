@@ -23,11 +23,7 @@ import {
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
 import { createRemoteSemanticIdentities } from "./governance.js";
 import type { SemanticTemplateIdentity } from "./semantic-template.js";
-import {
-  resolveTemplate,
-  semanticTemplateResolutionCandidate,
-  TemplateResolutionError,
-} from "./template-resolver.js";
+import { resolveTemplate, semanticTemplateResolutionCandidate, TemplateResolutionError } from "./template-resolver.js";
 
 export type ArtifactContractResolutionErrorCode =
   | "ARTIFACT_CONTRACT_NOT_FOUND"
