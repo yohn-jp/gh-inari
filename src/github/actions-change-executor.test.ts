@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import {
   GitHubActionsApiTransport,
@@ -13,6 +16,7 @@ import {
   deriveChangeNamingFromIssueTitle,
   isRepositoryEvidenceFailureReason,
   isTrustedActionsFailureStage,
+  loadBranchGovernance,
   runGitHubActionsChangeExecutor,
 } from "./actions-change-executor.js";
 import type {
@@ -669,6 +673,81 @@ function repositoryOnlyFetch(fork: boolean): typeof globalThis.fetch {
       status: 200,
     })) as unknown as typeof globalThis.fetch;
 }
+
+const branchPolicySource = ["version: 1", "sections: []", "branch:", '  pattern: "^feat/[0-9]+-[a-z0-9-]+$"', ""].join(
+  "\n",
+);
+
+async function withPolicyRoot(run: (root: string) => Promise<void>): Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), "gh-inari-branch-policy-"));
+  try {
+    await run(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function writePolicy(root: string, relativePath: string, source = branchPolicySource): Promise<void> {
+  const target = path.join(root, relativePath);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, source, "utf8");
+}
+
+test("branch policy fallback is selected only when the primary path is absent", async () => {
+  await withPolicyRoot(async (root) => {
+    await writePolicy(root, ".inari/pr-policy.yml");
+    assert.deepEqual(await loadBranchGovernance(root), { pattern: "^feat/[0-9]+-[a-z0-9-]+$" });
+  });
+});
+
+test("a non-regular primary policy cannot fall back to a valid legacy policy", async () => {
+  await withPolicyRoot(async (root) => {
+    await mkdir(path.join(root, ".github/inari/pr-policy.yml"), { recursive: true });
+    await writePolicy(root, ".inari/pr-policy.yml");
+    await assert.rejects(
+      () => loadBranchGovernance(root),
+      (error: unknown) =>
+        error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "branch-governance",
+    );
+  });
+});
+
+test("a primary policy symlink cannot be used or bypassed through the legacy path", async () => {
+  await withPolicyRoot(async (root) => {
+    const target = path.join(root, "outside-policy.yml");
+    await writeFile(target, branchPolicySource, "utf8");
+    const primary = path.join(root, ".github/inari/pr-policy.yml");
+    await mkdir(path.dirname(primary), { recursive: true });
+    await symlink(target, primary);
+    await writePolicy(root, ".inari/pr-policy.yml");
+    await assert.rejects(
+      () => loadBranchGovernance(root),
+      (error: unknown) =>
+        error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "branch-governance",
+    );
+  });
+});
+
+test("missing policies, malformed primary policy, and valid primary policy remain fail-closed and deterministic", async () => {
+  await withPolicyRoot(async (root) => {
+    await assert.rejects(
+      () => loadBranchGovernance(root),
+      (error: unknown) =>
+        error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "branch-governance",
+    );
+
+    await writePolicy(root, ".github/inari/pr-policy.yml", "version: 1\nsections: [");
+    await writePolicy(root, ".inari/pr-policy.yml");
+    await assert.rejects(
+      () => loadBranchGovernance(root),
+      (error: unknown) =>
+        error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "branch-governance",
+    );
+
+    await writePolicy(root, ".github/inari/pr-policy.yml");
+    assert.deepEqual(await loadBranchGovernance(root), { pattern: "^feat/[0-9]+-[a-z0-9-]+$" });
+  });
+});
 
 test("runtime setup exposes the bounded stage at each setup boundary", async () => {
   const cases: readonly {

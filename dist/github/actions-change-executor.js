@@ -7,7 +7,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash, createSign } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import path from "node:path";
 import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, projectChangeFromGitHubEvidence, validateGovernedRootIssueEvidence, } from "../change.js";
 import { extractTemplateIdentityMarker, renderIssueArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, } from "../artifact.js";
@@ -880,23 +881,43 @@ export class GitHubActionsEvidenceReader {
 export async function loadBranchGovernance(cwd) {
     try {
         for (const policyPath of POLICY_PATHS) {
-            let source;
+            const filePath = path.join(cwd, policyPath);
+            // O_NOFOLLOW pins the candidate to a single filesystem object: the open
+            // itself fails on a symlinked final path element, so there is no window
+            // between a link check and the read where the path can be swapped.
+            let handle;
             try {
-                source = await readFile(path.join(cwd, policyPath), "utf8");
+                handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
             }
-            catch {
-                // Continue only when this repository-native policy path is absent.
-                continue;
+            catch (error) {
+                // A fallback is safe only when the candidate path itself is absent.
+                if (isFileNotFound(error))
+                    continue;
+                throw new GitHubActionsChangeExecutorError();
             }
-            const overlay = parsePullRequestPolicyOverlay(source);
-            // A repository-native policy with no branch rule declares no branch precondition.
-            return overlay.branch;
+            try {
+                // Repository policy is a regular file authority; the descriptor above
+                // already excludes a symlinked final path element.
+                const stats = await handle.stat();
+                if (!stats.isFile())
+                    throw new GitHubActionsChangeExecutorError();
+                const source = await handle.readFile("utf8");
+                const overlay = parsePullRequestPolicyOverlay(source);
+                // A repository-native policy with no branch rule declares no branch precondition.
+                return overlay.branch;
+            }
+            finally {
+                await handle.close();
+            }
         }
         throw new GitHubActionsChangeExecutorError();
     }
     catch (error) {
         throw withFailureStage(error, "branch-governance");
     }
+}
+function isFileNotFound(error) {
+    return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 function requiredEnvironment(environment, key, stage = "trusted-execution") {
     const value = environment[key];
