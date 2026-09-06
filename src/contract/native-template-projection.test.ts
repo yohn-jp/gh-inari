@@ -107,3 +107,84 @@ test("fails closed for native capabilities that cannot preserve semantic state",
   });
   assert.throws(() => projectArtifactContractToPullRequestTemplate(choice), NativeTemplateProjectionError);
 });
+
+test("projects fixed title/labels/assignees onto the native Issue Form top level", () => {
+  const contract = parseArtifactContract({
+    version: "1",
+    kind: "issue",
+    id: "feature",
+    properties: {
+      title: { presence: "required", authority: { kind: "fixed", value: "feat: " } },
+      labels: { presence: "optional", authority: { kind: "fixed", value: ["enhancement"] } },
+      assignees: { presence: "optional", authority: { kind: "fixed", value: ["octocat"] } },
+    },
+    fields: [{ id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } }],
+  });
+  const projection = projectArtifactContractToIssueForm(contract);
+  assert.equal(projection.document.title, "feat: ");
+  assert.deepEqual(projection.document.labels, ["enhancement"]);
+  assert.deepEqual(projection.document.assignees, ["octocat"]);
+  assert.match(projection.content, /title: "feat: "/u);
+  assert.match(projection.content, /labels:\s*\n\s*- enhancement/u);
+});
+
+test("fails closed when a governed property has no native Issue Form representation", () => {
+  const supplied = parseArtifactContract({
+    version: "1",
+    kind: "issue",
+    id: "feature",
+    properties: { title: { presence: "required", authority: { kind: "supplied" } } },
+    fields: [{ id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } }],
+  });
+  assert.throws(
+    () => projectArtifactContractToIssueForm(supplied),
+    (error: unknown) =>
+      error instanceof NativeTemplateProjectionError &&
+      error.violations.some(
+        (violation) =>
+          violation.code === "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY" &&
+          violation.path === "$.properties.title.authority",
+      ),
+  );
+
+  const milestone = parseArtifactContract({
+    version: "1",
+    kind: "issue",
+    id: "feature",
+    properties: {
+      milestone: {
+        presence: "optional",
+        authority: { kind: "derived", derive: { op: "format", template: "{parent.number}" } },
+      },
+      parent: { presence: "required", authority: { kind: "supplied" } },
+    },
+    fields: [{ id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } }],
+  });
+  assert.throws(
+    () => projectArtifactContractToIssueForm(milestone),
+    (error: unknown) =>
+      error instanceof NativeTemplateProjectionError &&
+      error.violations.some((violation) => violation.path === "$.properties.milestone") &&
+      error.violations.some((violation) => violation.path === "$.properties.parent"),
+  );
+});
+
+test("fails closed for any governed pull-request property, since the native template is Markdown-only", () => {
+  const contract = parseArtifactContract({
+    version: "1",
+    kind: "pull_request",
+    id: "default",
+    properties: { title: { presence: "required", authority: { kind: "fixed", value: "chore: release" } } },
+    fields: [{ id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } }],
+  });
+  assert.throws(
+    () => projectArtifactContractToPullRequestTemplate(contract),
+    (error: unknown) =>
+      error instanceof NativeTemplateProjectionError &&
+      error.violations.some(
+        (violation) =>
+          violation.code === "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY" &&
+          violation.path === "$.properties.title",
+      ),
+  );
+});

@@ -15,6 +15,10 @@ export type NativeIssueFormProjection = NativeTemplateProjection & {
     readonly document: Readonly<{
         readonly name: string;
         readonly description: string;
+        /** Fixed-value governed properties the native Issue Form top level can represent. */
+        readonly title?: string;
+        readonly labels?: readonly string[];
+        readonly assignees?: readonly string[];
         readonly body: readonly Record<string, unknown>[];
     }>;
 };

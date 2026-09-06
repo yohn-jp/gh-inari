@@ -56,8 +56,54 @@ function suppliedField(field) {
 function addUnsupported(violations, path, message) {
     violations.push({ code: "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY", path, message });
 }
-function issueFieldElement(field, index) {
-    const path = `$.fields[${index}]`;
+function activeProperty(declaration) {
+    return declaration.presence !== "unused";
+}
+/**
+ * Native Issue Form top-level keys (`title`/`labels`/`assignees`) can only carry a
+ * fixed, deterministic value baked in at generation time: they have no supported
+ * mechanism for `supplied` end-user input, `platform` values, or `derived`
+ * computation. Anything else with a governed presence fails closed instead of
+ * silently disappearing from the projection.
+ */
+const ISSUE_FORM_TOP_LEVEL_PROPERTIES = new Set(["title", "labels", "assignees"]);
+function issueFormPropertyProjection(contract) {
+    const violations = [];
+    const topLevel = {};
+    for (const [name, declaration] of Object.entries(contract.properties)) {
+        if (!activeProperty(declaration))
+            continue;
+        const path = `$.properties.${name}`;
+        if (!ISSUE_FORM_TOP_LEVEL_PROPERTIES.has(name)) {
+            addUnsupported(violations, path, `Native Issue Form has no supported projection for governed property "${name}".`);
+            continue;
+        }
+        if (declaration.authority.kind !== "fixed") {
+            addUnsupported(violations, `${path}.authority`, `Native Issue Form top-level "${name}" can only project a fixed value; "${declaration.authority.kind}" authority has no supported representation.`);
+            continue;
+        }
+        topLevel[name] = Array.isArray(declaration.authority.value)
+            ? [...declaration.authority.value]
+            : declaration.authority.value;
+    }
+    return { topLevel, violations };
+}
+/**
+ * The native `PULL_REQUEST_TEMPLATE.md` target is Markdown body content only:
+ * GitHub does not interpret any front matter or metadata block from it. Every
+ * governed pull-request property therefore has no native representation, and
+ * any presence other than `unused` must fail closed rather than be dropped.
+ */
+function pullRequestPropertyViolations(contract) {
+    const violations = [];
+    for (const [name, declaration] of Object.entries(contract.properties)) {
+        if (!activeProperty(declaration))
+            continue;
+        addUnsupported(violations, `$.properties.${name}`, `Native pull-request Markdown template has no supported projection for governed property "${name}".`);
+    }
+    return violations;
+}
+function issueFieldElement(field) {
     if (field.primitive === "text") {
         return {
             type: "textarea",
@@ -128,12 +174,13 @@ function validatePullRequestFields(contract) {
     }
     return violations;
 }
-function issueDocument(contract) {
+function issueDocument(contract, topLevelProperties) {
     const fields = (contract.fields ?? []).filter(suppliedField);
     return {
         name: contract.id,
         description: `Artifact Contract ${contract.id}`,
-        body: fields.map((field, index) => issueFieldElement(field, (contract.fields ?? []).indexOf(field) || index)),
+        ...topLevelProperties,
+        body: fields.map((field) => issueFieldElement(field)),
     };
 }
 function renderIssueDocument(document) {
@@ -161,7 +208,8 @@ export function projectArtifactContractToIssueForm(input, options = {}) {
                 message: "Issue Form projection requires an issue contract.",
             },
         ]);
-    const violations = [...validateIssueFields(contract)];
+    const { topLevel, violations: propertyViolations } = issueFormPropertyProjection(contract);
+    const violations = [...validateIssueFields(contract), ...propertyViolations];
     const supplied = (contract.fields ?? []).some(suppliedField);
     if (!supplied)
         violations.push({
@@ -171,7 +219,7 @@ export function projectArtifactContractToIssueForm(input, options = {}) {
         });
     if (violations.length > 0)
         throw new NativeTemplateProjectionError(violations);
-    const document = issueDocument(contract);
+    const document = issueDocument(contract, topLevel);
     return {
         kind: "issue_form",
         path: generatedPath(contract, options.path),
@@ -190,7 +238,7 @@ export function projectArtifactContractToPullRequestTemplate(input, options = {}
                 message: "Pull request template projection requires a pull_request contract.",
             },
         ]);
-    const violations = [...validatePullRequestFields(contract)];
+    const violations = [...validatePullRequestFields(contract), ...pullRequestPropertyViolations(contract)];
     const supplied = (contract.fields ?? []).some(suppliedField);
     if (!supplied)
         violations.push({
