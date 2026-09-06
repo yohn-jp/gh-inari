@@ -21,6 +21,8 @@ import {
   type GhCommandResult,
   type GhTransport,
   type GhTransportOptions,
+  type GitHubIssue,
+  type GitHubPullRequest,
   type ValidatedRenderedIssueArtifact,
 } from "./index.js";
 import { prepareIssueArtifact, preparePullRequestArtifact } from "../artifact.js";
@@ -164,7 +166,24 @@ function pullRequestPayload(number = 43): string {
     html_url: `https://github.com/acme/inari/pull/${number}`,
     head: { ref: "feature" },
     base: { ref: "main" },
+    labels: [],
+    assignees: [],
+    milestone: null,
+    requested_reviewers: [],
+    requested_teams: [],
   });
+}
+
+function withField(payload: string, field: string, value: unknown): string {
+  const record = JSON.parse(payload) as Record<string, unknown>;
+  record[field] = value;
+  return JSON.stringify(record);
+}
+
+function withoutFields(payload: string, ...fields: readonly string[]): string {
+  const record = JSON.parse(payload) as Record<string, unknown>;
+  for (const field of fields) delete record[field];
+  return JSON.stringify(record);
 }
 
 function pullRequestPayloadWithDraft(number: number, draft: unknown): string {
@@ -917,5 +936,191 @@ test("rejects a base64-valid but UTF-8-invalid governed repository blob", async 
   await assert.rejects(
     adapter.getRepositoryBlob(sha),
     (error: unknown) => error instanceof GitHubApiResponseError && error.code === "GITHUB_API_RESPONSE_INVALID",
+  );
+});
+
+async function issueWith(number: number, field: string, value: unknown): Promise<GitHubIssue> {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, withField(issuePayload(number), field, value)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  return adapter.getIssue(number);
+}
+
+async function issueWithout(number: number, ...fields: readonly string[]): Promise<GitHubIssue> {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, withoutFields(issuePayload(number), ...fields)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  return adapter.getIssue(number);
+}
+
+async function pullRequestWith(number: number, field: string, value: unknown): Promise<GitHubPullRequest> {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, withField(pullRequestPayload(number), field, value)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  return adapter.getPullRequest(number);
+}
+
+async function pullRequestWithout(number: number, ...fields: readonly string[]): Promise<GitHubPullRequest> {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, withoutFields(pullRequestPayload(number), ...fields)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  return adapter.getPullRequest(number);
+}
+
+function assertMilestonePathViolation(error: unknown, operation: string): boolean {
+  return (
+    error instanceof GitHubApiResponseError &&
+    error.code === "GITHUB_API_RESPONSE_INVALID" &&
+    error.details.operation === operation &&
+    typeof error.details.path === "string" &&
+    error.details.path.startsWith("milestone")
+  );
+}
+
+test("getIssue observes a present milestone", async () => {
+  const issue = await issueWith(60, "milestone", { number: 7, title: "v1" });
+  assert.deepEqual(issue.milestone, { number: 7, title: "v1" });
+});
+
+test("getIssue treats a null and an absent milestone key identically as no milestone", async () => {
+  assert.equal((await issueWith(61, "milestone", null)).milestone, undefined);
+  assert.equal((await issueWithout(62, "milestone")).milestone, undefined);
+});
+
+test("getIssue fails closed on a malformed milestone", async () => {
+  for (const malformed of ["not-an-object", { title: "missing number" }, { number: "7", title: "v1" }, []]) {
+    await assert.rejects(issueWith(63, "milestone", malformed), (error: unknown) =>
+      assertMilestonePathViolation(error, "issue.read"),
+    );
+  }
+});
+
+test("getPullRequest observes present labels, assignees, milestone, and requested reviewers", async () => {
+  const pullRequest = await (async () => {
+    const transport = new StubGhTransport([
+      command(0, "gh version 2.0"),
+      command(),
+      repositoryIdentityResponse(),
+      command(
+        0,
+        withField(
+          withField(
+            withField(withField(pullRequestPayload(70), "labels", [{ name: "bug" }]), "assignees", [
+              { login: "octocat" },
+            ]),
+            "milestone",
+            { number: 3, title: "v2" },
+          ),
+          "requested_reviewers",
+          [{ login: "alice" }],
+        ),
+      ),
+    ]);
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+    return adapter.getPullRequest(70);
+  })();
+
+  assert.deepEqual(pullRequest.labels, ["bug"]);
+  assert.deepEqual(pullRequest.assignees, ["octocat"]);
+  assert.deepEqual(pullRequest.milestone, { number: 3, title: "v2" });
+});
+
+test("getPullRequest reports distinct user and team requested reviewers without conflating them", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(
+      0,
+      withField(
+        withField(pullRequestPayload(71), "requested_reviewers", [{ login: "alice" }, { login: "bob" }]),
+        "requested_teams",
+        [{ slug: "platform-team", name: "Platform Team" }],
+      ),
+    ),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const pullRequest = await adapter.getPullRequest(71);
+
+  assert.deepEqual(pullRequest.requestedReviewers, { users: ["alice", "bob"], teams: ["platform-team"] });
+});
+
+test("getPullRequest reports empty requested reviewers distinctly from absent reviewers", async () => {
+  const emptyPullRequest = await pullRequestWith(72, "requested_reviewers", []);
+  assert.deepEqual(emptyPullRequest.requestedReviewers, { users: [], teams: [] });
+
+  const absentPullRequest = await pullRequestWithout(73, "requested_reviewers", "requested_teams");
+  assert.equal(absentPullRequest.requestedReviewers, undefined);
+});
+
+test("getPullRequest treats absent labels, assignees, and milestone as unset rather than empty", async () => {
+  const pullRequest = await pullRequestWithout(74, "labels", "assignees", "milestone");
+  assert.equal(pullRequest.labels, undefined);
+  assert.equal(pullRequest.assignees, undefined);
+  assert.equal(pullRequest.milestone, undefined);
+});
+
+test("getPullRequest fails closed on malformed labels, assignees, and milestone", async () => {
+  await assert.rejects(
+    pullRequestWith(75, "labels", "not-an-array"),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.details.operation === "pull_request.read" &&
+      error.details.path === "labels",
+  );
+  await assert.rejects(
+    pullRequestWith(76, "assignees", [{ id: 1 }]),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.details.operation === "pull_request.read",
+  );
+  await assert.rejects(pullRequestWith(77, "milestone", "not-an-object"), (error: unknown) =>
+    assertMilestonePathViolation(error, "pull_request.read"),
+  );
+});
+
+test("getPullRequest fails closed on malformed requested reviewers, including a partially-shaped response", async () => {
+  await assert.rejects(
+    pullRequestWith(78, "requested_reviewers", "not-an-array"),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.details.operation === "pull_request.read" &&
+      error.details.path === "requested_reviewers",
+  );
+  await assert.rejects(
+    pullRequestWith(79, "requested_teams", [{ name: "Team without slug" }]),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.details.operation === "pull_request.read",
+  );
+  // Only one of the paired keys present is malformed, not "half absent".
+  await assert.rejects(
+    pullRequestWithout(80, "requested_teams"),
+    (error: unknown) =>
+      error instanceof GitHubApiResponseError &&
+      error.code === "GITHUB_API_RESPONSE_INVALID" &&
+      error.details.operation === "pull_request.read" &&
+      error.details.path === "requested_teams",
   );
 });

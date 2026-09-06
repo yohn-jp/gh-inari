@@ -29,7 +29,9 @@ import {
 import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
+  type GitHubMilestone,
   type GitHubPullRequest,
+  type GitHubReviewRequests,
   type RepositoryContext,
   type RepositoryTree,
   type RepositoryTreeEntry,
@@ -833,6 +835,7 @@ function parseIssue(value: unknown, operation: string, repositoryId?: string, re
   const state = responseState(record.state, operation);
   const url = responseUrl(record, operation);
   const body = record.body === null ? null : responseString(record.body, "body", operation);
+  const milestone = responseMilestone(record.milestone, "milestone", operation);
   return {
     number,
     title,
@@ -841,6 +844,7 @@ function parseIssue(value: unknown, operation: string, repositoryId?: string, re
     url,
     labels: responseNames(record.labels, "labels", operation),
     assignees: responseNames(record.assignees, "assignees", operation),
+    ...(milestone === undefined ? {} : { milestone }),
     ...(repositoryId === undefined ? {} : { repositoryId }),
     ...(repositoryHost === undefined ? {} : { repositoryHost }),
   };
@@ -860,6 +864,11 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
       : responseBoolean(record.maintainer_can_modify, "maintainer_can_modify", operation);
   const head = responseRef(record.head, "head", operation);
   const base = responseRef(record.base, "base", operation);
+  const milestone = responseMilestone(record.milestone, "milestone", operation);
+  const labels = record.labels === undefined ? undefined : responseNames(record.labels, "labels", operation);
+  const assignees =
+    record.assignees === undefined ? undefined : responseNames(record.assignees, "assignees", operation);
+  const requestedReviewers = responseReviewRequests(record, operation);
   return {
     number,
     title,
@@ -870,6 +879,10 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
     ...(maintainerCanModify === undefined ? {} : { maintainerCanModify }),
     head,
     base,
+    ...(labels === undefined ? {} : { labels }),
+    ...(assignees === undefined ? {} : { assignees }),
+    ...(milestone === undefined ? {} : { milestone }),
+    ...(requestedReviewers === undefined ? {} : { requestedReviewers }),
   };
 }
 
@@ -935,6 +948,68 @@ function responseNames(value: unknown, path: string, operation: string): readonl
       );
     }
     return responseString(item.name ?? item.login, `${path}[${index}]`, operation);
+  });
+}
+
+function responseMilestone(value: unknown, path: string, operation: string): GitHubMilestone | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return {
+    number: responseNumber(value.number, `${path}.number`, operation),
+    title: responseString(value.title, `${path}.title`, operation),
+  };
+}
+
+// Absent means neither key was returned at all; once either is present, both
+// must be well-formed so a partially-shaped response fails closed instead of
+// silently reporting an incomplete reviewer set.
+function responseReviewRequests(record: Record<string, unknown>, operation: string): GitHubReviewRequests | undefined {
+  if (record.requested_reviewers === undefined && record.requested_teams === undefined) return undefined;
+  return {
+    users: responseUserLogins(record.requested_reviewers, "requested_reviewers", operation),
+    teams: responseTeamSlugs(record.requested_teams, "requested_teams", operation),
+  };
+}
+
+function responseUserLogins(value: unknown, path: string, operation: string): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new GitHubApiResponseError(
+        operation,
+        `GitHub response field ${path}[${index}] is invalid during ${operation}.`,
+        { path: `${path}[${index}]` },
+      );
+    }
+    return responseString(item.login, `${path}[${index}].login`, operation);
+  });
+}
+
+// Teams have no `login`; `slug` is the stable, URL-safe identifier (unlike
+// the mutable display `name`), matching how GitHub itself addresses teams.
+function responseTeamSlugs(value: unknown, path: string, operation: string): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new GitHubApiResponseError(
+        operation,
+        `GitHub response field ${path}[${index}] is invalid during ${operation}.`,
+        { path: `${path}[${index}]` },
+      );
+    }
+    return responseString(item.slug, `${path}[${index}].slug`, operation);
   });
 }
 

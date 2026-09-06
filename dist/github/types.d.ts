@@ -52,6 +52,23 @@ export interface RepositoryTree {
     readonly sha: string;
     readonly entries: readonly RepositoryTreeEntry[];
 }
+/** Zero-or-one Canon v2 milestone observation, stable across Issue and pull request resources. */
+export interface GitHubMilestone {
+    readonly number: number;
+    readonly title: string;
+}
+/**
+ * Requested pull request reviewers, kept as distinct user and team lists.
+ *
+ * GitHub represents user and team review targets as separate resource kinds
+ * (`requested_reviewers` vs `requested_teams`) with different stable
+ * identifiers (login vs slug). Collapsing them into one string list would
+ * lose that distinction and make later semantic normalization ambiguous.
+ */
+export interface GitHubReviewRequests {
+    readonly users: readonly string[];
+    readonly teams: readonly string[];
+}
 export interface GitHubIssue {
     readonly number: number;
     readonly title: string;
@@ -60,6 +77,7 @@ export interface GitHubIssue {
     readonly url: string;
     readonly labels: readonly string[];
     readonly assignees: readonly string[];
+    readonly milestone?: GitHubMilestone;
     /** Decimal REST repository database ID when supplied by the adapter context. */
     readonly repositoryId?: string;
     /** Normalized GitHub host/install boundary paired with repositoryId. */
@@ -75,4 +93,8 @@ export interface GitHubPullRequest {
     readonly maintainerCanModify?: boolean;
     readonly head: string;
     readonly base: string;
+    readonly labels?: readonly string[];
+    readonly assignees?: readonly string[];
+    readonly milestone?: GitHubMilestone;
+    readonly requestedReviewers?: GitHubReviewRequests;
 }

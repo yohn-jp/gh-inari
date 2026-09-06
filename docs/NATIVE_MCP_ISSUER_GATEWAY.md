@@ -90,8 +90,7 @@ business logic.
 
 ```ts
 export interface ChangeRemoteExecutor {
-  execute(request: ChangeRemoteMutationRequest):
-    Promise<ChangeProjectionResult | ChangeRemoteExecutionResult>;
+  execute(request: ChangeRemoteMutationRequest): Promise<ChangeProjectionResult | ChangeRemoteExecutionResult>;
   read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult>;
 }
 ```
@@ -387,23 +386,23 @@ tool handler, not duplicated tool declarations.
 
 Proposed canonical V1 catalog:
 
-| Tool | Class | Repository semantic evaluation | Notes |
-| --- | --- | --- | --- |
-| `inari_health` | read | no/limited | Native replacement for `adapter_health`; returns protocol/runtime capability only, never filesystem paths or credentials. |
-| `inari_template_list` | read | yes | Discover governed repository templates. |
-| `inari_issue_schema` | read | yes | Resolve canonical Issue contract. |
-| `inari_pr_schema` | read | yes | Resolve canonical PR contract. |
-| `inari_issue_get` | read | yes | Canonical governed Issue projection. |
-| `inari_pr_get` | read | yes | Canonical governed PR projection. |
-| `inari_issue_validate` | read | yes | Validate existing/new Issue fields. |
-| `inari_pr_validate` | read | yes | Validate existing/new PR fields. |
-| `inari_issue_create` | write | yes | Governed Issue creation; Issue creation is not Change issuance. |
-| `inari_pr_create` | compatibility write | yes | Existing artifact-level contract. It must not bypass Change-control enforcement where a repository requires canonical Change issuance. |
-| `inari_change_show` | read | yes | Project the Change rooted at one Issue. |
-| `inari_change_issue` | write | yes | Issue the canonical branch + Draft PR Change transition. |
-| `inari_change_ready` | write | yes | Govern Ready transition. |
-| `inari_change_abort` | write | yes | Govern abort/recovery cleanup transition. |
-| `inari_execution_get` | read | no new policy evaluation | Resolve an accepted hosted execution handle to bounded Actions/result state. |
+| Tool                   | Class               | Repository semantic evaluation | Notes                                                                                                                                  |
+| ---------------------- | ------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `inari_health`         | read                | no/limited                     | Native replacement for `adapter_health`; returns protocol/runtime capability only, never filesystem paths or credentials.              |
+| `inari_template_list`  | read                | yes                            | Discover governed repository templates.                                                                                                |
+| `inari_issue_schema`   | read                | yes                            | Resolve canonical Issue contract.                                                                                                      |
+| `inari_pr_schema`      | read                | yes                            | Resolve canonical PR contract.                                                                                                         |
+| `inari_issue_get`      | read                | yes                            | Canonical governed Issue projection.                                                                                                   |
+| `inari_pr_get`         | read                | yes                            | Canonical governed PR projection.                                                                                                      |
+| `inari_issue_validate` | read                | yes                            | Validate existing/new Issue fields.                                                                                                    |
+| `inari_pr_validate`    | read                | yes                            | Validate existing/new PR fields.                                                                                                       |
+| `inari_issue_create`   | write               | yes                            | Governed Issue creation; Issue creation is not Change issuance.                                                                        |
+| `inari_pr_create`      | compatibility write | yes                            | Existing artifact-level contract. It must not bypass Change-control enforcement where a repository requires canonical Change issuance. |
+| `inari_change_show`    | read                | yes                            | Project the Change rooted at one Issue.                                                                                                |
+| `inari_change_issue`   | write               | yes                            | Issue the canonical branch + Draft PR Change transition.                                                                               |
+| `inari_change_ready`   | write               | yes                            | Govern Ready transition.                                                                                                               |
+| `inari_change_abort`   | write               | yes                            | Govern abort/recovery cleanup transition.                                                                                              |
+| `inari_execution_get`  | read                | no new policy evaluation       | Resolve an accepted hosted execution handle to bounded Actions/result state.                                                           |
 
 The final executable tool schemas, names, annotations, and descriptions must live in one
 Inari-owned module and be tested as public contract. Majiwari may temporarily alias
@@ -1327,17 +1326,20 @@ slices are:
 ### Wave A — native protocol ownership
 
 A1. **Native MCP contract module**
+
 - Port existing Majiwari tool schema/annotation contract.
 - Add Change and execution tools.
 - Add contract snapshots/tests.
 - No remote service.
 
 A2. **Native stdio server**
+
 - Register A1 against stdio.
 - Direct application/Core integration.
 - Prove Majiwari-equivalent local behavior.
 
 A3. **Majiwari federation migration preparation**
+
 - Make Majiwari capable of registering the native Inari server without Inari-specific
   protocol logic.
 - Do not delete old adapter until parity tests pass.
@@ -1347,16 +1349,19 @@ A1 is prerequisite for A2/A3.
 ### Wave B — hosted ingress
 
 B1. **Streamable HTTP MCP adapter**
+
 - MCP 2026-07-28 endpoint.
 - Protocol/header/schema bounds.
 - No repository mutation yet.
 
 B2. **MCP OAuth requester authentication**
+
 - Protected Resource Metadata and authorization discovery.
 - Hosted authorization boundary with GitHub user identity binding.
 - Token audience/issuer isolation.
 
 B3. **Installation/repository admission**
+
 - GitHub App installation resolution.
 - Immutable repository authorization.
 - Stable admission diagnostics.
@@ -1366,16 +1371,19 @@ B1 + B2 precede B3.
 ### Wave C — dispatch and result transport
 
 C1. **Dispatcher App capability**
+
 - Model `actions: write` as a distinct logical capability.
 - Repository/permission-scoped installation token.
 - App permission migration documentation/tests.
 
 C2. **Trusted workflow dispatch adapter**
+
 - Resolve default branch/workflow.
 - Dispatch fixed trusted workflow/ref.
 - Consume returned workflow run ID.
 
 C3. **Execution handle/result adapter**
+
 - Opaque execution ID.
 - Run-scoped status polling.
 - Run-scoped bounded result artifact retrieval.
@@ -1386,25 +1394,30 @@ C1 precedes C2; C2 precedes C3.
 ### Wave D — remote issuer credential boundary
 
 D1. **Actions OIDC verifier**
+
 - JWT/JWKS validation.
 - exact claim policy and diagnostics.
 - attested execution contract.
 
 D2. **Execution guard store**
+
 - atomic replay/lease/effect receipt interface.
 - bounded TTL reference adapter/tests.
 
 D3. **Remote effect sink protocol**
+
 - bounded `ChangeEffect` envelope + digest/index.
 - OIDC + execution binding.
 - no arbitrary GitHub request surface.
 
 D4. **Hosted installation credential broker/effect application**
+
 - move App JWT/token issuance from Actions into issuer deployment;
 - reuse `GitHubChangeEffectAdapter`;
 - exact effect-derived permission narrowing.
 
 D5. **Trusted executor integration**
+
 - inject remote effect sink into `TrustedChangeExecutor` sequencing;
 - remove hosted dependency on tenant App secrets;
 - preserve compatibility broker.
@@ -1414,26 +1427,31 @@ D1 + D2 precede D3; D3 precedes D4/D5 integration.
 ### Wave E — reusable workflow and rollout
 
 E1. **Trusted reusable executor**
+
 - publish pin-able workflow;
 - consumer bootstrap contract;
 - OIDC `job_workflow_ref`/SHA verification.
 
 E2. **Hosted Change dogfood**
+
 - issue/show/ready/abort/retry/recovery;
 - concurrent duplicate request tests;
 - provenance/issuer author verification.
 
 E3. **CLI hosted MCP executor**
+
 - implement MCP-backed `ChangeRemoteExecutor` using existing CLI dependency seam;
 - default selection/configuration and fallback diagnostics.
 
 E4. **Majiwari native federation cutover**
+
 - switch to native Inari MCP;
 - remove duplicate adapter after parity.
 
 ### Wave F — optional presentation
 
 F1. **MCP Apps Inari UI**
+
 - schema-driven forms and Change status;
 - UI resources only; no policy duplication.
 
