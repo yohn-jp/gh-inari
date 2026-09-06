@@ -8,6 +8,7 @@
  */
 import { type SemanticBranchMutationPlan } from "./semantic-branch-projection.js";
 import { type CanonicalContract, type PullRequestBranchGovernance } from "./contract/ir.js";
+import { type SemanticPullRequestMutationPlan } from "./semantic-pr-projection.js";
 export declare const CHANGE_CONTRACT_VERSION: 1;
 export type ChangeContractVersion = typeof CHANGE_CONTRACT_VERSION;
 export declare const CHANGE_STATES: readonly ["DEFINED", "DRAFT", "REVIEW", "ACCEPTED", "MERGED", "ABORTED", "RECOVERY_REQUIRED"];
@@ -147,6 +148,8 @@ export interface ChangeTransitionTarget {
     readonly branch?: string;
     readonly baseBranch?: string;
     readonly pullRequest?: number;
+    /** Core-produced PR plan consumed by Change for initial Draft publication. */
+    readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
 }
 export interface ChangeTransitionRequest {
     readonly version: ChangeTransitionContractVersion;
@@ -179,6 +182,8 @@ export type ChangeEffect = {
     /** Core-owned deterministic initial body; never an Issue-conversion request. */
     readonly body: string;
     readonly draft: true;
+    /** Semantic PR Core plan; absent only for the explicit v1 compatibility path. */
+    readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
 } | {
     readonly kind: "MARK_PULL_REQUEST_READY";
     readonly pullRequest: number;
@@ -341,6 +346,8 @@ export interface ChangeProjectionInput {
     readonly naming?: CanonicalBranchNamingInput;
     /** Repository-governed target base branch (legacy compatibility; Branch Plan source wins). */
     readonly baseBranch?: string;
+    /** Optional Core-produced PR plan for converged Change issuance. */
+    readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
     readonly evidence: ChangeGitHubEvidence;
     /** Optional known provenance when projecting from an identity rather than a snapshot. */
     readonly provenance?: ChangeProvenance;

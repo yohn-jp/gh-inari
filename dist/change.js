@@ -13,6 +13,7 @@ import { renderIssueArtifact, validateExistingIssueArtifact, validateExistingPul
 import { issueReferenceKey, normalizeIssueReference, } from "./contract/issue-reference.js";
 import { validateCanonicalContract } from "./contract/ir.js";
 import { parsePullRequestPolicyOverlay } from "./pr-policy.js";
+import { validateSemanticPullRequestMutationPlan, } from "./semantic-pr-projection.js";
 export const CHANGE_CONTRACT_VERSION = 1;
 export const CHANGE_STATES = Object.freeze([
     "DEFINED",
@@ -143,15 +144,32 @@ const PROJECTION_KEYS = new Set(["branch", "pullRequest"]);
 const CANONICAL_BRANCH_DERIVATION_KEYS = new Set(["change", "branchGovernance", "naming"]);
 const BRANCH_NAMING_KEYS = new Set(["type", "slug"]);
 const TRANSITION_REQUEST_KEYS = new Set(["version", "transition", "change", "target"]);
-const TRANSITION_TARGET_KEYS = new Set(["branchPlan", "branch", "baseBranch", "pullRequest"]);
+const TRANSITION_TARGET_KEYS = new Set([
+    "branchPlan",
+    "branch",
+    "baseBranch",
+    "pullRequest",
+    "semanticPullRequestPlan",
+]);
 const TRANSITION_PLAN_KEYS = new Set(["version", "request", "from", "to", "result", "effects"]);
-const EFFECT_KEYS = new Set(["kind", "branch", "baseBranch", "rootIssue", "title", "body", "draft", "pullRequest"]);
+const EFFECT_KEYS = new Set([
+    "kind",
+    "branch",
+    "baseBranch",
+    "rootIssue",
+    "title",
+    "body",
+    "draft",
+    "pullRequest",
+    "semanticPullRequestPlan",
+]);
 const CHANGE_PROJECTION_INPUT_KEYS = new Set([
     "change",
     "branchPlan",
     "branchGovernance",
     "naming",
     "baseBranch",
+    "semanticPullRequestPlan",
     "evidence",
     "provenance",
     "readyEvidence",
@@ -1490,6 +1508,7 @@ function validateTransitionTarget(input, path) {
     let branch;
     let baseBranch;
     let pullRequest;
+    let semanticPullRequestPlan;
     if (hasOwn(input, "branch")) {
         branch = validateTransitionBranch(input.branch, `${path}.branch`, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
     }
@@ -1520,6 +1539,9 @@ function validateTransitionTarget(input, path) {
             pullRequest = input.pullRequest;
         }
     }
+    if (hasOwn(input, "semanticPullRequestPlan")) {
+        semanticPullRequestPlan = validateSemanticPullRequestPlan(input.semanticPullRequestPlan, `${path}.semanticPullRequestPlan`, diagnostics);
+    }
     if (diagnostics.length > 0) {
         return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
     }
@@ -1530,9 +1552,43 @@ function validateTransitionTarget(input, path) {
             ...(branch === undefined ? {} : { branch }),
             ...(baseBranch === undefined ? {} : { baseBranch }),
             ...(pullRequest === undefined ? {} : { pullRequest }),
+            ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
         },
         diagnostics: [],
     };
+}
+function semanticPlanDiagnosticPath(path, violationPath) {
+    if (violationPath === "$" || violationPath.length === 0)
+        return path;
+    return `${path}${violationPath.startsWith("$") ? violationPath.slice(1) : `.${violationPath}`}`;
+}
+/** Validate a transported Semantic PR plan without making it a Change authority. */
+function validateSemanticPullRequestPlan(input, path, diagnostics) {
+    const result = validateSemanticPullRequestMutationPlan(input);
+    diagnostics.push(...result.violations.map((violation) => createChangeDiagnostic({
+        code: "CHANGE_INVALID_PLAN",
+        path: semanticPlanDiagnosticPath(path, violation.path),
+        message: violation.message,
+    })));
+    return result.plan;
+}
+/**
+ * The Change issuer is intentionally a narrow initial-Draft adapter.  Core
+ * still owns these fields; reject plans that require a later lifecycle or a
+ * relation transport the Change effect cannot prove.
+ */
+function validateSemanticPlanIssuanceCapabilities(plan, path, diagnostics) {
+    if (plan.desired.metadata.draft === false) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.desired.metadata.draft`, "A Change issuance Semantic PR plan must remain Draft.");
+    }
+    for (const key of ["milestone", "reviewers"]) {
+        if (Object.prototype.hasOwnProperty.call(plan.desired.metadata, key)) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.desired.metadata.${key}`, `The Change issuer cannot apply Semantic PR metadata "${key}" during issuance.`);
+        }
+    }
+    if (plan.desired.relations.implements.representation === "native") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.desired.relations.implements`, "The Change issuer cannot apply a native Semantic PR implements relation during issuance.");
+    }
 }
 function transitionRule(transition, state) {
     return CHANGE_TRANSITION_RULES.find((candidate) => candidate.transition === transition && candidate.from === state);
@@ -1574,6 +1630,21 @@ function validateTransitionSemantics(change, transition, target) {
             if (target.pullRequest !== undefined) {
                 reportTargetProblem(diagnostics, "$.target.pullRequest", "An issue transition cannot contain an already-created pull request.");
             }
+            if (target.semanticPullRequestPlan !== undefined) {
+                const desired = target.semanticPullRequestPlan.desired;
+                if (desired.head !== target.branch) {
+                    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_BRANCH_MISMATCH", "$.target.semanticPullRequestPlan.desired.head", "Semantic PR plan head must match the canonical Change branch.");
+                }
+                if (desired.base !== target.baseBranch) {
+                    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_BASE_MISMATCH", "$.target.semanticPullRequestPlan.desired.base", "Semantic PR plan base must match the canonical Change base branch.");
+                }
+                validateSemanticPlanIssuanceCapabilities(target.semanticPullRequestPlan, "$.target.semanticPullRequestPlan", diagnostics);
+                const repository = target.semanticPullRequestPlan.provenance.repository;
+                if (repository.host.toLocaleLowerCase("en-US") !== change.identity.repositoryHost ||
+                    repository.repositoryId !== change.identity.repositoryId) {
+                    addDiagnostic(diagnostics, "CHANGE_PROVENANCE_IDENTITY_MISMATCH", "$.target.semanticPullRequestPlan.provenance.repository", "Semantic PR plan repository identity must match the Change identity.");
+                }
+            }
         }
         if (diagnostics.length > 0) {
             return { diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
@@ -1583,8 +1654,14 @@ function validateTransitionSemantics(change, transition, target) {
             resolved: {
                 branch: target?.branch,
                 baseBranch: target?.baseBranch,
+                ...(target?.semanticPullRequestPlan === undefined
+                    ? {}
+                    : { semanticPullRequestPlan: target.semanticPullRequestPlan }),
             },
         };
+    }
+    if (target?.semanticPullRequestPlan !== undefined) {
+        reportTargetProblem(diagnostics, "$.target.semanticPullRequestPlan", `The ${transition} transition accepts a Semantic PR plan only for issue issuance.`);
     }
     if (target?.baseBranch !== undefined) {
         reportTargetProblem(diagnostics, "$.target.baseBranch", `The ${transition} transition does not accept a base branch target.`);
@@ -1679,7 +1756,13 @@ function resolvedTransitionTarget(request) {
     const target = request.target;
     const projection = request.change.projection;
     if (request.transition === "issue") {
-        return { branch: target?.branch, baseBranch: target?.baseBranch };
+        return {
+            branch: target?.branch,
+            baseBranch: target?.baseBranch,
+            ...(target?.semanticPullRequestPlan === undefined
+                ? {}
+                : { semanticPullRequestPlan: target.semanticPullRequestPlan }),
+        };
     }
     return {
         branch: target?.branch ?? projection?.branch,
@@ -1701,11 +1784,10 @@ function transitionResult(request, to) {
     };
 }
 /**
- * The initial Draft PR metadata is semantic Change data, not adapter policy.
- * Keep this payload intentionally small: implementation details and governed
- * PR fields are completed by the later Ready admission path.
+ * Explicit v1 compatibility payload used only when no Core PR plan is
+ * supplied. Converged issuance takes title/body from the validated plan.
  */
-function initialChangePullRequestPayload(rootIssue) {
+function initialChangePullRequestCompatibilityPayload(rootIssue) {
     return {
         title: `Change #${rootIssue}`,
         body: `Closes #${rootIssue}`,
@@ -1722,7 +1804,13 @@ function buildChangeTransitionPlan(request) {
         if (resolved.branch === undefined || resolved.baseBranch === undefined) {
             throw new Error("A valid issue request must resolve branch and base branch targets.");
         }
-        const pullRequestPayload = initialChangePullRequestPayload(request.change.identity.rootIssue);
+        const semanticPullRequestPlan = resolved.semanticPullRequestPlan;
+        const pullRequestPayload = semanticPullRequestPlan === undefined
+            ? initialChangePullRequestCompatibilityPayload(request.change.identity.rootIssue)
+            : {
+                title: semanticPullRequestPlan.desired.title,
+                body: semanticPullRequestPlan.desired.body,
+            };
         effects.push({
             kind: "CREATE_BRANCH",
             branch: resolved.branch,
@@ -1734,6 +1822,7 @@ function buildChangeTransitionPlan(request) {
             rootIssue: request.change.identity.rootIssue,
             ...pullRequestPayload,
             draft: true,
+            ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
         });
     }
     else if (request.transition === "ready") {
@@ -1871,13 +1960,25 @@ export function validateChangeEffect(input, path = "$") {
         return { valid: true, effect: { kind, branch, baseBranch }, diagnostics: [] };
     }
     if (kind === "CREATE_PULL_REQUEST") {
-        const allowed = new Set(["kind", "branch", "baseBranch", "rootIssue", "title", "body", "draft"]);
+        const allowed = new Set([
+            "kind",
+            "branch",
+            "baseBranch",
+            "rootIssue",
+            "title",
+            "body",
+            "draft",
+            "semanticPullRequestPlan",
+        ]);
         rejectEffectProperties(input, allowed, path, diagnostics);
         const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
         const baseBranch = requiredEffectBranch(input, "baseBranch", path, MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
         const rootIssue = requiredEffectNumber(input, "rootIssue", path, diagnostics);
         const title = requiredEffectText(input, "title", path, MAX_CHANGE_PR_TITLE_LENGTH, false, diagnostics);
         const body = requiredEffectText(input, "body", path, MAX_CHANGE_PR_BODY_LENGTH, true, diagnostics);
+        const semanticPullRequestPlan = hasOwn(input, "semanticPullRequestPlan")
+            ? validateSemanticPullRequestPlan(input.semanticPullRequestPlan, `${path}.semanticPullRequestPlan`, diagnostics)
+            : undefined;
         if (!hasOwn(input, "draft") || input.draft !== true) {
             addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", `${path}.draft`, "Create pull request effects must be draft.");
         }
@@ -1889,7 +1990,34 @@ export function validateChangeEffect(input, path = "$") {
             body === undefined) {
             return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
         }
-        return { valid: true, effect: { kind, branch, baseBranch, rootIssue, title, body, draft: true }, diagnostics: [] };
+        if (semanticPullRequestPlan !== undefined) {
+            if (semanticPullRequestPlan.desired.head !== branch) {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.semanticPullRequestPlan.desired.head`, "Semantic PR plan head must match the effect branch.");
+            }
+            if (semanticPullRequestPlan.desired.base !== baseBranch) {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.semanticPullRequestPlan.desired.base`, "Semantic PR plan base must match the effect base branch.");
+            }
+            if (semanticPullRequestPlan.desired.title !== title || semanticPullRequestPlan.desired.body !== body) {
+                addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.semanticPullRequestPlan.desired`, "Effect title and body must be the Semantic PR plan desired projection.");
+            }
+            validateSemanticPlanIssuanceCapabilities(semanticPullRequestPlan, `${path}.semanticPullRequestPlan`, diagnostics);
+        }
+        if (diagnostics.length > 0)
+            return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+        return {
+            valid: true,
+            effect: {
+                kind,
+                branch,
+                baseBranch,
+                rootIssue,
+                title,
+                body,
+                draft: true,
+                ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
+            },
+            diagnostics: [],
+        };
     }
     if (kind === "DELETE_BRANCH") {
         const allowed = new Set(["kind", "branch"]);
@@ -2193,7 +2321,7 @@ function buildChangeIssuanceVerification(result, canonicalBranch, canonicalBaseB
         },
     };
 }
-function buildChangeIssuancePlan(projection, branchPlan) {
+function buildChangeIssuancePlan(projection, branchPlan, semanticPullRequestPlan) {
     if ((projection.status !== "absent" && projection.status !== "healthy") ||
         !projection.valid ||
         projection.change === undefined ||
@@ -2217,6 +2345,7 @@ function buildChangeIssuancePlan(projection, branchPlan) {
                 ...(branchPlan === undefined ? {} : { branchPlan }),
                 branch: projection.canonicalBranch,
                 baseBranch: projection.canonicalBaseBranch,
+                ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
             },
         });
         return {
@@ -2269,6 +2398,14 @@ function issuanceFailureDiagnostics(projection) {
  * credentials, or any effect executor.
  */
 export function planChangeIssuance(input) {
+    let semanticPullRequestPlan;
+    if (isRecord(input) && hasOwn(input, "semanticPullRequestPlan")) {
+        const planDiagnostics = [];
+        semanticPullRequestPlan = validateSemanticPullRequestPlan(input.semanticPullRequestPlan, "$.semanticPullRequestPlan", planDiagnostics);
+        if (planDiagnostics.length > 0 || semanticPullRequestPlan === undefined) {
+            throw new ChangeIssuanceValidationError(createChangeDiagnosticReport(planDiagnostics).diagnostics);
+        }
+    }
     if (isRecord(input) && hasOwn(input, "governedIssue")) {
         const candidate = input.change;
         const rawIdentity = isRecord(candidate) && hasOwn(candidate, "identity") ? candidate.identity : candidate;
@@ -2293,7 +2430,7 @@ export function planChangeIssuance(input) {
     const branchPlan = isRecord(input) && hasOwn(input, "branchPlan")
         ? validateConsumedSemanticBranchPlan(input.branchPlan, [])
         : undefined;
-    const plan = buildChangeIssuancePlan(projection, branchPlan);
+    const plan = buildChangeIssuancePlan(projection, branchPlan, semanticPullRequestPlan);
     const result = validateChangeIssuancePlan(plan);
     if (!result.valid || result.plan === undefined)
         throw new ChangeIssuanceValidationError(result.diagnostics);
@@ -2417,6 +2554,7 @@ export function validateChangeIssuancePlan(input) {
             state: "DEFINED",
             provenance: resultChange.provenance,
         };
+        const semanticPullRequestPlan = effects.find((effect) => effect.kind === "CREATE_PULL_REQUEST")?.semanticPullRequestPlan;
         let expectedTransition;
         try {
             expectedTransition = planChangeTransition({
@@ -2426,6 +2564,7 @@ export function validateChangeIssuancePlan(input) {
                 target: {
                     branch: verification.canonicalBranch,
                     baseBranch: verification.canonicalBaseBranch,
+                    ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
                 },
             });
         }

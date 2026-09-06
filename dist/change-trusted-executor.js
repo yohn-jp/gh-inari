@@ -350,6 +350,14 @@ export class TrustedChangeExecutor {
                 diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.governedIssue.contract.provenance.treeSha", "The validated root Issue governance generation changed before issuance."),
             ]);
         }
+        const semanticPullRequestPlan = freshInput.semanticPullRequestPlan;
+        if (semanticPullRequestPlan !== undefined &&
+            (freshInput.governedIssue?.contract.provenance?.treeSha === undefined ||
+                semanticPullRequestPlan.generation.treeSha !== freshInput.governedIssue.contract.provenance.treeSha)) {
+            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Semantic PR plan generation changed before Change issuance planning.", [
+                diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.semanticPullRequestPlan.generation.treeSha", "The Semantic PR plan generation does not match the trusted repository generation."),
+            ]);
+        }
         const plannedInput = freshInput;
         const plan = planChangeIssuance(issueProjectionInput(plannedInput, request.requester));
         if (plan.mode === "return-existing") {

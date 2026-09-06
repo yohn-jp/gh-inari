@@ -10,6 +10,7 @@ import {
 
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
+const MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES = 1_048_576;
 
 export const CHANGE_REMOTE_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
 export type ChangeRemoteMutation = (typeof CHANGE_REMOTE_MUTATIONS)[number];
@@ -39,6 +40,8 @@ interface ChangeRemoteRequestBase {
 
 export interface ChangeRemoteMutationRequest extends ChangeRemoteRequestBase {
   readonly operation: ChangeRemoteMutation;
+  /** Core-produced PR plan; validated again inside trusted execution. */
+  readonly semanticPullRequestPlan?: unknown;
 }
 
 export interface ChangeRemoteReadRequest extends ChangeRemoteRequestBase {
@@ -165,6 +168,32 @@ function validateRequest(
       "A Change request requester identity is invalid.",
       { issue: request.issue },
     );
+  }
+  if (request.operation !== "show" && request.semanticPullRequestPlan !== undefined) {
+    if (request.operation !== "issue") {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "A Semantic PR plan is accepted only for Change issuance.",
+        { issue: request.issue },
+      );
+    }
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(request.semanticPullRequestPlan);
+    } catch {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "A Semantic PR plan must be JSON-serializable.",
+        { issue: request.issue },
+      );
+    }
+    if (serialized === undefined || serialized.length > MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES) {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "A Semantic PR plan exceeds the bounded request size.",
+        { issue: request.issue },
+      );
+    }
   }
   if (request.operation !== "show") assertMutation(request.operation);
   return request;
@@ -350,12 +379,14 @@ export function changeRemoteMutationRequest(
   operation: ChangeRemoteMutation,
   issue: number,
   requester?: string,
+  semanticPullRequestPlan?: unknown,
 ): ChangeRemoteMutationRequest {
   const request: ChangeRemoteMutationRequest = {
     version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
     operation,
     issue,
     ...(requester === undefined ? {} : { requester }),
+    ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
   };
   validateRequest(request);
   return request;

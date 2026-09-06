@@ -74,6 +74,11 @@ export interface GitHubActionsEvidenceReaderOptions {
     readonly transport: GitHubChangeEffectTransport;
     /** Trusted checkout containing the repository's default-branch governance. */
     readonly cwd?: string;
+    /**
+     * Core-produced PR plan supplied by the semantic preparation boundary.
+     * Omitted only while the explicit v1 Change payload remains in compatibility mode.
+     */
+    readonly semanticPullRequestPlan?: unknown;
 }
 /** Converts only bounded GitHub fields into the #213 Core evidence contract. */
 export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader {

@@ -376,7 +376,12 @@ function decodeUtf8(bytes: Uint8Array): string {
 }
 
 function canonicalMutationRequest(request: ChangeRemoteMutationRequest): ChangeRemoteMutationRequest {
-  return changeRemoteMutationRequest(request.operation, request.issue, request.requester);
+  return changeRemoteMutationRequest(
+    request.operation,
+    request.issue,
+    request.requester,
+    request.semanticPullRequestPlan,
+  );
 }
 
 function isNewRun(run: WorkflowRun, baseline: ReadonlySet<number>): boolean {
@@ -462,7 +467,7 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
         throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
       }
     }
-    return changeRemoteMutationRequest(request.operation, request.issue, requester);
+    return changeRemoteMutationRequest(request.operation, request.issue, requester, request.semanticPullRequestPlan);
   }
 
   private async dispatchAndCollect(
@@ -492,6 +497,9 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
       operation: request.operation,
       issue: request.issue,
       ...(request.requester === undefined ? {} : { requester: request.requester }),
+      ...(request.operation === "show" || request.semanticPullRequestPlan === undefined
+        ? {}
+        : { semanticPullRequestPlan: request.semanticPullRequestPlan }),
     };
     try {
       await this.#api.requestActionsApi(dispatchPath(), "POST", {

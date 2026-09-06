@@ -20,6 +20,7 @@ import { InariIssuerAppAuthority, assertTrustedExecution, TRUSTED_EXECUTION_EVEN
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
+import { validateSemanticPullRequestMutationPlan, } from "../semantic-pr-projection.js";
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_PULL_REQUESTS = 100;
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"];
@@ -513,6 +514,15 @@ export class GitHubActionsEvidenceReader {
         const readyEvidence = request.operation === "ready"
             ? await this.readReadyEvidence(baseBranch, issueBody, pullRequests, canonicalBranch)
             : undefined;
+        let semanticPullRequestPlan;
+        if (this.#options.semanticPullRequestPlan !== undefined) {
+            if (request.operation !== "issue")
+                throw new GitHubActionsChangeExecutorError();
+            const result = validateSemanticPullRequestMutationPlan(this.#options.semanticPullRequestPlan);
+            if (!result.valid || result.plan === undefined)
+                throw new GitHubActionsChangeExecutorError();
+            semanticPullRequestPlan = result.plan;
+        }
         return {
             change: this.#options.identity,
             branchGovernance: this.#options.branchGovernance,
@@ -525,6 +535,7 @@ export class GitHubActionsEvidenceReader {
             },
             ...(governedIssue === undefined ? {} : { governedIssue }),
             ...(readyEvidence === undefined ? {} : { readyEvidence }),
+            ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
         };
     }
     async readReadyEvidence(baseBranch, issueBody, pullRequests, branch) {
@@ -1060,6 +1071,9 @@ export async function createGitHubActionsChangeExecutor(options) {
         branchGovernance,
         transport: readTransport,
         cwd: options.cwd,
+        ...(options.request.operation !== "issue" || options.request.semanticPullRequestPlan === undefined
+            ? {}
+            : { semanticPullRequestPlan: options.request.semanticPullRequestPlan }),
     });
     if (options.request.operation === "show") {
         return {
@@ -1158,7 +1172,7 @@ export async function runGitHubActionsChangeExecutor(environment = process.env, 
             throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
         }
         const requestRecord = requestValue;
-        const allowedRequestKeys = new Set(["version", "operation", "issue", "requester"]);
+        const allowedRequestKeys = new Set(["version", "operation", "issue", "requester", "semanticPullRequestPlan"]);
         if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
             throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
         }
@@ -1173,10 +1187,13 @@ export async function runGitHubActionsChangeExecutor(environment = process.env, 
         if (requestRecord.operation !== "show" && !["issue", "ready", "abort"].includes(requestRecord.operation)) {
             throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
         }
+        if (requestRecord.semanticPullRequestPlan !== undefined && requestRecord.operation !== "issue") {
+            throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+        }
         const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
         const request = requestRecord.operation === "show"
             ? changeRemoteReadRequest(requestRecord.issue, requester)
-            : changeRemoteMutationRequest(requestRecord.operation, requestRecord.issue, requester);
+            : changeRemoteMutationRequest(requestRecord.operation, requestRecord.issue, requester, requestRecord.semanticPullRequestPlan);
         const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
         const result = request.operation === "show" ? await executor.read(request) : await executor.execute(request);
         process.stdout.write(`${JSON.stringify(result)}\n`);
