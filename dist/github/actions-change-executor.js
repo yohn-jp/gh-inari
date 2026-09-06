@@ -7,7 +7,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash, createSign } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import path from "node:path";
 import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, projectChangeFromGitHubEvidence, validateGovernedRootIssueEvidence, } from "../change.js";
 import { extractTemplateIdentityMarker, renderIssueArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, } from "../artifact.js";
@@ -881,9 +882,12 @@ export async function loadBranchGovernance(cwd) {
     try {
         for (const policyPath of POLICY_PATHS) {
             const filePath = path.join(cwd, policyPath);
-            let file;
+            // O_NOFOLLOW pins the candidate to a single filesystem object: the open
+            // itself fails on a symlinked final path element, so there is no window
+            // between a link check and the read where the path can be swapped.
+            let handle;
             try {
-                file = await lstat(filePath);
+                handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
             }
             catch (error) {
                 // A fallback is safe only when the candidate path itself is absent.
@@ -891,23 +895,20 @@ export async function loadBranchGovernance(cwd) {
                     continue;
                 throw new GitHubActionsChangeExecutorError();
             }
-            // Repository policy is a regular file authority. Do not follow a
-            // symlink or reinterpret another filesystem object as absence.
-            if (file.isSymbolicLink() || !file.isFile()) {
-                throw new GitHubActionsChangeExecutorError();
-            }
-            let source;
             try {
-                source = await readFile(filePath, "utf8");
+                // Repository policy is a regular file authority; the descriptor above
+                // already excludes a symlinked final path element.
+                const stats = await handle.stat();
+                if (!stats.isFile())
+                    throw new GitHubActionsChangeExecutorError();
+                const source = await handle.readFile("utf8");
+                const overlay = parsePullRequestPolicyOverlay(source);
+                // A repository-native policy with no branch rule declares no branch precondition.
+                return overlay.branch;
             }
-            catch {
-                // The path was present above; a read failure must never select a
-                // lower-precedence policy, including an ENOENT caused by a race.
-                throw new GitHubActionsChangeExecutorError();
+            finally {
+                await handle.close();
             }
-            const overlay = parsePullRequestPolicyOverlay(source);
-            // A repository-native policy with no branch rule declares no branch precondition.
-            return overlay.branch;
         }
         throw new GitHubActionsChangeExecutorError();
     }
