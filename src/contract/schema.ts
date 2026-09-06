@@ -20,7 +20,7 @@ export interface JsonSchema {
   readonly $id?: string;
   readonly title?: string;
   readonly description?: string;
-  readonly type?: "object" | "string" | "array" | "boolean";
+  readonly type?: "object" | "string" | "array" | "boolean" | "number" | "integer";
   readonly properties?: Readonly<Record<string, JsonSchema>>;
   readonly required?: readonly string[];
   readonly additionalProperties?: boolean;
@@ -32,6 +32,8 @@ export interface JsonSchema {
   readonly maxItems?: number;
   readonly minLength?: number;
   readonly maxLength?: number;
+  readonly minimum?: number;
+  readonly maximum?: number;
   readonly pattern?: string;
   readonly default?: JsonSchemaPrimitive | readonly JsonSchemaPrimitive[];
   readonly allOf?: readonly JsonSchema[];
