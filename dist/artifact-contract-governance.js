@@ -36,8 +36,8 @@ export class ArtifactContractResolutionError extends Error {
  * location/selector policy: `.github/inari/pull-request.json` and
  * `.github/inari/pull-requests/<id>.json` are the only recognized sources.
  */
-async function selectCanonIdentity(tree, selector, context, ref) {
-    const candidates = createRemoteSemanticIdentities(tree).filter((identity) => identity.kind === "pull_request");
+async function selectCanonIdentity(tree, kind, selector, context, ref) {
+    const candidates = createRemoteSemanticIdentities(tree).filter((identity) => identity.kind === kind);
     try {
         return await resolveTemplate({
             candidates: candidates.map(semanticTemplateResolutionCandidate),
@@ -88,7 +88,7 @@ function sourceProvenance(context, ref, treeSha, entry, source) {
         },
     };
 }
-function parseCanonSource(source, path) {
+function parseCanonSource(source, path, kind) {
     let raw;
     try {
         raw = JSON.parse(source);
@@ -98,8 +98,8 @@ function parseCanonSource(source, path) {
     }
     try {
         const contract = parseArtifactContract(raw);
-        if (contract.kind !== "pull_request") {
-            throw new ArtifactContractResolutionError("ARTIFACT_CONTRACT_KIND_INVALID", "$.kind", `Artifact Contract Canon "${path}" must declare kind "pull_request".`, { kind: contract.kind });
+        if (contract.kind !== kind) {
+            throw new ArtifactContractResolutionError("ARTIFACT_CONTRACT_KIND_INVALID", "$.kind", `Artifact Contract Canon "${path}" must declare kind "${kind}".`, { kind: contract.kind });
         }
         return contract;
     }
@@ -117,15 +117,23 @@ function parseCanonSource(source, path) {
  * Artifact Contract.  All repository identity and generation fields come
  * from the adapter's default-branch/tree/blob reads.
  */
-export async function compileRepositoryEffectivePullRequestContract(adapter, selector, options = {}) {
+export async function compileRepositoryEffectiveArtifactContract(adapter, kind, selector, options = {}) {
     const context = await adapter.resolveRepositoryContext();
     const ref = await adapter.getRepositoryDefaultBranch();
     const tree = await adapter.getRepositoryTree(ref);
-    const identity = await selectCanonIdentity(tree.entries, selector, context, ref);
+    const identity = await selectCanonIdentity(tree.entries, kind, selector, context, ref);
     const entry = findCanonEntry(tree.entries, identity, context, ref);
     const source = await adapter.getRepositoryBlob(entry.sha);
-    const contract = parseCanonSource(source, entry.path);
+    const contract = parseCanonSource(source, entry.path, kind);
     const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
     return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
+}
+/** Resolve the authoritative pull-request Canon through the shared adapter boundary. */
+export async function compileRepositoryEffectivePullRequestContract(adapter, selector, options = {}) {
+    return compileRepositoryEffectiveArtifactContract(adapter, "pull_request", selector, options);
+}
+/** Resolve the authoritative Issue Canon through the shared adapter boundary. */
+export async function compileRepositoryEffectiveIssueContract(adapter, selector, options = {}) {
+    return compileRepositoryEffectiveArtifactContract(adapter, "issue", selector, options);
 }
 //# sourceMappingURL=artifact-contract-governance.js.map

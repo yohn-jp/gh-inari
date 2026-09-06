@@ -25,6 +25,8 @@ import { createRemoteSemanticIdentities } from "./governance.js";
 import type { SemanticTemplateIdentity } from "./semantic-template.js";
 import { resolveTemplate, semanticTemplateResolutionCandidate, TemplateResolutionError } from "./template-resolver.js";
 
+export type RepositoryEffectiveArtifactKind = "issue" | "pull_request";
+
 export type ArtifactContractResolutionErrorCode =
   | "ARTIFACT_CONTRACT_NOT_FOUND"
   | "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS"
@@ -73,11 +75,12 @@ export interface RepositoryEffectiveArtifactContractOptions {
  */
 async function selectCanonIdentity(
   tree: readonly RepositoryTreeEntry[],
+  kind: RepositoryEffectiveArtifactKind,
   selector: string | undefined,
   context: RepositoryContext,
   ref: string,
 ): Promise<SemanticTemplateIdentity> {
-  const candidates = createRemoteSemanticIdentities(tree).filter((identity) => identity.kind === "pull_request");
+  const candidates = createRemoteSemanticIdentities(tree).filter((identity) => identity.kind === kind);
   try {
     return await resolveTemplate({
       candidates: candidates.map(semanticTemplateResolutionCandidate),
@@ -155,7 +158,7 @@ function sourceProvenance(
   };
 }
 
-function parseCanonSource(source: string, path: string): ArtifactContract {
+function parseCanonSource(source: string, path: string, kind: RepositoryEffectiveArtifactKind): ArtifactContract {
   let raw: unknown;
   try {
     raw = JSON.parse(source) as unknown;
@@ -169,11 +172,11 @@ function parseCanonSource(source: string, path: string): ArtifactContract {
   }
   try {
     const contract = parseArtifactContract(raw);
-    if (contract.kind !== "pull_request") {
+    if (contract.kind !== kind) {
       throw new ArtifactContractResolutionError(
         "ARTIFACT_CONTRACT_KIND_INVALID",
         "$.kind",
-        `Artifact Contract Canon "${path}" must declare kind "pull_request".`,
+        `Artifact Contract Canon "${path}" must declare kind "${kind}".`,
         { kind: contract.kind },
       );
     }
@@ -203,18 +206,37 @@ function parseCanonSource(source: string, path: string): ArtifactContract {
  * Artifact Contract.  All repository identity and generation fields come
  * from the adapter's default-branch/tree/blob reads.
  */
-export async function compileRepositoryEffectivePullRequestContract(
+export async function compileRepositoryEffectiveArtifactContract(
   adapter: GitHubAdapter,
+  kind: RepositoryEffectiveArtifactKind,
   selector?: string,
   options: RepositoryEffectiveArtifactContractOptions = {},
 ): Promise<EffectiveArtifactContract> {
   const context = await adapter.resolveRepositoryContext();
   const ref = await adapter.getRepositoryDefaultBranch();
   const tree = await adapter.getRepositoryTree(ref);
-  const identity = await selectCanonIdentity(tree.entries, selector, context, ref);
+  const identity = await selectCanonIdentity(tree.entries, kind, selector, context, ref);
   const entry = findCanonEntry(tree.entries, identity, context, ref);
   const source = await adapter.getRepositoryBlob(entry.sha);
-  const contract = parseCanonSource(source, entry.path);
+  const contract = parseCanonSource(source, entry.path, kind);
   const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
   return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
+}
+
+/** Resolve the authoritative pull-request Canon through the shared adapter boundary. */
+export async function compileRepositoryEffectivePullRequestContract(
+  adapter: GitHubAdapter,
+  selector?: string,
+  options: RepositoryEffectiveArtifactContractOptions = {},
+): Promise<EffectiveArtifactContract> {
+  return compileRepositoryEffectiveArtifactContract(adapter, "pull_request", selector, options);
+}
+
+/** Resolve the authoritative Issue Canon through the shared adapter boundary. */
+export async function compileRepositoryEffectiveIssueContract(
+  adapter: GitHubAdapter,
+  selector?: string,
+  options: RepositoryEffectiveArtifactContractOptions = {},
+): Promise<EffectiveArtifactContract> {
+  return compileRepositoryEffectiveArtifactContract(adapter, "issue", selector, options);
 }

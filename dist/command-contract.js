@@ -77,7 +77,7 @@ export const COMMAND_OPTIONS = {
     draft: option("draft", "draft", ["--draft"], "boolean", "none", "Create the PR as a draft."),
     maintainerCanModify: option("maintainerCanModify", "maintainer-can-modify", ["--maintainer-can-modify"], "boolean", "none", "Allow maintainer edits on the PR."),
     rawBody: option("rawBody", "body", ["--body", "--body-file", "-b", "-F"], "raw-input", "required", "Upstream gh raw Markdown input; rejected for governed create operations.", "value"),
-    capability: option("capability", "capability", ["--capability"], "string", "required", "Declared target capability for Core PR projection; repeat for multiple capabilities.", "id", true),
+    capability: option("capability", "capability", ["--capability"], "string", "required", "Declared target capability for Core semantic projection; repeat for multiple capabilities.", "id", true),
 };
 const COMMAND_OPTIONS_BY_ID = COMMAND_OPTIONS;
 const command = (id, domain, operation, path, summary, optionIds, positionalSyntax, argumentExample) => ({
@@ -107,7 +107,14 @@ export const INARI_COMMANDS = [
         "minimumVersion",
     ]),
     command("issue.schema", "issue", "schema", ["issue", "schema"], "Print the selected Issue template's semantic and metadata schema.", [...ARTIFACT_OPTIONS, "compact"], "[template]"),
+    command("issue.contract", "issue", "contract", ["issue", "contract"], "Resolve and print the Core Effective Issue Artifact Contract and caller input schema.", ["help", "json", "template", "repository", "capability"], "[template]"),
     command("issue.validate", "issue", "validate", ["issue", "validate"], "Validate local or existing Issue input against its selected contract.", [...LOCAL_ARTIFACT_INPUT_OPTIONS], "[<number>]"),
+    command("issue.materialize", "issue", "materialize", ["issue", "materialize"], "Materialize semantic Issue input through the Core Effective Contract.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("issue.plan", "issue", "plan", ["issue", "plan"], "Preview the deterministic Core Issue Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("issue.semantic.schema", "issue", "semantic-schema", ["issue", "semantic", "schema"], "Resolve and print the Core Effective Issue Artifact Contract and caller input schema.", ["help", "json", "template", "repository", "capability"], "[template]"),
+    command("issue.semantic.validate", "issue", "semantic-validate", ["issue", "semantic", "validate"], "Validate and materialize semantic Issue input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("issue.semantic.materialize", "issue", "semantic-materialize", ["issue", "semantic", "materialize"], "Materialize semantic Issue input through Core.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
+    command("issue.semantic.plan", "issue", "semantic-plan", ["issue", "semantic", "plan"], "Preview the deterministic Core Issue Mutation Plan without GitHub mutation.", ["help", "json", "template", "repository", "from", "capability"], "[template]"),
     command("issue.render", "issue", "render", ["issue", "render"], "Render validated Issue input into canonical Markdown.", [...LOCAL_ARTIFACT_INPUT_OPTIONS]),
     command("issue.create", "issue", "create", ["issue", "create"], "Validate, render, and create a governed Issue.", ISSUE_CREATE_OPTIONS),
     command("issue.explain", "issue", "explain", ["issue", "explain"], "Explain the governance state of an existing Issue.", [...EXISTING_OPTIONS], "<number>"),
