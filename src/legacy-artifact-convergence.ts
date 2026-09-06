@@ -241,7 +241,7 @@ function linkedIssueReferenceFromText(
   const trimmed = value.trim();
   // Only the complete, reserved closing-reference form is accepted. In
   // particular, this does not search arbitrary prose for a number.
-  const match = /^(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+(.+)$/iu.exec(trimmed);
+  const match = /^(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+(\S.*)$/iu.exec(trimmed);
   if (match === null) {
     return {
       diagnostics: [
