@@ -83,6 +83,61 @@ function governanceResponses(
   ];
 }
 
+function semanticGovernanceResponses(
+  sourceInput: Record<string, unknown>,
+  sourcePath: string,
+  generatedPath: string,
+  sourceSha = "semantic-sha",
+  nativeSha = "native-sha",
+  nativeSource?: string,
+  treeSha = "tree-sha-a",
+): { readonly responses: GhCommandResult[]; readonly expectedNative: string; readonly source: string } {
+  const source = JSON.stringify(sourceInput);
+  const normalized = normalizeSemanticTemplate(sourceInput, sourcePath);
+  const expectedNative = renderSemanticNative(normalized, generatedPath);
+  return {
+    source,
+    expectedNative,
+    responses: [
+      command("gh version 2.0"),
+      command(),
+      command("100000200\n"),
+      command(JSON.stringify({ default_branch: "main" })),
+      command(
+        JSON.stringify({
+          sha: treeSha,
+          truncated: false,
+          tree: [
+            { path: sourcePath, type: "blob", sha: sourceSha },
+            { path: generatedPath, type: "blob", sha: nativeSha },
+          ],
+        }),
+      ),
+      blobResponse(sourceSha, source),
+      blobResponse(nativeSha, nativeSource ?? expectedNative),
+    ],
+  };
+}
+
+function semanticTreeResponse(
+  treeSha: string,
+  sourcePath: string,
+  sourceSha: string,
+  generatedPath: string,
+  nativeSha: string,
+): GhCommandResult {
+  return command(
+    JSON.stringify({
+      sha: treeSha,
+      truncated: false,
+      tree: [
+        { path: sourcePath, type: "blob", sha: sourceSha },
+        { path: generatedPath, type: "blob", sha: nativeSha },
+      ],
+    }),
+  );
+}
+
 function adapterFor(responses: GhCommandResult[], cwd: string, repository = "acme/repository-b"): GitHubAdapter {
   return new GitHubAdapter({ cwd, repository, transport: new StubGovernanceTransport(responses) });
 }
@@ -686,7 +741,215 @@ test("compileRepositoryGovernedContract succeeds for a repository governed by .g
   assert.equal(contract.templateIdentity.path, generatedPath);
   assert.equal(contract.provenance?.template.path, generatedPath);
   assert.equal(contract.provenance?.template.sha, "native-sha");
+  assert.equal(contract.provenance?.semanticSource?.path, ".github/inari/issues/bug.json");
+  assert.equal(contract.provenance?.semanticSource?.sha, "semantic-sha");
+  assert.equal(
+    contract.provenance?.semanticSource?.digest,
+    createHash("sha256").update(JSON.stringify(semanticSource)).digest("hex"),
+  );
   assert.doesNotThrow(() => deserializeCanonicalContract(serializeCanonicalContract(contract)));
+});
+
+test("remote semantic pull-request governance requires its exact generated projection", async () => {
+  const source = {
+    version: 1,
+    kind: "pull_request",
+    id: "pull-request",
+    name: "Pull request",
+    sections: [{ id: "summary", kind: "input", type: "string", label: "Summary", placeholder: "Describe" }],
+  };
+  const generatedPath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const fixture = semanticGovernanceResponses(source, ".github/inari/pull-request.json", generatedPath);
+  const contract = await compileRepositoryGovernedContract(
+    new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(fixture.responses) }),
+    "pr",
+    "pull-request",
+  );
+
+  assert.equal(contract.templateIdentity.path, generatedPath);
+  assert.equal(contract.provenance?.template.sha, "native-sha");
+  assert.equal(contract.provenance?.semanticSource?.path, ".github/inari/pull-request.json");
+  assert.equal(contract.provenance?.semanticSource?.sha, "semantic-sha");
+});
+
+test("remote semantic governance rejects a divergent generated native projection with a bounded diagnostic", async () => {
+  const source = {
+    version: 1,
+    kind: "issue",
+    id: "bug",
+    name: "Bug",
+    description: "Reproducible defect",
+    sections: [{ id: "summary", kind: "input", type: "textarea", label: "Summary", required: true }],
+  };
+  const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
+  const fixture = semanticGovernanceResponses(
+    source,
+    ".github/inari/issues/bug.json",
+    generatedPath,
+    "semantic-sha",
+    "native-sha",
+    `${semanticGovernanceResponses(source, ".github/inari/issues/bug.json", generatedPath).expectedNative}stale\n`,
+  );
+  await assert.rejects(
+    compileRepositoryGovernedContract(
+      new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(fixture.responses) }),
+      "issue",
+      "bug",
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof GovernanceError);
+      assert.equal(error.code, "GOVERNANCE_SOURCE_INVALID");
+      assert.equal(error.details.path, generatedPath);
+      assert.equal(
+        error.details.reason,
+        "generated native projection does not match the deterministic semantic source projection",
+      );
+      assert.ok(error.message.length < 300);
+      return true;
+    },
+  );
+});
+
+test("remote semantic governance rejects a missing generated native projection", async () => {
+  const source = {
+    version: 1,
+    kind: "pull_request",
+    id: "pull-request",
+    name: "Pull request",
+    sections: [{ id: "summary", kind: "input", type: "string", label: "Summary" }],
+  };
+  const sourcePath = ".github/inari/pull-request.json";
+  const generatedPath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const serialized = JSON.stringify(source);
+  const responses = [
+    command("gh version 2.0"),
+    command(),
+    command("100000200\n"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: "tree-sha-a",
+        truncated: false,
+        tree: [{ path: sourcePath, type: "blob", sha: "semantic-sha" }],
+      }),
+    ),
+    blobResponse("semantic-sha", serialized),
+  ];
+  await assert.rejects(
+    compileRepositoryGovernedContract(
+      new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(responses) }),
+      "pr",
+      "pull-request",
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof GovernanceError);
+      assert.equal(error.code, "GOVERNANCE_SOURCE_INVALID");
+      assert.equal(error.details.path, generatedPath);
+      assert.equal(error.details.reason, "missing or non-file source");
+      return true;
+    },
+  );
+});
+
+test("semantic-only drift fails the Issue mutation freshness gate", async () => {
+  const source = {
+    version: 1,
+    kind: "issue",
+    id: "bug",
+    name: "Bug",
+    description: "Reproducible defect",
+    sections: [{ id: "summary", kind: "input", type: "textarea", label: "Summary", required: true }],
+  };
+  const sourcePath = ".github/inari/issues/bug.json";
+  const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
+  const fixture = semanticGovernanceResponses(source, sourcePath, generatedPath);
+  const transport = new StubGovernanceTransport([
+    ...fixture.responses,
+    command(JSON.stringify({ default_branch: "main" })),
+    semanticTreeResponse("tree-sha-b", sourcePath, "semantic-sha-new", generatedPath, "native-sha"),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "bug");
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { summary: "value" },
+    metadata: { title: "Bug" },
+  }).artifact;
+  await assert.rejects(createGovernedIssue(adapter, prepared), (error: unknown) => {
+    assert.ok(error instanceof GovernanceError);
+    assert.equal(error.code, "GOVERNANCE_GENERATION_STALE");
+    assert.equal(error.details.reason, "semantic source governance input changed");
+    return true;
+  });
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("native-only drift fails the pull-request mutation freshness gate", async () => {
+  const source = {
+    version: 1,
+    kind: "pull_request",
+    id: "pull-request",
+    name: "Pull request",
+    sections: [{ id: "summary", kind: "input", type: "string", label: "Summary" }],
+  };
+  const sourcePath = ".github/inari/pull-request.json";
+  const generatedPath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const fixture = semanticGovernanceResponses(source, sourcePath, generatedPath);
+  const transport = new StubGovernanceTransport([
+    ...fixture.responses,
+    command(JSON.stringify({ default_branch: "main" })),
+    semanticTreeResponse("tree-sha-b", sourcePath, "semantic-sha", generatedPath, "native-sha-new"),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "pr", "pull-request");
+  const prepared = preparePullRequestArtifact(contract, {
+    fields: { summary: "value" },
+    metadata: { title: "PR", head: "feature", base: "main" },
+  }).artifact;
+
+  await assert.rejects(createGovernedPullRequest(adapter, prepared), (error: unknown) => {
+    assert.ok(error instanceof GovernanceError);
+    assert.equal(error.code, "GOVERNANCE_GENERATION_STALE");
+    assert.equal(error.details.reason, "template governance input changed");
+    return true;
+  });
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("synchronized semantic source and native projection changes compile as one valid generation", async () => {
+  const source = {
+    version: 1,
+    kind: "issue",
+    id: "bug",
+    name: "Bug v2",
+    description: "Reproducible defect",
+    sections: [{ id: "summary", kind: "input", type: "textarea", label: "Summary v2", required: true }],
+  };
+  const sourcePath = ".github/inari/issues/bug.json";
+  const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
+  const fixture = semanticGovernanceResponses(
+    source,
+    sourcePath,
+    generatedPath,
+    "semantic-sha-v2",
+    "native-sha-v2",
+    undefined,
+    "tree-sha-v2",
+  );
+  const contract = await compileRepositoryGovernedContract(
+    new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(fixture.responses) }),
+    "issue",
+    "bug",
+  );
+
+  assert.equal(contract.provenance?.treeSha, "tree-sha-v2");
+  assert.equal(contract.provenance?.semanticSource?.sha, "semantic-sha-v2");
+  assert.equal(contract.provenance?.template.sha, "native-sha-v2");
 });
 
 test("arbitrary policy overrides are rejected for governed operations", () => {
