@@ -120,14 +120,32 @@ function parseReference(raw) {
     const separator = raw.indexOf(".");
     return separator === -1 ? { name: raw } : { name: raw.slice(0, separator), member: raw.slice(separator + 1) };
 }
-/** Extracts `{name}` / `{name.member}` placeholder bodies, or `undefined` for unbalanced braces. */
-function extractPlaceholders(template) {
+/**
+ * Parses a format template into the exact literal/reference sequence used by
+ * later materialization.  This is deliberately kept beside the derivation
+ * validator so the bounded grammar has one parser.
+ */
+function parseFormatParts(template) {
     const openCount = (template.match(/\{/gu) ?? []).length;
     const closeCount = (template.match(/\}/gu) ?? []).length;
     const matches = [...template.matchAll(/\{([^{}]*)\}/gu)];
     if (openCount !== matches.length || closeCount !== matches.length)
-        return undefined;
-    return matches.map((match) => match[1] ?? "");
+        return { unbalanced: true };
+    const parts = [];
+    let cursor = 0;
+    for (const match of matches) {
+        const literal = template.slice(cursor, match.index);
+        if (literal.length > 0)
+            parts.push({ kind: "literal", value: literal });
+        const reference = parseReference(match[1] ?? "");
+        if (reference === undefined)
+            return { invalidReference: match[1] ?? "", unbalanced: false };
+        parts.push({ kind: "reference", reference });
+        cursor = match.index + match[0].length;
+    }
+    if (cursor < template.length)
+        parts.push({ kind: "literal", value: template.slice(cursor) });
+    return { parts, unbalanced: false };
 }
 const ISSUE_PROPERTIES = {
     title: { shape: "text", multiplicity: "single" },
@@ -346,23 +364,17 @@ function validateDerivation(value, path, violations) {
             addViolation(violations, "ARTIFACT_CONTRACT_INVALID_DERIVATION", `${path}.template`, "A format derivation requires a non-empty template.");
             return undefined;
         }
-        const placeholders = extractPlaceholders(template);
-        if (placeholders === undefined) {
-            addViolation(violations, "ARTIFACT_CONTRACT_INVALID_DERIVATION", `${path}.template`, "Template placeholder braces are unbalanced.");
+        const parsedFormat = parseFormatParts(template);
+        if (parsedFormat.parts === undefined) {
+            addViolation(violations, "ARTIFACT_CONTRACT_INVALID_DERIVATION", `${path}.template`, parsedFormat.unbalanced
+                ? "Template placeholder braces are unbalanced."
+                : `Placeholder "{${parsedFormat.invalidReference ?? ""}}" is not a valid value/member reference.`);
             return undefined;
         }
-        const dependencies = [];
-        let ok = true;
-        for (const placeholder of placeholders) {
-            const reference = parseReference(placeholder);
-            if (reference === undefined) {
-                addViolation(violations, "ARTIFACT_CONTRACT_INVALID_DERIVATION", `${path}.template`, `Placeholder "{${placeholder}}" is not a valid value/member reference.`);
-                ok = false;
-                continue;
-            }
-            dependencies.push(reference);
-        }
-        return ok ? { spec: { op: "format", template }, dependencies } : undefined;
+        const dependencies = parsedFormat.parts
+            .filter((part) => part.kind === "reference")
+            .map((part) => part.reference);
+        return { spec: { op: "format", template }, dependencies, formatParts: parsedFormat.parts };
     }
     addViolation(violations, "ARTIFACT_CONTRACT_INVALID_DERIVATION", `${path}.op`, `Derivation operation "${String(op)}" is not supported.`);
     return undefined;
@@ -392,7 +404,11 @@ function validateAuthority(value, path, validateFixed, violations) {
         const derivation = validateDerivation(value.derive, `${path}.derive`, violations);
         if (derivation === undefined)
             return undefined;
-        return { authority: { kind: "derived", derive: derivation.spec }, dependencies: derivation.dependencies };
+        return {
+            authority: { kind: "derived", derive: derivation.spec },
+            dependencies: derivation.dependencies,
+            ...(derivation.formatParts === undefined ? {} : { formatParts: derivation.formatParts }),
+        };
     }
     if (kind === "fixed") {
         checkUnknownKeys(value, ["kind", "value"], path, violations);
@@ -448,6 +464,7 @@ function validatePropertyDeclaration(value, path, descriptor, violations) {
             ...(constraints === undefined ? {} : { constraints }),
         },
         dependencies: authority.dependencies,
+        ...(authority.formatParts === undefined ? {} : { formatParts: authority.formatParts }),
     };
 }
 const FIELD_PRIMITIVE_MULTIPLICITY = {
@@ -620,6 +637,7 @@ function validateFieldDeclaration(value, path, fieldIds, reservedNames, violatio
             ...(constraints === undefined ? {} : { constraints }),
         },
         dependencies: authority.dependencies,
+        ...(authority.formatParts === undefined ? {} : { formatParts: authority.formatParts }),
     };
 }
 function detectDerivationCycles(derived, dependenciesByName, violations) {
@@ -705,6 +723,7 @@ function compileArtifactContract(input) {
     const derived = new Set();
     const derivationOpByName = new Map();
     const endpointInfoByName = new Map();
+    const derivationsByName = new Map();
     const declaredNames = new Set(Object.keys(registry));
     const properties = {};
     for (const key of Object.keys(propertiesInput)) {
@@ -723,6 +742,12 @@ function compileArtifactContract(input) {
                 if (result.declaration.authority.kind === "derived") {
                     derived.add(key);
                     derivationOpByName.set(key, result.declaration.authority.derive.op);
+                    derivationsByName.set(key, {
+                        target: key,
+                        operation: result.declaration.authority.derive,
+                        dependencies: result.dependencies,
+                        ...(result.formatParts === undefined ? {} : { formatParts: result.formatParts }),
+                    });
                 }
             }
         }
@@ -750,6 +775,12 @@ function compileArtifactContract(input) {
                         if (result.declaration.authority.kind === "derived") {
                             derived.add(result.declaration.id);
                             derivationOpByName.set(result.declaration.id, result.declaration.authority.derive.op);
+                            derivationsByName.set(result.declaration.id, {
+                                target: result.declaration.id,
+                                operation: result.declaration.authority.derive,
+                                dependencies: result.dependencies,
+                                ...(result.formatParts === undefined ? {} : { formatParts: result.formatParts }),
+                            });
                         }
                     }
                 }
@@ -822,9 +853,22 @@ function compileArtifactContract(input) {
     detectDerivationCycles(derived, dependenciesByName, violations);
     if (violations.length > 0 || id === undefined)
         return { violations };
+    const normalizedProperties = {};
+    for (const key of Object.keys(properties).sort((left, right) => left.localeCompare(right, "en-US"))) {
+        const declaration = properties[key];
+        if (declaration !== undefined)
+            normalizedProperties[key] = declaration;
+    }
     return {
         violations,
-        contract: { version: ARTIFACT_CONTRACT_VERSION, kind, id, properties, ...(fields === undefined ? {} : { fields }) },
+        contract: {
+            version: ARTIFACT_CONTRACT_VERSION,
+            kind,
+            id,
+            properties: normalizedProperties,
+            ...(fields === undefined ? {} : { fields }),
+            derivations: [...derivationsByName.values()].sort((left, right) => left.target.localeCompare(right.target, "en-US")),
+        },
     };
 }
 export function validateArtifactContract(input) {
@@ -870,7 +914,7 @@ function canonicalizeField(declaration) {
 }
 function canonicalizeContract(contract) {
     const properties = {};
-    for (const key of Object.keys(contract.properties)) {
+    for (const key of Object.keys(contract.properties).sort((left, right) => left.localeCompare(right, "en-US"))) {
         const declaration = contract.properties[key];
         if (declaration !== undefined)
             properties[key] = canonicalizeProperty(declaration);

@@ -67,6 +67,29 @@ export type DerivationSpec = {
     readonly op: "slug";
     readonly from: string;
 };
+/** A reference parsed once by the Artifact Contract compiler. */
+export interface DerivationReference {
+    readonly name: string;
+    readonly member?: string;
+}
+export type DerivationFormatPart = {
+    readonly kind: "literal";
+    readonly value: string;
+} | {
+    readonly kind: "reference";
+    readonly reference: DerivationReference;
+};
+/**
+ * Core-owned derivation metadata retained on the normalized IR.  The
+ * authoring `DerivationSpec` remains the serialized vocabulary; these parsed
+ * references/parts are compiler output for downstream consumers.
+ */
+export interface ArtifactContractDerivation {
+    readonly target: string;
+    readonly operation: DerivationSpec;
+    readonly dependencies: readonly DerivationReference[];
+    readonly formatParts?: readonly DerivationFormatPart[];
+}
 export type FixedScalarValue = string | boolean | IssueReference;
 export type FixedValue = FixedScalarValue | readonly FixedScalarValue[];
 export type ValueAuthority = {
@@ -138,6 +161,8 @@ export interface ArtifactContract {
     readonly properties: Readonly<Record<string, PropertyValueDeclaration>>;
     /** Only present for `issue` and `pull_request`; `branch` has no body fields. */
     readonly fields?: readonly FieldDeclaration[];
+    /** Parsed once from the bounded derivation declarations; never authoring input. */
+    readonly derivations: readonly ArtifactContractDerivation[];
 }
 export type ArtifactContractViolationCode = "ARTIFACT_CONTRACT_INVALID_JSON" | "ARTIFACT_CONTRACT_NOT_OBJECT" | "ARTIFACT_CONTRACT_MISSING_PROPERTY" | "ARTIFACT_CONTRACT_UNKNOWN_PROPERTY" | "ARTIFACT_CONTRACT_INVALID_VALUE" | "ARTIFACT_CONTRACT_UNSUPPORTED_VERSION" | "ARTIFACT_CONTRACT_UNSUPPORTED_KIND" | "ARTIFACT_CONTRACT_INVALID_IDENTIFIER" | "ARTIFACT_CONTRACT_UNKNOWN_SEMANTIC_PROPERTY" | "ARTIFACT_CONTRACT_UNSUPPORTED_FIELD_PRIMITIVE" | "ARTIFACT_CONTRACT_UNKNOWN_AUTHORITY" | "ARTIFACT_CONTRACT_INVALID_CONSTRAINT" | "ARTIFACT_CONTRACT_MISSING_FIXED_VALUE" | "ARTIFACT_CONTRACT_INVALID_FIXED_VALUE" | "ARTIFACT_CONTRACT_INVALID_DERIVATION" | "ARTIFACT_CONTRACT_UNDECLARED_DEPENDENCY" | "ARTIFACT_CONTRACT_DERIVATION_CYCLE";
 export interface ArtifactContractViolation {

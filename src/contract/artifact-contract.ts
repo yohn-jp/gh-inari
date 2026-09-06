@@ -85,6 +85,28 @@ export type DerivationSpec =
   | { readonly op: "format"; readonly template: string }
   | { readonly op: "slug"; readonly from: string };
 
+/** A reference parsed once by the Artifact Contract compiler. */
+export interface DerivationReference {
+  readonly name: string;
+  readonly member?: string;
+}
+
+export type DerivationFormatPart =
+  | { readonly kind: "literal"; readonly value: string }
+  | { readonly kind: "reference"; readonly reference: DerivationReference };
+
+/**
+ * Core-owned derivation metadata retained on the normalized IR.  The
+ * authoring `DerivationSpec` remains the serialized vocabulary; these parsed
+ * references/parts are compiler output for downstream consumers.
+ */
+export interface ArtifactContractDerivation {
+  readonly target: string;
+  readonly operation: DerivationSpec;
+  readonly dependencies: readonly DerivationReference[];
+  readonly formatParts?: readonly DerivationFormatPart[];
+}
+
 export type FixedScalarValue = string | boolean | IssueReference;
 export type FixedValue = FixedScalarValue | readonly FixedScalarValue[];
 
@@ -157,6 +179,8 @@ export interface ArtifactContract {
   readonly properties: Readonly<Record<string, PropertyValueDeclaration>>;
   /** Only present for `issue` and `pull_request`; `branch` has no body fields. */
   readonly fields?: readonly FieldDeclaration[];
+  /** Parsed once from the bounded derivation declarations; never authoring input. */
+  readonly derivations: readonly ArtifactContractDerivation[];
 }
 
 export type ArtifactContractViolationCode =
@@ -294,24 +318,40 @@ function validateIdentifier(value: string, path: string, violations: ArtifactCon
   }
 }
 
-interface ParsedReference {
-  readonly name: string;
-  readonly member?: string;
-}
-
-function parseReference(raw: string): ParsedReference | undefined {
+function parseReference(raw: string): DerivationReference | undefined {
   if (!REFERENCE_PATTERN.test(raw)) return undefined;
   const separator = raw.indexOf(".");
   return separator === -1 ? { name: raw } : { name: raw.slice(0, separator), member: raw.slice(separator + 1) };
 }
 
-/** Extracts `{name}` / `{name.member}` placeholder bodies, or `undefined` for unbalanced braces. */
-function extractPlaceholders(template: string): readonly string[] | undefined {
+interface FormatPartsParseResult {
+  readonly parts?: readonly DerivationFormatPart[];
+  readonly invalidReference?: string;
+  readonly unbalanced: boolean;
+}
+
+/**
+ * Parses a format template into the exact literal/reference sequence used by
+ * later materialization.  This is deliberately kept beside the derivation
+ * validator so the bounded grammar has one parser.
+ */
+function parseFormatParts(template: string): FormatPartsParseResult {
   const openCount = (template.match(/\{/gu) ?? []).length;
   const closeCount = (template.match(/\}/gu) ?? []).length;
   const matches = [...template.matchAll(/\{([^{}]*)\}/gu)];
-  if (openCount !== matches.length || closeCount !== matches.length) return undefined;
-  return matches.map((match) => match[1] ?? "");
+  if (openCount !== matches.length || closeCount !== matches.length) return { unbalanced: true };
+  const parts: DerivationFormatPart[] = [];
+  let cursor = 0;
+  for (const match of matches) {
+    const literal = template.slice(cursor, match.index);
+    if (literal.length > 0) parts.push({ kind: "literal", value: literal });
+    const reference = parseReference(match[1] ?? "");
+    if (reference === undefined) return { invalidReference: match[1] ?? "", unbalanced: false };
+    parts.push({ kind: "reference", reference });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < template.length) parts.push({ kind: "literal", value: template.slice(cursor) });
+  return { parts, unbalanced: false };
 }
 
 /** Core-owned property registry: recognized property name -> intrinsic shape/multiplicity. Closed per #287. */
@@ -580,7 +620,8 @@ function validateFixedValue(
 
 interface DerivationParseResult {
   readonly spec: DerivationSpec;
-  readonly dependencies: readonly ParsedReference[];
+  readonly dependencies: readonly DerivationReference[];
+  readonly formatParts?: readonly DerivationFormatPart[];
 }
 
 function validateDerivation(
@@ -629,33 +670,24 @@ function validateDerivation(
       );
       return undefined;
     }
-    const placeholders = extractPlaceholders(template);
-    if (placeholders === undefined) {
+    const parsedFormat = parseFormatParts(template);
+    if (parsedFormat.parts === undefined) {
       addViolation(
         violations,
         "ARTIFACT_CONTRACT_INVALID_DERIVATION",
         `${path}.template`,
-        "Template placeholder braces are unbalanced.",
+        parsedFormat.unbalanced
+          ? "Template placeholder braces are unbalanced."
+          : `Placeholder "{${parsedFormat.invalidReference ?? ""}}" is not a valid value/member reference.`,
       );
       return undefined;
     }
-    const dependencies: ParsedReference[] = [];
-    let ok = true;
-    for (const placeholder of placeholders) {
-      const reference = parseReference(placeholder);
-      if (reference === undefined) {
-        addViolation(
-          violations,
-          "ARTIFACT_CONTRACT_INVALID_DERIVATION",
-          `${path}.template`,
-          `Placeholder "{${placeholder}}" is not a valid value/member reference.`,
-        );
-        ok = false;
-        continue;
-      }
-      dependencies.push(reference);
-    }
-    return ok ? { spec: { op: "format", template }, dependencies } : undefined;
+    const dependencies = parsedFormat.parts
+      .filter(
+        (part): part is Extract<DerivationFormatPart, { readonly kind: "reference" }> => part.kind === "reference",
+      )
+      .map((part) => part.reference);
+    return { spec: { op: "format", template }, dependencies, formatParts: parsedFormat.parts };
   }
   addViolation(
     violations,
@@ -668,7 +700,8 @@ function validateDerivation(
 
 interface AuthorityParseResult {
   readonly authority: ValueAuthority;
-  readonly dependencies: readonly ParsedReference[];
+  readonly dependencies: readonly DerivationReference[];
+  readonly formatParts?: readonly DerivationFormatPart[];
 }
 
 /**
@@ -705,7 +738,11 @@ function validateAuthority(
     }
     const derivation = validateDerivation(value.derive, `${path}.derive`, violations);
     if (derivation === undefined) return undefined;
-    return { authority: { kind: "derived", derive: derivation.spec }, dependencies: derivation.dependencies };
+    return {
+      authority: { kind: "derived", derive: derivation.spec },
+      dependencies: derivation.dependencies,
+      ...(derivation.formatParts === undefined ? {} : { formatParts: derivation.formatParts }),
+    };
   }
   if (kind === "fixed") {
     checkUnknownKeys(value, ["kind", "value"], path, violations);
@@ -733,7 +770,8 @@ function validateAuthority(
 
 interface PropertyParseResult {
   readonly declaration: PropertyValueDeclaration;
-  readonly dependencies: readonly ParsedReference[];
+  readonly dependencies: readonly DerivationReference[];
+  readonly formatParts?: readonly DerivationFormatPart[];
 }
 
 function validatePropertyDeclaration(
@@ -806,6 +844,7 @@ function validatePropertyDeclaration(
       ...(constraints === undefined ? {} : { constraints }),
     },
     dependencies: authority.dependencies,
+    ...(authority.formatParts === undefined ? {} : { formatParts: authority.formatParts }),
   };
 }
 
@@ -963,7 +1002,8 @@ function validateFieldConstraints(
 
 interface FieldParseResult {
   readonly declaration: FieldDeclaration;
-  readonly dependencies: readonly ParsedReference[];
+  readonly dependencies: readonly DerivationReference[];
+  readonly formatParts?: readonly DerivationFormatPart[];
 }
 
 function validateFieldDeclaration(
@@ -1070,12 +1110,13 @@ function validateFieldDeclaration(
       ...(constraints === undefined ? {} : { constraints }),
     },
     dependencies: authority.dependencies,
+    ...(authority.formatParts === undefined ? {} : { formatParts: authority.formatParts }),
   };
 }
 
 function detectDerivationCycles(
   derived: ReadonlySet<string>,
-  dependenciesByName: ReadonlyMap<string, readonly ParsedReference[]>,
+  dependenciesByName: ReadonlyMap<string, readonly DerivationReference[]>,
   violations: ArtifactContractViolation[],
 ): void {
   const state = new Map<string, "visiting" | "done">();
@@ -1193,10 +1234,11 @@ function compileArtifactContract(input: unknown): CompileResult {
     return { violations };
   }
 
-  const dependenciesByName = new Map<string, readonly ParsedReference[]>();
+  const dependenciesByName = new Map<string, readonly DerivationReference[]>();
   const derived = new Set<string>();
   const derivationOpByName = new Map<string, DerivationSpec["op"]>();
   const endpointInfoByName = new Map<string, DerivationEndpointInfo>();
+  const derivationsByName = new Map<string, ArtifactContractDerivation>();
   const declaredNames = new Set<string>(Object.keys(registry));
   const properties: Record<string, PropertyValueDeclaration> = {};
 
@@ -1221,6 +1263,12 @@ function compileArtifactContract(input: unknown): CompileResult {
         if (result.declaration.authority.kind === "derived") {
           derived.add(key);
           derivationOpByName.set(key, result.declaration.authority.derive.op);
+          derivationsByName.set(key, {
+            target: key,
+            operation: result.declaration.authority.derive,
+            dependencies: result.dependencies,
+            ...(result.formatParts === undefined ? {} : { formatParts: result.formatParts }),
+          });
         }
       }
     }
@@ -1248,6 +1296,12 @@ function compileArtifactContract(input: unknown): CompileResult {
             if (result.declaration.authority.kind === "derived") {
               derived.add(result.declaration.id);
               derivationOpByName.set(result.declaration.id, result.declaration.authority.derive.op);
+              derivationsByName.set(result.declaration.id, {
+                target: result.declaration.id,
+                operation: result.declaration.authority.derive,
+                dependencies: result.dependencies,
+                ...(result.formatParts === undefined ? {} : { formatParts: result.formatParts }),
+              });
             }
           }
         }
@@ -1376,9 +1430,23 @@ function compileArtifactContract(input: unknown): CompileResult {
   detectDerivationCycles(derived, dependenciesByName, violations);
 
   if (violations.length > 0 || id === undefined) return { violations };
+  const normalizedProperties: Record<string, PropertyValueDeclaration> = {};
+  for (const key of Object.keys(properties).sort((left, right) => left.localeCompare(right, "en-US"))) {
+    const declaration = properties[key];
+    if (declaration !== undefined) normalizedProperties[key] = declaration;
+  }
   return {
     violations,
-    contract: { version: ARTIFACT_CONTRACT_VERSION, kind, id, properties, ...(fields === undefined ? {} : { fields }) },
+    contract: {
+      version: ARTIFACT_CONTRACT_VERSION,
+      kind,
+      id,
+      properties: normalizedProperties,
+      ...(fields === undefined ? {} : { fields }),
+      derivations: [...derivationsByName.values()].sort((left, right) =>
+        left.target.localeCompare(right.target, "en-US"),
+      ),
+    },
   };
 }
 
@@ -1427,7 +1495,7 @@ function canonicalizeField(declaration: FieldDeclaration): UnknownRecord {
 
 function canonicalizeContract(contract: ArtifactContract): UnknownRecord {
   const properties: UnknownRecord = {};
-  for (const key of Object.keys(contract.properties)) {
+  for (const key of Object.keys(contract.properties).sort((left, right) => left.localeCompare(right, "en-US"))) {
     const declaration = contract.properties[key];
     if (declaration !== undefined) properties[key] = canonicalizeProperty(declaration);
   }
