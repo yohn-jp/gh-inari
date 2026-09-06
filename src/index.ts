@@ -20,6 +20,7 @@ export * from "./command-contract.js";
 export * from "./change.js";
 export * from "./change-executor.js";
 export * from "./change-trusted-executor.js";
+export * from "./semantic-pr-projection.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,

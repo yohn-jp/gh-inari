@@ -16,5 +16,6 @@ export * from "./command-contract.js";
 export * from "./change.js";
 export * from "./change-executor.js";
 export * from "./change-trusted-executor.js";
+export * from "./semantic-pr-projection.js";
 export { discoverTemplates, discoverTemplatesSync, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, selectTemplate, selectIssueTemplate, selectPullRequestTemplate, TemplateDiscoveryError, TemplateFilesystemError, TemplateNotFoundError, TemplateSelectionAmbiguousError, TemplateNameConflictError, InvalidTemplateSelectorError, } from "./template-discovery.js";
 export type { TemplateDiscoveryResult, TemplateSelector, TemplateType, TemplateKind, TemplateDiscoveryErrorCode, TemplateDiscoveryErrorDetails, } from "./template-discovery.js";
