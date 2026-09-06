@@ -865,8 +865,7 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
   const head = responseRef(record.head, "head", operation);
   const base = responseRef(record.base, "base", operation);
   const milestone = responseMilestone(record.milestone, "milestone", operation);
-  const labels =
-    record.labels === undefined ? undefined : responseNames(record.labels, "labels", operation);
+  const labels = record.labels === undefined ? undefined : responseNames(record.labels, "labels", operation);
   const assignees =
     record.assignees === undefined ? undefined : responseNames(record.assignees, "assignees", operation);
   const requestedReviewers = responseReviewRequests(record, operation);

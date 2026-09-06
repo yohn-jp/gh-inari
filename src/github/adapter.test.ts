@@ -1021,11 +1021,9 @@ test("getPullRequest observes present labels, assignees, milestone, and requeste
         0,
         withField(
           withField(
-            withField(
-              withField(pullRequestPayload(70), "labels", [{ name: "bug" }]),
-              "assignees",
-              [{ login: "octocat" }],
-            ),
+            withField(withField(pullRequestPayload(70), "labels", [{ name: "bug" }]), "assignees", [
+              { login: "octocat" },
+            ]),
             "milestone",
             { number: 3, title: "v2" },
           ),
