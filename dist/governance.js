@@ -187,6 +187,19 @@ export async function compileRepositoryGovernedContracts(adapter, domain) {
     }
     return outcomes;
 }
+/**
+ * Resolve the target repository's branch governance from its authoritative
+ * default-branch generation.  A repository with no policy, or with a policy
+ * that declares no branch rule, intentionally returns undefined; source
+ * acquisition and policy parse failures remain fail-closed errors.
+ */
+export async function resolveRepositoryBranchGovernance(adapter) {
+    const source = await readRepositoryGovernanceSource(adapter);
+    const policy = await readRepositoryPolicySource(adapter, source);
+    if (policy === undefined)
+        return undefined;
+    return parsePullRequestPolicyOverlay(policy.source).branch;
+}
 async function compileRepositoryGovernedContractFromSource(adapter, source, domain, selectedTemplate, policySourceLoader, templateResolutionSource) {
     const { context, ref, tree, discovery } = source;
     const templateEntry = findBlob(tree, selectedTemplate.path, context, ref);

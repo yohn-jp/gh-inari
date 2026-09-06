@@ -1,11 +1,15 @@
 import { type ChangeProjectionResult } from "../change.js";
 import { type ChangeRemoteExecutor, type ChangeRemoteExecutorOptions, type ChangeRemoteExecutionResult, type ChangeRemoteMutationRequest, type ChangeRemoteReadRequest } from "../change-executor.js";
-import type { RepositoryContext } from "./types.js";
+import type { RepositoryContext, RepositoryTree } from "./types.js";
 /** The only workflow and ref selected by the CLI transport. */
 export declare const INARI_CHANGE_EXECUTOR_WORKFLOW: "inari-change-executor.yml";
 export declare const INARI_CHANGE_EXECUTOR_REF: "refs/heads/main";
 export interface GitHubActionsRemoteApi {
     getRepositoryContext(): Promise<RepositoryContext>;
+    /** Repository-default-branch governance primitives; GitHubAdapter supplies these. */
+    getRepositoryDefaultBranch(): Promise<string>;
+    getRepositoryTree(ref: string): Promise<RepositoryTree>;
+    getRepositoryBlob(sha: string): Promise<string>;
     getAuthenticatedUser(): Promise<string>;
     requestActionsApi(actionsPath: string, method: "GET" | "POST", fields?: Readonly<Record<string, string>>): Promise<unknown>;
     requestRepositoryApi?(repositoryPath: string, method?: "GET"): Promise<{
