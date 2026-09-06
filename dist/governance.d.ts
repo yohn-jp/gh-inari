@@ -1,12 +1,23 @@
-import { type CanonicalContract, type ContractProvenance } from "./contract/ir.js";
+import { type CanonicalContract, type ContractProvenance, type PullRequestBranchGovernance } from "./contract/ir.js";
 import type { ArtifactContract } from "./contract/artifact-contract.js";
-import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type RepositoryTreeEntry, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
+import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type RepositoryTreeEntry, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
 import { type SemanticTemplateIdentity } from "./semantic-template.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
 import { type TemplateResolverDependencies } from "./template-resolver.js";
 export type GovernedArtifactDomain = "issue" | "pr";
 export interface GovernedContractCompileOptions {
     readonly templateResolver?: TemplateResolverDependencies;
+}
+/**
+ * Repository-default-branch governance source operations shared by provider
+ * adapters.  Keeping this seam structural lets read-only transports reuse the
+ * same repository source authority without consulting a local checkout.
+ */
+export interface RepositoryGovernanceSourceReader {
+    resolveRepositoryContext(): Promise<RepositoryContext>;
+    getRepositoryDefaultBranch(): Promise<string>;
+    getRepositoryTree(ref: string): Promise<RepositoryTree>;
+    getRepositoryBlob(sha: string): Promise<string>;
 }
 export type GovernanceErrorCode = "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN" | "GOVERNANCE_SOURCE_UNAVAILABLE" | "GOVERNANCE_SOURCE_INVALID" | "GOVERNANCE_GENERATION_STALE" | "GOVERNANCE_BRANCH_INVALID";
 export interface GovernanceErrorDetails {
@@ -69,6 +80,13 @@ export type CompiledTemplateOutcome = {
  * compileRepositoryGovernedContract instead.
  */
 export declare function compileRepositoryGovernedContracts(adapter: GitHubAdapter, domain: GovernedArtifactDomain): Promise<readonly CompiledTemplateOutcome[]>;
+/**
+ * Resolve the target repository's branch governance from its authoritative
+ * default-branch generation.  A repository with no policy, or with a policy
+ * that declares no branch rule, intentionally returns undefined; source
+ * acquisition and policy parse failures remain fail-closed errors.
+ */
+export declare function resolveRepositoryBranchGovernance(adapter: RepositoryGovernanceSourceReader): Promise<PullRequestBranchGovernance | undefined>;
 /** Discover all authoritative templates without compiling or reading a body. */
 export declare function discoverRepositoryTemplates(adapter: GitHubAdapter): Promise<TemplateDiscoveryResult>;
 /**

@@ -3,8 +3,9 @@ import { inflateRawSync } from "node:zlib";
 import { projectChangeFromGitHubEvidence } from "../change.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
 import { GitHubAdapter } from "./adapter.js";
-import { GitHubActionsEvidenceReader, isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage, loadBranchGovernance, } from "./actions-change-executor.js";
+import { GitHubActionsEvidenceReader, isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage, } from "./actions-change-executor.js";
 import { isGitHubAdapterError } from "./errors.js";
+import { resolveRepositoryBranchGovernance } from "../governance.js";
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml";
 export const INARI_CHANGE_EXECUTOR_REF = "refs/heads/main";
@@ -319,7 +320,15 @@ export class GitHubActionsChangeRemoteExecutor {
             if (context.repositoryId === undefined) {
                 throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "repository-identity-unavailable");
             }
-            const branchGovernance = await loadBranchGovernance(this.#cwd);
+            let branchGovernance;
+            try {
+                branchGovernance = await resolveRepositoryBranchGovernance(remoteGovernanceSourceReader(this.#api, context));
+            }
+            catch (error) {
+                if (error instanceof ChangeRemoteExecutorError)
+                    throw error;
+                throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "remote-governance-unavailable");
+            }
             const reader = new GitHubActionsEvidenceReader({
                 repository: { hostname: context.hostname, owner: context.owner, name: context.name },
                 identity: { repositoryHost: context.hostname, repositoryId: context.repositoryId, rootIssue: request.issue },
@@ -452,6 +461,19 @@ export class GitHubActionsChangeRemoteExecutor {
         }
         return parseArtifacts(value, name, repositoryId);
     }
+}
+/**
+ * Adapt the read-only Change transport to the shared repository governance
+ * authority. The same direct primitives are used by GitHubAdapter and by the
+ * injectable remote seam, without consulting cwd.
+ */
+function remoteGovernanceSourceReader(api, context) {
+    return {
+        resolveRepositoryContext: async () => context,
+        getRepositoryDefaultBranch: () => api.getRepositoryDefaultBranch(),
+        getRepositoryTree: (ref) => api.getRepositoryTree(ref),
+        getRepositoryBlob: (sha) => api.getRepositoryBlob(sha),
+    };
 }
 class GitHubRepositoryReadTransport {
     #api;
