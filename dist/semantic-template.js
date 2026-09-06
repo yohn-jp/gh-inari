@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as stringifyYaml } from "yaml";
 import { assertCanonicalContract, MULTI_SELECT_OPTION_SEPARATOR, } from "./contract/ir.js";
+import { parseArtifactContract } from "./contract/artifact-contract.js";
+import { ARTIFACT_CONTRACT_TEMPLATE_NOTICE, renderArtifactContractNativeTemplate, } from "./contract/native-template-projection.js";
 import { compileIssueFormYaml } from "./contract/issue-form.js";
 import { parsePullRequestTemplate, renderPullRequestTemplate } from "./pull-request-template.js";
 import { semanticTemplateResolutionCandidate, resolveTemplateSync, TemplateResolutionError, } from "./template-resolver.js";
@@ -322,8 +324,30 @@ export async function syncSemanticTemplates(repositoryRoot = process.cwd(), chec
     const identities = await discoverSemanticTemplates(root);
     const generated = new Map();
     for (const identity of identities) {
-        const document = await readSemanticTemplate(root, identity);
-        generated.set(identity.generatedPath, renderSemanticNative(document.source, identity.generatedPath));
+        const sourcePath = safeRepositoryPath(root, identity.sourcePath);
+        const serialized = await readFile(sourcePath, "utf8");
+        try {
+            const document = { ...identity, source: parseSemanticTemplate(serialized, identity.sourcePath) };
+            generated.set(identity.generatedPath, renderSemanticNative(document.source, identity.generatedPath));
+        }
+        catch (error) {
+            // Canon v2 is the semantic authority for new repositories. Keep v1
+            // parsing above as the bounded compatibility authoring path, but never
+            // reconstruct v2 semantics from its generated native projection.
+            let raw;
+            try {
+                raw = JSON.parse(serialized);
+            }
+            catch {
+                throw error;
+            }
+            if (!isRecord(raw) || typeof raw.version !== "string" || !Object.hasOwn(raw, "properties"))
+                throw error;
+            const artifactContract = parseArtifactContract(raw);
+            generated.set(identity.generatedPath, renderArtifactContractNativeTemplate(artifactContract, {
+                path: identity.generatedPath,
+            }));
+        }
     }
     const drift = [];
     const written = [];
@@ -833,6 +857,9 @@ function headingMetadata(section) {
 function findStaleGeneratedFiles(root, generated) {
     return findGeneratedFiles(root).then((files) => files.filter((file) => !generated.has(file)));
 }
+function isGeneratedTemplateContent(content) {
+    return content.includes(GENERATED_TEMPLATE_NOTICE) || content.includes(ARTIFACT_CONTRACT_TEMPLATE_NOTICE);
+}
 async function findGeneratedFiles(root) {
     const files = [];
     for (const directory of [ISSUE_NATIVE_DIRECTORY, PR_NATIVE_DIRECTORY]) {
@@ -845,7 +872,7 @@ async function findGeneratedFiles(root) {
                 continue;
             const relative = toRepositoryPath(root, path.join(absolute, entry.name));
             const content = await readFile(path.join(absolute, entry.name), "utf8");
-            if (content.includes(GENERATED_TEMPLATE_NOTICE))
+            if (isGeneratedTemplateContent(content))
                 files.push(relative);
         }
     }
@@ -853,7 +880,7 @@ async function findGeneratedFiles(root) {
     if (await optionalFile(defaultPr)) {
         const relative = toRepositoryPath(root, defaultPr);
         const content = await readFile(defaultPr, "utf8");
-        if (content.includes(GENERATED_TEMPLATE_NOTICE))
+        if (isGeneratedTemplateContent(content))
             files.push(relative);
     }
     return [...new Set(files)].sort();

@@ -1,5 +1,6 @@
 export * from "./ir.js";
 export * from "./artifact-contract.js";
+export * from "./native-template-projection.js";
 export * from "./effective-artifact-contract.js";
 export * from "./semantic-artifact.js";
 export * from "./schema.js";
