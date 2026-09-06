@@ -266,6 +266,24 @@ export declare function validateExistingIssueFromAdapter(reader: ExistingIssueRe
 export declare function validateExistingPullRequestFromAdapter(reader: ExistingPullRequestReader, contract: unknown, pullRequestNumber: number): Promise<FetchedExistingArtifact>;
 /** @internal Validate the canonical Issue metadata handoff before mutation. */
 export declare function verifyIssueMetadataRoundTrip(expected: Readonly<Record<string, unknown>>, artifact: ValidatedRenderedIssueArtifact): void;
-/** Escape only Markdown constructs that could change the canonical section structure. */
+/**
+ * Escape only Markdown constructs that can change the compiled canonical
+ * structure when a field value is spliced verbatim into a rendered body:
+ *
+ * - a heading line would be mistaken for the next section boundary
+ *   (`isHeading` / `headingBlocks` scan headings only to find where a
+ *   field's content ends);
+ * - a fence marker would shift the fence-tracking state those same scans use
+ *   to skip over heading-look-alikes inside embedded code;
+ * - a line matching the reserved `<!-- inari:... -->` marker prefix could be
+ *   read back as the trailing template-identity/dependency marker.
+ *
+ * Task-list (`- [ ]`) and blockquote (`>`) prefixes are not used by any
+ * section/field boundary detection in this file, so they are left as
+ * intentional Markdown rather than escaped merely because they resemble a
+ * construct (see #275). Checklist item labels get their own additional
+ * escape in `escapeChecklistLabel` because those *are* line-delimited by a
+ * task-list prefix during parsing.
+ */
 export declare function escapeMarkdownValue(value: string): string;
 export declare function removeHtmlComments(value: string): string;

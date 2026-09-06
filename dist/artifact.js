@@ -1048,7 +1048,7 @@ function renderFieldValue(field, value, kind) {
     }
     const selected = new Set(Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : []);
     const placeholder = kind === "pull_request" ? field.nativeMetadata.placeholder : undefined;
-    const lines = field.items.map((item) => `- [${selected.has(item.id) ? "x" : " "}] ${escapeMarkdownValue(item.label)}`);
+    const lines = field.items.map((item) => `- [${selected.has(item.id) ? "x" : " "}] ${escapeChecklistLabel(item.label)}`);
     return [placeholder === undefined ? "" : placeholder, lines.join("\n")].filter(Boolean).join("\n\n");
 }
 /** Map canonical Issue semantic values to the labels shown by GitHub Issue Forms. */
@@ -1410,23 +1410,53 @@ function stringArray(value, key) {
 function escapeHeading(value) {
     return value.replace(/[\r\n]+/gu, " ").trim();
 }
-/** Escape only Markdown constructs that could change the canonical section structure. */
+/**
+ * Escape only Markdown constructs that can change the compiled canonical
+ * structure when a field value is spliced verbatim into a rendered body:
+ *
+ * - a heading line would be mistaken for the next section boundary
+ *   (`isHeading` / `headingBlocks` scan headings only to find where a
+ *   field's content ends);
+ * - a fence marker would shift the fence-tracking state those same scans use
+ *   to skip over heading-look-alikes inside embedded code;
+ * - a line matching the reserved `<!-- inari:... -->` marker prefix could be
+ *   read back as the trailing template-identity/dependency marker.
+ *
+ * Task-list (`- [ ]`) and blockquote (`>`) prefixes are not used by any
+ * section/field boundary detection in this file, so they are left as
+ * intentional Markdown rather than escaped merely because they resemble a
+ * construct (see #275). Checklist item labels get their own additional
+ * escape in `escapeChecklistLabel` because those *are* line-delimited by a
+ * task-list prefix during parsing.
+ */
 export function escapeMarkdownValue(value) {
     return normalizeSource(value)
         .split("\n")
         .map((line) => {
         if (/^ {0,3}(?:#{1,6})(?:[ \t]+|$)/u.test(line))
             return line.replace(/^( {0,3})(#)/u, "$1\\$2");
-        if (/^ {0,3}(?:[-+*]|\d+[.)])[ \t]+\[[ xX]\]/u.test(line))
-            return line.replace(/^( {0,3})([-+*]|\d+[.)])/u, "$1\\$2");
         if (/^ {0,3}(?:```|~~~)/u.test(line))
             return line.replace(/^([ \t]{0,3})([`~])/u, "$1\\$2");
-        if (/^ {0,3}>[ \t]?/u.test(line))
-            return line.replace(/^( {0,3})(>)/u, "$1\\$2");
         if (/^ {0,3}<!--/u.test(line))
             return line.replace(/^( {0,3})(<!--)/u, "$1\\$2");
         return line;
     })
+        .join("\n");
+}
+/**
+ * Checklist item labels are rendered one-per-line under a shared `- [ ] `/
+ * `- [x] ` prefix, and parsing re-splits that same block back into items by
+ * matching the task-list prefix on each line. An embedded, unescaped
+ * task-list-look-alike line inside a label would therefore be read back as a
+ * separate checklist entry, so (unlike free-form string/array fields) the
+ * task-list prefix is structural here and must stay escaped.
+ */
+function escapeChecklistLabel(value) {
+    return escapeMarkdownValue(value)
+        .split("\n")
+        .map((line) => /^ {0,3}(?:[-+*]|\d+[.)])[ \t]+\[[ xX]\]/u.test(line)
+        ? line.replace(/^( {0,3})([-+*]|\d+[.)])/u, "$1\\$2")
+        : line)
         .join("\n");
 }
 function unescapeMarkdownValue(value) {
