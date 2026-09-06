@@ -36,6 +36,28 @@ import {
   createValidatedRenderedPullRequestArtifact,
 } from "./github/capability.js";
 
+// v1 artifact APIs remain available during migration. Their explicit
+// convergence adapter is re-exported here so callers do not need a second
+// legacy-specific package entrypoint.
+export {
+  artifactContractFromLegacyCanonical,
+  compileLegacyEffectiveArtifactContract,
+  convergeLegacyArtifactInput,
+  mapLegacyArtifactCandidate,
+  materializeLegacyArtifact,
+  tryMaterializeLegacyArtifact,
+  validateLegacyBranchProjection,
+} from "./legacy-artifact-convergence.js";
+export type {
+  LegacyArtifactCompatibilitySource,
+  LegacyArtifactConvergenceCode,
+  LegacyArtifactConvergenceDiagnostic,
+  LegacyArtifactConvergenceOptions,
+  LegacyArtifactConvergenceResult,
+  LegacyLinkedIssueRepository,
+  LegacySemanticArtifactMaterializationResult,
+} from "./legacy-artifact-convergence.js";
+
 export interface ArtifactInputMetadata {
   readonly title?: string;
   readonly labels?: readonly string[];
