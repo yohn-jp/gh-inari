@@ -7,14 +7,22 @@
  * used by stdio and a future hosted transport without changing semantics.
  */
 import { z } from "zod";
-import { ArtifactContractResolutionError, compileRepositoryEffectivePullRequestContract, } from "../artifact-contract-governance.js";
+import { ArtifactContractResolutionError, compileRepositoryEffectiveArtifactContract, compileRepositoryEffectiveBranchContract, compileRepositoryEffectiveIssueContract, compileRepositoryEffectivePullRequestContract, } from "../artifact-contract-governance.js";
 import { EffectiveArtifactContractCompilationError, } from "../contract/effective-artifact-contract.js";
 import { SemanticArtifactMaterializationError, tryMaterializeSemanticArtifact, } from "../contract/semantic-artifact.js";
+import { SemanticBranchProjectionError, tryPlanSemanticBranch, } from "../semantic-branch-projection.js";
+import { SemanticIssueProjectionError, tryPlanSemanticIssue, } from "../semantic-issue-projection.js";
 import { SemanticPullRequestProjectionError, tryPlanSemanticPullRequest, } from "../semantic-pr-projection.js";
 import { GitHubAdapter, isGitHubAdapterError } from "../github/index.js";
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1";
 export const INARI_MCP_TOOL_NAMES = Object.freeze([
+    "inari_issue_contract",
+    "inari_issue_materialize",
+    "inari_issue_plan",
+    "inari_branch_contract",
+    "inari_branch_materialize",
+    "inari_branch_plan",
     "inari_pr_contract",
     "inari_pr_materialize",
     "inari_pr_plan",
@@ -56,6 +64,13 @@ export const semanticPullRequestPlanInputSchema = z.strictObject({
     ...commonRequestShape,
     input: inputValueSchema,
 });
+/** Issue and Branch use the same closed-world request shape as PR. */
+export const semanticIssueContractInputSchema = z.strictObject(commonRequestShape);
+export const semanticIssueMaterializeInputSchema = z.strictObject({ ...commonRequestShape, input: inputValueSchema });
+export const semanticIssuePlanInputSchema = z.strictObject({ ...commonRequestShape, input: inputValueSchema });
+export const semanticBranchContractInputSchema = z.strictObject(commonRequestShape);
+export const semanticBranchMaterializeInputSchema = z.strictObject({ ...commonRequestShape, input: inputValueSchema });
+export const semanticBranchPlanInputSchema = z.strictObject({ ...commonRequestShape, input: inputValueSchema });
 const READ_ONLY = Object.freeze({
     readOnlyHint: true,
     destructiveHint: false,
@@ -94,6 +109,8 @@ export const semanticPullRequestOutputSchema = z
     mutation: z.boolean().optional(),
 })
     .strict();
+export const semanticIssueOutputSchema = semanticPullRequestOutputSchema;
+export const semanticBranchOutputSchema = semanticPullRequestOutputSchema;
 function adapterFor(requestRepository, dependencies) {
     if (dependencies.adapter !== undefined)
         return dependencies.adapter;
@@ -109,6 +126,24 @@ export async function resolveSemanticPullRequestContract(input, dependencies = {
     const adapter = adapterFor(input.repository, dependencies);
     const options = input.capabilities === undefined ? {} : { capabilities: input.capabilities };
     return compileRepositoryEffectivePullRequestContract(adapter, input.template, options);
+}
+/** Resolve any supported Artifact Contract through the repository/Core boundary. */
+async function resolveSemanticArtifactContract(kind, input, dependencies) {
+    const adapter = adapterFor(input.repository, dependencies);
+    const options = input.capabilities === undefined ? {} : { capabilities: input.capabilities };
+    if (kind === "issue")
+        return compileRepositoryEffectiveIssueContract(adapter, input.template, options);
+    if (kind === "branch")
+        return compileRepositoryEffectiveBranchContract(adapter, input.template, options);
+    return compileRepositoryEffectiveArtifactContract(adapter, kind, input.template, options);
+}
+/** Resolve the repository Canon for a semantic Issue. */
+export async function resolveSemanticIssueContract(input, dependencies = {}) {
+    return resolveSemanticArtifactContract("issue", input, dependencies);
+}
+/** Resolve the repository Canon for a semantic Branch. */
+export async function resolveSemanticBranchContract(input, dependencies = {}) {
+    return resolveSemanticArtifactContract("branch", input, dependencies);
 }
 function contractProjection(effectiveContract) {
     return {
@@ -154,6 +189,10 @@ function diagnosticsForError(error) {
     if (error instanceof SemanticArtifactMaterializationError)
         return boundedDiagnostics(error.violations);
     if (error instanceof SemanticPullRequestProjectionError)
+        return boundedDiagnostics(error.violations);
+    if (error instanceof SemanticIssueProjectionError)
+        return boundedDiagnostics(error.violations);
+    if (error instanceof SemanticBranchProjectionError)
         return boundedDiagnostics(error.violations);
     if (isGitHubAdapterError(error)) {
         return [
@@ -272,6 +311,121 @@ export function registerSemanticPullRequestTools(server, dependencies = {}) {
     }, async (input) => handlePlan(input, dependencies));
     return Object.freeze([contract, materialize, plan]);
 }
+function kindLabel(kind) {
+    return kind === "issue" ? "Issue" : "Branch";
+}
+async function handleArtifactContract(kind, input, dependencies) {
+    try {
+        return result(contractProjection(await resolveSemanticArtifactContract(kind, input, dependencies)), `Resolved the Effective ${kindLabel(kind)} Artifact Contract.`);
+    }
+    catch (error) {
+        return result(failure("contract", error), `Semantic ${kindLabel(kind)} contract resolution failed; see diagnostics.`);
+    }
+}
+async function handleArtifactMaterialize(kind, input, dependencies) {
+    let effectiveContract;
+    try {
+        effectiveContract = await resolveSemanticArtifactContract(kind, input, dependencies);
+    }
+    catch (error) {
+        return result(failure("contract", error), `Semantic ${kindLabel(kind)} contract resolution failed; see diagnostics.`);
+    }
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input.input);
+    if (!materialization.valid || materialization.artifact === undefined) {
+        return result({ ...failure("materialization", materialization.violations), effectiveContract }, `Semantic ${kindLabel(kind)} materialization failed; see diagnostics.`);
+    }
+    return result({
+        ok: true,
+        valid: true,
+        effectiveContract,
+        artifact: materialization.artifact,
+        provenance: materialization.artifact.provenance,
+        generation: materialization.artifact.generation,
+    }, `Materialized the semantic ${kindLabel(kind)} artifact.`);
+}
+async function handleArtifactPlan(kind, input, dependencies) {
+    let effectiveContract;
+    try {
+        effectiveContract = await resolveSemanticArtifactContract(kind, input, dependencies);
+    }
+    catch (error) {
+        return result(failure("contract", error), `Semantic ${kindLabel(kind)} contract resolution failed; see diagnostics.`);
+    }
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input.input);
+    if (!materialization.valid || materialization.artifact === undefined) {
+        return result({ ...failure("materialization", materialization.violations), effectiveContract }, `Semantic ${kindLabel(kind)} materialization failed; see diagnostics.`);
+    }
+    const planResult = kind === "issue"
+        ? tryPlanSemanticIssue({ artifact: materialization.artifact, capabilities: effectiveContract.capabilities })
+        : tryPlanSemanticBranch({ artifact: materialization.artifact });
+    if (!planResult.valid || planResult.plan === undefined) {
+        return result({ ...failure("projection", planResult.violations), effectiveContract }, `Semantic ${kindLabel(kind)} projection failed; see diagnostics.`);
+    }
+    const plan = planResult.plan;
+    return result({
+        ok: true,
+        valid: true,
+        effectiveContract,
+        artifact: materialization.artifact,
+        plan,
+        provenance: plan.provenance,
+        generation: plan.generation,
+        preview: true,
+        mutation: false,
+    }, `Produced a deterministic read-only semantic ${kindLabel(kind)} plan preview.`);
+}
+/** Register the typed Issue semantic artifact catalog without adding policy. */
+export function registerSemanticIssueTools(server, dependencies = {}) {
+    const contract = server.registerTool("inari_issue_contract", {
+        title: "Resolve semantic Issue contract",
+        description: "Resolve the repository's effective semantic Issue contract and caller schema through Inari Core.",
+        inputSchema: semanticIssueContractInputSchema,
+        outputSchema: semanticPullRequestOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleArtifactContract("issue", input, dependencies));
+    const materialize = server.registerTool("inari_issue_materialize", {
+        title: "Materialize semantic Issue",
+        description: "Materialize caller input into a validated semantic Issue artifact through Inari Core.",
+        inputSchema: semanticIssueMaterializeInputSchema,
+        outputSchema: semanticPullRequestOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleArtifactMaterialize("issue", input, dependencies));
+    const plan = server.registerTool("inari_issue_plan", {
+        title: "Preview semantic Issue plan",
+        description: "Preview a deterministic semantic Issue projection and mutation plan without GitHub mutation.",
+        inputSchema: semanticIssuePlanInputSchema,
+        outputSchema: semanticPullRequestOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleArtifactPlan("issue", input, dependencies));
+    return Object.freeze([contract, materialize, plan]);
+}
+/** Register the typed Branch semantic artifact catalog without adding policy. */
+export function registerSemanticBranchTools(server, dependencies = {}) {
+    const contract = server.registerTool("inari_branch_contract", {
+        title: "Resolve semantic Branch contract",
+        description: "Resolve the repository's effective semantic Branch contract and caller schema through Inari Core.",
+        inputSchema: semanticBranchContractInputSchema,
+        outputSchema: semanticPullRequestOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleArtifactContract("branch", input, dependencies));
+    const materialize = server.registerTool("inari_branch_materialize", {
+        title: "Materialize semantic Branch",
+        description: "Materialize caller input into a validated semantic Branch artifact through Inari Core.",
+        inputSchema: semanticBranchMaterializeInputSchema,
+        outputSchema: semanticPullRequestOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleArtifactMaterialize("branch", input, dependencies));
+    const plan = server.registerTool("inari_branch_plan", {
+        title: "Preview semantic Branch plan",
+        description: "Preview a deterministic semantic Branch projection and mutation plan without GitHub mutation.",
+        inputSchema: semanticBranchPlanInputSchema,
+        outputSchema: semanticPullRequestOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleArtifactPlan("branch", input, dependencies));
+    return Object.freeze([contract, materialize, plan]);
+}
 /** Publicly expose the protocol annotations without allowing mutation. */
 export const SEMANTIC_PULL_REQUEST_MCP_ANNOTATIONS = READ_ONLY;
+export const SEMANTIC_ISSUE_MCP_ANNOTATIONS = READ_ONLY;
+export const SEMANTIC_BRANCH_MCP_ANNOTATIONS = READ_ONLY;
 //# sourceMappingURL=tools.js.map

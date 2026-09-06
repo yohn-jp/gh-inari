@@ -1,6 +1,6 @@
 /** Transport-neutral native Inari MCP server. */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { INARI_MCP_TOOL_CONTRACT_VERSION, registerSemanticPullRequestTools, } from "./tools.js";
+import { INARI_MCP_TOOL_CONTRACT_VERSION, registerSemanticBranchTools, registerSemanticIssueTools, registerSemanticPullRequestTools, } from "./tools.js";
 export const INARI_MCP_SERVER_NAME = "inari";
 export const INARI_MCP_SERVER_VERSION = INARI_MCP_TOOL_CONTRACT_VERSION;
 /**
@@ -15,8 +15,10 @@ export function createInariMcpServer(options = {}) {
         name: options.name ?? INARI_MCP_SERVER_NAME,
         version: options.version ?? INARI_MCP_SERVER_VERSION,
     }, {
-        instructions: "Inari MCP exposes semantic pull-request contract discovery, materialization, and read-only plan preview. Inari Core and the repository Canon remain authoritative; this server performs no GitHub mutation.",
+        instructions: "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, and read-only plan preview. Inari Core and the repository Canon remain authoritative; this server performs no GitHub mutation.",
     });
+    registerSemanticIssueTools(server, options);
+    registerSemanticBranchTools(server, options);
     registerSemanticPullRequestTools(server, options);
     return server;
 }
