@@ -1,5 +1,5 @@
 import { type GhTransport, type GhTransportOutputLimits } from "./transport.js";
-import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact, type ValidatedSemanticPullRequestArtifact } from "./types.js";
+import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact, type ValidatedSemanticPullRequestArtifact, type ValidatedSemanticIssueArtifact } from "./types.js";
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
 export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
 export declare const DEFAULT_GH_TIMEOUTS_MS: Readonly<Record<GhOperationClass, number>>;
@@ -67,6 +67,8 @@ export declare class GitHubAdapter {
      */
     listPullRequests(head: string, base: string): Promise<readonly GitHubPullRequest[]>;
     createIssue(artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
+    /** Apply a Core-projected v2 Semantic Issue through the trusted adapter seam. */
+    createSemanticIssue(artifact: ValidatedSemanticIssueArtifact): Promise<GitHubIssue>;
     updateIssue(issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
     createPullRequest(artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
     /** Apply a Core-projected v2 Semantic PR through the existing GitHub seam. */
@@ -89,3 +91,4 @@ export declare class GitHubAdapter {
 export declare function assertValidatedRenderedIssueArtifact(artifact: unknown): asserts artifact is ValidatedRenderedIssueArtifact;
 export declare function assertValidatedRenderedPullRequestArtifact(artifact: unknown): asserts artifact is ValidatedRenderedPullRequestArtifact;
 export declare function assertTrustedSemanticPullRequestArtifact(artifact: unknown): asserts artifact is ValidatedSemanticPullRequestArtifact;
+export declare function assertTrustedSemanticIssueArtifact(artifact: unknown): asserts artifact is ValidatedSemanticIssueArtifact;

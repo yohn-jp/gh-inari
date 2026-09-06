@@ -1,6 +1,7 @@
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
 const trustedArtifacts = new WeakSet();
 const trustedSemanticArtifacts = new WeakSet();
+const trustedSemanticIssueArtifacts = new WeakSet();
 /** Internal compiler-to-adapter boundary; intentionally not part of the public exports. */
 export function createValidatedRenderedIssueArtifact(artifact) {
     const value = {
@@ -53,6 +54,24 @@ export function createValidatedSemanticPullRequestArtifact(artifact) {
 }
 export function isTrustedSemanticPullRequestArtifact(value) {
     return typeof value === "object" && value !== null && trustedSemanticArtifacts.has(value);
+}
+/** Internal Core-to-adapter boundary for v2 Semantic Issue projections. */
+export function createValidatedSemanticIssueArtifact(artifact) {
+    const value = {
+        phase: "validated-semantic",
+        kind: "issue",
+        title: artifact.title,
+        body: artifact.body,
+        provenance: cloneArtifactContractProvenance(artifact.provenance),
+        ...(artifact.labels === undefined ? {} : { labels: [...artifact.labels] }),
+        ...(artifact.assignees === undefined ? {} : { assignees: [...artifact.assignees] }),
+    };
+    deepFreeze(value);
+    trustedSemanticIssueArtifacts.add(value);
+    return value;
+}
+export function isTrustedSemanticIssueArtifact(value) {
+    return typeof value === "object" && value !== null && trustedSemanticIssueArtifacts.has(value);
 }
 function register(value) {
     deepFreeze(value);

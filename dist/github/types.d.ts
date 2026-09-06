@@ -49,6 +49,16 @@ export interface ValidatedSemanticPullRequestArtifact {
     readonly draft?: boolean;
     readonly maintainerCanModify?: boolean;
 }
+/** Opaque provider handoff for a Core-projected v2 Semantic Issue. */
+export interface ValidatedSemanticIssueArtifact {
+    readonly phase: "validated-semantic";
+    readonly kind: "issue";
+    readonly title: string;
+    readonly body: string;
+    readonly provenance: ArtifactContractProvenance;
+    readonly labels?: readonly string[];
+    readonly assignees?: readonly string[];
+}
 export interface RepositoryContext {
     readonly hostname: string;
     readonly host: string;

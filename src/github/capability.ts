@@ -4,10 +4,12 @@ import {
   type ValidatedRenderedIssueArtifact,
   type ValidatedRenderedPullRequestArtifact,
   type ValidatedSemanticPullRequestArtifact,
+  type ValidatedSemanticIssueArtifact,
 } from "./types.js";
 
 const trustedArtifacts = new WeakSet<object>();
 const trustedSemanticArtifacts = new WeakSet<object>();
+const trustedSemanticIssueArtifacts = new WeakSet<object>();
 
 /** Internal compiler-to-adapter boundary; intentionally not part of the public exports. */
 export function createValidatedRenderedIssueArtifact(
@@ -73,6 +75,28 @@ export function createValidatedSemanticPullRequestArtifact(
 
 export function isTrustedSemanticPullRequestArtifact(value: unknown): value is ValidatedSemanticPullRequestArtifact {
   return typeof value === "object" && value !== null && trustedSemanticArtifacts.has(value);
+}
+
+/** Internal Core-to-adapter boundary for v2 Semantic Issue projections. */
+export function createValidatedSemanticIssueArtifact(
+  artifact: Omit<ValidatedSemanticIssueArtifact, "phase">,
+): ValidatedSemanticIssueArtifact {
+  const value: ValidatedSemanticIssueArtifact = {
+    phase: "validated-semantic",
+    kind: "issue",
+    title: artifact.title,
+    body: artifact.body,
+    provenance: cloneArtifactContractProvenance(artifact.provenance),
+    ...(artifact.labels === undefined ? {} : { labels: [...artifact.labels] }),
+    ...(artifact.assignees === undefined ? {} : { assignees: [...artifact.assignees] }),
+  };
+  deepFreeze(value);
+  trustedSemanticIssueArtifacts.add(value);
+  return value;
+}
+
+export function isTrustedSemanticIssueArtifact(value: unknown): value is ValidatedSemanticIssueArtifact {
+  return typeof value === "object" && value !== null && trustedSemanticIssueArtifacts.has(value);
 }
 
 function register<T extends object>(value: T): T {
