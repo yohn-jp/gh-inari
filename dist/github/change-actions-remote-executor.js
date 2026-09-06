@@ -269,7 +269,7 @@ function decodeUtf8(bytes) {
     }
 }
 function canonicalMutationRequest(request) {
-    return changeRemoteMutationRequest(request.operation, request.issue, request.requester);
+    return changeRemoteMutationRequest(request.operation, request.issue, request.requester, request.semanticPullRequestPlan);
 }
 function isNewRun(run, baseline) {
     return !baseline.has(run.id) && run.event === "workflow_dispatch" && run.headBranch === INARI_CHANGE_EXECUTOR_BRANCH;
@@ -348,7 +348,7 @@ export class GitHubActionsChangeRemoteExecutor {
                 throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
             }
         }
-        return changeRemoteMutationRequest(request.operation, request.issue, requester);
+        return changeRemoteMutationRequest(request.operation, request.issue, requester, request.semanticPullRequestPlan);
     }
     async dispatchAndCollect(request) {
         const correlation = this.#randomUUID();
@@ -372,6 +372,9 @@ export class GitHubActionsChangeRemoteExecutor {
             operation: request.operation,
             issue: request.issue,
             ...(request.requester === undefined ? {} : { requester: request.requester }),
+            ...(request.operation === "show" || request.semanticPullRequestPlan === undefined
+                ? {}
+                : { semanticPullRequestPlan: request.semanticPullRequestPlan }),
         };
         try {
             await this.#api.requestActionsApi(dispatchPath(), "POST", {

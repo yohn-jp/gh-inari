@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { parseArtifactContract } from "./contract/artifact-contract.js";
+import { compileEffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
+import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
+import type { ArtifactContractProvenance } from "./contract/ir.js";
 import {
   CHANGE_CONTRACT_VERSION,
   CHANGE_TRANSITION_CONTRACT_VERSION,
@@ -31,6 +35,7 @@ import {
   validateChangeTransitionRequest,
   type Change,
 } from "./change.js";
+import { GITHUB_PULL_REQUEST_PROJECTION_CAPABILITIES, planSemanticPullRequest } from "./semantic-pr-projection.js";
 
 const validChange: Change = {
   version: CHANGE_CONTRACT_VERSION,
@@ -269,6 +274,67 @@ const issueRequest = {
   },
 } as const;
 
+const semanticPlanProvenance: ArtifactContractProvenance = {
+  authority: "repository-default-branch",
+  repository: {
+    host: "github.com",
+    owner: "yohn-jp",
+    name: "gh-inari",
+    nameWithOwner: "yohn-jp/gh-inari",
+    repositoryId: "100000210",
+  },
+  ref: "main",
+  treeSha: "tree-sha-323",
+  source: {
+    path: ".github/inari/canon/pull-request.json",
+    ref: "main",
+    sha: "blob-sha-323",
+    digest: "source-digest-323",
+  },
+};
+
+const semanticPlanContract = parseArtifactContract({
+  version: "1",
+  kind: "pull_request",
+  id: "change-test-pr",
+  properties: {
+    title: { presence: "required", authority: { kind: "fixed", value: "Semantic PR #323" } },
+    head: {
+      presence: "required",
+      authority: { kind: "fixed", value: "feat/210-define-canonical-change-domain-contract" },
+    },
+    base: { presence: "required", authority: { kind: "fixed", value: "main" } },
+    implements: { presence: "required", authority: { kind: "supplied" } },
+  },
+  fields: [
+    {
+      id: "summary",
+      primitive: "text",
+      presence: "required",
+      authority: { kind: "supplied" },
+      constraints: { minLength: 1 },
+    },
+  ],
+});
+
+const semanticPullRequestPlan = planSemanticPullRequest({
+  artifact: materializeSemanticArtifact(
+    compileEffectiveArtifactContract(semanticPlanContract, { provenance: semanticPlanProvenance }),
+    {
+      summary: "Semantic PR body from Core",
+      implements: [
+        {
+          repositoryHost: "github.com",
+          repositoryId: "100000210",
+          repository: "yohn-jp/gh-inari",
+          number: 210,
+        },
+      ],
+    },
+  ),
+  capabilities: [GITHUB_PULL_REQUEST_PROJECTION_CAPABILITIES.recognizedClosingReference],
+});
+
 test("Core owns the lifecycle matrix and emits explicit issue effects", () => {
   const result = validateChangeTransitionRequest(issueRequest);
   assert.equal(result.valid, true);
@@ -299,6 +365,42 @@ test("Core owns the lifecycle matrix and emits explicit issue effects", () => {
     projection: { branch: "feat/210-define-canonical-change-domain-contract" },
   });
   assert.equal(isChangeTransitionPlan(plan), true);
+});
+
+test("Change issuance consumes Semantic PR desired state without re-deriving it", () => {
+  const plan = planChangeTransition({
+    ...issueRequest,
+    target: {
+      ...issueRequest.target,
+      semanticPullRequestPlan,
+    },
+  });
+  const pullRequestEffect = plan.effects.find((effect) => effect.kind === "CREATE_PULL_REQUEST");
+  assert.deepEqual(pullRequestEffect, {
+    kind: "CREATE_PULL_REQUEST",
+    branch: issueRequest.target.branch,
+    baseBranch: issueRequest.target.baseBranch,
+    rootIssue: definedChange.identity.rootIssue,
+    title: semanticPullRequestPlan.desired.title,
+    body: semanticPullRequestPlan.desired.body,
+    draft: true,
+    semanticPullRequestPlan,
+  });
+  assert.equal(validateChangeTransitionPlan(plan).valid, true);
+});
+
+test("Change issuance rejects Semantic PR capabilities outside its initial-Draft effect", () => {
+  const nativePlan = structuredClone(semanticPullRequestPlan) as typeof semanticPullRequestPlan;
+  (nativePlan.desired.relations.implements as { representation: string }).representation = "native";
+  (nativePlan.effects[0]!.desired.relations.implements as { representation: string }).representation = "native";
+  assert.throws(
+    () =>
+      planChangeTransition({
+        ...issueRequest,
+        target: { ...issueRequest.target, semanticPullRequestPlan: nativePlan },
+      }),
+    (error: unknown) => error instanceof ChangeTransitionValidationError,
+  );
 });
 
 test("ready and abort produce Core-declared effects", () => {

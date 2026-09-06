@@ -23,6 +23,8 @@ interface ChangeRemoteRequestBase {
 }
 export interface ChangeRemoteMutationRequest extends ChangeRemoteRequestBase {
     readonly operation: ChangeRemoteMutation;
+    /** Core-produced PR plan; validated again inside trusted execution. */
+    readonly semanticPullRequestPlan?: unknown;
 }
 export interface ChangeRemoteReadRequest extends ChangeRemoteRequestBase {
     readonly operation: "show";
@@ -75,7 +77,7 @@ export declare class ChangeRemoteExecutorError extends Error {
 }
 export declare function normalizeChangeRemoteProjection(operation: string, result: unknown): ChangeProjectionResult;
 export declare function normalizeChangeRemoteExecutionResult(operation: string, result: unknown): ChangeRemoteExecutionResult;
-export declare function changeRemoteMutationRequest(operation: ChangeRemoteMutation, issue: number, requester?: string): ChangeRemoteMutationRequest;
+export declare function changeRemoteMutationRequest(operation: ChangeRemoteMutation, issue: number, requester?: string, semanticPullRequestPlan?: unknown): ChangeRemoteMutationRequest;
 export declare function changeRemoteReadRequest(issue: number, requester?: string): ChangeRemoteReadRequest;
 export declare function executeChangeRemoteMutation(executor: ChangeRemoteExecutor, request: ChangeRemoteMutationRequest): Promise<ChangeProjectionResult>;
 export declare function executeChangeRemoteMutationResult(executor: ChangeRemoteExecutor, request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult>;

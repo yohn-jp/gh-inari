@@ -104,15 +104,19 @@ export class GitHubChangeEffectAdapter {
         return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch };
     }
     async createPullRequest(effect) {
+        const desired = effect.semanticPullRequestPlan?.desired;
         const response = await this.request({
             method: "POST",
             path: `${this.repositoryPath()}/pulls`,
             body: {
-                head: effect.branch,
-                base: effect.baseBranch,
-                title: effect.title,
-                body: effect.body,
+                head: desired?.head ?? effect.branch,
+                base: desired?.base ?? effect.baseBranch,
+                title: desired?.title ?? effect.title,
+                body: desired?.body ?? effect.body,
                 draft: effect.draft,
+                ...(desired?.metadata.maintainerCanModify === undefined
+                    ? {}
+                    : { maintainer_can_modify: desired.metadata.maintainerCanModify }),
             },
         }, 201);
         const record = responseRecord(response);
@@ -124,8 +128,28 @@ export class GitHubChangeEffectAdapter {
             throw new InvalidGitHubResponseError();
         if (record.state !== "open" || record.draft !== true)
             throw new InvalidGitHubResponseError();
-        responseBranch(record.head, effect.branch);
-        responseBranch(record.base, effect.baseBranch);
+        responseBranch(record.head, desired?.head ?? effect.branch);
+        responseBranch(record.base, desired?.base ?? effect.baseBranch);
+        if (desired !== undefined &&
+            desired.metadata.maintainerCanModify !== undefined &&
+            record.maintainer_can_modify !== desired.metadata.maintainerCanModify) {
+            throw new InvalidGitHubResponseError();
+        }
+        if (desired !== undefined &&
+            ((desired.metadata.labels?.length ?? 0) > 0 || (desired.metadata.assignees?.length ?? 0) > 0)) {
+            const metadataResponse = responseRecord(await this.request({
+                method: "PATCH",
+                path: `${this.repositoryPath()}/issues/${pullRequest}`,
+                body: {
+                    ...(desired.metadata.labels === undefined ? {} : { labels: desired.metadata.labels }),
+                    ...(desired.metadata.assignees === undefined ? {} : { assignees: desired.metadata.assignees }),
+                },
+            }, 200));
+            if (desired.metadata.labels !== undefined)
+                responseStringSet(metadataResponse.labels, "name", desired.metadata.labels);
+            if (desired.metadata.assignees !== undefined)
+                responseStringSet(metadataResponse.assignees, "login", desired.metadata.assignees);
+        }
         return {
             kind: effect.kind,
             branch: effect.branch,
@@ -253,6 +277,18 @@ function responseBoundedString(value) {
         throw new InvalidGitHubResponseError();
     }
     return value;
+}
+function responseStringSet(value, property, expected) {
+    if (!Array.isArray(value))
+        throw new InvalidGitHubResponseError();
+    const actual = value.map((entry) => {
+        if (!isRecord(entry))
+            throw new InvalidGitHubResponseError();
+        return responseBoundedString(entry[property]);
+    });
+    const sort = (items) => [...items].sort((left, right) => left.localeCompare(right, "en-US"));
+    if (JSON.stringify(sort(actual)) !== JSON.stringify(sort(expected)))
+        throw new InvalidGitHubResponseError();
 }
 function assertRepository(value) {
     if (!isRecord(value) ||
