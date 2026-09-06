@@ -8,6 +8,7 @@
  */
 import { deriveBranchName } from "../branch-naming-authority.mjs";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
+import { validateSemanticBranchMutationPlan } from "./semantic-branch-projection.js";
 import { renderIssueArtifact, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
 import { issueReferenceKey, normalizeIssueReference, } from "./contract/issue-reference.js";
 import { validateCanonicalContract } from "./contract/ir.js";
@@ -142,11 +143,12 @@ const PROJECTION_KEYS = new Set(["branch", "pullRequest"]);
 const CANONICAL_BRANCH_DERIVATION_KEYS = new Set(["change", "branchGovernance", "naming"]);
 const BRANCH_NAMING_KEYS = new Set(["type", "slug"]);
 const TRANSITION_REQUEST_KEYS = new Set(["version", "transition", "change", "target"]);
-const TRANSITION_TARGET_KEYS = new Set(["branch", "baseBranch", "pullRequest"]);
+const TRANSITION_TARGET_KEYS = new Set(["branchPlan", "branch", "baseBranch", "pullRequest"]);
 const TRANSITION_PLAN_KEYS = new Set(["version", "request", "from", "to", "result", "effects"]);
 const EFFECT_KEYS = new Set(["kind", "branch", "baseBranch", "rootIssue", "title", "body", "draft", "pullRequest"]);
 const CHANGE_PROJECTION_INPUT_KEYS = new Set([
     "change",
+    "branchPlan",
     "branchGovernance",
     "naming",
     "baseBranch",
@@ -161,6 +163,7 @@ const CHANGE_ISSUANCE_PLAN_KEYS = new Set([
     "mode",
     "sourceStatus",
     "transaction",
+    "branchPlan",
     "result",
     "effects",
     "verification",
@@ -244,6 +247,7 @@ const CHANGE_MERGE_ADMISSION_INPUT_KEYS = new Set([
     "body",
     "expectedIssuer",
     "branchGovernance",
+    "branchPlan",
     "naming",
     "baseBranch",
     "evidence",
@@ -276,6 +280,7 @@ const CHANGE_READY_INPUT_KEYS = new Set([
     "contract",
     "body",
     "branchGovernance",
+    "branchPlan",
     "naming",
     "baseBranch",
     "evidence",
@@ -540,9 +545,28 @@ function validateCanonicalBranchNaming(input, diagnostics) {
     return { type: type, slug: slug };
 }
 /**
+ * Admit only a versioned Core Branch plan at the Change boundary. Change
+ * translates the bounded Core diagnostics into its own diagnostic contract;
+ * it never inspects type/Issue/slug or re-runs a branch derivation here.
+ */
+function validateConsumedSemanticBranchPlan(input, diagnostics, path = "$.branchPlan") {
+    const result = validateSemanticBranchMutationPlan(input);
+    if (result.valid && result.plan !== undefined)
+        return result.plan;
+    for (const violation of result.violations) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", `${path}${violation.path === "$" ? "" : violation.path.slice(1)}`, `Semantic Branch plan is invalid: ${violation.message}`);
+    }
+    if (result.violations.length === 0) {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", path, "Semantic Branch plan is invalid.");
+    }
+    return undefined;
+}
+/**
  * Derive one canonical branch identity from a validated Change identity,
  * repository branch governance, and governance-resolved naming parts.
  *
+ * @deprecated Compatibility-only v1 adapter path. Converged callers pass a
+ * Core-produced Branch plan to `projectChangeFromGitHubEvidence` instead.
  * The branch grammar is owned by the shared branch authority. This function
  * only supplies the Change Issue number, verifies the repository policy, and
  * returns a pure projection; it never creates or updates a Git ref.
@@ -1030,23 +1054,42 @@ export function projectChangeFromGitHubEvidence(input) {
         if (result.provenance !== undefined)
             provenance = result.provenance;
     }
+    const hasBranchPlan = hasOwn(input, "branchPlan");
+    let consumedBranchPlan;
+    if (hasBranchPlan) {
+        consumedBranchPlan = validateConsumedSemanticBranchPlan(input.branchPlan, diagnostics);
+    }
     let derivedCanonicalBranch;
-    if (identity !== undefined) {
-        const derivationInput = { change: identity };
-        if (hasOwn(input, "branchGovernance"))
-            derivationInput.branchGovernance = input.branchGovernance;
-        if (hasOwn(input, "naming"))
-            derivationInput.naming = input.naming;
-        const result = deriveCanonicalBranchIdentity(derivationInput);
-        diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
-        derivedCanonicalBranch = result.branch;
-    }
     let canonicalBaseBranch;
-    if (!hasOwn(input, "baseBranch")) {
-        addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.baseBranch", "Property is required.");
+    if (consumedBranchPlan !== undefined) {
+        // The Branch plan is already a Core projection. It is the only source of
+        // branch identity and source on this path; legacy naming/policy values are
+        // deliberately not consulted.
+        derivedCanonicalBranch = consumedBranchPlan.desired.name;
+        canonicalBaseBranch = consumedBranchPlan.desired.source;
+        if (hasOwn(input, "baseBranch") && input.baseBranch !== canonicalBaseBranch) {
+            addDiagnostic(diagnostics, "CHANGE_BRANCH_GOVERNANCE_MISMATCH", "$.baseBranch", "The supplied base branch does not match the Semantic Branch plan source.");
+        }
     }
-    else {
-        canonicalBaseBranch = projectionText(input.baseBranch, "$.baseBranch", diagnostics, "Canonical base branch", MAX_CHANGE_BASE_BRANCH_LENGTH);
+    else if (!hasBranchPlan) {
+        // Explicit v1 compatibility path. It remains available for historical
+        // adapters, but cannot compete with a supplied Semantic Branch plan.
+        if (identity !== undefined) {
+            const derivationInput = { change: identity };
+            if (hasOwn(input, "branchGovernance"))
+                derivationInput.branchGovernance = input.branchGovernance;
+            if (hasOwn(input, "naming"))
+                derivationInput.naming = input.naming;
+            const result = deriveCanonicalBranchIdentity(derivationInput);
+            diagnostics.push(...result.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
+            derivedCanonicalBranch = result.branch;
+        }
+        if (!hasOwn(input, "baseBranch")) {
+            addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.baseBranch", "Property is required.");
+        }
+        else {
+            canonicalBaseBranch = projectionText(input.baseBranch, "$.baseBranch", diagnostics, "Canonical base branch", MAX_CHANGE_BASE_BRANCH_LENGTH);
+        }
     }
     let evidence;
     if (!hasOwn(input, "evidence")) {
@@ -1075,8 +1118,10 @@ export function projectChangeFromGitHubEvidence(input) {
     const branches = projectionSourceValue(branchRead, []);
     const pullRequests = projectionSourceValue(pullRequestRead, []);
     // Once the trusted reader has found GitHub evidence explicitly claiming this
-    // root Issue, that evidence anchors the canonical branch.  Mutable Issue
-    // naming remains the authority only while no issued candidate exists.
+    // root Issue, that evidence anchors the canonical branch on the compatibility
+    // path.  A consumed Semantic Branch plan is already Core authority, so
+    // observed claims for a different branch are retained as ambiguity instead
+    // of replacing its desired identity.
     const anchoredBranchNames = new Set();
     for (const branch of branches) {
         if (branch.rootIssue === identity.rootIssue)
@@ -1086,8 +1131,13 @@ export function projectChangeFromGitHubEvidence(input) {
         if (pullRequest.rootIssue === identity.rootIssue)
             anchoredBranchNames.add(pullRequest.head);
     }
-    const canonicalBranch = anchoredBranchNames.size === 1 ? [...anchoredBranchNames][0] : derivedCanonicalBranch;
-    const hasAmbiguousAnchoredBranches = anchoredBranchNames.size > 1;
+    const canonicalBranch = consumedBranchPlan !== undefined
+        ? consumedBranchPlan.desired.name
+        : anchoredBranchNames.size === 1
+            ? [...anchoredBranchNames][0]
+            : derivedCanonicalBranch;
+    const hasAmbiguousAnchoredBranches = anchoredBranchNames.size > 1 ||
+        (consumedBranchPlan !== undefined && [...anchoredBranchNames].some((name) => name !== canonicalBranch));
     if (canonicalBranch === undefined) {
         return projectionEvidenceUnavailableResult(diagnostics, derivedCanonicalBranch, canonicalBaseBranch);
     }
@@ -1433,6 +1483,10 @@ function validateTransitionTarget(input, path) {
         return { valid: false, diagnostics };
     }
     addUnknownProperties(input, TRANSITION_TARGET_KEYS, path, diagnostics);
+    const hasBranchPlan = hasOwn(input, "branchPlan");
+    const branchPlan = hasBranchPlan
+        ? validateConsumedSemanticBranchPlan(input.branchPlan, diagnostics, `${path}.branchPlan`)
+        : undefined;
     let branch;
     let baseBranch;
     let pullRequest;
@@ -1441,6 +1495,22 @@ function validateTransitionTarget(input, path) {
     }
     if (hasOwn(input, "baseBranch")) {
         baseBranch = validateTransitionBranch(input.baseBranch, `${path}.baseBranch`, MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
+    }
+    if (branchPlan !== undefined) {
+        if (branch !== undefined && branch !== branchPlan.desired.name) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_TRANSITION_TARGET", `${path}.branch`, "Branch target does not match the Semantic Branch plan desired name.");
+        }
+        if (baseBranch !== undefined && baseBranch !== branchPlan.desired.source) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_TRANSITION_TARGET", `${path}.baseBranch`, "Base branch target does not match the Semantic Branch plan desired source.");
+        }
+        branch = branchPlan.desired.name;
+        baseBranch = branchPlan.desired.source;
+    }
+    else if (hasBranchPlan) {
+        // A malformed explicitly supplied plan must not silently fall back to
+        // caller-controlled branch fields.
+        branch = undefined;
+        baseBranch = undefined;
     }
     if (hasOwn(input, "pullRequest")) {
         if (typeof input.pullRequest !== "number" || !Number.isSafeInteger(input.pullRequest) || input.pullRequest < 1) {
@@ -1456,6 +1526,7 @@ function validateTransitionTarget(input, path) {
     return {
         valid: true,
         target: {
+            ...(branchPlan === undefined ? {} : { branchPlan }),
             ...(branch === undefined ? {} : { branch }),
             ...(baseBranch === undefined ? {} : { baseBranch }),
             ...(pullRequest === undefined ? {} : { pullRequest }),
@@ -2122,7 +2193,7 @@ function buildChangeIssuanceVerification(result, canonicalBranch, canonicalBaseB
         },
     };
 }
-function buildChangeIssuancePlan(projection) {
+function buildChangeIssuancePlan(projection, branchPlan) {
     if ((projection.status !== "absent" && projection.status !== "healthy") ||
         !projection.valid ||
         projection.change === undefined ||
@@ -2143,6 +2214,7 @@ function buildChangeIssuancePlan(projection) {
             transition: "issue",
             change: projection.change,
             target: {
+                ...(branchPlan === undefined ? {} : { branchPlan }),
                 branch: projection.canonicalBranch,
                 baseBranch: projection.canonicalBaseBranch,
             },
@@ -2153,6 +2225,7 @@ function buildChangeIssuancePlan(projection) {
             mode: "create",
             sourceStatus,
             transaction,
+            ...(branchPlan === undefined ? {} : { branchPlan }),
             result: transitionPlan.result,
             effects: transitionPlan.effects,
             verification: buildChangeIssuanceVerification(transitionPlan.result, projection.canonicalBranch, projection.canonicalBaseBranch),
@@ -2164,6 +2237,7 @@ function buildChangeIssuancePlan(projection) {
         mode: "return-existing",
         sourceStatus,
         transaction,
+        ...(branchPlan === undefined ? {} : { branchPlan }),
         result: projection.change,
         effects: [],
         verification: buildChangeIssuanceVerification(projection.change, projection.canonicalBranch, projection.canonicalBaseBranch),
@@ -2216,7 +2290,10 @@ export function planChangeIssuance(input) {
         projection.canonicalBaseBranch === undefined) {
         throw new ChangeIssuanceValidationError(issuanceFailureDiagnostics(projection));
     }
-    const plan = buildChangeIssuancePlan(projection);
+    const branchPlan = isRecord(input) && hasOwn(input, "branchPlan")
+        ? validateConsumedSemanticBranchPlan(input.branchPlan, [])
+        : undefined;
+    const plan = buildChangeIssuancePlan(projection, branchPlan);
     const result = validateChangeIssuancePlan(plan);
     if (!result.valid || result.plan === undefined)
         throw new ChangeIssuanceValidationError(result.diagnostics);
@@ -2268,6 +2345,10 @@ export function validateChangeIssuancePlan(input) {
     else {
         transaction = validateChangeIssuanceTransaction(input.transaction, "$.transaction", diagnostics);
     }
+    let branchPlan;
+    if (hasOwn(input, "branchPlan")) {
+        branchPlan = validateConsumedSemanticBranchPlan(input.branchPlan, diagnostics);
+    }
     let resultChange;
     if (!hasOwn(input, "result")) {
         addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.result", "Property is required.");
@@ -2298,6 +2379,14 @@ export function validateChangeIssuancePlan(input) {
         resultChange === undefined ||
         verification === undefined) {
         return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    if (branchPlan !== undefined) {
+        if (branchPlan.desired.name !== verification.canonicalBranch) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.branchPlan.desired.name", "Semantic Branch plan name must match issuance verification.");
+        }
+        if (branchPlan.desired.source !== verification.canonicalBaseBranch) {
+            addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", "$.branchPlan.desired.source", "Semantic Branch plan source must match issuance verification.");
+        }
     }
     const expectedIdempotencyKey = changeIdentityKey(resultChange.identity);
     if (!canonicalPlanEquals(transaction.identity, resultChange.identity)) {
@@ -2378,6 +2467,7 @@ export function validateChangeIssuancePlan(input) {
                 identity: resultChange.identity,
                 idempotencyKey: expectedIdempotencyKey,
             },
+            ...(branchPlan === undefined ? {} : { branchPlan }),
             result: resultChange,
             effects,
             verification,
@@ -3953,10 +4043,11 @@ export function validateChangeMergeAdmission(input) {
     let projection;
     let projectionSource = projectionInputAlias.value;
     const flattenedProjection = !projectionInputAlias.present &&
-        ["branchGovernance", "naming", "baseBranch", "evidence", "provenance"].some((key) => hasOwn(input, key));
+        ["branchPlan", "branchGovernance", "naming", "baseBranch", "evidence", "provenance"].some((key) => hasOwn(input, key));
     if (flattenedProjection) {
         projectionSource = {
             change: canonicalInput.value ?? canonical,
+            ...(hasOwn(input, "branchPlan") ? { branchPlan: input.branchPlan } : {}),
             branchGovernance: input.branchGovernance,
             naming: input.naming,
             baseBranch: input.baseBranch,
@@ -4352,9 +4443,10 @@ function readyAdmissionInput(input, diagnostics) {
     if (projection.present) {
         admission.projection = projection.value;
     }
-    else if (["branchGovernance", "naming", "baseBranch", "evidence", "provenance"].some((key) => hasOwn(input, key))) {
+    else if (["branchPlan", "branchGovernance", "naming", "baseBranch", "evidence", "provenance"].some((key) => hasOwn(input, key))) {
         admission.projection = {
             change: canonical.value,
+            ...(hasOwn(input, "branchPlan") ? { branchPlan: input.branchPlan } : {}),
             branchGovernance: input.branchGovernance,
             naming: input.naming,
             baseBranch: input.baseBranch,

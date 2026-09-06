@@ -6,6 +6,7 @@
  * transition matrix, and pure effect planning. It does not read or mutate
  * GitHub state or execute effects.
  */
+import { type SemanticBranchMutationPlan } from "./semantic-branch-projection.js";
 import { type CanonicalContract, type PullRequestBranchGovernance } from "./contract/ir.js";
 export declare const CHANGE_CONTRACT_VERSION: 1;
 export type ChangeContractVersion = typeof CHANGE_CONTRACT_VERSION;
@@ -141,6 +142,8 @@ export declare const CHANGE_TRANSITION_MATRIX: readonly [{
  * planned.  The target is data, not a transport or an adapter callback.
  */
 export interface ChangeTransitionTarget {
+    /** Core-produced Branch plan; its desired name/source are authoritative. */
+    readonly branchPlan?: SemanticBranchMutationPlan;
     readonly branch?: string;
     readonly baseBranch?: string;
     readonly pullRequest?: number;
@@ -326,12 +329,18 @@ export type ChangeProjectionEvidence = ChangeGitHubEvidence;
 export interface ChangeProjectionInput {
     /** A Change snapshot or identity; its existing state is never trusted. */
     readonly change: Change | ChangeIdentity;
+    /**
+     * Core-produced Semantic Branch plan. When present, this is the sole
+     * authority for the canonical branch name and source. The legacy naming
+     * inputs below are accepted only for compatibility when this plan is absent.
+     */
+    readonly branchPlan?: SemanticBranchMutationPlan;
     /** Existing repository branch policy consumed by #211's authority; absent when the repository declares no branch rule. */
     readonly branchGovernance?: PullRequestBranchGovernance;
-    /** Existing governance-resolved branch naming parts consumed by #211. */
-    readonly naming: CanonicalBranchNamingInput;
-    /** Repository-governed target base branch. */
-    readonly baseBranch: string;
+    /** Existing governance-resolved branch naming parts consumed by #211 (legacy compatibility). */
+    readonly naming?: CanonicalBranchNamingInput;
+    /** Repository-governed target base branch (legacy compatibility; Branch Plan source wins). */
+    readonly baseBranch?: string;
     readonly evidence: ChangeGitHubEvidence;
     /** Optional known provenance when projecting from an identity rather than a snapshot. */
     readonly provenance?: ChangeProvenance;
@@ -466,6 +475,8 @@ export interface ChangeIssuancePlan {
     readonly mode: ChangeIssuanceMode;
     readonly sourceStatus: ChangeIssuanceSourceStatus;
     readonly transaction: ChangeIssuanceTransaction;
+    /** The Core Branch plan consumed to establish issuance targets, when available. */
+    readonly branchPlan?: SemanticBranchMutationPlan;
     /** Expected semantic Change after the declared effects or existing return. */
     readonly result: Change;
     /** Ordered effects for the one transaction; empty for return-existing. */
@@ -626,6 +637,8 @@ export declare const projectChangeIdentity: typeof validateChangeIdentity;
  * Derive one canonical branch identity from a validated Change identity,
  * repository branch governance, and governance-resolved naming parts.
  *
+ * @deprecated Compatibility-only v1 adapter path. Converged callers pass a
+ * Core-produced Branch plan to `projectChangeFromGitHubEvidence` instead.
  * The branch grammar is owned by the shared branch authority. This function
  * only supplies the Change Issue number, verifies the repository policy, and
  * returns a pure projection; it never creates or updates a Git ref.
