@@ -9,13 +9,13 @@
  * into the effective metadata for the later materialization phase.
  */
 import { type ArtifactContract, type ArtifactContractDerivation, type ArtifactContractKind, type DerivationReference, type FieldDeclaration, type PropertyValueDeclaration } from "./artifact-contract.js";
-import { type ContractProvenance } from "./ir.js";
+import { type ArtifactContractProvenance } from "./ir.js";
 import type { JsonSchemaDocument } from "./schema.js";
 export declare const EFFECTIVE_ARTIFACT_CONTRACT_VERSION: "1";
 export type EffectiveArtifactContractVersion = typeof EFFECTIVE_ARTIFACT_CONTRACT_VERSION;
 export interface EffectiveArtifactContractOptions {
-    /** Existing Core provenance; `treeSha` and source fingerprints bind generation. */
-    readonly provenance: ContractProvenance;
+    /** Representation-independent Canon provenance; `treeSha` and `source` fingerprints bind generation. */
+    readonly provenance: ArtifactContractProvenance;
     /** Opaque target capability identifiers are carried, never interpreted, by this compiler. */
     readonly capabilities?: readonly string[];
 }
@@ -39,8 +39,8 @@ export interface EffectiveArtifactContract {
     readonly dependencyGraph: Readonly<Record<string, readonly DerivationReference[]>>;
     readonly evaluationOrder: readonly string[];
     /** The same immutable Core provenance is exposed as the generation binding. */
-    readonly provenance: ContractProvenance;
-    readonly generation: ContractProvenance;
+    readonly provenance: ArtifactContractProvenance;
+    readonly generation: ArtifactContractProvenance;
     readonly capabilities: readonly string[];
 }
 /** Compile a normalized Artifact Contract into the immutable Core discovery contract. */

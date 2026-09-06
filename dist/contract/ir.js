@@ -16,6 +16,22 @@ export const MULTI_SELECT_OPTION_SEPARATOR = ",";
  * remain GitHub behavior and are deliberately outside this contract rule.
  */
 export const LINKED_ISSUE_PATTERN = "(?:^|[^A-Za-z0-9_])(?:[Cc][Ll][Oo][Ss][Ee](?:[Ss]|[Dd])?|[Ff][Ii][Xx](?:[Ee][Ss]|[Ee][Dd])?|[Rr][Ee][Ss][Oo][Ll][Vv][Ee](?:[Ss]|[Dd])?)(?:[ \\t]+|[ \\t]*:[ \\t]*)(?:#[1-9][0-9]*|[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*#[1-9][0-9]*)(?![A-Za-z0-9_])";
+/**
+ * Adapt existing native-template {@link ContractProvenance} into the
+ * representation-independent {@link ArtifactContractProvenance} shape, for
+ * repositories that still compile Canon v2 contracts from a native template.
+ * Not required: a Canon v2 source with no native template constructs
+ * {@link ArtifactContractProvenance} directly.
+ */
+export function artifactContractProvenanceFromTemplate(provenance) {
+    return {
+        authority: provenance.authority,
+        repository: provenance.repository,
+        ref: provenance.ref,
+        treeSha: provenance.treeSha,
+        source: provenance.template,
+    };
+}
 export class CanonicalIrValidationError extends Error {
     violations;
     constructor(violations) {

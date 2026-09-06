@@ -21,15 +21,15 @@ import {
   type PropertyValueDeclaration,
   type ValueShape,
 } from "./artifact-contract.js";
-import { JSON_SCHEMA_DIALECT, type ContractProvenance } from "./ir.js";
+import { JSON_SCHEMA_DIALECT, type ArtifactContractProvenance } from "./ir.js";
 import type { JsonSchema, JsonSchemaDocument } from "./schema.js";
 
 export const EFFECTIVE_ARTIFACT_CONTRACT_VERSION = "1" as const;
 export type EffectiveArtifactContractVersion = typeof EFFECTIVE_ARTIFACT_CONTRACT_VERSION;
 
 export interface EffectiveArtifactContractOptions {
-  /** Existing Core provenance; `treeSha` and source fingerprints bind generation. */
-  readonly provenance: ContractProvenance;
+  /** Representation-independent Canon provenance; `treeSha` and `source` fingerprints bind generation. */
+  readonly provenance: ArtifactContractProvenance;
   /** Opaque target capability identifiers are carried, never interpreted, by this compiler. */
   readonly capabilities?: readonly string[];
 }
@@ -58,8 +58,8 @@ export interface EffectiveArtifactContract {
   readonly dependencyGraph: Readonly<Record<string, readonly DerivationReference[]>>;
   readonly evaluationOrder: readonly string[];
   /** The same immutable Core provenance is exposed as the generation binding. */
-  readonly provenance: ContractProvenance;
-  readonly generation: ContractProvenance;
+  readonly provenance: ArtifactContractProvenance;
+  readonly generation: ArtifactContractProvenance;
   readonly capabilities: readonly string[];
 }
 

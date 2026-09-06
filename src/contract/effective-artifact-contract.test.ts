@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { compileEffectiveArtifactContract } from "./effective-artifact-contract.js";
 import { parseArtifactContract, serializeArtifactContract } from "./artifact-contract.js";
-import type { ContractProvenance } from "./ir.js";
+import type { ArtifactContractProvenance } from "./ir.js";
 import type { JsonSchema } from "./schema.js";
 
-const provenance: ContractProvenance = {
+const provenance: ArtifactContractProvenance = {
   authority: "repository-default-branch",
   repository: {
     host: "github.com",
@@ -16,8 +16,8 @@ const provenance: ContractProvenance = {
   },
   ref: "main",
   treeSha: "tree-sha-1",
-  template: {
-    path: ".github/inari/feature.json",
+  source: {
+    path: ".github/inari/canon/feature.json",
     ref: "main",
     sha: "blob-sha-1",
     digest: "digest-1",
@@ -265,6 +265,47 @@ test("provenance/generation is immutable and stable for a fixed contract, capabi
 
   const changedGeneration = compile(derivedBranch, { treeSha: "tree-sha-2" });
   assert.notDeepEqual(first.generation, changedGeneration.generation);
+});
+
+test("a Canon v2 source compiles without constructing native-template provenance", () => {
+  const canonOnlyProvenance: ArtifactContractProvenance = {
+    authority: "repository-default-branch",
+    repository: {
+      host: "github.com",
+      owner: "yohn-jp",
+      name: "gh-inari",
+      nameWithOwner: "yohn-jp/gh-inari",
+    },
+    ref: "main",
+    treeSha: "tree-sha-1",
+    source: {
+      path: ".github/inari/canon/derived-branch.json",
+      ref: "main",
+      sha: "blob-sha-1",
+      digest: "digest-1",
+    },
+  };
+  assert.equal(Object.hasOwn(canonOnlyProvenance, "template"), false);
+
+  const contract = parseArtifactContract(derivedBranch);
+  const effective = compileEffectiveArtifactContract(contract, { provenance: canonOnlyProvenance });
+  assert.equal(effective.generation.source.digest, "digest-1");
+  assert.equal(Object.hasOwn(effective.generation, "template"), false);
+});
+
+test("changing the Canon source digest or tree generation changes effective generation identity", () => {
+  const base = compile(derivedBranch);
+
+  const changedTree = compile(derivedBranch, { treeSha: "tree-sha-2" });
+  assert.notEqual(changedTree.generation.treeSha, base.generation.treeSha);
+  assert.notDeepEqual(changedTree.generation, base.generation);
+
+  const contract = parseArtifactContract(derivedBranch);
+  const changedSource = compileEffectiveArtifactContract(contract, {
+    provenance: { ...provenance, source: { ...provenance.source, digest: "digest-2" } },
+  });
+  assert.notEqual(changedSource.generation.source.digest, base.generation.source.digest);
+  assert.notDeepEqual(changedSource.generation, base.generation);
 });
 
 test("compiled output is structurally stable regardless of authored property insertion order", () => {

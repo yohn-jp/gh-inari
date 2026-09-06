@@ -75,6 +75,34 @@ export interface ContractProvenance {
     /** Pull-request-only: present only when the repository's PR policy declares a branch rule. */
     readonly branchGovernance?: PullRequestBranchGovernance;
 }
+/**
+ * Representation-independent repository provenance for a Canon Artifact
+ * Contract's authoritative generation identity.
+ *
+ * Unlike {@link ContractProvenance}, this carries no native-template-only
+ * fields (`template`, `policy`, `templateResolution`, `branchGovernance`):
+ * a Canon v2 Artifact Contract is a repository Canon artifact, not
+ * necessarily a native Issue/PR template, so it has no template to bind to.
+ * `source` fingerprints whatever repository artifact is Canon-authoritative
+ * for the compiled contract.
+ */
+export interface ArtifactContractProvenance {
+    readonly authority: "repository-default-branch";
+    readonly repository: ContractProvenanceRepository;
+    readonly ref: string;
+    /** SHA of the repository's root Git tree at `ref`; see {@link ContractProvenance.treeSha}. */
+    readonly treeSha: string;
+    /** Fingerprint of the authoritative Canon source compiled into the contract. */
+    readonly source: ContractProvenanceSource;
+}
+/**
+ * Adapt existing native-template {@link ContractProvenance} into the
+ * representation-independent {@link ArtifactContractProvenance} shape, for
+ * repositories that still compile Canon v2 contracts from a native template.
+ * Not required: a Canon v2 source with no native template constructs
+ * {@link ArtifactContractProvenance} directly.
+ */
+export declare function artifactContractProvenanceFromTemplate(provenance: ContractProvenance): ArtifactContractProvenance;
 export interface NativeContractMetadata {
     readonly source: TemplateSource;
     readonly path: string;
