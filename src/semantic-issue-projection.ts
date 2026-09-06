@@ -27,9 +27,6 @@ export const GITHUB_ISSUE_PROJECTION_CAPABILITIES = Object.freeze({
   nativeBlockedByRelation: "github.issue.blocked-by.native",
   /** Semantic spelling retained alongside the GitHub endpoint spelling. */
   nativeDependsOnRelation: "github.issue.blocked-by.native",
-  recognizedParentConvention: "github.issue.parent.convention",
-  recognizedDependencyMarker: "github.issue.dependencies.marker",
-  recognizedDependencyConvention: "github.issue.dependencies.marker",
   bodyRelationFallback: "github.issue.relations.body-fallback",
 } as const);
 
@@ -46,15 +43,11 @@ export type GitHubIssueProjectionCapability =
 export interface GitHubIssueProjectionCapabilityFlags {
   readonly nativeParentRelation?: boolean;
   readonly nativeDependsOnRelation?: boolean;
-  readonly recognizedParentConvention?: boolean;
-  readonly recognizedDependencyConvention?: boolean;
   readonly bodyRelationFallback?: boolean;
   /** Compatibility spellings for adapters naming the GitHub endpoint. */
   readonly nativeParent?: boolean;
   readonly nativeDependsOn?: boolean;
   readonly nativeBlockedByRelation?: boolean;
-  readonly recognizedParentRelation?: boolean;
-  readonly recognizedDependencyMarker?: boolean;
 }
 
 export type GitHubIssueProjectionCapabilities = readonly string[] | GitHubIssueProjectionCapabilityFlags;
@@ -64,7 +57,7 @@ export interface SemanticIssueProjectionInput {
   readonly capabilities: GitHubIssueProjectionCapabilities;
 }
 
-export type SemanticIssueProjectionRepresentation = "none" | "native" | "recognized-convention" | "body-fallback";
+export type SemanticIssueProjectionRepresentation = "none" | "native" | "body-fallback";
 
 export interface DesiredIssueParentRelationProjection {
   readonly relation: "parent";
@@ -195,14 +188,10 @@ const PROJECTION_INPUT_KEYS = new Set(["artifact", "capabilities"]);
 const CAPABILITY_FLAG_KEYS = new Set([
   "nativeParentRelation",
   "nativeDependsOnRelation",
-  "recognizedParentConvention",
-  "recognizedDependencyConvention",
   "bodyRelationFallback",
   "nativeParent",
   "nativeDependsOn",
   "nativeBlockedByRelation",
-  "recognizedParentRelation",
-  "recognizedDependencyMarker",
 ]);
 const ISSUE_PROPERTY_NAMES = new Set(["title", "type", "labels", "assignees", "milestone", "parent", "dependsOn"]);
 const PLAN_ARTIFACT_IDENTITY_KEYS = new Set([
@@ -227,12 +216,7 @@ const DESIRED_METADATA_KEYS = new Set(["labels", "assignees", "milestone"]);
 const DESIRED_RELATIONS_KEYS = new Set(["parent", "dependsOn"]);
 const DESIRED_PARENT_RELATION_KEYS = new Set(["relation", "reference", "representation"]);
 const DESIRED_DEPENDS_ON_RELATION_KEYS = new Set(["relation", "references", "representation"]);
-const RELATION_REPRESENTATIONS = new Set<SemanticIssueProjectionRepresentation>([
-  "none",
-  "native",
-  "recognized-convention",
-  "body-fallback",
-]);
+const RELATION_REPRESENTATIONS = new Set<SemanticIssueProjectionRepresentation>(["none", "native", "body-fallback"]);
 const GOVERNANCE_GENERATION_MATCH_KEYS = new Set(["kind", "generation"]);
 const PLAN_EFFECT_KEYS = new Set(["kind", "desired"]);
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
@@ -250,18 +234,6 @@ const CAPABILITY_ALIASES = {
     "github.issue.blocked_by.native",
     "github.issue.dependencies.native",
     "issue.depends-on.native",
-  ]),
-  recognizedParent: new Set([
-    GITHUB_ISSUE_PROJECTION_CAPABILITIES.recognizedParentConvention,
-    "github.issue.parent.convention",
-    "issue.parent.convention",
-  ]),
-  recognizedDependsOn: new Set([
-    GITHUB_ISSUE_PROJECTION_CAPABILITIES.recognizedDependencyConvention,
-    GITHUB_ISSUE_PROJECTION_CAPABILITIES.recognizedDependencyMarker,
-    "github.issue.dependencies.marker",
-    "github.issue.dependencies.convention",
-    "issue.depends-on.convention",
   ]),
   fallback: new Set([
     GITHUB_ISSUE_PROJECTION_CAPABILITIES.bodyRelationFallback,
@@ -480,10 +452,6 @@ function normalizeCapabilities(
       input.nativeBlockedByRelation === true
     )
       values.push(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation);
-    if (input.recognizedParentConvention === true || input.recognizedParentRelation === true)
-      values.push(GITHUB_ISSUE_PROJECTION_CAPABILITIES.recognizedParentConvention);
-    if (input.recognizedDependencyConvention === true || input.recognizedDependencyMarker === true)
-      values.push(GITHUB_ISSUE_PROJECTION_CAPABILITIES.recognizedDependencyConvention);
     if (input.bodyRelationFallback === true) values.push(GITHUB_ISSUE_PROJECTION_CAPABILITIES.bodyRelationFallback);
   } else {
     addViolation(
@@ -733,21 +701,10 @@ function renderCanonicalBody(
     blocks.push(`## ${fieldHeading(key)}\n\n${renderFieldValue(fields[key])}`);
   }
 
-  const compatibilityParent =
-    parent !== undefined &&
-    (parentRepresentation === "recognized-convention" || parentRepresentation === "body-fallback");
-  const compatibilityDependsOn =
-    dependsOn.length > 0 &&
-    (dependsOnRepresentation === "recognized-convention" || dependsOnRepresentation === "body-fallback");
-  const markerParent = compatibilityParent ? parent : undefined;
-  const markerDependsOn = dependsOnRepresentation === "body-fallback" ? dependsOn : [];
-  const genericRelationMarker =
-    (markerParent !== undefined || markerDependsOn.length > 0) &&
-    (parentRepresentation === "body-fallback" ||
-      parentRepresentation === "recognized-convention" ||
-      dependsOnRepresentation === "body-fallback");
-  if (genericRelationMarker) blocks.push(relationFallbackMarker(markerParent, markerDependsOn));
-  if (compatibilityDependsOn && dependsOnRepresentation === "recognized-convention") {
+  if (parent !== undefined && parentRepresentation === "body-fallback") {
+    blocks.push(relationFallbackMarker(parent, []));
+  }
+  if (dependsOn.length > 0 && dependsOnRepresentation === "body-fallback") {
     blocks.push(renderIssueDependencyMarker({ blockedBy: dependsOn, blocks: [] }));
   }
   if (blocks.length === 0) return "";
@@ -785,7 +742,6 @@ function buildProjection(input: unknown, secondCapabilities?: unknown): Semantic
   let parentRepresentation: SemanticIssueProjectionRepresentation = "none";
   if (artifact.references.parent !== undefined) {
     if (hasCapability(capabilities, "nativeParent")) parentRepresentation = "native";
-    else if (hasCapability(capabilities, "recognizedParent")) parentRepresentation = "recognized-convention";
     else if (hasCapability(capabilities, "fallback")) parentRepresentation = "body-fallback";
     else {
       addViolation(
@@ -800,7 +756,6 @@ function buildProjection(input: unknown, secondCapabilities?: unknown): Semantic
   let dependsOnRepresentation: SemanticIssueProjectionRepresentation = "none";
   if (artifact.references.dependsOn.length > 0) {
     if (hasCapability(capabilities, "nativeDependsOn")) dependsOnRepresentation = "native";
-    else if (hasCapability(capabilities, "recognizedDependsOn")) dependsOnRepresentation = "recognized-convention";
     else if (hasCapability(capabilities, "fallback")) dependsOnRepresentation = "body-fallback";
     else {
       addViolation(

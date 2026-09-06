@@ -91,7 +91,6 @@ const native = [
   GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation,
   GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation,
 ];
-const recognized = [GITHUB_ISSUE_PROJECTION_CAPABILITIES.recognizedDependencyConvention];
 const fallback = [GITHUB_ISSUE_PROJECTION_CAPABILITIES.bodyRelationFallback];
 
 test("projects Issue identity, metadata, fields, and native relations from the artifact", () => {
@@ -106,24 +105,28 @@ test("projects Issue identity, metadata, fields, and native relations from the a
   assert.doesNotMatch(result.body, /semantic-relation/);
 });
 
-test("selects recognized dependency marker and bounded body fallback deterministically", () => {
-  const convention = projectSemanticIssue({ artifact: artifact(false), capabilities: recognized });
-  assert.equal(convention.relations.parent.representation, "none");
-  assert.equal(convention.relations.dependsOn.representation, "none");
+test("prefers GitHub-native relations over compatibility encodings", () => {
+  const result = projectSemanticIssue({ artifact: artifact(), capabilities: [...native, ...fallback] });
+  assert.equal(result.relations.parent.representation, "native");
+  assert.equal(result.relations.dependsOn.representation, "native");
+  assert.doesNotMatch(result.body, /inari:(?:semantic-relation|issue-dependencies)/);
+});
 
+test("selects native relations before bounded compatibility body fallback", () => {
   const dependencyArtifact = materializeSemanticArtifact(compileEffectiveArtifactContract(contract, { provenance }), {
     type: "feature",
     summary: "Dependency projection",
     dependsOn: [issue(282)],
   });
-  const recognizedProjection = projectSemanticIssue({ artifact: dependencyArtifact, capabilities: recognized });
-  assert.equal(recognizedProjection.relations.dependsOn.representation, "recognized-convention");
-  assert.match(recognizedProjection.body, /inari:issue-dependencies/);
+  const fallbackDependencyProjection = projectSemanticIssue({ artifact: dependencyArtifact, capabilities: fallback });
+  assert.equal(fallbackDependencyProjection.relations.dependsOn.representation, "body-fallback");
+  assert.match(fallbackDependencyProjection.body, /inari:issue-dependencies/);
 
   const fallbackProjection = projectSemanticIssue({ artifact: artifact(), capabilities: fallback });
   assert.equal(fallbackProjection.relations.parent.representation, "body-fallback");
   assert.equal(fallbackProjection.relations.dependsOn.representation, "body-fallback");
   assert.match(fallbackProjection.body, /inari:semantic-relation/);
+  assert.match(fallbackProjection.body, /inari:issue-dependencies/);
 });
 
 test("projection has no semantic override path and fails closed when relations are unrepresentable", () => {
@@ -134,7 +137,7 @@ test("projection has no semantic override path and fails closed when relations a
       error instanceof SemanticIssueProjectionError && error.violations[0]?.code === "SEMANTIC_ARTIFACT_INVALID",
   );
   assert.throws(
-    () => projectSemanticIssue({ artifact: artifact(), capabilities: recognized }),
+    () => projectSemanticIssue({ artifact: artifact(), capabilities: [] }),
     (error: unknown) =>
       error instanceof SemanticIssueProjectionError && error.violations[0]?.code === "RELATION_UNREPRESENTABLE",
   );

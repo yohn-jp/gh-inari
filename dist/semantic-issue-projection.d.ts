@@ -21,9 +21,6 @@ export declare const GITHUB_ISSUE_PROJECTION_CAPABILITIES: Readonly<{
     readonly nativeBlockedByRelation: "github.issue.blocked-by.native";
     /** Semantic spelling retained alongside the GitHub endpoint spelling. */
     readonly nativeDependsOnRelation: "github.issue.blocked-by.native";
-    readonly recognizedParentConvention: "github.issue.parent.convention";
-    readonly recognizedDependencyMarker: "github.issue.dependencies.marker";
-    readonly recognizedDependencyConvention: "github.issue.dependencies.marker";
     readonly bodyRelationFallback: "github.issue.relations.body-fallback";
 }>;
 /** Short alias retained for callers that name the set by its projection role. */
@@ -33,9 +30,6 @@ export declare const SEMANTIC_ISSUE_CAPABILITIES: Readonly<{
     readonly nativeBlockedByRelation: "github.issue.blocked-by.native";
     /** Semantic spelling retained alongside the GitHub endpoint spelling. */
     readonly nativeDependsOnRelation: "github.issue.blocked-by.native";
-    readonly recognizedParentConvention: "github.issue.parent.convention";
-    readonly recognizedDependencyMarker: "github.issue.dependencies.marker";
-    readonly recognizedDependencyConvention: "github.issue.dependencies.marker";
     readonly bodyRelationFallback: "github.issue.relations.body-fallback";
 }>;
 export type GitHubIssueProjectionCapability = (typeof GITHUB_ISSUE_PROJECTION_CAPABILITIES)[keyof typeof GITHUB_ISSUE_PROJECTION_CAPABILITIES];
@@ -47,22 +41,18 @@ export type GitHubIssueProjectionCapability = (typeof GITHUB_ISSUE_PROJECTION_CA
 export interface GitHubIssueProjectionCapabilityFlags {
     readonly nativeParentRelation?: boolean;
     readonly nativeDependsOnRelation?: boolean;
-    readonly recognizedParentConvention?: boolean;
-    readonly recognizedDependencyConvention?: boolean;
     readonly bodyRelationFallback?: boolean;
     /** Compatibility spellings for adapters naming the GitHub endpoint. */
     readonly nativeParent?: boolean;
     readonly nativeDependsOn?: boolean;
     readonly nativeBlockedByRelation?: boolean;
-    readonly recognizedParentRelation?: boolean;
-    readonly recognizedDependencyMarker?: boolean;
 }
 export type GitHubIssueProjectionCapabilities = readonly string[] | GitHubIssueProjectionCapabilityFlags;
 export interface SemanticIssueProjectionInput {
     readonly artifact: SemanticArtifact;
     readonly capabilities: GitHubIssueProjectionCapabilities;
 }
-export type SemanticIssueProjectionRepresentation = "none" | "native" | "recognized-convention" | "body-fallback";
+export type SemanticIssueProjectionRepresentation = "none" | "native" | "body-fallback";
 export interface DesiredIssueParentRelationProjection {
     readonly relation: "parent";
     /** The semantic parent Issue reference, omitted when no parent is set. */
