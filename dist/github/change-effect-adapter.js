@@ -1,4 +1,9 @@
-import { MAX_CHANGE_BRANCH_LENGTH, MAX_CHANGE_HOST_LENGTH, validateChangeEffect, } from "../change.js";
+import { MAX_CHANGE_BRANCH_LENGTH, MAX_CHANGE_COMMIT_SHA_LENGTH, MAX_CHANGE_HOST_LENGTH, validateChangeEffect, } from "../change.js";
+export const GITHUB_CHANGE_EFFECT_COMPARE_AND_DELETE_OUTCOMES = Object.freeze([
+    "deleted",
+    "absent",
+    "mismatch",
+]);
 export const GITHUB_CHANGE_EFFECT_FAILURE_CODES = Object.freeze({
     CREATE_BRANCH: "BRANCH_CREATE_FAILED",
     CREATE_PULL_REQUEST: "PULL_REQUEST_CREATE_FAILED",
@@ -100,8 +105,8 @@ export class GitHubChangeEffectAdapter {
             path: `${this.repositoryPath()}/git/refs`,
             body: { ref: `refs/heads/${effect.branch}`, sha: baseSha },
         }, 201);
-        parseGitReference(createdReference, `refs/heads/${effect.branch}`);
-        return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch };
+        const createdCommitSha = parseGitReference(createdReference, `refs/heads/${effect.branch}`);
+        return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch, createdCommitSha };
     }
     async createPullRequest(effect) {
         const desired = effect.semanticPullRequestPlan?.desired;
@@ -203,6 +208,9 @@ export class GitHubChangeEffectAdapter {
         return { kind: effect.kind, pullRequest: effect.pullRequest };
     }
     async deleteBranch(effect) {
+        const expectedCommitSha = effect.expectedCommitSha;
+        if (expectedCommitSha !== undefined)
+            return this.deleteBranchIfUnchanged({ ...effect, expectedCommitSha });
         const response = await this.request({
             method: "DELETE",
             path: `${this.repositoryPath()}/git/refs/heads/${encodeURIComponent(effect.branch)}`,
@@ -210,6 +218,53 @@ export class GitHubChangeEffectAdapter {
         if (response !== undefined && response !== null && response !== "")
             throw new InvalidGitHubResponseError();
         return { kind: effect.kind, branch: effect.branch };
+    }
+    async deleteBranchIfUnchanged(effect) {
+        const currentCommitSha = await this.readBranchCommitSha(effect.branch);
+        if (currentCommitSha === undefined) {
+            return {
+                kind: effect.kind,
+                branch: effect.branch,
+                expectedCommitSha: effect.expectedCommitSha,
+                outcome: "absent",
+            };
+        }
+        if (currentCommitSha !== effect.expectedCommitSha)
+            throw new InvalidGitHubResponseError();
+        if (typeof this.transport.compareAndDeleteBranch !== "function")
+            throw new InvalidGitHubResponseError();
+        const outcome = await this.transport.compareAndDeleteBranch({
+            branch: effect.branch,
+            expectedCommitSha: effect.expectedCommitSha,
+        });
+        if (outcome !== "deleted" && outcome !== "absent")
+            throw new InvalidGitHubResponseError();
+        return {
+            kind: effect.kind,
+            branch: effect.branch,
+            expectedCommitSha: effect.expectedCommitSha,
+            outcome,
+        };
+    }
+    async readBranchCommitSha(branch) {
+        let response;
+        try {
+            response = await this.transport.request({
+                hostname: this.repository.hostname,
+                method: "GET",
+                path: `${this.repositoryPath()}/git/ref/heads/${encodeURIComponent(branch)}`,
+            });
+        }
+        catch {
+            throw new InvalidGitHubResponseError();
+        }
+        if (!isRecord(response) || !isHttpStatus(response.status))
+            throw new InvalidGitHubResponseError();
+        if (response.status === 404)
+            return undefined;
+        if (response.status !== 200)
+            throw new InvalidGitHubResponseError();
+        return parseGitReference(response.body, `refs/heads/${branch}`);
     }
     async request(request, expectedStatus) {
         try {
@@ -252,7 +307,7 @@ function parseGitReference(value, expectedRef) {
     if (record.ref !== expectedRef || !isRecord(record.object) || record.object.type !== "commit") {
         throw new InvalidGitHubResponseError();
     }
-    return responseBoundedString(record.object.sha);
+    return responseCommitSha(record.object.sha);
 }
 function responseBranch(value, expected) {
     if (!isRecord(value) || value.ref !== expected)
@@ -277,6 +332,12 @@ function responseBoundedString(value) {
         throw new InvalidGitHubResponseError();
     }
     return value;
+}
+function responseCommitSha(value) {
+    if (typeof value !== "string" || value.length !== MAX_CHANGE_COMMIT_SHA_LENGTH || !/^[0-9a-f]{40}$/iu.test(value)) {
+        throw new InvalidGitHubResponseError();
+    }
+    return value.toLowerCase();
 }
 function responseStringSet(value, property, expected) {
     if (!Array.isArray(value))

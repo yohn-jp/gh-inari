@@ -10,7 +10,7 @@
  * exposes only a repository-scoped mutation channel to this module. Neither
  * the token nor the App private key appears in any public type or result.
  */
-import { CHANGE_EFFECT_KINDS, MAX_CHANGE_TRANSITION_EFFECTS, validateChangeEffect, } from "../change.js";
+import { CHANGE_EFFECT_KINDS, MAX_CHANGE_TRANSITION_EFFECTS, validateChangeEffectSuccessEvidence, validateChangeEffect, } from "../change.js";
 import { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 export { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL, } from "../issuer-identity.js";
 export const ISSUER_AUTHORITY_CONTRACT_VERSION = 1;
@@ -710,13 +710,22 @@ export class InariIssuerAppAuthority {
                 }
                 scope = scopeResult.value;
                 for (const effect of request.effects) {
+                    let evidence;
                     try {
-                        await candidate.apply(effect);
+                        evidence = await candidate.apply(effect);
+                        if ((effect.kind === "CREATE_BRANCH" && evidence === undefined) ||
+                            (evidence !== undefined && !validateChangeEffectSuccessEvidence(evidence, effect).valid)) {
+                            throw new Error("invalid effect evidence");
+                        }
                     }
                     catch {
                         throw internalBoundaryError("ISSUER_MUTATION_FAILED", "$.effects", "Trusted issuer mutation failed closed.");
                     }
-                    applied.push({ kind: effect.kind, status: "applied" });
+                    applied.push({
+                        kind: effect.kind,
+                        status: "applied",
+                        ...(evidence === undefined ? {} : { evidence }),
+                    });
                 }
             });
         }

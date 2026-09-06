@@ -30,10 +30,12 @@ import {
   serializeChangeTransitionPlan,
   serializeChangeTransitionRequest,
   validateChange,
+  validateChangeEffectSuccessEvidence,
   validateChangeIdentity,
   validateChangeTransitionPlan,
   validateChangeTransitionRequest,
   type Change,
+  type ChangeEffect,
 } from "./change.js";
 import { GITHUB_PULL_REQUEST_PROJECTION_CAPABILITIES, planSemanticPullRequest } from "./semantic-pr-projection.js";
 
@@ -520,4 +522,91 @@ test("malformed transition JSON uses the structured Change error contract", () =
       return true;
     },
   );
+});
+
+test("effect success evidence binds every knowable field exactly", () => {
+  const createBranchEffect: ChangeEffect = {
+    kind: "CREATE_BRANCH",
+    branch: "feat/210-define-canonical-change-domain-contract",
+    baseBranch: "main",
+  };
+  const createdCommitSha = "0123456789abcdef0123456789abcdef01234567";
+
+  const validBranchResult = validateChangeEffectSuccessEvidence(
+    {
+      kind: "CREATE_BRANCH",
+      branch: createBranchEffect.branch,
+      baseBranch: createBranchEffect.baseBranch,
+      createdCommitSha,
+    },
+    createBranchEffect,
+  );
+  assert.equal(validBranchResult.valid, true);
+
+  const malformedShaResult = validateChangeEffectSuccessEvidence(
+    {
+      kind: "CREATE_BRANCH",
+      branch: createBranchEffect.branch,
+      baseBranch: createBranchEffect.baseBranch,
+      createdCommitSha: "zz23456789abcdef0123456789abcdef01234567",
+    },
+    createBranchEffect,
+  );
+  assert.equal(malformedShaResult.valid, false);
+  assert.ok(malformedShaResult.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_EFFECT"));
+
+  const mismatchedBaseBranchResult = validateChangeEffectSuccessEvidence(
+    { kind: "CREATE_BRANCH", branch: createBranchEffect.branch, baseBranch: "develop", createdCommitSha },
+    createBranchEffect,
+  );
+  assert.equal(mismatchedBaseBranchResult.valid, false);
+  assert.ok(mismatchedBaseBranchResult.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_PLAN"));
+
+  const createPullRequestEffect: ChangeEffect = {
+    kind: "CREATE_PULL_REQUEST",
+    branch: "feat/210-define-canonical-change-domain-contract",
+    baseBranch: "main",
+    rootIssue: 210,
+    title: "feat: define canonical Change domain contract",
+    body: "Closes #210",
+    draft: true,
+  };
+
+  const validPrResult = validateChangeEffectSuccessEvidence(
+    {
+      kind: "CREATE_PULL_REQUEST",
+      branch: createPullRequestEffect.branch,
+      baseBranch: createPullRequestEffect.baseBranch,
+      rootIssue: createPullRequestEffect.rootIssue,
+      pullRequest: 901,
+    },
+    createPullRequestEffect,
+  );
+  assert.equal(validPrResult.valid, true);
+
+  const mismatchedRootIssueResult = validateChangeEffectSuccessEvidence(
+    {
+      kind: "CREATE_PULL_REQUEST",
+      branch: createPullRequestEffect.branch,
+      baseBranch: createPullRequestEffect.baseBranch,
+      rootIssue: 999,
+      pullRequest: 901,
+    },
+    createPullRequestEffect,
+  );
+  assert.equal(mismatchedRootIssueResult.valid, false);
+  assert.ok(mismatchedRootIssueResult.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_PLAN"));
+
+  const mismatchedBranchResult = validateChangeEffectSuccessEvidence(
+    {
+      kind: "CREATE_PULL_REQUEST",
+      branch: "other/branch",
+      baseBranch: createPullRequestEffect.baseBranch,
+      rootIssue: createPullRequestEffect.rootIssue,
+      pullRequest: 901,
+    },
+    createPullRequestEffect,
+  );
+  assert.equal(mismatchedBranchResult.valid, false);
+  assert.ok(mismatchedBranchResult.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_PLAN"));
 });

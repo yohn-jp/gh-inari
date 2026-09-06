@@ -14,9 +14,11 @@
 import {
   CHANGE_EFFECT_KINDS,
   MAX_CHANGE_TRANSITION_EFFECTS,
+  validateChangeEffectSuccessEvidence,
   validateChangeEffect,
   type ChangeEffect,
   type ChangeEffectKind,
+  type ChangeEffectSuccessEvidence,
 } from "../change.js";
 import { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 
@@ -192,8 +194,8 @@ export interface IssuerCredentialRequest {
 /** The only mutation surface exposed while the broker holds an App token. */
 export interface IssuerScopedMutationCapability {
   readonly scope: IssuerInstallationScope;
-  /** Applies one already-authorized ChangeEffect; returns no credential data. */
-  readonly apply: (effect: ChangeEffect) => Promise<void>;
+  /** Applies one already-authorized ChangeEffect and returns bounded evidence when available. */
+  readonly apply: (effect: ChangeEffect) => Promise<ChangeEffectSuccessEvidence | undefined>;
 }
 
 /**
@@ -212,6 +214,7 @@ export interface TrustedInstallationCredentialBroker {
 export interface IssuerMutationReceipt {
   readonly kind: ChangeEffectKind;
   readonly status: "applied";
+  readonly evidence?: ChangeEffectSuccessEvidence;
 }
 
 export interface IssuerMutationResult {
@@ -1106,8 +1109,15 @@ export class InariIssuerAppAuthority {
         }
         scope = scopeResult.value;
         for (const effect of request.effects) {
+          let evidence: ChangeEffectSuccessEvidence | undefined;
           try {
-            await candidate.apply(effect);
+            evidence = await candidate.apply(effect);
+            if (
+              (effect.kind === "CREATE_BRANCH" && evidence === undefined) ||
+              (evidence !== undefined && !validateChangeEffectSuccessEvidence(evidence, effect).valid)
+            ) {
+              throw new Error("invalid effect evidence");
+            }
           } catch {
             throw internalBoundaryError(
               "ISSUER_MUTATION_FAILED",
@@ -1115,7 +1125,11 @@ export class InariIssuerAppAuthority {
               "Trusted issuer mutation failed closed.",
             );
           }
-          applied.push({ kind: effect.kind, status: "applied" });
+          applied.push({
+            kind: effect.kind,
+            status: "applied",
+            ...(evidence === undefined ? {} : { evidence }),
+          });
         }
       });
     } catch (error: unknown) {

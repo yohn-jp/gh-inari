@@ -33,6 +33,7 @@ export interface ChangeRemoteReadRequest extends ChangeRemoteRequestBase {
 export interface ChangeRemoteEffectEvidence {
     readonly kind: ChangeEffectKind;
     readonly status: "succeeded" | "failed";
+    readonly createdCommitSha?: string;
 }
 export declare const CHANGE_REMOTE_EXECUTION_OUTCOMES: readonly ["verified", "returned-existing", "compensated", "recovery-required", "failed"];
 export type ChangeRemoteExecutionOutcome = (typeof CHANGE_REMOTE_EXECUTION_OUTCOMES)[number];

@@ -288,6 +288,17 @@ If compensation fails, Inari reports `RECOVERY_REQUIRED` or equivalent structure
 
 Recovery is itself governed and deterministic. Hidden cleanup that guesses caller intent is rejected.
 
+Issuance compensation retains the commit SHA returned by canonical branch creation and
+plans a SHA-conditional `DELETE_BRANCH` effect. Core permits that effect only when a
+fresh branch observation still identifies the same commit generation. GitHub's REST
+Delete reference endpoint has no compare-and-delete parameter; the Actions adapter
+therefore uses GraphQL `updateRefs` with `beforeOid` and the zero OID when the
+repository node ID is available. If that provider-native primitive is unavailable or
+fails, it sends no unsafe delete request and remains in `RECOVERY_REQUIRED`.
+Confirmed absence is idempotent and may converge without a mutation. This conditional
+compensation semantics is distinct from ordinary governed Abort cleanup, whose
+canonical-branch delete effect has the lifecycle policy intended for Abort.
+
 ## 10. Branch authority model
 
 The initial architecture governs branch birth, not every branch update.
@@ -318,6 +329,11 @@ The architecture explicitly rejects routing every feature-branch push through th
 ### 10.3 Deletion
 
 Branch deletion is a lifecycle and governance concern distinct from creation and update. Implementation must define cleanup behavior while preserving merged or aborted Change provenance.
+
+Issuance compensation and Abort are separate semantic authorities: compensation may
+delete only the exact issuer-created generation, while Abort uses the ordinary
+governed cleanup effect. A branch that advanced after issuance is never automatically
+deleted by compensation.
 
 ## 11. PR authority model
 

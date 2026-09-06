@@ -10,7 +10,7 @@
  * exposes only a repository-scoped mutation channel to this module. Neither
  * the token nor the App private key appears in any public type or result.
  */
-import { type ChangeEffect, type ChangeEffectKind } from "../change.js";
+import { type ChangeEffect, type ChangeEffectKind, type ChangeEffectSuccessEvidence } from "../change.js";
 import { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 export { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL, type InariIssuerPrincipal, } from "../issuer-identity.js";
 export declare const ISSUER_AUTHORITY_CONTRACT_VERSION: 1;
@@ -126,8 +126,8 @@ export interface IssuerCredentialRequest {
 /** The only mutation surface exposed while the broker holds an App token. */
 export interface IssuerScopedMutationCapability {
     readonly scope: IssuerInstallationScope;
-    /** Applies one already-authorized ChangeEffect; returns no credential data. */
-    readonly apply: (effect: ChangeEffect) => Promise<void>;
+    /** Applies one already-authorized ChangeEffect and returns bounded evidence when available. */
+    readonly apply: (effect: ChangeEffect) => Promise<ChangeEffectSuccessEvidence | undefined>;
 }
 /**
  * Implemented by trusted execution (for example, the future #218 executor).
@@ -141,6 +141,7 @@ export interface TrustedInstallationCredentialBroker {
 export interface IssuerMutationReceipt {
     readonly kind: ChangeEffectKind;
     readonly status: "applied";
+    readonly evidence?: ChangeEffectSuccessEvidence;
 }
 export interface IssuerMutationResult {
     readonly version: IssuerAuthorityContractVersion;

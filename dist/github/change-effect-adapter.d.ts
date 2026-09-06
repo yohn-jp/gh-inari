@@ -1,4 +1,4 @@
-import { type ChangeDiagnostic, type ChangeEffect, type ChangeEffectKind, type ChangeIssuanceFailureEvidence } from "../change.js";
+import { type ChangeDiagnostic, type ChangeEffect, type ChangeEffectKind, type ChangeEffectSuccessEvidence, type ChangeIssuanceFailureEvidence } from "../change.js";
 /** The repository target is resolved by the trusted caller, not by this adapter. */
 export interface GitHubChangeEffectRepository {
     readonly hostname: string;
@@ -30,7 +30,20 @@ export interface GitHubChangeEffectResponse {
  */
 export interface GitHubChangeEffectTransport {
     request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse>;
+    /**
+     * Provider-native compare-and-delete. REST GitHub does not implement this
+     * operation; the Actions transport supplies the GraphQL equivalent when
+     * available. It is never emulated by a GET followed by an unconditional
+     * DELETE.
+     */
+    readonly compareAndDeleteBranch?: (request: GitHubChangeEffectCompareAndDeleteRequest) => Promise<GitHubChangeEffectCompareAndDeleteOutcome>;
 }
+export interface GitHubChangeEffectCompareAndDeleteRequest {
+    readonly branch: string;
+    readonly expectedCommitSha: string;
+}
+export declare const GITHUB_CHANGE_EFFECT_COMPARE_AND_DELETE_OUTCOMES: readonly ["deleted", "absent", "mismatch"];
+export type GitHubChangeEffectCompareAndDeleteOutcome = (typeof GITHUB_CHANGE_EFFECT_COMPARE_AND_DELETE_OUTCOMES)[number];
 export interface GitHubChangeEffectAdapterOptions {
     readonly repository: GitHubChangeEffectRepository;
     readonly transport: GitHubChangeEffectTransport;
@@ -47,26 +60,7 @@ export declare const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<Chan
 /** Stable bounded failure evidence for a single explicit effect. */
 export declare function changeEffectFailureEvidence(effect: ChangeEffect): ChangeIssuanceFailureEvidence;
 /** Bounded success evidence; GitHub response bodies and URLs are intentionally absent. */
-export type GitHubChangeEffectSuccessEvidence = {
-    readonly kind: "CREATE_BRANCH";
-    readonly branch: string;
-    readonly baseBranch: string;
-} | {
-    readonly kind: "CREATE_PULL_REQUEST";
-    readonly branch: string;
-    readonly baseBranch: string;
-    readonly rootIssue: number;
-    readonly pullRequest: number;
-} | {
-    readonly kind: "MARK_PULL_REQUEST_READY";
-    readonly pullRequest: number;
-} | {
-    readonly kind: "CLOSE_PULL_REQUEST";
-    readonly pullRequest: number;
-} | {
-    readonly kind: "DELETE_BRANCH";
-    readonly branch: string;
-};
+export type GitHubChangeEffectSuccessEvidence = ChangeEffectSuccessEvidence;
 export type GitHubChangeEffectFailureEvidence = ChangeIssuanceFailureEvidence;
 export interface GitHubChangeEffectSuccessResult {
     readonly status: "succeeded";
@@ -107,6 +101,8 @@ export declare class GitHubChangeEffectAdapter {
     private markPullRequestReady;
     private closePullRequest;
     private deleteBranch;
+    private deleteBranchIfUnchanged;
+    private readBranchCommitSha;
     private request;
     private repositoryPath;
 }

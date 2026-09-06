@@ -5,6 +5,7 @@ import {
   type ChangeGitHubEvidence,
   type ChangeProjectionInput,
   type ChangeEffect,
+  type ChangeEffectSuccessEvidence,
 } from "./change.js";
 import {
   INARI_ISSUER_PRINCIPAL,
@@ -26,6 +27,7 @@ const identity = {
   rootIssue: 218,
 } as const;
 const branch = "feat/218-execute-change-plans-through-trusted-github-actions";
+const createdCommitSha = "0123456789abcdef0123456789abcdef01234567";
 const target: IssuerRepositoryIdentity = {
   repositoryHost: "github.com",
   repositoryId: identity.repositoryId,
@@ -50,7 +52,10 @@ function evidence(
 ): ChangeGitHubEvidence {
   return {
     issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
-    branches: { status: "available", value: branches.map((name) => ({ name })) },
+    branches: {
+      status: "available",
+      value: branches.map((name) => ({ name, ...(name === branch ? { sha: createdCommitSha } : {}) })),
+    },
     pullRequests,
   };
 }
@@ -63,6 +68,33 @@ function input(current: ChangeGitHubEvidence): ChangeProjectionInput {
     baseBranch: "main",
     evidence: current,
   };
+}
+
+function successEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
+  switch (effect.kind) {
+    case "CREATE_BRANCH":
+      return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch, createdCommitSha };
+    case "CREATE_PULL_REQUEST":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        baseBranch: effect.baseBranch,
+        rootIssue: effect.rootIssue,
+        pullRequest: 2180,
+      };
+    case "MARK_PULL_REQUEST_READY":
+    case "CLOSE_PULL_REQUEST":
+      return { kind: effect.kind, pullRequest: effect.pullRequest };
+    case "DELETE_BRANCH":
+      return effect.expectedCommitSha === undefined
+        ? { kind: effect.kind, branch: effect.branch }
+        : {
+            kind: effect.kind,
+            branch: effect.branch,
+            expectedCommitSha: effect.expectedCommitSha,
+            outcome: "deleted",
+          };
+  }
 }
 
 function draftPullRequest() {
@@ -137,7 +169,7 @@ class FakeIssuer {
       repository: target,
       installation: { appId: "218", installationId: "218", repositoryHost: "github.com" },
       permissions: {},
-      effects: [{ kind: effect.kind, status: "applied" }],
+      effects: [{ kind: effect.kind, status: "applied", evidence: successEvidence(effect) }],
     };
   }
 }
@@ -290,6 +322,39 @@ test("branch success and pull-request failure are compensated through a Core rec
   assert.equal(result.projection.status, "absent");
 });
 
+test("issuance recovery fails closed without deleting an advanced branch", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_PULL_REQUEST";
+  const originalApply = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    if (request.effects[0]?.kind === "CREATE_PULL_REQUEST") {
+      reader.current = input({
+        issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+        branches: {
+          status: "available",
+          value: [{ name: branch, sha: "fedcba9876543210fedcba9876543210fedcba98" }],
+        },
+        pullRequests: { status: "available", value: [] },
+      });
+    }
+    return originalApply(request);
+  };
+
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.outcome, "recovery-required");
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+  );
+});
+
 test("failed compensation returns bounded RECOVERY_REQUIRED evidence", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);
@@ -348,7 +413,7 @@ test("post-effect projection verification failure fails closed", async () => {
         repository: target,
         installation: { appId: "218", installationId: "218", repositoryHost: "github.com" },
         permissions: {},
-        effects: [{ kind: effect.kind, status: "applied" }],
+        effects: [{ kind: effect.kind, status: "applied", evidence: successEvidence(effect) }],
       };
     }
     return originalApply(request);

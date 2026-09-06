@@ -172,6 +172,9 @@ export const CHANGE_EFFECT_KINDS = Object.freeze([
 ] as const);
 export type ChangeEffectKind = (typeof CHANGE_EFFECT_KINDS)[number];
 
+/** GitHub currently exposes SHA-1 commit identities for repository refs. */
+export const MAX_CHANGE_COMMIT_SHA_LENGTH = 40 as const;
+
 /** Core-owned abort cleanup policy. Only the canonical branch may be deleted. */
 export const CHANGE_ABORT_CLEANUP_POLICY = "canonical-branch" as const;
 export type ChangeAbortCleanupPolicy = typeof CHANGE_ABORT_CLEANUP_POLICY;
@@ -210,7 +213,49 @@ export type ChangeEffect =
   | {
       readonly kind: "DELETE_BRANCH";
       readonly branch: string;
+      /** Present only for compensation-safe compare-and-delete semantics. */
+      readonly expectedCommitSha?: string;
     };
+
+/** Bounded provider success evidence retained by Core execution journals. */
+export type ChangeEffectSuccessEvidence =
+  | {
+      readonly kind: "CREATE_BRANCH";
+      readonly branch: string;
+      readonly baseBranch: string;
+      readonly createdCommitSha: string;
+    }
+  | {
+      readonly kind: "CREATE_PULL_REQUEST";
+      readonly branch: string;
+      readonly baseBranch: string;
+      readonly rootIssue: number;
+      readonly pullRequest: number;
+    }
+  | {
+      readonly kind: "MARK_PULL_REQUEST_READY";
+      readonly pullRequest: number;
+    }
+  | {
+      readonly kind: "CLOSE_PULL_REQUEST";
+      readonly pullRequest: number;
+    }
+  | {
+      readonly kind: "DELETE_BRANCH";
+      readonly branch: string;
+    }
+  | {
+      readonly kind: "DELETE_BRANCH";
+      readonly branch: string;
+      readonly expectedCommitSha: string;
+      readonly outcome: "deleted" | "absent";
+    };
+
+export interface ChangeEffectSuccessEvidenceValidationResult {
+  readonly valid: boolean;
+  readonly evidence?: ChangeEffectSuccessEvidence;
+  readonly diagnostics: readonly ChangeDiagnostic[];
+}
 
 export interface ChangeTransitionPlan {
   readonly version: ChangeTransitionContractVersion;
@@ -379,6 +424,8 @@ export interface ChangeIssueEvidence {
 /** One bounded remote branch candidate. */
 export interface ChangeBranchEvidence {
   readonly name: string;
+  /** Current ref generation when the trusted reader obtained it. */
+  readonly sha?: string;
   /**
    * The root Issue claim established by the trusted GitHub reader.  Branch
    * names are otherwise intentionally opaque to Core; this bounded claim lets
@@ -606,6 +653,8 @@ export type ChangeIssuanceEffectStatus = (typeof CHANGE_ISSUANCE_EFFECT_STATUSES
 export interface ChangeIssuanceEffectAttempt {
   readonly effect: ChangeEffect;
   readonly status: ChangeIssuanceEffectStatus;
+  /** Required for a successful CREATE_BRANCH before issuance compensation. */
+  readonly evidence?: ChangeEffectSuccessEvidence;
 }
 
 export type ChangeIssuanceAttemptedEffect = ChangeIssuanceEffectAttempt;
@@ -818,6 +867,17 @@ const EFFECT_KEYS = new Set([
   "draft",
   "pullRequest",
   "semanticPullRequestPlan",
+  "expectedCommitSha",
+]);
+const EFFECT_SUCCESS_EVIDENCE_KEYS = new Set([
+  "kind",
+  "branch",
+  "baseBranch",
+  "rootIssue",
+  "pullRequest",
+  "createdCommitSha",
+  "expectedCommitSha",
+  "outcome",
 ]);
 const CHANGE_PROJECTION_INPUT_KEYS = new Set([
   "change",
@@ -852,7 +912,7 @@ const CHANGE_ISSUANCE_VERIFICATION_KEYS = new Set([
   "pullRequest",
 ]);
 const CHANGE_ISSUANCE_PULL_REQUEST_KEYS = new Set(["required", "number"]);
-const CHANGE_ISSUANCE_ATTEMPT_KEYS = new Set(["effect", "status"]);
+const CHANGE_ISSUANCE_ATTEMPT_KEYS = new Set(["effect", "status", "evidence"]);
 const CHANGE_ISSUANCE_FAILURE_KEYS = new Set(["effect", "code", "message"]);
 const CHANGE_ISSUANCE_FAILURE_RECORD_KEYS = new Set(["attemptedEffects", "failure", "projection"]);
 const CHANGE_ISSUANCE_COMPENSATION_PLAN_KEYS = new Set([
@@ -969,7 +1029,7 @@ const CHANGE_EVIDENCE_AVAILABLE_KEYS = new Set(["status", "value"]);
 const CHANGE_EVIDENCE_ABSENT_KEYS = new Set(["status"]);
 const CHANGE_EVIDENCE_UNAVAILABLE_KEYS = new Set(["status", "reason"]);
 const CHANGE_ISSUE_EVIDENCE_KEYS = new Set(["number", "state"]);
-const CHANGE_BRANCH_EVIDENCE_KEYS = new Set(["name", "rootIssue"]);
+const CHANGE_BRANCH_EVIDENCE_KEYS = new Set(["name", "sha", "rootIssue"]);
 const CHANGE_PULL_REQUEST_EVIDENCE_KEYS = new Set([
   "number",
   "head",
@@ -1474,6 +1534,14 @@ function projectionNumber(
   return value;
 }
 
+function projectionCommitSha(value: unknown, path: string, diagnostics: ChangeDiagnostic[]): string | undefined {
+  if (typeof value !== "string" || value.length !== MAX_CHANGE_COMMIT_SHA_LENGTH || !/^[0-9a-f]{40}$/iu.test(value)) {
+    addDiagnostic(diagnostics, "CHANGE_PROJECTION_INVALID_EVIDENCE", path, "Commit SHA is invalid.");
+    return undefined;
+  }
+  return value.toLowerCase();
+}
+
 function readChangeProjectionEvidenceSource<T>(
   input: unknown,
   path: string,
@@ -1578,12 +1646,18 @@ function parseChangeBranchEvidence(
   }
   addUnknownProperties(value, CHANGE_BRANCH_EVIDENCE_KEYS, path, diagnostics);
   const name = projectionText(value.name, `${path}.name`, diagnostics, "Branch name", MAX_CHANGE_BRANCH_LENGTH);
+  let sha: string | undefined;
+  if (hasOwn(value, "sha")) sha = projectionCommitSha(value.sha, `${path}.sha`, diagnostics);
   let rootIssue: number | undefined;
   if (hasOwn(value, "rootIssue")) {
     rootIssue = projectionNumber(value.rootIssue, `${path}.rootIssue`, diagnostics, "Root Issue number");
   }
   if (diagnostics.length !== before || name === undefined) return undefined;
-  return rootIssue === undefined ? { name } : { name, rootIssue };
+  return {
+    name,
+    ...(sha === undefined ? {} : { sha }),
+    ...(rootIssue === undefined ? {} : { rootIssue }),
+  };
 }
 
 function parseChangeBranchEvidenceList(
@@ -1611,7 +1685,10 @@ function parseChangeBranchEvidenceList(
   }
   if (branches.length !== value.length) return undefined;
   return branches.sort(
-    (left, right) => compareText(left.name, right.name) || compareOptionalNumber(left.rootIssue, right.rootIssue),
+    (left, right) =>
+      compareText(left.name, right.name) ||
+      compareText(left.sha ?? "", right.sha ?? "") ||
+      compareOptionalNumber(left.rootIssue, right.rootIssue),
   );
 }
 
@@ -3113,6 +3190,14 @@ function validateEffectBranch(
   return value;
 }
 
+function validateEffectCommitSha(value: unknown, path: string, diagnostics: ChangeDiagnostic[]): string | undefined {
+  if (typeof value !== "string" || value.length !== MAX_CHANGE_COMMIT_SHA_LENGTH || !/^[0-9a-f]{40}$/iu.test(value)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_EFFECT", path, "Effect commit SHA is invalid.");
+    return undefined;
+  }
+  return value.toLowerCase();
+}
+
 function requiredEffectText(
   input: RecordValue,
   key: "title" | "body",
@@ -3287,13 +3372,21 @@ export function validateChangeEffect(input: unknown, path = "$"): ChangeEffectVa
   }
 
   if (kind === "DELETE_BRANCH") {
-    const allowed = new Set(["kind", "branch"]);
+    const allowed = new Set(["kind", "branch", "expectedCommitSha"]);
     rejectEffectProperties(input, allowed, path, diagnostics);
     const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    let expectedCommitSha: string | undefined;
+    if (hasOwn(input, "expectedCommitSha")) {
+      expectedCommitSha = validateEffectCommitSha(input.expectedCommitSha, `${path}.expectedCommitSha`, diagnostics);
+    }
     if (diagnostics.length > 0 || branch === undefined) {
       return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
     }
-    return { valid: true, effect: { kind, branch }, diagnostics: [] };
+    return {
+      valid: true,
+      effect: { kind, branch, ...(expectedCommitSha === undefined ? {} : { expectedCommitSha }) },
+      diagnostics: [],
+    };
   }
 
   const allowed = new Set(["kind", "pullRequest"]);
@@ -3306,6 +3399,122 @@ export function validateChangeEffect(input: unknown, path = "$"): ChangeEffectVa
     return { valid: true, effect: { kind, pullRequest }, diagnostics: [] };
   }
   return { valid: true, effect: { kind: "CLOSE_PULL_REQUEST", pullRequest }, diagnostics: [] };
+}
+
+/** Validate bounded success evidence returned by an effect authority. */
+export function validateChangeEffectSuccessEvidence(
+  input: unknown,
+  effect?: ChangeEffect,
+  path = "$",
+): ChangeEffectSuccessEvidenceValidationResult {
+  const diagnostics: ChangeDiagnostic[] = [];
+  if (!isRecord(input)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Effect success evidence must be an object.");
+    return { valid: false, diagnostics };
+  }
+  addUnknownProperties(input, EFFECT_SUCCESS_EVIDENCE_KEYS, path, diagnostics);
+  const kind = input.kind;
+  if (typeof kind !== "string" || !CHANGE_EFFECT_KINDS.includes(kind as ChangeEffectKind)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.kind`, "Effect success evidence kind is unsupported.");
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+
+  let evidence: ChangeEffectSuccessEvidence | undefined;
+  if (kind === "CREATE_BRANCH") {
+    rejectEffectProperties(input, new Set(["kind", "branch", "baseBranch", "createdCommitSha"]), path, diagnostics);
+    const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    const baseBranch = requiredEffectBranch(input, "baseBranch", path, MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
+    const createdCommitSha = hasOwn(input, "createdCommitSha")
+      ? validateEffectCommitSha(input.createdCommitSha, `${path}.createdCommitSha`, diagnostics)
+      : undefined;
+    if (!hasOwn(input, "createdCommitSha")) {
+      addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.createdCommitSha`, "Created commit SHA is required.");
+    }
+    if (branch !== undefined && baseBranch !== undefined && createdCommitSha !== undefined) {
+      evidence = { kind, branch, baseBranch, createdCommitSha };
+    }
+  } else if (kind === "CREATE_PULL_REQUEST") {
+    rejectEffectProperties(
+      input,
+      new Set(["kind", "branch", "baseBranch", "rootIssue", "pullRequest"]),
+      path,
+      diagnostics,
+    );
+    const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    const baseBranch = requiredEffectBranch(input, "baseBranch", path, MAX_CHANGE_BASE_BRANCH_LENGTH, diagnostics);
+    const rootIssue = requiredEffectNumber(input, "rootIssue", path, diagnostics);
+    const pullRequest = requiredEffectNumber(input, "pullRequest", path, diagnostics);
+    if (branch !== undefined && baseBranch !== undefined && rootIssue !== undefined && pullRequest !== undefined) {
+      evidence = { kind, branch, baseBranch, rootIssue, pullRequest };
+    }
+  } else if (kind === "MARK_PULL_REQUEST_READY" || kind === "CLOSE_PULL_REQUEST") {
+    rejectEffectProperties(input, new Set(["kind", "pullRequest"]), path, diagnostics);
+    const pullRequest = requiredEffectNumber(input, "pullRequest", path, diagnostics);
+    if (pullRequest !== undefined) evidence = { kind, pullRequest };
+  } else if (kind === "DELETE_BRANCH") {
+    const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    if (hasOwn(input, "expectedCommitSha")) {
+      rejectEffectProperties(input, new Set(["kind", "branch", "expectedCommitSha", "outcome"]), path, diagnostics);
+      const expectedCommitSha = validateEffectCommitSha(
+        input.expectedCommitSha,
+        `${path}.expectedCommitSha`,
+        diagnostics,
+      );
+      const outcome = input.outcome;
+      if (outcome !== "deleted" && outcome !== "absent") {
+        addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.outcome`, "Conditional delete outcome is invalid.");
+      }
+      if (branch !== undefined && expectedCommitSha !== undefined && (outcome === "deleted" || outcome === "absent")) {
+        evidence = { kind, branch, expectedCommitSha, outcome };
+      }
+    } else {
+      rejectEffectProperties(input, new Set(["kind", "branch"]), path, diagnostics);
+      if (branch !== undefined) evidence = { kind, branch };
+    }
+  }
+
+  if (effect !== undefined && evidence !== undefined && !effectSuccessEvidenceMatches(effect, evidence)) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", path, "Effect success evidence does not match its effect.");
+  }
+  if (diagnostics.length > 0 || evidence === undefined) {
+    return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+  }
+  return { valid: true, evidence, diagnostics: [] };
+}
+
+function effectSuccessEvidenceMatches(effect: ChangeEffect, evidence: ChangeEffectSuccessEvidence): boolean {
+  if (effect.kind !== evidence.kind) return false;
+  switch (effect.kind) {
+    case "CREATE_BRANCH":
+      // createdCommitSha has no effect-side counterpart to bind against (it is
+      // unknowable pre-apply); validateEffectCommitSha already guarantees it is a
+      // canonical lowercase 40-hex SHA before this function runs. Only the
+      // requested branch/baseBranch identity is knowable and checked here.
+      return (
+        evidence.kind === effect.kind && evidence.branch === effect.branch && evidence.baseBranch === effect.baseBranch
+      );
+    case "CREATE_PULL_REQUEST":
+      // pullRequest has no effect-side counterpart to bind against (the PR number
+      // is unknowable pre-apply); requiredEffectNumber already guarantees it is a
+      // positive safe integer. Every other knowable field is checked here.
+      return (
+        evidence.kind === effect.kind &&
+        evidence.branch === effect.branch &&
+        evidence.baseBranch === effect.baseBranch &&
+        evidence.rootIssue === effect.rootIssue
+      );
+    case "MARK_PULL_REQUEST_READY":
+    case "CLOSE_PULL_REQUEST":
+      return evidence.kind === effect.kind && evidence.pullRequest === effect.pullRequest;
+    case "DELETE_BRANCH":
+      return (
+        evidence.kind === effect.kind &&
+        evidence.branch === effect.branch &&
+        (effect.expectedCommitSha === undefined
+          ? !("expectedCommitSha" in evidence)
+          : "expectedCommitSha" in evidence && evidence.expectedCommitSha === effect.expectedCommitSha)
+      );
+  }
 }
 
 function validateEffectList(input: unknown, path: string, diagnostics: ChangeDiagnostic[]): ChangeEffect[] {
@@ -4150,7 +4359,22 @@ function validateChangeIssuanceEffectAttempts(
     addUnknownProperties(attempt, CHANGE_ISSUANCE_ATTEMPT_KEYS, `${path}[${index}]`, diagnostics);
     const effectResult = validateChangeEffect(attempt.effect, `${path}[${index}].effect`);
     diagnostics.push(...effectResult.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)));
-    if (!CHANGE_ISSUANCE_EFFECT_STATUSES.includes(attempt.status as ChangeIssuanceEffectStatus)) {
+    const status = CHANGE_ISSUANCE_EFFECT_STATUSES.includes(attempt.status as ChangeIssuanceEffectStatus)
+      ? (attempt.status as ChangeIssuanceEffectStatus)
+      : undefined;
+    let evidence: ChangeEffectSuccessEvidence | undefined;
+    if (hasOwn(attempt, "evidence") && effectResult.effect !== undefined) {
+      const evidenceResult = validateChangeEffectSuccessEvidence(
+        attempt.evidence,
+        effectResult.effect,
+        `${path}[${index}].evidence`,
+      );
+      diagnostics.push(
+        ...evidenceResult.diagnostics.slice(0, Math.max(0, MAX_CHANGE_DIAGNOSTICS - diagnostics.length)),
+      );
+      evidence = evidenceResult.evidence;
+    }
+    if (status === undefined) {
       addDiagnostic(
         diagnostics,
         "CHANGE_INVALID_PLAN",
@@ -4158,12 +4382,20 @@ function validateChangeIssuanceEffectAttempts(
         "Effect attempt status is unsupported.",
       );
     }
-    if (
-      diagnostics.length === before &&
-      effectResult.effect !== undefined &&
-      CHANGE_ISSUANCE_EFFECT_STATUSES.includes(attempt.status as ChangeIssuanceEffectStatus)
-    ) {
-      attempts.push({ effect: effectResult.effect, status: attempt.status as ChangeIssuanceEffectStatus });
+    if (status === "failed" && hasOwn(attempt, "evidence")) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        `${path}[${index}].evidence`,
+        "A failed effect attempt cannot contain success evidence.",
+      );
+    }
+    if (diagnostics.length === before && effectResult.effect !== undefined && status !== undefined) {
+      attempts.push({
+        effect: effectResult.effect,
+        status,
+        ...(evidence === undefined ? {} : { evidence }),
+      });
     }
   }
   return attempts;
@@ -4421,6 +4653,7 @@ function parseChangeProjectionResult(
   branches = branches.sort(
     (left, right) =>
       compareText(left.candidate.name, right.candidate.name) ||
+      compareText(left.candidate.sha ?? "", right.candidate.sha ?? "") ||
       compareText(left.classification, right.classification) ||
       compareText(left.reason, right.reason),
   );
@@ -4601,7 +4834,7 @@ function validateCreateIssuanceFailureSemantics(
   attemptedEffects: readonly ChangeIssuanceEffectAttempt[],
   failure: ChangeIssuanceFailureEvidence,
   diagnostics: ChangeDiagnostic[],
-): void {
+): string | undefined {
   if (issuance.mode !== "create" || issuance.sourceStatus !== "absent") {
     addRecoverySemanticDiagnostic(
       diagnostics,
@@ -4615,7 +4848,7 @@ function validateCreateIssuanceFailureSemantics(
       "$.issuance.effects",
       "A compensable issuance must contain the ordered branch and Draft pull-request effects.",
     );
-    return;
+    return undefined;
   }
   if (attemptedEffects.length !== 2) {
     addRecoverySemanticDiagnostic(
@@ -4647,6 +4880,16 @@ function validateCreateIssuanceFailureSemantics(
       "Failure evidence must identify the canonical Draft pull-request effect.",
     );
   }
+  const branchEvidence = attemptedEffects[0]?.evidence;
+  const createdCommitSha = branchEvidence?.kind === "CREATE_BRANCH" ? branchEvidence.createdCommitSha : undefined;
+  if (createdCommitSha === undefined) {
+    addRecoverySemanticDiagnostic(
+      diagnostics,
+      "$.failureEvidence.attemptedEffects[0].evidence",
+      "A successful CREATE_BRANCH must retain its created commit SHA before compensation.",
+    );
+  }
+  return createdCommitSha;
 }
 
 function validateFailureProjectionIdentity(
@@ -4686,14 +4929,22 @@ function validateFailureProjectionIdentity(
 function validateCompensationPlanEffects(
   effects: readonly ChangeEffect[],
   expectedBranch: string,
+  expectedCommitSha: string | undefined,
   path: string,
   diagnostics: ChangeDiagnostic[],
 ): void {
-  if (effects.length !== 1 || effects[0]?.kind !== "DELETE_BRANCH" || effects[0].branch !== expectedBranch) {
+  const effect = effects[0];
+  if (
+    effects.length !== 1 ||
+    effect?.kind !== "DELETE_BRANCH" ||
+    effect.branch !== expectedBranch ||
+    expectedCommitSha === undefined ||
+    effect.expectedCommitSha !== expectedCommitSha
+  ) {
     addRecoverySemanticDiagnostic(
       diagnostics,
       path,
-      "Compensation must contain exactly one delete effect for the canonical branch.",
+      "Compensation must contain exactly one SHA-conditional delete effect for the canonical branch.",
     );
   }
 }
@@ -4703,17 +4954,27 @@ function validateFailureProjectionShape(
   expectedBranch: string,
   expectedBaseBranch: string,
   rootIssue: number,
+  expectedCommitSha: string | undefined,
   path: string,
   diagnostics: ChangeDiagnostic[],
 ): void {
-  if (projection.status !== "partial") {
+  const canonicalBranchCandidates = projection.candidates.branches.filter(
+    (candidate) => candidate.candidate.name === expectedBranch,
+  );
+  const confirmedAbsent =
+    projection.status === "absent" &&
+    projection.valid &&
+    projection.change?.state === "DEFINED" &&
+    canonicalBranchCandidates.length === 0 &&
+    !projection.candidates.pullRequests.some((candidate) => candidate.classification === "canonical");
+  if (projection.status !== "partial" && !confirmedAbsent) {
     addRecoverySemanticDiagnostic(
       diagnostics,
       path,
-      "Branch compensation requires a confirmed partial branch-only projection.",
+      "Branch compensation requires a confirmed branch-only projection or confirmed branch absence.",
     );
   }
-  if (projection.change?.state !== "RECOVERY_REQUIRED") {
+  if (!confirmedAbsent && projection.change?.state !== "RECOVERY_REQUIRED") {
     addRecoverySemanticDiagnostic(
       diagnostics,
       `${path}.change.state`,
@@ -4721,8 +4982,9 @@ function validateFailureProjectionShape(
     );
   }
   if (
-    projection.change?.projection?.branch !== expectedBranch ||
-    projection.change?.projection?.pullRequest !== undefined
+    !confirmedAbsent &&
+    (projection.change?.projection?.branch !== expectedBranch ||
+      projection.change?.projection?.pullRequest !== undefined)
   ) {
     addRecoverySemanticDiagnostic(
       diagnostics,
@@ -4730,12 +4992,22 @@ function validateFailureProjectionShape(
       "Failure projection must retain only the canonical branch and no pull request.",
     );
   }
-  if (projection.candidates.branches.filter((candidate) => candidate.candidate.name === expectedBranch).length !== 1) {
+  if (!confirmedAbsent && canonicalBranchCandidates.length !== 1) {
     addRecoverySemanticDiagnostic(
       diagnostics,
       `${path}.candidates.branches`,
       "Failure projection must contain exactly one canonical branch candidate.",
     );
+  }
+  if (!confirmedAbsent) {
+    const currentCommitSha = canonicalBranchCandidates[0]?.candidate.sha;
+    if (expectedCommitSha === undefined || currentCommitSha !== expectedCommitSha) {
+      addRecoverySemanticDiagnostic(
+        diagnostics,
+        `${path}.candidates.branches`,
+        "The current canonical branch generation does not match the created generation.",
+      );
+    }
   }
   if (projection.candidates.pullRequests.some((candidate) => candidate.classification === "canonical")) {
     addRecoverySemanticDiagnostic(
@@ -4798,6 +5070,7 @@ function validateSafeFailureProjection(
   projectionInput: unknown,
   projection: ChangeProjectionResult,
   issuance: ChangeIssuancePlan,
+  expectedCommitSha: string | undefined,
   path: string,
   diagnostics: ChangeDiagnostic[],
 ): boolean {
@@ -4807,6 +5080,7 @@ function validateSafeFailureProjection(
     issuance.verification.canonicalBranch,
     issuance.verification.canonicalBaseBranch,
     issuance.transaction.identity.rootIssue,
+    expectedCommitSha,
     path,
     diagnostics,
   );
@@ -5057,15 +5331,21 @@ function buildChangeIssuanceCompensationPlan(
   parsed: ParsedChangeIssuanceRecoveryInput,
   diagnostics: ChangeDiagnostic[],
 ): ChangeIssuanceCompensationPlan | undefined {
-  validateCreateIssuanceFailureSemantics(parsed.issuance, parsed.attemptedEffects, parsed.failure, diagnostics);
+  const createdCommitSha = validateCreateIssuanceFailureSemantics(
+    parsed.issuance,
+    parsed.attemptedEffects,
+    parsed.failure,
+    diagnostics,
+  );
   validateSafeFailureProjection(
     parsed.projectionInput,
     parsed.projection,
     parsed.issuance,
+    createdCommitSha,
     "$.projection",
     diagnostics,
   );
-  if (diagnostics.length > 0) return undefined;
+  if (diagnostics.length > 0 || createdCommitSha === undefined) return undefined;
 
   const plan: ChangeIssuanceCompensationPlan = {
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
@@ -5081,6 +5361,7 @@ function buildChangeIssuanceCompensationPlan(
       {
         kind: "DELETE_BRANCH",
         branch: parsed.issuance.verification.canonicalBranch,
+        expectedCommitSha: createdCommitSha,
       },
     ],
     verification: compensationVerification(parsed.issuance),
@@ -5170,7 +5451,7 @@ export function validateChangeIssuanceCompensationPlan(input: unknown): ChangeIs
       "Compensation must reuse issuance idempotency.",
     );
   }
-  validateCreateIssuanceFailureSemantics(
+  const createdCommitSha = validateCreateIssuanceFailureSemantics(
     issuance,
     failureEvidence.attemptedEffects,
     failureEvidence.failure,
@@ -5182,10 +5463,17 @@ export function validateChangeIssuanceCompensationPlan(input: unknown): ChangeIs
     issuance.verification.canonicalBranch,
     issuance.verification.canonicalBaseBranch,
     issuance.transaction.identity.rootIssue,
+    createdCommitSha,
     "$.failureEvidence.projection",
     diagnostics,
   );
-  validateCompensationPlanEffects(effects, issuance.verification.canonicalBranch, "$.effects", diagnostics);
+  validateCompensationPlanEffects(
+    effects,
+    issuance.verification.canonicalBranch,
+    createdCommitSha,
+    "$.effects",
+    diagnostics,
+  );
   if (!canonicalPlanEquals(verification, compensationVerification(issuance))) {
     addRecoverySemanticDiagnostic(diagnostics, "$.verification", "Compensation verification does not match issuance.");
   }

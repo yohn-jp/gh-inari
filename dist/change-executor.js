@@ -1,4 +1,4 @@
-import { CHANGE_EFFECT_KINDS, CHANGE_IMPLEMENTED_TRANSITIONS, CHANGE_TRANSITION_CONTRACT_VERSION, validateChangeProjectionResult, } from "./change.js";
+import { CHANGE_EFFECT_KINDS, CHANGE_IMPLEMENTED_TRANSITIONS, CHANGE_TRANSITION_CONTRACT_VERSION, MAX_CHANGE_COMMIT_SHA_LENGTH, validateChangeProjectionResult, } from "./change.js";
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
 const MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES = 1_048_576;
@@ -108,7 +108,7 @@ function normalizeExecutionEvidence(operation, value) {
         if (typeof effect !== "object" ||
             effect === null ||
             Array.isArray(effect) ||
-            Object.keys(effect).some((key) => key !== "kind" && key !== "status")) {
+            Object.keys(effect).some((key) => key !== "kind" && key !== "status" && key !== "createdCommitSha")) {
             throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
         }
         const entry = effect;
@@ -118,7 +118,23 @@ function normalizeExecutionEvidence(operation, value) {
         if (entry.status !== "succeeded" && entry.status !== "failed") {
             throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
         }
-        effects.push({ kind: entry.kind, status: entry.status });
+        let createdCommitSha;
+        if (Object.prototype.hasOwnProperty.call(entry, "createdCommitSha")) {
+            if (entry.kind !== "CREATE_BRANCH" || entry.status !== "succeeded") {
+                throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
+            }
+            if (typeof entry.createdCommitSha !== "string" ||
+                entry.createdCommitSha.length !== MAX_CHANGE_COMMIT_SHA_LENGTH ||
+                !/^[0-9a-f]{40}$/iu.test(entry.createdCommitSha)) {
+                throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
+            }
+            createdCommitSha = entry.createdCommitSha.toLowerCase();
+        }
+        effects.push({
+            kind: entry.kind,
+            status: entry.status,
+            ...(createdCommitSha === undefined ? {} : { createdCommitSha }),
+        });
     }
     const requester = candidate.requester === undefined ? undefined : candidate.requester;
     const issuer = candidate.issuer === undefined ? undefined : candidate.issuer;

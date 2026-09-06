@@ -30,10 +30,12 @@ const MAX_LOGIN_LENGTH = 160;
 const MAX_TIMESTAMP_LENGTH = 64;
 const DEFAULT_API_URL = "https://api.github.com";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/iu;
+const EMPTY_COMMIT_SHA = "0".repeat(40);
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
 const GITHUB_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
+const CONDITIONAL_DELETE_REF_MUTATION = "mutation ConditionalDeleteRef($input: UpdateRefsInput!) { " + "updateRefs(input: $input) { clientMutationId } }";
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
     "repository-evidence",
@@ -176,6 +178,14 @@ function positiveNumber(value) {
     }
     return value;
 }
+function optionalCommitSha(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+        return undefined;
+    const object = value;
+    return object.type === "commit" && typeof object.sha === "string" && COMMIT_SHA_PATTERN.test(object.sha)
+        ? object.sha.toLowerCase()
+        : undefined;
+}
 function parseRepository(value, hostname = "github.com") {
     try {
         const parts = value.split("/");
@@ -241,20 +251,30 @@ async function boundedBody(response) {
 /** A bounded credential-bound transport. The bearer never appears in results. */
 export class GitHubActionsApiTransport {
     #apiUrl;
+    #graphqlApiUrl;
     #token;
+    #repositoryNodeId;
     #fetch;
     #failureStage;
     constructor(options) {
         // Bound the input length before the trailing-slash regex runs, so it cannot be handed an
         // unbounded string (CodeQL polynomial-regex guard).
         this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
+        this.#graphqlApiUrl = this.#apiUrl.endsWith("/api/v3")
+            ? `${this.#apiUrl.slice(0, -7)}/api/graphql`
+            : `${this.#apiUrl}/graphql`;
         this.#token = boundedString(options.token, 4096);
+        this.#repositoryNodeId =
+            options.repositoryNodeId === undefined ? undefined : boundedString(options.repositoryNodeId, 255);
         this.#fetch = options.fetch ?? globalThis.fetch;
         this.#failureStage = options.failureStage ?? "repository-evidence";
     }
     async request(request) {
+        return this.requestAt(this.#apiUrl, request);
+    }
+    async requestAt(baseUrl, request) {
         try {
-            const response = await this.#fetch(`${this.#apiUrl}/${request.path}`, {
+            const response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
                 method: request.method,
                 headers: {
                     Accept: "application/vnd.github+json",
@@ -269,6 +289,62 @@ export class GitHubActionsApiTransport {
         catch {
             throw new GitHubActionsChangeExecutorError(undefined, this.#failureStage);
         }
+    }
+    /**
+     * Delete only when GitHub's GraphQL ref update still points at the expected
+     * OID. A missing node ID or any GraphQL error is a safe mismatch; callers
+     * must not emulate this with a REST GET followed by DELETE.
+     */
+    async compareAndDeleteBranch(request) {
+        if (this.#repositoryNodeId === undefined ||
+            typeof request.branch !== "string" ||
+            request.branch.length === 0 ||
+            request.branch.length > 255 ||
+            /[\u0000-\u001F\u007F]/u.test(request.branch) ||
+            typeof request.expectedCommitSha !== "string" ||
+            !COMMIT_SHA_PATTERN.test(request.expectedCommitSha)) {
+            return "mismatch";
+        }
+        const response = await this.requestAt(this.#graphqlApiUrl, {
+            hostname: "github.com",
+            method: "POST",
+            path: "",
+            body: {
+                query: CONDITIONAL_DELETE_REF_MUTATION,
+                variables: {
+                    input: {
+                        repositoryId: this.#repositoryNodeId,
+                        refUpdates: [
+                            {
+                                name: `refs/heads/${request.branch}`,
+                                beforeOid: request.expectedCommitSha.toLowerCase(),
+                                afterOid: EMPTY_COMMIT_SHA,
+                                force: true,
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        if (response.status !== 200 ||
+            typeof response.body !== "object" ||
+            response.body === null ||
+            Array.isArray(response.body)) {
+            return "mismatch";
+        }
+        const body = response.body;
+        if (body.errors !== undefined)
+            return "mismatch";
+        const data = body.data;
+        if (typeof data !== "object" ||
+            data === null ||
+            Array.isArray(data) ||
+            typeof data.updateRefs !== "object" ||
+            data.updateRefs === null ||
+            Array.isArray(data.updateRefs)) {
+            return "mismatch";
+        }
+        return "deleted";
     }
 }
 function base64Url(value) {
@@ -304,6 +380,7 @@ export class GitHubActionsCredentialBroker {
         const transport = new GitHubActionsApiTransport({
             apiUrl: this.#options.apiUrl,
             token: credential.token,
+            repositoryNodeId: this.#options.repositoryNodeId,
             fetch: this.#fetch,
             failureStage: "projection-execution",
         });
@@ -316,6 +393,7 @@ export class GitHubActionsCredentialBroker {
                     // #217 deliberately sanitizes this provider failure at its boundary.
                     throw new GitHubActionsChangeExecutorError(GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind]);
                 }
+                return result.evidence;
             },
         };
         try {
@@ -786,25 +864,29 @@ export class GitHubActionsEvidenceReader {
             path: apiPath(this.#options.repository, `git/ref/heads/${encodeURIComponent(branch)}`),
         });
         if (response.status === 404)
-            return false;
+            return undefined;
         if (response.status !== 200)
             throw new GitHubActionsChangeExecutorError();
         const value = record(response.body);
         if (value.ref !== `refs/heads/${branch}`)
             throw new GitHubActionsChangeExecutorError();
-        return true;
+        const sha = optionalCommitSha(value.object);
+        return { name: branch, ...(sha === undefined ? {} : { sha }) };
     }
     async readBranches(derivedBranch) {
-        const names = new Set();
-        if (derivedBranch !== undefined && (await this.readBranch(derivedBranch)))
-            names.add(derivedBranch);
+        const branches = new Map();
+        if (derivedBranch !== undefined) {
+            const observed = await this.readBranch(derivedBranch);
+            if (observed !== undefined)
+                branches.set(observed.name, observed.sha);
+        }
         const response = await this.#options.transport.request({
             hostname: this.#options.repository.hostname,
             method: "GET",
             path: apiPath(this.#options.repository, "git/matching-refs/heads/"),
         });
         if (response.status === 404)
-            return [...names].map((name) => ({ name }));
+            return [...branches].map(([name, sha]) => ({ name, ...(sha === undefined ? {} : { sha }) }));
         if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
             throw new GitHubActionsChangeExecutorError();
         }
@@ -816,12 +898,20 @@ export class GitHubActionsEvidenceReader {
                 throw new GitHubActionsChangeExecutorError();
             const name = ref.slice(prefix.length);
             if (branchBelongsToRootIssue(name, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
-                names.add(name);
+                const sha = optionalCommitSha(value.object);
+                if (!branches.has(name) || sha !== undefined)
+                    branches.set(name, sha);
             }
         }
-        const orderedNames = [...names].sort();
+        const orderedNames = [...branches.keys()].sort();
         const hasHistoricalCandidate = orderedNames.some((name) => name !== derivedBranch);
-        return orderedNames.map((name) => hasHistoricalCandidate ? { name, rootIssue: this.#options.identity.rootIssue } : { name });
+        return orderedNames.map((name) => hasHistoricalCandidate
+            ? {
+                name,
+                ...(branches.get(name) === undefined ? {} : { sha: branches.get(name) }),
+                rootIssue: this.#options.identity.rootIssue,
+            }
+            : { name, ...(branches.get(name) === undefined ? {} : { sha: branches.get(name) }) });
     }
     async readPullRequests(derivedBranch, hasHistoricalBranch) {
         const response = await this.#options.transport.request({
@@ -1035,6 +1125,12 @@ export async function createGitHubActionsChangeExecutor(options) {
     if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) {
         throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-id");
     }
+    const repositoryNodeId = typeof repositoryBody.node_id === "string" &&
+        repositoryBody.node_id.length > 0 &&
+        repositoryBody.node_id.length <= 255 &&
+        !/[\u0000-\u001F\u007F]/u.test(repositoryBody.node_id)
+        ? repositoryBody.node_id
+        : undefined;
     if (typeof repositoryBody.fork !== "boolean") {
         throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-fork");
     }
@@ -1122,6 +1218,7 @@ export async function createGitHubActionsChangeExecutor(options) {
             privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
             repository,
             target,
+            repositoryNodeId,
             apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
             fetch: options.fetch,
         });

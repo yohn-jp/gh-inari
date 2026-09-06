@@ -6,6 +6,8 @@ import {
   GitHubChangeEffectContractError,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
+  type GitHubChangeEffectCompareAndDeleteRequest,
+  type GitHubChangeEffectCompareAndDeleteOutcome,
   type GitHubChangeEffectTransport,
 } from "./index.js";
 import type { ChangeEffect } from "../change.js";
@@ -15,9 +17,18 @@ type StubResponse = GitHubChangeEffectResponse | Error;
 class StubChangeEffectTransport implements GitHubChangeEffectTransport {
   readonly calls: GitHubChangeEffectRequest[] = [];
   private readonly responses: StubResponse[];
+  readonly compareAndDeleteBranch:
+    | ((request: GitHubChangeEffectCompareAndDeleteRequest) => Promise<GitHubChangeEffectCompareAndDeleteOutcome>)
+    | undefined;
 
-  constructor(responses: StubResponse[]) {
+  constructor(
+    responses: StubResponse[],
+    compareAndDeleteBranch?: (
+      request: GitHubChangeEffectCompareAndDeleteRequest,
+    ) => Promise<GitHubChangeEffectCompareAndDeleteOutcome>,
+  ) {
     this.responses = [...responses];
+    this.compareAndDeleteBranch = compareAndDeleteBranch;
   }
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
@@ -105,7 +116,12 @@ test("CREATE_BRANCH reads the explicit base ref and creates the exact explicit b
   assert.deepEqual(result, {
     status: "succeeded",
     effect,
-    evidence: { kind: "CREATE_BRANCH", branch: effect.branch, baseBranch: effect.baseBranch },
+    evidence: {
+      kind: "CREATE_BRANCH",
+      branch: effect.branch,
+      baseBranch: effect.baseBranch,
+      createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
+    },
   });
 });
 
@@ -271,6 +287,73 @@ test("DELETE_BRANCH is an explicit compensation execution boundary with no plann
     effect,
     evidence: { kind: "DELETE_BRANCH", branch: effect.branch },
   });
+});
+
+test("SHA-conditional compensation uses an atomic provider primitive and never sends unconditional DELETE", async () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const effect = { kind: "DELETE_BRANCH", branch: "Feature/Exact_Name", expectedCommitSha: sha } as const;
+  let primitiveCalls = 0;
+  const transport = new StubChangeEffectTransport(
+    [response(200, gitReference("refs/heads/Feature/Exact_Name", sha))],
+    async (request) => {
+      primitiveCalls += 1;
+      assert.deepEqual(request, { branch: effect.branch, expectedCommitSha: sha });
+      return "deleted";
+    },
+  );
+
+  const result = await adapter(transport).execute(effect);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(primitiveCalls, 1);
+  assert.deepEqual(transport.calls, [
+    {
+      hostname: "github.com",
+      method: "GET",
+      path: "repos/acme/inari/git/ref/heads/Feature%2FExact_Name",
+    },
+  ]);
+  assert.deepEqual(result, {
+    status: "succeeded",
+    effect,
+    evidence: { kind: "DELETE_BRANCH", branch: effect.branch, expectedCommitSha: sha, outcome: "deleted" },
+  });
+});
+
+test("SHA-conditional compensation treats absence as idempotent and refuses REST-only deletion", async () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const effect = { kind: "DELETE_BRANCH", branch: "Feature/Exact_Name", expectedCommitSha: sha } as const;
+  const absent = await adapter(new StubChangeEffectTransport([response(404)])).execute(effect);
+  assert.deepEqual(absent, {
+    status: "succeeded",
+    effect,
+    evidence: { kind: "DELETE_BRANCH", branch: effect.branch, expectedCommitSha: sha, outcome: "absent" },
+  });
+
+  const restOnly = await adapter(
+    new StubChangeEffectTransport([response(200, gitReference("refs/heads/Feature/Exact_Name", sha))]),
+  ).execute(effect);
+  assert.equal(restOnly.status, "failed");
+});
+
+test("a concurrent update is reported by compare-and-delete and cannot fall through to DELETE", async () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const effect = { kind: "DELETE_BRANCH", branch: "Feature/Exact_Name", expectedCommitSha: sha } as const;
+  let primitiveCalls = 0;
+  const transport = new StubChangeEffectTransport(
+    [response(200, gitReference("refs/heads/Feature/Exact_Name", sha))],
+    async () => {
+      primitiveCalls += 1;
+      return "mismatch";
+    },
+  );
+  const result = await adapter(transport).execute(effect);
+  assert.equal(result.status, "failed");
+  assert.equal(primitiveCalls, 1);
+  assert.equal(
+    transport.calls.some((call) => call.method === "DELETE"),
+    false,
+  );
 });
 
 test("the adapter validates an effect but never repairs or canonicalizes its values", async () => {

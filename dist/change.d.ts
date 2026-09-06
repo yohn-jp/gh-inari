@@ -161,6 +161,8 @@ export interface ChangeTransitionRequest {
 }
 export declare const CHANGE_EFFECT_KINDS: readonly ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY", "CLOSE_PULL_REQUEST", "DELETE_BRANCH"];
 export type ChangeEffectKind = (typeof CHANGE_EFFECT_KINDS)[number];
+/** GitHub currently exposes SHA-1 commit identities for repository refs. */
+export declare const MAX_CHANGE_COMMIT_SHA_LENGTH: 40;
 /** Core-owned abort cleanup policy. Only the canonical branch may be deleted. */
 export declare const CHANGE_ABORT_CLEANUP_POLICY: "canonical-branch";
 export type ChangeAbortCleanupPolicy = typeof CHANGE_ABORT_CLEANUP_POLICY;
@@ -193,7 +195,41 @@ export type ChangeEffect = {
 } | {
     readonly kind: "DELETE_BRANCH";
     readonly branch: string;
+    /** Present only for compensation-safe compare-and-delete semantics. */
+    readonly expectedCommitSha?: string;
 };
+/** Bounded provider success evidence retained by Core execution journals. */
+export type ChangeEffectSuccessEvidence = {
+    readonly kind: "CREATE_BRANCH";
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly createdCommitSha: string;
+} | {
+    readonly kind: "CREATE_PULL_REQUEST";
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly rootIssue: number;
+    readonly pullRequest: number;
+} | {
+    readonly kind: "MARK_PULL_REQUEST_READY";
+    readonly pullRequest: number;
+} | {
+    readonly kind: "CLOSE_PULL_REQUEST";
+    readonly pullRequest: number;
+} | {
+    readonly kind: "DELETE_BRANCH";
+    readonly branch: string;
+} | {
+    readonly kind: "DELETE_BRANCH";
+    readonly branch: string;
+    readonly expectedCommitSha: string;
+    readonly outcome: "deleted" | "absent";
+};
+export interface ChangeEffectSuccessEvidenceValidationResult {
+    readonly valid: boolean;
+    readonly evidence?: ChangeEffectSuccessEvidence;
+    readonly diagnostics: readonly ChangeDiagnostic[];
+}
 export interface ChangeTransitionPlan {
     readonly version: ChangeTransitionContractVersion;
     readonly request: ChangeTransitionRequest;
@@ -298,6 +334,8 @@ export interface ChangeIssueEvidence {
 /** One bounded remote branch candidate. */
 export interface ChangeBranchEvidence {
     readonly name: string;
+    /** Current ref generation when the trusted reader obtained it. */
+    readonly sha?: string;
     /**
      * The root Issue claim established by the trusted GitHub reader.  Branch
      * names are otherwise intentionally opaque to Core; this bounded claim lets
@@ -502,6 +540,8 @@ export type ChangeIssuanceEffectStatus = (typeof CHANGE_ISSUANCE_EFFECT_STATUSES
 export interface ChangeIssuanceEffectAttempt {
     readonly effect: ChangeEffect;
     readonly status: ChangeIssuanceEffectStatus;
+    /** Required for a successful CREATE_BRANCH before issuance compensation. */
+    readonly evidence?: ChangeEffectSuccessEvidence;
 }
 export type ChangeIssuanceAttemptedEffect = ChangeIssuanceEffectAttempt;
 /** Bounded executor failure evidence; it contains no transport or credential. */
@@ -702,6 +742,8 @@ export declare function planChangeTransition(input: unknown): ChangeTransitionPl
 export declare const createChangeTransitionPlan: typeof planChangeTransition;
 /** Validate one declarative effect primitive without executing it. */
 export declare function validateChangeEffect(input: unknown, path?: string): ChangeEffectValidationResult;
+/** Validate bounded success evidence returned by an effect authority. */
+export declare function validateChangeEffectSuccessEvidence(input: unknown, effect?: ChangeEffect, path?: string): ChangeEffectSuccessEvidenceValidationResult;
 /** Validate and canonicalize a previously generated or transported plan. */
 export declare function validateChangeTransitionPlan(input: unknown): ChangeTransitionPlanValidationResult;
 export declare const validateChangePlan: typeof validateChangeTransitionPlan;

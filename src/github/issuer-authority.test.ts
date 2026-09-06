@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChangeEffect } from "../change.js";
+import type { ChangeEffect, ChangeEffectSuccessEvidence } from "../change.js";
 import {
   INITIAL_CHANGE_EFFECT_PERMISSION_REQUIREMENTS,
   INARI_ISSUER_APP_KIND,
@@ -75,6 +75,33 @@ const scope: IssuerInstallationScope = {
   expiresAt: "2026-09-06T00:00:00.000Z",
 };
 
+function successEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
+  switch (effect.kind) {
+    case "CREATE_BRANCH":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        baseBranch: effect.baseBranch,
+        createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
+      };
+    case "CREATE_PULL_REQUEST":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        baseBranch: effect.baseBranch,
+        rootIssue: effect.rootIssue,
+        pullRequest: 901,
+      };
+    case "MARK_PULL_REQUEST_READY":
+    case "CLOSE_PULL_REQUEST":
+      return { kind: effect.kind, pullRequest: effect.pullRequest };
+    case "DELETE_BRANCH":
+      return effect.expectedCommitSha === undefined
+        ? { kind: effect.kind, branch: effect.branch }
+        : { kind: effect.kind, branch: effect.branch, expectedCommitSha: effect.expectedCommitSha, outcome: "deleted" };
+  }
+}
+
 function request(overrides: Partial<IssuerMutationRequest> = {}): IssuerMutationRequest {
   return {
     version: ISSUER_AUTHORITY_CONTRACT_VERSION,
@@ -98,7 +125,10 @@ function brokerFor(
         calls.push(credentialRequest);
         await operation({
           scope: candidateScope,
-          apply: async (effect: ChangeEffect) => onEffect(effect),
+          apply: async (effect: ChangeEffect) => {
+            await onEffect(effect);
+            return successEvidence(effect);
+          },
         } as never);
       },
     },
@@ -239,8 +269,27 @@ test("authority holds the broker boundary and returns only bounded mutation rece
   });
   assert.deepEqual(applied, effects);
   assert.deepEqual(result.effects, [
-    { kind: "CREATE_BRANCH", status: "applied" },
-    { kind: "CREATE_PULL_REQUEST", status: "applied" },
+    {
+      kind: "CREATE_BRANCH",
+      status: "applied",
+      evidence: {
+        kind: "CREATE_BRANCH",
+        branch: effects[0].branch,
+        baseBranch: effects[0].baseBranch,
+        createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
+      },
+    },
+    {
+      kind: "CREATE_PULL_REQUEST",
+      status: "applied",
+      evidence: {
+        kind: "CREATE_PULL_REQUEST",
+        branch: effects[1].branch,
+        baseBranch: effects[1].baseBranch,
+        rootIssue: effects[1].rootIssue,
+        pullRequest: 901,
+      },
+    },
   ]);
   assert.deepEqual(result.installation, scope.installation);
   const serialized = JSON.stringify(result);
