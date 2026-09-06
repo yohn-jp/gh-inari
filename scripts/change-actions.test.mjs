@@ -11,8 +11,8 @@ test("trusted Change workflow delegates semantic decisions to the versioned exec
   const source = fs.readFileSync(workflowPath, "utf8");
   assert.match(source, /INARI_CHANGE_REQUEST:/u);
   assert.match(source, /node dist\/github\/actions-change-executor\.js/u);
-  assert.match(source, /ref: refs\/heads\/main/u);
+  assert.match(source, /ref: \$\{\{ github\.workflow_sha \}\}/u);
   assert.match(source, /persist-credentials: false/u);
   assert.doesNotMatch(source, /^\s+(branch|pull_request|lifecycle|idempotency|compensation|recovery):/imu);
-  assert.doesNotMatch(source, /ref:\s*\$\{\{/u);
+  assert.doesNotMatch(source, /^\s+ref: refs\/heads\/main$/mu);
 });

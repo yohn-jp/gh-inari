@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import {
@@ -42,6 +43,7 @@ const target: IssuerRepositoryIdentity = {
   repositoryId: "218000001",
   nameWithOwner: "acme/inari",
 };
+const checkedOutSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 function issuerCredentialRequest(): IssuerCredentialRequest {
   return {
@@ -652,7 +654,7 @@ function trustedEnvironment(overrides: Record<string, string | undefined> = {}):
     GITHUB_EVENT_NAME: "workflow_dispatch",
     GITHUB_REF: "refs/heads/main",
     GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/inari-change-executor.yml@refs/heads/main",
-    GITHUB_WORKFLOW_SHA: "a".repeat(40),
+    GITHUB_WORKFLOW_SHA: checkedOutSha,
     INARI_ISSUER_APP_ID: "218",
     INARI_ISSUER_INSTALLATION_ID: "219",
     INARI_ISSUER_APP_PRIVATE_KEY: "unused-in-these-tests",
@@ -685,10 +687,10 @@ test("runtime setup exposes the bounded stage at each setup boundary", async () 
       stage: "trusted-execution",
     },
     {
-      name: "branch governance",
+      name: "trusted checkout",
       environment: trustedEnvironment(),
       cwd: "/tmp/inari-missing-governance",
-      stage: "branch-governance",
+      stage: "trusted-execution",
     },
     {
       name: "issuer configuration",
@@ -872,6 +874,21 @@ test("Trusted executor construction rejects a workflow_ref naming a different wo
       }),
       fetch: repositoryOnlyFetch(false),
     }),
+  );
+});
+
+test("Trusted executor construction rejects a checkout that differs from the attested workflow SHA", async () => {
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({ GITHUB_WORKFLOW_SHA: "a".repeat(40) }),
+      fetch: repositoryOnlyFetch(false),
+    }),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError &&
+      error.details?.stage === "trusted-execution" &&
+      !JSON.stringify(error).includes("a".repeat(40)),
   );
 });
 

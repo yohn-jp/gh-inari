@@ -5,6 +5,7 @@
  * GitHub evidence, invokes Core planning, applies explicit effects through the
  * #217 issuer authority, and verifies a fresh #213 projection.
  */
+import { execFileSync } from "node:child_process";
 import { createHash, createSign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -26,6 +27,7 @@ const MAX_TITLE_LENGTH = 255;
 const MAX_LOGIN_LENGTH = 160;
 const MAX_TIMESTAMP_LENGTH = 64;
 const DEFAULT_API_URL = "https://api.github.com";
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/iu;
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
@@ -896,6 +898,30 @@ function requiredEnvironment(environment, key, stage = "trusted-execution") {
         throw withFailureStage(error, stage);
     }
 }
+/**
+ * The workflow SHA is the generation that GitHub attested for this workflow.
+ * Refusing to continue when the checkout resolves anything else closes the
+ * moving-default-branch race before any privileged executor can be created.
+ */
+function assertAttestedCheckout(cwd, workflowSha) {
+    if (!COMMIT_SHA_PATTERN.test(workflowSha))
+        throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    let checkedOutSha;
+    try {
+        checkedOutSha = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+            cwd,
+            encoding: "utf8",
+            maxBuffer: 1024,
+            stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+    }
+    catch {
+        throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
+    if (!COMMIT_SHA_PATTERN.test(checkedOutSha) || checkedOutSha.toLowerCase() !== workflowSha.toLowerCase()) {
+        throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
+}
 function issuerFailureStage(error) {
     if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined)
         return error.details.stage;
@@ -1004,6 +1030,7 @@ export async function createGitHubActionsChangeExecutor(options) {
     }
     const workflowRef = "refs/heads/main";
     const workflowSha = requiredEnvironment(environment, "GITHUB_WORKFLOW_SHA", "trusted-execution");
+    assertAttestedCheckout(options.cwd, workflowSha);
     let execution;
     try {
         execution = assertTrustedExecution({
