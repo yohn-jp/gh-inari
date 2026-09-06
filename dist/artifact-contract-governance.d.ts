@@ -12,6 +12,7 @@
  */
 import { type EffectiveArtifactContract } from "./contract/index.js";
 import { GitHubAdapter } from "./github/index.js";
+export type RepositoryEffectiveArtifactKind = "issue" | "pull_request";
 export type ArtifactContractResolutionErrorCode = "ARTIFACT_CONTRACT_NOT_FOUND" | "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS" | "ARTIFACT_CONTRACT_SOURCE_INVALID" | "ARTIFACT_CONTRACT_KIND_INVALID";
 export interface ArtifactContractResolutionDiagnostic {
     readonly code: ArtifactContractResolutionErrorCode;
@@ -34,4 +35,8 @@ export interface RepositoryEffectiveArtifactContractOptions {
  * Artifact Contract.  All repository identity and generation fields come
  * from the adapter's default-branch/tree/blob reads.
  */
+export declare function compileRepositoryEffectiveArtifactContract(adapter: GitHubAdapter, kind: RepositoryEffectiveArtifactKind, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
+/** Resolve the authoritative pull-request Canon through the shared adapter boundary. */
 export declare function compileRepositoryEffectivePullRequestContract(adapter: GitHubAdapter, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
+/** Resolve the authoritative Issue Canon through the shared adapter boundary. */
+export declare function compileRepositoryEffectiveIssueContract(adapter: GitHubAdapter, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;

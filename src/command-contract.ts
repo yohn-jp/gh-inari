@@ -35,7 +35,14 @@ export type CommandId =
   | "root.diagnose"
   | "root.doctor"
   | "issue.schema"
+  | "issue.contract"
   | "issue.validate"
+  | "issue.materialize"
+  | "issue.plan"
+  | "issue.semantic.schema"
+  | "issue.semantic.validate"
+  | "issue.semantic.materialize"
+  | "issue.semantic.plan"
   | "issue.render"
   | "issue.create"
   | "issue.explain"
@@ -319,7 +326,7 @@ export const COMMAND_OPTIONS = {
     ["--capability"],
     "string",
     "required",
-    "Declared target capability for Core PR projection; repeat for multiple capabilities.",
+    "Declared target capability for Core semantic projection; repeat for multiple capabilities.",
     "id",
     true,
   ),
@@ -380,6 +387,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "[template]",
   ),
   command(
+    "issue.contract",
+    "issue",
+    "contract",
+    ["issue", "contract"],
+    "Resolve and print the Core Effective Issue Artifact Contract and caller input schema.",
+    ["help", "json", "template", "repository", "capability"],
+    "[template]",
+  ),
+  command(
     "issue.validate",
     "issue",
     "validate",
@@ -387,6 +403,60 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Validate local or existing Issue input against its selected contract.",
     [...LOCAL_ARTIFACT_INPUT_OPTIONS],
     "[<number>]",
+  ),
+  command(
+    "issue.materialize",
+    "issue",
+    "materialize",
+    ["issue", "materialize"],
+    "Materialize semantic Issue input through the Core Effective Contract.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
+  ),
+  command(
+    "issue.plan",
+    "issue",
+    "plan",
+    ["issue", "plan"],
+    "Preview the deterministic Core Issue Mutation Plan without GitHub mutation.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
+  ),
+  command(
+    "issue.semantic.schema",
+    "issue",
+    "semantic-schema",
+    ["issue", "semantic", "schema"],
+    "Resolve and print the Core Effective Issue Artifact Contract and caller input schema.",
+    ["help", "json", "template", "repository", "capability"],
+    "[template]",
+  ),
+  command(
+    "issue.semantic.validate",
+    "issue",
+    "semantic-validate",
+    ["issue", "semantic", "validate"],
+    "Validate and materialize semantic Issue input through Core.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
+  ),
+  command(
+    "issue.semantic.materialize",
+    "issue",
+    "semantic-materialize",
+    ["issue", "semantic", "materialize"],
+    "Materialize semantic Issue input through Core.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
+  ),
+  command(
+    "issue.semantic.plan",
+    "issue",
+    "semantic-plan",
+    ["issue", "semantic", "plan"],
+    "Preview the deterministic Core Issue Mutation Plan without GitHub mutation.",
+    ["help", "json", "template", "repository", "from", "capability"],
+    "[template]",
   ),
   command(
     "issue.render",

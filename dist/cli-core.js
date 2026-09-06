@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ArtifactInputError, ArtifactPreparationError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
-import { compileRepositoryEffectivePullRequestContract } from "./artifact-contract-governance.js";
+import { compileRepositoryEffectiveIssueContract, compileRepositoryEffectivePullRequestContract, } from "./artifact-contract-governance.js";
 import { effectiveFieldConstraints, projectContract, SemanticValidationError, } from "./contract/index.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
@@ -17,6 +17,7 @@ import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, pro
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
 import { tryPlanSemanticPullRequest } from "./semantic-pr-projection.js";
+import { tryPlanSemanticIssue } from "./semantic-issue-projection.js";
 import { SemanticPullRequestExecutor, SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION, } from "./semantic-pr-executor.js";
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -639,6 +640,12 @@ async function runMcpCommand(command, rest, parsed, root) {
     return 0;
 }
 async function runArtifactCommand(domain, command, rest, parsed, root, dependencies, json) {
+    if (domain === "issue") {
+        const semantic = semanticIssueOperation(command, rest);
+        if (semantic !== undefined) {
+            return runSemanticIssueCommand(semantic.operation, semantic.rest, parsed, root, dependencies, json);
+        }
+    }
     if (domain === "pr") {
         const semantic = semanticPullRequestOperation(command, rest);
         if (semantic !== undefined) {
@@ -646,7 +653,7 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         }
     }
     if (parsed.capabilities.length > 0) {
-        throw new CliError("INVALID_OPTION", "Option --capability is only supported by the semantic PR commands.", "--capability");
+        throw new CliError("INVALID_OPTION", "Option --capability is only supported by semantic artifact commands.", "--capability");
     }
     if (command === "schema") {
         let contract;
@@ -770,6 +777,102 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
         throw invalidArtifactNumberError(domain, rest[0]);
     }
     throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
+}
+function semanticIssueOperation(command, rest) {
+    if (command === "contract" || command === "materialize" || command === "plan") {
+        return { operation: command, rest };
+    }
+    if (command !== "semantic")
+        return undefined;
+    const nested = rest[0];
+    if (nested === "schema")
+        return { operation: "contract", rest: rest.slice(1) };
+    if (nested === "validate" || nested === "materialize")
+        return { operation: "materialize", rest: rest.slice(1) };
+    if (nested === "plan")
+        return { operation: "plan", rest: rest.slice(1) };
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Issue semantic command "${nested ?? ""}".`);
+}
+function rejectSemanticIssueOptions(operation, parsed) {
+    const allowed = new Set(operation === "contract" ? ["json", "template", "repository"] : ["json", "template", "repository", "from"]);
+    const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
+    if (unsupported !== undefined) {
+        const option = getOption(unsupported);
+        throw new CliError("INVALID_OPTION", `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by the semantic Issue ${operation} command.`, "$argv", { command: `issue ${operation}`, option: option.id });
+    }
+    if (parsed.fields.length > 0) {
+        throw new CliError("INVALID_OPTION", "Semantic Issue commands accept caller input only through --from; --field is not a Core semantic input adapter.", "--field");
+    }
+}
+async function runSemanticIssueCommand(operation, rest, parsed, root, dependencies, _json) {
+    rejectSemanticIssueOptions(operation, parsed);
+    if (rest.length > 1) {
+        throw new CliError("UNKNOWN_COMMAND", `Unexpected Issue semantic argument "${rest[1] ?? ""}".`);
+    }
+    const selector = templateSelector(parsed, rest[0]);
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    const effectiveContract = await compileRepositoryEffectiveIssueContract(adapter, selector, {
+        capabilities: parsed.capabilities,
+    });
+    const contractProjection = {
+        ok: true,
+        version: effectiveContract.version,
+        artifactContractVersion: effectiveContract.artifactContractVersion,
+        kind: effectiveContract.kind,
+        id: effectiveContract.id,
+        contract: effectiveContract.contract,
+        effectiveContract,
+        inputSchema: effectiveContract.inputSchema,
+        properties: effectiveContract.properties,
+        ...(effectiveContract.fields === undefined ? {} : { fields: effectiveContract.fields }),
+        derivations: effectiveContract.derivations,
+        dependencyGraph: effectiveContract.dependencyGraph,
+        evaluationOrder: effectiveContract.evaluationOrder,
+        provenance: effectiveContract.provenance,
+        generation: effectiveContract.generation,
+        capabilities: effectiveContract.capabilities,
+    };
+    if (operation === "contract") {
+        console.log(JSON.stringify(contractProjection));
+        return 0;
+    }
+    const input = await readJsonValue(parsed.options.from);
+    const materialization = tryMaterializeSemanticArtifact(effectiveContract, input);
+    if (!materialization.valid || materialization.artifact === undefined) {
+        console.log(JSON.stringify(semanticFailure("materialization", materialization.violations, effectiveContract)));
+        return EXIT_VALIDATION;
+    }
+    if (operation === "materialize") {
+        console.log(JSON.stringify({
+            ok: true,
+            valid: true,
+            effectiveContract,
+            artifact: materialization.artifact,
+            provenance: materialization.artifact.provenance,
+            generation: materialization.artifact.generation,
+        }));
+        return 0;
+    }
+    const plan = tryPlanSemanticIssue({
+        artifact: materialization.artifact,
+        capabilities: effectiveContract.capabilities,
+    });
+    if (!plan.valid || plan.plan === undefined) {
+        console.log(JSON.stringify(semanticFailure("projection", plan.violations, effectiveContract)));
+        return EXIT_VALIDATION;
+    }
+    console.log(JSON.stringify({
+        ok: true,
+        valid: true,
+        effectiveContract,
+        artifact: materialization.artifact,
+        plan: plan.plan,
+        provenance: plan.plan.provenance,
+        generation: plan.plan.generation,
+        preview: true,
+        mutation: false,
+    }));
+    return 0;
 }
 function semanticPullRequestOperation(command, rest) {
     if (command === "contract" || command === "materialize" || command === "plan" || command === "execute") {
