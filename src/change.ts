@@ -3486,13 +3486,17 @@ function effectSuccessEvidenceMatches(effect: ChangeEffect, evidence: ChangeEffe
   if (effect.kind !== evidence.kind) return false;
   switch (effect.kind) {
     case "CREATE_BRANCH":
+      // createdCommitSha has no effect-side counterpart to bind against (it is
+      // unknowable pre-apply); validateEffectCommitSha already guarantees it is a
+      // canonical lowercase 40-hex SHA before this function runs. Only the
+      // requested branch/baseBranch identity is knowable and checked here.
       return (
-        evidence.kind === effect.kind &&
-        evidence.branch === effect.branch &&
-        evidence.baseBranch === effect.baseBranch &&
-        evidence.createdCommitSha.length === MAX_CHANGE_COMMIT_SHA_LENGTH
+        evidence.kind === effect.kind && evidence.branch === effect.branch && evidence.baseBranch === effect.baseBranch
       );
     case "CREATE_PULL_REQUEST":
+      // pullRequest has no effect-side counterpart to bind against (the PR number
+      // is unknowable pre-apply); requiredEffectNumber already guarantees it is a
+      // positive safe integer. Every other knowable field is checked here.
       return (
         evidence.kind === effect.kind &&
         evidence.branch === effect.branch &&
