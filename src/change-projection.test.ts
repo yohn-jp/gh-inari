@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { compileEffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
+import { parseArtifactContract } from "./contract/artifact-contract.js";
+import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
+import { planSemanticBranch } from "./semantic-branch-projection.js";
 import {
   CHANGE_CONTRACT_VERSION,
+  planChangeIssuance,
   projectChangeFromGitHubEvidence,
   type ChangeGitHubEvidence,
   type ChangeIdentity,
@@ -48,6 +53,58 @@ function projectionInput(evidence: ChangeGitHubEvidence): ChangeProjectionInput 
   };
 }
 
+function semanticBranchPlan() {
+  const contract = parseArtifactContract({
+    version: "1",
+    kind: "branch",
+    id: "change-branch",
+    properties: {
+      type: {
+        presence: "required",
+        authority: { kind: "supplied" },
+        constraints: { values: ["feat", "fix"] },
+      },
+      issue: { presence: "required", authority: { kind: "supplied" } },
+      slug: { presence: "required", authority: { kind: "supplied" } },
+      name: {
+        presence: "required",
+        authority: { kind: "derived", derive: { op: "format", template: "{type}/{issue.number}-{slug}" } },
+      },
+      source: { presence: "required", authority: { kind: "fixed", value: "main" } },
+    },
+  });
+  const provenance = {
+    authority: "repository-default-branch" as const,
+    repository: {
+      host: "github.com",
+      owner: "yohn-jp",
+      name: "gh-inari",
+      nameWithOwner: "yohn-jp/gh-inari",
+      repositoryId: identity.repositoryId,
+    },
+    ref: "main",
+    treeSha: "tree-sha",
+    source: {
+      path: ".github/inari/canon/branch.json",
+      ref: "main",
+      sha: "branch-sha",
+      digest: "branch-digest",
+    },
+  };
+  const effective = compileEffectiveArtifactContract(contract, { provenance });
+  const artifact = materializeSemanticArtifact(effective, {
+    type: "feat",
+    issue: {
+      repositoryHost: identity.repositoryHost,
+      repositoryId: identity.repositoryId,
+      repository: "yohn-jp/gh-inari",
+      number: identity.rootIssue,
+    },
+    slug: "from-semantic-plan",
+  });
+  return planSemanticBranch({ artifact });
+}
+
 test("projects a healthy canonical Draft/Review/Accepted/Merged/Aborted lifecycle", () => {
   const cases: readonly [ChangePullRequestEvidence, string][] = [
     [{ number: 400, head: canonicalBranch, base: "main", state: "open", draft: true, merged: false }, "DRAFT"],
@@ -77,6 +134,80 @@ test("projects a healthy canonical Draft/Review/Accepted/Merged/Aborted lifecycl
     else assert.equal(result.candidates.branches[0]?.classification, "canonical");
     assert.equal(result.candidates.pullRequests[0]?.classification, "canonical");
   }
+});
+
+test("consumes the Semantic Branch plan as the canonical branch and source", () => {
+  const branchPlan = semanticBranchPlan();
+  const result = projectChangeFromGitHubEvidence({
+    change: identity,
+    branchPlan,
+    // Deliberately conflicting legacy values must not become a second authority.
+    naming: { type: "fix", slug: "caller-value-is-not-authoritative" },
+    branchGovernance: { pattern: "^fix/" },
+    baseBranch: "main",
+    evidence: {
+      issue: issueEvidence(),
+      branches: { status: "available", value: [{ name: branchPlan.desired.name }] },
+      pullRequests: {
+        status: "available",
+        value: [
+          {
+            number: 499,
+            head: branchPlan.desired.name,
+            base: branchPlan.desired.source,
+            state: "open",
+            draft: true,
+            merged: false,
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.canonicalBranch, "feat/213-from-semantic-plan");
+  assert.equal(result.canonicalBaseBranch, "main");
+  assert.equal(result.change?.state, "DRAFT");
+});
+
+test("Change issuance retains the consumed Branch plan while planning lifecycle effects", () => {
+  const branchPlan = semanticBranchPlan();
+  const plan = planChangeIssuance({
+    change: identity,
+    branchPlan,
+    baseBranch: branchPlan.desired.source,
+    evidence: {
+      issue: issueEvidence(),
+      branches: { status: "absent" },
+      pullRequests: { status: "absent" },
+    },
+  });
+  assert.deepEqual(plan.branchPlan, branchPlan);
+  assert.deepEqual(plan.effects, [
+    { kind: "CREATE_BRANCH", branch: branchPlan.desired.name, baseBranch: branchPlan.desired.source },
+    {
+      kind: "CREATE_PULL_REQUEST",
+      branch: branchPlan.desired.name,
+      baseBranch: branchPlan.desired.source,
+      rootIssue: identity.rootIssue,
+      title: `Change #${identity.rootIssue}`,
+      body: `Closes #${identity.rootIssue}`,
+      draft: true,
+    },
+  ]);
+});
+
+test("rejects an invalid Semantic Branch plan without falling back to legacy naming", () => {
+  const result = projectChangeFromGitHubEvidence({
+    change: identity,
+    branchPlan: { version: "1", kind: "branch" },
+    naming,
+    branchGovernance: governance,
+    baseBranch: canonicalBaseBranch,
+    evidence: { issue: issueEvidence(), branches: { status: "absent" }, pullRequests: { status: "absent" } },
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.status, "unavailable");
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.path.startsWith("$.branchPlan")));
 });
 
 test("rejects a pull request that reuses the root Issue number", () => {
