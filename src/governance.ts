@@ -759,7 +759,9 @@ async function readRepositoryTemplateResolutionConfig(
   return { config, source: sourceIdentityValue };
 }
 
-function createRemoteSemanticIdentities(tree: readonly RepositoryTreeEntry[]): readonly SemanticTemplateIdentity[] {
+export function createRemoteSemanticIdentities(
+  tree: readonly RepositoryTreeEntry[],
+): readonly SemanticTemplateIdentity[] {
   const identities: SemanticTemplateIdentity[] = [];
   for (const entry of tree) {
     if (entry.type !== "blob" || !entry.path.endsWith(".json")) continue;

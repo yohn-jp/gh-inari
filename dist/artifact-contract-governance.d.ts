@@ -5,12 +5,13 @@
  * Canon v2 pull-request contract from the authoritative default branch and
  * compiles it through the shared Effective Artifact Contract compiler.  It
  * does not select semantic values, derive identities, or project GitHub
- * representations.
+ * representations, and it does not define its own Canon location or
+ * selector policy: discovery and template-resolution precedence are
+ * delegated to the same repository governance authority every other
+ * governed artifact uses (`governance.ts`, `template-resolver.ts`).
  */
 import { type EffectiveArtifactContract } from "./contract/index.js";
 import { GitHubAdapter } from "./github/index.js";
-/** Canon locations accepted by the v2 repository contract resolver. */
-export declare const ARTIFACT_CONTRACT_CANON_PATHS: readonly [".github/inari/canon/pull-request.json", ".github/inari/canon/pull_request.json", ".github/inari/canon/pull-requests", ".github/inari/canon/pull_requests", ".inari/canon/pull-request.json", ".inari/canon/pull_request.json", ".inari/canon/pull-requests", ".inari/canon/pull_requests"];
 export type ArtifactContractResolutionErrorCode = "ARTIFACT_CONTRACT_NOT_FOUND" | "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS" | "ARTIFACT_CONTRACT_SOURCE_INVALID" | "ARTIFACT_CONTRACT_KIND_INVALID";
 export interface ArtifactContractResolutionDiagnostic {
     readonly code: ArtifactContractResolutionErrorCode;

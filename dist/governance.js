@@ -489,7 +489,7 @@ async function readRepositoryTemplateResolutionConfig(adapter, source, parseConf
     }
     return { config, source: sourceIdentityValue };
 }
-function createRemoteSemanticIdentities(tree) {
+export function createRemoteSemanticIdentities(tree) {
     const identities = [];
     for (const entry of tree) {
         if (entry.type !== "blob" || !entry.path.endsWith(".json"))

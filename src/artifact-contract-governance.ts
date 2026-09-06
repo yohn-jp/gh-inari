@@ -5,7 +5,10 @@
  * Canon v2 pull-request contract from the authoritative default branch and
  * compiles it through the shared Effective Artifact Contract compiler.  It
  * does not select semantic values, derive identities, or project GitHub
- * representations.
+ * representations, and it does not define its own Canon location or
+ * selector policy: discovery and template-resolution precedence are
+ * delegated to the same repository governance authority every other
+ * governed artifact uses (`governance.ts`, `template-resolver.ts`).
  */
 
 import { createHash } from "node:crypto";
@@ -18,18 +21,13 @@ import {
   type ArtifactContractProvenance,
 } from "./contract/index.js";
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
-
-/** Canon locations accepted by the v2 repository contract resolver. */
-export const ARTIFACT_CONTRACT_CANON_PATHS = Object.freeze([
-  ".github/inari/canon/pull-request.json",
-  ".github/inari/canon/pull_request.json",
-  ".github/inari/canon/pull-requests",
-  ".github/inari/canon/pull_requests",
-  ".inari/canon/pull-request.json",
-  ".inari/canon/pull_request.json",
-  ".inari/canon/pull-requests",
-  ".inari/canon/pull_requests",
-] as const);
+import { createRemoteSemanticIdentities } from "./governance.js";
+import type { SemanticTemplateIdentity } from "./semantic-template.js";
+import {
+  resolveTemplate,
+  semanticTemplateResolutionCandidate,
+  TemplateResolutionError,
+} from "./template-resolver.js";
 
 export type ArtifactContractResolutionErrorCode =
   | "ARTIFACT_CONTRACT_NOT_FOUND"
@@ -70,81 +68,68 @@ export interface RepositoryEffectiveArtifactContractOptions {
   readonly capabilities?: readonly string[];
 }
 
-interface CanonCandidate {
-  readonly entry: RepositoryTreeEntry;
-  readonly id: string;
-}
-
-function compareStrings(left: string, right: string): number {
-  return left.localeCompare(right, "en-US");
-}
-
-function isPullRequestCanonPath(value: string): boolean {
-  if (!value.endsWith(".json")) return false;
-  return (
-    value === ".github/inari/canon/pull-request.json" ||
-    value === ".github/inari/canon/pull_request.json" ||
-    value === ".inari/canon/pull-request.json" ||
-    value === ".inari/canon/pull_request.json" ||
-    /^\.github\/inari\/canon\/pull[-_]requests\/[A-Za-z0-9_-]+\.json$/u.test(value) ||
-    /^\.inari\/canon\/pull[-_]requests\/[A-Za-z0-9_-]+\.json$/u.test(value)
-  );
-}
-
-function candidateId(path: string): string {
-  const base = path.slice(path.lastIndexOf("/") + 1).replace(/\.json$/u, "");
-  if (base === "pull-request" || base === "pull_request") return "default";
-  return base;
-}
-
-function canonCandidates(tree: readonly RepositoryTreeEntry[]): readonly CanonCandidate[] {
-  return tree
-    .filter((entry) => entry.type === "blob" && isPullRequestCanonPath(entry.path))
-    .map((entry) => ({ entry, id: candidateId(entry.path) }))
-    .sort((left, right) => compareStrings(left.entry.path, right.entry.path));
-}
-
-function selectCandidate(
-  candidates: readonly CanonCandidate[],
+/**
+ * Resolve the authoritative pull-request Canon identity using the same
+ * repository governance discovery and template-resolution precedence as
+ * every other governed artifact. This module does not define a second
+ * location/selector policy: `.github/inari/pull-request.json` and
+ * `.github/inari/pull-requests/<id>.json` are the only recognized sources.
+ */
+async function selectCanonIdentity(
+  tree: readonly RepositoryTreeEntry[],
   selector: string | undefined,
   context: RepositoryContext,
   ref: string,
-): CanonCandidate {
-  if (candidates.length === 0) {
+): Promise<SemanticTemplateIdentity> {
+  const candidates = createRemoteSemanticIdentities(tree).filter((identity) => identity.kind === "pull_request");
+  try {
+    return await resolveTemplate({
+      candidates: candidates.map(semanticTemplateResolutionCandidate),
+      selector,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof TemplateResolutionError)) throw error;
+    throw artifactContractResolutionErrorFromTemplateResolution(error, context, ref);
+  }
+}
+
+function artifactContractResolutionErrorFromTemplateResolution(
+  error: TemplateResolutionError,
+  context: RepositoryContext,
+  ref: string,
+): ArtifactContractResolutionError {
+  const details = { repository: context.nameWithOwner, ref, ...error.details };
+  switch (error.code) {
+    case "TEMPLATE_RESOLUTION_SELECTOR_AMBIGUOUS":
+    case "TEMPLATE_RESOLUTION_DEFAULT_AMBIGUOUS":
+    case "TEMPLATE_RESOLUTION_AMBIGUOUS":
+      return new ArtifactContractResolutionError(
+        "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS",
+        "$.selector",
+        error.message,
+        details,
+      );
+    default:
+      return new ArtifactContractResolutionError("ARTIFACT_CONTRACT_NOT_FOUND", "$.selector", error.message, details);
+  }
+}
+
+function findCanonEntry(
+  tree: readonly RepositoryTreeEntry[],
+  identity: SemanticTemplateIdentity,
+  context: RepositoryContext,
+  ref: string,
+): RepositoryTreeEntry {
+  const entry = tree.find((candidate) => candidate.path === identity.sourcePath && candidate.type === "blob");
+  if (entry === undefined) {
     throw new ArtifactContractResolutionError(
       "ARTIFACT_CONTRACT_NOT_FOUND",
       "$.source",
-      `No pull_request Artifact Contract Canon was found for ${context.nameWithOwner} at ref "${ref}".`,
-      { repository: context.nameWithOwner, ref, attemptedPaths: ARTIFACT_CONTRACT_CANON_PATHS },
+      `Artifact Contract Canon "${identity.sourcePath}" was not found for ${context.nameWithOwner} at ref "${ref}".`,
+      { repository: context.nameWithOwner, ref, path: identity.sourcePath },
     );
   }
-  const requested = selector?.trim();
-  const matches =
-    requested === undefined || requested === ""
-      ? candidates.length === 1
-        ? candidates
-        : candidates.filter((candidate) => candidate.id === "default")
-      : candidates.filter(
-          (candidate) =>
-            candidate.id === requested ||
-            candidate.entry.path === requested ||
-            candidate.entry.path.replace(/\.json$/u, "") === requested,
-        );
-  if (matches.length === 1) return matches[0] as CanonCandidate;
-  if (matches.length > 1) {
-    throw new ArtifactContractResolutionError(
-      "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS",
-      "$.selector",
-      `Artifact Contract selector "${requested ?? "default"}" matches multiple Canon sources.`,
-      { selector: requested ?? "default", matches: matches.map((candidate) => candidate.entry.path) },
-    );
-  }
-  throw new ArtifactContractResolutionError(
-    "ARTIFACT_CONTRACT_NOT_FOUND",
-    "$.selector",
-    `No pull_request Artifact Contract Canon matches selector "${requested ?? "default"}".`,
-    { selector: requested ?? "default", candidates: candidates.map((candidate) => candidate.entry.path) },
-  );
+  return entry;
 }
 
 function sourceProvenance(
@@ -230,9 +215,10 @@ export async function compileRepositoryEffectivePullRequestContract(
   const context = await adapter.resolveRepositoryContext();
   const ref = await adapter.getRepositoryDefaultBranch();
   const tree = await adapter.getRepositoryTree(ref);
-  const candidate = selectCandidate(canonCandidates(tree.entries), selector, context, ref);
-  const source = await adapter.getRepositoryBlob(candidate.entry.sha);
-  const contract = parseCanonSource(source, candidate.entry.path);
-  const provenance = sourceProvenance(context, ref, tree.sha, candidate.entry, source);
+  const identity = await selectCanonIdentity(tree.entries, selector, context, ref);
+  const entry = findCanonEntry(tree.entries, identity, context, ref);
+  const source = await adapter.getRepositoryBlob(entry.sha);
+  const contract = parseCanonSource(source, entry.path);
+  const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
   return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
 }

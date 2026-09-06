@@ -127,7 +127,7 @@ async function invoke(
   try {
     const inputPath = path.join(directory, "input.json");
     if (input !== undefined) await writeFile(inputPath, JSON.stringify(input), "utf8");
-    const sourcePath = ".github/inari/canon/pull-requests/default.json";
+    const sourcePath = ".github/inari/pull-requests/default.json";
     const transport = new SemanticPrTransport(canon, [{ path: sourcePath, sha: "canon-sha" }]);
     const lines: string[] = [];
     const originalLog = console.log;
@@ -149,6 +149,40 @@ async function invoke(
       });
       const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
       return { exitCode, output, calls: transport.calls };
+    } finally {
+      console.log = originalLog;
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function invokeWithTree(
+  treeEntries: readonly { readonly path: string; readonly sha: string }[],
+  selector: string | undefined,
+  canon: string,
+): Promise<{ readonly exitCode: number; readonly output: Record<string, unknown> }> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-semantic-pr-"));
+  try {
+    const transport = new SemanticPrTransport(canon, treeEntries);
+    const lines: string[] = [];
+    const originalLog = console.log;
+    try {
+      console.log = (line: string) => lines.push(line);
+      const argv = [
+        "pr",
+        "contract",
+        ...(selector === undefined ? [] : [selector]),
+        "--repository",
+        "acme/repository-b",
+        "--json",
+      ];
+      const exitCode = await runCli(argv, {
+        repositoryRoot: directory,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      });
+      const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+      return { exitCode, output };
     } finally {
       console.log = originalLog;
     }
@@ -180,7 +214,7 @@ test("CLI resolves a derived PR Canon, materializes it, and previews a determini
   assert.equal(
     (first.output.provenance as Record<string, unknown>).source &&
       ((first.output.provenance as Record<string, unknown>).source as Record<string, unknown>).path,
-    ".github/inari/canon/pull-requests/default.json",
+    ".github/inari/pull-requests/default.json",
   );
   assert.equal(
     first.calls.some((args) => args.includes("pull_request.create")),
@@ -236,4 +270,39 @@ test("CLI preserves repository-selectable supplied branch authority through the 
   assert.equal(desired.head, "topic/from-caller");
   assert.equal(desired.title, "Caller-named PR");
   assert.equal(desired.base, "main");
+});
+
+test("CLI fails closed when no repository Canon exists at any recognized location", async () => {
+  const result = await invokeWithTree([], undefined, derivedCanon);
+  assert.equal(result.exitCode, 2);
+  const error = result.output.error as Record<string, unknown>;
+  assert.equal(error.code, "ARTIFACT_CONTRACT_NOT_FOUND");
+});
+
+test("CLI fails closed on an ambiguous Canon selector instead of guessing a source", async () => {
+  const result = await invokeWithTree(
+    [
+      { path: ".github/inari/pull-requests/one.json", sha: "canon-sha-one" },
+      { path: ".github/inari/pull-requests/two.json", sha: "canon-sha-two" },
+    ],
+    undefined,
+    derivedCanon,
+  );
+  assert.equal(result.exitCode, 2);
+  const error = result.output.error as Record<string, unknown>;
+  assert.equal(error.code, "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS");
+});
+
+test("CLI ignores non-canonical Canon aliases such as .inari and underscore variants", async () => {
+  const result = await invokeWithTree(
+    [
+      { path: ".inari/canon/pull-requests/default.json", sha: "canon-sha-legacy" },
+      { path: ".github/inari/canon/pull_request.json", sha: "canon-sha-underscore" },
+    ],
+    undefined,
+    derivedCanon,
+  );
+  assert.equal(result.exitCode, 2);
+  const error = result.output.error as Record<string, unknown>;
+  assert.equal(error.code, "ARTIFACT_CONTRACT_NOT_FOUND");
 });
