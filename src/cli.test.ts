@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
 import { runCli } from "./cli.js";
+import { COMMAND_CONTRACT_VERSION } from "./command-contract.js";
 
 class CliStubTransport implements GhTransport {
   private readonly callHistory: string[][] = [];
@@ -1031,7 +1032,7 @@ test("machine-readable version reports the invocation contract and capabilities"
     assert.equal(output.name, "gh-inari");
     assert.equal(output.version, "0.3.0");
     assert.equal(output.protocol, 1);
-    assert.equal(output.commandContractVersion, "1.1.0");
+    assert.equal(output.commandContractVersion, COMMAND_CONTRACT_VERSION);
     assert.deepEqual(output.invocation, {
       canonical: "inari",
       compatibility: "gh inari",
@@ -1060,7 +1061,7 @@ test("diagnose reports canonical runtime readiness independently from a missing 
         status: 0,
         stdout: JSON.stringify({
           version: "0.3.0",
-          commandContractVersion: "1.1.0",
+          commandContractVersion: COMMAND_CONTRACT_VERSION,
           capabilities: [
             "canonical-invocation",
             "machine-readable-version",
@@ -1102,7 +1103,7 @@ test("diagnose reports stale extension capability health separately from the rea
         status: 0,
         stdout: JSON.stringify({
           version: "0.3.0",
-          commandContractVersion: "1.1.0",
+          commandContractVersion: COMMAND_CONTRACT_VERSION,
           capabilities: [
             "canonical-invocation",
             "machine-readable-version",
@@ -1123,7 +1124,7 @@ test("diagnose reports stale extension capability health separately from the rea
                 name: "gh-inari",
                 version: "0.2.0",
                 protocol: 1,
-                commandContractVersion: "1.1.0",
+                commandContractVersion: COMMAND_CONTRACT_VERSION,
                 capabilities: ["canonical-invocation"],
                 invocation: { canonical: "inari", direct: "gh-inari", fallback: "npx --yes gh-inari" },
               }),

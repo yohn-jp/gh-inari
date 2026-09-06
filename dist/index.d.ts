@@ -21,5 +21,6 @@ export * from "./semantic-issue-projection.js";
 export * from "./semantic-branch-projection.js";
 export * from "./semantic-pr-executor.js";
 export * from "./artifact-contract-governance.js";
+export * from "./mcp/index.js";
 export { discoverTemplates, discoverTemplatesSync, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, selectTemplate, selectIssueTemplate, selectPullRequestTemplate, TemplateDiscoveryError, TemplateFilesystemError, TemplateNotFoundError, TemplateSelectionAmbiguousError, TemplateNameConflictError, InvalidTemplateSelectorError, } from "./template-discovery.js";
 export type { TemplateDiscoveryResult, TemplateSelector, TemplateType, TemplateKind, TemplateDiscoveryErrorCode, TemplateDiscoveryErrorDetails, } from "./template-discovery.js";
