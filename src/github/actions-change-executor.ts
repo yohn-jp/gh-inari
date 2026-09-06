@@ -8,7 +8,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, createSign } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import path from "node:path";
 import {
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
@@ -1046,12 +1047,27 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
 export async function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance | undefined> {
   try {
     for (const policyPath of POLICY_PATHS) {
+      const filePath = path.join(cwd, policyPath);
+      let file: Stats;
+      try {
+        file = await lstat(filePath);
+      } catch (error: unknown) {
+        // A fallback is safe only when the candidate path itself is absent.
+        if (isFileNotFound(error)) continue;
+        throw new GitHubActionsChangeExecutorError();
+      }
+      // Repository policy is a regular file authority. Do not follow a
+      // symlink or reinterpret another filesystem object as absence.
+      if (file.isSymbolicLink() || !file.isFile()) {
+        throw new GitHubActionsChangeExecutorError();
+      }
       let source: string;
       try {
-        source = await readFile(path.join(cwd, policyPath), "utf8");
+        source = await readFile(filePath, "utf8");
       } catch {
-        // Continue only when this repository-native policy path is absent.
-        continue;
+        // The path was present above; a read failure must never select a
+        // lower-precedence policy, including an ENOENT caused by a race.
+        throw new GitHubActionsChangeExecutorError();
       }
       const overlay = parsePullRequestPolicyOverlay(source);
       // A repository-native policy with no branch rule declares no branch precondition.
@@ -1061,6 +1077,10 @@ export async function loadBranchGovernance(cwd: string): Promise<PullRequestBran
   } catch (error: unknown) {
     throw withFailureStage(error, "branch-governance");
   }
+}
+
+function isFileNotFound(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 function requiredEnvironment(
