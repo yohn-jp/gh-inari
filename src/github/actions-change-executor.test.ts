@@ -197,6 +197,46 @@ test("Actions evidence reader retains the observed canonical branch generation",
   });
 });
 
+test("merge-boundary evidence retains the observed PR even when its branch is noncanonical", async () => {
+  const transport = new ReadTransport({
+    pullRequests: [
+      {
+        number: 2190,
+        head: { ref: "manual/branch" },
+        base: { ref: "main" },
+        state: "open",
+        draft: true,
+        merged_at: null,
+        user: { login: "human" },
+      },
+    ],
+  });
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    pullRequestNumber: 2190,
+    branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+
+  const result = await reader.read(changeRemoteReadRequest(218));
+  assert.deepEqual(result.evidence.pullRequests, {
+    status: "available",
+    value: [
+      {
+        number: 2190,
+        head: "manual/branch",
+        base: "main",
+        state: "open",
+        draft: true,
+        merged: false,
+        rootIssue: 218,
+        provenance: { issuer: "human" },
+      },
+    ],
+  });
+});
+
 test("Actions evidence reader accepts multiline Issue bodies while preserving single-line validation", async () => {
   const transport = new ReadTransport({ issueBody: "## Summary\r\n\r\nfirst paragraph\nsecond paragraph" });
   const reader = new GitHubActionsEvidenceReader({
