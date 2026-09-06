@@ -54,6 +54,7 @@ jobs:
         env:
           INARI_CHANGE_REQUEST: ${{ inputs.request }}
           GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
           INARI_ISSUER_APP_ID: ${{ secrets.INARI_ISSUER_APP_ID }}
           INARI_ISSUER_INSTALLATION_ID: ${{ secrets.INARI_ISSUER_INSTALLATION_ID }}
           INARI_ISSUER_APP_PRIVATE_KEY: ${{ secrets.INARI_ISSUER_APP_PRIVATE_KEY }}

@@ -14,6 +14,15 @@ export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRAC
 export const CHANGE_REMOTE_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
 export type ChangeRemoteMutation = (typeof CHANGE_REMOTE_MUTATIONS)[number];
 
+/**
+ * Canonical requester identity for GitHub-authenticated execution.  The
+ * authenticated login is converted at the transport/runtime boundary; it
+ * is never a substitute for an issuer or another Change provenance role.
+ */
+export function canonicalGitHubRequester(login: string): string {
+  return `github:${login}`;
+}
+
 export interface ChangeRemoteExecutorOptions {
   /** Repository-local working directory used by an executor implementation. */
   readonly cwd: string;

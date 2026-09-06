@@ -1,7 +1,7 @@
 import { randomUUID as generateRandomUUID } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { projectChangeFromGitHubEvidence } from "../change.js";
-import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
+import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
 import { GitHubAdapter } from "./adapter.js";
 import { GitHubActionsEvidenceReader, isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage, loadBranchGovernance, } from "./actions-change-executor.js";
 import { isGitHubAdapterError } from "./errors.js";
@@ -342,7 +342,7 @@ export class GitHubActionsChangeRemoteExecutor {
         if (requester === undefined) {
             try {
                 const login = await this.#api.getAuthenticatedUser();
-                requester = `github:${login}`;
+                requester = canonicalGitHubRequester(login);
             }
             catch (error) {
                 throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");

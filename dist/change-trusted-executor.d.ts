@@ -34,6 +34,11 @@ export declare class TrustedChangeExecutor implements ChangeRemoteExecutor {
     constructor(options: ChangeTrustedExecutorOptions);
     read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult>;
     execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult>;
+    /**
+     * Bind semantic provenance to the authenticated trusted runtime actor.
+     * Caller input may corroborate that identity, but can never replace it.
+     */
+    private bindRequester;
     private executeReady;
     private verifyReadyProjection;
     private readInput;

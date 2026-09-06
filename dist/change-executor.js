@@ -2,6 +2,14 @@ import { CHANGE_EFFECT_KINDS, CHANGE_IMPLEMENTED_TRANSITIONS, CHANGE_TRANSITION_
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
 export const CHANGE_REMOTE_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
+/**
+ * Canonical requester identity for GitHub-authenticated execution.  The
+ * authenticated login is converted at the transport/runtime boundary; it
+ * is never a substitute for an issuer or another Change provenance role.
+ */
+export function canonicalGitHubRequester(login) {
+    return `github:${login}`;
+}
 export const CHANGE_REMOTE_EXECUTION_OUTCOMES = Object.freeze([
     "verified",
     "returned-existing",

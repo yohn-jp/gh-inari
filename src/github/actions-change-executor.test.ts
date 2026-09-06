@@ -651,6 +651,7 @@ function trustedEnvironment(overrides: Record<string, string | undefined> = {}):
   return {
     GITHUB_REPOSITORY: "acme/inari",
     GITHUB_TOKEN: "read-token",
+    GITHUB_ACTOR: "octocat",
     GITHUB_EVENT_NAME: "workflow_dispatch",
     GITHUB_REF: "refs/heads/main",
     GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/inari-change-executor.yml@refs/heads/main",
@@ -959,6 +960,30 @@ test("Trusted executor construction succeeds when the workflow ref, target ref, 
     fetch: repositoryOnlyFetch(false),
   });
   assert.ok(executor);
+});
+
+test("workflow_dispatch and workflow_call both require a bounded authenticated actor", async () => {
+  for (const event of ["workflow_dispatch", "workflow_call"] as const) {
+    const executor = await createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeRemoteMutationRequest("issue", 218),
+      environment: trustedEnvironment({ GITHUB_EVENT_NAME: event }),
+      fetch: repositoryOnlyFetch(false),
+    });
+    assert.ok(executor);
+
+    await assert.rejects(
+      createGitHubActionsChangeExecutor({
+        cwd: process.cwd(),
+        request: changeRemoteMutationRequest("issue", 218),
+        environment: trustedEnvironment({ GITHUB_EVENT_NAME: event, GITHUB_ACTOR: undefined }),
+        fetch: repositoryOnlyFetch(false),
+      }),
+      (error: unknown) =>
+        error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "trusted-execution",
+      event,
+    );
+  }
 });
 
 test("read-only Change executor construction does not require Issuer App secrets", async () => {

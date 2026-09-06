@@ -142,14 +142,53 @@ class FakeIssuer {
   }
 }
 
-function executor(reader: MutableReader, issuer: FakeIssuer): TrustedChangeExecutor {
+function executor(
+  reader: MutableReader,
+  issuer: FakeIssuer,
+  trustedExecution: TrustedExecutionContext = execution,
+): TrustedChangeExecutor {
   return new TrustedChangeExecutor({
     reader,
     issuerAuthority: issuer,
-    execution,
+    execution: trustedExecution,
     target,
   });
 }
+
+test("trusted execution actor is the sole requester provenance authority", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  const trustedExecution = { ...execution, requester: "github:trusted-actor" };
+
+  const result = await executor(reader, issuer, trustedExecution).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.requester, "github:trusted-actor");
+  assert.equal(result.projection.change?.provenance.requester, "github:trusted-actor");
+});
+
+test("a caller requester that differs from the trusted actor fails closed", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  const trustedExecution = { ...execution, requester: "github:trusted-actor" };
+
+  await assert.rejects(
+    executor(reader, issuer, trustedExecution).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      issue: identity.rootIssue,
+      requester: "github:forged-actor",
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError &&
+      error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED" &&
+      error.diagnostics.some((item) => item.code === "CHANGE_PROVENANCE_CONFLICT"),
+  );
+  assert.deepEqual(issuer.effects, []);
+});
 
 test("trusted issuance plans in Core, applies ordered effects, and verifies a fresh projection", async () => {
   const reader = new MutableReader(input(evidence([])));
