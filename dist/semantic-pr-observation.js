@@ -117,8 +117,19 @@ const DESIRED_RELATION_REPRESENTATIONS = new Set(["none", "native", "recognized-
 const REPOSITORY_LOCATOR_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
 const REPOSITORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/u;
 const ISSUE_NUMBER_PATTERN = /^[1-9][0-9]{0,15}$/u;
-const CLOSING_REFERENCE_PATTERN = /(?:^|[^A-Za-z0-9_])(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)(?:[\t ]+|[\t ]*:[\t ]*)((?:[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*)?#([1-9][0-9]{0,15}))(?![A-Za-z0-9_])/giu;
-const FALLBACK_MARKER_PATTERN = /<!--[\t ]*inari:semantic-relation[\t ]+([\s\S]{1,32768}?)[\t ]*-->/gu;
+const CLOSING_KEYWORDS = new Set([
+    "close",
+    "closed",
+    "closes",
+    "fix",
+    "fixed",
+    "fixes",
+    "resolve",
+    "resolved",
+    "resolves",
+]);
+const FALLBACK_MARKER_PREFIX = "inari:semantic-relation";
+const FALLBACK_MARKER_MAX_PAYLOAD_LENGTH = 32_768;
 function isRecord(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value))
         return false;
@@ -353,16 +364,117 @@ function relationReferenceFromLocator(locator, repository, path, violations) {
         number,
     };
 }
+function lineContentStart(line) {
+    let index = 0;
+    let indentation = 0;
+    while (index < line.length) {
+        const character = line[index];
+        if (character === " ") {
+            indentation += 1;
+            index += 1;
+            continue;
+        }
+        if (character === "\t") {
+            indentation = 4;
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    return { index, indentation };
+}
+function fenceAtLineStart(line) {
+    const start = lineContentStart(line);
+    if (start.indentation > 3)
+        return undefined;
+    const character = line[start.index];
+    if (character !== "`" && character !== "~")
+        return undefined;
+    let length = 0;
+    while (line[start.index + length] === character)
+        length += 1;
+    return length < 3 ? undefined : { character, length };
+}
+function isFenceClose(line, fence) {
+    const candidate = fenceAtLineStart(line);
+    if (candidate === undefined || candidate.character !== fence.character || candidate.length < fence.length)
+        return false;
+    const start = lineContentStart(line).index + candidate.length;
+    for (let index = start; index < line.length; index += 1) {
+        if (line[index] !== " " && line[index] !== "\t")
+            return false;
+    }
+    return true;
+}
+function isAsciiLetter(character) {
+    return character !== undefined && ((character >= "a" && character <= "z") || (character >= "A" && character <= "Z"));
+}
+function closingReferenceLocator(line) {
+    const start = lineContentStart(line);
+    // Four-space indentation and tabs are indented code blocks, not projected relation lines.
+    if (start.indentation > 3)
+        return undefined;
+    let cursor = start.index;
+    const keywordStart = cursor;
+    while (isAsciiLetter(line[cursor]))
+        cursor += 1;
+    if (cursor === keywordStart)
+        return undefined;
+    const keyword = line.slice(keywordStart, cursor).toLocaleLowerCase("en-US");
+    if (!CLOSING_KEYWORDS.has(keyword))
+        return undefined;
+    const separatorStart = cursor;
+    while (line[cursor] === " " || line[cursor] === "\t")
+        cursor += 1;
+    if (line[cursor] === ":") {
+        cursor += 1;
+        while (line[cursor] === " " || line[cursor] === "\t")
+            cursor += 1;
+    }
+    else if (cursor === separatorStart) {
+        return undefined;
+    }
+    const locatorStart = cursor;
+    let locatorEnd = line.length;
+    while (locatorEnd > locatorStart && (line[locatorEnd - 1] === " " || line[locatorEnd - 1] === "\t"))
+        locatorEnd -= 1;
+    if (locatorStart === locatorEnd)
+        return undefined;
+    const locator = line.slice(locatorStart, locatorEnd);
+    const separator = locator.lastIndexOf("#");
+    if (separator < 0)
+        return undefined;
+    const repositoryLocator = locator.slice(0, separator);
+    const issueNumber = locator.slice(separator + 1);
+    if (!ISSUE_NUMBER_PATTERN.test(issueNumber))
+        return undefined;
+    if (repositoryLocator !== "" && !REPOSITORY_LOCATOR_PATTERN.test(repositoryLocator))
+        return undefined;
+    return locator;
+}
 function parseBodyRelations(body, repository, violations) {
     const recognized = [];
     const recognizedSeen = new Set();
-    CLOSING_REFERENCE_PATTERN.lastIndex = 0;
-    let match;
-    while ((match = CLOSING_REFERENCE_PATTERN.exec(body)) !== null) {
-        const locator = match[1];
+    let offset = 0;
+    let fence;
+    for (const line of body.split(/\r\n|\r|\n/u)) {
+        const lineOffset = offset;
+        const lineBreakLength = body[lineOffset + line.length] === "\r" && body[lineOffset + line.length + 1] === "\n" ? 2 : 1;
+        offset += line.length + (lineOffset + line.length < body.length ? lineBreakLength : 0);
+        if (fence !== undefined) {
+            if (isFenceClose(line, fence))
+                fence = undefined;
+            continue;
+        }
+        const lineFence = fenceAtLineStart(line);
+        if (lineFence !== undefined) {
+            fence = lineFence;
+            continue;
+        }
+        const locator = closingReferenceLocator(line);
         if (locator === undefined)
             continue;
-        const reference = relationReferenceFromLocator(locator, repository, `$.pullRequest.body@${match.index}`, violations);
+        const reference = relationReferenceFromLocator(locator, repository, `$.pullRequest.body@${lineOffset}`, violations);
         if (reference === undefined)
             continue;
         const key = issueReferenceKey(reference);
@@ -372,31 +484,58 @@ function parseBodyRelations(body, repository, violations) {
         }
     }
     const fallbackCandidates = [];
-    FALLBACK_MARKER_PATTERN.lastIndex = 0;
-    while ((match = FALLBACK_MARKER_PATTERN.exec(body)) !== null) {
-        const payload = match[1];
-        if (payload === undefined)
+    let markerStart = body.indexOf("<!--");
+    while (markerStart >= 0) {
+        let markerCursor = markerStart + 4;
+        while (body[markerCursor] === " " || body[markerCursor] === "\t")
+            markerCursor += 1;
+        if (!body.startsWith(FALLBACK_MARKER_PREFIX, markerCursor)) {
+            markerStart = body.indexOf("<!--", markerStart + 4);
             continue;
+        }
+        markerCursor += FALLBACK_MARKER_PREFIX.length;
+        if (body[markerCursor] !== " " && body[markerCursor] !== "\t") {
+            markerStart = body.indexOf("<!--", markerStart + 4);
+            continue;
+        }
+        while (body[markerCursor] === " " || body[markerCursor] === "\t")
+            markerCursor += 1;
+        const markerEnd = body.indexOf("-->", markerCursor);
+        if (markerEnd < 0 || markerEnd - markerCursor > FALLBACK_MARKER_MAX_PAYLOAD_LENGTH) {
+            markerStart = body.indexOf("<!--", markerStart + 4);
+            continue;
+        }
+        let payloadEnd = markerEnd;
+        while (payloadEnd > markerCursor && (body[payloadEnd - 1] === " " || body[payloadEnd - 1] === "\t"))
+            payloadEnd -= 1;
+        if (payloadEnd === markerCursor) {
+            markerStart = body.indexOf("<!--", markerEnd + 3);
+            continue;
+        }
+        const payload = body.slice(markerCursor, payloadEnd);
         let parsed;
         try {
             parsed = JSON.parse(payload);
         }
         catch {
-            addViolation(violations, "OBSERVED_RELATION_MARKER_INVALID", `$.pullRequest.body@${match.index}`, "Semantic relation fallback marker must contain valid JSON.");
+            addViolation(violations, "OBSERVED_RELATION_MARKER_INVALID", `$.pullRequest.body@${markerStart}`, "Semantic relation fallback marker must contain valid JSON.");
+            markerStart = body.indexOf("<!--", markerEnd + 3);
             continue;
         }
         if (!isRecord(parsed) || parsed.version !== "1" || !hasOwn(parsed, "implements")) {
-            addViolation(violations, "OBSERVED_RELATION_MARKER_INVALID", `$.pullRequest.body@${match.index}`, "Semantic relation fallback marker has an unsupported shape.");
+            addViolation(violations, "OBSERVED_RELATION_MARKER_INVALID", `$.pullRequest.body@${markerStart}`, "Semantic relation fallback marker has an unsupported shape.");
+            markerStart = body.indexOf("<!--", markerEnd + 3);
             continue;
         }
         const markerViolations = [];
-        const references = normalizeReferenceArray(parsed.implements, `$.pullRequest.body@${match.index}.implements`, markerViolations, "OBSERVED_RELATION_MARKER_INVALID");
+        const references = normalizeReferenceArray(parsed.implements, `$.pullRequest.body@${markerStart}.implements`, markerViolations, "OBSERVED_RELATION_MARKER_INVALID");
         if (Object.keys(parsed).some((key) => key !== "version" && key !== "implements")) {
-            addViolation(markerViolations, "OBSERVED_RELATION_MARKER_INVALID", `$.pullRequest.body@${match.index}`, "Semantic relation fallback marker contains an unsupported property.");
+            addViolation(markerViolations, "OBSERVED_RELATION_MARKER_INVALID", `$.pullRequest.body@${markerStart}`, "Semantic relation fallback marker contains an unsupported property.");
         }
         violations.push(...markerViolations.slice(0, Math.max(0, SEMANTIC_PULL_REQUEST_OBSERVATION_LIMITS.diagnostics - violations.length)));
         if (references !== undefined && markerViolations.length === 0)
             fallbackCandidates.push([...references]);
+        markerStart = body.indexOf("<!--", markerEnd + 3);
     }
     const fallback = fallbackCandidates[0] ?? [];
     const conflict = fallbackCandidates.some((candidate) => !sameReferences(candidate, fallback));

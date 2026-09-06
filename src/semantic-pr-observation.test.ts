@@ -130,11 +130,31 @@ test("normalizes a bounded GitHub PR and recognized closing-reference evidence",
 
 test("recognizes GitHub closing-keyword variants and cross-repository syntax", () => {
   const observed = observeSemanticPullRequest({
-    pullRequest: githubPullRequest(recognizedDesired, "This text resolves: #283 and fixes yohn-jp/gh-inari#283."),
+    pullRequest: githubPullRequest(recognizedDesired, "RESOLVED: #283\nfixes yohn-jp/gh-inari#283"),
     repository,
   });
   assert.equal(observed.relations.implements.representation, "recognized-convention");
   assert.deepEqual(observed.relations.implements.references, [issue(283)]);
+});
+
+test("does not infer closing references from fences, quotes, or unrelated prose", () => {
+  const body = [
+    "This prose mentions Fixes #283 but is not a projected relation.",
+    "> Example: Closes #283",
+    "```markdown",
+    "Resolves #283",
+    "```",
+    "    Fixes #283",
+    "`Closes #283`",
+    "Closes#283",
+  ].join("\n");
+  const observed = observeSemanticPullRequest({
+    pullRequest: githubPullRequest(recognizedDesired, body),
+    repository,
+  });
+  assert.equal(observed.relations.implements.representation, "none");
+  assert.deepEqual(observed.relations.implements.references, []);
+  assert.deepEqual(observed.relations.implements.evidence.recognizedConvention, []);
 });
 
 test("reconciles native and fallback representations without changing semantic references", () => {
