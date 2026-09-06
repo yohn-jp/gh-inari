@@ -236,7 +236,10 @@ test("observeBlockedBy returns unavailable (truncated) when the result exceeds t
 });
 
 test("observeBlockedBy returns unavailable when a later page unexpectedly 404s", async () => {
-  const reader = new StubReader([{ status: 200, body: page(100, 1) }, { status: 404, body: undefined }]);
+  const reader = new StubReader([
+    { status: 200, body: page(100, 1) },
+    { status: 404, body: undefined },
+  ]);
   const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeBlockedBy(288);
   assert.equal(observation.kind, "unavailable");
