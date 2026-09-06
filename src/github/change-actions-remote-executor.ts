@@ -3,6 +3,7 @@ import { inflateRawSync } from "node:zlib";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+  canonicalGitHubRequester,
   ChangeRemoteExecutorError,
   changeRemoteMutationRequest,
   normalizeChangeRemoteExecutionResult,
@@ -456,7 +457,7 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
     if (requester === undefined) {
       try {
         const login = await this.#api.getAuthenticatedUser();
-        requester = `github:${login}`;
+        requester = canonicalGitHubRequester(login);
       } catch (error: unknown) {
         throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
       }

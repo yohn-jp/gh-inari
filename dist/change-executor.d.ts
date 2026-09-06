@@ -3,6 +3,12 @@ import { type ChangeDiagnostic, type ChangeEffectKind, type ChangeProjectionResu
 export declare const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION: 1;
 export declare const CHANGE_REMOTE_MUTATIONS: readonly ["issue", "ready", "abort"];
 export type ChangeRemoteMutation = (typeof CHANGE_REMOTE_MUTATIONS)[number];
+/**
+ * Canonical requester identity for GitHub-authenticated execution.  The
+ * authenticated login is converted at the transport/runtime boundary; it
+ * is never a substitute for an issuer or another Change provenance role.
+ */
+export declare function canonicalGitHubRequester(login: string): string;
 export interface ChangeRemoteExecutorOptions {
     /** Repository-local working directory used by an executor implementation. */
     readonly cwd: string;

@@ -13,7 +13,7 @@ import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, project
 import { extractTemplateIdentityMarker, renderIssueArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, } from "../artifact.js";
 import { compileLocalGovernedContract } from "../governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
-import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, changeRemoteMutationRequest, changeRemoteReadRequest, } from "../change-executor.js";
+import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, changeRemoteMutationRequest, changeRemoteReadRequest, } from "../change-executor.js";
 import { ChangeTrustedExecutorError, TrustedChangeExecutor, } from "../change-trusted-executor.js";
 import { GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES, GitHubChangeEffectAdapter, } from "./change-effect-adapter.js";
 import { InariIssuerAppAuthority, assertTrustedExecution, TRUSTED_EXECUTION_EVENTS, IssuerAuthorityError, } from "./issuer-authority.js";
@@ -1031,6 +1031,7 @@ export async function createGitHubActionsChangeExecutor(options) {
     const workflowRef = "refs/heads/main";
     const workflowSha = requiredEnvironment(environment, "GITHUB_WORKFLOW_SHA", "trusted-execution");
     assertAttestedCheckout(options.cwd, workflowSha);
+    const actor = requiredEnvironment(environment, "GITHUB_ACTOR", "trusted-execution");
     let execution;
     try {
         execution = assertTrustedExecution({
@@ -1046,7 +1047,7 @@ export async function createGitHubActionsChangeExecutor(options) {
             // the primary proof against untrusted/forked execution is the workflow-ref match above.
             fork: repositoryBody.fork,
             pullRequest: event === "pull_request" || event === "pull_request_target",
-            ...(environment.GITHUB_ACTOR === undefined ? {} : { requester: environment.GITHUB_ACTOR }),
+            requester: canonicalGitHubRequester(actor),
         });
     }
     catch (error) {

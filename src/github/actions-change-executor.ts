@@ -31,6 +31,7 @@ import { compileLocalGovernedContract } from "../governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+  canonicalGitHubRequester,
   changeRemoteMutationRequest,
   changeRemoteReadRequest,
   type ChangeRemoteExecutor,
@@ -1209,6 +1210,7 @@ export async function createGitHubActionsChangeExecutor(
   const workflowRef = "refs/heads/main";
   const workflowSha = requiredEnvironment(environment, "GITHUB_WORKFLOW_SHA", "trusted-execution");
   assertAttestedCheckout(options.cwd, workflowSha);
+  const actor = requiredEnvironment(environment, "GITHUB_ACTOR", "trusted-execution");
 
   let execution: TrustedExecutionContext;
   try {
@@ -1225,7 +1227,7 @@ export async function createGitHubActionsChangeExecutor(
       // the primary proof against untrusted/forked execution is the workflow-ref match above.
       fork: repositoryBody.fork,
       pullRequest: event === "pull_request" || event === "pull_request_target",
-      ...(environment.GITHUB_ACTOR === undefined ? {} : { requester: environment.GITHUB_ACTOR }),
+      requester: canonicalGitHubRequester(actor),
     });
   } catch (error: unknown) {
     throw withFailureStage(error, "trusted-execution");

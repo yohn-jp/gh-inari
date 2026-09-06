@@ -341,8 +341,9 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
   }
 
   async read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult> {
+    const boundRequest = this.bindRequester(request);
     try {
-      return projectionFor(await this.readInput(request));
+      return projectionFor(await this.readInput(boundRequest));
     } catch (error: unknown) {
       if (error instanceof ChangeTrustedExecutorError) throw error;
       throw new ChangeTrustedExecutorError(
@@ -353,11 +354,12 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
   }
 
   async execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
-    if (request.operation === "issue") return this.executeIssue(request);
-    const input = await this.readInput(request);
+    const boundRequest = this.bindRequester(request);
+    if (boundRequest.operation === "issue") return this.executeIssue(boundRequest);
+    const input = await this.readInput(boundRequest);
     const current = projectionFor(input);
-    if (request.operation === "ready") return this.executeReady(request, input, current);
-    const recoveryRetry = request.operation === "abort" && isAbortCleanupRecoveryProjection(current);
+    if (boundRequest.operation === "ready") return this.executeReady(boundRequest, input, current);
+    const recoveryRetry = boundRequest.operation === "abort" && isAbortCleanupRecoveryProjection(current);
     if ((!current.valid || current.change === undefined) && !recoveryRetry) {
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
@@ -372,7 +374,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
         current.diagnostics,
       );
     }
-    if (request.operation === "abort" && !isTrustedInariIssuerPrincipal(current.change.provenance.issuer)) {
+    if (boundRequest.operation === "abort" && !isTrustedInariIssuerPrincipal(current.change.provenance.issuer)) {
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
         "The canonical Change issuer provenance is not trusted.",
@@ -387,12 +389,12 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
     }
     const plan = planChangeTransition({
       version: CHANGE_TRANSITION_CONTRACT_VERSION,
-      transition: request.operation,
+      transition: boundRequest.operation,
       change: {
         ...current.change,
         provenance: {
           ...current.change.provenance,
-          ...(request.requester === undefined ? {} : { requester: request.requester }),
+          ...(boundRequest.requester === undefined ? {} : { requester: boundRequest.requester }),
         },
       },
       target: {
@@ -402,7 +404,30 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
           : { pullRequest: current.change.projection.pullRequest }),
       },
     });
-    return this.executeTransition(request, plan, input);
+    return this.executeTransition(boundRequest, plan, input);
+  }
+
+  /**
+   * Bind semantic provenance to the authenticated trusted runtime actor.
+   * Caller input may corroborate that identity, but can never replace it.
+   */
+  private bindRequester<T extends ChangeRemoteMutationRequest | ChangeRemoteReadRequest>(request: T): T {
+    const trustedRequester = this.#execution.requester;
+    if (trustedRequester !== undefined && request.requester !== undefined && request.requester !== trustedRequester) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "The Change requester does not match the trusted execution actor.",
+        [
+          diagnostic(
+            "CHANGE_PROVENANCE_CONFLICT",
+            "$.requester",
+            "Caller requester provenance does not match the authenticated trusted actor.",
+          ),
+        ],
+      );
+    }
+    if (trustedRequester === undefined || request.requester === trustedRequester) return request;
+    return { ...request, requester: trustedRequester } as T;
   }
 
   private async executeReady(
