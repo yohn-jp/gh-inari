@@ -22,6 +22,7 @@ export * from "./change-executor.js";
 export * from "./change-trusted-executor.js";
 export * from "./semantic-pr-projection.js";
 export * from "./semantic-issue-projection.js";
+export * from "./semantic-branch-projection.js";
 export * from "./artifact-contract-governance.js";
 export {
   discoverTemplates,
