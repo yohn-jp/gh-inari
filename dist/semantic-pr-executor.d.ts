@@ -35,6 +35,10 @@ export interface SemanticPullRequestObservedProjection {
     readonly base: string;
     readonly draft: boolean;
     readonly maintainerCanModify?: boolean;
+    readonly labels?: readonly string[];
+    readonly assignees?: readonly string[];
+    readonly milestone?: string;
+    readonly reviewers?: readonly string[];
 }
 export interface SemanticPullRequestExecutionEffectEvidence {
     readonly kind: "CREATE_PULL_REQUEST";

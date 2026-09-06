@@ -50,6 +50,8 @@ export interface ValidatedSemanticPullRequestArtifact {
   readonly provenance: ArtifactContractProvenance;
   readonly head: string;
   readonly base: string;
+  readonly labels?: readonly string[];
+  readonly assignees?: readonly string[];
   readonly draft?: boolean;
   readonly maintainerCanModify?: boolean;
 }

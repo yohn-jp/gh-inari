@@ -61,6 +61,8 @@ export function createValidatedSemanticPullRequestArtifact(
     provenance: cloneArtifactContractProvenance(artifact.provenance),
     head: artifact.head,
     base: artifact.base,
+    ...(artifact.labels === undefined ? {} : { labels: [...artifact.labels] }),
+    ...(artifact.assignees === undefined ? {} : { assignees: [...artifact.assignees] }),
     ...(artifact.draft === undefined ? {} : { draft: artifact.draft }),
     ...(artifact.maintainerCanModify === undefined ? {} : { maintainerCanModify: artifact.maintainerCanModify }),
   };

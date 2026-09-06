@@ -50,6 +50,10 @@ export interface SemanticPullRequestObservedProjection {
   readonly base: string;
   readonly draft: boolean;
   readonly maintainerCanModify?: boolean;
+  readonly labels?: readonly string[];
+  readonly assignees?: readonly string[];
+  readonly milestone?: string;
+  readonly reviewers?: readonly string[];
 }
 
 export interface SemanticPullRequestExecutionEffectEvidence {
@@ -136,6 +140,10 @@ function isRecord(value: unknown): value is RecordValue {
 
 function hasOwn(record: RecordValue, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function compareStrings(left: string, right: string): number {
+  return left.localeCompare(right, "en-US");
 }
 
 function diagnostic(code: string, path: string, message: string): SemanticPullRequestExecutionDiagnostic {
@@ -266,6 +274,10 @@ function revalidationFailed(
 }
 
 function observedProjection(pullRequest: GitHubPullRequest): SemanticPullRequestObservedProjection {
+  const reviewers =
+    pullRequest.requestedReviewers === undefined
+      ? undefined
+      : [...pullRequest.requestedReviewers.users, ...pullRequest.requestedReviewers.teams].sort();
   return Object.freeze({
     kind: "pull_request" as const,
     number: pullRequest.number,
@@ -277,7 +289,39 @@ function observedProjection(pullRequest: GitHubPullRequest): SemanticPullRequest
     base: pullRequest.base,
     draft: pullRequest.draft,
     ...(pullRequest.maintainerCanModify === undefined ? {} : { maintainerCanModify: pullRequest.maintainerCanModify }),
+    ...(pullRequest.labels === undefined ? {} : { labels: Object.freeze([...pullRequest.labels]) }),
+    ...(pullRequest.assignees === undefined ? {} : { assignees: Object.freeze([...pullRequest.assignees]) }),
+    ...(pullRequest.milestone === undefined ? {} : { milestone: pullRequest.milestone.title }),
+    ...(reviewers === undefined ? {} : { reviewers: Object.freeze(reviewers) }),
   });
+}
+
+function unsupportedDesiredState(
+  desired: SemanticPullRequestMutationPlan["desired"],
+): readonly SemanticPullRequestExecutionDiagnostic[] {
+  const diagnostics: SemanticPullRequestExecutionDiagnostic[] = [];
+  const metadata = desired.metadata as RecordValue;
+  for (const key of ["milestone", "reviewers"] as const) {
+    if (hasOwn(metadata, key)) {
+      diagnostics.push(
+        diagnostic(
+          "SEMANTIC_PR_DESIRED_STATE_UNSUPPORTED",
+          `$.desired.metadata.${key}`,
+          `The local Executor cannot faithfully apply and verify desired ${key}.`,
+        ),
+      );
+    }
+  }
+  if (desired.relations.implements.representation === "native") {
+    diagnostics.push(
+      diagnostic(
+        "SEMANTIC_PR_DESIRED_STATE_UNSUPPORTED",
+        "$.desired.relations.implements",
+        "The local Executor cannot faithfully apply and verify a native implements relation.",
+      ),
+    );
+  }
+  return diagnostics;
 }
 
 function projectionMismatches(
@@ -285,6 +329,10 @@ function projectionMismatches(
   observed: GitHubPullRequest,
 ): readonly SemanticPullRequestExecutionDiagnostic[] {
   const diagnostics: SemanticPullRequestExecutionDiagnostic[] = [];
+  const observedReviewers =
+    observed.requestedReviewers === undefined
+      ? undefined
+      : [...observed.requestedReviewers.users, ...observed.requestedReviewers.teams].sort();
   const compare = (path: string, expected: unknown, actual: unknown): void => {
     if (stableSerialize(expected) !== stableSerialize(actual)) {
       diagnostics.push(
@@ -296,10 +344,25 @@ function projectionMismatches(
       );
     }
   };
+  const compareStringSet = (path: string, expected: readonly string[], actual: unknown): void => {
+    compare(
+      path,
+      [...expected].sort(compareStrings),
+      Array.isArray(actual) ? [...actual].sort(compareStrings) : actual,
+    );
+  };
   compare("$.desired.title", desired.title, observed.title);
   compare("$.desired.head", desired.head, observed.head);
   compare("$.desired.base", desired.base, observed.base);
   compare("$.desired.body", desired.body, observed.body);
+  if (hasOwn(desired.metadata as RecordValue, "labels"))
+    compareStringSet("$.desired.metadata.labels", desired.metadata.labels ?? [], observed.labels);
+  if (hasOwn(desired.metadata as RecordValue, "assignees"))
+    compareStringSet("$.desired.metadata.assignees", desired.metadata.assignees ?? [], observed.assignees);
+  if (hasOwn(desired.metadata as RecordValue, "milestone"))
+    compare("$.desired.metadata.milestone", desired.metadata.milestone, observed.milestone?.title);
+  if (hasOwn(desired.metadata as RecordValue, "reviewers"))
+    compareStringSet("$.desired.metadata.reviewers", desired.metadata.reviewers ?? [], observedReviewers);
   if (hasOwn(desired.metadata as RecordValue, "draft"))
     compare("$.desired.metadata.draft", desired.metadata.draft, observed.draft);
   if (hasOwn(desired.metadata as RecordValue, "maintainerCanModify"))
@@ -320,6 +383,8 @@ function semanticMutationArtifact(plan: SemanticPullRequestMutationPlan) {
     head: desired.head,
     base: desired.base,
     provenance: desired.provenance,
+    ...(desired.metadata.labels === undefined ? {} : { labels: desired.metadata.labels }),
+    ...(desired.metadata.assignees === undefined ? {} : { assignees: desired.metadata.assignees }),
     ...(desired.metadata.draft === undefined ? {} : { draft: desired.metadata.draft }),
     ...(desired.metadata.maintainerCanModify === undefined
       ? {}
@@ -365,6 +430,9 @@ export class SemanticPullRequestExecutor implements SemanticPullRequestExecution
         ],
       );
     }
+
+    const unsupported = unsupportedDesiredState(plan.desired);
+    if (unsupported.length > 0) throw planInvalid(unsupported);
 
     // Compile against the authoritative default branch/tree/blob immediately
     // before admission.  A successful CLI preflight is not authorization.

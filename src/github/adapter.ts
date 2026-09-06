@@ -481,7 +481,22 @@ export class GitHubAdapter {
     appendBooleanField(args, "draft", artifact.draft);
     appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
     const result = await this.runApi(args, "pull_request.create");
-    return parsePullRequest(result, "pull_request.create");
+    const pullRequest = parsePullRequest(result, "pull_request.create");
+
+    // The pull-request create endpoint does not accept labels or assignees.
+    // Keep this provider-specific follow-up inside the adapter so Core and the
+    // Executor never reconstruct GitHub mutation semantics.
+    if ((artifact.labels?.length ?? 0) > 0 || (artifact.assignees?.length ?? 0) > 0) {
+      const metadataArgs = this.apiArguments(
+        context,
+        `repos/${context.nameWithOwner}/issues/${pullRequest.number}`,
+        "PATCH",
+      );
+      appendRawFields(metadataArgs, "labels[]", artifact.labels);
+      appendRawFields(metadataArgs, "assignees[]", artifact.assignees);
+      await this.runApi(metadataArgs, "pull_request.update");
+    }
+    return pullRequest;
   }
 
   async updatePullRequest(
@@ -725,6 +740,8 @@ export function assertTrustedSemanticPullRequestArtifact(
   assertString(artifact.body, "body");
   assertString(artifact.head, "head");
   assertString(artifact.base, "base");
+  assertStringArray(artifact.labels, "labels");
+  assertStringArray(artifact.assignees, "assignees");
   assertArtifactContractProvenance(artifact.provenance);
   assertOptionalBoolean(artifact.draft, "draft");
   assertOptionalBoolean(artifact.maintainerCanModify, "maintainerCanModify");

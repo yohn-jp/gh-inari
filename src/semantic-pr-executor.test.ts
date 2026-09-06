@@ -33,6 +33,9 @@ const source = JSON.stringify({
     base: { presence: "required", authority: { kind: "fixed", value: "main" } },
     type: { presence: "required", authority: { kind: "supplied" }, constraints: { values: ["feat", "fix"] } },
     implements: { presence: "required", authority: { kind: "supplied" } },
+    labels: { presence: "optional", authority: { kind: "supplied" } },
+    assignees: { presence: "optional", authority: { kind: "supplied" } },
+    reviewers: { presence: "optional", authority: { kind: "supplied" } },
   },
   fields: [
     { id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } },
@@ -84,6 +87,17 @@ function rawFields(args: readonly string[]): Record<string, string> {
   return fields;
 }
 
+function rawFieldsAll(args: readonly string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "--raw-field") continue;
+    const raw = args[index + 1] ?? "";
+    const separator = raw.indexOf("=");
+    if (separator > 0 && raw.slice(0, separator) === name) values.push(raw.slice(separator + 1));
+  }
+  return values;
+}
+
 class ExecutorTransport implements GhTransport {
   readonly calls: string[][] = [];
   readonly treeShas: string[];
@@ -104,6 +118,13 @@ class ExecutorTransport implements GhTransport {
       return command("HTTP/1.1 200 OK\n\n[]");
     if (args.some((value) => value.includes("/pulls/700"))) {
       return command(this.created ?? pullRequestPayload({ title: "", body: "", head: "", base: "" }));
+    }
+    if (args.some((value) => value.includes("/issues/700")) && args.includes("PATCH")) {
+      const payload = JSON.parse(this.created ?? "{}") as Record<string, unknown>;
+      payload.labels = rawFieldsAll(args, "labels[]").map((value) => ({ name: value }));
+      payload.assignees = rawFieldsAll(args, "assignees[]").map((value) => ({ login: value }));
+      this.created = JSON.stringify(payload);
+      return command(this.created);
     }
     if (args.some((value) => value.includes("/pulls")) && args.includes("--method") && args.includes("POST")) {
       const fields = rawFields(args);
@@ -138,13 +159,15 @@ class ExecutorTransport implements GhTransport {
   }
 }
 
-function input(): Record<string, unknown> {
-  return { type: "feat", implements: [issue], summary: "Execute semantic PR" };
+function input(values: Readonly<Record<string, unknown>> = {}): Record<string, unknown> {
+  return { type: "feat", implements: [issue], summary: "Execute semantic PR", ...values };
 }
 
 async function invoke(
   transport: ExecutorTransport,
   treeShas: readonly string[] = ["tree-sha", "tree-sha"],
+  values: Readonly<Record<string, unknown>> = {},
+  capability = "github.pull_request.implements.closing-reference",
 ): Promise<{
   readonly exitCode: number;
   readonly output: Record<string, unknown>;
@@ -152,7 +175,7 @@ async function invoke(
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-semantic-pr-executor-"));
   try {
     const inputPath = path.join(directory, "input.json");
-    await writeFile(inputPath, JSON.stringify(input()), "utf8");
+    await writeFile(inputPath, JSON.stringify(input(values)), "utf8");
     const lines: string[] = [];
     const originalLog = console.log;
     try {
@@ -167,7 +190,7 @@ async function invoke(
           "--from",
           inputPath,
           "--capability",
-          "github.pull_request.implements.closing-reference",
+          capability,
           "--json",
         ],
         {
@@ -214,6 +237,34 @@ test("local Semantic PR Executor fails closed when the Canon generation is stale
   assert.equal(result.exitCode, 2);
   const error = result.output.error as Record<string, unknown>;
   assert.equal(error.code, "SEMANTIC_PR_EXECUTION_PRECONDITION_FAILED");
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("local Semantic PR Executor applies and verifies supported metadata", async () => {
+  const transport = new ExecutorTransport();
+  const result = await invoke(transport, ["tree-sha", "tree-sha"], {
+    labels: ["semantic"],
+    assignees: ["octocat"],
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal((result.output.evidence as Record<string, unknown>).outcome, "verified");
+  const projection = result.output.projection as Record<string, unknown>;
+  assert.deepEqual(projection.labels, ["semantic"]);
+  assert.deepEqual(projection.assignees, ["octocat"]);
+  assert.equal(
+    transport.calls.some((args) => args.includes("PATCH") && args.some((value) => value.includes("/issues/700"))),
+    true,
+  );
+});
+
+test("local Semantic PR Executor rejects unsupported desired semantics before effects", async () => {
+  const transport = new ExecutorTransport();
+  const result = await invoke(transport, ["tree-sha", "tree-sha"], { reviewers: ["octocat"] });
+  assert.equal(result.exitCode, 2);
+  assert.equal((result.output.error as Record<string, unknown>).code, "SEMANTIC_PR_EXECUTION_PLAN_INVALID");
   assert.equal(
     transport.calls.some((args) => args.includes("POST")),
     false,
