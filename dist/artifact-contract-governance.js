@@ -1,9 +1,9 @@
 /**
  * Repository Canon resolution for the Semantic Artifact pipeline.
  *
- * This module is the repository-facing Core adapter boundary.  It resolves a
- * Canon v2 pull-request contract from the authoritative default branch and
- * compiles it through the shared Effective Artifact Contract compiler.  It
+ * This module is the repository-facing Core adapter boundary. It resolves an
+ * Artifact Contract Canon from the authoritative default branch and compiles
+ * it through the shared Effective Artifact Contract compiler. It
  * does not select semantic values, derive identities, or project GitHub
  * representations, and it does not define its own Canon location or
  * selector policy: discovery and template-resolution precedence are
@@ -12,8 +12,8 @@
  */
 import { createHash } from "node:crypto";
 import { ArtifactContractValidationError, parseArtifactContract, compileEffectiveArtifactContract, } from "./contract/index.js";
-import { createRemoteSemanticIdentities } from "./governance.js";
-import { resolveTemplate, semanticTemplateResolutionCandidate, TemplateResolutionError } from "./template-resolver.js";
+import { resolveRemoteArtifactContractIdentity } from "./governance.js";
+import { TemplateResolutionError } from "./template-resolver.js";
 /** Stable machine-readable failure for repository Canon resolution. */
 export class ArtifactContractResolutionError extends Error {
     code;
@@ -30,19 +30,14 @@ export class ArtifactContractResolutionError extends Error {
     }
 }
 /**
- * Resolve the authoritative pull-request Canon identity using the same
- * repository governance discovery and template-resolution precedence as
- * every other governed artifact. This module does not define a second
- * location/selector policy: `.github/inari/pull-request.json` and
- * `.github/inari/pull-requests/<id>.json` are the only recognized sources.
+ * Resolve the authoritative Artifact Contract Canon identity using the same
+ * repository governance discovery and template-resolution precedence as every
+ * other governed artifact. This module does not read arbitrary repository
+ * files.
  */
 async function selectCanonIdentity(tree, kind, selector, context, ref) {
-    const candidates = createRemoteSemanticIdentities(tree).filter((identity) => identity.kind === kind);
     try {
-        return await resolveTemplate({
-            candidates: candidates.map(semanticTemplateResolutionCandidate),
-            selector,
-        });
+        return await resolveRemoteArtifactContractIdentity(tree, kind, selector);
     }
     catch (error) {
         if (!(error instanceof TemplateResolutionError))
@@ -113,9 +108,9 @@ function parseCanonSource(source, path, kind) {
     }
 }
 /**
- * Resolve the authoritative pull-request Canon and compile its Effective
- * Artifact Contract.  All repository identity and generation fields come
- * from the adapter's default-branch/tree/blob reads.
+ * Resolve the authoritative Artifact Contract Canon and compile its Effective
+ * Artifact Contract. All repository identity and generation fields come from
+ * the adapter's default-branch/tree/blob reads.
  */
 export async function compileRepositoryEffectiveArtifactContract(adapter, kind, selector, options = {}) {
     const context = await adapter.resolveRepositoryContext();
@@ -128,12 +123,16 @@ export async function compileRepositoryEffectiveArtifactContract(adapter, kind, 
     const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
     return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
 }
-/** Resolve the authoritative pull-request Canon through the shared adapter boundary. */
+/** Resolve and compile a pull-request Artifact Contract from the repository Canon. */
 export async function compileRepositoryEffectivePullRequestContract(adapter, selector, options = {}) {
     return compileRepositoryEffectiveArtifactContract(adapter, "pull_request", selector, options);
 }
-/** Resolve the authoritative Issue Canon through the shared adapter boundary. */
+/** Resolve and compile an Issue Artifact Contract from the repository Canon. */
 export async function compileRepositoryEffectiveIssueContract(adapter, selector, options = {}) {
     return compileRepositoryEffectiveArtifactContract(adapter, "issue", selector, options);
+}
+/** Resolve and compile a Branch Artifact Contract from the repository Canon. */
+export async function compileRepositoryEffectiveBranchContract(adapter, selector, options = {}) {
+    return compileRepositoryEffectiveArtifactContract(adapter, "branch", selector, options);
 }
 //# sourceMappingURL=artifact-contract-governance.js.map

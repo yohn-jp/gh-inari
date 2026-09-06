@@ -1,4 +1,5 @@
 import { type CanonicalContract, type ContractProvenance } from "./contract/ir.js";
+import type { ArtifactContract } from "./contract/artifact-contract.js";
 import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type RepositoryTreeEntry, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
 import { type SemanticTemplateIdentity } from "./semantic-template.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
@@ -121,3 +122,19 @@ export declare function createGovernedPullRequest(adapter: GitHubAdapter, artifa
 /** Update a pull request only after verifying its governance generation is still fresh. */
 export declare function updateGovernedPullRequest(adapter: GitHubAdapter, pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;
 export declare function createRemoteSemanticIdentities(tree: readonly RepositoryTreeEntry[]): readonly SemanticTemplateIdentity[];
+/** Repository-owned Canon identity used by the representation-independent artifact pipeline. */
+export interface RepositoryArtifactContractIdentity {
+    readonly id: string;
+    readonly kind: ArtifactContract["kind"];
+    readonly name: string;
+    readonly sourcePath: string;
+    readonly generatedPath: string;
+}
+/**
+ * Discover all repository-owned Artifact Contract Canons from the shared
+ * governance source. Location and identity rules live here so CLI, MCP, and
+ * other adapters consume one repository policy authority.
+ */
+export declare function createRemoteArtifactContractIdentities(tree: readonly RepositoryTreeEntry[]): readonly RepositoryArtifactContractIdentity[];
+/** Resolve an Artifact Contract identity with the shared template selector semantics. */
+export declare function resolveRemoteArtifactContractIdentity(tree: readonly RepositoryTreeEntry[], kind: ArtifactContract["kind"], selector?: string): Promise<RepositoryArtifactContractIdentity>;

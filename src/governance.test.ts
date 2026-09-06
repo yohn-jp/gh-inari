@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   compileRepositoryGovernedContract,
+  createRemoteArtifactContractIdentities,
   createGovernedIssue,
   createGovernedPullRequest,
   discoverRepositoryTemplates,
@@ -10,6 +11,7 @@ import {
   rejectGovernedPolicyOverride,
   updateGovernedIssue,
   updateGovernedPullRequest,
+  resolveRemoteArtifactContractIdentity,
 } from "./governance.js";
 import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
 import { deserializeCanonicalContract, serializeCanonicalContract } from "./contract/index.js";
@@ -171,6 +173,29 @@ test("authoritative discovery matches all supported native PR template locations
       "docs/PULL_REQUEST_TEMPLATE/docs.txt",
     ],
   );
+});
+
+test("Artifact Contract discovery and selector resolution use the shared repository authority", async () => {
+  const tree = [
+    { path: ".github/inari/issues/default.json", type: "blob" as const, sha: "issue-sha" },
+    { path: ".github/inari/branch.json", type: "blob" as const, sha: "branch-sha" },
+    { path: ".github/inari/branches/release.json", type: "blob" as const, sha: "release-sha" },
+    { path: ".github/inari/pull-request.json", type: "blob" as const, sha: "pr-sha" },
+    { path: ".inari/branches/ignored.json", type: "blob" as const, sha: "ignored-sha" },
+  ];
+
+  const identities = createRemoteArtifactContractIdentities(tree);
+  assert.deepEqual(
+    identities.map(({ kind, id, sourcePath }) => ({ kind, id, sourcePath })),
+    [
+      { kind: "branch", id: "branch", sourcePath: ".github/inari/branch.json" },
+      { kind: "branch", id: "release", sourcePath: ".github/inari/branches/release.json" },
+      { kind: "issue", id: "default", sourcePath: ".github/inari/issues/default.json" },
+      { kind: "pull_request", id: "pull-request", sourcePath: ".github/inari/pull-request.json" },
+    ],
+  );
+  const selected = await resolveRemoteArtifactContractIdentity(tree, "branch", "release");
+  assert.equal(selected.sourcePath, ".github/inari/branches/release.json");
 });
 
 test("nested remote governance paths fail closed", async () => {

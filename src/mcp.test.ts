@@ -23,7 +23,7 @@ class SemanticPrTransport implements GhTransport {
   readonly calls: string[][] = [];
   private readonly responses: GhCommandResult[];
 
-  constructor(source: string) {
+  constructor(source: string, sourcePath = ".github/inari/pull-requests/default.json") {
     this.responses = [
       command("gh version 2.0"),
       command(),
@@ -33,7 +33,7 @@ class SemanticPrTransport implements GhTransport {
         JSON.stringify({
           sha: "tree-sha-semantic-mcp",
           truncated: false,
-          tree: [{ path: ".github/inari/pull-requests/default.json", type: "blob", sha: "canon-sha" }],
+          tree: [{ path: sourcePath, type: "blob", sha: "canon-sha" }],
         }),
       ),
       blobResponse("canon-sha", source),
@@ -87,6 +87,26 @@ const issueReference = {
   number: 285,
 };
 
+const semanticIssueCanon = JSON.stringify({
+  version: "1",
+  kind: "issue",
+  id: "default",
+  properties: {
+    title: { presence: "required", authority: { kind: "supplied" } },
+  },
+  fields: [{ id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } }],
+});
+
+const semanticBranchCanon = JSON.stringify({
+  version: "1",
+  kind: "branch",
+  id: "default",
+  properties: {
+    name: { presence: "required", authority: { kind: "supplied" } },
+    source: { presence: "required", authority: { kind: "fixed", value: "main" } },
+  },
+});
+
 function createAdapterFactory(
   source: string,
   transports: SemanticPrTransport[],
@@ -130,7 +150,17 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
     const listed = await client.listTools();
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ["inari_pr_contract", "inari_pr_materialize", "inari_pr_plan"].sort(),
+      [
+        "inari_issue_contract",
+        "inari_issue_materialize",
+        "inari_issue_plan",
+        "inari_branch_contract",
+        "inari_branch_materialize",
+        "inari_branch_plan",
+        "inari_pr_contract",
+        "inari_pr_materialize",
+        "inari_pr_plan",
+      ].sort(),
     );
     for (const tool of listed.tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
@@ -214,4 +244,48 @@ test("MCP preserves bounded Core diagnostics and rejects derived-value overrides
     });
     assert.equal(malformed.isError, true);
   });
+});
+
+test("native MCP exposes Issue and Branch catalogs through the same Core boundaries", async () => {
+  const transports: SemanticPrTransport[] = [];
+  const server = createInariMcpServer({
+    repository: "acme/repository-b",
+    createAdapter: (options) => {
+      const sourcePath =
+        transports.length < 2 ? ".github/inari/issues/default.json" : ".github/inari/branches/default.json";
+      const source = transports.length < 2 ? semanticIssueCanon : semanticBranchCanon;
+      const transport = new SemanticPrTransport(source, sourcePath);
+      transports.push(transport);
+      return new GitHubAdapter({ ...options, transport });
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-artifacts-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const issueContract = await client.callTool({ name: "inari_issue_contract", arguments: {} });
+    assert.equal(record(issueContract.structuredContent).kind, "issue");
+    const issuePlan = await client.callTool({
+      name: "inari_issue_plan",
+      arguments: { input: { title: "MCP Issue", summary: "Issue through Core" } },
+    });
+    const issuePlanContent = structuredContent(issuePlan.structuredContent);
+    assert.equal(issuePlanContent.valid, true);
+    assert.equal(issuePlanContent.mutation, false);
+
+    const branchContract = await client.callTool({ name: "inari_branch_contract", arguments: {} });
+    assert.equal(record(branchContract.structuredContent).kind, "branch");
+    const branchPlan = await client.callTool({
+      name: "inari_branch_plan",
+      arguments: { input: { name: "feat/mcp" } },
+    });
+    const branchPlanContent = structuredContent(branchPlan.structuredContent);
+    assert.equal(branchPlanContent.valid, true);
+    assert.equal(branchPlanContent.mutation, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
