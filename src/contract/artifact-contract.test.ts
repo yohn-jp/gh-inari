@@ -196,6 +196,65 @@ test("rejects a derivation cycle deterministically", () => {
   assert.ok(result.violations.some((violation) => violation.code === "ARTIFACT_CONTRACT_DERIVATION_CYCLE"));
 });
 
+test("rejects a copy derivation whose source shape does not match the target", () => {
+  // draft:boolean cannot be derived by copying a text field.
+  const invalid = clone(pullRequestContract) as { properties: { draft: { authority: unknown } } };
+  invalid.properties.draft.authority = { kind: "derived", derive: { op: "copy", from: "summary" } };
+  assert.deepEqual(violationCodes(invalid), ["ARTIFACT_CONTRACT_INVALID_DERIVATION"]);
+});
+
+test("rejects a format derivation targeting a non-text-like or many-valued property", () => {
+  // implements is issue_reference[]; format only ever produces a single text-like value.
+  const invalid = clone(pullRequestContract) as { properties: { implements: { authority: unknown } } };
+  invalid.properties.implements.authority = { kind: "derived", derive: { op: "format", template: "{type}" } };
+  assert.deepEqual(violationCodes(invalid), ["ARTIFACT_CONTRACT_INVALID_DERIVATION"]);
+});
+
+test("rejects a copy derivation whose source multiplicity does not match the target", () => {
+  // parent is issue_reference (zero-or-one); dependsOn is issue_reference (many). Same
+  // shape, different intrinsic multiplicity, so copying between them must fail closed.
+  const invalid = {
+    version: "1",
+    kind: "issue",
+    id: "multiplicity-mismatch",
+    properties: {
+      dependsOn: { presence: "optional", authority: { kind: "supplied" } },
+      parent: { presence: "optional", authority: { kind: "derived", derive: { op: "copy", from: "dependsOn" } } },
+    },
+  };
+  assert.deepEqual(violationCodes(invalid), ["ARTIFACT_CONTRACT_INVALID_DERIVATION"]);
+});
+
+test("member accessors are rejected outside format derivations", () => {
+  const invalid = clone(branchContract) as { properties: { name: { authority: { derive: unknown } } } };
+  invalid.properties.name.authority.derive = { op: "copy", from: "issue.number" };
+  assert.deepEqual(violationCodes(invalid), ["ARTIFACT_CONTRACT_INVALID_DERIVATION"]);
+});
+
+test("constraints unsupported by a value shape fail closed instead of being silently dropped", () => {
+  // `name` is a text-shaped property; a closed values set only applies to
+  // classification/label shapes and must not be silently ignored.
+  const invalid = clone(branchContract) as { properties: { name: Record<string, unknown> } };
+  invalid.properties.name.constraints = { values: ["x"] };
+  assert.ok(violationCodes(invalid).includes("ARTIFACT_CONTRACT_UNKNOWN_PROPERTY"));
+});
+
+test("a fixed many-valued property must satisfy its own item-count constraints", () => {
+  const invalid = {
+    version: "1",
+    kind: "issue",
+    id: "fixed-item-count",
+    properties: {
+      labels: {
+        presence: "optional",
+        authority: { kind: "fixed", value: ["bug", "triage"] },
+        constraints: { values: ["bug", "triage", "duplicate"], maxItems: 1 },
+      },
+    },
+  };
+  assert.deepEqual(violationCodes(invalid), ["ARTIFACT_CONTRACT_INVALID_FIXED_VALUE"]);
+});
+
 test("rejects a missing fixed value", () => {
   const invalid = clone(branchContract) as { properties: { source: { authority: Record<string, unknown> } } };
   delete invalid.properties.source.authority.value;

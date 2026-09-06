@@ -379,8 +379,6 @@ function validatePresence(value: unknown, path: string, violations: ArtifactCont
   return value as Presence;
 }
 
-const STRING_LIKE_SHAPES: readonly ValueShape[] = ["text", "classification", "label"];
-
 function validatePropertyConstraints(
   value: unknown,
   path: string,
@@ -392,37 +390,22 @@ function validatePropertyConstraints(
     addViolation(violations, "ARTIFACT_CONTRACT_INVALID_CONSTRAINT", path, "Constraints must be an object.");
     return undefined;
   }
-  checkUnknownKeys(value, ["values", "minLength", "maxLength", "pattern", "minItems", "maxItems"], path, violations);
+  const supportsClosedValueSet = shape === "classification" || shape === "label";
+  // Only the shape/multiplicity-appropriate keys are ever accepted; an
+  // unsupported key (e.g. `values` on a `text` property) fails closed as an
+  // unknown property instead of silently being dropped.
+  const allowedKeys = [
+    ...(shape === "text" ? ["minLength", "maxLength", "pattern"] : []),
+    ...(supportsClosedValueSet ? ["values"] : []),
+    ...(multiplicity === "many" ? ["minItems", "maxItems"] : []),
+  ];
+  checkUnknownKeys(value, allowedKeys, path, violations);
   const minLength = optionalNonNegativeInteger(value, "minLength", path, violations);
   const maxLength = optionalNonNegativeInteger(value, "maxLength", path, violations);
   const pattern = validateOptionalPattern(value, path, violations);
   const minItems = optionalNonNegativeInteger(value, "minItems", path, violations);
   const maxItems = optionalNonNegativeInteger(value, "maxItems", path, violations);
-  const values = validateClosedValueSet(value, path, shape === "classification" || shape === "label", violations);
-  if (shape !== "text" && (minLength !== undefined || maxLength !== undefined || pattern !== undefined)) {
-    addViolation(
-      violations,
-      "ARTIFACT_CONTRACT_INVALID_CONSTRAINT",
-      path,
-      "String constraints are only supported for the text value shape.",
-    );
-  }
-  if (multiplicity !== "many" && (minItems !== undefined || maxItems !== undefined)) {
-    addViolation(
-      violations,
-      "ARTIFACT_CONTRACT_INVALID_CONSTRAINT",
-      path,
-      "Item-count constraints are only supported for many-valued properties.",
-    );
-  }
-  if (shape !== "classification" && shape !== "label" && values !== undefined) {
-    addViolation(
-      violations,
-      "ARTIFACT_CONTRACT_INVALID_CONSTRAINT",
-      `${path}.values`,
-      "A closed value set is only supported for classification and label value shapes.",
-    );
-  }
+  const values = supportsClosedValueSet ? validateClosedValueSet(value, path, violations) : undefined;
   if (shape === "classification" && values === undefined) {
     addViolation(
       violations,
@@ -479,12 +462,10 @@ function validateOptionalPattern(
 function validateClosedValueSet(
   record: UnknownRecord,
   path: string,
-  supported: boolean,
   violations: ArtifactContractViolation[],
 ): readonly string[] | undefined {
   if (!hasOwn(record, "values")) return undefined;
   const rawValues = record.values;
-  if (!supported) return undefined; // reported by the caller against the correct shape-specific message
   if (
     !Array.isArray(rawValues) ||
     rawValues.length === 0 ||
@@ -586,6 +567,14 @@ function validateFixedValue(
     if (item === undefined) ok = false;
     else items.push(item);
   });
+  if (constraints?.minItems !== undefined && value.length < constraints.minItems) {
+    addViolation(violations, "ARTIFACT_CONTRACT_INVALID_FIXED_VALUE", path, "Fixed value does not satisfy minItems.");
+    ok = false;
+  }
+  if (constraints?.maxItems !== undefined && value.length > constraints.maxItems) {
+    addViolation(violations, "ARTIFACT_CONTRACT_INVALID_FIXED_VALUE", path, "Fixed value does not satisfy maxItems.");
+    ok = false;
+  }
   return ok ? items : undefined;
 }
 
@@ -827,6 +816,33 @@ const FIELD_PRIMITIVE_MULTIPLICITY: Readonly<Record<FieldPrimitive, Multiplicity
   attachment: "many",
 };
 
+/**
+ * The content shape a field primitive exposes to derivation. `checklist`
+ * and `attachment` are structured/opaque content (checked-item sets, file
+ * references) rather than a single scalar-like value, so they cannot
+ * participate in `copy`/`format`/`slug` derivation as source or target.
+ */
+const FIELD_CONTENT_SHAPE: Readonly<Record<FieldPrimitive, ValueShape | "opaque">> = {
+  text: "text",
+  choice: "classification",
+  checklist: "opaque",
+  attachment: "opaque",
+};
+
+/** Shapes `format`/`slug` may read from or write to: scalar, string-rendered content. */
+const DERIVATION_TEXT_SHAPES: readonly ValueShape[] = [
+  "text",
+  "classification",
+  "label",
+  "actor",
+  "milestone_reference",
+];
+
+interface DerivationEndpointInfo {
+  readonly shape: ValueShape | "opaque";
+  readonly multiplicity: Multiplicity;
+}
+
 function validateChecklistItems(
   value: unknown,
   path: string,
@@ -902,7 +918,7 @@ function validateFieldConstraints(
   const pattern = validateOptionalPattern(value, path, violations);
   const minItems = optionalNonNegativeInteger(value, "minItems", path, violations);
   const maxItems = optionalNonNegativeInteger(value, "maxItems", path, violations);
-  const values = primitive === "choice" ? validateClosedValueSet(value, path, true, violations) : undefined;
+  const values = primitive === "choice" ? validateClosedValueSet(value, path, violations) : undefined;
   const items =
     primitive === "checklist" && hasOwn(value, "items")
       ? validateChecklistItems(value.items, `${path}.items`, violations)
@@ -1179,6 +1195,8 @@ function compileArtifactContract(input: unknown): CompileResult {
 
   const dependenciesByName = new Map<string, readonly ParsedReference[]>();
   const derived = new Set<string>();
+  const derivationOpByName = new Map<string, DerivationSpec["op"]>();
+  const endpointInfoByName = new Map<string, DerivationEndpointInfo>();
   const declaredNames = new Set<string>(Object.keys(registry));
   const properties: Record<string, PropertyValueDeclaration> = {};
 
@@ -1199,7 +1217,11 @@ function compileArtifactContract(input: unknown): CompileResult {
       properties[key] = result.declaration;
       if (result.declaration.presence !== "unused") {
         dependenciesByName.set(key, result.dependencies);
-        if (result.declaration.authority.kind === "derived") derived.add(key);
+        endpointInfoByName.set(key, { shape: descriptor.shape, multiplicity: descriptor.multiplicity });
+        if (result.declaration.authority.kind === "derived") {
+          derived.add(key);
+          derivationOpByName.set(key, result.declaration.authority.derive.op);
+        }
       }
     }
   }
@@ -1219,7 +1241,14 @@ function compileArtifactContract(input: unknown): CompileResult {
           fields?.push(result.declaration);
           if (result.declaration.presence !== "unused") {
             dependenciesByName.set(result.declaration.id, result.dependencies);
-            if (result.declaration.authority.kind === "derived") derived.add(result.declaration.id);
+            endpointInfoByName.set(result.declaration.id, {
+              shape: FIELD_CONTENT_SHAPE[result.declaration.primitive],
+              multiplicity: FIELD_PRIMITIVE_MULTIPLICITY[result.declaration.primitive],
+            });
+            if (result.declaration.authority.kind === "derived") {
+              derived.add(result.declaration.id);
+              derivationOpByName.set(result.declaration.id, result.declaration.authority.derive.op);
+            }
           }
         }
       });
@@ -1234,6 +1263,8 @@ function compileArtifactContract(input: unknown): CompileResult {
   }
 
   for (const [name, dependencies] of dependenciesByName) {
+    const op = derivationOpByName.get(name);
+    const targetInfo = endpointInfoByName.get(name);
     for (const reference of dependencies) {
       if (!dependenciesByName.has(reference.name)) {
         addViolation(
@@ -1244,9 +1275,20 @@ function compileArtifactContract(input: unknown): CompileResult {
         );
         continue;
       }
+      const sourceInfo = endpointInfoByName.get(reference.name);
       if (reference.member !== undefined) {
-        const shape = registry[reference.name]?.shape;
-        const members = shape === undefined ? [] : (VALUE_SHAPE_MEMBERS[shape] ?? []);
+        if (op !== "format") {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+            `$.${name}`,
+            `Member accessors are only supported in format derivations, not "${op}".`,
+          );
+          continue;
+        }
+        const memberShape = sourceInfo?.shape;
+        const members =
+          memberShape === undefined || memberShape === "opaque" ? [] : (VALUE_SHAPE_MEMBERS[memberShape] ?? []);
         if (!members.includes(reference.member)) {
           addViolation(
             violations,
@@ -1254,7 +1296,79 @@ function compileArtifactContract(input: unknown): CompileResult {
             `$.${name}`,
             `"${reference.name}.${reference.member}" is not a declared scalar member of the referenced value's shape.`,
           );
+          continue;
         }
+        if (sourceInfo !== undefined && sourceInfo.multiplicity !== "single") {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+            `$.${name}`,
+            `Member access requires a single-valued source, but "${reference.name}" is many-valued.`,
+          );
+        }
+        continue;
+      }
+      // Whole-value reference (no member accessor).
+      if (op === "copy") {
+        if (
+          sourceInfo === undefined ||
+          targetInfo === undefined ||
+          sourceInfo.shape === "opaque" ||
+          targetInfo.shape === "opaque" ||
+          sourceInfo.shape !== targetInfo.shape ||
+          sourceInfo.multiplicity !== targetInfo.multiplicity
+        ) {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+            `$.${name}`,
+            `copy requires "${reference.name}" to share the same shape and multiplicity as "${name}".`,
+          );
+        }
+      } else if (op === "format" || op === "slug") {
+        if (sourceInfo === undefined || sourceInfo.shape === "opaque") {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+            `$.${name}`,
+            `"${reference.name}" cannot participate in a ${op} derivation.`,
+          );
+        } else if (sourceInfo.multiplicity !== "single") {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+            `$.${name}`,
+            `"${reference.name}" must be single-valued to participate in a ${op} derivation.`,
+          );
+        }
+      }
+    }
+    if (op === "format" && targetInfo !== undefined) {
+      const shape = targetInfo.shape;
+      if (shape === "opaque" || targetInfo.multiplicity !== "single") {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+          `$.${name}`,
+          "A format derivation may only target a single-valued value.",
+        );
+      } else if (!DERIVATION_TEXT_SHAPES.includes(shape)) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+          `$.${name}`,
+          `A format derivation cannot target the "${shape}" value shape.`,
+        );
+      }
+    }
+    if (op === "slug" && targetInfo !== undefined) {
+      if (targetInfo.shape !== "text" || targetInfo.multiplicity !== "single") {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_DERIVATION",
+          `$.${name}`,
+          "A slug derivation may only target a single-valued text value.",
+        );
       }
     }
   }
