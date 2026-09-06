@@ -106,6 +106,9 @@ export async function runCli(argv, dependencies = {}) {
         if (domain === "change") {
             return await runChangeCommand(command, rest, parsed, root, dependencies, json);
         }
+        if (domain === "mcp") {
+            return await runMcpCommand(command, rest, parsed, root);
+        }
         if (domain === "issue" || domain === "pr") {
             return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
         }
@@ -618,6 +621,22 @@ async function runChangeCommand(command, rest, parsed, root, dependencies, json)
         result.evidence.outcome === "verified" ||
         result.evidence.outcome === "returned-existing";
     return projection.valid && executionSucceeded ? 0 : EXIT_VALIDATION;
+}
+async function runMcpCommand(command, rest, parsed, root) {
+    if (command !== "serve" || rest.length > 0) {
+        throw new CliError("UNKNOWN_COMMAND", `Unknown MCP command "${command ?? ""}".`);
+    }
+    const unsupported = Object.keys(parsed.options).find((key) => key !== "repository");
+    if (unsupported !== undefined) {
+        const option = getOption(unsupported);
+        throw new CliError("INVALID_OPTION", `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by the MCP server command.`, "$argv", { command: "mcp serve", option: option.id });
+    }
+    const { startInariMcpStdio } = await import("./mcp/stdio.js");
+    await startInariMcpStdio({
+        repositoryRoot: root,
+        ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+    });
+    return 0;
 }
 async function runArtifactCommand(domain, command, rest, parsed, root, dependencies, json) {
     if (domain === "pr") {
@@ -1523,7 +1542,7 @@ function isOwnedInvocation(argv) {
         return true;
     const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
     if (helpRequested &&
-        (first === "issue" || first === "pr" || first === "template" || first === "change") &&
+        (first === "issue" || first === "pr" || first === "template" || first === "change" || first === "mcp") &&
         positionals.length === 1)
         return true;
     return getCommandForPositionals(positionals) !== undefined;
@@ -1580,6 +1599,7 @@ const DOMAIN_PASSTHROUGH_EXAMPLE = {
     pr: "pr checks",
     template: "template view",
     change: "change list",
+    mcp: "mcp serve",
 };
 /** Dispatches to root, domain, or leaf help from the canonical command model. */
 function printHelpFor(positionals, helpValue) {
@@ -1588,7 +1608,7 @@ function printHelpFor(positionals, helpValue) {
     if (helpValue === "full")
         return printFullHelp();
     const [domain, command] = positionals;
-    if (domain === "issue" || domain === "pr" || domain === "change") {
+    if (domain === "issue" || domain === "pr" || domain === "change" || domain === "mcp") {
         const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
         if (definition !== undefined && definition.domain === domain)
             return printLeafHelp(definition);
@@ -1616,6 +1636,7 @@ Domains:
   pr         Governed pull request schema, validation, rendering, and lifecycle
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
+  mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
 All other commands (e.g. repo, auth, pr list, issue view) are passed through to gh.

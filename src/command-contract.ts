@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.1.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.2.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -26,7 +26,7 @@ export const RUNTIME_CAPABILITIES = [
 ] as const;
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
-export type CommandDomain = "root" | "issue" | "pr" | "template" | "change" | "skill";
+export type CommandDomain = "root" | "issue" | "pr" | "template" | "change" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -70,6 +70,7 @@ export type CommandId =
   | "change.show"
   | "change.ready"
   | "change.abort"
+  | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
 
@@ -128,6 +129,7 @@ const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "pol
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
+const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
 const PR_CREATE_OPTIONS = [
   "help",
@@ -677,6 +679,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     CHANGE_OPTIONS,
     "<number>",
   ),
+  command(
+    "mcp.serve",
+    "mcp",
+    "serve",
+    ["mcp", "serve"],
+    "Run the native Inari semantic MCP server over local stdio.",
+    MCP_OPTIONS,
+  ),
   command("skill.index", "skill", "index", ["skill"], "List bounded operational playbooks.", ["help", "json"]),
   command(
     "skill.scenario",
@@ -837,7 +847,7 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string 
   return `${commandInvocation(id)} <template>`;
 }
 
-export function helpInvocation(domain: "issue" | "pr" | "template" | "change" | "skill"): string {
+export function helpInvocation(domain: "issue" | "pr" | "template" | "change" | "mcp" | "skill"): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
 
@@ -915,7 +925,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
   }
   const domain = positionals[0];
-  if (domain === "issue" || domain === "pr" || domain === "change")
+  if (domain === "issue" || domain === "pr" || domain === "change" || domain === "mcp")
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
   if (domain === "template") return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };
   if (domain === "skill") return { ...full, commands: full.commands.filter((entry) => entry.domain === "skill") };

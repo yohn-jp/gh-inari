@@ -287,6 +287,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
     }
+    if (domain === "mcp") {
+      return await runMcpCommand(command, rest, parsed, root);
+    }
     if (domain === "issue" || domain === "pr") {
       return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
     }
@@ -931,6 +934,33 @@ async function runChangeCommand(
     result.evidence.outcome === "verified" ||
     result.evidence.outcome === "returned-existing";
   return projection.valid && executionSucceeded ? 0 : EXIT_VALIDATION;
+}
+
+async function runMcpCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+): Promise<number> {
+  if (command !== "serve" || rest.length > 0) {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown MCP command "${command ?? ""}".`);
+  }
+  const unsupported = Object.keys(parsed.options).find((key) => key !== "repository");
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by the MCP server command.`,
+      "$argv",
+      { command: "mcp serve", option: option.id },
+    );
+  }
+  const { startInariMcpStdio } = await import("./mcp/stdio.js");
+  await startInariMcpStdio({
+    repositoryRoot: root,
+    ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+  });
+  return 0;
 }
 
 async function runArtifactCommand(
@@ -2023,7 +2053,7 @@ function isOwnedInvocation(argv: readonly string[]): boolean {
   const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
   if (
     helpRequested &&
-    (first === "issue" || first === "pr" || first === "template" || first === "change") &&
+    (first === "issue" || first === "pr" || first === "template" || first === "change" || first === "mcp") &&
     positionals.length === 1
   )
     return true;
@@ -2092,11 +2122,12 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<Record<"issue" | "pr" | "template" | "change", string>> = {
+const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<Record<"issue" | "pr" | "template" | "change" | "mcp", string>> = {
   issue: "issue list",
   pr: "pr checks",
   template: "template view",
   change: "change list",
+  mcp: "mcp serve",
 };
 
 /** Dispatches to root, domain, or leaf help from the canonical command model. */
@@ -2104,7 +2135,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
   if (helpValue === "json") return console.log(JSON.stringify(projectCommandHelp(positionals)));
   if (helpValue === "full") return printFullHelp();
   const [domain, command] = positionals;
-  if (domain === "issue" || domain === "pr" || domain === "change") {
+  if (domain === "issue" || domain === "pr" || domain === "change" || domain === "mcp") {
     const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
     if (definition !== undefined && definition.domain === domain) return printLeafHelp(definition);
     return printDomainHelp(domain);
@@ -2130,6 +2161,7 @@ Domains:
   pr         Governed pull request schema, validation, rendering, and lifecycle
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
+  mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
 All other commands (e.g. repo, auth, pr list, issue view) are passed through to gh.
@@ -2139,7 +2171,7 @@ Run \`inari --help=full\` for the complete command and option reference.
 Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime checks.`);
 }
 
-function printDomainHelp(domain: "issue" | "pr" | "template" | "change"): void {
+function printDomainHelp(domain: "issue" | "pr" | "template" | "change" | "mcp"): void {
   const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
 

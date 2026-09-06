@@ -25,6 +25,7 @@ export * from "./semantic-issue-projection.js";
 export * from "./semantic-branch-projection.js";
 export * from "./semantic-pr-executor.js";
 export * from "./artifact-contract-governance.js";
+export * from "./mcp/index.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,
