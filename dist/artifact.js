@@ -55,7 +55,8 @@ function renderTemplateIdentityMarker(contract) {
     };
     return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
 }
-function renderIssueDependencyMarker(dependencies) {
+/** Render the bounded compatibility marker used for Issue dependency projections. */
+export function renderIssueDependencyMarker(dependencies) {
     return `${ISSUE_DEPENDENCY_MARKER_PREFIX}${JSON.stringify({
         version: ISSUE_DEPENDENCY_MARKER_VERSION,
         dependencies,

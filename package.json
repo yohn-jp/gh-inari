@@ -48,6 +48,10 @@
       "types": "./dist/semantic-pr-projection.d.ts",
       "import": "./dist/semantic-pr-projection.js"
     },
+    "./semantic-issue-projection": {
+      "types": "./dist/semantic-issue-projection.d.ts",
+      "import": "./dist/semantic-issue-projection.js"
+    },
     "./semantic-branch-projection": {
       "types": "./dist/semantic-branch-projection.d.ts",
       "import": "./dist/semantic-branch-projection.js"
