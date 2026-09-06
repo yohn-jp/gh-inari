@@ -1,5 +1,5 @@
 import { type GhTransport, type GhTransportOutputLimits } from "./transport.js";
-import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./types.js";
+import { type GitHubIssue, type GitHubPullRequest, type RepositoryContext, type RepositoryTree, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact, type ValidatedSemanticPullRequestArtifact } from "./types.js";
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
 export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
 export declare const DEFAULT_GH_TIMEOUTS_MS: Readonly<Record<GhOperationClass, number>>;
@@ -59,9 +59,18 @@ export declare class GitHubAdapter {
     readIssue(issueNumber: number): Promise<GitHubIssue>;
     getPullRequest(pullRequestNumber: number): Promise<GitHubPullRequest>;
     readPullRequest(pullRequestNumber: number): Promise<GitHubPullRequest>;
+    /**
+     * Read the bounded set of pull requests targeting one head/base pair.
+     *
+     * This is an adapter-owned observation primitive for plan preconditions;
+     * callers do not construct GitHub API paths or parse provider responses.
+     */
+    listPullRequests(head: string, base: string): Promise<readonly GitHubPullRequest[]>;
     createIssue(artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
     updateIssue(issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue>;
     createPullRequest(artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
+    /** Apply a Core-projected v2 Semantic PR through the existing GitHub seam. */
+    createSemanticPullRequest(artifact: ValidatedSemanticPullRequestArtifact): Promise<GitHubPullRequest>;
     updatePullRequest(pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest>;
     private resolveRepositoryContextOnce;
     /** Resolve the host-scoped REST repository database identity for both local and explicit targets. */
@@ -79,3 +88,4 @@ export declare class GitHubAdapter {
 }
 export declare function assertValidatedRenderedIssueArtifact(artifact: unknown): asserts artifact is ValidatedRenderedIssueArtifact;
 export declare function assertValidatedRenderedPullRequestArtifact(artifact: unknown): asserts artifact is ValidatedRenderedPullRequestArtifact;
+export declare function assertTrustedSemanticPullRequestArtifact(artifact: unknown): asserts artifact is ValidatedSemanticPullRequestArtifact;

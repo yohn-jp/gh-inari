@@ -1,5 +1,6 @@
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
 const trustedArtifacts = new WeakSet();
+const trustedSemanticArtifacts = new WeakSet();
 /** Internal compiler-to-adapter boundary; intentionally not part of the public exports. */
 export function createValidatedRenderedIssueArtifact(artifact) {
     const value = {
@@ -31,6 +32,28 @@ export function createValidatedRenderedPullRequestArtifact(artifact) {
 export function isTrustedValidatedRenderedArtifact(value) {
     return typeof value === "object" && value !== null && trustedArtifacts.has(value);
 }
+/** Internal Core-to-adapter boundary for v2 Semantic PR projections. */
+export function createValidatedSemanticPullRequestArtifact(artifact) {
+    const value = {
+        phase: "validated-semantic",
+        kind: "pull_request",
+        title: artifact.title,
+        body: artifact.body,
+        provenance: cloneArtifactContractProvenance(artifact.provenance),
+        head: artifact.head,
+        base: artifact.base,
+        ...(artifact.labels === undefined ? {} : { labels: [...artifact.labels] }),
+        ...(artifact.assignees === undefined ? {} : { assignees: [...artifact.assignees] }),
+        ...(artifact.draft === undefined ? {} : { draft: artifact.draft }),
+        ...(artifact.maintainerCanModify === undefined ? {} : { maintainerCanModify: artifact.maintainerCanModify }),
+    };
+    deepFreeze(value);
+    trustedSemanticArtifacts.add(value);
+    return value;
+}
+export function isTrustedSemanticPullRequestArtifact(value) {
+    return typeof value === "object" && value !== null && trustedSemanticArtifacts.has(value);
+}
 function register(value) {
     deepFreeze(value);
     trustedArtifacts.add(value);
@@ -45,6 +68,15 @@ function cloneProvenance(provenance) {
         template: { ...provenance.template },
         ...(provenance.policy === undefined ? {} : { policy: { ...provenance.policy } }),
         ...(provenance.branchGovernance === undefined ? {} : { branchGovernance: { ...provenance.branchGovernance } }),
+    };
+}
+function cloneArtifactContractProvenance(provenance) {
+    return {
+        authority: provenance.authority,
+        repository: { ...provenance.repository },
+        ref: provenance.ref,
+        treeSha: provenance.treeSha,
+        source: { ...provenance.source },
     };
 }
 function deepFreeze(value) {
