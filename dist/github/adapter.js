@@ -3,7 +3,7 @@ import { mkdtemp, open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ContractViolationError, GhNotInstalledError, GhUnauthenticatedError, GitHubAdapterError, GitHubApiError, GitHubApiResponseError, GitHubOutputLimitError, GitHubResourceKindMismatchError, GitHubTimeoutError, GitHubTransportError, InvalidRepositoryOverrideError, RepositoryResolutionError, } from "./errors.js";
-import { isTrustedSemanticPullRequestArtifact, isTrustedValidatedRenderedArtifact } from "./capability.js";
+import { isTrustedSemanticIssueArtifact, isTrustedSemanticPullRequestArtifact, isTrustedValidatedRenderedArtifact, } from "./capability.js";
 import { DEFAULT_GH_OUTPUT_LIMITS_BYTES, GhTransportOutputLimitError, GhTransportTimeoutError, ProcessGhTransport, } from "./transport.js";
 import { VALIDATED_RENDERED_PHASE, } from "./types.js";
 const DEFAULT_HOSTNAME = "github.com";
@@ -310,6 +310,19 @@ export class GitHubAdapter {
         const result = await this.runApi(args, "issue.create");
         return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
     }
+    /** Apply a Core-projected v2 Semantic Issue through the trusted adapter seam. */
+    async createSemanticIssue(artifact) {
+        assertTrustedSemanticIssueArtifact(artifact);
+        const context = await this.resolveRepositoryContext();
+        assertArtifactContractRepository(artifact, context);
+        const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues`, "POST");
+        appendRawField(args, "title", artifact.title);
+        appendRawField(args, "body", artifact.body);
+        appendRawFields(args, "labels[]", artifact.labels);
+        appendRawFields(args, "assignees[]", artifact.assignees);
+        const result = await this.runApi(args, "issue.create");
+        return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
+    }
     async updateIssue(issueNumber, artifact) {
         assertIssueNumber(issueNumber, "issue_number");
         assertValidatedRenderedIssueArtifact(artifact);
@@ -574,6 +587,21 @@ export function assertTrustedSemanticPullRequestArtifact(artifact) {
     assertArtifactContractProvenance(artifact.provenance);
     assertOptionalBoolean(artifact.draft, "draft");
     assertOptionalBoolean(artifact.maintainerCanModify, "maintainerCanModify");
+}
+export function assertTrustedSemanticIssueArtifact(artifact) {
+    if (!isTrustedSemanticIssueArtifact(artifact)) {
+        throw new ContractViolationError("Mutation requires an opaque Semantic Issue artifact produced by Core.", "artifact");
+    }
+    if (!isRecord(artifact))
+        throw new ContractViolationError("Mutation requires a Semantic Issue artifact.");
+    if (artifact.phase !== "validated-semantic" || artifact.kind !== "issue") {
+        throw new ContractViolationError("Mutation requires a validated Semantic Issue artifact.", "artifact");
+    }
+    assertString(artifact.title, "title");
+    assertString(artifact.body, "body");
+    assertStringArray(artifact.labels, "labels");
+    assertStringArray(artifact.assignees, "assignees");
+    assertArtifactContractProvenance(artifact.provenance);
 }
 function assertArtifactBase(artifact, kind) {
     if (!isTrustedValidatedRenderedArtifact(artifact)) {
