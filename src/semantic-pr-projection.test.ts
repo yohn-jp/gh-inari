@@ -9,7 +9,9 @@ import {
   planSemanticPullRequest,
   projectSemanticPullRequest,
   serializeSemanticPullRequestMutationPlan,
+  deserializeSemanticPullRequestMutationPlan,
   tryProjectSemanticPullRequest,
+  validateSemanticPullRequestMutationPlan,
   SemanticPullRequestProjectionError,
 } from "./semantic-pr-projection.js";
 
@@ -150,4 +152,145 @@ test("fails closed for missing relation capability and incompatible artifacts", 
   const result = tryProjectSemanticPullRequest({ artifact: malformed, capabilities: native });
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((violation) => violation.code === "SEMANTIC_ARTIFACT_INCOMPATIBLE"));
+});
+
+function validPlan(): Record<string, unknown> {
+  const plan = planSemanticPullRequest({ artifact: artifact(), capabilities: recognized });
+  return JSON.parse(serializeSemanticPullRequestMutationPlan(plan)) as Record<string, unknown>;
+}
+
+function expectInvalid(tampered: unknown): void {
+  const result = validateSemanticPullRequestMutationPlan(tampered);
+  assert.equal(result.valid, false);
+  assert.ok(result.violations.length > 0);
+}
+
+test("mutation plan validation is a closed-world nested binding boundary", () => {
+  assert.equal(validateSemanticPullRequestMutationPlan(validPlan()).valid, true);
+
+  const roundTripped = deserializeSemanticPullRequestMutationPlan(
+    serializeSemanticPullRequestMutationPlan(
+      planSemanticPullRequest({ artifact: artifact(), capabilities: recognized }),
+    ),
+  );
+  assert.deepEqual(roundTripped, planSemanticPullRequest({ artifact: artifact(), capabilities: recognized }));
+
+  // artifact digest tampering
+  {
+    const plan = validPlan();
+    (plan.artifact as Record<string, unknown>).digest = "not-a-sha256-digest";
+    expectInvalid(plan);
+  }
+
+  // artifact identity unknown property
+  {
+    const plan = validPlan();
+    (plan.artifact as Record<string, unknown>).extra = "tampered";
+    expectInvalid(plan);
+  }
+
+  // desired title tampering breaks binding with effects[0].desired
+  {
+    const plan = validPlan();
+    (plan.desired as Record<string, unknown>).title = "tampered title";
+    expectInvalid(plan);
+  }
+
+  // desired head tampering breaks binding with target-absence precondition
+  {
+    const plan = validPlan();
+    (plan.desired as Record<string, unknown>).head = "tampered-head";
+    expectInvalid(plan);
+  }
+
+  // desired base tampering breaks binding with target-absence precondition
+  {
+    const plan = validPlan();
+    (plan.desired as Record<string, unknown>).base = "tampered-base";
+    expectInvalid(plan);
+  }
+
+  // desired nested unknown property
+  {
+    const plan = validPlan();
+    (plan.desired as Record<string, unknown>).metadata = {
+      ...((plan.desired as Record<string, unknown>).metadata as Record<string, unknown>),
+      extra: "tampered",
+    };
+    expectInvalid(plan);
+  }
+
+  // effect kind tampering
+  {
+    const plan = validPlan();
+    const effects = plan.effects as Record<string, unknown>[];
+    effects[0] = { ...effects[0], kind: "DELETE_PULL_REQUEST" };
+    expectInvalid(plan);
+  }
+
+  // effect desired tampering diverges from top-level desired
+  {
+    const plan = validPlan();
+    const effects = plan.effects as Record<string, unknown>[];
+    effects[0] = {
+      ...effects[0],
+      desired: { ...(effects[0].desired as Record<string, unknown>), title: "effect-only title" },
+    };
+    expectInvalid(plan);
+  }
+
+  // governance precondition generation tampering
+  {
+    const plan = validPlan();
+    const preconditions = plan.preconditions as Record<string, unknown>[];
+    const governanceIndex = preconditions.findIndex((entry) => entry.kind === "GOVERNANCE_GENERATION_MATCH");
+    preconditions[governanceIndex] = {
+      ...preconditions[governanceIndex],
+      generation: { ...(preconditions[governanceIndex].generation as Record<string, unknown>), ref: "tampered-ref" },
+    };
+    expectInvalid(plan);
+  }
+
+  // target-absence precondition head tampering
+  {
+    const plan = validPlan();
+    const preconditions = plan.preconditions as Record<string, unknown>[];
+    const targetIndex = preconditions.findIndex((entry) => entry.kind === "PULL_REQUEST_TARGET_ABSENT");
+    preconditions[targetIndex] = { ...preconditions[targetIndex], head: "tampered-head" };
+    expectInvalid(plan);
+  }
+
+  // target-absence precondition base tampering
+  {
+    const plan = validPlan();
+    const preconditions = plan.preconditions as Record<string, unknown>[];
+    const targetIndex = preconditions.findIndex((entry) => entry.kind === "PULL_REQUEST_TARGET_ABSENT");
+    preconditions[targetIndex] = { ...preconditions[targetIndex], base: "tampered-base" };
+    expectInvalid(plan);
+  }
+
+  // missing required precondition
+  {
+    const plan = validPlan();
+    plan.preconditions = (plan.preconditions as Record<string, unknown>[]).filter(
+      (entry) => entry.kind !== "PULL_REQUEST_TARGET_ABSENT",
+    );
+    expectInvalid(plan);
+  }
+
+  // duplicate precondition
+  {
+    const plan = validPlan();
+    const preconditions = plan.preconditions as Record<string, unknown>[];
+    plan.preconditions = [...preconditions, preconditions[0]];
+    expectInvalid(plan);
+  }
+
+  // unknown precondition kind
+  {
+    const plan = validPlan();
+    const preconditions = plan.preconditions as Record<string, unknown>[];
+    plan.preconditions = [...preconditions, { kind: "UNKNOWN_PRECONDITION" }];
+    expectInvalid(plan);
+  }
 });

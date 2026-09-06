@@ -193,6 +193,46 @@ const PR_PROPERTY_NAMES = new Set([
   "maintainerCanModify",
   "implements",
 ]);
+const PLAN_ARTIFACT_IDENTITY_KEYS = new Set([
+  "version",
+  "effectiveContractVersion",
+  "artifactContractVersion",
+  "kind",
+  "id",
+  "digest",
+]);
+const DESIRED_PROJECTION_KEYS = new Set([
+  "version",
+  "kind",
+  "title",
+  "head",
+  "base",
+  "body",
+  "metadata",
+  "relations",
+  "provenance",
+  "generation",
+]);
+const DESIRED_METADATA_KEYS = new Set([
+  "labels",
+  "assignees",
+  "milestone",
+  "reviewers",
+  "draft",
+  "maintainerCanModify",
+]);
+const DESIRED_RELATIONS_KEYS = new Set(["implements"]);
+const DESIRED_IMPLEMENTS_RELATION_KEYS = new Set(["relation", "references", "representation"]);
+const RELATION_REPRESENTATIONS = new Set<SemanticPullRequestProjectionRepresentation>([
+  "none",
+  "native",
+  "recognized-convention",
+  "body-fallback",
+]);
+const GOVERNANCE_GENERATION_MATCH_KEYS = new Set(["kind", "generation"]);
+const PULL_REQUEST_TARGET_ABSENT_KEYS = new Set(["kind", "head", "base"]);
+const PLAN_EFFECT_KEYS = new Set(["kind", "desired"]);
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
 
 const CAPABILITY_ALIASES = {
   native: new Set([
@@ -879,6 +919,268 @@ export function serializeSemanticPullRequestMutationPlan(input: unknown): string
   return stableSerialize(result.plan);
 }
 
+function validatePlanArtifactIdentity(
+  input: unknown,
+  path: string,
+  violations: SemanticPullRequestProjectionViolation[],
+): void {
+  if (!isRecord(input)) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", path, "Artifact identity must be an object.");
+    return;
+  }
+  unknownProperties(input, PLAN_ARTIFACT_IDENTITY_KEYS, path, violations, "MUTATION_PLAN_INVALID");
+  if (input.version !== "1")
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.version`, "Artifact version is unsupported.");
+  if (input.effectiveContractVersion !== "1")
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.effectiveContractVersion`,
+      "Effective Contract version is unsupported.",
+    );
+  if (input.artifactContractVersion !== "1")
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.artifactContractVersion`,
+      "Artifact Contract version is unsupported.",
+    );
+  if (input.kind !== "pull_request")
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.kind`, "Artifact identity kind is invalid.");
+  requiredString(input.id, `${path}.id`, violations, 512);
+  if (typeof input.digest !== "string" || !SHA256_HEX_PATTERN.test(input.digest))
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.digest`, "Artifact digest must be a SHA-256 hex value.");
+}
+
+function validateDesiredMetadata(
+  input: unknown,
+  path: string,
+  violations: SemanticPullRequestProjectionViolation[],
+): void {
+  if (!isRecord(input)) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", path, "Desired metadata must be an object.");
+    return;
+  }
+  unknownProperties(input, DESIRED_METADATA_KEYS, path, violations, "MUTATION_PLAN_INVALID");
+  for (const key of ["labels", "assignees", "reviewers"] as const) {
+    if (!hasOwn(input, key)) continue;
+    nonEmptyStringArray(input[key], `${path}.${key}`, violations);
+  }
+  if (hasOwn(input, "milestone")) requiredString(input.milestone, `${path}.milestone`, violations, 512);
+  for (const key of ["draft", "maintainerCanModify"] as const) {
+    if (!hasOwn(input, key)) continue;
+    if (typeof input[key] !== "boolean")
+      addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.${key}`, "Value must be boolean.");
+  }
+}
+
+function validateDesiredRelations(
+  input: unknown,
+  path: string,
+  violations: SemanticPullRequestProjectionViolation[],
+): void {
+  if (!isRecord(input)) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", path, "Desired relations must be an object.");
+    return;
+  }
+  unknownProperties(input, DESIRED_RELATIONS_KEYS, path, violations, "MUTATION_PLAN_INVALID");
+  const implementsRelation = input.implements;
+  if (!isRecord(implementsRelation)) {
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.implements`,
+      "Desired implements relation must be an object.",
+    );
+    return;
+  }
+  unknownProperties(
+    implementsRelation,
+    DESIRED_IMPLEMENTS_RELATION_KEYS,
+    `${path}.implements`,
+    violations,
+    "MUTATION_PLAN_INVALID",
+  );
+  if (implementsRelation.relation !== "implements")
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.implements.relation`,
+      'Relation kind must be "implements".',
+    );
+  if (!RELATION_REPRESENTATIONS.has(implementsRelation.representation as SemanticPullRequestProjectionRepresentation))
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.implements.representation`,
+      "Relation representation is invalid.",
+    );
+  if (!Array.isArray(implementsRelation.references)) {
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.implements.references`,
+      "Relation references must be an array.",
+    );
+  } else {
+    implementsRelation.references.forEach((entry, index) => {
+      const result = normalizeIssueReference(entry, `${path}.implements.references[${index}]`);
+      if (!result.valid)
+        addViolation(
+          violations,
+          "MUTATION_PLAN_INVALID",
+          `${path}.implements.references[${index}]`,
+          "IssueReference is invalid.",
+        );
+    });
+  }
+}
+
+function validateDesiredProjectionShape(
+  input: unknown,
+  path: string,
+  violations: SemanticPullRequestProjectionViolation[],
+): void {
+  if (!isRecord(input)) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", path, "Desired pull-request projection must be an object.");
+    return;
+  }
+  unknownProperties(input, DESIRED_PROJECTION_KEYS, path, violations, "MUTATION_PLAN_INVALID");
+  if (input.version !== SEMANTIC_PULL_REQUEST_PROJECTION_VERSION)
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.version`, "Desired projection version is unsupported.");
+  if (input.kind !== "pull_request")
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.kind`, "Desired projection kind is invalid.");
+  requiredString(input.title, `${path}.title`, violations);
+  requiredString(input.head, `${path}.head`, violations);
+  requiredString(input.base, `${path}.base`, violations);
+  if (typeof input.body !== "string")
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.body`, "Desired body must be a string.");
+  validateDesiredMetadata(input.metadata, `${path}.metadata`, violations);
+  validateDesiredRelations(input.relations, `${path}.relations`, violations);
+  if (!provenanceIsValid(input.provenance))
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.provenance`, "Desired provenance is invalid.");
+  if (!provenanceIsValid(input.generation))
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.generation`, "Desired generation is invalid.");
+  if (
+    provenanceIsValid(input.provenance) &&
+    provenanceIsValid(input.generation) &&
+    stableSerialize(input.provenance) !== stableSerialize(input.generation)
+  )
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${path}.generation`,
+      "Desired generation must equal desired provenance.",
+    );
+}
+
+function validatePreconditions(
+  input: unknown,
+  planGeneration: unknown,
+  desired: unknown,
+  path: string,
+  violations: SemanticPullRequestProjectionViolation[],
+): void {
+  if (!Array.isArray(input)) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", path, "Preconditions must be an array.");
+    return;
+  }
+  const seenKinds = new Set<string>();
+  const requiredKinds = ["GOVERNANCE_GENERATION_MATCH", "PULL_REQUEST_TARGET_ABSENT"];
+  const desiredHead = isRecord(desired) ? desired.head : undefined;
+  const desiredBase = isRecord(desired) ? desired.base : undefined;
+  input.forEach((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      addViolation(violations, "MUTATION_PLAN_INVALID", entryPath, "Precondition must be an object.");
+      return;
+    }
+    const kind = entry.kind;
+    if (typeof kind !== "string" || !requiredKinds.includes(kind)) {
+      addViolation(violations, "MUTATION_PLAN_INVALID", `${entryPath}.kind`, "Precondition kind is unknown.");
+      return;
+    }
+    if (seenKinds.has(kind)) {
+      addViolation(violations, "MUTATION_PLAN_INVALID", entryPath, `Duplicate precondition "${kind}".`);
+      return;
+    }
+    seenKinds.add(kind);
+    if (kind === "GOVERNANCE_GENERATION_MATCH") {
+      unknownProperties(entry, GOVERNANCE_GENERATION_MATCH_KEYS, entryPath, violations, "MUTATION_PLAN_INVALID");
+      if (!provenanceIsValid(entry.generation)) {
+        addViolation(
+          violations,
+          "MUTATION_PLAN_INVALID",
+          `${entryPath}.generation`,
+          "Precondition generation is invalid.",
+        );
+      } else if (
+        !provenanceIsValid(planGeneration) ||
+        stableSerialize(entry.generation) !== stableSerialize(planGeneration)
+      ) {
+        addViolation(
+          violations,
+          "MUTATION_PLAN_INVALID",
+          `${entryPath}.generation`,
+          "Precondition generation must equal plan generation.",
+        );
+      }
+    } else {
+      unknownProperties(entry, PULL_REQUEST_TARGET_ABSENT_KEYS, entryPath, violations, "MUTATION_PLAN_INVALID");
+      const head = requiredString(entry.head, `${entryPath}.head`, violations);
+      const base = requiredString(entry.base, `${entryPath}.base`, violations);
+      if (head !== undefined && typeof desiredHead === "string" && head !== desiredHead)
+        addViolation(
+          violations,
+          "MUTATION_PLAN_INVALID",
+          `${entryPath}.head`,
+          "Precondition head must equal desired head.",
+        );
+      if (base !== undefined && typeof desiredBase === "string" && base !== desiredBase)
+        addViolation(
+          violations,
+          "MUTATION_PLAN_INVALID",
+          `${entryPath}.base`,
+          "Precondition base must equal desired base.",
+        );
+    }
+  });
+  for (const kind of requiredKinds) {
+    if (!seenKinds.has(kind))
+      addViolation(violations, "MUTATION_PLAN_INVALID", path, `Required precondition "${kind}" is missing.`);
+  }
+}
+
+function validateEffects(
+  input: unknown,
+  planDesired: unknown,
+  path: string,
+  violations: SemanticPullRequestProjectionViolation[],
+): void {
+  if (!Array.isArray(input) || input.length !== 1) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", path, "A PR plan requires exactly one explicit effect.");
+    return;
+  }
+  const effect = input[0];
+  const effectPath = `${path}[0]`;
+  if (!isRecord(effect)) {
+    addViolation(violations, "MUTATION_PLAN_INVALID", effectPath, "Effect must be an object.");
+    return;
+  }
+  unknownProperties(effect, PLAN_EFFECT_KEYS, effectPath, violations, "MUTATION_PLAN_INVALID");
+  if (effect.kind !== "CREATE_PULL_REQUEST")
+    addViolation(violations, "MUTATION_PLAN_INVALID", `${effectPath}.kind`, "Effect kind is invalid.");
+  validateDesiredProjectionShape(effect.desired, `${effectPath}.desired`, violations);
+  if (violations.length === 0 && stableSerialize(effect.desired) !== stableSerialize(planDesired)) {
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      `${effectPath}.desired`,
+      "Effect desired projection must equal plan desired projection.",
+    );
+  }
+}
+
 /** Validate the bounded shape of a transported plan without executing it. */
 export function validateSemanticPullRequestMutationPlan(input: unknown): SemanticPullRequestMutationPlanResult {
   const violations: SemanticPullRequestProjectionViolation[] = [];
@@ -903,8 +1205,7 @@ export function validateSemanticPullRequestMutationPlan(input: unknown): Semanti
     addViolation(violations, "MUTATION_PLAN_INVALID", "$.version", "Mutation plan version is unsupported.");
   if (input.kind !== "pull_request")
     addViolation(violations, "MUTATION_PLAN_INVALID", "$.kind", "Mutation plan kind is invalid.");
-  if (!isRecord(input.artifact))
-    addViolation(violations, "MUTATION_PLAN_INVALID", "$.artifact", "Artifact identity is required.");
+  validatePlanArtifactIdentity(input.artifact, "$.artifact", violations);
   if (!provenanceIsValid(input.provenance))
     addViolation(violations, "MUTATION_PLAN_INVALID", "$.provenance", "Plan provenance is invalid.");
   if (!provenanceIsValid(input.generation))
@@ -916,12 +1217,22 @@ export function validateSemanticPullRequestMutationPlan(input: unknown): Semanti
   )
     addViolation(violations, "MUTATION_PLAN_INVALID", "$.generation", "Plan generation must equal provenance.");
   const capabilities = normalizeCapabilities(input.capabilities, violations);
-  if (!Array.isArray(input.preconditions))
-    addViolation(violations, "MUTATION_PLAN_INVALID", "$.preconditions", "Preconditions must be an array.");
-  if (!Array.isArray(input.effects) || input.effects.length !== 1)
-    addViolation(violations, "MUTATION_PLAN_INVALID", "$.effects", "A PR plan requires one explicit effect.");
-  if (!isRecord(input.desired) || input.desired.kind !== "pull_request")
-    addViolation(violations, "MUTATION_PLAN_INVALID", "$.desired", "Desired pull-request projection is required.");
+  validateDesiredProjectionShape(input.desired, "$.desired", violations);
+  if (
+    isRecord(input.desired) &&
+    provenanceIsValid(input.desired.generation) &&
+    provenanceIsValid(input.generation) &&
+    stableSerialize(input.desired.generation) !== stableSerialize(input.generation)
+  ) {
+    addViolation(
+      violations,
+      "MUTATION_PLAN_INVALID",
+      "$.desired.generation",
+      "Desired generation must equal plan generation.",
+    );
+  }
+  validatePreconditions(input.preconditions, input.generation, input.desired, "$.preconditions", violations);
+  validateEffects(input.effects, input.desired, "$.effects", violations);
   if (violations.length > 0 || capabilities === undefined) return invalidPlanResult(violations);
   return { valid: true, plan: cloneImmutable(input as unknown as SemanticPullRequestMutationPlan), violations: [] };
 }
