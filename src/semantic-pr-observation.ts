@@ -734,14 +734,14 @@ function parseBodyRelations(
     }
     while (body[markerCursor] === " " || body[markerCursor] === "\t") markerCursor += 1;
     const markerEnd = body.indexOf("-->", markerCursor);
-    if (markerEnd < 0 || markerEnd - markerCursor > FALLBACK_MARKER_MAX_PAYLOAD_LENGTH) {
+    if (markerEnd < 0) {
       markerStart = body.indexOf("<!--", markerStart + 4);
       continue;
     }
     let payloadEnd = markerEnd;
     while (payloadEnd > markerCursor && (body[payloadEnd - 1] === " " || body[payloadEnd - 1] === "\t"))
       payloadEnd -= 1;
-    if (payloadEnd === markerCursor) {
+    if (payloadEnd === markerCursor || payloadEnd - markerCursor > FALLBACK_MARKER_MAX_PAYLOAD_LENGTH) {
       markerStart = body.indexOf("<!--", markerEnd + 3);
       continue;
     }
