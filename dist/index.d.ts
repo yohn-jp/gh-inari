@@ -18,6 +18,7 @@ export * from "./change-executor.js";
 export * from "./change-trusted-executor.js";
 export * from "./semantic-pr-projection.js";
 export * from "./semantic-issue-projection.js";
+export * from "./semantic-issue-observation.js";
 export * from "./semantic-branch-projection.js";
 export * from "./semantic-branch-observation.js";
 export * from "./semantic-pr-executor.js";
