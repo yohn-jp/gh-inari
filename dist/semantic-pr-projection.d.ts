@@ -143,3 +143,4 @@ export declare function validateSemanticPullRequestMutationPlan(input: unknown):
 export declare function deserializeSemanticPullRequestMutationPlan(serialized: string): SemanticPullRequestMutationPlan;
 export declare const serializeSemanticPullRequestPlan: typeof serializeSemanticPullRequestMutationPlan;
 export declare const parseSemanticPullRequestMutationPlan: typeof deserializeSemanticPullRequestMutationPlan;
+export * from "./semantic-pr-observation.js";

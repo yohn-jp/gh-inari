@@ -850,4 +850,8 @@ export function deserializeSemanticPullRequestMutationPlan(serialized) {
 }
 export const serializeSemanticPullRequestPlan = serializeSemanticPullRequestMutationPlan;
 export const parseSemanticPullRequestMutationPlan = deserializeSemanticPullRequestMutationPlan;
+// Observation/comparison is a separate Core boundary, but re-export its
+// public surface here so consumers that already import the PR projection
+// module can adopt observed postconditions without coupling to an executor.
+export * from "./semantic-pr-observation.js";
 //# sourceMappingURL=semantic-pr-projection.js.map
