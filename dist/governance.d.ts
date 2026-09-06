@@ -1,5 +1,6 @@
 import { type CanonicalContract, type ContractProvenance } from "./contract/ir.js";
-import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
+import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest, type RepositoryTreeEntry, type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/index.js";
+import { type SemanticTemplateIdentity } from "./semantic-template.js";
 import { type TemplateDiscoveryResult, type TemplateSelector } from "./template-discovery.js";
 import { type TemplateResolverDependencies } from "./template-resolver.js";
 export type GovernedArtifactDomain = "issue" | "pr";
@@ -119,3 +120,4 @@ export declare function updateGovernedIssue(adapter: GitHubAdapter, issueNumber:
 export declare function createGovernedPullRequest(adapter: GitHubAdapter, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;
 /** Update a pull request only after verifying its governance generation is still fresh. */
 export declare function updateGovernedPullRequest(adapter: GitHubAdapter, pullRequestNumber: number, artifact: ValidatedRenderedPullRequestArtifact): Promise<GovernedMutationResult<GitHubPullRequest>>;
+export declare function createRemoteSemanticIdentities(tree: readonly RepositoryTreeEntry[]): readonly SemanticTemplateIdentity[];

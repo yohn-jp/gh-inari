@@ -15,12 +15,14 @@ import {
   renderPullRequestArtifact,
   type ArtifactInputDocument,
 } from "./artifact.js";
+import { compileRepositoryEffectivePullRequestContract } from "./artifact-contract-governance.js";
 import {
   effectiveFieldConstraints,
   projectContract,
   type CanonicalContract,
   SemanticValidationError,
 } from "./contract/index.js";
+import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
   assertPullRequestSyncInputComplete,
@@ -106,6 +108,7 @@ import {
   type ChangeRemoteMutation,
 } from "./change-executor.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
+import { tryPlanSemanticPullRequest } from "./semantic-pr-projection.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -207,6 +210,8 @@ interface ParsedArgs {
   readonly options: Readonly<Record<string, string | boolean>>;
   /** Raw `--field` occurrences, preserved in argv order for deterministic repeated-value semantics. */
   readonly fields: readonly RawFieldEntry[];
+  /** Core projection capability identifiers, preserved in argv order. */
+  readonly capabilities: readonly string[];
 }
 
 interface CliErrorShape {
@@ -925,6 +930,19 @@ async function runArtifactCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  if (domain === "pr") {
+    const semantic = semanticPullRequestOperation(command, rest);
+    if (semantic !== undefined) {
+      return runSemanticPullRequestCommand(semantic.operation, semantic.rest, parsed, root, dependencies, json);
+    }
+  }
+  if (parsed.capabilities.length > 0) {
+    throw new CliError(
+      "INVALID_OPTION",
+      "Option --capability is only supported by the semantic PR commands.",
+      "--capability",
+    );
+  }
   if (command === "schema") {
     let contract: CanonicalContract;
     if (typeof parsed.options.repository === "string") {
@@ -1067,6 +1085,147 @@ async function runArtifactCommand(
     throw invalidArtifactNumberError(domain, rest[0]);
   }
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
+}
+
+type SemanticPullRequestOperation = "contract" | "materialize" | "plan";
+
+function semanticPullRequestOperation(
+  command: string | undefined,
+  rest: readonly string[],
+): { readonly operation: SemanticPullRequestOperation; readonly rest: readonly string[] } | undefined {
+  if (command === "contract" || command === "materialize" || command === "plan") {
+    return { operation: command, rest };
+  }
+  if (command !== "semantic") return undefined;
+  const nested = rest[0];
+  if (nested === "schema") return { operation: "contract", rest: rest.slice(1) };
+  if (nested === "validate" || nested === "materialize") return { operation: "materialize", rest: rest.slice(1) };
+  if (nested === "plan") return { operation: "plan", rest: rest.slice(1) };
+  throw new CliError("UNKNOWN_COMMAND", `Unknown PR semantic command "${nested ?? ""}".`);
+}
+
+function rejectSemanticPullRequestOptions(operation: SemanticPullRequestOperation, parsed: ParsedArgs): void {
+  const allowed = new Set(
+    operation === "contract" ? ["json", "template", "repository"] : ["json", "template", "repository", "from"],
+  );
+  const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by the semantic PR ${operation} command.`,
+      "$argv",
+      { command: `pr ${operation}`, option: option.id },
+    );
+  }
+  if (parsed.fields.length > 0) {
+    throw new CliError(
+      "INVALID_OPTION",
+      "Semantic PR commands accept caller input only through --from; --field is not a Core semantic input adapter.",
+      "--field",
+    );
+  }
+}
+
+function semanticFailure(
+  phase: string,
+  diagnostics: readonly unknown[],
+  effectiveContract?: unknown,
+): Readonly<Record<string, unknown>> {
+  return {
+    ok: false,
+    valid: false,
+    phase,
+    diagnostics,
+    // Keep the existing machine-readable validation convention while retaining
+    // the exact Core diagnostic objects without translation.
+    violations: diagnostics,
+    ...(effectiveContract === undefined ? {} : { effectiveContract }),
+  };
+}
+
+async function runSemanticPullRequestCommand(
+  operation: SemanticPullRequestOperation,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  _json: boolean,
+): Promise<number> {
+  rejectSemanticPullRequestOptions(operation, parsed);
+  if (rest.length > 1) {
+    throw new CliError("UNKNOWN_COMMAND", `Unexpected PR semantic argument "${rest[1] ?? ""}".`);
+  }
+  const selector = templateSelector(parsed, rest[0]);
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const effectiveContract = await compileRepositoryEffectivePullRequestContract(adapter, selector, {
+    capabilities: parsed.capabilities,
+  });
+  const contractProjection = {
+    ok: true,
+    version: effectiveContract.version,
+    artifactContractVersion: effectiveContract.artifactContractVersion,
+    kind: effectiveContract.kind,
+    id: effectiveContract.id,
+    contract: effectiveContract.contract,
+    effectiveContract,
+    inputSchema: effectiveContract.inputSchema,
+    properties: effectiveContract.properties,
+    ...(effectiveContract.fields === undefined ? {} : { fields: effectiveContract.fields }),
+    derivations: effectiveContract.derivations,
+    dependencyGraph: effectiveContract.dependencyGraph,
+    evaluationOrder: effectiveContract.evaluationOrder,
+    provenance: effectiveContract.provenance,
+    generation: effectiveContract.generation,
+    capabilities: effectiveContract.capabilities,
+  };
+  if (operation === "contract") {
+    console.log(JSON.stringify(contractProjection));
+    return 0;
+  }
+
+  const input = await readJsonValue(parsed.options.from);
+  const materialization = tryMaterializeSemanticArtifact(effectiveContract, input);
+  if (!materialization.valid || materialization.artifact === undefined) {
+    console.log(JSON.stringify(semanticFailure("materialization", materialization.violations, effectiveContract)));
+    return EXIT_VALIDATION;
+  }
+  if (operation === "materialize") {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        valid: true,
+        effectiveContract,
+        artifact: materialization.artifact,
+        provenance: materialization.artifact.provenance,
+        generation: materialization.artifact.generation,
+      }),
+    );
+    return 0;
+  }
+
+  const plan = tryPlanSemanticPullRequest({
+    artifact: materialization.artifact,
+    capabilities: effectiveContract.capabilities,
+  });
+  if (!plan.valid || plan.plan === undefined) {
+    console.log(JSON.stringify(semanticFailure("projection", plan.violations, effectiveContract)));
+    return EXIT_VALIDATION;
+  }
+  console.log(
+    JSON.stringify({
+      ok: true,
+      valid: true,
+      effectiveContract,
+      artifact: materialization.artifact,
+      plan: plan.plan,
+      provenance: plan.plan.provenance,
+      generation: plan.plan.generation,
+      preview: true,
+      mutation: false,
+    }),
+  );
+  return 0;
 }
 
 async function runExistingValidation(
@@ -1344,6 +1503,11 @@ async function readInputDocument(
   value: string | boolean | undefined,
   parser: (input: unknown) => ArtifactInputDocument = parseArtifactInputDocument,
 ): Promise<ArtifactInputDocument> {
+  return parser(await readJsonValue(value));
+}
+
+/** Read one bounded JSON value without adapting its shape for Core. */
+async function readJsonValue(value: string | boolean | undefined): Promise<unknown> {
   if (typeof value !== "string" || value.length === 0)
     throw new CliError("INPUT_REQUIRED", "Use --from <file.json>.", "--from");
   let source: string;
@@ -1375,7 +1539,7 @@ async function readInputDocument(
     if (cause instanceof Error) error.cause = cause;
     throw error;
   }
-  return parser(parsed);
+  return parsed;
 }
 
 function mergeOptionMetadata(
@@ -1637,6 +1801,7 @@ function templateSelector(parsed: ParsedArgs, positional: string | undefined): s
 function parseArguments(argv: readonly string[]): ParsedArgs {
   const options: Record<string, string | boolean> = {};
   const fields: RawFieldEntry[] = [];
+  const capabilities: string[] = [];
   const tokenized = tokenizeCommandArgv(argv);
   for (const occurrence of tokenized.options) {
     const option = occurrence.definition;
@@ -1669,6 +1834,13 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
       fields.push({ name: raw.slice(0, separatorIndex), value: raw.slice(separatorIndex + 1) });
       continue;
     }
+    if (option.id === "capability") {
+      const capability = occurrence.value;
+      if (capability === undefined || capability.length === 0)
+        throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires a value.`);
+      capabilities.push(capability);
+      continue;
+    }
     const key = option.id;
     if (option.valueType === "boolean") {
       if (occurrence.value === undefined) {
@@ -1684,7 +1856,7 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
       throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires a value.`);
     options[key] = occurrence.value;
   }
-  return { positionals: tokenized.positionals, options, fields };
+  return { positionals: tokenized.positionals, options, fields, capabilities };
 }
 
 function toErrorShape(error: unknown): CliErrorShape {
@@ -1775,6 +1947,7 @@ function classifyExitCode(error: unknown): number {
   )
     return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("ARTIFACT_CONTRACT_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_")) return EXIT_VALIDATION;
@@ -1880,7 +2053,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
   if (helpValue === "full") return printFullHelp();
   const [domain, command] = positionals;
   if (domain === "issue" || domain === "pr" || domain === "change") {
-    const definition = command === undefined ? undefined : getCommandForPositionals([domain, command]);
+    const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
     if (definition !== undefined && definition.domain === domain) return printLeafHelp(definition);
     return printDomainHelp(domain);
   }
