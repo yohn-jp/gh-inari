@@ -60,6 +60,10 @@
       "types": "./dist/semantic-branch-observation.d.ts",
       "import": "./dist/semantic-branch-observation.js"
     },
+    "./semantic-branch-executor": {
+      "types": "./dist/semantic-branch-executor.d.ts",
+      "import": "./dist/semantic-branch-executor.js"
+    },
     "./semantic-pr-observation": {
       "types": "./dist/semantic-pr-observation.d.ts",
       "import": "./dist/semantic-pr-observation.js"

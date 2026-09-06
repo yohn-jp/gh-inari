@@ -92,6 +92,13 @@ export interface RepositoryTree {
   readonly entries: readonly RepositoryTreeEntry[];
 }
 
+/** Bounded Git ref evidence used by semantic branch admission. */
+export interface GitHubBranch {
+  readonly name: string;
+  readonly ref: string;
+  readonly sha: string;
+}
+
 /** Zero-or-one Canon v2 milestone observation, stable across Issue and pull request resources. */
 export interface GitHubMilestone {
   readonly number: number;

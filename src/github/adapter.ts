@@ -33,6 +33,7 @@ import {
 import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
+  type GitHubBranch,
   type GitHubMilestone,
   type GitHubPullRequest,
   type GitHubReviewRequests,
@@ -76,6 +77,8 @@ const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.fre
   "issue.update": "mutation",
   "pull_request.create": "mutation",
   "pull_request.update": "mutation",
+  "branch.read": "read",
+  "branch.create": "mutation",
 });
 
 function operationClass(operation: string): GhOperationClass {
@@ -426,6 +429,31 @@ export class GitHubAdapter {
       });
     }
     return response.body.map((entry) => parsePullRequest(entry, "pull_request.list"));
+  }
+
+  /** Read one explicit branch ref; a missing ref is represented as undefined. */
+  async findBranch(branch: string): Promise<GitHubBranch | undefined> {
+    assertPullRequestRef(branch, "branch");
+    const response = await this.requestRepositoryApi(`git/ref/heads/${encodeURIComponent(branch)}`, "GET");
+    if (response.status === 404) return undefined;
+    if (response.status < 200 || response.status >= 300) {
+      throw new GitHubApiError("branch.read", "GitHub branch ref lookup failed.");
+    }
+    return parseBranch(response.body, branch, "branch.read");
+  }
+
+  /** Create exactly the branch and source refs supplied by a trusted Core plan. */
+  async createBranch(branch: string, source: string): Promise<GitHubBranch> {
+    assertPullRequestRef(branch, "branch");
+    assertPullRequestRef(source, "source");
+    const base = await this.findBranch(source);
+    if (base === undefined) throw new GitHubApiError("branch.create", "GitHub branch source ref was not found.");
+    const context = await this.resolveRepositoryContext();
+    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/git/refs`, "POST");
+    appendRawField(args, "ref", `refs/heads/${branch}`);
+    appendRawField(args, "sha", base.sha);
+    const result = await this.runApi(args, "branch.create");
+    return parseBranch(result, branch, "branch.create");
   }
 
   async createIssue(artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue> {
@@ -1044,6 +1072,22 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
     ...(milestone === undefined ? {} : { milestone }),
     ...(requestedReviewers === undefined ? {} : { requestedReviewers }),
   };
+}
+
+function parseBranch(value: unknown, expectedName: string, operation: string): GitHubBranch {
+  const record = responseRecord(value, operation);
+  const ref = responseString(record.ref, "ref", operation);
+  const expectedRef = `refs/heads/${expectedName}`;
+  if (ref !== expectedRef || !isRecord(record.object) || record.object.type !== "commit") {
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid branch ref.", { path: "ref" });
+  }
+  const sha = responseString(record.object.sha, "object.sha", operation);
+  if (sha.length === 0 || sha.length > 128 || /[\u0000-\u001F\u007F]/u.test(sha)) {
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid branch object SHA.", {
+      path: "object.sha",
+    });
+  }
+  return { name: expectedName, ref, sha };
 }
 
 function responseRecord(value: unknown, operation: string): Record<string, unknown> {
