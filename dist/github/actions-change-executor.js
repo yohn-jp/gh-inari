@@ -24,10 +24,12 @@ const MAX_PULL_REQUESTS = 100;
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"];
 const MAX_TITLE_LENGTH = 255;
 const MAX_LOGIN_LENGTH = 160;
+const MAX_TIMESTAMP_LENGTH = 64;
 const DEFAULT_API_URL = "https://api.github.com";
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
+const GITHUB_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
     "repository-evidence",
@@ -104,6 +106,37 @@ function boundedString(value, maxLength) {
         throw new GitHubActionsChangeExecutorError();
     }
     return value;
+}
+function boundedGitHubTimestamp(value) {
+    const timestamp = boundedString(value, MAX_TIMESTAMP_LENGTH);
+    const match = GITHUB_TIMESTAMP_PATTERN.exec(timestamp);
+    if (match === null)
+        throw new GitHubActionsChangeExecutorError();
+    const date = new Date(timestamp);
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hours = Number(match[4]);
+    const minutes = Number(match[5]);
+    const seconds = Number(match[6]);
+    const milliseconds = Number((match[7] ?? "").padEnd(3, "0"));
+    if (!Number.isFinite(date.getTime()) ||
+        date.getUTCFullYear() !== year ||
+        date.getUTCMonth() + 1 !== month ||
+        date.getUTCDate() !== day ||
+        date.getUTCHours() !== hours ||
+        date.getUTCMinutes() !== minutes ||
+        date.getUTCSeconds() !== seconds ||
+        date.getUTCMilliseconds() !== milliseconds) {
+        throw new GitHubActionsChangeExecutorError();
+    }
+    return timestamp;
+}
+function mergedStateFromGitHubEvidence(value) {
+    if (value === null)
+        return false;
+    boundedGitHubTimestamp(value);
+    return true;
 }
 function boundedArtifactBody(value) {
     if (value === null)
@@ -811,7 +844,7 @@ export class GitHubActionsEvidenceReader {
                     base: boundedString(base.ref, 255),
                     state,
                     draft: value.draft,
-                    ...(state === "closed" ? { merged: value.merged_at !== null } : { merged: false }),
+                    ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
                     provenance: { issuer: issuerPrincipal(login) },
                 },
             ];

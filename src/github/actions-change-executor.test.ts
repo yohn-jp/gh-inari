@@ -103,6 +103,8 @@ class ReadTransport implements GitHubChangeEffectTransport {
     private readonly options: {
       readonly issueBody?: unknown;
       readonly issueTitle?: unknown;
+      readonly pullRequests?: readonly unknown[];
+      readonly branchPresent?: boolean;
     } = {},
   ) {}
 
@@ -123,10 +125,14 @@ class ReadTransport implements GitHubChangeEffectTransport {
       };
     }
     if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
-      return { status: 404, body: { message: "Not Found" } };
+      return this.options.branchPresent
+        ? { status: 200, body: { ref: "refs/heads/feat/218-execute-change-plans-safely" } }
+        : { status: 404, body: { message: "Not Found" } };
     }
     if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
-    if (request.path.includes("pulls?state=all")) return { status: 200, body: [] };
+    if (request.path.includes("pulls?state=all")) {
+      return { status: 200, body: this.options.pullRequests ?? [] };
+    }
     throw new Error("unexpected read");
   }
 }
@@ -279,6 +285,93 @@ test("Actions evidence reader rejects an Issue response that is already a pull r
     transport,
   });
   await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)), GitHubActionsChangeExecutorError);
+});
+
+function githubPullRequestEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    number: 2180,
+    head: { ref: "feat/218-execute-change-plans-safely" },
+    base: { ref: "main" },
+    state: "closed",
+    draft: false,
+    merged_at: null,
+    user: { login: "inari-issuer[bot]" },
+    ...overrides,
+  };
+}
+
+function evidenceReaderForPullRequests(
+  pullRequests: readonly unknown[],
+  branchPresent = true,
+): GitHubActionsEvidenceReader {
+  return new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
+    transport: new ReadTransport({ pullRequests, branchPresent }),
+  });
+}
+
+test("Actions evidence reader requires validated merge evidence for closed PRs", async () => {
+  const merged = await evidenceReaderForPullRequests([
+    githubPullRequestEvidence({ merged_at: "2024-02-29T12:34:56.123Z" }),
+  ]).read(changeRemoteMutationRequest("issue", 218));
+  assert.deepEqual(merged.evidence.pullRequests, {
+    status: "available",
+    value: [
+      {
+        number: 2180,
+        head: "feat/218-execute-change-plans-safely",
+        base: "main",
+        state: "closed",
+        draft: false,
+        merged: true,
+        provenance: { issuer: "app:inari-issuer" },
+      },
+    ],
+  });
+  assert.equal(projectChangeFromGitHubEvidence(merged).change?.state, "MERGED");
+
+  const aborted = await evidenceReaderForPullRequests([githubPullRequestEvidence()], false).read(
+    changeRemoteMutationRequest("issue", 218),
+  );
+  assert.equal(projectChangeFromGitHubEvidence(aborted).change?.state, "ABORTED");
+
+  const openWithoutMergeEvidence = await evidenceReaderForPullRequests([
+    githubPullRequestEvidence({ state: "open", draft: true, merged_at: undefined }),
+  ]).read(changeRemoteMutationRequest("issue", 218));
+  assert.equal(projectChangeFromGitHubEvidence(openWithoutMergeEvidence).change?.state, "DRAFT");
+  assert.deepEqual(openWithoutMergeEvidence.evidence.pullRequests, {
+    status: "available",
+    value: [
+      {
+        number: 2180,
+        head: "feat/218-execute-change-plans-safely",
+        base: "main",
+        state: "open",
+        draft: true,
+        merged: false,
+        provenance: { issuer: "app:inari-issuer" },
+      },
+    ],
+  });
+});
+
+test("Actions evidence reader fails closed for omitted or malformed closed PR merge evidence", async () => {
+  const { merged_at: _omitted, ...withoutMergeEvidence } = githubPullRequestEvidence();
+  const candidates = [
+    withoutMergeEvidence,
+    githubPullRequestEvidence({ merged_at: undefined }),
+    githubPullRequestEvidence({ merged_at: "not-a-timestamp" }),
+    githubPullRequestEvidence({ merged_at: "2024-02-30T12:34:56Z" }),
+    githubPullRequestEvidence({ merged_at: 1_710_000_000 }),
+  ];
+  for (const candidate of candidates) {
+    await assert.rejects(
+      () => evidenceReaderForPullRequests([candidate]).read(changeRemoteMutationRequest("issue", 218)),
+      GitHubActionsChangeExecutorError,
+    );
+  }
 });
 
 class MutablePreIssuanceTransport implements GitHubChangeEffectTransport {
