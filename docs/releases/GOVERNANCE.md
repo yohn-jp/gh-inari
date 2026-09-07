@@ -121,17 +121,22 @@ changed — commits and pushes that diff directly to `main`. Its write
 scope is mechanically limited to `dist/**`; it never touches source or
 configuration.
 
-This is enforced by a GitHub Ruleset bypass scoped narrowly to the
-`github-actions[bot]` actor on the `main` branch pattern, not by
-anything tracked in this repository (there is no Rulesets-as-code file
-here). No human or agent identity holds equivalent bypass authority.
-Because Ruleset bypass is scoped per-actor rather than per-workflow,
-any other workflow that requested `contents: write` would also be able
-to push directly to `main` — every other workflow in this repository is
-expected to declare `contents: read`, and `CODEOWNERS` requires
-`@yohnark` review on all of `/.github/`, so any future addition of
-`contents: write` to a workflow file should be treated as
-security-sensitive during review.
+Authentication uses a dedicated GitHub App (`inari-dist-sync`), not the
+ambient `GITHUB_TOKEN` — GitHub Rulesets cannot list the built-in
+`github-actions` identity as a bypass actor, only installed Apps, Deploy
+keys, Teams, and roles. The workflow mints a short-lived installation
+token via `actions/create-github-app-token` (job permission stays
+`contents: read`; only the App's own installation token can write) and
+uses it for the checkout and push. This is enforced by a GitHub Ruleset
+bypass scoped narrowly to the `inari-dist-sync` App on the `main` branch
+pattern, not by anything tracked in this repository (there is no
+Rulesets-as-code file here). No human or agent identity holds equivalent
+bypass authority. Because Ruleset bypass is scoped per-actor, this App
+is installed with `contents: write` on this repository only and no
+other permission — it cannot open PRs, read Issues, or act on any other
+repository. `CODEOWNERS` requires `@yohnark` review on all of
+`/.github/`, so any future addition of `contents: write` to a workflow
+file should be treated as security-sensitive during review.
 
 ## What this buys
 
