@@ -48,9 +48,10 @@ export declare class TrustedChangeExecutor implements ChangeRemoteExecutor {
     private readInput;
     /** Read normalized evidence without projecting it; the Ready actor owns the next projection state. */
     private readRawInput;
+    private executeAbort;
+    private readAbortInput;
+    private applyAbortEffect;
     private executeIssue;
     private recoverIssuance;
-    private executeTransition;
-    private recoverTransition;
 }
 export declare const GitHubActionsChangeExecutor: typeof TrustedChangeExecutor;
