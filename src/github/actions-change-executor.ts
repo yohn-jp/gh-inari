@@ -18,6 +18,7 @@ import {
   validateGovernedRootIssueEvidence,
   type CanonicalBranchNamingInput,
   type ChangeBranchEvidence,
+  type ChangeDiagnostic,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
   type ChangeReadyEvidence,
@@ -36,15 +37,22 @@ import {
   canonicalGitHubRequester,
   changeRemoteMutationRequest,
   changeRemoteReadRequest,
+  normalizeChangeRemoteExecutionEvidence,
+  normalizeChangeRemoteExecutionResult,
+  normalizeChangeRemoteProjection,
   type ChangeRemoteExecutor,
+  type ChangeRemoteExecutionEvidence,
   type ChangeRemoteMutationRequest,
   type ChangeRemoteReadRequest,
 } from "../change-executor.js";
 import {
   ChangeTrustedExecutorError,
+  isChangeTrustedExecutorErrorCode,
   TrustedChangeExecutor,
+  type ChangeTrustedExecutorErrorCode,
   type ChangeTrustedEvidenceReader,
 } from "../change-trusted-executor.js";
+import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   GitHubChangeEffectAdapter,
@@ -127,6 +135,9 @@ export function isRepositoryEvidenceFailureReason(value: unknown): value is Repo
 export interface TrustedActionsFailureDiagnostic {
   readonly stage: TrustedActionsFailureStage;
   readonly reason?: RepositoryEvidenceFailureReason;
+  readonly trustedCode?: ChangeTrustedExecutorErrorCode;
+  readonly diagnostics?: readonly ChangeDiagnostic[];
+  readonly evidence?: ChangeRemoteExecutionEvidence;
 }
 
 export function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage {
@@ -136,8 +147,40 @@ export function isTrustedActionsFailureStage(value: unknown): value is TrustedAc
 function failureDiagnostic(
   stage: TrustedActionsFailureStage,
   reason?: RepositoryEvidenceFailureReason,
+  fields: Omit<TrustedActionsFailureDiagnostic, "stage" | "reason"> = {},
 ): TrustedActionsFailureDiagnostic {
-  return Object.freeze(reason === undefined ? { stage } : { stage, reason });
+  return Object.freeze({
+    stage,
+    ...(reason === undefined ? {} : { reason }),
+    ...(fields.trustedCode === undefined ? {} : { trustedCode: fields.trustedCode }),
+    ...(fields.diagnostics === undefined ? {} : { diagnostics: fields.diagnostics }),
+    ...(fields.evidence === undefined ? {} : { evidence: fields.evidence }),
+  });
+}
+
+function trustedFailureFields(
+  error: ChangeTrustedExecutorError,
+): Omit<TrustedActionsFailureDiagnostic, "stage" | "reason"> {
+  const fields: {
+    trustedCode?: ChangeTrustedExecutorErrorCode;
+    diagnostics?: readonly ChangeDiagnostic[];
+    evidence?: ChangeRemoteExecutionEvidence;
+  } = {};
+  if (isChangeTrustedExecutorErrorCode(error.code)) fields.trustedCode = error.code;
+  try {
+    const diagnostics = normalizeTrustedFailureDiagnostics(error.diagnostics);
+    if (diagnostics !== undefined && diagnostics.length > 0) fields.diagnostics = diagnostics;
+  } catch {
+    // Invalid internal diagnostics are omitted rather than serialized.
+  }
+  if (error.evidence !== undefined) {
+    try {
+      fields.evidence = normalizeChangeRemoteExecutionEvidence(error.evidence.operation, error.evidence);
+    } catch {
+      // Invalid internal evidence is omitted rather than serialized.
+    }
+  }
+  return fields;
 }
 
 export class GitHubActionsChangeExecutorError extends Error {
@@ -148,10 +191,11 @@ export class GitHubActionsChangeExecutorError extends Error {
     message = "Trusted Change Actions runtime configuration is invalid.",
     stage?: TrustedActionsFailureStage,
     reason?: RepositoryEvidenceFailureReason,
+    fields: Omit<TrustedActionsFailureDiagnostic, "stage" | "reason"> = {},
   ) {
     super(message);
     this.name = "GitHubActionsChangeExecutorError";
-    this.details = stage === undefined ? undefined : failureDiagnostic(stage, reason);
+    this.details = stage === undefined ? undefined : failureDiagnostic(stage, reason, fields);
   }
 }
 
@@ -1274,12 +1318,18 @@ function trustedFailureStage(
   return issuerStage ?? "projection-execution";
 }
 
-function asTrustedActionsFailure(
+export function asTrustedActionsFailure(
   error: unknown,
   issuerStage: TrustedActionsFailureStage | undefined,
 ): GitHubActionsChangeExecutorError {
   if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error;
-  return new GitHubActionsChangeExecutorError(undefined, trustedFailureStage(error, issuerStage));
+  const stage = trustedFailureStage(error, issuerStage);
+  return new GitHubActionsChangeExecutorError(
+    undefined,
+    stage,
+    undefined,
+    error instanceof ChangeTrustedExecutorError ? trustedFailureFields(error) : {},
+  );
 }
 
 export interface GitHubActionsRuntimeOptions {
@@ -1534,7 +1584,10 @@ export async function runGitHubActionsChangeExecutor(
             requestRecord.semanticPullRequestPlan,
           );
     const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
-    const result = request.operation === "show" ? await executor.read(request) : await executor.execute(request);
+    const result =
+      request.operation === "show"
+        ? normalizeChangeRemoteProjection(request.operation, await executor.read(request))
+        : normalizeChangeRemoteExecutionResult(request.operation, await executor.execute(request));
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error: unknown) {

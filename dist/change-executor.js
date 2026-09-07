@@ -1,7 +1,9 @@
 import { CHANGE_EFFECT_KINDS, CHANGE_IMPLEMENTED_TRANSITIONS, CHANGE_TRANSITION_CONTRACT_VERSION, MAX_CHANGE_COMMIT_SHA_LENGTH, validateChangeProjectionResult, } from "./change.js";
+import { isSecretSafeBoundedText } from "./change-failure-diagnostics.js";
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
 const MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES = 1_048_576;
+export const MAX_CHANGE_REMOTE_EXECUTION_EVIDENCE_BYTES = 16_384;
 export const CHANGE_REMOTE_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
 /**
  * Canonical requester identity for GitHub-authenticated execution.  The
@@ -78,7 +80,7 @@ export function normalizeChangeRemoteProjection(operation, result) {
 function validText(value, maxLength) {
     return (typeof value === "string" && value.length > 0 && value.length <= maxLength && !/[\u0000-\u001F\u007F]/u.test(value));
 }
-function normalizeExecutionEvidence(operation, value) {
+export function normalizeChangeRemoteExecutionEvidence(operation, value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
         throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
     }
@@ -98,6 +100,7 @@ function normalizeExecutionEvidence(operation, value) {
     }
     if (candidate.version !== CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION ||
         candidate.operation !== operation ||
+        !CHANGE_REMOTE_MUTATIONS.includes(operation) ||
         !CHANGE_REMOTE_EXECUTION_OUTCOMES.includes(candidate.outcome) ||
         !Array.isArray(candidate.effects) ||
         candidate.effects.length > 8) {
@@ -138,7 +141,8 @@ function normalizeExecutionEvidence(operation, value) {
     }
     const requester = candidate.requester === undefined ? undefined : candidate.requester;
     const issuer = candidate.issuer === undefined ? undefined : candidate.issuer;
-    if ((requester !== undefined && !validText(requester, 160)) || (issuer !== undefined && !validText(issuer, 160))) {
+    if ((requester !== undefined && !isSecretSafeBoundedText(requester, 160)) ||
+        (issuer !== undefined && !isSecretSafeBoundedText(issuer, 160))) {
         throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
     }
     let failure;
@@ -149,8 +153,8 @@ function normalizeExecutionEvidence(operation, value) {
         const failureValue = candidate.failure;
         if (Object.keys(failureValue).some((key) => !["kind", "code", "message"].includes(key)) ||
             !CHANGE_EFFECT_KINDS.includes(failureValue.kind) ||
-            !validText(failureValue.code, 80) ||
-            !validText(failureValue.message, 240)) {
+            !isSecretSafeBoundedText(failureValue.code, 80) ||
+            !isSecretSafeBoundedText(failureValue.message, 240)) {
             throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
         }
         failure = {
@@ -163,7 +167,7 @@ function normalizeExecutionEvidence(operation, value) {
         !["not-required", "succeeded", "failed"].includes(candidate.compensation)) {
         throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned invalid bounded execution evidence.", { operation });
     }
-    return {
+    const normalized = {
         version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
         operation: operation,
         outcome: candidate.outcome,
@@ -175,6 +179,10 @@ function normalizeExecutionEvidence(operation, value) {
             : { compensation: candidate.compensation }),
         ...(failure === undefined ? {} : { failure }),
     };
+    if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > MAX_CHANGE_REMOTE_EXECUTION_EVIDENCE_BYTES) {
+        throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned oversized bounded execution evidence.", { operation });
+    }
+    return normalized;
 }
 export function normalizeChangeRemoteExecutionResult(operation, result) {
     if (typeof result === "object" &&
@@ -186,7 +194,9 @@ export function normalizeChangeRemoteExecutionResult(operation, result) {
             throw new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "The Change executor returned an invalid bounded execution result.", { operation });
         }
         const projection = normalizeChangeRemoteProjection(operation, envelope.projection);
-        const evidence = envelope.evidence === undefined ? undefined : normalizeExecutionEvidence(operation, envelope.evidence);
+        const evidence = envelope.evidence === undefined
+            ? undefined
+            : normalizeChangeRemoteExecutionEvidence(operation, envelope.evidence);
         return Object.freeze({
             projection,
             ...(evidence === undefined ? {} : { evidence }),

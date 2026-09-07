@@ -1,6 +1,7 @@
 import { type ChangeDiagnostic, type ChangeEffectKind, type ChangeProjectionResult } from "./change.js";
 /** Version of the transport-neutral semantic request boundary. */
 export declare const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION: 1;
+export declare const MAX_CHANGE_REMOTE_EXECUTION_EVIDENCE_BYTES: 16384;
 export declare const CHANGE_REMOTE_MUTATIONS: readonly ["issue", "ready", "abort"];
 export type ChangeRemoteMutation = (typeof CHANGE_REMOTE_MUTATIONS)[number];
 /**
@@ -77,6 +78,7 @@ export declare class ChangeRemoteExecutorError extends Error {
     constructor(code: ChangeRemoteExecutorErrorCode, message: string, details?: unknown, diagnostics?: readonly ChangeDiagnostic[]);
 }
 export declare function normalizeChangeRemoteProjection(operation: string, result: unknown): ChangeProjectionResult;
+export declare function normalizeChangeRemoteExecutionEvidence(operation: string, value: unknown): ChangeRemoteExecutionEvidence;
 export declare function normalizeChangeRemoteExecutionResult(operation: string, result: unknown): ChangeRemoteExecutionResult;
 export declare function changeRemoteMutationRequest(operation: ChangeRemoteMutation, issue: number, requester?: string, semanticPullRequestPlan?: unknown): ChangeRemoteMutationRequest;
 export declare function changeRemoteReadRequest(issue: number, requester?: string): ChangeRemoteReadRequest;

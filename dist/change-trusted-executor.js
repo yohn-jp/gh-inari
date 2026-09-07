@@ -12,6 +12,16 @@ import { changeEffectFailureEvidence } from "./github/change-effect-adapter.js";
 import { ISSUER_AUTHORITY_CONTRACT_VERSION, INARI_ISSUER_PRINCIPAL, } from "./github/issuer-authority.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, } from "./change-executor.js";
 import { executeReadyWithXState, } from "./change/machine/ready-execution-machine.js";
+export const CHANGE_TRUSTED_EXECUTOR_ERROR_CODES = Object.freeze([
+    "CHANGE_EXECUTION_READ_FAILED",
+    "CHANGE_EXECUTION_PRECONDITION_FAILED",
+    "CHANGE_EXECUTION_EFFECT_FAILED",
+    "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+    "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+]);
+export function isChangeTrustedExecutorErrorCode(value) {
+    return CHANGE_TRUSTED_EXECUTOR_ERROR_CODES.includes(value);
+}
 /** Bounded trusted-execution failure; provider/API details are discarded. */
 export class ChangeTrustedExecutorError extends Error {
     code;

@@ -252,6 +252,56 @@ test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {
   });
 });
 
+test("CLI --json preserves the bounded trusted code and Core diagnostic envelope", async () => {
+  const result = await capture(["change", "issue", "42", "--json"], {
+    changeExecutor: {
+      async execute() {
+        throw new ChangeRemoteExecutorError(
+          "CHANGE_REMOTE_RUN_FAILED",
+          "The trusted Change workflow did not produce a successful result.",
+          {
+            operation: "change.issue",
+            reason: "workflow-failed",
+            stage: "projection-execution",
+            trustedCode: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+          },
+          [
+            {
+              version: 1,
+              code: "CHANGE_PROVENANCE_CONFLICT",
+              path: "$.projection.change.provenance",
+              message: "The trusted Change provenance is inconsistent.",
+            },
+          ],
+        );
+      },
+      async read() {
+        throw new Error("unreachable");
+      },
+    },
+  });
+
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(result.output?.error, {
+    code: "CHANGE_REMOTE_RUN_FAILED",
+    message: "The trusted Change workflow did not produce a successful result.",
+    details: {
+      operation: "change.issue",
+      reason: "workflow-failed",
+      stage: "projection-execution",
+      trustedCode: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+    },
+    diagnostics: [
+      {
+        version: 1,
+        code: "CHANGE_PROVENANCE_CONFLICT",
+        path: "$.projection.change.provenance",
+        message: "The trusted Change provenance is inconsistent.",
+      },
+    ],
+  });
+});
+
 test("caller authentication failure is distinct from an unconfigured executor", async () => {
   const adapter = {
     async getAuthenticatedUser() {

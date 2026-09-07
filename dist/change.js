@@ -146,6 +146,9 @@ const DIAGNOSTIC_CODES = [
     "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
     "CHANGE_PROVENANCE_CONFLICT",
 ];
+export function isChangeDiagnosticCode(value) {
+    return typeof value === "string" && DIAGNOSTIC_CODES.includes(value);
+}
 const CHANGE_KEYS = new Set(["version", "identity", "state", "provenance", "projection"]);
 const IDENTITY_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const PROVENANCE_KEYS = new Set(CHANGE_PROVENANCE_ROLES);

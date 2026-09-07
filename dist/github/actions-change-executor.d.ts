@@ -5,9 +5,9 @@
  * GitHub evidence, invokes Core planning, applies explicit effects through the
  * #217 issuer authority, and verifies a fresh #213 projection.
  */
-import { type CanonicalBranchNamingInput, type ChangeProjectionInput } from "../change.js";
-import { type ChangeRemoteExecutor, type ChangeRemoteMutationRequest, type ChangeRemoteReadRequest } from "../change-executor.js";
-import { type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
+import { type CanonicalBranchNamingInput, type ChangeDiagnostic, type ChangeProjectionInput } from "../change.js";
+import { type ChangeRemoteExecutor, type ChangeRemoteExecutionEvidence, type ChangeRemoteMutationRequest, type ChangeRemoteReadRequest } from "../change-executor.js";
+import { type ChangeTrustedExecutorErrorCode, type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
 import { type GitHubChangeEffectCompareAndDeleteOutcome, type GitHubChangeEffectRepository, type GitHubChangeEffectRequest, type GitHubChangeEffectResponse, type GitHubChangeEffectTransport } from "./change-effect-adapter.js";
 import { type IssuerCredentialRequest, type IssuerScopedMutationCapability, type TrustedInstallationCredentialBroker, type IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { PullRequestBranchGovernance } from "../contract/ir.js";
@@ -25,12 +25,15 @@ export declare function isRepositoryEvidenceFailureReason(value: unknown): value
 export interface TrustedActionsFailureDiagnostic {
     readonly stage: TrustedActionsFailureStage;
     readonly reason?: RepositoryEvidenceFailureReason;
+    readonly trustedCode?: ChangeTrustedExecutorErrorCode;
+    readonly diagnostics?: readonly ChangeDiagnostic[];
+    readonly evidence?: ChangeRemoteExecutionEvidence;
 }
 export declare function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage;
 export declare class GitHubActionsChangeExecutorError extends Error {
     readonly code: "CHANGE_ACTIONS_RUNTIME_INVALID";
     readonly details?: TrustedActionsFailureDiagnostic;
-    constructor(message?: string, stage?: TrustedActionsFailureStage, reason?: RepositoryEvidenceFailureReason);
+    constructor(message?: string, stage?: TrustedActionsFailureStage, reason?: RepositoryEvidenceFailureReason, fields?: Omit<TrustedActionsFailureDiagnostic, "stage" | "reason">);
 }
 export interface GitHubActionsApiTransportOptions {
     readonly apiUrl?: string;
@@ -127,6 +130,7 @@ export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenc
     private request;
 }
 export declare function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance | undefined>;
+export declare function asTrustedActionsFailure(error: unknown, issuerStage: TrustedActionsFailureStage | undefined): GitHubActionsChangeExecutorError;
 export interface GitHubActionsRuntimeOptions {
     readonly cwd: string;
     readonly request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest;

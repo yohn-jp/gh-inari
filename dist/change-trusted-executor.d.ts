@@ -22,6 +22,8 @@ export interface ChangeTrustedExecutorOptions {
     readonly target: IssuerRepositoryIdentity;
 }
 export type ChangeTrustedExecutorErrorCode = "CHANGE_EXECUTION_READ_FAILED" | "CHANGE_EXECUTION_PRECONDITION_FAILED" | "CHANGE_EXECUTION_EFFECT_FAILED" | "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED" | "CHANGE_EXECUTION_RECOVERY_REQUIRED";
+export declare const CHANGE_TRUSTED_EXECUTOR_ERROR_CODES: readonly ["CHANGE_EXECUTION_READ_FAILED", "CHANGE_EXECUTION_PRECONDITION_FAILED", "CHANGE_EXECUTION_EFFECT_FAILED", "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED", "CHANGE_EXECUTION_RECOVERY_REQUIRED"];
+export declare function isChangeTrustedExecutorErrorCode(value: unknown): value is ChangeTrustedExecutorErrorCode;
 /** Bounded trusted-execution failure; provider/API details are discarded. */
 export declare class ChangeTrustedExecutorError extends Error {
     readonly code: ChangeTrustedExecutorErrorCode;

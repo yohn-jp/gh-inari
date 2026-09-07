@@ -14,8 +14,9 @@ import { MAX_CHANGE_ARTIFACT_BODY_LENGTH, deriveCanonicalBranchIdentity, project
 import { extractTemplateIdentityMarker, renderIssueArtifact, selectExistingArtifactCandidate, validateExistingIssueArtifact, } from "../artifact.js";
 import { compileLocalGovernedContract } from "../governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
-import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, changeRemoteMutationRequest, changeRemoteReadRequest, } from "../change-executor.js";
-import { ChangeTrustedExecutorError, TrustedChangeExecutor, } from "../change-trusted-executor.js";
+import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, changeRemoteMutationRequest, changeRemoteReadRequest, normalizeChangeRemoteExecutionEvidence, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
+import { ChangeTrustedExecutorError, isChangeTrustedExecutorErrorCode, TrustedChangeExecutor, } from "../change-trusted-executor.js";
+import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
 import { GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES, GitHubChangeEffectAdapter, } from "./change-effect-adapter.js";
 import { InariIssuerAppAuthority, assertTrustedExecution, TRUSTED_EXECUTION_EVENTS, IssuerAuthorityError, } from "./issuer-authority.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
@@ -65,16 +66,44 @@ export function isRepositoryEvidenceFailureReason(value) {
 export function isTrustedActionsFailureStage(value) {
     return TRUSTED_ACTIONS_FAILURE_STAGES.includes(value);
 }
-function failureDiagnostic(stage, reason) {
-    return Object.freeze(reason === undefined ? { stage } : { stage, reason });
+function failureDiagnostic(stage, reason, fields = {}) {
+    return Object.freeze({
+        stage,
+        ...(reason === undefined ? {} : { reason }),
+        ...(fields.trustedCode === undefined ? {} : { trustedCode: fields.trustedCode }),
+        ...(fields.diagnostics === undefined ? {} : { diagnostics: fields.diagnostics }),
+        ...(fields.evidence === undefined ? {} : { evidence: fields.evidence }),
+    });
+}
+function trustedFailureFields(error) {
+    const fields = {};
+    if (isChangeTrustedExecutorErrorCode(error.code))
+        fields.trustedCode = error.code;
+    try {
+        const diagnostics = normalizeTrustedFailureDiagnostics(error.diagnostics);
+        if (diagnostics !== undefined && diagnostics.length > 0)
+            fields.diagnostics = diagnostics;
+    }
+    catch {
+        // Invalid internal diagnostics are omitted rather than serialized.
+    }
+    if (error.evidence !== undefined) {
+        try {
+            fields.evidence = normalizeChangeRemoteExecutionEvidence(error.evidence.operation, error.evidence);
+        }
+        catch {
+            // Invalid internal evidence is omitted rather than serialized.
+        }
+    }
+    return fields;
 }
 export class GitHubActionsChangeExecutorError extends Error {
     code = "CHANGE_ACTIONS_RUNTIME_INVALID";
     details;
-    constructor(message = "Trusted Change Actions runtime configuration is invalid.", stage, reason) {
+    constructor(message = "Trusted Change Actions runtime configuration is invalid.", stage, reason, fields = {}) {
         super(message);
         this.name = "GitHubActionsChangeExecutorError";
-        this.details = stage === undefined ? undefined : failureDiagnostic(stage, reason);
+        this.details = stage === undefined ? undefined : failureDiagnostic(stage, reason, fields);
     }
 }
 function withFailureStage(error, stage) {
@@ -1081,10 +1110,11 @@ function trustedFailureStage(error, issuerStage) {
         return issuerFailureStage(error);
     return issuerStage ?? "projection-execution";
 }
-function asTrustedActionsFailure(error, issuerStage) {
+export function asTrustedActionsFailure(error, issuerStage) {
     if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined)
         return error;
-    return new GitHubActionsChangeExecutorError(undefined, trustedFailureStage(error, issuerStage));
+    const stage = trustedFailureStage(error, issuerStage);
+    return new GitHubActionsChangeExecutorError(undefined, stage, undefined, error instanceof ChangeTrustedExecutorError ? trustedFailureFields(error) : {});
 }
 /** Build the trusted executor from GitHub Actions runtime claims and secrets. */
 export async function createGitHubActionsChangeExecutor(options) {
@@ -1317,7 +1347,9 @@ export async function runGitHubActionsChangeExecutor(environment = process.env, 
             ? changeRemoteReadRequest(requestRecord.issue, requester)
             : changeRemoteMutationRequest(requestRecord.operation, requestRecord.issue, requester, requestRecord.semanticPullRequestPlan);
         const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
-        const result = request.operation === "show" ? await executor.read(request) : await executor.execute(request);
+        const result = request.operation === "show"
+            ? normalizeChangeRemoteProjection(request.operation, await executor.read(request))
+            : normalizeChangeRemoteExecutionResult(request.operation, await executor.execute(request));
         process.stdout.write(`${JSON.stringify(result)}\n`);
         return 0;
     }

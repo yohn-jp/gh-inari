@@ -1,9 +1,11 @@
 import { randomUUID as generateRandomUUID } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { projectChangeFromGitHubEvidence } from "../change.js";
-import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
+import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, canonicalGitHubRequester, ChangeRemoteExecutorError, changeRemoteMutationRequest, normalizeChangeRemoteExecutionEvidence, normalizeChangeRemoteExecutionResult, normalizeChangeRemoteProjection, } from "../change-executor.js";
+import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
 import { GitHubAdapter } from "./adapter.js";
 import { GitHubActionsEvidenceReader, isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage, } from "./actions-change-executor.js";
+import { isChangeTrustedExecutorErrorCode } from "../change-trusted-executor.js";
 import { isGitHubAdapterError } from "./errors.js";
 import { resolveRepositoryBranchGovernance } from "../governance.js";
 /** The only workflow and ref selected by the CLI transport. */
@@ -54,8 +56,10 @@ function remoteError(code, operation, reason, diagnostic) {
             : {
                 stage: diagnostic.stage,
                 ...(diagnostic.reason === undefined ? {} : { stageReason: diagnostic.reason }),
+                ...(diagnostic.trustedCode === undefined ? {} : { trustedCode: diagnostic.trustedCode }),
+                ...(diagnostic.evidence === undefined ? {} : { evidence: diagnostic.evidence }),
             }),
-    });
+    }, diagnostic?.diagnostics);
 }
 function normalizeTransportError(error, operation, code) {
     if (error instanceof ChangeRemoteExecutorError)
@@ -74,16 +78,34 @@ function artifactsPath(name) {
 function dispatchPath() {
     return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/dispatches`;
 }
-function parseFailureDiagnostic(value) {
+function parseFailureDiagnostic(value, operation) {
     if (value === undefined)
         return undefined;
     const details = record(value);
-    if (Object.keys(details).some((key) => key !== "stage" && key !== "reason") ||
+    if (Object.keys(details).some((key) => !["stage", "reason", "trustedCode", "diagnostics", "evidence"].includes(key)) ||
         !isTrustedActionsFailureStage(details.stage) ||
-        (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason))) {
+        (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason)) ||
+        (details.trustedCode !== undefined && !isChangeTrustedExecutorErrorCode(details.trustedCode))) {
         throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
     }
-    return Object.freeze(details.reason === undefined ? { stage: details.stage } : { stage: details.stage, reason: details.reason });
+    let diagnostics;
+    try {
+        diagnostics = normalizeTrustedFailureDiagnostics(details.diagnostics);
+    }
+    catch {
+        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    }
+    let evidence;
+    if (details.evidence !== undefined) {
+        evidence = normalizeChangeRemoteExecutionEvidence(operation, details.evidence);
+    }
+    return Object.freeze({
+        stage: details.stage,
+        ...(details.reason === undefined ? {} : { reason: details.reason }),
+        ...(details.trustedCode === undefined ? {} : { trustedCode: details.trustedCode }),
+        ...(diagnostics === undefined ? {} : { diagnostics }),
+        ...(evidence === undefined ? {} : { evidence }),
+    });
 }
 function parseRuns(value) {
     const payload = record(value);
@@ -146,7 +168,7 @@ function parseArtifacts(value, expectedName, expectedRepositoryId) {
         };
     });
 }
-function resultFromArchive(archive) {
+function resultFromArchive(archive, operation) {
     try {
         if (archive.byteLength === 0 || archive.byteLength > 1_048_576) {
             throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
@@ -230,7 +252,7 @@ function resultFromArchive(archive) {
                 throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
             }
             boundedText(failure.message, 240);
-            const diagnostic = parseFailureDiagnostic(failure.details);
+            const diagnostic = parseFailureDiagnostic(failure.details, operation);
             return {
                 value: undefined,
                 failed: true,
@@ -381,7 +403,7 @@ export class GitHubActionsChangeRemoteExecutor {
             operation: request.operation,
             issue: request.issue,
             ...(request.requester === undefined ? {} : { requester: request.requester }),
-            ...(request.operation === "show" || request.semanticPullRequestPlan === undefined
+            ...(request.semanticPullRequestPlan === undefined
                 ? {}
                 : { semanticPullRequestPlan: request.semanticPullRequestPlan }),
         };
@@ -395,7 +417,7 @@ export class GitHubActionsChangeRemoteExecutor {
         catch (error) {
             throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_DISPATCH_FAILED");
         }
-        return this.waitForResult(`change.${request.operation}`, baseline, artifactName, context.repositoryId);
+        return this.waitForResult(`change.${request.operation}`, baseline, artifactName, context.repositoryId, request.operation);
     }
     async readRuns(operation) {
         let value;
@@ -407,7 +429,7 @@ export class GitHubActionsChangeRemoteExecutor {
         }
         return parseRuns(value);
     }
-    async waitForResult(operation, baseline, artifactName, repositoryId) {
+    async waitForResult(operation, baseline, artifactName, repositoryId, semanticOperation) {
         const baselineIds = new Set(baseline.map((run) => run.id));
         for (let attempt = 0; attempt < this.#maxPollAttempts; attempt += 1) {
             const runs = await this.readRuns(operation);
@@ -435,7 +457,7 @@ export class GitHubActionsChangeRemoteExecutor {
                 catch (error) {
                     throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
                 }
-                const result = resultFromArchive(archive);
+                const result = resultFromArchive(archive, semanticOperation);
                 if (run.conclusion !== "success") {
                     throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "workflow-conclusion", result.diagnostic);
                 }
