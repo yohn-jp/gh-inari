@@ -441,6 +441,188 @@ test("post-effect projection verification failure fails closed", async () => {
   );
 });
 
+test("an initial evidence read failure fails closed before any issuance effect", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  reader.failNextRead = true;
+  const issuer = new FakeIssuer(reader);
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) => error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_READ_FAILED",
+  );
+  assert.deepEqual(issuer.effects, []);
+});
+
+test("trusted issuance fails closed for an existing canonical branch, a duplicate PR, and a wrong-base PR", async () => {
+  const cases: readonly [string, ChangeProjectionInput][] = [
+    ["existing canonical branch without a pull request", input(evidence([branch], { status: "available", value: [] }))],
+    [
+      "duplicate canonical pull requests",
+      input(
+        evidence([branch], {
+          status: "available",
+          value: [
+            { number: 2180, head: branch, base: "main", state: "open", draft: true, merged: false },
+            { number: 2181, head: branch, base: "main", state: "open", draft: false, merged: false },
+          ],
+        }),
+      ),
+    ],
+    [
+      "wrong-base canonical pull request",
+      input(
+        evidence([branch], {
+          status: "available",
+          value: [{ number: 2180, head: branch, base: "develop", state: "open", draft: true, merged: false }],
+        }),
+      ),
+    ],
+  ];
+
+  for (const [name, current] of cases) {
+    const reader = new MutableReader(current);
+    const issuer = new FakeIssuer(reader);
+    await assert.rejects(
+      executor(reader, issuer).execute({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        operation: "issue",
+        issue: identity.rootIssue,
+      }),
+      (error: unknown) =>
+        error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED",
+      name,
+    );
+    assert.deepEqual(issuer.effects, [], name);
+  }
+});
+
+test("a branch created despite an ambiguous creation response fails closed into recovery without a duplicate create", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_BRANCH";
+  const originalApply = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    if (request.effects[0]?.kind === "CREATE_BRANCH") {
+      reader.current = { ...reader.current, evidence: evidence([branch]) };
+    }
+    return originalApply(request);
+  };
+
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.outcome, "recovery-required");
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH"],
+  );
+});
+
+test("a pull request created despite an ambiguous creation response refuses compensation and preserves the branch", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_PULL_REQUEST";
+  const originalApply = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    if (request.effects[0]?.kind === "CREATE_PULL_REQUEST") {
+      reader.current = {
+        ...reader.current,
+        evidence: evidence([branch], { status: "available", value: [draftPullRequest()] }),
+      };
+    }
+    return originalApply(request);
+  };
+
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.outcome, "recovery-required");
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+  );
+});
+
+test("a reread failure after a branch-creation failure fails closed into recovery", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_BRANCH";
+  issuer.failReadAfterEffectFailure = true;
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+  );
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH"],
+  );
+});
+
+test("a reread failure after a pull-request creation failure fails closed into recovery", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_PULL_REQUEST";
+  issuer.failReadAfterEffectFailure = true;
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+  );
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+  );
+});
+
+test("a reread failure after issuance compensation fails closed into recovery", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_PULL_REQUEST";
+  const originalApply = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    const result = await originalApply(request);
+    if (request.effects[0]?.kind === "DELETE_BRANCH") reader.failNextRead = true;
+    return result;
+  };
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+  );
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "DELETE_BRANCH"],
+  );
+});
+
 test("DRAFT and REVIEW aborts close the canonical PR and delete only the canonical branch", async () => {
   for (const draft of [true, false]) {
     const reader = new MutableReader(
