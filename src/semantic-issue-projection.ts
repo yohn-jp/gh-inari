@@ -193,7 +193,20 @@ const CAPABILITY_FLAG_KEYS = new Set([
   "nativeDependsOn",
   "nativeBlockedByRelation",
 ]);
-const ISSUE_PROPERTY_NAMES = new Set(["title", "type", "labels", "assignees", "milestone", "parent", "dependsOn"]);
+const ISSUE_PROPERTY_NAMES = new Set([
+  "title",
+  "type",
+  "labels",
+  "assignees",
+  "milestone",
+  "parent",
+  "dependsOn",
+  // Lifecycle declarations are consumed by the lifecycle evidence projector;
+  // they are not rendered as a second Issue relation authority here.
+  "role",
+  "supersedes",
+  "supersededBy",
+]);
 const PLAN_ARTIFACT_IDENTITY_KEYS = new Set([
   "version",
   "effectiveContractVersion",
