@@ -36,6 +36,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/change.d.ts",
   "dist/change.js",
   "dist/change.js.map",
+  "dist/change/machine/lifecycle-machine.d.ts",
+  "dist/change/machine/lifecycle-machine.js",
+  "dist/change/machine/lifecycle-machine.js.map",
   "dist/change-executor.d.ts",
   "dist/change-executor.js",
   "dist/change-executor.js.map",
@@ -96,6 +99,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/contract/issue-reference.d.ts",
   "dist/contract/issue-reference.js",
   "dist/contract/issue-reference.js.map",
+  "dist/contract/native-template-projection.d.ts",
+  "dist/contract/native-template-projection.js",
+  "dist/contract/native-template-projection.js.map",
   "dist/contract/normalization.d.ts",
   "dist/contract/normalization.js",
   "dist/contract/normalization.js.map",
@@ -153,6 +159,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/issuer-identity.d.ts",
   "dist/issuer-identity.js",
   "dist/issuer-identity.js.map",
+  "dist/legacy-artifact-convergence.d.ts",
+  "dist/legacy-artifact-convergence.js",
+  "dist/legacy-artifact-convergence.js.map",
   "dist/mcp/index.d.ts",
   "dist/mcp/index.js",
   "dist/mcp/index.js.map",
@@ -336,7 +345,10 @@ async function main() {
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
   const packResult = run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"]);
-  const [packInfo] = JSON.parse(packResult.stdout);
+  const parsedPackInfo = JSON.parse(packResult.stdout);
+  const packInfo = Array.isArray(parsedPackInfo)
+    ? parsedPackInfo[0]
+    : (parsedPackInfo[packageJson.name] ?? parsedPackInfo);
   const packedFiles = packInfo.files.map((entry) => entry.path);
   const expected = [...EXPECTED_PACKED_FILES].sort();
   const actual = [...packedFiles].sort();

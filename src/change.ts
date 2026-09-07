@@ -8,6 +8,7 @@
  */
 
 import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { resolveChangeLifecycleTransition } from "./change/machine/lifecycle-machine.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { validateSemanticBranchMutationPlan, type SemanticBranchMutationPlan } from "./semantic-branch-projection.js";
 
@@ -124,7 +125,13 @@ export type ChangeTransitionOperation = ChangeTransition;
 export const CHANGE_TRANSITIONS = CHANGE_TRANSITION_OPERATIONS;
 export const CHANGE_IMPLEMENTED_TRANSITIONS = Object.freeze(["issue", "ready", "abort"] as const);
 
-/** The only lifecycle edges currently owned by Inari Core. */
+/**
+ * Migration-only compatibility snapshot of the lifecycle edges.
+ *
+ * Executable legality is owned by the internal XState lifecycle machine;
+ * parity tests keep this public compatibility value equivalent until the
+ * migration is complete.
+ */
 export const CHANGE_TRANSITION_RULES = Object.freeze([
   { transition: "issue", from: "DEFINED", to: "DRAFT" },
   { transition: "ready", from: "DRAFT", to: "REVIEW" },
@@ -2590,7 +2597,11 @@ interface ResolvedTransitionTarget {
   readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
 }
 
-type ChangeTransitionRule = (typeof CHANGE_TRANSITION_RULES)[number];
+type ChangeTransitionRule = {
+  readonly transition: ChangeTransition;
+  readonly from: ChangeState;
+  readonly to: ChangeState;
+};
 
 function normalizeChangeTransition(input: unknown): ChangeTransition | undefined {
   if (typeof input !== "string") return undefined;
@@ -2774,7 +2785,7 @@ interface ChangeTransitionTargetValidation {
 }
 
 function transitionRule(transition: ChangeTransition, state: ChangeState): ChangeTransitionRule | undefined {
-  return CHANGE_TRANSITION_RULES.find((candidate) => candidate.transition === transition && candidate.from === state);
+  return resolveChangeLifecycleTransition(transition, state);
 }
 
 function reportTransitionMismatch(diagnostics: ChangeDiagnostic[], path: string, message: string): void {

@@ -191,9 +191,15 @@ The projection pipeline may produce diagnostics or fail closed before a lifecycl
 The internal lifecycle event vocabulary should map directly to semantic operations, for example:
 
 ```ts
-{ type: "ISSUE" }
-{ type: "READY" }
-{ type: "ABORT" }
+{
+  type: "ISSUE";
+}
+{
+  type: "READY";
+}
+{
+  type: "ABORT";
+}
 ```
 
 Event names are internal implementation details, but there must be a one-to-one semantic mapping to public operations. Machine-local events must not become a competing command vocabulary.
