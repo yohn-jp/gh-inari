@@ -8,12 +8,19 @@ import {
   validateExistingPullRequestArtifact,
 } from "../src/artifact.ts";
 import {
+  isChangeDiagnosticCode,
   projectChangeFromGitHubEvidence,
   validateChangeMergeAdmission,
   validateGovernedRootIssueEvidence,
 } from "../src/change.ts";
 import { changeRemoteReadRequest } from "../src/change-executor.ts";
 import { GitHubActionsEvidenceReader } from "../src/github/actions-change-executor.ts";
+import {
+  isRepositoryEvidenceFailureReason,
+  isTrustedActionsFailureStage,
+} from "../src/github/actions-change-executor.ts";
+import { isChangeTrustedExecutorErrorCode, ChangeTrustedExecutorError } from "../src/change-trusted-executor.ts";
+import { isSecretSafeBoundedText } from "../src/change-failure-diagnostics.ts";
 import { GitHubAdapter } from "../src/github/adapter.ts";
 import { compileRepositoryGovernedContracts } from "../src/governance.ts";
 import { tryObserveSemanticPullRequest } from "../src/semantic-pr-observation.ts";
@@ -30,7 +37,35 @@ const MAX_REPORT_DIAGNOSTICS = 8;
 const MAX_REPORT_CODE_LENGTH = 96;
 const MAX_REPORT_PATH_LENGTH = 256;
 const MAX_REPORT_MESSAGE_LENGTH = 256;
+const MAX_REPORT_BYTES = 16_384;
 const REPOSITORY_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
+const CHANGE_MERGE_ADMISSION_FAILURE_STAGES = Object.freeze([
+  "repository-evidence",
+  "pull-request-evidence",
+  "governance-evidence",
+  "change-projection",
+  "root-issue-evidence",
+  "merge-admission",
+  "change-provenance",
+]);
+const REPORT_DIAGNOSTIC_CODES = new Set([
+  "CHANGE_ADMISSION_INVALID",
+  "CHANGE_MERGE_ADMISSION_UNAVAILABLE",
+  "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE",
+  "CHANGE_MERGE_ADMISSION_CLASSIFICATION_INVALID",
+  "CHANGE_MERGE_ADMISSION_ROOT_ISSUE_INVALID",
+  "CHANGE_MERGE_ADMISSION_EVENT_INVALID",
+  "CHANGE_MERGE_ADMISSION_EVENT_IDENTITY_MISMATCH",
+  "CHANGE_MERGE_ADMISSION_PULL_REQUEST_IDENTITY_MISMATCH",
+  "CHANGE_MERGE_ADMISSION_BRANCH_MISMATCH",
+  "CHANGE_MERGE_ADMISSION_BASE_MISMATCH",
+  "CHANGE_MERGE_ADMISSION_ROOT_ISSUE_MISMATCH",
+  "CHANGE_MERGE_ADMISSION_ROOT_ISSUE_GOVERNANCE_INVALID",
+  "CHANGE_MERGE_ADMISSION_REPOSITORY_IDENTITY_INVALID",
+  "CHANGE_MERGE_ADMISSION_REPOSITORY_IDENTITY_MISMATCH",
+  "CHANGE_MERGE_ADMISSION_PR_GOVERNANCE_INVALID",
+  "CHANGE_MERGE_ADMISSION_GOVERNANCE_PROVENANCE_INVALID",
+]);
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -41,31 +76,90 @@ function diagnostic(code, pathValue, message) {
 }
 
 function boundedDiagnostic(value) {
-  const code =
-    typeof value?.code === "string" ? value.code.slice(0, MAX_REPORT_CODE_LENGTH) : "CHANGE_ADMISSION_INVALID";
-  const pathValue = typeof value?.path === "string" ? value.path.slice(0, MAX_REPORT_PATH_LENGTH) : "$";
-  const message =
-    typeof value?.message === "string"
-      ? value.message.slice(0, MAX_REPORT_MESSAGE_LENGTH)
-      : "Change admission failed closed.";
-  return { code, path: pathValue, message };
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.some((key) => !["version", "code", "path", "message"].includes(key))) return undefined;
+  const code = value.code;
+  const pathValue = value.path;
+  const message = value.message;
+  if (
+    typeof code !== "string" ||
+    code.length === 0 ||
+    code.length > MAX_REPORT_CODE_LENGTH ||
+    !(REPORT_DIAGNOSTIC_CODES.has(code) || isChangeDiagnosticCode(code)) ||
+    !isSecretSafeBoundedText(pathValue, MAX_REPORT_PATH_LENGTH) ||
+    !isSecretSafeBoundedText(message, MAX_REPORT_MESSAGE_LENGTH)
+  ) {
+    return undefined;
+  }
+  if (value.version !== undefined && value.version !== 1) return undefined;
+  return {
+    ...(value.version === undefined ? {} : { version: 1 }),
+    code,
+    path: pathValue,
+    message,
+  };
 }
 
 function boundedDiagnostics(values) {
   const result = [];
   for (const value of values) {
     if (result.length >= MAX_REPORT_DIAGNOSTICS) break;
-    result.push(boundedDiagnostic(value));
+    const bounded = boundedDiagnostic(value);
+    if (bounded !== undefined) result.push(bounded);
   }
+  if (new TextEncoder().encode(JSON.stringify(result)).byteLength > MAX_REPORT_BYTES) return [];
   return result;
 }
 
-function failureReport(code = "CHANGE_MERGE_ADMISSION_UNAVAILABLE", classification = "unclassified") {
+function failureReport(code = "CHANGE_MERGE_ADMISSION_UNAVAILABLE", classification = "unclassified", failure) {
+  const failureDiagnostics =
+    failure === undefined
+      ? []
+      : [
+          diagnostic(
+            "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE",
+            "$.failure",
+            "Change merge admission failed at a bounded internal stage.",
+          ),
+          ...(failure.diagnostics ?? []),
+        ];
   return {
     valid: false,
     check: CHANGE_MERGE_ADMISSION_CHECK,
     classification,
-    diagnostics: [diagnostic(code, "$", "Change merge admission failed closed.")],
+    ...(failure === undefined ? {} : { failureStage: failure.stage }),
+    ...(failure?.reason === undefined ? {} : { failureReason: failure.reason }),
+    ...(failure?.trustedCode === undefined ? {} : { failureCode: failure.trustedCode }),
+    diagnostics: boundedDiagnostics([
+      diagnostic(code, "$", "Change merge admission failed closed."),
+      ...failureDiagnostics,
+    ]),
+  };
+}
+
+function failureMetadata(error, fallbackStage) {
+  let stage = CHANGE_MERGE_ADMISSION_FAILURE_STAGES.includes(fallbackStage) ? fallbackStage : "change-provenance";
+  let reason = "internal";
+  let trustedCode;
+  let diagnostics = [];
+  if (isRecord(error) && isRecord(error.details)) {
+    if (isTrustedActionsFailureStage(error.details.stage)) stage = error.details.stage;
+    if (isRepositoryEvidenceFailureReason(error.details.reason)) reason = error.details.reason;
+    if (isChangeTrustedExecutorErrorCode(error.details.trustedCode)) trustedCode = error.details.trustedCode;
+    if (Array.isArray(error.details.diagnostics)) diagnostics = error.details.diagnostics;
+  }
+  if (error instanceof ChangeTrustedExecutorError) {
+    if (isChangeTrustedExecutorErrorCode(error.code)) trustedCode = error.code;
+    if (Array.isArray(error.diagnostics)) diagnostics = error.diagnostics;
+  } else if (isRecord(error) && Array.isArray(error.diagnostics)) {
+    diagnostics = error.diagnostics;
+  }
+  return {
+    stage,
+    reason,
+    ...(trustedCode === undefined ? {} : { trustedCode }),
+    diagnostics,
   };
 }
 
@@ -393,6 +487,7 @@ export async function validateGitHubPullRequestEvent({ event, root = REPOSITORY_
         : { hostname: new URL(process.env.GITHUB_SERVER_URL).hostname }),
     });
 
+  let failureStage = "repository-evidence";
   try {
     const context = await github.getRepositoryContext();
     if (context.repositoryId === undefined || !REPOSITORY_NAME_PATTERN.test(context.nameWithOwner)) {
@@ -402,8 +497,10 @@ export async function validateGitHubPullRequestEvent({ event, root = REPOSITORY_
       return failureReport("CHANGE_MERGE_ADMISSION_REPOSITORY_IDENTITY_MISMATCH");
     }
 
+    failureStage = "pull-request-evidence";
     const observed = await github.getPullRequest(eventValue.number);
     if (observed.number !== eventValue.number) return failureReport("CHANGE_MERGE_ADMISSION_EVENT_IDENTITY_MISMATCH");
+    failureStage = "governance-evidence";
     const prOutcomes = await compileRepositoryGovernedContracts(github, "pr");
     const selection = selectPullRequestContract(compiledContracts(prOutcomes), observed.body);
     if (selection?.contract === undefined || !selection.result.valid) {
@@ -445,14 +542,17 @@ export async function validateGitHubPullRequestEvent({ event, root = REPOSITORY_
       branchGovernance: provenance?.branchGovernance,
       transport,
     };
+    failureStage = "change-projection";
     const reader = new GitHubActionsEvidenceReader(readerOptions);
     const projection = await reader.read(changeRemoteReadRequest(rootResult.number));
+    failureStage = "root-issue-evidence";
     const rootDiagnostics = await readRootIssueGovernance(
       github,
       rootResult.number,
       identity,
       projection.baseBranch ?? provenance?.ref,
     );
+    failureStage = "merge-admission";
     const report = validateChangeMergeAdmissionEvent({
       event,
       projection,
@@ -466,8 +566,8 @@ export async function validateGitHubPullRequestEvent({ event, root = REPOSITORY_
       diagnostics: boundedDiagnostics([...rootDiagnostics, ...report.diagnostics]),
       valid: report.valid && rootDiagnostics.length === 0,
     };
-  } catch {
-    return failureReport("CHANGE_MERGE_ADMISSION_UNAVAILABLE");
+  } catch (error) {
+    return failureReport("CHANGE_MERGE_ADMISSION_UNAVAILABLE", "unclassified", failureMetadata(error, failureStage));
   }
 }
 

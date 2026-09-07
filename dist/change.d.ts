@@ -669,6 +669,7 @@ export interface ChangeTransitionRecoveryPlanValidationResult {
     readonly plan?: ChangeTransitionRecoveryPlan;
     readonly diagnostics: readonly ChangeDiagnostic[];
 }
+export declare function isChangeDiagnosticCode(value: unknown): value is ChangeDiagnosticCode;
 export declare const MAX_CHANGE_BASE_BRANCH_LENGTH: 255;
 export declare const MAX_CHANGE_TRANSITION_EFFECTS: 8;
 export declare const MAX_CHANGE_PROJECTION_CANDIDATES: 64;

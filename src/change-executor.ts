@@ -8,10 +8,12 @@ import {
   type ChangeEffectKind,
   type ChangeProjectionResult,
 } from "./change.js";
+import { isSecretSafeBoundedText } from "./change-failure-diagnostics.js";
 
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
 const MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES = 1_048_576;
+export const MAX_CHANGE_REMOTE_EXECUTION_EVIDENCE_BYTES = 16_384 as const;
 
 export const CHANGE_REMOTE_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
 export type ChangeRemoteMutation = (typeof CHANGE_REMOTE_MUTATIONS)[number];
@@ -220,7 +222,10 @@ function validText(value: unknown, maxLength: number): value is string {
   );
 }
 
-function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRemoteExecutionEvidence {
+export function normalizeChangeRemoteExecutionEvidence(
+  operation: string,
+  value: unknown,
+): ChangeRemoteExecutionEvidence {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ChangeRemoteExecutorError(
       "CHANGE_REMOTE_RESULT_INVALID",
@@ -249,6 +254,7 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
   if (
     candidate.version !== CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION ||
     candidate.operation !== operation ||
+    !CHANGE_REMOTE_MUTATIONS.includes(operation as ChangeRemoteMutation) ||
     !CHANGE_REMOTE_EXECUTION_OUTCOMES.includes(candidate.outcome as ChangeRemoteExecutionOutcome) ||
     !Array.isArray(candidate.effects) ||
     candidate.effects.length > 8
@@ -318,7 +324,10 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
   }
   const requester = candidate.requester === undefined ? undefined : candidate.requester;
   const issuer = candidate.issuer === undefined ? undefined : candidate.issuer;
-  if ((requester !== undefined && !validText(requester, 160)) || (issuer !== undefined && !validText(issuer, 160))) {
+  if (
+    (requester !== undefined && !isSecretSafeBoundedText(requester, 160)) ||
+    (issuer !== undefined && !isSecretSafeBoundedText(issuer, 160))
+  ) {
     throw new ChangeRemoteExecutorError(
       "CHANGE_REMOTE_RESULT_INVALID",
       "The Change executor returned invalid bounded execution evidence.",
@@ -338,8 +347,8 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
     if (
       Object.keys(failureValue).some((key) => !["kind", "code", "message"].includes(key)) ||
       !CHANGE_EFFECT_KINDS.includes(failureValue.kind as ChangeEffectKind) ||
-      !validText(failureValue.code, 80) ||
-      !validText(failureValue.message, 240)
+      !isSecretSafeBoundedText(failureValue.code, 80) ||
+      !isSecretSafeBoundedText(failureValue.message, 240)
     ) {
       throw new ChangeRemoteExecutorError(
         "CHANGE_REMOTE_RESULT_INVALID",
@@ -363,7 +372,7 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
       { operation },
     );
   }
-  return {
+  const normalized = {
     version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
     operation: operation as ChangeRemoteMutation,
     outcome: candidate.outcome as ChangeRemoteExecutionOutcome,
@@ -375,6 +384,14 @@ function normalizeExecutionEvidence(operation: string, value: unknown): ChangeRe
       : { compensation: candidate.compensation as "not-required" | "succeeded" | "failed" }),
     ...(failure === undefined ? {} : { failure }),
   };
+  if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > MAX_CHANGE_REMOTE_EXECUTION_EVIDENCE_BYTES) {
+    throw new ChangeRemoteExecutorError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "The Change executor returned oversized bounded execution evidence.",
+      { operation },
+    );
+  }
+  return normalized;
 }
 
 export function normalizeChangeRemoteExecutionResult(operation: string, result: unknown): ChangeRemoteExecutionResult {
@@ -394,7 +411,9 @@ export function normalizeChangeRemoteExecutionResult(operation: string, result: 
     }
     const projection = normalizeChangeRemoteProjection(operation, envelope.projection);
     const evidence =
-      envelope.evidence === undefined ? undefined : normalizeExecutionEvidence(operation, envelope.evidence);
+      envelope.evidence === undefined
+        ? undefined
+        : normalizeChangeRemoteExecutionEvidence(operation, envelope.evidence);
     return Object.freeze({
       projection,
       ...(evidence === undefined ? {} : { evidence }),

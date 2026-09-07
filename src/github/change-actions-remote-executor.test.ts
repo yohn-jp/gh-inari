@@ -454,6 +454,39 @@ test("unknown or malformed workflow diagnostic stages remain fail closed", async
     { stage: "provider-specific" },
     { stage: "installation-token", token: "secret" },
     { stage: "repository-evidence", reason: "provider-specific-reason" },
+    { stage: "projection-execution", trustedCode: "provider-specific-code" },
+    {
+      stage: "projection-execution",
+      diagnostics: [
+        {
+          version: 1,
+          code: "CHANGE_PROJECTION_PARTIAL",
+          path: "$.projection",
+          message: "unknown diagnostic property",
+          extra: true,
+        },
+      ],
+    },
+    {
+      stage: "projection-execution",
+      diagnostics: [
+        {
+          version: 1,
+          code: "CHANGE_PROJECTION_PARTIAL",
+          path: "$.projection",
+          message: "Bearer raw-secret-token /private/provider/body",
+        },
+      ],
+    },
+    {
+      stage: "projection-execution",
+      diagnostics: Array.from({ length: 33 }, () => ({
+        version: 1,
+        code: "CHANGE_PROJECTION_PARTIAL",
+        path: "$.projection",
+        message: "bounded diagnostic",
+      })),
+    },
   ]) {
     const api = new FakeActionsApi();
     api.archiveValue = {
@@ -490,6 +523,67 @@ test("workflow failure artifacts preserve the bounded repository-evidence reason
           stageReason: "repository-fork",
         }) &&
       !JSON.stringify(error).includes("repo-secret-token") &&
+      !JSON.stringify(error).includes("/private/provider/path"),
+  );
+});
+
+test("workflow failure artifacts preserve trusted code, Core diagnostics, and bounded evidence", async () => {
+  const api = new FakeActionsApi();
+  api.archiveValue = {
+    ok: false,
+    error: {
+      code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+      message: "raw provider body Bearer installation-secret-token /private/provider/path",
+      details: {
+        stage: "projection-execution",
+        trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        diagnostics: [
+          {
+            version: 1,
+            code: "CHANGE_PROVENANCE_CONFLICT",
+            path: "$.projection.change.provenance",
+            message: "The trusted Change provenance is inconsistent.",
+          },
+        ],
+        evidence: {
+          version: 1,
+          operation: "issue",
+          outcome: "recovery-required",
+          effects: [],
+          compensation: "failed",
+        },
+      },
+    },
+  };
+  await assert.rejects(
+    executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeRemoteExecutorError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({
+          operation: "change.issue",
+          reason: "workflow-failed",
+          stage: "projection-execution",
+          trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+          evidence: {
+            version: 1,
+            operation: "issue",
+            outcome: "recovery-required",
+            effects: [],
+            compensation: "failed",
+          },
+        }) &&
+      JSON.stringify(error.diagnostics) ===
+        JSON.stringify([
+          {
+            version: 1,
+            code: "CHANGE_PROVENANCE_CONFLICT",
+            path: "$.projection.change.provenance",
+            message: "The trusted Change provenance is inconsistent.",
+          },
+        ]) &&
+      !JSON.stringify(error).includes("installation-secret-token") &&
       !JSON.stringify(error).includes("/private/provider/path"),
   );
 });

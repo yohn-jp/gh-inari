@@ -14,6 +14,7 @@ import {
   TRUSTED_ACTIONS_FAILURE_STAGES,
   createGitHubActionsChangeExecutor,
   deriveChangeNamingFromIssueTitle,
+  asTrustedActionsFailure,
   isRepositoryEvidenceFailureReason,
   isTrustedActionsFailureStage,
   loadBranchGovernance,
@@ -27,12 +28,13 @@ import type {
 import {
   CHANGE_TRANSITION_CONTRACT_VERSION,
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
+  createChangeDiagnostic,
   planChangeIssuance,
   projectChangeFromGitHubEvidence,
   type ChangeEffect,
   type ChangeEffectSuccessEvidence,
 } from "../change.js";
-import { TrustedChangeExecutor } from "../change-trusted-executor.js";
+import { ChangeTrustedExecutorError, TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
   INARI_ISSUER_PRINCIPAL,
   type IssuerCredentialRequest,
@@ -1045,6 +1047,71 @@ test("workflow entrypoint emits the bounded diagnostic and no exception payload"
     details: { stage: "repository-evidence", reason: "repository-configuration" },
   });
   assert.doesNotMatch(JSON.stringify(output), /privateKey|token|exception|\/home/iu);
+});
+
+test("trusted executor failures retain only bounded code, Core diagnostics, and evidence", () => {
+  const mapped = asTrustedActionsFailure(
+    new ChangeTrustedExecutorError(
+      "CHANGE_EXECUTION_PRECONDITION_FAILED",
+      "Bearer installation-secret-token /private/provider/path",
+      [
+        createChangeDiagnostic({
+          code: "CHANGE_PROVENANCE_CONFLICT",
+          path: "$.governedIssue.contract.provenance.treeSha",
+          message: "The validated governance generation changed before issuance.",
+        }),
+      ],
+      {
+        version: 1,
+        operation: "issue",
+        outcome: "recovery-required",
+        effects: [],
+        compensation: "failed",
+      },
+    ),
+    "projection-execution",
+  );
+
+  assert.deepEqual(mapped.details, {
+    stage: "projection-execution",
+    trustedCode: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+    diagnostics: [
+      {
+        version: 1,
+        code: "CHANGE_PROVENANCE_CONFLICT",
+        path: "$.governedIssue.contract.provenance.treeSha",
+        message: "The validated governance generation changed before issuance.",
+      },
+    ],
+    evidence: {
+      version: 1,
+      operation: "issue",
+      outcome: "recovery-required",
+      effects: [],
+      compensation: "failed",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(mapped), /installation-secret-token|\/private\/provider\/path/iu);
+});
+
+test("unsafe or malformed trusted diagnostics are omitted at the Actions producer boundary", () => {
+  const mapped = asTrustedActionsFailure(
+    new ChangeTrustedExecutorError("CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED", "raw exception", [
+      {
+        version: 1,
+        code: "CHANGE_PROJECTION_PARTIAL",
+        path: "$.projection",
+        message: "Bearer raw-secret-token /home/runner/private-body",
+      },
+    ]),
+    "projection-execution",
+  );
+
+  assert.deepEqual(mapped.details, {
+    stage: "projection-execution",
+    trustedCode: "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+  });
+  assert.doesNotMatch(JSON.stringify(mapped), /raw exception|raw-secret-token|\/home\/runner/iu);
 });
 
 test("credential issuance and scope validation keep separate bounded stages", async () => {

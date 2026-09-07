@@ -849,6 +849,10 @@ const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_PROVENANCE_CONFLICT",
 ];
 
+export function isChangeDiagnosticCode(value: unknown): value is ChangeDiagnosticCode {
+  return typeof value === "string" && DIAGNOSTIC_CODES.includes(value as ChangeDiagnosticCode);
+}
+
 const CHANGE_KEYS = new Set(["version", "identity", "state", "provenance", "projection"]);
 const IDENTITY_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const PROVENANCE_KEYS = new Set(CHANGE_PROVENANCE_ROLES);

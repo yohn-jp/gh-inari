@@ -6,6 +6,7 @@ import { INARI_ISSUER_PRINCIPAL } from "../src/github/issuer-authority.ts";
 import {
   classifyChangePullRequestContract,
   validateChangeMergeAdmissionEvent,
+  validateGitHubPullRequestEvent,
 } from "./validate-change-merge-admission.mjs";
 
 const identity = {
@@ -208,4 +209,26 @@ test("invalid governed contract, duplicate/conflicting evidence, and recovery fa
     canonicalChange: recovery,
   });
   assertRejected(result, "CHANGE_PROVENANCE_INVALID_INPUT");
+});
+
+test("Change provenance internal failures retain only bounded stage and diagnostics", async () => {
+  const event = githubEvent();
+  const result = await validateGitHubPullRequestEvent({
+    event,
+    adapter: {
+      async getRepositoryContext() {
+        throw new Error("Bearer provider-secret-token /home/runner/private-body");
+      },
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.failureStage, "repository-evidence");
+  assert.equal(result.failureReason, "internal");
+  assert.equal(result.failureCode, undefined);
+  assert.deepEqual(
+    result.diagnostics.map((diagnostic) => diagnostic.code),
+    ["CHANGE_MERGE_ADMISSION_UNAVAILABLE", "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE"],
+  );
+  assert.doesNotMatch(JSON.stringify(result), /provider-secret-token|\/home\/runner|Bearer/iu);
 });

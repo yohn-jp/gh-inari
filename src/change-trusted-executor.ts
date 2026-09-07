@@ -77,6 +77,18 @@ export type ChangeTrustedExecutorErrorCode =
   | "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED"
   | "CHANGE_EXECUTION_RECOVERY_REQUIRED";
 
+export const CHANGE_TRUSTED_EXECUTOR_ERROR_CODES = Object.freeze([
+  "CHANGE_EXECUTION_READ_FAILED",
+  "CHANGE_EXECUTION_PRECONDITION_FAILED",
+  "CHANGE_EXECUTION_EFFECT_FAILED",
+  "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+  "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+] as const);
+
+export function isChangeTrustedExecutorErrorCode(value: unknown): value is ChangeTrustedExecutorErrorCode {
+  return CHANGE_TRUSTED_EXECUTOR_ERROR_CODES.includes(value as ChangeTrustedExecutorErrorCode);
+}
+
 /** Bounded trusted-execution failure; provider/API details are discarded. */
 export class ChangeTrustedExecutorError extends Error {
   readonly code: ChangeTrustedExecutorErrorCode;
