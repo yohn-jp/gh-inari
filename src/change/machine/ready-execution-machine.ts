@@ -8,7 +8,9 @@ import type {
   ChangeReadyTransitionValidationResult,
   ChangeTransitionPlan,
 } from "../../change.js";
+import { createChangeDiagnostic } from "../../change.js";
 import type { ChangeRemoteMutationRequest, ChangeRemoteExecutionResult } from "../../change-executor.js";
+import { transitionChangeLifecycle } from "./lifecycle-machine.js";
 
 export type ReadyExecutionFailureCode =
   | "CHANGE_EXECUTION_READ_FAILED"
@@ -149,6 +151,21 @@ function rereadFailure(context: ReadyMachineContext, failure: ReadyExecutionFail
     : failure;
 }
 
+function lifecyclePreconditionFailure(state: Change["state"]): ReadyExecutionFailure {
+  const message = `Ready lifecycle transition is not allowed from state "${state}".`;
+  return {
+    code: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+    message,
+    diagnostics: [
+      createChangeDiagnostic({
+        code: "CHANGE_TRANSITION_NOT_ALLOWED",
+        path: "$.change.state",
+        message,
+      }),
+    ],
+  };
+}
+
 const readyExecutionMachine = setup({
   types: {
     context: {} as ReadyMachineContext,
@@ -257,6 +274,13 @@ const readyExecutionMachine = setup({
           };
         }
         try {
+          const lifecycle = transitionChangeLifecycle(projection.change.state, "ready");
+          if (!lifecycle.accepted) {
+            return {
+              validationInput: undefined,
+              failure: lifecyclePreconditionFailure(projection.change.state),
+            };
+          }
           const validationInput = context.services.semantics.validationInput(
             input,
             projection.change,

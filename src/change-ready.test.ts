@@ -13,6 +13,7 @@ import {
   type ChangeProjectionInput,
   type ChangeReadyEvidence,
   type ChangePullRequestEvidence,
+  projectChangeFromGitHubEvidence,
 } from "./change.js";
 import { renderIssueArtifact, renderPullRequestArtifact } from "./artifact.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
@@ -30,6 +31,7 @@ import {
   type ChangeTrustedEvidenceReader,
 } from "./change-trusted-executor.js";
 import type { ChangeRemoteMutationRequest } from "./change-executor.js";
+import { executeReadyWithXState } from "./change/machine/ready-execution-machine.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -289,6 +291,49 @@ test("invalid Ready request causes no GitHub mutation", async () => {
       error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED",
   );
   assert.deepEqual(issuerAuthority.effects, []);
+});
+
+test("Ready execution delegates lifecycle admission to the canonical machine", async () => {
+  const projected = projectChangeFromGitHubEvidence(projectionInput());
+  assert.ok(projected.change);
+  const rejectedProjection = {
+    ...projected,
+    change: { ...projected.change, state: "ABORTED" as const },
+  };
+  let validationInputCalled = false;
+  let planCalled = false;
+
+  const outcome = await executeReadyWithXState({
+    request: remoteReadyRequest(),
+    read: async () => ({ ok: true as const, input: projectionInput() }),
+    apply: async () => ({ ok: true as const }),
+    failureForEffect: () => ({ code: "PULL_REQUEST_READY_FAILED", message: "bounded" }),
+    semantics: {
+      project: () => rejectedProjection,
+      validationInput: () => {
+        validationInputCalled = true;
+        return {};
+      },
+      validate: () => ({ valid: true, diagnostics: [] }),
+      plan: () => {
+        planCalled = true;
+        throw new Error("lifecycle rejection must stop before planning");
+      },
+      verify: () => ({ valid: true, diagnostics: [] }),
+    },
+    results: {
+      returnedExisting: (projection) => ({ projection }),
+      verified: (projection) => ({ projection }),
+      failed: (projection) => ({ projection }),
+    },
+  });
+
+  assert.equal(outcome.kind, "failure");
+  if (outcome.kind !== "failure") throw new Error("expected lifecycle rejection");
+  assert.equal(outcome.failure.code, "CHANGE_EXECUTION_PRECONDITION_FAILED");
+  assert.equal(outcome.failure.diagnostics[0]?.code, "CHANGE_TRANSITION_NOT_ALLOWED");
+  assert.equal(validationInputCalled, false);
+  assert.equal(planCalled, false);
 });
 
 test("trusted executor treats a healthy already-ready retry as a no-op", async () => {
