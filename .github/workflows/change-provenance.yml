@@ -18,10 +18,14 @@ jobs:
     name: Change provenance
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout target default branch
+      # The validator is introduced by the pull request being evaluated. Run
+      # the check from that PR head so bootstrap does not depend on main
+      # already containing the validator. This check has read-only token scope,
+      # matching the source-trust boundary of the repository's PR checks.
+      - name: Checkout pull request head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
           persist-credentials: false
 
