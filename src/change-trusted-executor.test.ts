@@ -119,9 +119,15 @@ function closedPullRequest() {
 }
 
 class MutableReader implements ChangeTrustedEvidenceReader {
+  failNextRead = false;
+
   constructor(public current: ChangeProjectionInput) {}
 
   async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+    if (this.failNextRead) {
+      this.failNextRead = false;
+      throw new Error("provider detail must not cross the boundary");
+    }
     return this.current;
   }
 }
@@ -129,6 +135,8 @@ class MutableReader implements ChangeTrustedEvidenceReader {
 class FakeIssuer {
   readonly effects: ChangeEffect[] = [];
   fail: ChangeEffect["kind"] | undefined;
+  failReadAfterEffectFailure = false;
+  leaveBranchAfterDelete = false;
   readonly reader: MutableReader;
 
   constructor(reader: MutableReader) {
@@ -139,7 +147,10 @@ class FakeIssuer {
     const effect = inputValue.effects[0];
     assert.ok(effect);
     this.effects.push(effect);
-    if (effect.kind === this.fail) throw new Error("provider detail must not cross the boundary");
+    if (effect.kind === this.fail) {
+      if (this.failReadAfterEffectFailure) this.reader.failNextRead = true;
+      throw new Error("provider detail must not cross the boundary");
+    }
     if (effect.kind === "CREATE_BRANCH") {
       this.reader.current = { ...this.reader.current, evidence: evidence([branch]) };
     } else if (effect.kind === "CREATE_PULL_REQUEST") {
@@ -152,7 +163,7 @@ class FakeIssuer {
         ...this.reader.current,
         evidence: evidence([branch], { status: "available", value: [closedPullRequest()] }),
       };
-    } else if (effect.kind === "DELETE_BRANCH") {
+    } else if (effect.kind === "DELETE_BRANCH" && !this.leaveBranchAfterDelete) {
       const pullRequests =
         this.reader.current.evidence.pullRequests?.status === "available"
           ? this.reader.current.evidence.pullRequests.value
@@ -452,6 +463,67 @@ test("DRAFT and REVIEW aborts close the canonical PR and delete only the canonic
     assert.equal(result.projection.change?.provenance.requester, "agent:aborter");
     assert.equal(result.projection.change?.provenance.issuer, INARI_ISSUER_PRINCIPAL);
   }
+});
+
+test("a pull-request close failure enters bounded abort cleanup recovery", async () => {
+  const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CLOSE_PULL_REQUEST";
+
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CLOSE_PULL_REQUEST"],
+  );
+  assert.equal(result.evidence?.outcome, "recovery-required");
+  assert.equal(result.evidence?.failure?.kind, "CLOSE_PULL_REQUEST");
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+});
+
+test("abort cleanup reread failure fails closed with recovery evidence", async () => {
+  const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "DELETE_BRANCH";
+  issuer.failReadAfterEffectFailure = true;
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError &&
+      error.code === "CHANGE_EXECUTION_RECOVERY_REQUIRED" &&
+      error.evidence?.failure?.kind === "DELETE_BRANCH",
+  );
+});
+
+test("abort verification rejects a successful cleanup whose branch remains", async () => {
+  const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
+  const issuer = new FakeIssuer(reader);
+  issuer.leaveBranchAfterDelete = true;
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError &&
+      error.code === "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED" &&
+      error.diagnostics.length > 0,
+  );
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CLOSE_PULL_REQUEST", "DELETE_BRANCH"],
+  );
 });
 
 test("already-aborted retry performs no duplicate close or delete", async () => {

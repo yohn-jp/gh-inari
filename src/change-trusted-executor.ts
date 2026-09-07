@@ -55,6 +55,17 @@ import {
   type ReadyExecutionOutcome,
   type ReadyReadResult,
 } from "./change/machine/ready-execution-machine.js";
+import {
+  executeAbortWithXState,
+  type AbortAdmissionResult,
+  type AbortEffect,
+  type AbortEffectResult,
+  type AbortExecutionOutcome,
+  type AbortExecutionServices,
+  type AbortPlanResult,
+  type AbortReadResult,
+  type AbortVerificationResult,
+} from "./change/machine/abort-execution-machine.js";
 
 export interface ChangeTrustedEvidenceReader {
   /** Returns bounded Core projection input; it never returns a GitHub response. */
@@ -359,6 +370,12 @@ function failureFor(effect: ChangeEffect): GitHubChangeEffectFailureEvidence {
   return changeEffectFailureEvidence(effect);
 }
 
+const DEFAULT_ABORT_READ_FAILURE = {
+  code: "CHANGE_EXECUTION_READ_FAILED",
+  message: "Trusted Change evidence read failed closed.",
+  diagnostics: [],
+} as const;
+
 export class TrustedChangeExecutor implements ChangeRemoteExecutor {
   readonly #reader: ChangeTrustedEvidenceReader;
   readonly #issuerAuthority: Pick<InariIssuerAppAuthority, "applyEffects">;
@@ -389,54 +406,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
     const boundRequest = this.bindRequester(request);
     if (boundRequest.operation === "issue") return this.executeIssue(boundRequest);
     if (boundRequest.operation === "ready") return this.executeReady(boundRequest);
-    const input = await this.readInput(boundRequest);
-    const current = projectionFor(input);
-    const recoveryRetry = boundRequest.operation === "abort" && isAbortCleanupRecoveryProjection(current);
-    if ((!current.valid || current.change === undefined) && !recoveryRetry) {
-      throw new ChangeTrustedExecutorError(
-        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
-        "A valid canonical Change projection is required before a lifecycle transition.",
-        current.diagnostics,
-      );
-    }
-    if (current.change === undefined) {
-      throw new ChangeTrustedExecutorError(
-        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
-        "A canonical Change snapshot is required before a lifecycle transition.",
-        current.diagnostics,
-      );
-    }
-    if (boundRequest.operation === "abort" && !isTrustedInariIssuerPrincipal(current.change.provenance.issuer)) {
-      throw new ChangeTrustedExecutorError(
-        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
-        "The canonical Change issuer provenance is not trusted.",
-        [
-          diagnostic(
-            "CHANGE_PROVENANCE_ISSUER_MISMATCH",
-            "$.projection.change.provenance.issuer",
-            "The canonical Change issuer provenance is not trusted.",
-          ),
-        ],
-      );
-    }
-    const plan = planChangeTransition({
-      version: CHANGE_TRANSITION_CONTRACT_VERSION,
-      transition: boundRequest.operation,
-      change: {
-        ...current.change,
-        provenance: {
-          ...current.change.provenance,
-          ...(boundRequest.requester === undefined ? {} : { requester: boundRequest.requester }),
-        },
-      },
-      target: {
-        ...(current.change.projection?.branch === undefined ? {} : { branch: current.change.projection.branch }),
-        ...(current.change.projection?.pullRequest === undefined
-          ? {}
-          : { pullRequest: current.change.projection.pullRequest }),
-      },
-    });
-    return this.executeTransition(boundRequest, plan, input);
+    return this.executeAbort(boundRequest);
   }
 
   /**
@@ -612,6 +582,244 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
         "CHANGE_EXECUTION_READ_FAILED",
         "Trusted Change evidence read failed closed.",
       );
+    }
+  }
+
+  private async executeAbort(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+    const results: AbortExecutionServices["results"] = {
+      returnedExisting: (projection) => ({
+        projection,
+        evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+      }),
+      verified: (projection, attempts) => ({
+        projection,
+        evidence: executionEvidence(request.operation, "verified", request.requester, effectEvidence(attempts)),
+      }),
+      recoveryRequired: (projection, attempts, failure) => ({
+        projection,
+        evidence: executionEvidence(
+          request.operation,
+          "recovery-required",
+          request.requester,
+          effectEvidence(attempts),
+          "failed",
+          { effect: failure.effect, code: failure.code, message: failure.message },
+        ),
+      }),
+    };
+    const services: AbortExecutionServices = {
+      request,
+      read: (abortRequest) => this.readAbortInput(abortRequest),
+      apply: (effect) => this.applyAbortEffect(effect),
+      failureForEffect: (effect) => {
+        const failure = failureFor(effect);
+        return { code: failure.code, message: failure.message };
+      },
+      recoveryReadFailure: (abortRequest, attempts, failure) => ({
+        code: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        message: "A failed Change transition could not be bounded for recovery.",
+        diagnostics: [],
+        evidence: executionEvidence(
+          abortRequest.operation,
+          "recovery-required",
+          abortRequest.requester,
+          effectEvidence(attempts),
+          "failed",
+          { effect: failure.effect, code: failure.code, message: failure.message },
+        ),
+      }),
+      semantics: {
+        project: projectionFor,
+        classify: (projection): AbortAdmissionResult => {
+          const recoveryRetry = isAbortCleanupRecoveryProjection(projection);
+          if ((!projection.valid || projection.change === undefined) && !recoveryRetry) {
+            return {
+              ok: false,
+              failure: {
+                code: "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+                message: "A valid canonical Change projection is required before a lifecycle transition.",
+                diagnostics: projection.diagnostics,
+              },
+            };
+          }
+          if (projection.change === undefined) {
+            return {
+              ok: false,
+              failure: {
+                code: "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+                message: "A canonical Change snapshot is required before a lifecycle transition.",
+                diagnostics: projection.diagnostics,
+              },
+            };
+          }
+          if (!isTrustedInariIssuerPrincipal(projection.change.provenance.issuer)) {
+            return {
+              ok: false,
+              failure: {
+                code: "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+                message: "The canonical Change issuer provenance is not trusted.",
+                diagnostics: [
+                  diagnostic(
+                    "CHANGE_PROVENANCE_ISSUER_MISMATCH",
+                    "$.projection.change.provenance.issuer",
+                    "The canonical Change issuer provenance is not trusted.",
+                  ),
+                ],
+              },
+            };
+          }
+          return { ok: true, phase: recoveryRetry ? "recovery" : "normal" };
+        },
+        plan: (abortRequest, projection): AbortPlanResult => {
+          if (projection.change === undefined) {
+            return {
+              ok: false,
+              failure: {
+                code: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+                message: "A canonical Change snapshot is required before an abort transition.",
+                diagnostics: projection.diagnostics,
+              },
+            };
+          }
+          try {
+            const plan = planChangeTransition({
+              version: CHANGE_TRANSITION_CONTRACT_VERSION,
+              transition: abortRequest.operation,
+              change: {
+                ...projection.change,
+                provenance: {
+                  ...projection.change.provenance,
+                  ...(abortRequest.requester === undefined ? {} : { requester: abortRequest.requester }),
+                },
+              },
+              target: {
+                ...(projection.change.projection?.branch === undefined
+                  ? {}
+                  : { branch: projection.change.projection.branch }),
+                ...(projection.change.projection?.pullRequest === undefined
+                  ? {}
+                  : { pullRequest: projection.change.projection.pullRequest }),
+              },
+            });
+            return { ok: true, plan };
+          } catch (error: unknown) {
+            return {
+              ok: false,
+              failure: {
+                code: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+                message: "Abort transition planning failed closed.",
+                diagnostics: error instanceof ChangeTrustedExecutorError ? error.diagnostics : [],
+              },
+            };
+          }
+        },
+        recover: (abortRequest, transition, attempts, failed, failedInput) => {
+          const failureEvidence: ChangeIssuanceFailureEvidence = {
+            effect: failed.effect,
+            code: failed.code,
+            message: failed.message,
+          };
+          const evidence = executionEvidence(
+            abortRequest.operation,
+            "recovery-required",
+            abortRequest.requester,
+            effectEvidence(attempts),
+            "failed",
+            failureEvidence,
+          );
+          try {
+            const recovery = planChangeRecovery({
+              transition,
+              attemptedEffects: attempts,
+              failure: failureEvidence,
+              projection: failedInput,
+            });
+            if (!("transition" in recovery)) {
+              return {
+                ok: false,
+                failure: {
+                  code: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+                  message: "A failed Change transition produced an invalid recovery authority result.",
+                  diagnostics: [],
+                  evidence,
+                },
+              };
+            }
+            const projection = projectionFor(failedInput);
+            return {
+              ok: true,
+              result: results.recoveryRequired(
+                recoveryProjection(projection, recovery.result.change),
+                attempts,
+                failed,
+              ),
+            };
+          } catch (error: unknown) {
+            return {
+              ok: false,
+              failure: {
+                code: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+                message: "A failed Change transition could not produce a bounded recovery plan.",
+                diagnostics: error instanceof ChangeTrustedExecutorError ? error.diagnostics : [],
+                evidence,
+              },
+            };
+          }
+        },
+        verify: (abortRequest, _input, projection, plan): AbortVerificationResult => {
+          try {
+            verifyProjection(plan, projection);
+            return { valid: true, diagnostics: [] };
+          } catch (error: unknown) {
+            if (error instanceof ChangeTrustedExecutorError) {
+              return { valid: false, diagnostics: error.diagnostics, message: error.message };
+            }
+            return {
+              valid: false,
+              diagnostics: [],
+              message: "Post-effect Abort projection verification failed.",
+            };
+          }
+        },
+      },
+      results,
+    };
+    const outcome: AbortExecutionOutcome = await executeAbortWithXState(services);
+    if (outcome.kind === "result") return outcome.result;
+    throw new ChangeTrustedExecutorError(
+      outcome.failure.code,
+      outcome.failure.message,
+      outcome.failure.diagnostics,
+      outcome.failure.evidence,
+    );
+  }
+
+  private async readAbortInput(request: ChangeRemoteMutationRequest): Promise<AbortReadResult> {
+    try {
+      return { ok: true, input: await this.readRawInput(request) };
+    } catch (error: unknown) {
+      if (error instanceof ChangeTrustedExecutorError) {
+        return {
+          ok: false,
+          failure: {
+            code: error.code,
+            message: error.message,
+            diagnostics: error.diagnostics,
+            evidence: error.evidence,
+          },
+        };
+      }
+      return { ok: false, failure: { ...DEFAULT_ABORT_READ_FAILURE } };
+    }
+  }
+
+  private async applyAbortEffect(effect: AbortEffect): Promise<AbortEffectResult> {
+    try {
+      await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+      return { ok: true };
+    } catch {
+      const failure = failureFor(effect);
+      return { ok: false, failure: { code: failure.code, message: failure.message } };
     }
   }
 
@@ -854,130 +1062,6 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
       failure,
     );
     return { projection, evidence };
-  }
-
-  private async executeTransition(
-    request: ChangeRemoteMutationRequest,
-    plan: ChangeTransitionPlan,
-    input: ChangeProjectionInput,
-  ): Promise<ChangeRemoteExecutionResult> {
-    void input;
-    const attempts: ChangeIssuanceEffectAttempt[] = [];
-    if (plan.effects.length === 0) {
-      const after = projectionFor(await this.readInput(request));
-      verifyProjection(plan, after);
-      return {
-        projection: after,
-        evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
-      };
-    }
-    for (const effect of plan.effects) {
-      try {
-        await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
-        attempts.push({ effect, status: "succeeded" });
-      } catch {
-        attempts.push({ effect, status: "failed" });
-        const failure = failureFor(effect);
-        if (request.operation === "abort") {
-          return this.recoverTransition(request, plan, attempts, failure);
-        }
-        return {
-          projection: projectionFor(await this.readInput(request)),
-          evidence: executionEvidence(
-            request.operation,
-            "failed",
-            request.requester,
-            effectEvidence(attempts),
-            "not-required",
-            failure,
-          ),
-        };
-      }
-    }
-    const after = projectionFor(await this.readInput(request));
-    verifyProjection(plan, after);
-    return {
-      projection: after,
-      evidence: executionEvidence(request.operation, "verified", request.requester, effectEvidence(attempts)),
-    };
-  }
-
-  private async recoverTransition(
-    request: ChangeRemoteMutationRequest,
-    transition: ChangeTransitionPlan,
-    attempts: readonly ChangeIssuanceEffectAttempt[],
-    failure: ChangeIssuanceFailureEvidence,
-  ): Promise<ChangeRemoteExecutionResult> {
-    let afterInput: ChangeProjectionInput;
-    try {
-      afterInput = await this.readInput(request);
-    } catch {
-      throw new ChangeTrustedExecutorError(
-        "CHANGE_EXECUTION_RECOVERY_REQUIRED",
-        "A failed Change transition could not be bounded for recovery.",
-        [],
-        executionEvidence(
-          request.operation,
-          "recovery-required",
-          request.requester,
-          effectEvidence(attempts),
-          "failed",
-          failure,
-        ),
-      );
-    }
-
-    let recovery;
-    try {
-      recovery = planChangeRecovery({
-        transition,
-        attemptedEffects: attempts,
-        failure,
-        projection: afterInput,
-      });
-    } catch (error: unknown) {
-      const diagnostics = error instanceof ChangeTrustedExecutorError ? error.diagnostics : [];
-      throw new ChangeTrustedExecutorError(
-        "CHANGE_EXECUTION_RECOVERY_REQUIRED",
-        "A failed Change transition could not produce a bounded recovery plan.",
-        diagnostics,
-        executionEvidence(
-          request.operation,
-          "recovery-required",
-          request.requester,
-          effectEvidence(attempts),
-          "failed",
-          failure,
-        ),
-      );
-    }
-    if (!("transition" in recovery)) {
-      throw new ChangeTrustedExecutorError(
-        "CHANGE_EXECUTION_RECOVERY_REQUIRED",
-        "A failed Change transition produced an invalid recovery authority result.",
-        [],
-        executionEvidence(
-          request.operation,
-          "recovery-required",
-          request.requester,
-          effectEvidence(attempts),
-          "failed",
-          failure,
-        ),
-      );
-    }
-    const after = projectionFor(afterInput);
-    return {
-      projection: recoveryProjection(after, recovery.result.change),
-      evidence: executionEvidence(
-        request.operation,
-        "recovery-required",
-        request.requester,
-        effectEvidence(attempts),
-        "failed",
-        failure,
-      ),
-    };
   }
 }
 
