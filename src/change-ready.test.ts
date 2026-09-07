@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   CHANGE_CONTRACT_VERSION,
   CHANGE_TRANSITION_CONTRACT_VERSION,
+  type ChangeGitHubEvidence,
   planChangeRecovery,
   planChangeIssuance,
   planChangeReadyTransition,
@@ -200,9 +201,25 @@ const execution: TrustedExecutionContext = {
 };
 
 class MutableReader implements ChangeTrustedEvidenceReader {
+  readCount = 0;
   constructor(public current: ChangeProjectionInput) {}
   async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+    this.readCount += 1;
     return this.current;
+  }
+}
+
+class RereadReader extends MutableReader {
+  constructor(
+    current: ChangeProjectionInput,
+    private readonly reread: ChangeProjectionInput,
+  ) {
+    super(current);
+  }
+
+  override async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+    this.readCount += 1;
+    return this.readCount === 1 ? this.current : this.reread;
   }
 }
 
@@ -257,6 +274,7 @@ test("trusted executor applies only MARK_PULL_REQUEST_READY after Core validatio
   const issuerAuthority = new FakeIssuer(reader);
   const result = await executor(reader, issuerAuthority).execute(remoteReadyRequest());
   assert.deepEqual(issuerAuthority.effects, ["MARK_PULL_REQUEST_READY"]);
+  assert.equal(reader.readCount, 2);
   assert.equal(result.evidence?.outcome, "verified");
   assert.equal(result.projection.change?.state, "REVIEW");
 });
@@ -278,6 +296,7 @@ test("trusted executor treats a healthy already-ready retry as a no-op", async (
   const issuerAuthority = new FakeIssuer(reader);
   const result = await executor(reader, issuerAuthority).execute(remoteReadyRequest());
   assert.deepEqual(issuerAuthority.effects, []);
+  assert.equal(reader.readCount, 2);
   assert.equal(result.evidence?.outcome, "returned-existing");
   assert.equal(result.projection.change?.state, "REVIEW");
 });
@@ -302,6 +321,46 @@ test("post-effect projection verification failure is deterministic and bounded",
       error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
   );
   assert.deepEqual(issuerAuthority.effects, ["MARK_PULL_REQUEST_READY"]);
+});
+
+test("Ready fails closed when the required reread is unavailable or malformed", async () => {
+  const rereads: readonly [string, ChangeProjectionInput][] = [
+    [
+      "unavailable",
+      {
+        ...projectionInput(),
+        evidence: {
+          ...projectionInput().evidence,
+          branches: { status: "unavailable", reason: "reread unavailable" },
+        },
+      },
+    ],
+    [
+      "malformed",
+      {
+        ...projectionInput(),
+        evidence: {
+          ...projectionInput().evidence,
+          branches: {
+            status: "available",
+            value: "not-a-branch-list",
+          } as unknown as ChangeGitHubEvidence["branches"],
+        },
+      },
+    ],
+  ];
+
+  for (const [name, reread] of rereads) {
+    const reader = new RereadReader(projectionInput(), reread);
+    const issuerAuthority = new FakeIssuer(reader);
+    await assert.rejects(
+      executor(reader, issuerAuthority).execute(remoteReadyRequest()),
+      (error: unknown) => error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_READ_FAILED",
+      name,
+    );
+    assert.deepEqual(issuerAuthority.effects, ["MARK_PULL_REQUEST_READY"], name);
+    assert.equal(reader.readCount, 2, name);
+  }
 });
 
 test("requester and issuer provenance remain separate through Ready", async () => {
