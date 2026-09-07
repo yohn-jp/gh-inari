@@ -69,6 +69,7 @@ function parseArgs(argv) {
 
 function main() {
   const { tarball } = parseArgs(process.argv.slice(2));
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   let tarballPath;
   let ownsTarball;
   if (tarball !== undefined) {
@@ -80,7 +81,10 @@ function main() {
     // Verifies the dist produced by the build step, not a re-built one:
     // prepack's implicit rebuild is intentionally not relied on here.
     const packResult = run("npm", ["pack", "--json", "--ignore-scripts"], { cwd: repoRoot });
-    const [packInfo] = JSON.parse(packResult.stdout);
+    const parsedPackInfo = JSON.parse(packResult.stdout);
+    const packInfo = Array.isArray(parsedPackInfo)
+      ? parsedPackInfo[0]
+      : (parsedPackInfo[packageJson.name] ?? parsedPackInfo);
     tarballPath = path.join(repoRoot, packInfo.filename);
     ownsTarball = true;
   }
