@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   CHANGE_CONTRACT_VERSION,
   CHANGE_TRANSITION_CONTRACT_VERSION,
+  type ChangeGitHubEvidence,
   planChangeRecovery,
   planChangeIssuance,
   planChangeReadyTransition,
@@ -12,6 +13,7 @@ import {
   type ChangeProjectionInput,
   type ChangeReadyEvidence,
   type ChangePullRequestEvidence,
+  projectChangeFromGitHubEvidence,
 } from "./change.js";
 import { renderIssueArtifact, renderPullRequestArtifact } from "./artifact.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
@@ -29,6 +31,7 @@ import {
   type ChangeTrustedEvidenceReader,
 } from "./change-trusted-executor.js";
 import type { ChangeRemoteMutationRequest } from "./change-executor.js";
+import { executeReadyWithXState } from "./change/machine/ready-execution-machine.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -200,9 +203,25 @@ const execution: TrustedExecutionContext = {
 };
 
 class MutableReader implements ChangeTrustedEvidenceReader {
+  readCount = 0;
   constructor(public current: ChangeProjectionInput) {}
   async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+    this.readCount += 1;
     return this.current;
+  }
+}
+
+class RereadReader extends MutableReader {
+  constructor(
+    current: ChangeProjectionInput,
+    private readonly reread: ChangeProjectionInput,
+  ) {
+    super(current);
+  }
+
+  override async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+    this.readCount += 1;
+    return this.readCount === 1 ? this.current : this.reread;
   }
 }
 
@@ -257,6 +276,7 @@ test("trusted executor applies only MARK_PULL_REQUEST_READY after Core validatio
   const issuerAuthority = new FakeIssuer(reader);
   const result = await executor(reader, issuerAuthority).execute(remoteReadyRequest());
   assert.deepEqual(issuerAuthority.effects, ["MARK_PULL_REQUEST_READY"]);
+  assert.equal(reader.readCount, 2);
   assert.equal(result.evidence?.outcome, "verified");
   assert.equal(result.projection.change?.state, "REVIEW");
 });
@@ -273,11 +293,55 @@ test("invalid Ready request causes no GitHub mutation", async () => {
   assert.deepEqual(issuerAuthority.effects, []);
 });
 
+test("Ready execution delegates lifecycle admission to the canonical machine", async () => {
+  const projected = projectChangeFromGitHubEvidence(projectionInput());
+  assert.ok(projected.change);
+  const rejectedProjection = {
+    ...projected,
+    change: { ...projected.change, state: "ABORTED" as const },
+  };
+  let validationInputCalled = false;
+  let planCalled = false;
+
+  const outcome = await executeReadyWithXState({
+    request: remoteReadyRequest(),
+    read: async () => ({ ok: true as const, input: projectionInput() }),
+    apply: async () => ({ ok: true as const }),
+    failureForEffect: () => ({ code: "PULL_REQUEST_READY_FAILED", message: "bounded" }),
+    semantics: {
+      project: () => rejectedProjection,
+      validationInput: () => {
+        validationInputCalled = true;
+        return {};
+      },
+      validate: () => ({ valid: true, diagnostics: [] }),
+      plan: () => {
+        planCalled = true;
+        throw new Error("lifecycle rejection must stop before planning");
+      },
+      verify: () => ({ valid: true, diagnostics: [] }),
+    },
+    results: {
+      returnedExisting: (projection) => ({ projection }),
+      verified: (projection) => ({ projection }),
+      failed: (projection) => ({ projection }),
+    },
+  });
+
+  assert.equal(outcome.kind, "failure");
+  if (outcome.kind !== "failure") throw new Error("expected lifecycle rejection");
+  assert.equal(outcome.failure.code, "CHANGE_EXECUTION_PRECONDITION_FAILED");
+  assert.equal(outcome.failure.diagnostics[0]?.code, "CHANGE_TRANSITION_NOT_ALLOWED");
+  assert.equal(validationInputCalled, false);
+  assert.equal(planCalled, false);
+});
+
 test("trusted executor treats a healthy already-ready retry as a no-op", async () => {
   const reader = new MutableReader(projectionInput(pullRequest({ draft: false })));
   const issuerAuthority = new FakeIssuer(reader);
   const result = await executor(reader, issuerAuthority).execute(remoteReadyRequest());
   assert.deepEqual(issuerAuthority.effects, []);
+  assert.equal(reader.readCount, 2);
   assert.equal(result.evidence?.outcome, "returned-existing");
   assert.equal(result.projection.change?.state, "REVIEW");
 });
@@ -302,6 +366,46 @@ test("post-effect projection verification failure is deterministic and bounded",
       error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
   );
   assert.deepEqual(issuerAuthority.effects, ["MARK_PULL_REQUEST_READY"]);
+});
+
+test("Ready fails closed when the required reread is unavailable or malformed", async () => {
+  const rereads: readonly [string, ChangeProjectionInput][] = [
+    [
+      "unavailable",
+      {
+        ...projectionInput(),
+        evidence: {
+          ...projectionInput().evidence,
+          branches: { status: "unavailable", reason: "reread unavailable" },
+        },
+      },
+    ],
+    [
+      "malformed",
+      {
+        ...projectionInput(),
+        evidence: {
+          ...projectionInput().evidence,
+          branches: {
+            status: "available",
+            value: "not-a-branch-list",
+          } as unknown as ChangeGitHubEvidence["branches"],
+        },
+      },
+    ],
+  ];
+
+  for (const [name, reread] of rereads) {
+    const reader = new RereadReader(projectionInput(), reread);
+    const issuerAuthority = new FakeIssuer(reader);
+    await assert.rejects(
+      executor(reader, issuerAuthority).execute(remoteReadyRequest()),
+      (error: unknown) => error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_READ_FAILED",
+      name,
+    );
+    assert.deepEqual(issuerAuthority.effects, ["MARK_PULL_REQUEST_READY"], name);
+    assert.equal(reader.readCount, 2, name);
+  }
 });
 
 test("requester and issuer provenance remain separate through Ready", async () => {
