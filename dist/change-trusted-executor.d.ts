@@ -40,8 +40,12 @@ export declare class TrustedChangeExecutor implements ChangeRemoteExecutor {
      */
     private bindRequester;
     private executeReady;
+    private readReadyInput;
+    private applyReadyEffect;
     private verifyReadyProjection;
     private readInput;
+    /** Read normalized evidence without projecting it; the Ready actor owns the next projection state. */
+    private readRawInput;
     private executeIssue;
     private recoverIssuance;
     private executeTransition;

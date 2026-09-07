@@ -79,7 +79,13 @@ export type ChangeTransition = (typeof CHANGE_TRANSITION_OPERATIONS)[number];
 export type ChangeTransitionOperation = ChangeTransition;
 export declare const CHANGE_TRANSITIONS: readonly ["issue", "ready", "abort", "merge"];
 export declare const CHANGE_IMPLEMENTED_TRANSITIONS: readonly ["issue", "ready", "abort"];
-/** The only lifecycle edges currently owned by Inari Core. */
+/**
+ * Migration-only compatibility snapshot of the lifecycle edges.
+ *
+ * Executable legality is owned by the internal XState lifecycle machine;
+ * parity tests keep this public compatibility value equivalent until the
+ * migration is complete.
+ */
 export declare const CHANGE_TRANSITION_RULES: readonly [{
     readonly transition: "issue";
     readonly from: "DEFINED";

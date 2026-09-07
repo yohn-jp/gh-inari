@@ -11,6 +11,7 @@ import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { changeEffectFailureEvidence } from "./github/change-effect-adapter.js";
 import { ISSUER_AUTHORITY_CONTRACT_VERSION, INARI_ISSUER_PRINCIPAL, } from "./github/issuer-authority.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, } from "./change-executor.js";
+import { executeReadyWithXState, } from "./change/machine/ready-execution-machine.js";
 /** Bounded trusted-execution failure; provider/API details are discarded. */
 export class ChangeTrustedExecutorError extends Error {
     code;
@@ -214,10 +215,10 @@ export class TrustedChangeExecutor {
         const boundRequest = this.bindRequester(request);
         if (boundRequest.operation === "issue")
             return this.executeIssue(boundRequest);
+        if (boundRequest.operation === "ready")
+            return this.executeReady(boundRequest);
         const input = await this.readInput(boundRequest);
         const current = projectionFor(input);
-        if (boundRequest.operation === "ready")
-            return this.executeReady(boundRequest, input, current);
         const recoveryRetry = boundRequest.operation === "abort" && isAbortCleanupRecoveryProjection(current);
         if ((!current.valid || current.change === undefined) && !recoveryRetry) {
             throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED", "A valid canonical Change projection is required before a lifecycle transition.", current.diagnostics);
@@ -264,54 +265,92 @@ export class TrustedChangeExecutor {
             return request;
         return { ...request, requester: trustedRequester };
     }
-    async executeReady(request, input, current) {
-        const preconditionInput = readyInput(input, current.change, request.requester);
-        const precondition = validateChangeReadyTransition(preconditionInput);
-        if (!precondition.valid) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Ready transition preconditions failed.", precondition.diagnostics);
+    async executeReady(request) {
+        const outcome = await executeReadyWithXState({
+            request,
+            read: (readyRequest) => this.readReadyInput(readyRequest),
+            apply: (effect) => this.applyReadyEffect(effect),
+            failureForEffect: (effect) => {
+                const failure = failureFor(effect);
+                return { code: failure.code, message: failure.message };
+            },
+            semantics: {
+                project: projectionFor,
+                validationInput: readyInput,
+                validate: validateChangeReadyTransition,
+                plan: planChangeReadyTransition,
+                verify: (readyRequest, input, projection, plan) => {
+                    try {
+                        this.verifyReadyProjection(readyRequest, input, projection, plan);
+                        return { valid: true, diagnostics: [] };
+                    }
+                    catch (error) {
+                        if (error instanceof ChangeTrustedExecutorError) {
+                            return { valid: false, diagnostics: error.diagnostics, message: error.message };
+                        }
+                        return {
+                            valid: false,
+                            diagnostics: [],
+                            message: "Post-effect Ready projection verification failed.",
+                        };
+                    }
+                },
+            },
+            results: {
+                returnedExisting: (projection) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+                }),
+                verified: (projection, effect) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, "verified", request.requester, [
+                        { kind: effect.kind, status: "succeeded" },
+                    ]),
+                }),
+                failed: (projection, effect, effectFailure) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, "failed", request.requester, [{ kind: effect.kind, status: "failed" }], "not-required", { effect, code: effectFailure.code, message: effectFailure.message }),
+                }),
+            },
+        });
+        if (outcome.kind === "result")
+            return outcome.result;
+        throw new ChangeTrustedExecutorError(outcome.failure.code, outcome.failure.message, outcome.failure.diagnostics);
+    }
+    async readReadyInput(request) {
+        try {
+            return { ok: true, input: await this.readRawInput(request) };
         }
-        // The plan is produced only after all semantic preconditions pass.  Core
-        // also guarantees that a mutating Ready plan contains exactly this effect.
-        const plan = planChangeReadyTransition(preconditionInput);
-        if (plan.effects.length > 1 ||
-            (plan.effects[0] !== undefined && plan.effects[0].kind !== "MARK_PULL_REQUEST_READY")) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED", "Ready transition produced an invalid effect plan.");
-        }
-        if (plan.effects.length === 0) {
-            const afterInput = await this.readInput(request);
-            const after = projectionFor(afterInput);
-            this.verifyReadyProjection(request, afterInput, after, plan);
+        catch (error) {
+            if (error instanceof ChangeTrustedExecutorError) {
+                return {
+                    ok: false,
+                    failure: {
+                        code: error.code,
+                        message: error.message,
+                        diagnostics: error.diagnostics,
+                    },
+                };
+            }
             return {
-                projection: after,
-                evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+                ok: false,
+                failure: {
+                    code: "CHANGE_EXECUTION_READ_FAILED",
+                    message: "Trusted Change evidence read failed closed.",
+                    diagnostics: [],
+                },
             };
         }
-        const effect = plan.effects[0];
+    }
+    async applyReadyEffect(effect) {
         try {
             await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+            return { ok: true };
         }
         catch {
-            let after;
-            try {
-                after = projectionFor(await this.readInput(request));
-            }
-            catch {
-                throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_READ_FAILED", "Trusted Change evidence read failed after the Ready effect failed.");
-            }
-            return {
-                projection: after,
-                evidence: executionEvidence(request.operation, "failed", request.requester, [{ kind: effect.kind, status: "failed" }], "not-required", failureFor(effect)),
-            };
+            const failure = failureFor(effect);
+            return { ok: false, failure: { code: failure.code, message: failure.message } };
         }
-        const afterInput = await this.readInput(request);
-        const after = projectionFor(afterInput);
-        this.verifyReadyProjection(request, afterInput, after, plan);
-        return {
-            projection: after,
-            evidence: executionEvidence(request.operation, "verified", request.requester, [
-                { kind: effect.kind, status: "succeeded" },
-            ]),
-        };
     }
     verifyReadyProjection(request, input, projection, plan) {
         if (projection.change === undefined) {
@@ -331,6 +370,17 @@ export class TrustedChangeExecutor {
                 throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_READ_FAILED", "Trusted Change evidence identity does not match the semantic request.");
             }
             return input;
+        }
+        catch (error) {
+            if (error instanceof ChangeTrustedExecutorError)
+                throw error;
+            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_READ_FAILED", "Trusted Change evidence read failed closed.");
+        }
+    }
+    /** Read normalized evidence without projecting it; the Ready actor owns the next projection state. */
+    async readRawInput(request) {
+        try {
+            return requestWithProvenance(await this.#reader.read(request), request.requester, undefined);
         }
         catch (error) {
             if (error instanceof ChangeTrustedExecutorError)

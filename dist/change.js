@@ -7,6 +7,7 @@
  * GitHub state or execute effects.
  */
 import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { resolveChangeLifecycleTransition } from "./change/machine/lifecycle-machine.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { validateSemanticBranchMutationPlan } from "./semantic-branch-projection.js";
 import { renderIssueArtifact, validateExistingIssueArtifact, validateExistingPullRequestArtifact, } from "./artifact.js";
@@ -51,7 +52,13 @@ export const CHANGE_TRANSITION_CONTRACT_VERSION = CHANGE_CONTRACT_VERSION;
 export const CHANGE_TRANSITION_OPERATIONS = Object.freeze(["issue", "ready", "abort", "merge"]);
 export const CHANGE_TRANSITIONS = CHANGE_TRANSITION_OPERATIONS;
 export const CHANGE_IMPLEMENTED_TRANSITIONS = Object.freeze(["issue", "ready", "abort"]);
-/** The only lifecycle edges currently owned by Inari Core. */
+/**
+ * Migration-only compatibility snapshot of the lifecycle edges.
+ *
+ * Executable legality is owned by the internal XState lifecycle machine;
+ * parity tests keep this public compatibility value equivalent until the
+ * migration is complete.
+ */
 export const CHANGE_TRANSITION_RULES = Object.freeze([
     { transition: "issue", from: "DEFINED", to: "DRAFT" },
     { transition: "ready", from: "DRAFT", to: "REVIEW" },
@@ -1620,7 +1627,7 @@ function validateSemanticPlanIssuanceCapabilities(plan, path, diagnostics) {
     }
 }
 function transitionRule(transition, state) {
-    return CHANGE_TRANSITION_RULES.find((candidate) => candidate.transition === transition && candidate.from === state);
+    return resolveChangeLifecycleTransition(transition, state);
 }
 function reportTransitionMismatch(diagnostics, path, message) {
     addDiagnostic(diagnostics, "CHANGE_TRANSITION_NOT_ALLOWED", path, message);
