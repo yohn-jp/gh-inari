@@ -52,6 +52,8 @@ export declare class TrustedChangeExecutor implements ChangeRemoteExecutor {
     private readAbortInput;
     private applyAbortEffect;
     private executeIssue;
-    private recoverIssuance;
+    private validateIssuanceGovernance;
+    private readIssuanceInput;
+    private applyIssuanceEffect;
 }
 export declare const GitHubActionsChangeExecutor: typeof TrustedChangeExecutor;

@@ -6,13 +6,14 @@
  * only. Naming, lifecycle validity, idempotency, compensation, and projection
  * semantics remain delegated to the existing Core authorities.
  */
-import { CHANGE_TRANSITION_CONTRACT_VERSION, createChangeDiagnostic, planChangeIssuance, planChangeIssuanceRecovery, planChangeRecovery, planChangeReadyTransition, planChangeTransition, projectChangeFromGitHubEvidence, validateGovernedRootIssueEvidence, validateChangeReadyTransition, } from "./change.js";
+import { CHANGE_TRANSITION_CONTRACT_VERSION, ChangeIssuanceRecoveryValidationError, ChangeIssuanceValidationError, createChangeDiagnostic, planChangeIssuance, planChangeIssuanceRecovery, planChangeRecovery, planChangeReadyTransition, planChangeTransition, projectChangeFromGitHubEvidence, validateGovernedRootIssueEvidence, validateChangeReadyTransition, } from "./change.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { changeEffectFailureEvidence } from "./github/change-effect-adapter.js";
 import { ISSUER_AUTHORITY_CONTRACT_VERSION, INARI_ISSUER_PRINCIPAL, } from "./github/issuer-authority.js";
 import { CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION, } from "./change-executor.js";
 import { executeReadyWithXState, } from "./change/machine/ready-execution-machine.js";
 import { executeAbortWithXState, } from "./change/machine/abort-execution-machine.js";
+import { executeIssuanceWithXState, } from "./change/machine/issuance-execution-machine.js";
 export const CHANGE_TRUSTED_EXECUTOR_ERROR_CODES = Object.freeze([
     "CHANGE_EXECUTION_READ_FAILED",
     "CHANGE_EXECUTION_PRECONDITION_FAILED",
@@ -581,137 +582,179 @@ export class TrustedChangeExecutor {
         }
     }
     async executeIssue(request) {
-        const input = await this.readInput(request);
-        const rootIssueDiagnostics = this.#reader.requiresGovernedIssueValidation || input.governedIssue !== undefined
+        const services = {
+            request,
+            read: (issuanceRequest) => this.readIssuanceInput(issuanceRequest),
+            apply: (effect) => this.applyIssuanceEffect(effect),
+            failureForEffect: (effect) => {
+                const failure = failureFor(effect);
+                return { code: failure.code, message: failure.message };
+            },
+            semantics: {
+                project: projectionFor,
+                validateGovernance: (issuanceInput) => this.validateIssuanceGovernance(issuanceInput),
+                validateGovernanceDrift: (initial, fresh) => validateIssuanceGovernanceDrift(initial, fresh),
+                plan: (issuanceInput, requester) => {
+                    try {
+                        return { ok: true, plan: planChangeIssuance(issueProjectionInput(issuanceInput, requester)) };
+                    }
+                    catch (error) {
+                        return {
+                            ok: false,
+                            failure: {
+                                code: "CHANGE_EXECUTION_PRECONDITION_FAILED",
+                                message: "Change issuance planning failed closed.",
+                                diagnostics: error instanceof ChangeIssuanceValidationError ? error.diagnostics : [],
+                            },
+                        };
+                    }
+                },
+                verify: (issuanceRequest, issuanceInput, projection, plan) => {
+                    try {
+                        verifyProjection(plan, projection);
+                        return { valid: true, diagnostics: [] };
+                    }
+                    catch (error) {
+                        if (error instanceof ChangeTrustedExecutorError) {
+                            return { valid: false, diagnostics: error.diagnostics, message: error.message };
+                        }
+                        return {
+                            valid: false,
+                            diagnostics: [],
+                            message: "Post-effect Change issuance projection verification failed.",
+                        };
+                    }
+                },
+                classifyEffectFailureProjection: (projection) => projection.status === "absent" && projection.valid && projection.change?.state === "DEFINED"
+                    ? "confirmed-absent"
+                    : "unresolved",
+                planRecovery: (recoveryInput) => {
+                    try {
+                        const plan = planChangeIssuanceRecovery({
+                            issuance: recoveryInput.issuance,
+                            attemptedEffects: recoveryInput.attempts,
+                            failure: recoveryInput.failure,
+                            projection: recoveryInput.projectionInput,
+                            ...(recoveryInput.compensation === undefined
+                                ? {}
+                                : {
+                                    compensation: {
+                                        status: recoveryInput.compensation.status,
+                                        projection: recoveryInput.compensation.projectionInput,
+                                        ...(recoveryInput.compensation.failure === undefined
+                                            ? {}
+                                            : { failure: recoveryInput.compensation.failure }),
+                                    },
+                                }),
+                        });
+                        return { ok: true, plan };
+                    }
+                    catch (error) {
+                        return {
+                            ok: false,
+                            failure: {
+                                code: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+                                message: "A failed Change issuance could not produce a bounded recovery plan.",
+                                diagnostics: error instanceof ChangeIssuanceRecoveryValidationError ? error.diagnostics : [],
+                            },
+                        };
+                    }
+                },
+            },
+            results: {
+                returnedExisting: (projection) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+                }),
+                verified: (projection, attempts) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, "verified", request.requester, effectEvidence(attempts)),
+                }),
+                effectFailed: (attempts, failure) => ({
+                    code: "CHANGE_EXECUTION_EFFECT_FAILED",
+                    message: "A Change effect failed before a compensable partial issuance was established.",
+                    diagnostics: [],
+                    evidence: executionEvidence(request.operation, "failed", request.requester, effectEvidence(attempts), "not-required", failure),
+                }),
+                compensated: (projection, attempts, failure) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, "compensated", request.requester, effectEvidence(attempts), "succeeded", failure),
+                }),
+                recoveryRequired: (projection, attempts, failure, compensationStatus) => ({
+                    projection,
+                    evidence: executionEvidence(request.operation, compensationStatus === "succeeded" ? "compensated" : "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure),
+                }),
+                recoveryUnsafe: (plan, projection, attempts, failure, compensationStatus) => ({
+                    projection: recoveryProjection(projection, recoveryChangeForProjection(plan, projection)),
+                    evidence: executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure),
+                }),
+                recoveryReadFailure: (attempts, failure, compensationStatus) => ({
+                    code: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+                    message: compensationStatus === undefined
+                        ? "Issuance failed and its partial projection could not be bounded for recovery."
+                        : "Issuance compensation completed without bounded post-compensation evidence.",
+                    diagnostics: [],
+                    evidence: executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), compensationStatus ?? "failed", failure),
+                }),
+            },
+        };
+        const outcome = await executeIssuanceWithXState(services);
+        if (outcome.kind === "result")
+            return outcome.result;
+        throw new ChangeTrustedExecutorError(outcome.failure.code, outcome.failure.message, outcome.failure.diagnostics, outcome.failure.evidence);
+    }
+    validateIssuanceGovernance(input) {
+        return this.#reader.requiresGovernedIssueValidation || input.governedIssue !== undefined
             ? validateGovernedRootIssueEvidence(input.governedIssue, projectionIdentity(input), input.baseBranch)
             : [];
-        if (rootIssueDiagnostics.length > 0) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Governed root Issue validation failed before Change issuance planning.", rootIssueDiagnostics);
-        }
-        // Re-read the complete trusted evidence immediately before planning. The
-        // contract provenance carries the governance generation; a changed
-        // template/native source therefore cannot authorize the first effect.
-        const freshInput = await this.readInput(request);
-        const freshRootIssueDiagnostics = this.#reader.requiresGovernedIssueValidation || freshInput.governedIssue !== undefined
-            ? validateGovernedRootIssueEvidence(freshInput.governedIssue, projectionIdentity(freshInput), freshInput.baseBranch)
-            : [];
-        if (freshRootIssueDiagnostics.length > 0) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Governed root Issue validation changed before Change issuance planning.", freshRootIssueDiagnostics);
-        }
-        const validatedGeneration = input.governedIssue?.contract.provenance?.treeSha;
-        const freshGeneration = freshInput.governedIssue?.contract.provenance?.treeSha;
-        if (validatedGeneration !== undefined && freshGeneration !== validatedGeneration) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Repository governance changed before Change issuance planning.", [
-                diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.governedIssue.contract.provenance.treeSha", "The validated root Issue governance generation changed before issuance."),
-            ]);
-        }
-        const semanticPullRequestPlan = freshInput.semanticPullRequestPlan;
-        if (semanticPullRequestPlan !== undefined &&
-            (freshInput.governedIssue?.contract.provenance?.treeSha === undefined ||
-                semanticPullRequestPlan.generation.treeSha !== freshInput.governedIssue.contract.provenance.treeSha)) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_PRECONDITION_FAILED", "Semantic PR plan generation changed before Change issuance planning.", [
-                diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.semanticPullRequestPlan.generation.treeSha", "The Semantic PR plan generation does not match the trusted repository generation."),
-            ]);
-        }
-        const plannedInput = freshInput;
-        const plan = planChangeIssuance(issueProjectionInput(plannedInput, request.requester));
-        if (plan.mode === "return-existing") {
-            const after = projectionFor(await this.readInput(request));
-            verifyProjection(plan, after);
-            return {
-                projection: after,
-                evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
-            };
-        }
-        const attempts = [];
-        for (const effect of plan.effects) {
-            try {
-                const mutation = await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
-                const evidence = mutation.effects[0]?.evidence;
-                attempts.push({ effect, status: "succeeded", ...(evidence === undefined ? {} : { evidence }) });
-            }
-            catch {
-                attempts.push({ effect, status: "failed" });
-                return this.recoverIssuance(request, plan, attempts, failureFor(effect));
-            }
-        }
-        const after = projectionFor(await this.readInput(request));
-        verifyProjection(plan, after);
-        return {
-            projection: after,
-            evidence: executionEvidence(request.operation, "verified", request.requester, effectEvidence(attempts)),
-        };
     }
-    async recoverIssuance(request, issuance, attempts, failure) {
-        if (attempts.length !== 2 || attempts[0]?.status !== "succeeded") {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_EFFECT_FAILED", "A Change effect failed before a compensable partial issuance was established.", [], executionEvidence(request.operation, "failed", request.requester, effectEvidence(attempts), "not-required", failure));
-        }
-        let failedProjectionInput;
+    async readIssuanceInput(request) {
         try {
-            failedProjectionInput = await this.readInput(request);
+            return { ok: true, input: await this.readRawInput(request) };
         }
-        catch {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_RECOVERY_REQUIRED", "Issuance failed and its partial projection could not be bounded for recovery.", [], executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), "failed", failure));
-        }
-        let recovery;
-        try {
-            recovery = planChangeIssuanceRecovery({
-                issuance,
-                attemptedEffects: attempts,
-                failure,
-                projection: failedProjectionInput,
-            });
-        }
-        catch {
-            const projection = projectionFor(failedProjectionInput);
+        catch (error) {
+            if (error instanceof ChangeTrustedExecutorError) {
+                return {
+                    ok: false,
+                    failure: { code: error.code, message: error.message, diagnostics: error.diagnostics },
+                };
+            }
             return {
-                projection: recoveryProjection(projection, recoveryChangeForProjection(issuance, projection)),
-                evidence: executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), "failed", failure),
-            };
-        }
-        const compensationEffect = recovery.compensation.plan.effects[0];
-        if (compensationEffect === undefined) {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_RECOVERY_REQUIRED", "Issuance recovery did not produce an explicit compensation effect.", [], executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), "failed", failure));
-        }
-        let compensationFailure;
-        let compensationStatus = "succeeded";
-        try {
-            await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, compensationEffect));
-        }
-        catch {
-            compensationStatus = "failed";
-            compensationFailure = failureFor(compensationEffect);
-        }
-        let compensatedProjectionInput;
-        try {
-            compensatedProjectionInput = await this.readInput(request);
-        }
-        catch {
-            throw new ChangeTrustedExecutorError("CHANGE_EXECUTION_RECOVERY_REQUIRED", "Issuance compensation completed without bounded post-compensation evidence.", [], executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure));
-        }
-        const projection = projectionFor(compensatedProjectionInput);
-        try {
-            recovery = planChangeIssuanceRecovery({
-                issuance,
-                attemptedEffects: attempts,
-                failure,
-                projection: failedProjectionInput,
-                compensation: {
-                    status: compensationStatus,
-                    projection: compensatedProjectionInput,
-                    ...(compensationFailure === undefined ? {} : { failure: compensationFailure }),
+                ok: false,
+                failure: {
+                    code: "CHANGE_EXECUTION_READ_FAILED",
+                    message: "Trusted Change evidence read failed closed.",
+                    diagnostics: [],
                 },
-            });
-        }
-        catch {
-            return {
-                projection: recoveryProjection(projection, recoveryChangeForProjection(issuance, projection)),
-                evidence: executionEvidence(request.operation, "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure),
             };
         }
-        const evidence = executionEvidence(request.operation, compensationStatus === "succeeded" ? "compensated" : "recovery-required", request.requester, effectEvidence(attempts), compensationStatus, failure);
-        return { projection, evidence };
     }
+    async applyIssuanceEffect(effect) {
+        try {
+            const mutation = await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+            const evidence = mutation.effects[0]?.evidence;
+            return { ok: true, ...(evidence === undefined ? {} : { evidence }) };
+        }
+        catch {
+            const failure = failureFor(effect);
+            return { ok: false, failure: { code: failure.code, message: failure.message } };
+        }
+    }
+}
+function validateIssuanceGovernanceDrift(initial, fresh) {
+    const diagnostics = [];
+    const validatedGeneration = initial.governedIssue?.contract.provenance?.treeSha;
+    const freshGeneration = fresh.governedIssue?.contract.provenance?.treeSha;
+    if (validatedGeneration !== undefined && freshGeneration !== validatedGeneration) {
+        diagnostics.push(diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.governedIssue.contract.provenance.treeSha", "The validated root Issue governance generation changed before issuance."));
+    }
+    const semanticPullRequestPlan = fresh.semanticPullRequestPlan;
+    if (semanticPullRequestPlan !== undefined &&
+        (fresh.governedIssue?.contract.provenance?.treeSha === undefined ||
+            semanticPullRequestPlan.generation.treeSha !== fresh.governedIssue.contract.provenance.treeSha)) {
+        diagnostics.push(diagnostic("CHANGE_PROVENANCE_CONFLICT", "$.semanticPullRequestPlan.generation.treeSha", "The Semantic PR plan generation does not match the trusted repository generation."));
+    }
+    return diagnostics;
 }
 export const GitHubActionsChangeExecutor = TrustedChangeExecutor;
 //# sourceMappingURL=change-trusted-executor.js.map
