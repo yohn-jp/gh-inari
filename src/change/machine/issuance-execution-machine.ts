@@ -117,7 +117,9 @@ export interface IssuanceExecutionSemantics {
     plan: ChangeIssuancePlan,
   ) => IssuanceVerificationResult;
   /** Classifies rechecked evidence after a CREATE_BRANCH effect failure. */
-  readonly classifyEffectFailureProjection: (projection: ChangeProjectionResult) => IssuanceEffectFailureProjectionClass;
+  readonly classifyEffectFailureProjection: (
+    projection: ChangeProjectionResult,
+  ) => IssuanceEffectFailureProjectionClass;
   readonly planRecovery: (input: IssuanceRecoveryPlanInput) => IssuanceRecoveryPlanResult;
 }
 
@@ -387,9 +389,7 @@ const issuanceExecutionMachine = setup({
         const fresh = context.freshInput;
         if (fresh === undefined) return { plan: undefined, failure: DEFAULT_READ_FAILURE };
         const planned = context.services.semantics.plan(fresh, context.services.request.requester);
-        return planned.ok
-          ? { plan: planned.plan, failure: undefined }
-          : { plan: undefined, failure: planned.failure };
+        return planned.ok ? { plan: planned.plan, failure: undefined } : { plan: undefined, failure: planned.failure };
       }),
       always: [
         {
@@ -748,7 +748,9 @@ const issuanceExecutionMachine = setup({
       entry: assign(({ context }): { outcome: IssuanceExecutionOutcome } => {
         const failure = context.effectFailure;
         if (failure === undefined) return { outcome: { kind: "failure", failure: defaultVerificationFailure() } };
-        return { outcome: { kind: "failure", failure: context.services.results.effectFailed(context.attempts, failure) } };
+        return {
+          outcome: { kind: "failure", failure: context.services.results.effectFailed(context.attempts, failure) },
+        };
       }),
     },
     branchRecoveryRequired: {
@@ -805,7 +807,9 @@ const issuanceExecutionMachine = setup({
 });
 
 /** Execute Change issuance and its bounded compensation through the internal XState actor. */
-export async function executeIssuanceWithXState(services: IssuanceExecutionServices): Promise<IssuanceExecutionOutcome> {
+export async function executeIssuanceWithXState(
+  services: IssuanceExecutionServices,
+): Promise<IssuanceExecutionOutcome> {
   const actor = createActor(issuanceExecutionMachine, { input: services });
   try {
     const result = toPromise(actor);
