@@ -76,6 +76,10 @@
       "types": "./dist/semantic-pr-observation.d.ts",
       "import": "./dist/semantic-pr-observation.js"
     },
+    "./agent-authority": {
+      "types": "./dist/agent-authority/index.d.ts",
+      "import": "./dist/agent-authority/index.js"
+    },
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
