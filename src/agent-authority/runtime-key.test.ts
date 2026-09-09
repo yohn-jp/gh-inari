@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -51,11 +51,11 @@ test("persists with owner-only permissions and reloads the same public identity"
     const generated = generateRuntimeAuthorityKeyPair();
     assert.equal(persistRuntimeAuthorityPrivateKey(filePath, generated.privateKey), filePath);
 
+    const pem = await readFile(filePath, "utf8");
+    assert.match(pem, /^-----BEGIN PRIVATE KEY-----/u);
     const stat = await lstat(filePath);
     assert.equal(stat.isFile(), true);
     assert.equal(stat.mode & 0o777, 0o600);
-    const pem = await readFile(filePath, "utf8");
-    assert.match(pem, /^-----BEGIN PRIVATE KEY-----/u);
 
     const loaded = loadRuntimeAuthorityKeyPair(filePath);
     assert.equal(loaded.publicKeyJwk.x, generated.publicKeyJwk.x);
@@ -82,6 +82,11 @@ test("fails closed for unsafe permissions, symlinks, and malformed private mater
       (error: unknown) =>
         error instanceof RuntimeAuthorityKeyError && error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
     );
+    assert.throws(
+      () => persistRuntimeAuthorityPrivateKey(symlinkPath, generated.privateKey),
+      (error: unknown) =>
+        error instanceof RuntimeAuthorityKeyError && error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+    );
 
     const malformedPath = path.join(directory, "malformed.pem");
     await writeFile(malformedPath, "not-a-private-key-secret", { mode: 0o600 });
@@ -96,6 +101,49 @@ test("fails closed for unsafe permissions, symlinks, and malformed private mater
         return true;
       },
     );
+  });
+});
+
+test("rejects intermediate symlink, non-directory, and writable ancestor redirection", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), "inari-runtime-key-outside-"));
+    try {
+      const generated = generateRuntimeAuthorityKeyPair();
+      const redirectedAncestor = path.join(directory, "redirected-ancestor");
+      await symlink(outside, redirectedAncestor);
+      const redirectedPath = path.join(redirectedAncestor, "nested", "runtime.pem");
+
+      assert.throws(
+        () => persistRuntimeAuthorityPrivateKey(redirectedPath, generated.privateKey),
+        (error: unknown) =>
+          error instanceof RuntimeAuthorityKeyError && error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+      );
+      assert.throws(
+        () => loadRuntimeAuthorityPrivateKey(redirectedPath),
+        (error: unknown) =>
+          error instanceof RuntimeAuthorityKeyError && error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+      );
+      await assert.rejects(lstat(path.join(outside, "nested", "runtime.pem")));
+
+      const nonDirectory = path.join(directory, "non-directory");
+      await writeFile(nonDirectory, "not-a-directory", { mode: 0o600 });
+      assert.throws(
+        () => persistRuntimeAuthorityPrivateKey(path.join(nonDirectory, "runtime.pem"), generated.privateKey),
+        (error: unknown) =>
+          error instanceof RuntimeAuthorityKeyError && error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+      );
+
+      const writableAncestor = path.join(directory, "writable-ancestor");
+      await mkdir(writableAncestor, { mode: 0o700 });
+      await chmod(writableAncestor, 0o777);
+      assert.throws(
+        () => persistRuntimeAuthorityPrivateKey(path.join(writableAncestor, "runtime.pem"), generated.privateKey),
+        (error: unknown) =>
+          error instanceof RuntimeAuthorityKeyError && error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+      );
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });
 

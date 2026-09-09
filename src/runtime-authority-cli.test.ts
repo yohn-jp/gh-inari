@@ -51,9 +51,9 @@ test("authority generate writes a local key, exports public material, and does n
     assert.equal(JSON.parse(firstOutput.publicKeyJson).x, firstOutput.publicKey.x);
 
     const keyPath = path.join(repositoryRoot, "runtime.pem");
+    assert.equal((await readFile(keyPath, "utf8")).includes(firstOutput.publicKey.x), false);
     assert.equal((await lstat(keyPath)).mode & 0o777, 0o600);
     assert.equal(loadRuntimeAuthorityKeyPair(keyPath).publicKeyJwk.x, firstOutput.publicKey.x);
-    assert.equal((await readFile(keyPath, "utf8")).includes(firstOutput.publicKey.x), false);
 
     const duplicate = await captureCli(
       ["authority", "generate", "--private-key", "runtime.pem", "--json"],
