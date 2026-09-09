@@ -214,19 +214,19 @@ There is no required central Session registry between Runtime and App.
 
 ## 5. Authority and credential ownership matrix
 
-| Item | Holder / canonical location | Lifetime | Secret? | What it authorizes | Must never be used for |
-| --- | --- | --- | --- | --- | --- |
-| Runtime private key | Runtime manager / local secret store | Long-lived, rotated | Yes | Signing bounded Session Certificates | Direct App request authentication; GitHub API; Agent bootstrap disclosure |
-| Runtime public key | Repository canonical trust artifact | Until revoked/rotated | No | Verification that a Session Certificate came from a trusted Runtime | GitHub mutation by itself |
-| Runtime trust record | Protected canonical repository ref | Versioned | No | Maximum delegable capability, TTL and key status for one Runtime | Session-local policy overrides |
-| Session private key | One Agent Session | Ephemeral; session/TTL bounded | Yes | Proof-of-possession and request signatures for that Session | Signing new Session Certificates; GitHub API authentication |
-| Session public key | Embedded in Session Certificate | Same as certificate | No | Verification of Session request signatures | Delegation by itself |
-| Session Certificate | Agent Session; may be logged only where policy permits | Short-lived | No in the PoP model | Evidence that a trusted Runtime delegated bounded authority to the Session public key | GitHub API authentication without Session proof-of-possession |
-| Manual Session credential bundle | Human -> one manual Agent Session | Short-lived | **Yes** because it contains the Session private key | Portable bootstrap of the same Session protocol | Reuse across sessions or long-term storage |
-| GitHub App private key | App/executor deployment only | Long-lived, rotated | Yes | Minting App JWT / installation tokens | Agent or Runtime credential |
-| GitHub App installation token | App/executor process only | Provider-bounded short lifetime | Yes | Actual GitHub API operations within App/install permission ceiling | Returning to Agent/Runtime/MCP result |
-| Repository semantic policy | Protected canonical repository ref | Versioned | No | Defines admissible semantic capabilities and constraints | Secret storage or session identity |
-| Current GitHub evidence | GitHub | Current state | No | Admission, idempotency, postcondition and one-shot evidence | Delegation identity |
+| Item                             | Holder / canonical location                            | Lifetime                        | Secret?                                             | What it authorizes                                                                    | Must never be used for                                                    |
+| -------------------------------- | ------------------------------------------------------ | ------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Runtime private key              | Runtime manager / local secret store                   | Long-lived, rotated             | Yes                                                 | Signing bounded Session Certificates                                                  | Direct App request authentication; GitHub API; Agent bootstrap disclosure |
+| Runtime public key               | Repository canonical trust artifact                    | Until revoked/rotated           | No                                                  | Verification that a Session Certificate came from a trusted Runtime                   | GitHub mutation by itself                                                 |
+| Runtime trust record             | Protected canonical repository ref                     | Versioned                       | No                                                  | Maximum delegable capability, TTL and key status for one Runtime                      | Session-local policy overrides                                            |
+| Session private key              | One Agent Session                                      | Ephemeral; session/TTL bounded  | Yes                                                 | Proof-of-possession and request signatures for that Session                           | Signing new Session Certificates; GitHub API authentication               |
+| Session public key               | Embedded in Session Certificate                        | Same as certificate             | No                                                  | Verification of Session request signatures                                            | Delegation by itself                                                      |
+| Session Certificate              | Agent Session; may be logged only where policy permits | Short-lived                     | No in the PoP model                                 | Evidence that a trusted Runtime delegated bounded authority to the Session public key | GitHub API authentication without Session proof-of-possession             |
+| Manual Session credential bundle | Human -> one manual Agent Session                      | Short-lived                     | **Yes** because it contains the Session private key | Portable bootstrap of the same Session protocol                                       | Reuse across sessions or long-term storage                                |
+| GitHub App private key           | App/executor deployment only                           | Long-lived, rotated             | Yes                                                 | Minting App JWT / installation tokens                                                 | Agent or Runtime credential                                               |
+| GitHub App installation token    | App/executor process only                              | Provider-bounded short lifetime | Yes                                                 | Actual GitHub API operations within App/install permission ceiling                    | Returning to Agent/Runtime/MCP result                                     |
+| Repository semantic policy       | Protected canonical repository ref                     | Versioned                       | No                                                  | Defines admissible semantic capabilities and constraints                              | Secret storage or session identity                                        |
+| Current GitHub evidence          | GitHub                                                 | Current state                   | No                                                  | Admission, idempotency, postcondition and one-shot evidence                           | Delegation identity                                                       |
 
 Three secret classes exist and must remain separated:
 
@@ -268,11 +268,7 @@ Illustrative shape:
   "notBefore": "2026-09-08T00:00:00Z",
   "notAfter": null,
   "maxSessionTtlSeconds": 7200,
-  "capabilityCeiling": [
-    "change.implement",
-    "change.ready",
-    "change.abort"
-  ]
+  "capabilityCeiling": ["change.implement", "change.ready", "change.abort"]
 }
 ```
 
@@ -496,9 +492,7 @@ The payload is a versioned claims object. V1 requires at least:
     "kind": "issue",
     "number": 364
   },
-  "capabilities": [
-    { "kind": "change.implement", "issue": 364 }
-  ],
+  "capabilities": [{ "kind": "change.implement", "issue": 364 }],
   "iat": 0,
   "nbf": 0,
   "exp": 0
