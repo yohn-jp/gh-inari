@@ -5,7 +5,7 @@
  * option mechanics only; inverse option scopes are derived from commands so
  * the command surface has one authority.
  */
-export const COMMAND_CONTRACT_VERSION = "1.3.0";
+export const COMMAND_CONTRACT_VERSION = "1.4.0";
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}`;
 export const AGENT_INVOCATION_CONTRACT = {
     canonical: "inari",
@@ -27,6 +27,7 @@ const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "pol
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"];
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"];
 const CHANGE_OPTIONS = ["help", "json", "repository"];
+const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"];
 const MCP_OPTIONS = ["help", "repository"];
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"];
 const PR_CREATE_OPTIONS = [
@@ -78,6 +79,8 @@ export const COMMAND_OPTIONS = {
     maintainerCanModify: option("maintainerCanModify", "maintainer-can-modify", ["--maintainer-can-modify"], "boolean", "none", "Allow maintainer edits on the PR."),
     rawBody: option("rawBody", "body", ["--body", "--body-file", "-b", "-F"], "raw-input", "required", "Upstream gh raw Markdown input; rejected for governed create operations.", "value"),
     capability: option("capability", "capability", ["--capability"], "string", "required", "Declared target capability for Core semantic projection; repeat for multiple capabilities.", "id", true),
+    privateKey: option("privateKey", "private-key", ["--private-key"], "string", "required", "Local Runtime Authority private-key file. The file is never published or used as a GitHub credential.", "path"),
+    replace: option("replace", "replace", ["--replace"], "boolean", "none", "Explicitly replace an existing local Runtime Authority private-key file."),
 };
 const COMMAND_OPTIONS_BY_ID = COMMAND_OPTIONS;
 const command = (id, domain, operation, path, summary, optionIds, positionalSyntax, argumentExample) => ({
@@ -159,6 +162,7 @@ export const INARI_COMMANDS = [
     command("change.show", "change", "show", ["change", "show"], "Read a bounded machine-readable projection of a governed Change.", CHANGE_OPTIONS, "<number>"),
     command("change.ready", "change", "ready", ["change", "ready"], "Request the governed transition of a Change from Draft to review.", CHANGE_OPTIONS, "<number>"),
     command("change.abort", "change", "abort", ["change", "abort"], "Request authoritative termination of a governed Change.", CHANGE_OPTIONS, "<number>"),
+    command("authority.generate", "authority", "generate", ["authority", "generate"], "Generate and securely persist a local Ed25519 Runtime Authority keypair.", AUTHORITY_OPTIONS),
     command("mcp.serve", "mcp", "serve", ["mcp", "serve"], "Run the native Inari semantic MCP server over local stdio.", MCP_OPTIONS),
     command("skill.index", "skill", "index", ["skill"], "List bounded operational playbooks.", ["help", "json"]),
     command("skill.scenario", "skill", "scenario", ["skill"], "Print one bounded operational playbook.", ["help", "json"], "[scenario]"),
@@ -332,7 +336,12 @@ export function projectCommandHelp(positionals) {
         return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
     }
     const domain = positionals[0];
-    if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp")
+    if (domain === "issue" ||
+        domain === "pr" ||
+        domain === "branch" ||
+        domain === "change" ||
+        domain === "authority" ||
+        domain === "mcp")
         return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
     if (domain === "template")
         return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };

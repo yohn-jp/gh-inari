@@ -14,11 +14,12 @@ import { discoverTemplates } from "./template-discovery.js";
 import { applySemanticPatch, assessExistingArtifact, currentArtifactInput, diffArtifact, prepareRemediationArtifact, prepareSyncInput, remediationDiagnosticReport, remediationFailureDetails, readGovernedExistingArtifact, RemediationError, translateRemediationFailure, updateGovernedExistingArtifact, } from "./reconciliation.js";
 import { discoverSemanticTemplates, importNativeTemplate, renderSemanticCompactSchema, syncSemanticTemplates, SEMANTIC_ISSUE_DIRECTORY, SEMANTIC_PULL_REQUEST_FILE, SEMANTIC_TEMPLATE_DIRECTORY, } from "./semantic-template.js";
 import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, projectSkillIndexToText, projectSkillScenarioToJson, projectSkillScenarioToText, SKILL_SCENARIOS, } from "./skill.js";
-import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
+import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommand, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
 import { GITHUB_ISSUE_PROJECTION_CAPABILITIES, tryPlanSemanticIssue, tryProjectSemanticIssue, } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
+import { canonicalRuntimeAuthorityPublicKeyJson, defaultRuntimeAuthorityPrivateKeyPath, generateAndPersistRuntimeAuthorityKeyPair, } from "./agent-authority/runtime-key.js";
 import { compareSemanticIssueProjection, tryObserveSemanticIssue, } from "./semantic-issue-observation.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "./semantic-pr-observation.js";
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
@@ -42,6 +43,7 @@ const BOOLEAN_OPTIONS = new Set([
     "compact",
     "check",
     "dryRun",
+    "replace",
 ]);
 const VALUE_OPTIONS = new Set([
     "from",
@@ -54,6 +56,7 @@ const VALUE_OPTIONS = new Set([
     "to",
     "requireCapability",
     "minimumVersion",
+    "privateKey",
 ]);
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"];
 /** The installed gh-inari executable entrypoint. */
@@ -111,6 +114,9 @@ export async function runCli(argv, dependencies = {}) {
         }
         if (domain === "change") {
             return await runChangeCommand(command, rest, parsed, root, dependencies, json);
+        }
+        if (domain === "authority") {
+            return runAuthorityCommand(command, rest, parsed, root, json);
         }
         if (domain === "mcp") {
             return await runMcpCommand(command, rest, parsed, root);
@@ -513,6 +519,45 @@ function runSkillCommand(scenarioId, json) {
     if (observedBytes > MAX_SKILL_OUTPUT_BYTES)
         throw skillOutputExceedsBudgetError(scenarioId, observedBytes);
     console.log(output);
+    return 0;
+}
+function rejectUnsupportedAuthorityOptions(options, capabilities) {
+    if (capabilities.length > 0) {
+        throw new CliError("INVALID_OPTION", "Option --capability is not supported by authority commands.", "--capability");
+    }
+    const definition = getCommand("authority.generate");
+    const unsupported = Object.keys(options).find((id) => !definition.optionIds.includes(id));
+    if (unsupported === undefined)
+        return;
+    const option = getOption(unsupported);
+    throw new CliError("INVALID_OPTION", `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority generate.`, "$argv", { command: "authority generate", option: option.id });
+}
+function runAuthorityCommand(command, rest, parsed, root, json) {
+    if (command !== "generate" || rest.length > 0) {
+        throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
+    }
+    rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
+    const requestedPath = parsed.options.privateKey;
+    const privateKeyPath = typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
+    const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
+        replace: parsed.options.replace === true,
+    });
+    const output = {
+        ok: true,
+        operation: "authority.generate",
+        privateKeyPath,
+        publicKey: pair.publicKeyJwk,
+        publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
+        repositoryTrustChanged: false,
+    };
+    if (json)
+        console.log(JSON.stringify(output));
+    else {
+        console.log("Generated local Runtime Authority keypair.");
+        console.log(`Private key: ${privateKeyPath}`);
+        console.log(`Public key: ${output.publicKeyJson}`);
+        console.log("Repository trust was not modified.");
+    }
     return 0;
 }
 function invalidArtifactNumberError(domain, value) {
@@ -1823,6 +1868,8 @@ function classifyExitCode(error) {
         return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code.startsWith("CHANGE_"))
         return EXIT_VALIDATION;
+    if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_"))
+        return EXIT_VALIDATION;
     if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_"))
         return EXIT_REMOTE;
     if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code))
@@ -1852,6 +1899,7 @@ function isOwnedInvocation(argv) {
             first === "branch" ||
             first === "template" ||
             first === "change" ||
+            first === "authority" ||
             first === "mcp") &&
         positionals.length === 1)
         return true;
@@ -1910,6 +1958,7 @@ const DOMAIN_PASSTHROUGH_EXAMPLE = {
     branch: "branch list",
     template: "template view",
     change: "change list",
+    authority: "authority generate",
     mcp: "mcp serve",
 };
 /** Dispatches to root, domain, or leaf help from the canonical command model. */
@@ -1919,7 +1968,12 @@ function printHelpFor(positionals, helpValue) {
     if (helpValue === "full")
         return printFullHelp();
     const [domain, command] = positionals;
-    if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp") {
+    if (domain === "issue" ||
+        domain === "pr" ||
+        domain === "branch" ||
+        domain === "change" ||
+        domain === "authority" ||
+        domain === "mcp") {
         const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
         if (definition !== undefined && definition.domain === domain)
             return printLeafHelp(definition);
@@ -1948,6 +2002,7 @@ Domains:
   branch     Semantic Branch observation and drift checks
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
+  authority  Local Runtime Authority key generation and secure loading
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
