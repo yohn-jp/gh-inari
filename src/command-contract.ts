@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.3.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.4.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -26,7 +26,7 @@ export const RUNTIME_CAPABILITIES = [
 ] as const;
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
-export type CommandDomain = "root" | "issue" | "pr" | "branch" | "template" | "change" | "mcp" | "skill";
+export type CommandDomain = "root" | "issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -81,6 +81,7 @@ export type CommandId =
   | "change.show"
   | "change.ready"
   | "change.abort"
+  | "authority.generate"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -108,7 +109,9 @@ export type OptionId =
   | "draft"
   | "maintainerCanModify"
   | "rawBody"
-  | "capability";
+  | "capability"
+  | "privateKey"
+  | "replace";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -140,6 +143,7 @@ const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "pol
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
+const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
 const PR_CREATE_OPTIONS = [
@@ -333,6 +337,23 @@ export const COMMAND_OPTIONS = {
     "Declared target capability for Core semantic projection; repeat for multiple capabilities.",
     "id",
     true,
+  ),
+  privateKey: option(
+    "privateKey",
+    "private-key",
+    ["--private-key"],
+    "string",
+    "required",
+    "Local Runtime Authority private-key file. The file is never published or used as a GitHub credential.",
+    "path",
+  ),
+  replace: option(
+    "replace",
+    "replace",
+    ["--replace"],
+    "boolean",
+    "none",
+    "Explicitly replace an existing local Runtime Authority private-key file.",
   ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
@@ -790,6 +811,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "authority.generate",
+    "authority",
+    "generate",
+    ["authority", "generate"],
+    "Generate and securely persist a local Ed25519 Runtime Authority keypair.",
+    AUTHORITY_OPTIONS,
+  ),
+  command(
     "mcp.serve",
     "mcp",
     "serve",
@@ -957,7 +986,9 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string 
   return `${commandInvocation(id)} <template>`;
 }
 
-export function helpInvocation(domain: "issue" | "pr" | "branch" | "template" | "change" | "mcp" | "skill"): string {
+export function helpInvocation(
+  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp" | "skill",
+): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
 
@@ -1035,7 +1066,14 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     return { ...full, commands: full.commands.filter((entry) => entry.id === commandId) };
   }
   const domain = positionals[0];
-  if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp")
+  if (
+    domain === "issue" ||
+    domain === "pr" ||
+    domain === "branch" ||
+    domain === "change" ||
+    domain === "authority" ||
+    domain === "mcp"
+  )
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
   if (domain === "template") return { ...full, commands: full.commands.filter((entry) => entry.domain === "template") };
   if (domain === "skill") return { ...full, commands: full.commands.filter((entry) => entry.domain === "skill") };

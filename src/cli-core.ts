@@ -92,6 +92,7 @@ import {
   commandRecoveryInvocation,
   commandTemplateSchemaInvocation,
   commandUsage,
+  getCommand,
   getCommandForPositionals,
   getDomainCommands,
   getOption,
@@ -119,6 +120,11 @@ import {
   tryProjectSemanticIssue,
 } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
+import {
+  canonicalRuntimeAuthorityPublicKeyJson,
+  defaultRuntimeAuthorityPrivateKeyPath,
+  generateAndPersistRuntimeAuthorityKeyPair,
+} from "./agent-authority/runtime-key.js";
 import {
   compareSemanticIssueProjection,
   tryObserveSemanticIssue,
@@ -213,6 +219,7 @@ const BOOLEAN_OPTIONS = new Set([
   "compact",
   "check",
   "dryRun",
+  "replace",
 ]);
 const VALUE_OPTIONS = new Set([
   "from",
@@ -225,6 +232,7 @@ const VALUE_OPTIONS = new Set([
   "to",
   "requireCapability",
   "minimumVersion",
+  "privateKey",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -304,6 +312,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
+    }
+    if (domain === "authority") {
+      return runAuthorityCommand(command, rest, parsed, root, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -790,6 +801,60 @@ function runSkillCommand(scenarioId: string | undefined, json: boolean): number 
   const observedBytes = Buffer.byteLength(output, "utf8");
   if (observedBytes > MAX_SKILL_OUTPUT_BYTES) throw skillOutputExceedsBudgetError(scenarioId, observedBytes);
   console.log(output);
+  return 0;
+}
+
+function rejectUnsupportedAuthorityOptions(
+  options: Readonly<Record<string, string | boolean>>,
+  capabilities: readonly string[],
+): void {
+  if (capabilities.length > 0) {
+    throw new CliError("INVALID_OPTION", "Option --capability is not supported by authority commands.", "--capability");
+  }
+  const definition = getCommand("authority.generate");
+  const unsupported = Object.keys(options).find((id) => !definition.optionIds.includes(id as OptionId));
+  if (unsupported === undefined) return;
+  const option = getOption(unsupported as OptionId);
+  throw new CliError(
+    "INVALID_OPTION",
+    `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority generate.`,
+    "$argv",
+    { command: "authority generate", option: option.id },
+  );
+}
+
+function runAuthorityCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  json: boolean,
+): number {
+  if (command !== "generate" || rest.length > 0) {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
+  }
+  rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
+  const requestedPath = parsed.options.privateKey;
+  const privateKeyPath =
+    typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
+  const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
+    replace: parsed.options.replace === true,
+  });
+  const output = {
+    ok: true,
+    operation: "authority.generate",
+    privateKeyPath,
+    publicKey: pair.publicKeyJwk,
+    publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
+    repositoryTrustChanged: false,
+  } as const;
+  if (json) console.log(JSON.stringify(output));
+  else {
+    console.log("Generated local Runtime Authority keypair.");
+    console.log(`Private key: ${privateKeyPath}`);
+    console.log(`Public key: ${output.publicKeyJson}`);
+    console.log("Repository trust was not modified.");
+  }
   return 0;
 }
 
@@ -2459,6 +2524,7 @@ function classifyExitCode(error: unknown): number {
     return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("SEMANTIC_PR_EXECUTION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
@@ -2484,6 +2550,7 @@ function isOwnedInvocation(argv: readonly string[]): boolean {
       first === "branch" ||
       first === "template" ||
       first === "change" ||
+      first === "authority" ||
       first === "mcp") &&
     positionals.length === 1
   )
@@ -2553,22 +2620,31 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<Record<"issue" | "pr" | "branch" | "template" | "change" | "mcp", string>> =
-  {
-    issue: "issue list",
-    pr: "pr checks",
-    branch: "branch list",
-    template: "template view",
-    change: "change list",
-    mcp: "mcp serve",
-  };
+const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<
+  Record<"issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp", string>
+> = {
+  issue: "issue list",
+  pr: "pr checks",
+  branch: "branch list",
+  template: "template view",
+  change: "change list",
+  authority: "authority generate",
+  mcp: "mcp serve",
+};
 
 /** Dispatches to root, domain, or leaf help from the canonical command model. */
 function printHelpFor(positionals: readonly string[], helpValue: string | boolean | undefined): void {
   if (helpValue === "json") return console.log(JSON.stringify(projectCommandHelp(positionals)));
   if (helpValue === "full") return printFullHelp();
   const [domain, command] = positionals;
-  if (domain === "issue" || domain === "pr" || domain === "branch" || domain === "change" || domain === "mcp") {
+  if (
+    domain === "issue" ||
+    domain === "pr" ||
+    domain === "branch" ||
+    domain === "change" ||
+    domain === "authority" ||
+    domain === "mcp"
+  ) {
     const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
     if (definition !== undefined && definition.domain === domain) return printLeafHelp(definition);
     return printDomainHelp(domain);
@@ -2595,6 +2671,7 @@ Domains:
   branch     Semantic Branch observation and drift checks
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
+  authority  Local Runtime Authority key generation and secure loading
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
@@ -2605,7 +2682,7 @@ Run \`inari --help=full\` for the complete command and option reference.
 Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime checks.`);
 }
 
-function printDomainHelp(domain: "issue" | "pr" | "branch" | "template" | "change" | "mcp"): void {
+function printDomainHelp(domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp"): void {
   const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
 
