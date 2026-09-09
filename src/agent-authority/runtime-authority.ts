@@ -26,6 +26,10 @@ export type RuntimeAuthorityContractVersion = typeof RUNTIME_AUTHORITY_CONTRACT_
 
 export const RUNTIME_AUTHORITY_KIND = "runtime-authority" as const;
 
+/** Repository-native trust-artifact location on the authoritative protected ref. */
+export const RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY = ".github/inari/authorities" as const;
+export const RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX = `${RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY}/` as const;
+
 export const RUNTIME_AUTHORITY_STATUSES = Object.freeze(["active", "disabled"] as const);
 export type RuntimeAuthorityStatus = (typeof RUNTIME_AUTHORITY_STATUSES)[number];
 
