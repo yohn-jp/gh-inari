@@ -21,6 +21,9 @@ import { type CapabilityKind } from "./capability.js";
 export declare const RUNTIME_AUTHORITY_CONTRACT_VERSION: 1;
 export type RuntimeAuthorityContractVersion = typeof RUNTIME_AUTHORITY_CONTRACT_VERSION;
 export declare const RUNTIME_AUTHORITY_KIND: "runtime-authority";
+/** Repository-native trust-artifact location on the authoritative protected ref. */
+export declare const RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY: ".github/inari/authorities";
+export declare const RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX: ".github/inari/authorities/";
 export declare const RUNTIME_AUTHORITY_STATUSES: readonly ["active", "disabled"];
 export type RuntimeAuthorityStatus = (typeof RUNTIME_AUTHORITY_STATUSES)[number];
 /** A trust record identifies its signer; bounded to a safe, `kid`-compatible identifier. */

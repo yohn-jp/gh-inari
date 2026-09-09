@@ -21,6 +21,9 @@ import { canonicalJsonString } from "./codec.js";
 import { CAPABILITY_KINDS, isCapabilityKind } from "./capability.js";
 export const RUNTIME_AUTHORITY_CONTRACT_VERSION = 1;
 export const RUNTIME_AUTHORITY_KIND = "runtime-authority";
+/** Repository-native trust-artifact location on the authoritative protected ref. */
+export const RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY = ".github/inari/authorities";
+export const RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX = `${RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY}/`;
 export const RUNTIME_AUTHORITY_STATUSES = Object.freeze(["active", "disabled"]);
 /** A trust record identifies its signer; bounded to a safe, `kid`-compatible identifier. */
 export const MAX_RUNTIME_AUTHORITY_ID_LENGTH = 128;
