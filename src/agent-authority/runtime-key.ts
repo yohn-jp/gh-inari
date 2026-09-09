@@ -229,9 +229,19 @@ function descriptorPath(fd: number, child?: string): string | undefined {
   return child === undefined ? path.join(root, String(fd)) : path.join(root, String(fd), child);
 }
 
+function requiredDescriptorPath(fd: number, child?: string): string {
+  const result = descriptorPath(fd, child);
+  if (result === undefined) {
+    throw safeKeyError(
+      "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+      "This platform cannot safely anchor Runtime key paths to a directory descriptor.",
+    );
+  }
+  return result;
+}
+
 interface SecureDirectoryHandle {
   readonly fd: number;
-  readonly absolutePath: string;
 }
 
 function directoryOpenFlags(noFollow: number): number {
@@ -251,7 +261,29 @@ function closeQuietly(fd: number | undefined): void {
 function openAndValidateAncestorDirectory(directoryPath: string, noFollow: number): number {
   let fd: number;
   try {
+    // This opens an existing directory only; O_DIRECTORY|O_NOFOLLOW plus fstat
+    // makes it a stable ancestor descriptor.
+    // lgtm [js/insecure-temporary-file]
     fd = openSync(directoryPath, directoryOpenFlags(noFollow));
+  } catch {
+    throw safeKeyError(
+      "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
+      "Runtime Authority key path contains an unsafe ancestor directory.",
+    );
+  }
+  try {
+    assertSafeAncestorDirectoryStat(fstatSync(fd));
+    return fd;
+  } catch (error: unknown) {
+    closeQuietly(fd);
+    throw error;
+  }
+}
+
+function openRootDirectory(root: string, noFollow: number): number {
+  let fd: number;
+  try {
+    fd = openSync(root, directoryOpenFlags(noFollow));
   } catch {
     throw safeKeyError(
       "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE",
@@ -272,8 +304,7 @@ function openSecureKeyDirectory(directory: string, createMissing: boolean): Secu
   const root = path.parse(targetDirectory).root;
   const noFollow = noFollowFlag();
   let current: SecureDirectoryHandle = {
-    fd: openAndValidateAncestorDirectory(root, noFollow),
-    absolutePath: root,
+    fd: openRootDirectory(root, noFollow),
   };
   const components = path
     .relative(root, targetDirectory)
@@ -282,8 +313,7 @@ function openSecureKeyDirectory(directory: string, createMissing: boolean): Secu
 
   try {
     for (const component of components) {
-      const absoluteChild = path.join(current.absolutePath, component);
-      const childPath = descriptorPath(current.fd, component) ?? absoluteChild;
+      const childPath = requiredDescriptorPath(current.fd, component);
       let childFd: number;
       try {
         childFd = openAndValidateAncestorDirectory(childPath, noFollow);
@@ -307,7 +337,7 @@ function openSecureKeyDirectory(directory: string, createMissing: boolean): Secu
         childFd = openAndValidateAncestorDirectory(childPath, noFollow);
       }
       closeQuietly(current.fd);
-      current = { fd: childFd, absolutePath: absoluteChild };
+      current = { fd: childFd };
     }
 
     assertSecureDirectoryStat(fstatSync(current.fd));
@@ -319,7 +349,7 @@ function openSecureKeyDirectory(directory: string, createMissing: boolean): Secu
 }
 
 function stableChildPath(directory: SecureDirectoryHandle, child: string): string {
-  return descriptorPath(directory.fd, child) ?? path.join(directory.absolutePath, child);
+  return requiredDescriptorPath(directory.fd, child);
 }
 
 function targetBasename(filePath: string): string {
