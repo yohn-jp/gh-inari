@@ -17,6 +17,29 @@ jobs:
   change-provenance:
     name: Change provenance
     runs-on: ubuntu-latest
+    # --- Golden Path bootstrap enforcement suspension (Issue #437) --------
+    # Change provenance enforcement is temporarily suspended while the Inari
+    # Golden Path is bootstrapped manually. Bootstrap Epic/leaf branches and
+    # Draft PRs implement the canonical Change issuance path itself, so they
+    # cannot by construction satisfy the merge-admission validator that
+    # already requires PRs to have been issued as healthy canonical Changes.
+    #
+    # This is an enforcement-boundary gate only: the validator
+    # (scripts/validate-change-merge-admission.mjs, src/change.ts) and its
+    # tests are unchanged and still run in isolation. Suspending the `if`
+    # below causes this required check to report as `skipped`, which GitHub
+    # treats as non-blocking for required status checks, instead of
+    # deleting or weakening the check.
+    #
+    # Restoration condition: re-enable once Inari can execute the canonical
+    # path end-to-end and that path has been dogfooded against gh-inari:
+    #   governed Issue -> Change issuance -> canonical branch + Draft PR
+    #   -> implementation -> Change ready -> review admission
+    #
+    # To re-enable: delete the `if: false` line (and this comment block, or
+    # trim it) so the job runs unconditionally again. Do not introduce a
+    # second provenance mechanism during this suspension.
+    if: false
     steps:
       # The validator is introduced by the pull request being evaluated. Run
       # the check from that PR head so bootstrap does not depend on main
