@@ -176,6 +176,20 @@ class ReadTransport implements GitHubChangeEffectTransport {
         : { status: 404, body: { message: "Not Found" } };
     }
     if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
+    if (request.path.endsWith("pulls/2190")) {
+      return {
+        status: 200,
+        body: {
+          number: 2190,
+          head: { ref: "manual/branch" },
+          base: { ref: "main" },
+          state: "open",
+          draft: true,
+          merged_at: null,
+          user: { login: "human" },
+        },
+      };
+    }
     if (request.path.includes("pulls?state=all")) {
       return { status: 200, body: this.options.pullRequests ?? [] };
     }
@@ -237,6 +251,103 @@ test("merge-boundary evidence retains the observed PR even when its branch is no
       },
     ],
   });
+});
+
+class CanonicalPullRequestLookupTransport implements GitHubChangeEffectTransport {
+  readonly calls: GitHubChangeEffectRequest[] = [];
+
+  constructor(private readonly pullRequests: readonly unknown[]) {}
+
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    this.calls.push(request);
+    if (request.path.endsWith("repos/acme/inari")) {
+      return { status: 200, body: { id: 218000001, default_branch: "main" } };
+    }
+    if (request.path.endsWith("issues/218")) {
+      return {
+        status: 200,
+        body: { number: 218, title: "feat: Execute Change plans safely", state: "open" },
+      };
+    }
+    if (request.path.includes("git/ref/heads/feat%2F218-execute-change-plans-safely")) {
+      return { status: 404, body: { message: "Not Found" } };
+    }
+    if (request.path.includes("git/matching-refs/heads/")) return { status: 200, body: [] };
+    if (request.path.includes("pulls?state=all&head=")) {
+      return { status: 200, body: this.pullRequests };
+    }
+    if (request.path.includes("pulls?state=all&per_page=")) {
+      throw new Error("unfiltered pull-request enumeration is not allowed");
+    }
+    throw new Error(`unexpected read: ${request.path}`);
+  }
+}
+
+test("canonical PR lookup is independent of repository PR ordering", async () => {
+  const transport = new CanonicalPullRequestLookupTransport([
+    {
+      number: 2180,
+      head: { ref: "feat/218-execute-change-plans-safely" },
+      base: { ref: "main" },
+      state: "open",
+      draft: true,
+      merged_at: null,
+      user: { login: "inari-issuer[bot]" },
+    },
+  ]);
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+
+  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+
+  assert.deepEqual(result.evidence.pullRequests, {
+    status: "available",
+    value: [
+      {
+        number: 2180,
+        head: "feat/218-execute-change-plans-safely",
+        base: "main",
+        state: "open",
+        draft: true,
+        merged: false,
+        provenance: { issuer: INARI_ISSUER_PRINCIPAL },
+      },
+    ],
+  });
+  assert.equal(
+    transport.calls.some((request) =>
+      request.path.includes(
+        "pulls?state=all&head=acme%3Afeat%2F218-execute-change-plans-safely&base=main&per_page=100",
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    transport.calls.some((request) => request.path === "repos/acme/inari/pulls?state=all&per_page=100"),
+    false,
+  );
+});
+
+test("canonical PR lookup reports bounded incomplete evidence", async () => {
+  const transport = new CanonicalPullRequestLookupTransport(Array.from({ length: 100 }, () => null));
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+
+  await assert.rejects(
+    () => reader.read(changeRemoteMutationRequest("issue", 218)),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError &&
+      error.details?.stage === "repository-evidence" &&
+      error.details.reason === "pull-request-evidence",
+  );
 });
 
 test("Actions evidence reader accepts multiline Issue bodies while preserving single-line validation", async () => {
@@ -950,6 +1061,7 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
     "repository-body",
     "repository-id",
     "repository-fork",
+    "pull-request-evidence",
   ]);
   for (const reason of REPOSITORY_EVIDENCE_FAILURE_REASONS) {
     assert.equal(isRepositoryEvidenceFailureReason(reason), true);

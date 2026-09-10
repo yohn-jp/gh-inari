@@ -52,6 +52,7 @@ const REPORT_DIAGNOSTIC_CODES = new Set([
   "CHANGE_ADMISSION_INVALID",
   "CHANGE_MERGE_ADMISSION_UNAVAILABLE",
   "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE",
+  "CHANGE_MERGE_ADMISSION_PULL_REQUEST_EVIDENCE_INCOMPLETE",
   "CHANGE_MERGE_ADMISSION_CLASSIFICATION_INVALID",
   "CHANGE_MERGE_ADMISSION_ROOT_ISSUE_INVALID",
   "CHANGE_MERGE_ADMISSION_EVENT_INVALID",
@@ -112,15 +113,21 @@ function boundedDiagnostics(values) {
   return result;
 }
 
-function failureReport(code = "CHANGE_MERGE_ADMISSION_UNAVAILABLE", classification = "unclassified", failure) {
+export function failureReport(code = "CHANGE_MERGE_ADMISSION_UNAVAILABLE", classification = "unclassified", failure) {
+  const failureCode =
+    failure?.reason === "pull-request-evidence"
+      ? "CHANGE_MERGE_ADMISSION_PULL_REQUEST_EVIDENCE_INCOMPLETE"
+      : "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE";
   const failureDiagnostics =
     failure === undefined
       ? []
       : [
           diagnostic(
-            "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE",
+            failureCode,
             "$.failure",
-            "Change merge admission failed at a bounded internal stage.",
+            failureCode === "CHANGE_MERGE_ADMISSION_PULL_REQUEST_EVIDENCE_INCOMPLETE"
+              ? "Bounded canonical pull-request evidence was incomplete or exhausted."
+              : "Change merge admission failed at a bounded internal stage.",
           ),
           ...(failure.diagnostics ?? []),
         ];
@@ -146,6 +153,7 @@ function failureMetadata(error, fallbackStage) {
   if (isRecord(error) && isRecord(error.details)) {
     if (isTrustedActionsFailureStage(error.details.stage)) stage = error.details.stage;
     if (isRepositoryEvidenceFailureReason(error.details.reason)) reason = error.details.reason;
+    if (reason === "pull-request-evidence") stage = "pull-request-evidence";
     if (isChangeTrustedExecutorErrorCode(error.details.trustedCode)) trustedCode = error.details.trustedCode;
     if (Array.isArray(error.details.diagnostics)) diagnostics = error.details.diagnostics;
   }

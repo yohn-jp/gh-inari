@@ -24,7 +24,8 @@ import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 import { validateSemanticPullRequestMutationPlan, } from "../semantic-pr-projection.js";
 const MAX_RESPONSE_BYTES = 1_048_576;
-const MAX_PULL_REQUESTS = 100;
+const MAX_BRANCH_MATCHES = 100;
+const MAX_CANONICAL_PULL_REQUEST_MATCHES = 100;
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"];
 const MAX_TITLE_LENGTH = 255;
 const MAX_LOGIN_LENGTH = 160;
@@ -49,8 +50,8 @@ export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
 ]);
 /**
  * Bounded, secret-safe reasons within the `repository-evidence` stage. Fixed at the
- * exact repository-bootstrap boundary that failed so #239-class dogfood failures no
- * longer collapse into one undifferentiated stage (issue #244).
+ * exact repository read boundary that failed so evidence failures do not collapse
+ * into one undifferentiated stage.
  */
 export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
     "repository-configuration",
@@ -59,6 +60,7 @@ export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
     "repository-body",
     "repository-id",
     "repository-fork",
+    "pull-request-evidence",
 ]);
 export function isRepositoryEvidenceFailureReason(value) {
     return REPOSITORY_EVIDENCE_FAILURE_REASONS.includes(value);
@@ -602,7 +604,7 @@ export class GitHubActionsEvidenceReader {
             });
         const derivedBranch = derivation?.valid === true ? derivation.branch : undefined;
         const branches = await this.readBranches(derivedBranch);
-        const pullRequests = await this.readPullRequests(derivedBranch, branches.some((candidate) => candidate.rootIssue !== undefined));
+        const pullRequests = await this.readPullRequests(derivedBranch, baseBranch, branches).catch(atRepositoryEvidenceReason("pull-request-evidence"));
         const anchoredBranches = new Set([
             ...branches.filter((candidate) => candidate.rootIssue === request.issue).map((candidate) => candidate.name),
             ...pullRequests.filter((candidate) => candidate.rootIssue === request.issue).map((candidate) => candidate.head),
@@ -916,7 +918,7 @@ export class GitHubActionsEvidenceReader {
         });
         if (response.status === 404)
             return [...branches].map(([name, sha]) => ({ name, ...(sha === undefined ? {} : { sha }) }));
-        if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
+        if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_BRANCH_MATCHES) {
             throw new GitHubActionsChangeExecutorError();
         }
         for (const candidate of response.body) {
@@ -942,54 +944,84 @@ export class GitHubActionsEvidenceReader {
             }
             : { name, ...(branches.get(name) === undefined ? {} : { sha: branches.get(name) }) });
     }
-    async readPullRequests(derivedBranch, hasHistoricalBranch) {
-        const response = await this.#options.transport.request({
-            hostname: this.#options.repository.hostname,
-            method: "GET",
-            path: apiPath(this.#options.repository, `pulls?state=all&per_page=${MAX_PULL_REQUESTS}`),
-        });
-        if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
-            throw new GitHubActionsChangeExecutorError();
-        }
-        const pullRequests = response.body.flatMap((candidate) => {
-            const value = record(candidate);
-            const head = record(value.head);
-            const base = record(value.base);
-            const user = record(value.user);
-            const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
-            if (state === undefined || typeof value.draft !== "boolean")
+    async readPullRequests(derivedBranch, baseBranch, branches) {
+        const candidateBranches = new Set(branches.map((candidate) => candidate.name));
+        if (derivedBranch !== undefined)
+            candidateBranches.add(derivedBranch);
+        const orderedBranches = [...candidateBranches].sort();
+        const hasHistoricalBranch = branches.some((candidate) => candidate.rootIssue !== undefined);
+        const pullRequests = [];
+        for (const branch of orderedBranches) {
+            const response = await this.#options.transport.request({
+                hostname: this.#options.repository.hostname,
+                method: "GET",
+                path: apiPath(this.#options.repository, `pulls?state=all&head=${encodeURIComponent(`${this.#options.repository.owner}:${branch}`)}&base=${encodeURIComponent(baseBranch)}&per_page=${MAX_CANONICAL_PULL_REQUEST_MATCHES}`),
+            });
+            if (response.status !== 200 ||
+                !Array.isArray(response.body) ||
+                response.body.length >= MAX_CANONICAL_PULL_REQUEST_MATCHES) {
                 throw new GitHubActionsChangeExecutorError();
-            const number = positiveNumber(value.number);
-            const login = boundedString(user.login, MAX_LOGIN_LENGTH);
-            const headName = boundedString(head.ref, 255);
-            if (head.repo !== undefined && head.repo !== null) {
-                const headRepository = record(head.repo);
-                if (headRepository.full_name !== `${this.#options.repository.owner}/${this.#options.repository.name}`) {
-                    return [];
-                }
             }
-            const isObservedPullRequest = number === this.#options.pullRequestNumber;
-            if (!isObservedPullRequest &&
-                !branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
-                return [];
+            for (const candidate of response.body) {
+                const parsed = this.parsePullRequestEvidence(candidate, branch, false);
+                if (parsed !== undefined)
+                    pullRequests.push(parsed);
             }
-            return [
-                {
-                    number,
-                    head: headName,
-                    base: boundedString(base.ref, 255),
-                    state,
-                    draft: value.draft,
-                    ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
-                    provenance: { issuer: issuerPrincipal(login) },
-                    ...(isObservedPullRequest ? { rootIssue: this.#options.identity.rootIssue } : {}),
-                },
-            ];
-        });
+        }
+        if (this.#options.pullRequestNumber !== undefined) {
+            const response = await this.#options.transport.request({
+                hostname: this.#options.repository.hostname,
+                method: "GET",
+                path: apiPath(this.#options.repository, `pulls/${this.#options.pullRequestNumber}`),
+            });
+            if (response.status !== 200)
+                throw new GitHubActionsChangeExecutorError();
+            const observed = this.parsePullRequestEvidence(response.body, undefined, true);
+            if (observed !== undefined && !pullRequests.some((candidate) => candidate.number === observed.number)) {
+                pullRequests.push(observed);
+            }
+        }
         const hasHistoricalCandidate = hasHistoricalBranch || pullRequests.some((candidate) => candidate.head !== derivedBranch);
         return pullRequests.map((candidate) => hasHistoricalCandidate || candidate.head !== derivedBranch
             ? { ...candidate, rootIssue: this.#options.identity.rootIssue }
             : candidate);
+    }
+    parsePullRequestEvidence(candidate, expectedHead, observed) {
+        const value = record(candidate);
+        const head = record(value.head);
+        const base = record(value.base);
+        const user = record(value.user);
+        const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
+        if (state === undefined || typeof value.draft !== "boolean")
+            throw new GitHubActionsChangeExecutorError();
+        const number = positiveNumber(value.number);
+        if (observed && this.#options.pullRequestNumber !== undefined && number !== this.#options.pullRequestNumber) {
+            throw new GitHubActionsChangeExecutorError();
+        }
+        const login = boundedString(user.login, MAX_LOGIN_LENGTH);
+        const headName = boundedString(head.ref, 255);
+        if (expectedHead !== undefined && headName !== expectedHead)
+            return undefined;
+        if (head.repo !== undefined && head.repo !== null) {
+            const headRepository = record(head.repo);
+            if (headRepository.full_name !== `${this.#options.repository.owner}/${this.#options.repository.name}`) {
+                return undefined;
+            }
+        }
+        if (!observed &&
+            !branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)) {
+            return undefined;
+        }
+        return {
+            number,
+            head: headName,
+            base: boundedString(base.ref, 255),
+            state,
+            draft: value.draft,
+            ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
+            provenance: { issuer: issuerPrincipal(login) },
+            ...(observed ? { rootIssue: this.#options.identity.rootIssue } : {}),
+        };
     }
     async request(request, expected) {
         const response = await this.#options.transport.request({

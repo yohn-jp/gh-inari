@@ -86,7 +86,8 @@ import {
 } from "../semantic-pr-projection.js";
 
 const MAX_RESPONSE_BYTES = 1_048_576;
-const MAX_PULL_REQUESTS = 100;
+const MAX_BRANCH_MATCHES = 100;
+const MAX_CANONICAL_PULL_REQUEST_MATCHES = 100;
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
 const MAX_TITLE_LENGTH = 255;
 const MAX_LOGIN_LENGTH = 160;
@@ -115,8 +116,8 @@ export type TrustedActionsFailureStage = (typeof TRUSTED_ACTIONS_FAILURE_STAGES)
 
 /**
  * Bounded, secret-safe reasons within the `repository-evidence` stage. Fixed at the
- * exact repository-bootstrap boundary that failed so #239-class dogfood failures no
- * longer collapse into one undifferentiated stage (issue #244).
+ * exact repository read boundary that failed so evidence failures do not collapse
+ * into one undifferentiated stage.
  */
 export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
   "repository-configuration",
@@ -125,6 +126,7 @@ export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
   "repository-body",
   "repository-id",
   "repository-fork",
+  "pull-request-evidence",
 ] as const);
 export type RepositoryEvidenceFailureReason = (typeof REPOSITORY_EVIDENCE_FAILURE_REASONS)[number];
 
@@ -775,9 +777,8 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
           });
     const derivedBranch = derivation?.valid === true ? derivation.branch : undefined;
     const branches = await this.readBranches(derivedBranch);
-    const pullRequests = await this.readPullRequests(
-      derivedBranch,
-      branches.some((candidate) => candidate.rootIssue !== undefined),
+    const pullRequests = await this.readPullRequests(derivedBranch, baseBranch, branches).catch(
+      atRepositoryEvidenceReason("pull-request-evidence"),
     );
     const anchoredBranches = new Set<string>([
       ...branches.filter((candidate) => candidate.rootIssue === request.issue).map((candidate) => candidate.name),
@@ -1111,7 +1112,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     });
     if (response.status === 404)
       return [...branches].map(([name, sha]) => ({ name, ...(sha === undefined ? {} : { sha }) }));
-    if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
+    if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_BRANCH_MATCHES) {
       throw new GitHubActionsChangeExecutorError();
     }
     for (const candidate of response.body) {
@@ -1140,52 +1141,50 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
 
   private async readPullRequests(
     derivedBranch: string | undefined,
-    hasHistoricalBranch: boolean,
+    baseBranch: string,
+    branches: readonly ChangeBranchEvidence[],
   ): Promise<readonly ChangePullRequestEvidence[]> {
-    const response = await this.#options.transport.request({
-      hostname: this.#options.repository.hostname,
-      method: "GET",
-      path: apiPath(this.#options.repository, `pulls?state=all&per_page=${MAX_PULL_REQUESTS}`),
-    });
-    if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_PULL_REQUESTS) {
-      throw new GitHubActionsChangeExecutorError();
-    }
-    const pullRequests = response.body.flatMap((candidate): ChangePullRequestEvidence[] => {
-      const value = record(candidate);
-      const head = record(value.head);
-      const base = record(value.base);
-      const user = record(value.user);
-      const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
-      if (state === undefined || typeof value.draft !== "boolean") throw new GitHubActionsChangeExecutorError();
-      const number = positiveNumber(value.number);
-      const login = boundedString(user.login, MAX_LOGIN_LENGTH);
-      const headName = boundedString(head.ref, 255);
-      if (head.repo !== undefined && head.repo !== null) {
-        const headRepository = record(head.repo);
-        if (headRepository.full_name !== `${this.#options.repository.owner}/${this.#options.repository.name}`) {
-          return [];
-        }
-      }
-      const isObservedPullRequest = number === this.#options.pullRequestNumber;
+    const candidateBranches = new Set(branches.map((candidate) => candidate.name));
+    if (derivedBranch !== undefined) candidateBranches.add(derivedBranch);
+    const orderedBranches = [...candidateBranches].sort();
+    const hasHistoricalBranch = branches.some((candidate) => candidate.rootIssue !== undefined);
+    const pullRequests: ChangePullRequestEvidence[] = [];
+
+    for (const branch of orderedBranches) {
+      const response = await this.#options.transport.request({
+        hostname: this.#options.repository.hostname,
+        method: "GET",
+        path: apiPath(
+          this.#options.repository,
+          `pulls?state=all&head=${encodeURIComponent(`${this.#options.repository.owner}:${branch}`)}&base=${encodeURIComponent(baseBranch)}&per_page=${MAX_CANONICAL_PULL_REQUEST_MATCHES}`,
+        ),
+      });
       if (
-        !isObservedPullRequest &&
-        !branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)
+        response.status !== 200 ||
+        !Array.isArray(response.body) ||
+        response.body.length >= MAX_CANONICAL_PULL_REQUEST_MATCHES
       ) {
-        return [];
+        throw new GitHubActionsChangeExecutorError();
       }
-      return [
-        {
-          number,
-          head: headName,
-          base: boundedString(base.ref, 255),
-          state,
-          draft: value.draft,
-          ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
-          provenance: { issuer: issuerPrincipal(login) },
-          ...(isObservedPullRequest ? { rootIssue: this.#options.identity.rootIssue } : {}),
-        },
-      ];
-    });
+      for (const candidate of response.body) {
+        const parsed = this.parsePullRequestEvidence(candidate, branch, false);
+        if (parsed !== undefined) pullRequests.push(parsed);
+      }
+    }
+
+    if (this.#options.pullRequestNumber !== undefined) {
+      const response = await this.#options.transport.request({
+        hostname: this.#options.repository.hostname,
+        method: "GET",
+        path: apiPath(this.#options.repository, `pulls/${this.#options.pullRequestNumber}`),
+      });
+      if (response.status !== 200) throw new GitHubActionsChangeExecutorError();
+      const observed = this.parsePullRequestEvidence(response.body, undefined, true);
+      if (observed !== undefined && !pullRequests.some((candidate) => candidate.number === observed.number)) {
+        pullRequests.push(observed);
+      }
+    }
+
     const hasHistoricalCandidate =
       hasHistoricalBranch || pullRequests.some((candidate) => candidate.head !== derivedBranch);
     return pullRequests.map((candidate) =>
@@ -1193,6 +1192,48 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
         ? { ...candidate, rootIssue: this.#options.identity.rootIssue }
         : candidate,
     );
+  }
+
+  private parsePullRequestEvidence(
+    candidate: unknown,
+    expectedHead: string | undefined,
+    observed: boolean,
+  ): ChangePullRequestEvidence | undefined {
+    const value = record(candidate);
+    const head = record(value.head);
+    const base = record(value.base);
+    const user = record(value.user);
+    const state = value.state === "open" || value.state === "closed" ? value.state : undefined;
+    if (state === undefined || typeof value.draft !== "boolean") throw new GitHubActionsChangeExecutorError();
+    const number = positiveNumber(value.number);
+    if (observed && this.#options.pullRequestNumber !== undefined && number !== this.#options.pullRequestNumber) {
+      throw new GitHubActionsChangeExecutorError();
+    }
+    const login = boundedString(user.login, MAX_LOGIN_LENGTH);
+    const headName = boundedString(head.ref, 255);
+    if (expectedHead !== undefined && headName !== expectedHead) return undefined;
+    if (head.repo !== undefined && head.repo !== null) {
+      const headRepository = record(head.repo);
+      if (headRepository.full_name !== `${this.#options.repository.owner}/${this.#options.repository.name}`) {
+        return undefined;
+      }
+    }
+    if (
+      !observed &&
+      !branchBelongsToRootIssue(headName, this.#options.identity.rootIssue, this.#options.branchGovernance)
+    ) {
+      return undefined;
+    }
+    return {
+      number,
+      head: headName,
+      base: boundedString(base.ref, 255),
+      state,
+      draft: value.draft,
+      ...(state === "closed" ? { merged: mergedStateFromGitHubEvidence(value.merged_at) } : { merged: false }),
+      provenance: { issuer: issuerPrincipal(login) },
+      ...(observed ? { rootIssue: this.#options.identity.rootIssue } : {}),
+    };
   }
 
   private async request(request: Omit<GitHubChangeEffectRequest, "hostname">, expected: number): Promise<unknown> {
