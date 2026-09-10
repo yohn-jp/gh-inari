@@ -236,7 +236,7 @@ export class GitHubAdapter {
     const result = await this.runCommand(
       [
         "api",
-        `repos/${context.nameWithOwner}/${repositoryPath}`,
+        `repos/${context.nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
         "--hostname",
         context.hostname,
         "--method",

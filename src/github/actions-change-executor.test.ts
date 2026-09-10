@@ -332,6 +332,54 @@ test("canonical PR lookup is independent of repository PR ordering", async () =>
   );
 });
 
+test("canonical PR lookup does not fail when repository history hits the legacy 100-item bound", async () => {
+  const canonical = {
+    number: 2180,
+    head: { ref: "feat/218-execute-change-plans-safely" },
+    base: { ref: "main" },
+    state: "open",
+    draft: true,
+    merged_at: null,
+    user: { login: "inari-issuer[bot]" },
+  };
+  const transport = new (class extends CanonicalPullRequestLookupTransport {
+    override async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+      if (request.path === "repos/acme/inari/pulls?state=all&per_page=100") {
+        return { status: 200, body: Array.from({ length: 100 }, () => null) };
+      }
+      return super.request(request);
+    }
+  })([canonical]);
+
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    transport,
+  });
+
+  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+
+  assert.deepEqual(result.evidence.pullRequests, {
+    status: "available",
+    value: [
+      {
+        number: 2180,
+        head: "feat/218-execute-change-plans-safely",
+        base: "main",
+        state: "open",
+        draft: true,
+        merged: false,
+        provenance: { issuer: INARI_ISSUER_PRINCIPAL },
+      },
+    ],
+  });
+  assert.equal(
+    transport.calls.some((request) => request.path.endsWith("pulls?state=all&per_page=100")),
+    false,
+  );
+});
+
 test("canonical PR lookup reports bounded incomplete evidence", async () => {
   const transport = new CanonicalPullRequestLookupTransport(Array.from({ length: 100 }, () => null));
   const reader = new GitHubActionsEvidenceReader({

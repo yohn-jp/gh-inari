@@ -493,6 +493,29 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   );
 });
 
+test("reads the repository root without adding a trailing slash", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, 'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":100000157,"default_branch":"main"}'),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const response = await adapter.requestRepositoryApi("");
+
+  assert.deepEqual(response, { status: 200, body: { id: 100000157, default_branch: "main" } });
+  assert.deepEqual(transport.calls.at(-1)?.args, [
+    "api",
+    "repos/acme/inari",
+    "--hostname",
+    "github.com",
+    "--method",
+    "GET",
+    "--include",
+  ]);
+});
+
 test("rejects missing and non-boolean pull request draft response fields", async () => {
   for (const draft of [undefined, null, "false", 0]) {
     const transport = new StubGhTransport([
