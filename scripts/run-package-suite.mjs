@@ -336,9 +336,9 @@ export function validateCodexPluginMetadata(packageJson, manifest, marketplace) 
 // Validates the repo marketplace -> npm package -> Codex Plugin manifest ->
 // Skill distribution contract, confirms the declared Skill path resolves
 // inside the package and is included in the packed tarball, and confirms the
-// Skill routes to `inari skill` rather than duplicating the scenario
-// playbooks it must stay thin against. Imports `dist/skill.js` (not
-// `src/skill.ts`) so this check runs against the same build the tarball ships.
+// Skill routes to `inari skill` rather than duplicating playbooks. The actual
+// Skill command is exercised by the installed packed artifact certification;
+// this package-content check must not execute a checkout-local distribution.
 export async function validateCodexPlugin(packageJson, packedFiles) {
   const manifestPath = path.join(repoRoot, ".codex-plugin", "plugin.json");
   if (!fs.existsSync(manifestPath)) throw new Error(".codex-plugin/plugin.json is missing");
@@ -348,8 +348,6 @@ export async function validateCodexPlugin(packageJson, packedFiles) {
   if (!fs.existsSync(marketplacePath)) throw new Error(".agents/plugins/marketplace.json is missing");
   const marketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
   validateCodexPluginMetadata(packageJson, manifest, marketplace);
-
-  const { SKILL_SCENARIOS } = await import(path.join(repoRoot, "dist", "skill.js"));
 
   const skillPath = manifest.skills;
   const skillFile = path.join(repoRoot, skillPath, "SKILL.md");
@@ -365,16 +363,7 @@ export async function validateCodexPlugin(packageJson, packedFiles) {
   if (!body.includes("inari skill")) {
     throw new Error(`${skillPath}/SKILL.md must route agents to \`inari skill\` instead of duplicating playbooks`);
   }
-  for (const scenario of SKILL_SCENARIOS) {
-    // Match `inari skill <scenario-id>` regardless of Markdown formatting (backticks, code fences, plain text).
-    // Use word boundaries to avoid partial-word false matches.
-    const pattern = new RegExp(`\\binari\\s+skill\\s+${scenario.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
-    if (pattern.test(body)) {
-      throw new Error(
-        `${skillPath}/SKILL.md must not hard-code scenario "${scenario.id}"; route via \`inari skill\` only`,
-      );
-    }
-  }
+  // Scenario routing is certified by the installed artifact harness below.
 }
 
 async function main() {
