@@ -8,50 +8,45 @@ concurrency:
   group: change-provenance-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  issues: read
-  pull-requests: read
+permissions: {}
 
 jobs:
   change-provenance:
     name: Change provenance
     runs-on: ubuntu-latest
     steps:
-      # The validator is introduced by the pull request being evaluated. Run
-      # the check from that PR head so bootstrap does not depend on main
-      # already containing the validator. This check has read-only token scope,
-      # matching the source-trust boundary of the repository's PR checks.
-      - name: Checkout pull request head
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: "24"
-
-      - name: Install trusted dependencies
-        run: corepack pnpm install --frozen-lockfile --ignore-scripts
-
       # --- Golden Path bootstrap enforcement suspension (Issue #437) --------
-      # See .github/change-provenance-suspended.md for why this exists and
-      # its restoration condition. This step-level gate (not a job-level
-      # `if: false`, which actionlint rejects as a constant condition) skips
-      # only the validation step; checkout/setup/install still run, so the
-      # "Change provenance" check completes as a passing, non-blocking job
-      # instead of failing. The validator itself
-      # (scripts/validate-change-merge-admission.mjs, src/change.ts) and its
-      # tests are unchanged. To re-enable enforcement, delete
-      # .github/change-provenance-suspended.md; do not introduce a second
-      # provenance mechanism during this suspension.
-      - name: Validate Change merge admission
-        if: hashFiles('.github/change-provenance-suspended.md') == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_EVENT_PATH: ${{ github.event_path }}
-        run: node --import tsx scripts/validate-change-merge-admission.mjs --event "$GITHUB_EVENT_PATH"
+      #
+      # Change provenance enforcement is temporarily suspended while the
+      # Inari Golden Path is bootstrapped manually: bootstrap Epic/leaf
+      # branches and Draft PRs implement the canonical Change issuance path
+      # itself, so they cannot by construction satisfy the merge-admission
+      # validator, which already requires PRs to have been issued as
+      # healthy canonical Changes.
+      #
+      # For the duration of this suspension, the job body below replaces
+      # the normal checkout / Node setup / dependency install / validate
+      # steps with a single explicit no-op, under the same "Change
+      # provenance" check identity, so branch protection sees a passing,
+      # non-blocking required check without running any of that work. The
+      # provenance validator and its tests
+      # (scripts/validate-change-merge-admission.mjs, src/change.ts, and
+      # their tests) are untouched; they are simply not invoked while this
+      # suspension is in effect.
+      #
+      # Restoration condition: once Inari can execute the canonical path
+      # end-to-end and that path has been dogfooded against gh-inari:
+      #   governed Issue -> Change issuance -> canonical branch + Draft PR
+      #   -> implementation -> Change ready -> review admission
+      #
+      # To re-enable: revert this commit (restoring the checkout/setup/
+      # install/validate steps, and the `permissions:` block they need,
+      # from version control history) so the job actually runs the
+      # validator again. The act of reverting this diff is the restoration;
+      # do not leave any trace of this suspension (comments, conditionals,
+      # marker files) behind once restored, and do not introduce a second
+      # provenance mechanism during the suspension.
+      - name: Change provenance temporarily suspended
+        run: |
+          echo "Change provenance enforcement is temporarily suspended during Inari Golden Path bootstrap (issue #437)."
+          echo "Restore by reverting this workflow change once the canonical Change issuance path has been dogfooded end-to-end against gh-inari."
