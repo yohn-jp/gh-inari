@@ -4,6 +4,8 @@ Inari (`inari`, packaged as `gh-inari`) is a governed GitHub CLI focused on repo
 
 Migrated repositories can author semantic template contracts under `.github/inari/` and regenerate the committed GitHub-native projections with `inari template sync`; see [Semantic template authority](docs/SEMANTIC_TEMPLATES.md).
 
+The normative end-to-end composition over those authorities is defined in [Inari Golden Path Architecture](docs/GOLDEN_PATH_ARCHITECTURE.md).
+
 ## Install and invoke
 
 The canonical agent- and human-facing surface is the `inari` executable from
