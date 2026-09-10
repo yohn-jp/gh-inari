@@ -16,10 +16,10 @@ export declare const TRUSTED_ACTIONS_FAILURE_STAGES: readonly ["repository-evide
 export type TrustedActionsFailureStage = (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
 /**
  * Bounded, secret-safe reasons within the `repository-evidence` stage. Fixed at the
- * exact repository-bootstrap boundary that failed so #239-class dogfood failures no
- * longer collapse into one undifferentiated stage (issue #244).
+ * exact repository read boundary that failed so evidence failures do not collapse
+ * into one undifferentiated stage.
  */
-export declare const REPOSITORY_EVIDENCE_FAILURE_REASONS: readonly ["repository-configuration", "repository-request", "repository-status", "repository-body", "repository-id", "repository-fork"];
+export declare const REPOSITORY_EVIDENCE_FAILURE_REASONS: readonly ["repository-configuration", "repository-request", "repository-status", "repository-body", "repository-id", "repository-fork", "pull-request-evidence"];
 export type RepositoryEvidenceFailureReason = (typeof REPOSITORY_EVIDENCE_FAILURE_REASONS)[number];
 export declare function isRepositoryEvidenceFailureReason(value: unknown): value is RepositoryEvidenceFailureReason;
 export interface TrustedActionsFailureDiagnostic {
@@ -127,6 +127,7 @@ export declare class GitHubActionsEvidenceReader implements ChangeTrustedEvidenc
     private readBranch;
     private readBranches;
     private readPullRequests;
+    private parsePullRequestEvidence;
     private request;
 }
 export declare function loadBranchGovernance(cwd: string): Promise<PullRequestBranchGovernance | undefined>;

@@ -148,7 +148,7 @@ export class GitHubAdapter {
         const context = await this.resolveRepositoryContext();
         const result = await this.runCommand([
             "api",
-            `repos/${context.nameWithOwner}/${repositoryPath}`,
+            `repos/${context.nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
             "--hostname",
             context.hostname,
             "--method",

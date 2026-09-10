@@ -5,6 +5,7 @@ import { pullRequestContractFixture } from "../src/contract/fixtures.ts";
 import { INARI_ISSUER_PRINCIPAL } from "../src/github/issuer-authority.ts";
 import {
   classifyChangePullRequestContract,
+  failureReport,
   validateChangeMergeAdmissionEvent,
   validateGitHubPullRequestEvent,
 } from "./validate-change-merge-admission.mjs";
@@ -231,4 +232,24 @@ test("Change provenance internal failures retain only bounded stage and diagnost
     ["CHANGE_MERGE_ADMISSION_UNAVAILABLE", "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE"],
   );
   assert.doesNotMatch(JSON.stringify(result), /provider-secret-token|\/home\/runner|Bearer/iu);
+});
+
+test("bounded pull-request evidence failures retain a specific admission classification", () => {
+  const result = failureReport("CHANGE_MERGE_ADMISSION_UNAVAILABLE", "unclassified", {
+    stage: "pull-request-evidence",
+    reason: "pull-request-evidence",
+    diagnostics: [],
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.failureStage, "pull-request-evidence");
+  assert.equal(result.failureReason, "pull-request-evidence");
+  assert.deepEqual(
+    result.diagnostics.map((diagnostic) => diagnostic.code),
+    ["CHANGE_MERGE_ADMISSION_UNAVAILABLE", "CHANGE_MERGE_ADMISSION_PULL_REQUEST_EVIDENCE_INCOMPLETE"],
+  );
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_MERGE_ADMISSION_INTERNAL_FAILURE"),
+    false,
+  );
 });
