@@ -155,18 +155,22 @@ Neither choice changes the authority table or creates a new lifecycle.
 
 ### 4.1 Stages and exit conditions
 
-| Stage             | Authoritative activity                                                                                                                                                                                          | Exit condition and next action                                                                                           |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `ENVIRONMENT`     | Run the packaged executable's compatibility/capability preflight in a clean environment.                                                                                                                        | Package identity and required capabilities are verified; discover the target repository Canon.                           |
-| `GOVERNANCE`      | Resolve the target repository, immutable governance generation, Issue/PR contracts, and effective semantic inputs through existing Core discovery.                                                              | Governance is available and valid; obtain or create a governed Issue through the existing Issue path.                    |
-| `ISSUE`           | Read an existing governed Issue or create one with the existing governed Issue operation.                                                                                                                       | The root Issue is valid and eligible; its Change projection is `DEFINED`; issue the Change.                              |
-| `CHANGE_ISSUANCE` | Invoke existing Change issuance semantics: root-Issue validation, authoritative projection, Semantic Branch/PR plan admission, canonical branch creation, separate Draft PR creation, reread, and verification. | Exactly one healthy canonical branch and Draft PR exist; Change is `DRAFT`; implement on that canonical branch.          |
-| `IMPLEMENTATION`  | A worker edits, commits, and updates the already-issued working branch under the existing Change and local execution boundaries.                                                                                | Ready preconditions and required evidence are satisfied; request the governed `ready` transition.                        |
-| `READY`           | Invoke existing Change ready semantics. Core validates the projection and preconditions; XState/executor sequences the effect, rereads, and verifies.                                                           | Canonical PR is non-draft and the Change is `REVIEW`; repository review and CI become the next external activity.        |
-| `REVIEW`          | GitHub review, required checks, Rulesets, and merge admission remain repository and Change policy.                                                                                                              | The Golden Path certification target is reached. Any later accepted/merged state is observed under existing authorities. |
+| Stage            | Authoritative activity                                                                                                                                                                                          | Exit condition and next action                                                                                           |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `ENVIRONMENT`    | Run the packaged executable's compatibility/capability preflight in a clean environment.                                                                                                                        | Package identity and required capabilities are verified; discover the target repository Canon.                           |
+| `GOVERNANCE`     | Resolve the target repository, immutable governance generation, Issue/PR contracts, and effective semantic inputs through existing Core discovery.                                                              | Governance is available and valid; obtain or create a governed Issue through the existing Issue path.                    |
+| `ISSUE`          | Read an existing governed Issue or create one with the existing governed Issue operation.                                                                                                                       | The root Issue is valid and eligible; its Change projection is `DEFINED`; issue the Change.                              |
+| `CHANGE`         | Invoke existing Change issuance semantics: root-Issue validation, authoritative projection, Semantic Branch/PR plan admission, canonical branch creation, separate Draft PR creation, reread, and verification. | Exactly one healthy canonical branch and Draft PR exist; Change is `DRAFT`; implement on that canonical branch.          |
+| `IMPLEMENTATION` | A worker edits, commits, and updates the already-issued working branch under the existing Change and local execution boundaries.                                                                                | Ready preconditions and required evidence are satisfied; request the governed `ready` transition.                        |
+| `READY`          | Invoke existing Change ready semantics. Core validates the projection and preconditions; XState/executor sequences the effect, rereads, and verifies.                                                           | Canonical PR is non-draft and the Change is `REVIEW`; repository review and CI become the next external activity.        |
+| `REVIEW`         | GitHub review, required checks, Rulesets, and merge admission remain repository and Change policy.                                                                                                              | The Golden Path certification target is reached. Any later accepted/merged state is observed under existing authorities. |
 
 The stage name is a composition-level read projection, not a replacement for
 Change state. In particular:
+
+- The stage names in this table are the canonical `status.phase` vocabulary;
+  Change issuance is the activity of the `CHANGE` phase, not a second phase
+  token.
 
 - `DEFINED`, `DRAFT`, `REVIEW`, `ACCEPTED`, `MERGED`, `ABORTED`, and
   `RECOVERY_REQUIRED` retain the exact Change vocabulary;
@@ -313,6 +317,7 @@ Its `kind` is one of:
 | `RETRY`               | Repeat the named safe operation after the required reread/precondition.          |
 | `ABORT`               | Run the governed abort/cleanup transition.                                       |
 | `RECOVER`             | Run the explicitly admitted recovery action.                                     |
+| `MANUAL_REVIEW`       | Stop automated recovery and require bounded human/operator inspection.           |
 | `WAIT`                | Wait for an external repository condition such as CI or review.                  |
 
 Each object also contains:
@@ -335,6 +340,7 @@ AUTHORITATIVE_REREAD_REQUIRED
 IDEMPOTENT_RETRY
 ABORT_CLEANUP_REQUIRED
 RECOVERY_ACTION_REQUIRED
+MANUAL_RECOVERY_REVIEW_REQUIRED
 WAIT_FOR_REPOSITORY_REVIEW
 ```
 
@@ -384,8 +390,10 @@ command. A recovery result is not success and cannot be normalized to
 - `status.availability = actionable` requires one safe `nextAction` and no
   `recovery`; `blocked` and `terminal` require no `nextAction`.
 - `status.availability = recovery-required` requires non-null `recovery` and
-  one `RETRY`, `ABORT`, `RECOVER`, or `WAIT` next action whose safety is
-  justified by that recovery object.
+  one `RETRY`, `ABORT`, `RECOVER`, or `MANUAL_REVIEW` next action whose safety
+  is justified by that recovery object. The `nextAction.kind` mirrors
+  `recovery.safeAction`, with `MANUAL_REVIEW` mapping directly to
+  `MANUAL_REVIEW`.
 - `nextAction = RETRY` is valid only after the required authoritative reread or
   an explicitly read-only preflight retry.
 - A healthy `change.issue` retry exposes `executionOutcome = returned-existing`
