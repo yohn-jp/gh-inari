@@ -568,11 +568,33 @@ export class GitHubActionsEvidenceReader {
         if (request.issue !== this.#options.identity.rootIssue) {
             throw new GitHubActionsChangeExecutorError();
         }
-        const repositoryResponse = await this.request({ method: "GET", path: apiPath(this.#options.repository, "") }, 200);
-        const repository = record(repositoryResponse);
-        if (String(repository.id) !== this.#options.identity.repositoryId)
-            throw new GitHubActionsChangeExecutorError();
-        const baseBranch = boundedString(repository.default_branch, 255);
+        const repositoryResponse = await this.#options.transport
+            .request({
+            hostname: this.#options.repository.hostname,
+            method: "GET",
+            path: apiPath(this.#options.repository, ""),
+        })
+            .catch(atRepositoryEvidenceReason("repository-request"));
+        if (repositoryResponse.status !== 200) {
+            throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-status");
+        }
+        let repository;
+        try {
+            repository = record(repositoryResponse.body);
+        }
+        catch (error) {
+            throw atRepositoryEvidenceReason("repository-body")(error);
+        }
+        if (String(repository.id) !== this.#options.identity.repositoryId) {
+            throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-id");
+        }
+        let baseBranch;
+        try {
+            baseBranch = boundedString(repository.default_branch, 255);
+        }
+        catch (error) {
+            throw atRepositoryEvidenceReason("repository-body")(error);
+        }
         const issueResponse = await this.request({ method: "GET", path: apiPath(this.#options.repository, `issues/${request.issue}`) }, 200);
         const issue = record(issueResponse);
         // GitHub's Issues endpoint also returns pull-request resources. Presence of

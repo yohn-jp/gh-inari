@@ -398,6 +398,28 @@ test("canonical PR lookup reports bounded incomplete evidence", async () => {
   );
 });
 
+test("repository root read failures retain a bounded repository reason", async () => {
+  const transport = new (class extends ReadTransport {
+    override async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+      if (request.path.endsWith("repos/acme/inari")) return { status: 404, body: { message: "Not Found" } };
+      return super.request(request);
+    }
+  })();
+  const reader = new GitHubActionsEvidenceReader({
+    repository,
+    identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+    transport,
+  });
+
+  await assert.rejects(
+    () => reader.read(changeRemoteMutationRequest("issue", 218)),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError &&
+      error.details?.stage === "repository-evidence" &&
+      error.details.reason === "repository-status",
+  );
+});
+
 test("Actions evidence reader accepts multiline Issue bodies while preserving single-line validation", async () => {
   const transport = new ReadTransport({ issueBody: "## Summary\r\n\r\nfirst paragraph\nsecond paragraph" });
   const reader = new GitHubActionsEvidenceReader({
