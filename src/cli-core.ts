@@ -112,6 +112,7 @@ import {
   type ChangeRemoteExecutorOptions,
   type ChangeRemoteMutation,
 } from "./change-executor.js";
+import { tryProjectImplementationHandoff } from "./change-handoff.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
 import {
@@ -974,6 +975,19 @@ function projectChangeCommandResult(
   };
 }
 
+function projectChangeHandoffCommandResult(
+  issue: number,
+  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+): Readonly<Record<string, unknown>> {
+  const handoff = tryProjectImplementationHandoff(projection);
+  return {
+    ...projectChangeCommandResult("handoff", issue, projection),
+    ok: handoff.valid,
+    diagnostics: handoff.diagnostics,
+    ...(handoff.handoff === undefined ? {} : { handoff: handoff.handoff }),
+  };
+}
+
 function rejectUnsupportedChangeOptions(command: string, options: Readonly<Record<string, string | boolean>>): void {
   const definition = getCommandForPositionals(["change", command]);
   if (definition === undefined) return;
@@ -1007,13 +1021,18 @@ async function runChangeCommand(
   const issue = Number(rest[0]);
   const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
   const result =
-    definition.operation === "show"
+    definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
       : await executeChangeRemoteMutationResult(
           executor,
           changeRemoteMutationRequest(definition.operation as ChangeRemoteMutation, issue),
         );
   const projection = result.projection;
+  if (definition.operation === "handoff") {
+    const handoffResult = projectChangeHandoffCommandResult(issue, projection);
+    console.log(JSON.stringify(handoffResult));
+    return handoffResult.ok === true ? 0 : EXIT_VALIDATION;
+  }
   console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection, result.evidence)));
   const executionSucceeded =
     result.evidence === undefined ||

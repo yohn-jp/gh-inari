@@ -46,6 +46,7 @@ import {
 } from "../semantic-pr-projection.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
 import {
+  createGitHubActionsChangeRemoteExecutor,
   GitHubAdapter,
   GitHubIssueRelationObservationAdapter,
   isGitHubAdapterError,
@@ -53,6 +54,14 @@ import {
   type IssueRelationDiagnostic,
 } from "../github/index.js";
 import { GITHUB_ISSUE_PROJECTION_CAPABILITIES } from "../semantic-issue-projection.js";
+import {
+  changeRemoteReadRequest,
+  ChangeRemoteExecutorError,
+  readChangeRemoteProjection,
+  type ChangeRemoteExecutor,
+  type ChangeRemoteExecutorOptions,
+} from "../change-executor.js";
+import { tryProjectImplementationHandoff } from "../change-handoff.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
@@ -73,6 +82,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_plan",
   "inari_pr_observe",
   "inari_pr_drift",
+  "inari_change_handoff",
 ] as const);
 
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
@@ -167,6 +177,15 @@ export const semanticPullRequestDriftInputSchema = z.strictObject({
   input: inputValueSchema,
 });
 
+/** Input schema for the read-only canonical implementation handoff. */
+export const implementationHandoffInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  issue: artifactNumberSchema,
+});
+
+/** Compatibility name for callers that prefix the handoff with Change. */
+export const changeImplementationHandoffInputSchema = implementationHandoffInputSchema;
+
 export type SemanticPullRequestContractInput = z.infer<typeof semanticPullRequestContractInputSchema>;
 export type SemanticPullRequestMaterializeInput = z.infer<typeof semanticPullRequestMaterializeInputSchema>;
 export type SemanticPullRequestPlanInput = z.infer<typeof semanticPullRequestPlanInputSchema>;
@@ -182,6 +201,8 @@ export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInp
 export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
 export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
+export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
+export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
 
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
@@ -197,6 +218,14 @@ export interface NativeSemanticPullRequestDependencies {
 
 /** Shared dependency seam for all read-only semantic artifact catalogs. */
 export interface NativeSemanticArtifactDependencies extends NativeSemanticPullRequestDependencies {}
+
+/** Injectable read boundary for Change projections exposed through MCP. */
+export interface NativeChangeDependencies extends NativeSemanticPullRequestDependencies {
+  /** Direct semantic executor seam for tests or embedding applications. */
+  readonly changeExecutor?: ChangeRemoteExecutor;
+  /** Factory seam for repository-scoped Change executor construction. */
+  readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+}
 
 const READ_ONLY: ToolAnnotations = Object.freeze({
   readOnlyHint: true,
@@ -249,6 +278,28 @@ export type SemanticBranchMcpOutput = SemanticPullRequestMcpOutput;
 export const semanticIssueOutputSchema = semanticPullRequestOutputSchema;
 export const semanticBranchOutputSchema = semanticPullRequestOutputSchema;
 
+/** Structured output schema for the canonical Change implementation handoff. */
+export const implementationHandoffOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("change.handoff"),
+    issue: artifactNumberSchema,
+    change: artifactNumberSchema.optional(),
+    status: z.string().optional(),
+    state: z.string().optional(),
+    canonicalBranch: z.string().optional(),
+    canonicalBaseBranch: z.string().optional(),
+    branch: z.string().optional(),
+    pullRequest: artifactNumberSchema.optional(),
+    handoff: z.unknown().optional(),
+    projection: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+  })
+  .strict();
+
+export const changeImplementationHandoffOutputSchema = implementationHandoffOutputSchema;
+
 function adapterFor(
   requestRepository: string | undefined,
   dependencies: NativeSemanticPullRequestDependencies,
@@ -260,6 +311,22 @@ function adapterFor(
     ...(repository === undefined ? {} : { repository }),
   };
   return (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))(options);
+}
+
+function changeExecutorFor(
+  requestRepository: string | undefined,
+  dependencies: NativeChangeDependencies,
+): ChangeRemoteExecutor {
+  if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
+  const cwd = dependencies.repositoryRoot ?? process.cwd();
+  const repository = requestRepository ?? dependencies.repository;
+  const options: ChangeRemoteExecutorOptions = {
+    cwd,
+    ...(repository === undefined ? {} : { repository }),
+  };
+  if (dependencies.createChangeExecutor !== undefined) return dependencies.createChangeExecutor(options);
+  const adapter = adapterFor(requestRepository, dependencies);
+  return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
 }
 
 /** Resolve the repository Canon through the existing repository/Core boundary. */
@@ -369,6 +436,12 @@ function diagnosticsForError(error: unknown): unknown[] {
   if (error instanceof EffectiveArtifactContractCompilationError) {
     return [{ code: "EFFECTIVE_CONTRACT_INVALID", path: "$", message: boundedErrorMessage(error) }];
   }
+  if (error instanceof ChangeRemoteExecutorError) {
+    const diagnostics = error.diagnostics === undefined ? [] : boundedDiagnostics(error.diagnostics);
+    return diagnostics.length > 0
+      ? diagnostics
+      : [{ code: error.code, path: "$", message: boundedErrorMessage(error) }];
+  }
   return [{ code: "CORE_OPERATION_FAILED", path: "$", message: boundedErrorMessage(error) }];
 }
 
@@ -386,11 +459,61 @@ function failure(
   };
 }
 
-function result(data: SemanticPullRequestMcpOutput, summary: string): CallToolResult {
+function result<T extends Record<string, unknown>>(data: T, summary: string): CallToolResult {
   return {
     structuredContent: data,
     content: [{ type: "text", text: summary }],
   };
+}
+
+function projectChangeHandoffResult(
+  issue: number,
+  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+): Record<string, unknown> {
+  const change = projection.change;
+  const changeProjection = change?.projection;
+  const handoff = tryProjectImplementationHandoff(projection);
+  return {
+    ok: handoff.valid,
+    valid: handoff.valid,
+    operation: "change.handoff",
+    issue,
+    change: change?.identity.rootIssue ?? issue,
+    status: projection.status,
+    ...(change === undefined ? {} : { state: change.state }),
+    ...(projection.canonicalBranch === undefined ? {} : { canonicalBranch: projection.canonicalBranch }),
+    ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
+    ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
+    ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+    diagnostics: handoff.diagnostics,
+    ...(handoff.handoff === undefined ? {} : { handoff: handoff.handoff }),
+    projection,
+  };
+}
+
+async function handleImplementationHandoff(
+  input: ImplementationHandoffInput,
+  dependencies: NativeChangeDependencies,
+): Promise<CallToolResult> {
+  try {
+    const executor = changeExecutorFor(input.repository, dependencies);
+    const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    return result(
+      projectChangeHandoffResult(input.issue, projection),
+      "Read the canonical implementation handoff through the Change Core boundary.",
+    );
+  } catch (error: unknown) {
+    return result(
+      {
+        ok: false,
+        valid: false,
+        operation: "change.handoff",
+        issue: input.issue,
+        diagnostics: diagnosticsForError(error),
+      },
+      "Implementation handoff is unavailable; see diagnostics.",
+    );
+  }
 }
 
 function observationRepository(
@@ -1159,6 +1282,26 @@ export function registerSemanticBranchTools(
     async (input: SemanticBranchDriftInput) => handleBranchDrift(input, dependencies),
   );
   return Object.freeze([contract, materialize, plan, observe, drift]);
+}
+
+/** Register the read-only worker handoff projection over the existing Change read boundary. */
+export function registerChangeTools(
+  server: McpServer,
+  dependencies: NativeChangeDependencies = {},
+): readonly RegisteredTool[] {
+  const handoff = server.registerTool(
+    "inari_change_handoff",
+    {
+      title: "Read implementation handoff",
+      description:
+        "Read the bounded canonical implementation handoff for a healthy DRAFT Change. Inari owns remote identity only; the worker owns local worktree and session state.",
+      inputSchema: implementationHandoffInputSchema,
+      outputSchema: implementationHandoffOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: ImplementationHandoffInput) => handleImplementationHandoff(input, dependencies),
+  );
+  return Object.freeze([handoff]);
 }
 
 /** Publicly expose the protocol annotations without allowing mutation. */

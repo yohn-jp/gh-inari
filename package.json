@@ -40,6 +40,10 @@
       "types": "./dist/change-executor.d.ts",
       "import": "./dist/change-executor.js"
     },
+    "./change-handoff": {
+      "types": "./dist/change-handoff.d.ts",
+      "import": "./dist/change-handoff.js"
+    },
     "./change-trusted-executor": {
       "types": "./dist/change-trusted-executor.d.ts",
       "import": "./dist/change-trusted-executor.js"
