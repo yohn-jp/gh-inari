@@ -38,6 +38,7 @@ export * from "./artifact-contract-governance.js";
 export * from "./golden-path-governance.js";
 export * from "./legacy-artifact-convergence.js";
 export * from "./golden-path-status.js";
+export * from "./release-certification.js";
 export * from "./agent-authority/index.js";
 export * from "./mcp/index.js";
 export {
