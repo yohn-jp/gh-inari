@@ -1,0 +1,158 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  GOLDEN_PATH_NORMAL_ACTION_KINDS,
+  projectGoldenPathStatus,
+  tryProjectGoldenPathStatus,
+  validateGoldenPathStatus,
+} from "./golden-path-status.js";
+
+function input(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    environment: true,
+    governance: true,
+    issue: { status: "present", governed: true, number: 42 },
+    ...overrides,
+  };
+}
+
+test("projects each normal Golden Path phase to at most one bounded action", () => {
+  const cases: Array<{
+    name: string;
+    input: Record<string, unknown>;
+    phase: string;
+    availability: string;
+    action: string | null;
+    reason: string | null;
+  }> = [
+    {
+      name: "environment",
+      input: {},
+      phase: "ENVIRONMENT",
+      availability: "actionable",
+      action: "PREFLIGHT",
+      reason: "PACKAGE_CAPABILITY_REQUIRED",
+    },
+    {
+      name: "governance",
+      input: { environment: true },
+      phase: "GOVERNANCE",
+      availability: "actionable",
+      action: "DISCOVER_GOVERNANCE",
+      reason: "GOVERNANCE_DISCOVERY_REQUIRED",
+    },
+    {
+      name: "issue",
+      input: { environment: true, governance: true, issue: "absent" },
+      phase: "ISSUE",
+      availability: "actionable",
+      action: "CREATE_ISSUE",
+      reason: "GOVERNED_ISSUE_REQUIRED",
+    },
+    {
+      name: "defined change",
+      input: input({ change: { state: "DEFINED", projectionStatus: "absent" } }),
+      phase: "ISSUE",
+      availability: "actionable",
+      action: "ISSUE_CHANGE",
+      reason: "CHANGE_ISSUANCE_REQUIRED",
+    },
+    {
+      name: "implementation",
+      input: input({ change: { state: "DRAFT", projectionStatus: "healthy" } }),
+      phase: "IMPLEMENTATION",
+      availability: "actionable",
+      action: "IMPLEMENT",
+      reason: "CHANGE_ISSUED",
+    },
+    {
+      name: "ready",
+      input: input({ change: { state: "DRAFT", projectionStatus: "healthy" }, implementation: { ready: true } }),
+      phase: "READY",
+      availability: "actionable",
+      action: "READY_CHANGE",
+      reason: "READY_PRECONDITIONS_REQUIRED",
+    },
+    {
+      name: "review",
+      input: input({ change: { state: "REVIEW", projectionStatus: "healthy" } }),
+      phase: "REVIEW",
+      availability: "actionable",
+      action: "WAIT",
+      reason: "WAIT_FOR_REPOSITORY_REVIEW",
+    },
+    {
+      name: "terminal",
+      input: input({ change: { state: "MERGED", projectionStatus: "healthy" } }),
+      phase: "TERMINAL",
+      availability: "terminal",
+      action: null,
+      reason: null,
+    },
+  ];
+
+  for (const candidate of cases) {
+    const result = projectGoldenPathStatus(candidate.input);
+    assert.equal(result.status.phase, candidate.phase, candidate.name);
+    assert.equal(result.status.availability, candidate.availability, candidate.name);
+    assert.equal(result.nextAction?.kind ?? null, candidate.action, candidate.name);
+    assert.equal(result.nextAction?.reasonCode ?? null, candidate.reason, candidate.name);
+    assert.equal(result.recovery, null, candidate.name);
+    assert.ok(result.nextAction === null || GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(result.nextAction.kind as never));
+  }
+});
+
+test("suppresses normal mutation for unavailable and ambiguous Change evidence", () => {
+  for (const projectionStatus of ["partial", "duplicate", "wrong-base", "ambiguous", "unavailable"] as const) {
+    const result = projectGoldenPathStatus(input({ change: { state: "DRAFT", projectionStatus } }));
+    assert.equal(result.status.availability, "blocked");
+    assert.equal(result.nextAction, null);
+    assert.equal(result.status.projectionStatus, projectionStatus);
+  }
+});
+
+test("projects supplied recovery evidence without selecting recovery policy", () => {
+  const result = projectGoldenPathStatus(
+    input({
+      change: { state: "RECOVERY_REQUIRED", projectionStatus: "partial" },
+      recovery: {
+        class: "POST_EFFECT_VERIFICATION",
+        safeAction: "MANUAL_REVIEW",
+        retryable: false,
+        rereadRequired: true,
+        automaticCleanup: "forbidden",
+      },
+    }),
+  );
+  assert.equal(result.status.phase, "RECOVERY");
+  assert.equal(result.status.availability, "recovery-required");
+  assert.equal(result.nextAction?.kind, "MANUAL_REVIEW");
+  assert.equal(result.nextAction?.owner, "recovery");
+  assert.equal(result.nextAction?.reasonCode, "MANUAL_RECOVERY_REVIEW_REQUIRED");
+  assert.equal(result.recovery?.rereadRequired, true);
+});
+
+test("rejects contradictory or malformed evidence instead of guessing", () => {
+  const contradictory = tryProjectGoldenPathStatus(
+    input({
+      subject: { repositoryHost: "github.com", repositoryId: "1", rootIssue: 99 },
+      change: {
+        state: "DRAFT",
+        projectionStatus: "healthy",
+        subject: { repositoryHost: "github.com", repositoryId: "1", rootIssue: 42 },
+      },
+    }),
+  );
+  assert.equal(contradictory.valid, false);
+  assert.ok(contradictory.diagnostics.length > 0);
+  assert.equal(tryProjectGoldenPathStatus({ environment: true, unsupported: true }).valid, false);
+});
+
+test("validates the zero-or-one action invariant at the public boundary", () => {
+  const valid = projectGoldenPathStatus(input({ change: { state: "DRAFT", projectionStatus: "healthy" } }));
+  assert.equal(validateGoldenPathStatus(valid).valid, true);
+  assert.equal(
+    validateGoldenPathStatus({ ...valid, status: { ...valid.status, availability: "blocked" } }).valid,
+    false,
+  );
+});

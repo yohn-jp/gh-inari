@@ -27,6 +27,7 @@ export * from "./semantic-issue-executor.js";
 export * from "./semantic-branch-executor.js";
 export * from "./artifact-contract-governance.js";
 export * from "./legacy-artifact-convergence.js";
+export * from "./golden-path-status.js";
 export * from "./agent-authority/index.js";
 export * from "./mcp/index.js";
 export { discoverTemplates, discoverTemplatesSync, discoverTemplatesFromPaths, classifyTemplatePath, isTemplateContainerPath, isTemplatePathInNativeDirectory, selectTemplate, selectIssueTemplate, selectPullRequestTemplate, TemplateDiscoveryError, TemplateFilesystemError, TemplateNotFoundError, TemplateSelectionAmbiguousError, TemplateNameConflictError, InvalidTemplateSelectorError, } from "./template-discovery.js";
