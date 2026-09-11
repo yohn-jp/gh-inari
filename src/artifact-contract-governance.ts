@@ -22,7 +22,12 @@ import {
 } from "./contract/index.js";
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
 import { resolveRemoteArtifactContractIdentity, type RepositoryArtifactContractIdentity } from "./governance.js";
-import { TemplateResolutionError } from "./template-resolver.js";
+import {
+  parseTemplateResolutionConfig,
+  TEMPLATE_RESOLUTION_CONFIG_PATH,
+  TemplateResolutionError,
+} from "./template-resolver.js";
+import type { TemplateSelector } from "./template-discovery.js";
 
 export type RepositoryEffectiveArtifactKind = "issue" | "branch" | "pull_request";
 
@@ -74,15 +79,49 @@ export interface RepositoryEffectiveArtifactContractOptions {
 async function selectCanonIdentity(
   tree: readonly RepositoryTreeEntry[],
   kind: RepositoryEffectiveArtifactKind,
-  selector: string | undefined,
+  selector: string | TemplateSelector | undefined,
+  configuredDefault: string | TemplateSelector | undefined,
   context: RepositoryContext,
   ref: string,
 ): Promise<RepositoryArtifactContractIdentity> {
   try {
-    return await resolveRemoteArtifactContractIdentity(tree, kind, selector);
+    return await resolveRemoteArtifactContractIdentity(tree, kind, selector, configuredDefault);
   } catch (error: unknown) {
     if (!(error instanceof TemplateResolutionError)) throw error;
     throw artifactContractResolutionErrorFromTemplateResolution(error, context, ref);
+  }
+}
+
+async function readConfiguredDefault(
+  adapter: GitHubAdapter,
+  tree: readonly RepositoryTreeEntry[],
+  kind: RepositoryEffectiveArtifactKind,
+): Promise<string | TemplateSelector | undefined> {
+  if (kind === "branch") return undefined;
+  const entry = tree.find((candidate) => candidate.path === TEMPLATE_RESOLUTION_CONFIG_PATH);
+  if (entry === undefined) return undefined;
+  if (entry.type !== "blob") {
+    throw new ArtifactContractResolutionError(
+      "ARTIFACT_CONTRACT_SOURCE_INVALID",
+      entry.path,
+      `Template resolution config "${entry.path}" is not a regular file.`,
+    );
+  }
+  const source = await adapter.getRepositoryBlob(entry.sha);
+  try {
+    const config = parseTemplateResolutionConfig(source, entry.path);
+    return config.defaults[kind === "pull_request" ? "pr" : "issue"];
+  } catch (error: unknown) {
+    if (error instanceof TemplateResolutionError) {
+      throw new ArtifactContractResolutionError(
+        "ARTIFACT_CONTRACT_SOURCE_INVALID",
+        entry.path,
+        error.message,
+        { reason: error.details.reason, path: entry.path },
+        [error.toJSON()],
+      );
+    }
+    throw error;
   }
 }
 
@@ -203,13 +242,15 @@ function parseCanonSource(source: string, path: string, kind: RepositoryEffectiv
 export async function compileRepositoryEffectiveArtifactContract(
   adapter: GitHubAdapter,
   kind: RepositoryEffectiveArtifactKind,
-  selector?: string,
+  selector?: string | TemplateSelector,
   options: RepositoryEffectiveArtifactContractOptions = {},
 ): Promise<EffectiveArtifactContract> {
   const context = await adapter.resolveRepositoryContext();
   const ref = await adapter.getRepositoryDefaultBranch();
   const tree = await adapter.getRepositoryTree(ref);
-  const identity = await selectCanonIdentity(tree.entries, kind, selector, context, ref);
+  const configuredDefault =
+    selector === undefined ? await readConfiguredDefault(adapter, tree.entries, kind) : undefined;
+  const identity = await selectCanonIdentity(tree.entries, kind, selector, configuredDefault, context, ref);
   const entry = findCanonEntry(tree.entries, identity, context, ref);
   const source = await adapter.getRepositoryBlob(entry.sha);
   const contract = parseCanonSource(source, entry.path, kind);
@@ -220,7 +261,7 @@ export async function compileRepositoryEffectiveArtifactContract(
 /** Resolve and compile a pull-request Artifact Contract from the repository Canon. */
 export async function compileRepositoryEffectivePullRequestContract(
   adapter: GitHubAdapter,
-  selector?: string,
+  selector?: string | TemplateSelector,
   options: RepositoryEffectiveArtifactContractOptions = {},
 ): Promise<EffectiveArtifactContract> {
   return compileRepositoryEffectiveArtifactContract(adapter, "pull_request", selector, options);
@@ -229,7 +270,7 @@ export async function compileRepositoryEffectivePullRequestContract(
 /** Resolve and compile an Issue Artifact Contract from the repository Canon. */
 export async function compileRepositoryEffectiveIssueContract(
   adapter: GitHubAdapter,
-  selector?: string,
+  selector?: string | TemplateSelector,
   options: RepositoryEffectiveArtifactContractOptions = {},
 ): Promise<EffectiveArtifactContract> {
   return compileRepositoryEffectiveArtifactContract(adapter, "issue", selector, options);
@@ -238,7 +279,7 @@ export async function compileRepositoryEffectiveIssueContract(
 /** Resolve and compile a Branch Artifact Contract from the repository Canon. */
 export async function compileRepositoryEffectiveBranchContract(
   adapter: GitHubAdapter,
-  selector?: string,
+  selector?: string | TemplateSelector,
   options: RepositoryEffectiveArtifactContractOptions = {},
 ): Promise<EffectiveArtifactContract> {
   return compileRepositoryEffectiveArtifactContract(adapter, "branch", selector, options);

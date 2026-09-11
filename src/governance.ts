@@ -903,12 +903,13 @@ export function createRemoteArtifactContractIdentities(
 export async function resolveRemoteArtifactContractIdentity(
   tree: readonly RepositoryTreeEntry[],
   kind: ArtifactContract["kind"],
-  selector?: string,
+  selector?: string | TemplateSelector,
+  configuredDefault?: string | TemplateSelector,
 ): Promise<RepositoryArtifactContractIdentity> {
   const candidates = createRemoteArtifactContractIdentities(tree)
     .filter((identity) => identity.kind === kind)
     .map(repositoryArtifactContractResolutionCandidate);
-  return resolveTemplate({ candidates, selector });
+  return resolveTemplate({ candidates, selector, configuredDefault });
 }
 
 function repositoryArtifactContractResolutionCandidate(
