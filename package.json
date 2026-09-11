@@ -48,6 +48,10 @@
       "types": "./dist/change-trusted-executor.d.ts",
       "import": "./dist/change-trusted-executor.js"
     },
+    "./golden-path-review": {
+      "types": "./dist/golden-path-review.d.ts",
+      "import": "./dist/golden-path-review.js"
+    },
     "./semantic-pr-projection": {
       "types": "./dist/semantic-pr-projection.d.ts",
       "import": "./dist/semantic-pr-projection.js"
