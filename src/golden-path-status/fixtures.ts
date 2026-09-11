@@ -190,6 +190,8 @@ export interface DeterministicActorOptions {
   readonly failEffect?: ChangeEffectKind;
   /** Simulate an effect that applied despite an ambiguous provider failure. */
   readonly applyFailedEffect?: boolean;
+  /** Leave a successful effect unapplied to exercise production verification failure. */
+  readonly applySuccessfulEffect?: boolean;
   /** Keep the canonical branch after DELETE_BRANCH for verification-failure tests. */
   readonly leaveBranchAfterDelete?: boolean;
 }
@@ -237,7 +239,8 @@ export class DeterministicIssuer {
     this.effects.push(effect);
 
     const failed = effect.kind === this.options.failEffect;
-    if (!failed || this.options.applyFailedEffect) this.applyEvidence(effect);
+    const applyEffect = failed ? this.options.applyFailedEffect === true : this.options.applySuccessfulEffect !== false;
+    if (applyEffect) this.applyEvidence(effect);
     if (failed) throw new Error("deterministic effect failure");
 
     return {
