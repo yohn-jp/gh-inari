@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseArguments, sanitizeWorkerEnvironment } from "./self-dogfood.mjs";
+import { parseArguments, projectWorkerHandoff, sanitizeWorkerEnvironment } from "./self-dogfood.mjs";
 
 const scriptPath = fileURLToPath(new URL("./self-dogfood.mjs", import.meta.url));
 
@@ -30,11 +30,18 @@ test("worker handoff allowlists environment and carries only bounded identities"
       AWS_SECRET_ACCESS_KEY: "cloud-secret",
     },
     {
-      issue: 239,
+      version: 1,
+      kind: "implementation-handoff",
+      repositoryHost: "github.com",
+      repositoryId: "123239",
+      rootIssue: 239,
+      changeVersion: "1",
+      state: "DRAFT",
       branch: "feat/239-disposable-dogfood",
+      baseBranch: "main",
       pullRequest: 9239,
-      sourceCommitSha: "a".repeat(40),
     },
+    "a".repeat(40),
   );
 
   assert.deepEqual(environment.PATH, "/usr/bin");
@@ -42,8 +49,28 @@ test("worker handoff allowlists environment and carries only bounded identities"
   assert.equal(environment.GH_TOKEN, undefined);
   assert.equal(environment.INARI_ISSUER_PRIVATE_KEY, undefined);
   assert.equal(environment.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(environment.INARI_CHANGE_ISSUE, "239");
   assert.equal(environment.INARI_IMPLEMENTATION_BRANCH, "feat/239-disposable-dogfood");
   assert.doesNotMatch(environment.INARI_IMPLEMENTATION_HANDOFF, /secret|private|token/iu);
+});
+
+test("worker handoff rejects unknown sensitive fields instead of serializing them", () => {
+  const handoff = {
+    version: 1,
+    kind: "implementation-handoff",
+    repositoryHost: "github.com",
+    repositoryId: "123239",
+    rootIssue: 239,
+    changeVersion: "1",
+    state: "DRAFT",
+    branch: "feat/239-disposable-dogfood",
+    baseBranch: "main",
+    pullRequest: 9239,
+    token: "issuer-secret",
+    privateKey: "issuer-private-key",
+  };
+  assert.throws(() => projectWorkerHandoff(handoff), /unsupported fields/u);
+  assert.throws(() => sanitizeWorkerEnvironment({}, handoff, "a".repeat(40)), /unsupported fields/u);
 });
 
 test("live dogfood is opt-in and emits bounded blocked evidence without mutation", () => {
@@ -75,7 +102,7 @@ test("live dogfood is opt-in and emits bounded blocked evidence without mutation
     assert.ok(evidence.diagnostics.length > 0);
     assert.ok(evidence.diagnostics.length <= 20);
     assert.ok(evidence.diagnostics.every((item) => item.message.length <= 512));
-    assert.deepEqual(evidence.operations, [{ operation: "self-dogfood", outcome: "blocked" }]);
+    assert.deepEqual(evidence.operations, []);
   } finally {
     fs.rmSync(workerDirectory, { recursive: true, force: true });
   }
@@ -90,6 +117,7 @@ test("opt-in flow consumes canonical handoff and keeps worker credentials isolat
   const outputFile = path.join(root, "evidence.json");
   const fakeInari = path.join(root, "fake-inari.mjs");
   const worker = path.join(root, "worker.mjs");
+  const authority = path.join(root, "authority.mjs");
   fs.writeFileSync(
     fakeInari,
     `#!/usr/bin/env node
@@ -107,11 +135,11 @@ const common = { branch: "feat/239-self-dogfood", pullRequest: 9239, version: "1
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
 else if (args.includes("skill")) output = { id: "golden-path", version: "1", workflow: [] };
-else if (args.includes("check")) output = { valid: true, governance: { valid: true } };
-else if (issue) output = { ok: true, status: issueCount === 0 ? "DRAFT" : "DRAFT", ...common, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
-else if (args.includes("handoff")) output = { ok: true, status: "DRAFT", ...common, handoff: { version: 1, kind: "implementation-handoff", rootIssue: 239, state: "DRAFT", branch: common.branch, pullRequest: common.pullRequest, changeVersion: "1" } };
-else if (args.includes("show")) output = { ok: true, status: "REVIEW", ...common };
-else if (ready) output = { ok: true, status: "REVIEW", ...common, evidence: { outcome: readyCount === 0 ? "verified" : "returned-existing" } };
+else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
+else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
+else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: "1" } };
+else if (args.includes("show")) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" } };
+else if (ready) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: readyCount === 0 ? "verified" : "returned-existing" } };
 else output = { ok: false };
 console.log(JSON.stringify(output));
 `,
@@ -121,6 +149,13 @@ console.log(JSON.stringify(output));
     worker,
     `import fs from "node:fs";
 fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: process.env.GH_TOKEN, branch: process.env.INARI_IMPLEMENTATION_BRANCH }));
+`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  fs.writeFileSync(
+    authority,
+    `export function validateDisposableGovernedIssue(value) { return { valid: value.disposableMarker?.kind === "self-dogfood" }; }
+export function validateSelfDogfoodEvidence(value) { return { valid: value.result === "passed" && value.schemaVersion === "1" }; }
 `,
     { encoding: "utf8", mode: 0o600 },
   );
@@ -141,6 +176,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
         workerDirectory,
         "--worker-command",
         JSON.stringify([process.execPath, worker]),
+        "--evidence-authority",
+        authority,
         "--output",
         outputFile,
       ],
@@ -166,17 +203,17 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
     assert.deepEqual(
       evidence.operations.map(({ operation }) => operation),
       [
-        "preflight.opt-in",
-        "preflight.installed-executable",
-        "skill.golden-path",
-        "disposable-issue.governance-check",
-        "change.issue.first",
-        "change.issue.return-existing",
-        "change.handoff",
-        "worker.implementation",
-        "change.ready.first",
-        "change.ready.reread",
-        "change.ready.retry",
+        "opt-in",
+        "executable",
+        "skill",
+        "governance",
+        "first-issuance",
+        "return-existing",
+        "handoff",
+        "worker",
+        "first-ready",
+        "reread",
+        "ready-retry",
       ],
     );
     const observation = JSON.parse(fs.readFileSync(workerObservation, "utf8"));
