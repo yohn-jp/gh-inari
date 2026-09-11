@@ -9,6 +9,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import {
+  CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  sha256Tarball,
+  writeCertificationEvidence,
+} from "./certification-evidence.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
@@ -279,10 +284,62 @@ function packArtifact() {
 
 function parseArgs(argv) {
   const index = argv.indexOf("--tarball");
-  if (index === -1) return { tarball: undefined };
-  const value = argv[index + 1];
-  if (value === undefined || value.startsWith("--")) fail("--tarball requires a .tgz path");
-  return { tarball: value };
+  const evidenceIndex = argv.indexOf("--evidence");
+  const goldenPathIndex = argv.indexOf("--certify-golden-path");
+  const readValue = (option, optionIndex) => {
+    if (optionIndex === -1) return undefined;
+    const value = argv[optionIndex + 1];
+    if (value === undefined || value.startsWith("--")) fail(`${option} requires a value`);
+    return value;
+  };
+  const value = readValue("--tarball", index);
+  return {
+    tarball: value,
+    evidence: readValue("--evidence", evidenceIndex),
+    certifyGoldenPath: goldenPathIndex !== -1,
+  };
+}
+
+function sourceCommitSha() {
+  const value = run("git", ["rev-parse", "HEAD"]).stdout.trim();
+  if (!/^[0-9a-f]{40}$/u.test(value)) fail("git rev-parse HEAD did not return an exact commit SHA");
+  return value;
+}
+
+function certificationContractVersions() {
+  return {
+    goldenPath: process.env.INARI_GOLDEN_PATH_CONTRACT_VERSION ?? "unavailable",
+    statusRecovery: process.env.INARI_STATUS_RECOVERY_CONTRACT_VERSION ?? "unavailable",
+    skill: process.env.INARI_SKILL_CONTRACT_VERSION ?? "unavailable",
+  };
+}
+
+function writePackedEvidence(evidencePath, tarballPath, result = "blocked", diagnostics = []) {
+  fs.mkdirSync(path.dirname(path.resolve(evidencePath)), { recursive: true });
+  writeCertificationEvidence(evidencePath, {
+    schemaVersion: CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+    certificationKind: "packed-artifact-golden-path",
+    result,
+    sourceCommitSha: sourceCommitSha(),
+    contractVersions: certificationContractVersions(),
+    package: {
+      name: packageJson.name,
+      version: packageJson.version,
+      tarballSha256: sha256Tarball(tarballPath),
+    },
+    diagnostics,
+  });
+}
+
+function certifyGoldenPathSkill(consumerDirectory, environment) {
+  const launcher = path.join(consumerDirectory, "node_modules", ".bin", "inari");
+  const result = jsonOutput(
+    invoke(launcher, ["skill", "golden-path", "--json"], { cwd: consumerDirectory, env: environment }),
+    "installed inari skill golden-path --json",
+  );
+  if (result.id !== "golden-path" || !Array.isArray(result.workflow) || result.workflow.length === 0)
+    fail("installed inari skill golden-path returned an invalid playbook");
+  return result;
 }
 
 function createConsumer(directory, name) {
@@ -400,7 +457,7 @@ function certifyNpxFallback(rootDirectory, tarballPath, externalExecutables) {
 }
 
 function main() {
-  const { tarball } = parseArgs(process.argv.slice(2));
+  const { tarball, evidence, certifyGoldenPath } = parseArgs(process.argv.slice(2));
   let tarballPath;
   let ownsTarball = false;
   if (tarball === undefined) {
@@ -451,6 +508,10 @@ function main() {
     );
 
     certifyEntryBoundary(consumerDirectory, installedEnvironment);
+    if (certifyGoldenPath) {
+      console.log("checking the installed inari skill golden-path contract...");
+      certifyGoldenPathSkill(consumerDirectory, installedEnvironment);
+    }
     certifyNpxFallback(certificationRoot, tarballPath, externalExecutables);
 
     // Compatibility certification is also fed from the installed package. It
@@ -481,6 +542,16 @@ function main() {
     validateVersionOutput(extensionVersion, packageJson);
 
     console.log("packed Golden Path preflight and entry certification passed.");
+    if (evidence !== undefined) {
+      writePackedEvidence(evidence, tarballPath, "blocked", [
+        {
+          code: "DEPENDENCY_CONTRACTS_NOT_INTEGRATED",
+          message:
+            "Complete Golden Path certification remains blocked until the #402/#403/#404 contracts are integrated and exercised.",
+        },
+      ]);
+      console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
+    }
   } finally {
     fs.rmSync(certificationRoot, { recursive: true, force: true });
     if (ownsTarball && tarballPath !== undefined) fs.rmSync(tarballPath, { force: true });
