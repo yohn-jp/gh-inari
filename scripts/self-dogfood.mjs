@@ -19,23 +19,23 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // these are not a second long-term evidence schema.
 export const SELF_DOGFOOD_SCHEMA_VERSION = "1";
 export const SELF_DOGFOOD_KIND = "self-dogfood-golden-path";
+export const GOLDEN_PATH_CONTRACT_VERSION = "1";
 export const MAX_DIAGNOSTICS = 20;
 export const MAX_OPERATIONS = 32;
 export const MAX_DIAGNOSTIC_MESSAGE = 512;
 export const SELF_DOGFOOD_OPERATIONS = Object.freeze({
-  OPT_IN: "opt-in",
-  EXECUTABLE: "executable",
-  SKILL: "skill",
-  GOVERNANCE: "governance",
-  FIRST_ISSUANCE: "first-issuance",
-  RETURN_EXISTING: "return-existing",
-  HANDOFF: "handoff",
-  WORKER: "worker",
-  FIRST_READY: "first-ready",
-  REREAD: "reread",
-  READY_RETRY: "ready-retry",
-  ABORT: "abort",
-  ABORT_REREAD: "abort-reread",
+  OPT_IN: "preflight.opt-in",
+  EXECUTABLE: "preflight.installed-executable",
+  SKILL: "skill.golden-path",
+  GOVERNANCE: "disposable-issue.governance-check",
+  FIRST_ISSUANCE: "change.issue.first",
+  RETURN_EXISTING: "change.issue.return-existing",
+  HANDOFF: "change.handoff",
+  WORKER: "worker.implementation",
+  FIRST_READY: "change.ready.first",
+  REREAD: "change.ready.reread",
+  READY_RETRY: "change.ready.retry",
+  ABORT: "change.abort.recovery",
 });
 export const SELF_DOGFOOD_OUTCOMES = Object.freeze({
   VERIFIED: "verified",
@@ -71,7 +71,6 @@ export const SELF_DOGFOOD_OPERATION_OUTCOMES = Object.freeze({
     SELF_DOGFOOD_OUTCOMES.RETURNED_EXISTING,
   ]),
   [SELF_DOGFOOD_OPERATIONS.ABORT]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.ABORT_REREAD]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
 });
 const COMMAND_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_BYTES = 64 * 1024;
@@ -106,6 +105,9 @@ export const WORKER_HANDOFF_FIELDS = Object.freeze([
   "pullRequest",
 ]);
 const WORKER_HANDOFF_FIELD_SET = new Set(WORKER_HANDOFF_FIELDS);
+const IMPLEMENTATION_HANDOFF_CONTRACT_VERSION = 1;
+const IMPLEMENTATION_HANDOFF_KIND = "implementation-handoff";
+const CHANGE_CONTRACT_VERSION = 1;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -163,7 +165,12 @@ export function parseArguments(argv) {
     abort: false,
     timeoutMs: COMMAND_TIMEOUT_MS,
   };
+  let skipConsumedValue = false;
   for (let index = 0; index < argv.length; index += 1) {
+    if (skipConsumedValue) {
+      skipConsumedValue = false;
+      continue;
+    }
     const token = argv[index];
     if (token === "--help" || token === "-h") return { help: true, options };
     if (token === "--abort") {
@@ -177,7 +184,7 @@ export function parseArguments(argv) {
     }
     if (token === "--evidence-authority") {
       options.evidenceAuthority = requireValue(argv, index, token);
-      index += 1;
+      skipConsumedValue = true;
       continue;
     }
     if (token === "--repository") {
@@ -312,9 +319,12 @@ function outputField(value, ...paths) {
 function changeIdentity(value, fallbackIssue) {
   const branch = outputField(value, ["branch"], ["canonicalBranch"], ["change", "projection", "branch"]);
   const pullRequest = outputField(value, ["pullRequest"], ["change", "projection", "pullRequest"]);
+  const reportedIssue = outputField(value, ["issue"], ["change"], ["projection", "change", "identity", "rootIssue"]);
   if (typeof branch !== "string" || branch.length === 0) throw new Error("Change response omitted canonical branch");
   if (!Number.isSafeInteger(pullRequest) || pullRequest < 1)
     throw new Error("Change response omitted canonical pull request");
+  if (reportedIssue !== undefined && reportedIssue !== fallbackIssue)
+    throw new Error("Change response returned a different root Issue identity");
   return { issue: fallbackIssue, branch, pullRequest };
 }
 
@@ -327,18 +337,27 @@ function publicStatus(value) {
 }
 
 function authoritativeRecovery(value) {
-  const recovery = outputField(
-    value,
+  const recoveryPaths = [
     ["recovery"],
     ["projection", "recovery"],
     ["status", "recovery"],
     ["projection", "change", "recovery"],
-  );
+  ];
+  let recovery;
+  for (const pathParts of recoveryPaths) {
+    let current = value;
+    for (const part of pathParts) current = current?.[part];
+    if (current !== undefined) {
+      recovery = current;
+      break;
+    }
+  }
+  if (recovery === null) return { state: "none", action: null };
   if (
     recovery !== null &&
     typeof recovery === "object" &&
     typeof recovery.state === "string" &&
-    typeof recovery.action === "string"
+    (typeof recovery.action === "string" || recovery.action === null)
   )
     return { state: recovery.state, action: recovery.action };
   return { state: "unavailable", action: "inspect" };
@@ -375,6 +394,7 @@ function contractVersion(value, ...keys) {
       ["projection", "change", key],
     );
     if (typeof candidate === "string" && candidate.length > 0) return candidate;
+    if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 1) return String(candidate);
   }
   return "unknown";
 }
@@ -389,6 +409,35 @@ export function projectWorkerHandoff(handoff) {
     throw new Error("implementation handoff must be an object");
   const unknown = Object.keys(handoff).filter((key) => !WORKER_HANDOFF_FIELD_SET.has(key));
   if (unknown.length > 0) throw new Error(`implementation handoff has unsupported fields: ${unknown.join(", ")}`);
+  if (handoff.version !== IMPLEMENTATION_HANDOFF_CONTRACT_VERSION)
+    throw new Error("implementation handoff has an unsupported contract version");
+  if (handoff.kind !== IMPLEMENTATION_HANDOFF_KIND) throw new Error("implementation handoff has an invalid kind");
+  if (
+    typeof handoff.repositoryHost !== "string" ||
+    handoff.repositoryHost.length === 0 ||
+    /[\u0000-\u001f\u007f]/u.test(handoff.repositoryHost)
+  )
+    throw new Error("implementation handoff has an invalid repository host");
+  if (
+    typeof handoff.repositoryId !== "string" ||
+    handoff.repositoryId.length === 0 ||
+    /[\u0000-\u001f\u007f]/u.test(handoff.repositoryId)
+  )
+    throw new Error("implementation handoff has an invalid repository identity");
+  if (!Number.isSafeInteger(handoff.rootIssue) || handoff.rootIssue < 1)
+    throw new Error("implementation handoff has an invalid root Issue");
+  if (handoff.changeVersion !== CHANGE_CONTRACT_VERSION)
+    throw new Error("implementation handoff has an unsupported Change contract version");
+  if (handoff.state !== "DRAFT") throw new Error("implementation handoff state must be DRAFT");
+  for (const [field, value] of [
+    ["branch", handoff.branch],
+    ["baseBranch", handoff.baseBranch],
+  ]) {
+    if (typeof value !== "string" || value.length === 0 || /[\u0000-\u001f\u007f]/u.test(value))
+      throw new Error(`implementation handoff has an invalid ${field}`);
+  }
+  if (!Number.isSafeInteger(handoff.pullRequest) || handoff.pullRequest < 1)
+    throw new Error("implementation handoff has an invalid pull request");
   const projected = {};
   for (const field of WORKER_HANDOFF_FIELDS) {
     if (!Object.hasOwn(handoff, field)) throw new Error(`implementation handoff omitted ${field}`);
@@ -449,8 +498,7 @@ function recordOperation(evidence, operation, operationOutcome) {
     throw new Error(`unsupported self-dogfood operation outcome: ${operation}/${operationOutcome}`);
   const expected = SELF_DOGFOOD_REQUIRED_SEQUENCE[evidence.operations.length];
   const optionalAbort =
-    evidence.operations.length >= SELF_DOGFOOD_REQUIRED_SEQUENCE.length &&
-    [SELF_DOGFOOD_OPERATIONS.ABORT, SELF_DOGFOOD_OPERATIONS.ABORT_REREAD].includes(operation);
+    evidence.operations.length >= SELF_DOGFOOD_REQUIRED_SEQUENCE.length && operation === SELF_DOGFOOD_OPERATIONS.ABORT;
   if (operation !== expected && !optionalAbort)
     throw new Error(`self-dogfood operation order mismatch: expected ${expected ?? "completion"}, got ${operation}`);
   if (evidence.operations.length >= MAX_OPERATIONS) throw new Error("self-dogfood operation limit exceeded");
@@ -460,10 +508,10 @@ function recordOperation(evidence, operation, operationOutcome) {
 function assertCertificationOperations(evidence) {
   const actual = evidence.operations.map(({ operation }) => operation);
   const required = [...SELF_DOGFOOD_REQUIRED_SEQUENCE];
-  const hasOptionalAbort = actual.length === required.length + 2;
+  const hasOptionalAbort = actual.length === required.length + 1;
   if (!hasOptionalAbort && actual.length !== required.length)
     throw new Error("self-dogfood operation sequence is incomplete");
-  if (hasOptionalAbort) required.push(SELF_DOGFOOD_OPERATIONS.ABORT, SELF_DOGFOOD_OPERATIONS.ABORT_REREAD);
+  if (hasOptionalAbort) required.push(SELF_DOGFOOD_OPERATIONS.ABORT);
   if (actual.some((operation, index) => operation !== required[index]))
     throw new Error("self-dogfood operation sequence is not canonical");
   for (const entry of evidence.operations) {
@@ -491,9 +539,12 @@ function writeEvidence(evidence, output) {
 async function loadSharedEvidenceAuthority(options) {
   if (typeof options.evidenceAuthority !== "string" || options.evidenceAuthority.length === 0)
     throw new Error("shared certification evidence authority is unavailable; integrate #415 authority");
+  const resolvedPath = path.resolve(options.evidenceAuthority);
   const specifier =
-    options.evidenceAuthority.startsWith("/") || options.evidenceAuthority.startsWith(".")
-      ? pathToFileURL(path.resolve(options.evidenceAuthority)).href
+    options.evidenceAuthority.startsWith("file:") || fs.existsSync(resolvedPath)
+      ? options.evidenceAuthority.startsWith("file:")
+        ? options.evidenceAuthority
+        : pathToFileURL(resolvedPath).href
       : options.evidenceAuthority;
   const authority = await import(specifier);
   if (
@@ -517,7 +568,9 @@ function assertPreconditions(options, evidence) {
     throw new Error("--worker-cwd and --worker-command are required for implementation handoff");
   if (!fs.existsSync(options.workerCwd) || !fs.statSync(options.workerCwd).isDirectory())
     throw new Error("--worker-cwd must be an existing directory");
-  const relative = path.relative(repoRoot, options.workerCwd);
+  const resolvedRepoRoot = fs.realpathSync(repoRoot);
+  const resolvedWorkerCwd = fs.realpathSync(options.workerCwd);
+  const relative = path.relative(resolvedRepoRoot, resolvedWorkerCwd);
   if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".."))
     throw new Error("worker cwd must be outside the source checkout");
   if (options.abort && process.env.INARI_SELF_DOGFOOD_ALLOW_RECOVERY !== "1")
@@ -576,7 +629,7 @@ async function runDogfood(options) {
     if (typeof skillVersion !== "string" || skillVersion.length === 0 || skill.id !== "golden-path")
       throw new Error("golden-path Skill contract is unavailable");
     evidence.contractVersions.skill = skillVersion;
-    evidence.contractVersions.goldenPath = skillVersion;
+    evidence.contractVersions.goldenPath = GOLDEN_PATH_CONTRACT_VERSION;
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.SKILL, SELF_DOGFOOD_OUTCOMES.VERIFIED);
 
     const issueCheck = invoke([
@@ -705,7 +758,6 @@ async function runDogfood(options) {
       if (!["ABORTED", "aborted"].includes(publicStatus(abortReread)))
         throw new Error("Abort reread did not verify ABORTED state");
       recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.ABORT, SELF_DOGFOOD_OUTCOMES.VERIFIED);
-      recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.ABORT_REREAD, SELF_DOGFOOD_OUTCOMES.VERIFIED);
     }
     assertCertificationOperations(evidence);
     const expectedFinalStatus = options.abort ? "ABORTED" : "REVIEW";

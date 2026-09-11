@@ -20,6 +20,22 @@ test("self-dogfood requires an exact disposable Issue confirmation", () => {
   );
 });
 
+test("evidence authority does not skip the following repository option", () => {
+  const parsed = parseArguments([
+    "--evidence-authority",
+    "/tmp/shared-certification-authority.mjs",
+    "--repository",
+    "yohn-jp/gh-inari",
+    "--issue",
+    "416",
+    "--confirm-disposable",
+    "416",
+  ]);
+  assert.equal(parsed.options.evidenceAuthority, "/tmp/shared-certification-authority.mjs");
+  assert.deepEqual(parsed.options.repository, { owner: "yohn-jp", name: "gh-inari" });
+  assert.equal(parsed.options.issue, 416);
+});
+
 test("worker handoff allowlists environment and carries only bounded identities", () => {
   const environment = sanitizeWorkerEnvironment(
     {
@@ -35,7 +51,7 @@ test("worker handoff allowlists environment and carries only bounded identities"
       repositoryHost: "github.com",
       repositoryId: "123239",
       rootIssue: 239,
-      changeVersion: "1",
+      changeVersion: 1,
       state: "DRAFT",
       branch: "feat/239-disposable-dogfood",
       baseBranch: "main",
@@ -51,6 +67,7 @@ test("worker handoff allowlists environment and carries only bounded identities"
   assert.equal(environment.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(environment.INARI_CHANGE_ISSUE, "239");
   assert.equal(environment.INARI_IMPLEMENTATION_BRANCH, "feat/239-disposable-dogfood");
+  assert.equal(environment.INARI_SOURCE_COMMIT_SHA, "a".repeat(40));
   assert.doesNotMatch(environment.INARI_IMPLEMENTATION_HANDOFF, /secret|private|token/iu);
 });
 
@@ -61,7 +78,7 @@ test("worker handoff rejects unknown sensitive fields instead of serializing the
     repositoryHost: "github.com",
     repositoryId: "123239",
     rootIssue: 239,
-    changeVersion: "1",
+    changeVersion: 1,
     state: "DRAFT",
     branch: "feat/239-disposable-dogfood",
     baseBranch: "main",
@@ -71,6 +88,32 @@ test("worker handoff rejects unknown sensitive fields instead of serializing the
   };
   assert.throws(() => projectWorkerHandoff(handoff), /unsupported fields/u);
   assert.throws(() => sanitizeWorkerEnvironment({}, handoff, "a".repeat(40)), /unsupported fields/u);
+});
+
+test("worker handoff rejects forged lifecycle or identity values", () => {
+  const handoff = {
+    version: 1,
+    kind: "implementation-handoff",
+    repositoryHost: "github.com",
+    repositoryId: "123239",
+    rootIssue: 239,
+    changeVersion: 1,
+    state: "DRAFT",
+    branch: "feat/239-disposable-dogfood",
+    baseBranch: "main",
+    pullRequest: 9239,
+  };
+  assert.doesNotThrow(() => projectWorkerHandoff(handoff));
+  for (const [field, value] of [
+    ["version", "1"],
+    ["kind", "other"],
+    ["rootIssue", 0],
+    ["changeVersion", 2],
+    ["state", "REVIEW"],
+    ["pullRequest", 0],
+  ]) {
+    assert.throws(() => projectWorkerHandoff({ ...handoff, [field]: value }), /implementation handoff/u, field);
+  }
 });
 
 test("live dogfood is opt-in and emits bounded blocked evidence without mutation", () => {
@@ -131,13 +174,13 @@ const readyStateFile = process.env.FAKE_INARI_READY_STATE;
 const readyCount = Number(fs.existsSync(readyStateFile) ? fs.readFileSync(readyStateFile, "utf8") : "0");
 const ready = args.includes("ready");
 if (ready) fs.writeFileSync(readyStateFile, String(readyCount + 1));
-const common = { branch: "feat/239-self-dogfood", pullRequest: 9239, version: "1" };
+const common = { branch: "feat/239-self-dogfood", pullRequest: 9239, version: 1 };
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
-else if (args.includes("skill")) output = { id: "golden-path", version: "1", workflow: [] };
+else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
 else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
-else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: "1" } };
+else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
 else if (args.includes("show")) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" } };
 else if (ready) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: readyCount === 0 ? "verified" : "returned-existing" } };
 else output = { ok: false };
@@ -199,21 +242,22 @@ export function validateSelfDogfoodEvidence(value) { return { valid: value.resul
     );
     const evidence = JSON.parse(fs.readFileSync(outputFile, "utf8"));
     assert.equal(evidence.result, "passed");
+    assert.deepEqual(evidence.contractVersions, { goldenPath: "1", statusRecovery: "1", skill: "1.1.0" });
     assert.equal(evidence.change.pullRequest, 9239);
     assert.deepEqual(
       evidence.operations.map(({ operation }) => operation),
       [
-        "opt-in",
-        "executable",
-        "skill",
-        "governance",
-        "first-issuance",
-        "return-existing",
-        "handoff",
-        "worker",
-        "first-ready",
-        "reread",
-        "ready-retry",
+        "preflight.opt-in",
+        "preflight.installed-executable",
+        "skill.golden-path",
+        "disposable-issue.governance-check",
+        "change.issue.first",
+        "change.issue.return-existing",
+        "change.handoff",
+        "worker.implementation",
+        "change.ready.first",
+        "change.ready.reread",
+        "change.ready.retry",
       ],
     );
     const observation = JSON.parse(fs.readFileSync(workerObservation, "utf8"));
