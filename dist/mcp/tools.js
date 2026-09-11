@@ -16,8 +16,10 @@ import { SemanticIssueProjectionError, tryPlanSemanticIssue, } from "../semantic
 import { compareSemanticIssueProjection, tryObserveSemanticIssue } from "../semantic-issue-observation.js";
 import { SemanticPullRequestProjectionError, tryPlanSemanticPullRequest, } from "../semantic-pr-projection.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
-import { GitHubAdapter, GitHubIssueRelationObservationAdapter, isGitHubAdapterError, } from "../github/index.js";
+import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, GitHubIssueRelationObservationAdapter, isGitHubAdapterError, } from "../github/index.js";
 import { GITHUB_ISSUE_PROJECTION_CAPABILITIES } from "../semantic-issue-projection.js";
+import { changeRemoteReadRequest, ChangeRemoteExecutorError, readChangeRemoteProjection, } from "../change-executor.js";
+import { tryProjectImplementationHandoff } from "../change-handoff.js";
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1";
 export const INARI_MCP_TOOL_NAMES = Object.freeze([
@@ -36,6 +38,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
     "inari_pr_plan",
     "inari_pr_observe",
     "inari_pr_drift",
+    "inari_change_handoff",
 ]);
 const MAX_STRING_LENGTH = 1_024;
 const MAX_CAPABILITIES = 64;
@@ -117,6 +120,13 @@ export const semanticPullRequestDriftInputSchema = z.strictObject({
     number: artifactNumberSchema,
     input: inputValueSchema,
 });
+/** Input schema for the read-only canonical implementation handoff. */
+export const implementationHandoffInputSchema = z.strictObject({
+    repository: repositorySchema.optional(),
+    issue: artifactNumberSchema,
+});
+/** Compatibility name for callers that prefix the handoff with Change. */
+export const changeImplementationHandoffInputSchema = implementationHandoffInputSchema;
 const READ_ONLY = Object.freeze({
     readOnlyHint: true,
     destructiveHint: false,
@@ -162,6 +172,26 @@ export const semanticPullRequestOutputSchema = z
     .strict();
 export const semanticIssueOutputSchema = semanticPullRequestOutputSchema;
 export const semanticBranchOutputSchema = semanticPullRequestOutputSchema;
+/** Structured output schema for the canonical Change implementation handoff. */
+export const implementationHandoffOutputSchema = z
+    .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("change.handoff"),
+    issue: artifactNumberSchema,
+    change: artifactNumberSchema.optional(),
+    status: z.string().optional(),
+    state: z.string().optional(),
+    canonicalBranch: z.string().optional(),
+    canonicalBaseBranch: z.string().optional(),
+    branch: z.string().optional(),
+    pullRequest: artifactNumberSchema.optional(),
+    handoff: z.unknown().optional(),
+    projection: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+})
+    .strict();
+export const changeImplementationHandoffOutputSchema = implementationHandoffOutputSchema;
 function adapterFor(requestRepository, dependencies) {
     if (dependencies.adapter !== undefined)
         return dependencies.adapter;
@@ -171,6 +201,20 @@ function adapterFor(requestRepository, dependencies) {
         ...(repository === undefined ? {} : { repository }),
     };
     return (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))(options);
+}
+function changeExecutorFor(requestRepository, dependencies) {
+    if (dependencies.changeExecutor !== undefined)
+        return dependencies.changeExecutor;
+    const cwd = dependencies.repositoryRoot ?? process.cwd();
+    const repository = requestRepository ?? dependencies.repository;
+    const options = {
+        cwd,
+        ...(repository === undefined ? {} : { repository }),
+    };
+    if (dependencies.createChangeExecutor !== undefined)
+        return dependencies.createChangeExecutor(options);
+    const adapter = adapterFor(requestRepository, dependencies);
+    return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
 }
 /** Resolve the repository Canon through the existing repository/Core boundary. */
 export async function resolveSemanticPullRequestContract(input, dependencies = {}) {
@@ -260,6 +304,12 @@ function diagnosticsForError(error) {
     if (error instanceof EffectiveArtifactContractCompilationError) {
         return [{ code: "EFFECTIVE_CONTRACT_INVALID", path: "$", message: boundedErrorMessage(error) }];
     }
+    if (error instanceof ChangeRemoteExecutorError) {
+        const diagnostics = error.diagnostics === undefined ? [] : boundedDiagnostics(error.diagnostics);
+        return diagnostics.length > 0
+            ? diagnostics
+            : [{ code: error.code, path: "$", message: boundedErrorMessage(error) }];
+    }
     return [{ code: "CORE_OPERATION_FAILED", path: "$", message: boundedErrorMessage(error) }];
 }
 function failure(phase, diagnostics) {
@@ -277,6 +327,43 @@ function result(data, summary) {
         structuredContent: data,
         content: [{ type: "text", text: summary }],
     };
+}
+function projectChangeHandoffResult(issue, projection) {
+    const change = projection.change;
+    const changeProjection = change?.projection;
+    const handoff = tryProjectImplementationHandoff(projection);
+    return {
+        ok: handoff.valid,
+        valid: handoff.valid,
+        operation: "change.handoff",
+        issue,
+        change: change?.identity.rootIssue ?? issue,
+        status: projection.status,
+        ...(change === undefined ? {} : { state: change.state }),
+        ...(projection.canonicalBranch === undefined ? {} : { canonicalBranch: projection.canonicalBranch }),
+        ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
+        ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
+        ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+        diagnostics: handoff.diagnostics,
+        ...(handoff.handoff === undefined ? {} : { handoff: handoff.handoff }),
+        projection,
+    };
+}
+async function handleImplementationHandoff(input, dependencies) {
+    try {
+        const executor = changeExecutorFor(input.repository, dependencies);
+        const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+        return result(projectChangeHandoffResult(input.issue, projection), "Read the canonical implementation handoff through the Change Core boundary.");
+    }
+    catch (error) {
+        return result({
+            ok: false,
+            valid: false,
+            operation: "change.handoff",
+            issue: input.issue,
+            diagnostics: diagnosticsForError(error),
+        }, "Implementation handoff is unavailable; see diagnostics.");
+    }
 }
 function observationRepository(context) {
     return {
@@ -764,6 +851,17 @@ export function registerSemanticBranchTools(server, dependencies = {}) {
         annotations: READ_ONLY,
     }, async (input) => handleBranchDrift(input, dependencies));
     return Object.freeze([contract, materialize, plan, observe, drift]);
+}
+/** Register the read-only worker handoff projection over the existing Change read boundary. */
+export function registerChangeTools(server, dependencies = {}) {
+    const handoff = server.registerTool("inari_change_handoff", {
+        title: "Read implementation handoff",
+        description: "Read the bounded canonical implementation handoff for a healthy DRAFT Change. Inari owns remote identity only; the worker owns local worktree and session state.",
+        inputSchema: implementationHandoffInputSchema,
+        outputSchema: implementationHandoffOutputSchema,
+        annotations: READ_ONLY,
+    }, async (input) => handleImplementationHandoff(input, dependencies));
+    return Object.freeze([handoff]);
 }
 /** Publicly expose the protocol annotations without allowing mutation. */
 export const SEMANTIC_PULL_REQUEST_MCP_ANNOTATIONS = READ_ONLY;

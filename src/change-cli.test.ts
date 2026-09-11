@@ -161,6 +161,7 @@ test("change handoff reads the same Change projection and exposes only canonical
     },
   ]);
   assert.equal(result.output?.ok, true);
+  assert.equal(result.output?.valid, true);
   assert.deepEqual(result.output?.handoff, {
     version: 1,
     kind: "implementation-handoff",
@@ -185,6 +186,7 @@ test("change handoff rejects an already-review Change without mutation", async (
   assert.equal(result.exitCode, 2);
   assert.equal(calls[0]?.operation, "show");
   assert.equal(result.output?.ok, false);
+  assert.equal(result.output?.valid, false);
   assert.equal(result.output?.handoff, undefined);
   assert.ok(Array.isArray(result.output?.diagnostics));
 });

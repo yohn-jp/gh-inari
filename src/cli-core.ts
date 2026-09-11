@@ -983,6 +983,7 @@ function projectChangeHandoffCommandResult(
   return {
     ...projectChangeCommandResult("handoff", issue, projection),
     ok: handoff.valid,
+    valid: handoff.valid,
     diagnostics: handoff.diagnostics,
     ...(handoff.handoff === undefined ? {} : { handoff: handoff.handoff }),
   };

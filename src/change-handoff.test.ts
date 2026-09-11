@@ -63,6 +63,26 @@ test("healthy REVIEW evidence is not implementation-admissible", () => {
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_STATE"));
 });
 
+test("handoff fails closed when healthy metadata disagrees with the canonical Draft PR", () => {
+  const input = projection();
+  const candidate = input.candidates.pullRequests[0];
+  assert.ok(candidate);
+  const result = tryProjectImplementationHandoff({
+    ...input,
+    candidates: {
+      ...input.candidates,
+      pullRequests: [
+        {
+          ...candidate,
+          candidate: { ...candidate.candidate, draft: false },
+        },
+      ],
+    },
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_STATE"));
+});
+
 test("partial, duplicate, ambiguous, wrong-base, and unavailable evidence fail closed", () => {
   const cases: readonly ChangeProjectionResult[] = [
     {

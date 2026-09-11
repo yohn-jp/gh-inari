@@ -238,6 +238,11 @@ export function tryProjectImplementationHandoff(input: unknown): ImplementationH
   if (!projection.valid || projection.status !== "healthy") {
     if (projection.diagnostics.length > 0) extraDiagnostics.push(...projection.diagnostics);
     if (statusFailure !== undefined) extraDiagnostics.push(statusFailure);
+    if (extraDiagnostics.length === 0) {
+      extraDiagnostics.push(
+        diagnostic("CHANGE_INVALID_PROJECTION", "$.valid", "Change projection is not implementation-admissible."),
+      );
+    }
     return invalid(extraDiagnostics);
   }
   if (projection.diagnostics.length > 0) {
@@ -297,6 +302,16 @@ export function tryProjectImplementationHandoff(input: unknown): ImplementationH
       diagnostic("CHANGE_INVALID_IDENTITY", "$.change.identity.rootIssue", "Change root Issue is invalid."),
     );
   const candidates = canonicalCandidateCount(projection, branch, baseBranch, pullRequest);
+  const canonicalPullRequest = projection.candidates.pullRequests.find(
+    (candidate) =>
+      candidate.classification === "canonical" &&
+      candidate.candidate.number === pullRequest &&
+      candidate.candidate.head === branch &&
+      candidate.candidate.base === baseBranch,
+  )?.candidate;
+  const canonicalBranchCandidate = projection.candidates.branches.find(
+    (candidate) => candidate.classification === "canonical" && candidate.candidate.name === branch,
+  )?.candidate;
   if (candidates.branches !== 1)
     extraDiagnostics.push(
       diagnostic(
@@ -313,6 +328,46 @@ export function tryProjectImplementationHandoff(input: unknown): ImplementationH
         "Exactly one canonical pull-request candidate is required.",
       ),
     );
+  if (
+    canonicalBranchCandidate?.rootIssue !== undefined &&
+    canonicalBranchCandidate.rootIssue !== change.identity.rootIssue
+  )
+    extraDiagnostics.push(
+      diagnostic(
+        "CHANGE_PROJECTION_CONFLICT",
+        "$.candidates.branches",
+        "Canonical branch root Issue does not match the Change identity.",
+      ),
+    );
+  if (canonicalPullRequest !== undefined) {
+    if (canonicalPullRequest.state !== "open" || !canonicalPullRequest.draft || canonicalPullRequest.merged) {
+      extraDiagnostics.push(
+        diagnostic(
+          "CHANGE_INVALID_STATE",
+          "$.candidates.pullRequests",
+          "Canonical pull request must be open and in DRAFT state for implementation handoff.",
+        ),
+      );
+    }
+    if (canonicalPullRequest.accepted === true) {
+      extraDiagnostics.push(
+        diagnostic(
+          "CHANGE_PROJECTION_CONFLICT",
+          "$.candidates.pullRequests",
+          "A draft canonical pull request cannot be accepted.",
+        ),
+      );
+    }
+    if (canonicalPullRequest.rootIssue !== undefined && canonicalPullRequest.rootIssue !== change.identity.rootIssue) {
+      extraDiagnostics.push(
+        diagnostic(
+          "CHANGE_PROJECTION_CONFLICT",
+          "$.candidates.pullRequests",
+          "Canonical pull-request root Issue does not match the Change identity.",
+        ),
+      );
+    }
+  }
   if (extraDiagnostics.length > 0) return invalid(extraDiagnostics);
   const handoff: ImplementationHandoff = {
     version: IMPLEMENTATION_HANDOFF_CONTRACT_VERSION,

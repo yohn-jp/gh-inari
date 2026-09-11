@@ -10,9 +10,10 @@ import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server
 import { z } from "zod";
 import { type EffectiveArtifactContract } from "../contract/effective-artifact-contract.js";
 import { GitHubAdapter, type GitHubAdapterOptions } from "../github/index.js";
+import { type ChangeRemoteExecutor, type ChangeRemoteExecutorOptions } from "../change-executor.js";
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export declare const INARI_MCP_TOOL_CONTRACT_VERSION: "1";
-export declare const INARI_MCP_TOOL_NAMES: readonly ["inari_issue_contract", "inari_issue_materialize", "inari_issue_plan", "inari_issue_observe", "inari_issue_drift", "inari_branch_contract", "inari_branch_materialize", "inari_branch_plan", "inari_branch_observe", "inari_branch_drift", "inari_pr_contract", "inari_pr_materialize", "inari_pr_plan", "inari_pr_observe", "inari_pr_drift"];
+export declare const INARI_MCP_TOOL_NAMES: readonly ["inari_issue_contract", "inari_issue_materialize", "inari_issue_plan", "inari_issue_observe", "inari_issue_drift", "inari_branch_contract", "inari_branch_materialize", "inari_branch_plan", "inari_branch_observe", "inari_branch_drift", "inari_pr_contract", "inari_pr_materialize", "inari_pr_plan", "inari_pr_observe", "inari_pr_drift", "inari_change_handoff"];
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
 /** Input schema shared by contract discovery and the two semantic operations. */
 export declare const semanticPullRequestContractInputSchema: z.ZodObject<{
@@ -109,6 +110,16 @@ export declare const semanticPullRequestDriftInputSchema: z.ZodObject<{
     template: z.ZodOptional<z.ZodString>;
     capabilities: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strict>;
+/** Input schema for the read-only canonical implementation handoff. */
+export declare const implementationHandoffInputSchema: z.ZodObject<{
+    repository: z.ZodOptional<z.ZodString>;
+    issue: z.ZodNumber;
+}, z.core.$strict>;
+/** Compatibility name for callers that prefix the handoff with Change. */
+export declare const changeImplementationHandoffInputSchema: z.ZodObject<{
+    repository: z.ZodOptional<z.ZodString>;
+    issue: z.ZodNumber;
+}, z.core.$strict>;
 export type SemanticPullRequestContractInput = z.infer<typeof semanticPullRequestContractInputSchema>;
 export type SemanticPullRequestMaterializeInput = z.infer<typeof semanticPullRequestMaterializeInputSchema>;
 export type SemanticPullRequestPlanInput = z.infer<typeof semanticPullRequestPlanInputSchema>;
@@ -124,6 +135,8 @@ export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInp
 export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
 export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
+export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
+export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
     /** Local repository working directory used for GitHubAdapter resolution. */
@@ -137,6 +150,13 @@ export interface NativeSemanticPullRequestDependencies {
 }
 /** Shared dependency seam for all read-only semantic artifact catalogs. */
 export interface NativeSemanticArtifactDependencies extends NativeSemanticPullRequestDependencies {
+}
+/** Injectable read boundary for Change projections exposed through MCP. */
+export interface NativeChangeDependencies extends NativeSemanticPullRequestDependencies {
+    /** Direct semantic executor seam for tests or embedding applications. */
+    readonly changeExecutor?: ChangeRemoteExecutor;
+    /** Factory seam for repository-scoped Change executor construction. */
+    readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
 }
 /**
  * Core result fields are intentionally explicit so malformed adapter output
@@ -257,6 +277,39 @@ export declare const semanticBranchOutputSchema: z.ZodObject<{
     preview: z.ZodOptional<z.ZodBoolean>;
     mutation: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strict>;
+/** Structured output schema for the canonical Change implementation handoff. */
+export declare const implementationHandoffOutputSchema: z.ZodObject<{
+    ok: z.ZodBoolean;
+    valid: z.ZodBoolean;
+    operation: z.ZodLiteral<"change.handoff">;
+    issue: z.ZodNumber;
+    change: z.ZodOptional<z.ZodNumber>;
+    status: z.ZodOptional<z.ZodString>;
+    state: z.ZodOptional<z.ZodString>;
+    canonicalBranch: z.ZodOptional<z.ZodString>;
+    canonicalBaseBranch: z.ZodOptional<z.ZodString>;
+    branch: z.ZodOptional<z.ZodString>;
+    pullRequest: z.ZodOptional<z.ZodNumber>;
+    handoff: z.ZodOptional<z.ZodUnknown>;
+    projection: z.ZodOptional<z.ZodUnknown>;
+    diagnostics: z.ZodArray<z.ZodUnknown>;
+}, z.core.$strict>;
+export declare const changeImplementationHandoffOutputSchema: z.ZodObject<{
+    ok: z.ZodBoolean;
+    valid: z.ZodBoolean;
+    operation: z.ZodLiteral<"change.handoff">;
+    issue: z.ZodNumber;
+    change: z.ZodOptional<z.ZodNumber>;
+    status: z.ZodOptional<z.ZodString>;
+    state: z.ZodOptional<z.ZodString>;
+    canonicalBranch: z.ZodOptional<z.ZodString>;
+    canonicalBaseBranch: z.ZodOptional<z.ZodString>;
+    branch: z.ZodOptional<z.ZodString>;
+    pullRequest: z.ZodOptional<z.ZodNumber>;
+    handoff: z.ZodOptional<z.ZodUnknown>;
+    projection: z.ZodOptional<z.ZodUnknown>;
+    diagnostics: z.ZodArray<z.ZodUnknown>;
+}, z.core.$strict>;
 /** Resolve the repository Canon through the existing repository/Core boundary. */
 export declare function resolveSemanticPullRequestContract(input: SemanticPullRequestContractInput, dependencies?: NativeSemanticPullRequestDependencies): Promise<EffectiveArtifactContract>;
 /** Resolve the repository Canon for a semantic Issue. */
@@ -269,6 +322,8 @@ export declare function registerSemanticPullRequestTools(server: McpServer, depe
 export declare function registerSemanticIssueTools(server: McpServer, dependencies?: NativeSemanticArtifactDependencies): readonly RegisteredTool[];
 /** Register the typed Branch semantic artifact catalog without adding policy. */
 export declare function registerSemanticBranchTools(server: McpServer, dependencies?: NativeSemanticArtifactDependencies): readonly RegisteredTool[];
+/** Register the read-only worker handoff projection over the existing Change read boundary. */
+export declare function registerChangeTools(server: McpServer, dependencies?: NativeChangeDependencies): readonly RegisteredTool[];
 /** Publicly expose the protocol annotations without allowing mutation. */
 export declare const SEMANTIC_PULL_REQUEST_MCP_ANNOTATIONS: {
     title?: string | undefined;

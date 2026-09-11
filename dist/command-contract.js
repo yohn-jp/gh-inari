@@ -160,6 +160,7 @@ export const INARI_COMMANDS = [
     command("template.import", "template", "import", ["template", "import"], "Import a native template into a semantic contract.", ["help", "json", "from", "to"]),
     command("change.issue", "change", "issue", ["change", "issue"], "Request authoritative issuance of a governed Change for an Issue.", CHANGE_OPTIONS, "<number>"),
     command("change.show", "change", "show", ["change", "show"], "Read a bounded machine-readable projection of a governed Change.", CHANGE_OPTIONS, "<number>"),
+    command("change.handoff", "change", "handoff", ["change", "handoff"], "Read the canonical implementation handoff for an implementation-admissible Change.", CHANGE_OPTIONS, "<number>"),
     command("change.ready", "change", "ready", ["change", "ready"], "Request the governed transition of a Change from Draft to review.", CHANGE_OPTIONS, "<number>"),
     command("change.abort", "change", "abort", ["change", "abort"], "Request authoritative termination of a governed Change.", CHANGE_OPTIONS, "<number>"),
     command("authority.generate", "authority", "generate", ["authority", "generate"], "Generate and securely persist a local Ed25519 Runtime Authority keypair.", AUTHORITY_OPTIONS),
