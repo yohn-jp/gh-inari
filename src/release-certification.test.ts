@@ -105,6 +105,18 @@ test("binds self-dogfood evidence to the expected release repository", () => {
   assert.equal(result.diagnostics[0]?.code, "REPOSITORY_MISMATCH");
 });
 
+test("binds the canonical Change identity to the dogfood root Issue", () => {
+  const result = verifyReleaseCertification(
+    input({
+      dogfoodEvidence: dogfoodEvidence({
+        change: { issue: 404, branch: "feat/405-certification", pullRequest: 999 },
+      }),
+    }),
+  );
+  assert.equal(result.passed, false);
+  assert.equal(result.diagnostics[0]?.code, "DOGFOOD_IDENTITY_INVALID");
+});
+
 test("rejects package, version, and exact tarball digest mismatches", () => {
   const result = verifyReleaseCertification(
     input({
@@ -118,6 +130,25 @@ test("rejects package, version, and exact tarball digest mismatches", () => {
     result.diagnostics.map((diagnostic) => diagnostic.code),
     ["PACKAGE_MISMATCH", "TARBALL_DIGEST_MISMATCH"],
   );
+});
+
+test("rejects passed evidence with diagnostics or cross-lane fields", () => {
+  const diagnosticResult = verifyReleaseCertification(
+    input({ packedEvidence: packedEvidence({ diagnostics: [{ code: "PACKED_WARNING", message: "not clean" }] }) }),
+  );
+  assert.equal(diagnosticResult.passed, false);
+  assert.equal(diagnosticResult.diagnostics[0]?.code, "EVIDENCE_MALFORMED");
+
+  const crossLaneResult = verifyReleaseCertification(
+    input({
+      packedEvidence: packedEvidence({
+        mutableLastGreen: true,
+        repository: { owner: "yohn-jp", name: "gh-inari" },
+      }),
+    }),
+  );
+  assert.equal(crossLaneResult.passed, false);
+  assert.equal(crossLaneResult.diagnostics[0]?.code, "EVIDENCE_MALFORMED");
 });
 
 test("rejects failed, blocked, and unknown results", () => {

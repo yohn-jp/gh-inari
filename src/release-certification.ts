@@ -180,14 +180,17 @@ export interface ReleaseCertificationVerificationResult {
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
-const EVIDENCE_KEYS = new Set([
+const COMMON_EVIDENCE_KEYS = new Set([
   "schemaVersion",
   "certificationKind",
   "result",
   "sourceCommitSha",
   "contractVersions",
   "diagnostics",
-  "package",
+]);
+const PACKED_EVIDENCE_KEYS = new Set([...COMMON_EVIDENCE_KEYS, "package"]);
+const DOGFOOD_EVIDENCE_KEYS = new Set([
+  ...COMMON_EVIDENCE_KEYS,
   "repository",
   "rootIssue",
   "change",
@@ -205,6 +208,7 @@ const RECOVERY_KEYS = new Set(["state", "action"]);
 const RECOVERY_NONE_STATES = new Set(["NONE", "none", "NOT_REQUIRED", "not-required"]);
 const RECOVERY_REQUIRED_STATES = new Set(["RECOVERY_REQUIRED", "recovery-required"]);
 const RECOVERY_COMPLETED_STATES = new Set(["COMPLETED", "completed"]);
+const DIAGNOSTIC_CODE_PATTERN = /^[A-Z][A-Z0-9_.-]{0,127}$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -246,6 +250,7 @@ function validateDiagnostics(value: unknown): boolean {
     if (!isRecord(diagnostic) || !hasOnlyKeys(diagnostic, DIAGNOSTIC_KEYS)) return false;
     return (
       isBoundedString(diagnostic.code, MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH) &&
+      DIAGNOSTIC_CODE_PATTERN.test(diagnostic.code) &&
       isBoundedString(diagnostic.message, MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH)
     );
   });
@@ -270,7 +275,8 @@ function validateEnvelope(
     pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence must be a JSON object.");
     return false;
   }
-  if (!hasOnlyKeys(value, EVIDENCE_KEYS)) {
+  const allowedKeys = expectedKind === "packed-artifact-golden-path" ? PACKED_EVIDENCE_KEYS : DOGFOOD_EVIDENCE_KEYS;
+  if (!hasOnlyKeys(value, allowedKeys)) {
     pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence contains unknown fields.");
     return false;
   }
@@ -300,6 +306,10 @@ function validateEnvelope(
   }
   if (!validateDiagnostics(value.diagnostics)) {
     pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence diagnostics are missing or unbounded.");
+    return false;
+  }
+  if (value.result === "passed" && Array.isArray(value.diagnostics) && value.diagnostics.length !== 0) {
+    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Passed certification evidence must not contain diagnostics.");
     return false;
   }
   return true;
@@ -396,6 +406,14 @@ function validateDogfoodExtension(
       diagnostics,
       "REPOSITORY_MISMATCH",
       "Self-dogfood repository does not match the release repository.",
+    );
+    return false;
+  }
+  if (change.issue !== value.rootIssue) {
+    pushDiagnostic(
+      diagnostics,
+      "DOGFOOD_IDENTITY_INVALID",
+      "Self-dogfood Change issue must match the evidence root Issue.",
     );
     return false;
   }
