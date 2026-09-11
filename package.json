@@ -52,6 +52,10 @@
       "types": "./dist/golden-path-review.d.ts",
       "import": "./dist/golden-path-review.js"
     },
+    "./golden-path-entry": {
+      "types": "./dist/golden-path-entry.d.ts",
+      "import": "./dist/golden-path-entry.js"
+    },
     "./semantic-pr-projection": {
       "types": "./dist/semantic-pr-projection.d.ts",
       "import": "./dist/semantic-pr-projection.js"
