@@ -12,6 +12,7 @@
  */
 import { type EffectiveArtifactContract } from "./contract/index.js";
 import { GitHubAdapter } from "./github/index.js";
+import type { TemplateSelector } from "./template-discovery.js";
 export type RepositoryEffectiveArtifactKind = "issue" | "branch" | "pull_request";
 export type ArtifactContractResolutionErrorCode = "ARTIFACT_CONTRACT_NOT_FOUND" | "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS" | "ARTIFACT_CONTRACT_SOURCE_INVALID" | "ARTIFACT_CONTRACT_KIND_INVALID";
 export interface ArtifactContractResolutionDiagnostic {
@@ -35,10 +36,10 @@ export interface RepositoryEffectiveArtifactContractOptions {
  * Artifact Contract. All repository identity and generation fields come from
  * the adapter's default-branch/tree/blob reads.
  */
-export declare function compileRepositoryEffectiveArtifactContract(adapter: GitHubAdapter, kind: RepositoryEffectiveArtifactKind, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
+export declare function compileRepositoryEffectiveArtifactContract(adapter: GitHubAdapter, kind: RepositoryEffectiveArtifactKind, selector?: string | TemplateSelector, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
 /** Resolve and compile a pull-request Artifact Contract from the repository Canon. */
-export declare function compileRepositoryEffectivePullRequestContract(adapter: GitHubAdapter, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
+export declare function compileRepositoryEffectivePullRequestContract(adapter: GitHubAdapter, selector?: string | TemplateSelector, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
 /** Resolve and compile an Issue Artifact Contract from the repository Canon. */
-export declare function compileRepositoryEffectiveIssueContract(adapter: GitHubAdapter, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
+export declare function compileRepositoryEffectiveIssueContract(adapter: GitHubAdapter, selector?: string | TemplateSelector, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
 /** Resolve and compile a Branch Artifact Contract from the repository Canon. */
-export declare function compileRepositoryEffectiveBranchContract(adapter: GitHubAdapter, selector?: string, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;
+export declare function compileRepositoryEffectiveBranchContract(adapter: GitHubAdapter, selector?: string | TemplateSelector, options?: RepositoryEffectiveArtifactContractOptions): Promise<EffectiveArtifactContract>;

@@ -155,4 +155,4 @@ export interface RepositoryArtifactContractIdentity {
  */
 export declare function createRemoteArtifactContractIdentities(tree: readonly RepositoryTreeEntry[]): readonly RepositoryArtifactContractIdentity[];
 /** Resolve an Artifact Contract identity with the shared template selector semantics. */
-export declare function resolveRemoteArtifactContractIdentity(tree: readonly RepositoryTreeEntry[], kind: ArtifactContract["kind"], selector?: string): Promise<RepositoryArtifactContractIdentity>;
+export declare function resolveRemoteArtifactContractIdentity(tree: readonly RepositoryTreeEntry[], kind: ArtifactContract["kind"], selector?: string | TemplateSelector, configuredDefault?: string | TemplateSelector): Promise<RepositoryArtifactContractIdentity>;
