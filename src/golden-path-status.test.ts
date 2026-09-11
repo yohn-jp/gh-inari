@@ -132,6 +132,61 @@ test("projects supplied recovery evidence without selecting recovery policy", ()
   assert.equal(result.recovery?.rereadRequired, true);
 });
 
+test("projects recovery WAIT as a recovery-owned action with the reread reason", () => {
+  const result = projectGoldenPathStatus(
+    input({
+      change: { state: "RECOVERY_REQUIRED", projectionStatus: "partial" },
+      recovery: {
+        class: "POST_EFFECT_VERIFICATION",
+        safeAction: "WAIT",
+        retryable: false,
+        rereadRequired: true,
+        automaticCleanup: "none",
+      },
+    }),
+  );
+  assert.deepEqual(result.nextAction, {
+    kind: "WAIT",
+    owner: "recovery",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  });
+  assert.equal(validateGoldenPathStatus(result).valid, true);
+});
+
+test("fails closed for inconsistent recovery action metadata", () => {
+  const base = input({ change: { state: "RECOVERY_REQUIRED", projectionStatus: "partial" } });
+  assert.equal(
+    tryProjectGoldenPathStatus({
+      ...base,
+      recovery: {
+        class: "POST_EFFECT_VERIFICATION",
+        safeAction: "RETRY",
+        retryable: true,
+        rereadRequired: true,
+        automaticCleanup: "forbidden",
+      },
+    }).valid,
+    false,
+  );
+  const validRecovery = projectGoldenPathStatus({
+    ...base,
+    recovery: {
+      class: "POST_EFFECT_VERIFICATION",
+      safeAction: "WAIT",
+      retryable: false,
+      rereadRequired: true,
+      automaticCleanup: "none",
+    },
+  });
+  assert.equal(
+    validateGoldenPathStatus({
+      ...validRecovery,
+      nextAction: { ...validRecovery.nextAction!, owner: "repository" },
+    }).valid,
+    false,
+  );
+});
+
 test("rejects contradictory or malformed evidence instead of guessing", () => {
   const contradictory = tryProjectGoldenPathStatus(
     input({
@@ -155,4 +210,18 @@ test("validates the zero-or-one action invariant at the public boundary", () => 
     validateGoldenPathStatus({ ...valid, status: { ...valid.status, availability: "blocked" } }).valid,
     false,
   );
+  assert.equal(
+    validateGoldenPathStatus({
+      ...valid,
+      nextAction: { ...valid.nextAction!, owner: "caller" },
+    }).valid,
+    false,
+  );
+  for (const state of ["DRAFT", "REVIEW", "ACCEPTED", "MERGED", "ABORTED", "RECOVERY_REQUIRED"] as const) {
+    assert.equal(
+      tryProjectGoldenPathStatus(input({ issue: "absent", change: { state, projectionStatus: "healthy" } })).valid,
+      false,
+      state,
+    );
+  }
 });

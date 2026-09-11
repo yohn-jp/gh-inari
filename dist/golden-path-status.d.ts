@@ -9,8 +9,6 @@
 import { type Change, type ChangeIdentity, type ChangeProjectionResult, type ChangeProjectionStatus, type ChangeState } from "./change.js";
 import { type ChangeRemoteExecutionOutcome } from "./change-executor.js";
 export declare const GOLDEN_PATH_STATUS_VERSION: 1;
-/** Alias used by callers that name the envelope as a contract. */
-export declare const GOLDEN_PATH_STATUS_CONTRACT_VERSION: 1;
 export type GoldenPathStatusVersion = typeof GOLDEN_PATH_STATUS_VERSION;
 export declare const GOLDEN_PATH_PHASES: readonly ["ENVIRONMENT", "GOVERNANCE", "ISSUE", "CHANGE", "IMPLEMENTATION", "READY", "REVIEW", "TERMINAL", "RECOVERY"];
 export type GoldenPathPhase = (typeof GOLDEN_PATH_PHASES)[number];
@@ -19,17 +17,53 @@ export type GoldenPathAvailability = (typeof GOLDEN_PATH_AVAILABILITIES)[number]
 /** Normal actions deliberately exclude recovery actions owned by #410. */
 export declare const GOLDEN_PATH_NORMAL_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "WAIT"];
 export type GoldenPathNormalActionKind = (typeof GOLDEN_PATH_NORMAL_ACTION_KINDS)[number];
-export declare const GOLDEN_PATH_NEXT_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "WAIT"];
-export type GoldenPathNextActionKind = GoldenPathNormalActionKind;
 /** Recovery actions are a separate boundary; this module only projects supplied recovery evidence. */
-export declare const GOLDEN_PATH_RECOVERY_ACTION_KINDS: readonly ["RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW"];
+export declare const GOLDEN_PATH_RECOVERY_ACTION_KINDS: readonly ["RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW", "WAIT"];
 export type GoldenPathRecoveryActionKind = (typeof GOLDEN_PATH_RECOVERY_ACTION_KINDS)[number];
-export declare const GOLDEN_PATH_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "WAIT", "RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW"];
+export declare const GOLDEN_PATH_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "WAIT", "RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW", "WAIT"];
 export type GoldenPathActionKind = (typeof GOLDEN_PATH_ACTION_KINDS)[number];
 export declare const GOLDEN_PATH_ACTION_OWNERS: readonly ["caller", "inari", "worker", "repository", "recovery"];
 export type GoldenPathActionOwner = (typeof GOLDEN_PATH_ACTION_OWNERS)[number];
 export declare const GOLDEN_PATH_REASON_CODES: readonly ["PACKAGE_CAPABILITY_REQUIRED", "GOVERNANCE_DISCOVERY_REQUIRED", "GOVERNED_ISSUE_REQUIRED", "CHANGE_ISSUANCE_REQUIRED", "CHANGE_ISSUED", "READY_PRECONDITIONS_REQUIRED", "REVIEW_ADMITTED", "AUTHORITATIVE_REREAD_REQUIRED", "IDEMPOTENT_RETRY", "ABORT_CLEANUP_REQUIRED", "RECOVERY_ACTION_REQUIRED", "MANUAL_RECOVERY_REVIEW_REQUIRED", "WAIT_FOR_REPOSITORY_REVIEW"];
 export type GoldenPathReasonCode = (typeof GOLDEN_PATH_REASON_CODES)[number];
+/**
+ * The sole normal-action metadata authority.  Projection and serialized
+ * status validation both consume this table; it is not a lifecycle matrix.
+ */
+export declare const GOLDEN_PATH_NORMAL_ACTION_METADATA: Readonly<{
+    readonly PREFLIGHT: {
+        readonly owner: "caller";
+        readonly reasonCode: "PACKAGE_CAPABILITY_REQUIRED";
+    };
+    readonly DISCOVER_GOVERNANCE: {
+        readonly owner: "inari";
+        readonly reasonCode: "GOVERNANCE_DISCOVERY_REQUIRED";
+    };
+    readonly CREATE_ISSUE: {
+        readonly owner: "inari";
+        readonly reasonCode: "GOVERNED_ISSUE_REQUIRED";
+    };
+    readonly ISSUE_CHANGE: {
+        readonly owner: "inari";
+        readonly reasonCode: "CHANGE_ISSUANCE_REQUIRED";
+    };
+    readonly IMPLEMENT: {
+        readonly owner: "worker";
+        readonly reasonCode: "CHANGE_ISSUED";
+    };
+    readonly READY_CHANGE: {
+        readonly owner: "inari";
+        readonly reasonCode: "READY_PRECONDITIONS_REQUIRED";
+    };
+    readonly REVIEW: {
+        readonly owner: "repository";
+        readonly reasonCode: "REVIEW_ADMITTED";
+    };
+    readonly WAIT: {
+        readonly owner: "repository";
+        readonly reasonCode: "WAIT_FOR_REPOSITORY_REVIEW";
+    };
+}>;
 export declare const GOLDEN_PATH_STATUS_RECOVERY_CLASSES: readonly ["ISSUANCE_PARTIAL_PROJECTION", "ISSUANCE_COMPENSATION_UNSAFE", "ABORT_CLEANUP_PENDING", "ABORT_CLEANUP_UNSAFE", "POST_EFFECT_VERIFICATION"];
 export type GoldenPathStatusRecoveryClass = (typeof GOLDEN_PATH_STATUS_RECOVERY_CLASSES)[number];
 export declare const GOLDEN_PATH_AUTOMATIC_CLEANUP: readonly ["none", "conditional", "forbidden"];
@@ -83,10 +117,6 @@ export interface GoldenPathStatus {
     readonly recovery: GoldenPathRecoveryProjection | null;
     readonly diagnostics: readonly GoldenPathDiagnostic[];
 }
-export type GoldenPathStatusEnvelope = GoldenPathStatus;
-export type GoldenPathResult = GoldenPathStatus;
-export type GoldenPathStatusProjection = GoldenPathStatus;
-export type GoldenPathStatusProjectionInput = GoldenPathStatusInput;
 export interface GoldenPathStatusProjectionResult {
     readonly valid: boolean;
     readonly projection?: GoldenPathStatus;
@@ -163,10 +193,6 @@ export interface GoldenPathStatusInput {
 export declare function tryProjectGoldenPathStatus(input: unknown): GoldenPathStatusProjectionResult;
 /** Throwing projection entry point for Core callers. */
 export declare function projectGoldenPathStatus(input: unknown): GoldenPathStatus;
-export declare const projectGoldenPath: typeof projectGoldenPathStatus;
-export declare const tryProjectGoldenPath: typeof tryProjectGoldenPathStatus;
-export declare const projectGoldenPathStatusFromEvidence: typeof projectGoldenPathStatus;
-export declare const deriveGoldenPathStatus: typeof projectGoldenPathStatus;
 export interface GoldenPathStatusValidationResult {
     readonly valid: boolean;
     readonly status?: GoldenPathStatus;

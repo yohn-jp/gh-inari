@@ -21,8 +21,6 @@ import {
 import { CHANGE_REMOTE_EXECUTION_OUTCOMES, type ChangeRemoteExecutionOutcome } from "./change-executor.js";
 
 export const GOLDEN_PATH_STATUS_VERSION = 1 as const;
-/** Alias used by callers that name the envelope as a contract. */
-export const GOLDEN_PATH_STATUS_CONTRACT_VERSION = GOLDEN_PATH_STATUS_VERSION;
 export type GoldenPathStatusVersion = typeof GOLDEN_PATH_STATUS_VERSION;
 
 export const GOLDEN_PATH_PHASES = Object.freeze([
@@ -58,11 +56,15 @@ export const GOLDEN_PATH_NORMAL_ACTION_KINDS = Object.freeze([
   "WAIT",
 ] as const);
 export type GoldenPathNormalActionKind = (typeof GOLDEN_PATH_NORMAL_ACTION_KINDS)[number];
-export const GOLDEN_PATH_NEXT_ACTION_KINDS = GOLDEN_PATH_NORMAL_ACTION_KINDS;
-export type GoldenPathNextActionKind = GoldenPathNormalActionKind;
 
 /** Recovery actions are a separate boundary; this module only projects supplied recovery evidence. */
-export const GOLDEN_PATH_RECOVERY_ACTION_KINDS = Object.freeze(["RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW"] as const);
+export const GOLDEN_PATH_RECOVERY_ACTION_KINDS = Object.freeze([
+  "RETRY",
+  "ABORT",
+  "RECOVER",
+  "MANUAL_REVIEW",
+  "WAIT",
+] as const);
 export type GoldenPathRecoveryActionKind = (typeof GOLDEN_PATH_RECOVERY_ACTION_KINDS)[number];
 
 export const GOLDEN_PATH_ACTION_KINDS = Object.freeze([
@@ -96,6 +98,21 @@ export const GOLDEN_PATH_REASON_CODES = Object.freeze([
   "WAIT_FOR_REPOSITORY_REVIEW",
 ] as const);
 export type GoldenPathReasonCode = (typeof GOLDEN_PATH_REASON_CODES)[number];
+
+/**
+ * The sole normal-action metadata authority.  Projection and serialized
+ * status validation both consume this table; it is not a lifecycle matrix.
+ */
+export const GOLDEN_PATH_NORMAL_ACTION_METADATA = Object.freeze({
+  PREFLIGHT: { owner: "caller", reasonCode: "PACKAGE_CAPABILITY_REQUIRED" },
+  DISCOVER_GOVERNANCE: { owner: "inari", reasonCode: "GOVERNANCE_DISCOVERY_REQUIRED" },
+  CREATE_ISSUE: { owner: "inari", reasonCode: "GOVERNED_ISSUE_REQUIRED" },
+  ISSUE_CHANGE: { owner: "inari", reasonCode: "CHANGE_ISSUANCE_REQUIRED" },
+  IMPLEMENT: { owner: "worker", reasonCode: "CHANGE_ISSUED" },
+  READY_CHANGE: { owner: "inari", reasonCode: "READY_PRECONDITIONS_REQUIRED" },
+  REVIEW: { owner: "repository", reasonCode: "REVIEW_ADMITTED" },
+  WAIT: { owner: "repository", reasonCode: "WAIT_FOR_REPOSITORY_REVIEW" },
+} as const);
 
 export const GOLDEN_PATH_STATUS_RECOVERY_CLASSES = Object.freeze([
   "ISSUANCE_PARTIAL_PROJECTION",
@@ -174,11 +191,6 @@ export interface GoldenPathStatus {
   readonly recovery: GoldenPathRecoveryProjection | null;
   readonly diagnostics: readonly GoldenPathDiagnostic[];
 }
-
-export type GoldenPathStatusEnvelope = GoldenPathStatus;
-export type GoldenPathResult = GoldenPathStatus;
-export type GoldenPathStatusProjection = GoldenPathStatus;
-export type GoldenPathStatusProjectionInput = GoldenPathStatusInput;
 
 export interface GoldenPathStatusProjectionResult {
   readonly valid: boolean;
@@ -747,12 +759,21 @@ function parseRecovery(
     );
     return undefined;
   }
-  if (value.safeAction === "RETRY" && value.retryable !== true) {
+  if (value.retryable !== (value.safeAction === "RETRY")) {
     addDiagnostic(
       diagnostics,
       "GOLDEN_PATH_RECOVERY_INVALID",
       "$.recovery.retryable",
-      "A retry action requires retryable evidence.",
+      "Recovery retryability must be true exactly for RETRY.",
+    );
+    return undefined;
+  }
+  if (value.automaticCleanup === "forbidden" && ["RETRY", "ABORT", "RECOVER"].includes(value.safeAction as string)) {
+    addDiagnostic(
+      diagnostics,
+      "GOLDEN_PATH_RECOVERY_INVALID",
+      "$.recovery.automaticCleanup",
+      "Forbidden cleanup cannot expose an automatic retry, abort, or recover action.",
     );
     return undefined;
   }
@@ -814,12 +835,8 @@ function mergeSubjects(
   return Object.keys(merged).length === 0 ? undefined : merged;
 }
 
-function normalAction(
-  kind: GoldenPathNormalActionKind,
-  owner: GoldenPathActionOwner,
-  reasonCode: GoldenPathReasonCode,
-): GoldenPathNextAction {
-  return { kind, owner, reasonCode };
+function normalAction(kind: GoldenPathNormalActionKind): GoldenPathNextAction {
+  return { kind, ...GOLDEN_PATH_NORMAL_ACTION_METADATA[kind] };
 }
 
 function recoveryAction(
@@ -835,7 +852,9 @@ function recoveryAction(
         ? "MANUAL_RECOVERY_REVIEW_REQUIRED"
         : kind === "RETRY"
           ? "IDEMPOTENT_RETRY"
-          : "RECOVERY_ACTION_REQUIRED");
+          : kind === "WAIT"
+            ? "AUTHORITATIVE_REREAD_REQUIRED"
+            : "RECOVERY_ACTION_REQUIRED");
   return { kind, owner: "recovery", reasonCode, ...(retryOf === undefined ? {} : { retryOf }) };
 }
 
@@ -901,6 +920,13 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
       "$.ready",
       "Implementation readiness conflicts with ready preconditions.",
     );
+  if (issue === "absent" && change.state !== undefined && change.state !== "DEFINED")
+    addDiagnostic(
+      diagnostics,
+      "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
+      "$.issue",
+      "An absent Issue cannot have an issued or terminal Change state.",
+    );
   if (diagnostics.length > 0) return { valid: false, diagnostics };
 
   const fields: Omit<GoldenPathStatusFields, "phase" | "availability"> = {
@@ -935,7 +961,7 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
 
   if (environment === "missing") {
     status = { phase: "ENVIRONMENT", availability: "actionable", ...fields };
-    nextAction = normalAction("PREFLIGHT", "caller", "PACKAGE_CAPABILITY_REQUIRED");
+    nextAction = normalAction("PREFLIGHT");
   } else if (environment !== "available") {
     addDiagnostic(
       diagnostics,
@@ -946,7 +972,7 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
     status = blockedStatus("ENVIRONMENT", fields);
   } else if (governance === "missing") {
     status = { phase: "GOVERNANCE", availability: "actionable", ...fields };
-    nextAction = normalAction("DISCOVER_GOVERNANCE", "inari", "GOVERNANCE_DISCOVERY_REQUIRED");
+    nextAction = normalAction("DISCOVER_GOVERNANCE");
   } else if (governance !== "available") {
     addDiagnostic(
       diagnostics,
@@ -957,10 +983,10 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
     status = blockedStatus("GOVERNANCE", fields);
   } else if (issue === "missing" && change.state === undefined) {
     status = { phase: "ISSUE", availability: "actionable", ...fields };
-    nextAction = normalAction("CREATE_ISSUE", "inari", "GOVERNED_ISSUE_REQUIRED");
+    nextAction = normalAction("CREATE_ISSUE");
   } else if (issue === "absent" && change.state === undefined) {
     status = { phase: "ISSUE", availability: "actionable", ...fields };
-    nextAction = normalAction("CREATE_ISSUE", "inari", "GOVERNED_ISSUE_REQUIRED");
+    nextAction = normalAction("CREATE_ISSUE");
   } else if (issue === "unavailable") {
     addDiagnostic(
       diagnostics,
@@ -971,7 +997,7 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
     status = blockedStatus("ISSUE", fields);
   } else if (change.state === undefined) {
     status = { phase: "ISSUE", availability: "actionable", ...fields };
-    nextAction = normalAction("ISSUE_CHANGE", "inari", "CHANGE_ISSUANCE_REQUIRED");
+    nextAction = normalAction("ISSUE_CHANGE");
   } else if (change.state === "RECOVERY_REQUIRED") {
     if (recovery !== null && recovery !== undefined) {
       status = { phase: "RECOVERY", availability: "recovery-required", ...fields };
@@ -1000,20 +1026,19 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
     status = blockedStatus("CHANGE", fields);
   } else if (change.state === "DEFINED") {
     status = { phase: "ISSUE", availability: "actionable", ...fields };
-    nextAction = normalAction("ISSUE_CHANGE", "inari", "CHANGE_ISSUANCE_REQUIRED");
+    nextAction = normalAction("ISSUE_CHANGE");
   } else if (change.state === "DRAFT") {
     if (readyEligible === true || implementationReady === true) {
       status = { phase: "READY", availability: "actionable", ...fields };
-      nextAction = normalAction("READY_CHANGE", "inari", "READY_PRECONDITIONS_REQUIRED");
+      nextAction = normalAction("READY_CHANGE");
     } else {
       status = { phase: "IMPLEMENTATION", availability: "actionable", ...fields };
-      nextAction = normalAction("IMPLEMENT", "worker", "CHANGE_ISSUED");
+      nextAction = normalAction("IMPLEMENT");
     }
   } else if (change.state === "REVIEW") {
     status = { phase: "REVIEW", availability: "actionable", ...fields };
-    if (isRecord(input.review) && input.review.action === "review")
-      nextAction = normalAction("REVIEW", "repository", "REVIEW_ADMITTED");
-    else nextAction = normalAction("WAIT", "repository", "WAIT_FOR_REPOSITORY_REVIEW");
+    if (isRecord(input.review) && input.review.action === "review") nextAction = normalAction("REVIEW");
+    else nextAction = normalAction("WAIT");
   } else {
     status = { phase: "TERMINAL", availability: "terminal", ...fields };
   }
@@ -1064,11 +1089,6 @@ export function projectGoldenPathStatus(input: unknown): GoldenPathStatus {
   if (!result.valid || result.projection === undefined) throw new GoldenPathStatusError(result.diagnostics);
   return result.projection;
 }
-
-export const projectGoldenPath = projectGoldenPathStatus;
-export const tryProjectGoldenPath = tryProjectGoldenPathStatus;
-export const projectGoldenPathStatusFromEvidence = projectGoldenPathStatus;
-export const deriveGoldenPathStatus = projectGoldenPathStatus;
 
 function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
   const diagnostics: GoldenPathDiagnostic[] = [];
@@ -1129,26 +1149,69 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
         "$.nextAction.reasonCode",
         "Next action reason code is invalid.",
       );
+    const recoveryEnvelope = availability === "recovery-required" && isRecord(input.recovery);
+    const recoveryActionKind =
+      recoveryEnvelope && GOLDEN_PATH_RECOVERY_ACTION_KINDS.includes(action.kind as GoldenPathRecoveryActionKind);
+    const normalActionKind =
+      !recoveryActionKind && GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(action.kind as GoldenPathNormalActionKind);
+    if (normalActionKind) {
+      const expected = GOLDEN_PATH_NORMAL_ACTION_METADATA[action.kind as GoldenPathNormalActionKind];
+      if (action.owner !== expected.owner)
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
+          "$.nextAction.owner",
+          "Normal action owner does not match its bounded metadata.",
+        );
+      if (action.reasonCode !== expected.reasonCode)
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
+          "$.nextAction.reasonCode",
+          "Normal action reason code does not match its bounded metadata.",
+        );
+    }
+    if (recoveryActionKind && isRecord(input.recovery)) {
+      if (action.kind !== input.recovery.safeAction || action.owner !== "recovery")
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
+          "$.nextAction",
+          "Recovery action must mirror recovery.safeAction and be recovery-owned.",
+        );
+      const expectedReason =
+        input.recovery.reasonCode === undefined
+          ? recoveryAction(input.recovery.safeAction as GoldenPathRecoveryActionKind).reasonCode
+          : input.recovery.reasonCode;
+      if (action.reasonCode !== expectedReason)
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
+          "$.nextAction.reasonCode",
+          "Recovery action reason code does not match recovery evidence.",
+        );
+      if (Boolean(input.recovery.retryable) !== (input.recovery.safeAction === "RETRY"))
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_RECOVERY_INVALID",
+          "$.recovery.retryable",
+          "Recovery retryability is inconsistent with safeAction.",
+        );
+    }
     if (
       action.retryOf !== undefined &&
       (action.kind !== "RETRY" ||
         !GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(action.retryOf as GoldenPathNormalActionKind))
     )
       addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.nextAction.retryOf", "Retry target is invalid.");
-    if (
-      GOLDEN_PATH_RECOVERY_ACTION_KINDS.includes(action.kind as GoldenPathRecoveryActionKind) &&
-      action.owner !== "recovery"
-    )
+    if (recoveryActionKind && action.owner !== "recovery")
       addDiagnostic(
         diagnostics,
         "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
         "$.nextAction.owner",
         "Recovery action owner must be recovery.",
       );
-    if (
-      GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(action.kind as GoldenPathNormalActionKind) &&
-      action.owner === "recovery"
-    )
+    if (normalActionKind && action.owner === "recovery")
       addDiagnostic(
         diagnostics,
         "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
@@ -1166,7 +1229,8 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
   if (
     availability === "actionable" &&
     (!isRecord(input.nextAction) ||
-      GOLDEN_PATH_RECOVERY_ACTION_KINDS.includes(input.nextAction.kind as GoldenPathRecoveryActionKind))
+      !GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(input.nextAction.kind as GoldenPathNormalActionKind) ||
+      input.nextAction.owner === "recovery")
   )
     addDiagnostic(
       diagnostics,
