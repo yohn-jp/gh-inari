@@ -10,12 +10,41 @@ import {
   validateGoldenPathRecovery,
   type GoldenPathRecoveryInput,
 } from "./golden-path-recovery.js";
-import type { ChangeProjectionResult } from "./change.js";
-import type { ChangeRecoveryPlan } from "./change.js";
+import {
+  planChangeIssuance,
+  planChangeIssuanceRecovery,
+  planChangeTransition,
+  planChangeTransitionRecovery,
+  type ChangeBranchEvidence,
+  type ChangeIdentity,
+  type ChangeProjectionInput,
+  type ChangeProjectionResult,
+  type ChangePullRequestEvidence,
+} from "./change.js";
 import type { ChangeRemoteExecutionEvidence } from "./change-executor.js";
 
 const branch = "feat/395-golden-path";
 const branchSha = "0123456789abcdef0123456789abcdef01234567";
+const coreIdentity: ChangeIdentity = { repositoryHost: "github.com", repositoryId: "100", rootIssue: 395 };
+const branchGovernance = { pattern: "^feat/[0-9]+-[a-z0-9-]+$" } as const;
+const naming = { type: "feat", slug: "golden-path" } as const;
+
+function coreProjectionInput(
+  branches: readonly ChangeBranchEvidence[],
+  pullRequests: readonly ChangePullRequestEvidence[],
+): ChangeProjectionInput {
+  return {
+    change: coreIdentity,
+    branchGovernance,
+    naming,
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: 395, state: "open" } },
+      branches: { status: "available", value: branches },
+      pullRequests: { status: "available", value: pullRequests },
+    },
+  };
+}
 
 function projection(
   status: ChangeProjectionResult["status"],
@@ -106,6 +135,21 @@ test("unsafe or ambiguous issuance cleanup is manual and forbidden", () => {
         effects: [{ kind: "CREATE_BRANCH", status: "succeeded", createdCommitSha: branchSha }],
         compensation: "failed",
         failure: { kind: "DELETE_BRANCH", code: "DELETE_FAILED", message: "bounded" },
+      }),
+    ),
+  );
+  assert.equal(result?.class, "ISSUANCE_COMPENSATION_UNSAFE");
+  assert.equal(result?.safeAction, "MANUAL_REVIEW");
+  assert.equal(result?.automaticCleanup, "forbidden");
+});
+
+test("an unsafe recovery result is not hidden by a successful compensation attempt", () => {
+  const result = projectGoldenPathRecovery(
+    input(
+      projection("partial", { branchSha }),
+      evidence("issue", "recovery-required", {
+        compensation: "succeeded",
+        failure: { kind: "CREATE_PULL_REQUEST", code: "VERIFY_FAILED", message: "bounded" },
       }),
     ),
   );
@@ -217,21 +261,25 @@ test("a recovery-state projection without executor evidence remains fail-closed"
 });
 
 test("a validated issuance recovery plan supplies cleanup authority without reclassification", () => {
-  const plan = {
-    version: 1,
-    operation: "recover-issue",
-    issuance: { transaction: { idempotencyKey: "change:395" } },
-    failureEvidence: {
-      attemptedEffects: [],
-      failure: { effect: { kind: "CREATE_PULL_REQUEST" }, code: "CREATE_FAILED", message: "bounded" },
-      projection: projection("unavailable"),
-    },
-    compensation: {
-      status: "required",
-      plan: { effects: [{ kind: "DELETE_BRANCH", branch, expectedCommitSha: branchSha }] },
-    },
-    result: { state: "RECOVERY_REQUIRED" },
-  } as unknown as ChangeRecoveryPlan;
+  const issuance = planChangeIssuance(coreProjectionInput([], []));
+  const plan = planChangeIssuanceRecovery({
+    issuance,
+    attemptedEffects: [
+      {
+        effect: issuance.effects[0]!,
+        status: "succeeded",
+        evidence: {
+          kind: "CREATE_BRANCH",
+          branch,
+          baseBranch: "main",
+          createdCommitSha: branchSha,
+        },
+      },
+      { effect: issuance.effects[1]!, status: "failed" },
+    ],
+    failure: { effect: issuance.effects[1]!, code: "CREATE_FAILED", message: "bounded" },
+    projection: coreProjectionInput([{ name: branch, sha: branchSha }], []),
+  });
   const result = projectGoldenPathRecovery({ recoveryPlan: plan });
   assert.deepEqual(result, {
     class: "ISSUANCE_PARTIAL_PROJECTION",
@@ -244,22 +292,53 @@ test("a validated issuance recovery plan supplies cleanup authority without recl
   });
 });
 
-test("a validated abort recovery plan exposes only its remaining Core-admitted cleanup", () => {
-  const plan = {
-    version: 1,
-    operation: "recover-transition",
-    transition: { request: { transition: "abort" } },
-    failureEvidence: {
-      attemptedEffects: [],
-      failure: { effect: { kind: "CLOSE_PULL_REQUEST" }, code: "CLOSE_FAILED", message: "bounded" },
-      projection: projection("unavailable"),
-    },
-    effects: [
-      { kind: "CLOSE_PULL_REQUEST", pullRequest: 902 },
-      { kind: "DELETE_BRANCH", branch },
+test("a Core-verified successful issuance compensation is not recovery evidence", () => {
+  const issuance = planChangeIssuance(coreProjectionInput([], []));
+  const plan = planChangeIssuanceRecovery({
+    issuance,
+    attemptedEffects: [
+      {
+        effect: issuance.effects[0]!,
+        status: "succeeded",
+        evidence: {
+          kind: "CREATE_BRANCH",
+          branch,
+          baseBranch: "main",
+          createdCommitSha: branchSha,
+        },
+      },
+      { effect: issuance.effects[1]!, status: "failed" },
     ],
-    result: { state: "RECOVERY_REQUIRED" },
-  } as unknown as ChangeRecoveryPlan;
+    failure: { effect: issuance.effects[1]!, code: "CREATE_FAILED", message: "bounded" },
+    projection: coreProjectionInput([{ name: branch, sha: branchSha }], []),
+    compensation: { status: "succeeded", projection: coreProjectionInput([], []) },
+  });
+  assert.equal(projectGoldenPathRecovery({ recoveryPlan: plan }), null);
+});
+
+test("a validated abort recovery plan exposes only its remaining Core-admitted cleanup", () => {
+  const change = {
+    version: 1 as const,
+    identity: coreIdentity,
+    state: "DRAFT" as const,
+    provenance: {},
+    projection: { branch, pullRequest: 902 },
+  };
+  const transition = planChangeTransition({
+    version: 1,
+    transition: "abort",
+    change,
+    target: { branch, pullRequest: 902 },
+  });
+  const plan = planChangeTransitionRecovery({
+    transition,
+    attemptedEffects: [{ effect: transition.effects[0]!, status: "failed" }],
+    failure: { effect: transition.effects[0]!, code: "CLOSE_FAILED", message: "bounded" },
+    projection: coreProjectionInput(
+      [{ name: branch, sha: branchSha }],
+      [{ number: 902, head: branch, base: "main", state: "open", draft: true }],
+    ),
+  });
   const result = projectGoldenPathRecovery({ recoveryPlan: plan });
   assert.deepEqual(result, {
     class: "ABORT_CLEANUP_PENDING",
@@ -269,6 +348,24 @@ test("a validated abort recovery plan exposes only its remaining Core-admitted c
     rereadRequired: true,
     automaticCleanup: "conditional",
     reasonCode: "ABORT_CLEANUP_REQUIRED",
+  });
+});
+
+test("an invalid forged recovery plan cannot authorize a mutation action", () => {
+  const forged = {
+    version: 1,
+    operation: "recover-transition",
+    effects: [{ kind: "DELETE_BRANCH", branch }],
+  } as never;
+  const result = projectGoldenPathRecovery({ recoveryPlan: forged });
+  assert.deepEqual(result, {
+    class: "ABORT_CLEANUP_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    owner: "recovery",
+    retryable: false,
+    rereadRequired: true,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
   });
 });
 

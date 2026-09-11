@@ -6,7 +6,13 @@
  * does not inspect provider errors, and does not expose an adapter effect.
  */
 
-import type { ChangeRecoveryPlan, ChangeProjectionResult, ChangeTransitionRecoveryPlan } from "./change.js";
+import {
+  validateChangeIssuanceRecoveryPlan,
+  validateChangeTransitionRecoveryPlan,
+  type ChangeRecoveryPlan,
+  type ChangeProjectionResult,
+  type ChangeTransitionRecoveryPlan,
+} from "./change.js";
 import type { ChangeRemoteExecutionEvidence, ChangeRemoteExecutionResult } from "./change-executor.js";
 
 export const GOLDEN_PATH_RECOVERY_CLASSES = Object.freeze([
@@ -219,6 +225,34 @@ function projectionFor(input: GoldenPathRecoveryInput): ChangeProjectionResult |
   return input.recoveryPlan?.failureEvidence.projection;
 }
 
+function validateRecoveryPlan(
+  input: unknown,
+): { readonly valid: true; readonly plan: ChangeRecoveryPlan } | { readonly valid: false } {
+  if (!isRecord(input)) return { valid: false };
+  try {
+    if (input.operation === "recover-issue") {
+      const result = validateChangeIssuanceRecoveryPlan(input);
+      if (!result.valid || result.plan === undefined) return { valid: false };
+      return { valid: true, plan: result.plan };
+    }
+    if (input.operation === "recover-transition") {
+      const result = validateChangeTransitionRecoveryPlan(input);
+      if (!result.valid || result.plan === undefined) return { valid: false };
+      return { valid: true, plan: result.plan };
+    }
+  } catch {
+    return { valid: false };
+  }
+  return { valid: false };
+}
+
+function invalidPlanRecovery(input: GoldenPathRecoveryInput): GoldenPathRecovery {
+  const operation = isRecord(input.recoveryPlan) ? input.recoveryPlan.operation : undefined;
+  return operation === "recover-transition"
+    ? recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED")
+    : recovery("ISSUANCE_COMPENSATION_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
+}
+
 function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvidence | undefined {
   if (input.evidence !== undefined) return input.evidence;
   const plan = input.recoveryPlan;
@@ -271,13 +305,10 @@ function rereadProven(input: GoldenPathRecoveryInput): boolean {
   );
 }
 
-function idempotencyProven(
-  input: GoldenPathRecoveryInput,
-  evidence: ChangeRemoteExecutionEvidence | undefined,
-): boolean {
-  if (evidence?.outcome === "returned-existing") return true;
-  const plan = input.recoveryPlan;
-  return plan?.operation === "recover-issue" && plan.issuance.transaction.idempotencyKey.length > 0;
+function idempotencyProven(evidence: ChangeRemoteExecutionEvidence | undefined): boolean {
+  // Only the existing executor outcome is accepted as idempotency evidence;
+  // an issuance transaction key is an identity, not a retry authorization.
+  return evidence?.outcome === "returned-existing";
 }
 
 function canonicalJson(value: unknown): string {
@@ -315,8 +346,13 @@ function issuanceRecovery(
   evidence: ChangeRemoteExecutionEvidence,
 ): GoldenPathRecovery | null {
   const plan = input.recoveryPlan;
+  // A validated Core plan (or the explicit `compensated` executor outcome)
+  // proves that compensation completed and is not recovery evidence.  A
+  // `recovery-required` result with `compensation: succeeded` is different:
+  // the trusted executor uses that combination for an unsafe recovery plan,
+  // so it must remain fail-closed rather than being mistaken for success.
   if (
-    evidence.compensation === "succeeded" ||
+    evidence.outcome === "compensated" ||
     (plan?.operation === "recover-issue" && plan.compensation.status === "succeeded")
   ) {
     // A verified compensation is not a recovery-required result.
@@ -397,7 +433,7 @@ function postEffectRecovery(
   if (unavailable) {
     return recovery("POST_EFFECT_VERIFICATION", "WAIT", false, "forbidden", "AUTHORITATIVE_REREAD_REQUIRED");
   }
-  if (rereadProven(input) && idempotencyProven(input, evidence)) {
+  if (rereadProven(input) && idempotencyProven(evidence)) {
     return recovery("POST_EFFECT_VERIFICATION", "RETRY", true, "none", "IDEMPOTENT_RETRY");
   }
   return recovery("POST_EFFECT_VERIFICATION", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
@@ -409,7 +445,13 @@ function postEffectRecovery(
  * recovery merely from its outcome.
  */
 export function projectGoldenPathRecovery(source: GoldenPathRecoverySource): GoldenPathRecovery | null {
-  const input = sourceInput(source);
+  const rawInput = sourceInput(source);
+  let input: GoldenPathRecoveryInput = rawInput;
+  if (rawInput.recoveryPlan !== undefined) {
+    const planResult = validateRecoveryPlan(rawInput.recoveryPlan);
+    if (!planResult.valid) return invalidPlanRecovery(rawInput);
+    input = { ...rawInput, recoveryPlan: planResult.plan };
+  }
   const evidence =
     evidenceFor(input) ??
     (input.operation === undefined
