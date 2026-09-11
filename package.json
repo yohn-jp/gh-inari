@@ -91,6 +91,10 @@
     "./template-resolver": {
       "types": "./dist/template-resolver.d.ts",
       "import": "./dist/template-resolver.js"
+    },
+    "./golden-path-status": {
+      "types": "./dist/golden-path-status.d.ts",
+      "import": "./dist/golden-path-status.js"
     }
   },
   "files": [
