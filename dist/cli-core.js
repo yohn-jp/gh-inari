@@ -17,6 +17,7 @@ import { findSkillScenario, MAX_SKILL_OUTPUT_BYTES, projectSkillIndexToJson, pro
 import { AGENT_INVOCATION_CONTRACT, COMMAND_CONTRACT_VERSION, COMMAND_OPTIONS, INARI_COMMANDS, RUNTIME_CAPABILITIES, commandExample, commandInvocation, commandRecoveryInvocation, commandTemplateSchemaInvocation, commandUsage, getCommand, getCommandForPositionals, getDomainCommands, getOption, optionSyntax, projectCommandHelp, tokenizeCommandArgv, } from "./command-contract.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest, executeChangeRemoteMutationResult, readChangeRemoteProjection, } from "./change-executor.js";
 import { tryProjectImplementationHandoff } from "./change-handoff.js";
+import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
 import { GITHUB_ISSUE_PROJECTION_CAPABILITIES, tryPlanSemanticIssue, tryProjectSemanticIssue, } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
@@ -686,11 +687,19 @@ async function runChangeCommand(command, rest, parsed, root, dependencies, json)
         console.log(JSON.stringify(handoffResult));
         return handoffResult.ok === true ? 0 : EXIT_VALIDATION;
     }
-    console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection, result.evidence)));
+    const commandResult = projectChangeCommandResult(definition.operation, issue, projection, result.evidence);
+    const entry = definition.operation === "issue"
+        ? tryProjectGoldenPathEntry({
+            projection,
+            requireGovernedIssue: false,
+            ...(result.evidence?.outcome === undefined ? {} : { executionOutcome: result.evidence.outcome }),
+        })
+        : undefined;
+    console.log(JSON.stringify({ ...commandResult, ...(entry === undefined ? {} : { entry }) }));
     const executionSucceeded = result.evidence === undefined ||
         result.evidence.outcome === "verified" ||
         result.evidence.outcome === "returned-existing";
-    return projection.valid && executionSucceeded ? 0 : EXIT_VALIDATION;
+    return projection.valid && executionSucceeded && (entry === undefined || entry.valid) ? 0 : EXIT_VALIDATION;
 }
 async function runMcpCommand(command, rest, parsed, root) {
     if (command !== "serve" || rest.length > 0) {
