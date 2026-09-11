@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { ArtifactContractValidationError, parseArtifactContract, compileEffectiveArtifactContract, } from "./contract/index.js";
 import { resolveRemoteArtifactContractIdentity } from "./governance.js";
-import { TemplateResolutionError } from "./template-resolver.js";
+import { parseTemplateResolutionConfig, TEMPLATE_RESOLUTION_CONFIG_PATH, TemplateResolutionError, } from "./template-resolver.js";
 /** Stable machine-readable failure for repository Canon resolution. */
 export class ArtifactContractResolutionError extends Error {
     code;
@@ -35,14 +35,35 @@ export class ArtifactContractResolutionError extends Error {
  * other governed artifact. This module does not read arbitrary repository
  * files.
  */
-async function selectCanonIdentity(tree, kind, selector, context, ref) {
+async function selectCanonIdentity(tree, kind, selector, configuredDefault, context, ref) {
     try {
-        return await resolveRemoteArtifactContractIdentity(tree, kind, selector);
+        return await resolveRemoteArtifactContractIdentity(tree, kind, selector, configuredDefault);
     }
     catch (error) {
         if (!(error instanceof TemplateResolutionError))
             throw error;
         throw artifactContractResolutionErrorFromTemplateResolution(error, context, ref);
+    }
+}
+async function readConfiguredDefault(adapter, tree, kind) {
+    if (kind === "branch")
+        return undefined;
+    const entry = tree.find((candidate) => candidate.path === TEMPLATE_RESOLUTION_CONFIG_PATH);
+    if (entry === undefined)
+        return undefined;
+    if (entry.type !== "blob") {
+        throw new ArtifactContractResolutionError("ARTIFACT_CONTRACT_SOURCE_INVALID", entry.path, `Template resolution config "${entry.path}" is not a regular file.`);
+    }
+    const source = await adapter.getRepositoryBlob(entry.sha);
+    try {
+        const config = parseTemplateResolutionConfig(source, entry.path);
+        return config.defaults[kind === "pull_request" ? "pr" : "issue"];
+    }
+    catch (error) {
+        if (error instanceof TemplateResolutionError) {
+            throw new ArtifactContractResolutionError("ARTIFACT_CONTRACT_SOURCE_INVALID", entry.path, error.message, { reason: error.details.reason, path: entry.path }, [error.toJSON()]);
+        }
+        throw error;
     }
 }
 function artifactContractResolutionErrorFromTemplateResolution(error, context, ref) {
@@ -116,7 +137,8 @@ export async function compileRepositoryEffectiveArtifactContract(adapter, kind, 
     const context = await adapter.resolveRepositoryContext();
     const ref = await adapter.getRepositoryDefaultBranch();
     const tree = await adapter.getRepositoryTree(ref);
-    const identity = await selectCanonIdentity(tree.entries, kind, selector, context, ref);
+    const configuredDefault = selector === undefined ? await readConfiguredDefault(adapter, tree.entries, kind) : undefined;
+    const identity = await selectCanonIdentity(tree.entries, kind, selector, configuredDefault, context, ref);
     const entry = findCanonEntry(tree.entries, identity, context, ref);
     const source = await adapter.getRepositoryBlob(entry.sha);
     const contract = parseCanonSource(source, entry.path, kind);

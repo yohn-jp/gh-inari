@@ -594,11 +594,11 @@ export function createRemoteArtifactContractIdentities(tree) {
     return identities.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath, "en-US"));
 }
 /** Resolve an Artifact Contract identity with the shared template selector semantics. */
-export async function resolveRemoteArtifactContractIdentity(tree, kind, selector) {
+export async function resolveRemoteArtifactContractIdentity(tree, kind, selector, configuredDefault) {
     const candidates = createRemoteArtifactContractIdentities(tree)
         .filter((identity) => identity.kind === kind)
         .map(repositoryArtifactContractResolutionCandidate);
-    return resolveTemplate({ candidates, selector });
+    return resolveTemplate({ candidates, selector, configuredDefault });
 }
 function repositoryArtifactContractResolutionCandidate(identity) {
     return {
