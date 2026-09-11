@@ -76,7 +76,10 @@ function failure(issue, error, projection, evidence) {
     });
 }
 function resultFailure(issue, code, message, projection, evidence) {
-    const diagnostics = Object.freeze([]);
+    // Keep the authoritative projection diagnostics on every fail-closed
+    // result.  A caller must be able to distinguish stale/unavailable/wrong
+    // state evidence without parsing the human-readable failure message.
+    const diagnostics = freezeDiagnostics(projection.diagnostics);
     return Object.freeze({
         version: GOLDEN_PATH_REVIEW_ADMISSION_CONTRACT_VERSION,
         operation: GOLDEN_PATH_REVIEW_ADMISSION_OPERATION,
@@ -95,14 +98,20 @@ function isReviewSuccess(issue, projection, evidence) {
     const change = projection.change;
     if (!projection.valid ||
         projection.status !== "healthy" ||
+        projection.diagnostics.length !== 0 ||
         change === undefined ||
         change.identity.rootIssue !== issue ||
         change.state !== "REVIEW" ||
         change.projection?.branch === undefined ||
-        !positivePullRequest(change.projection.pullRequest))
+        !positivePullRequest(change.projection.pullRequest) ||
+        projection.canonicalBranch !== change.projection.branch ||
+        projection.canonicalBaseBranch === undefined)
         return false;
+    // The composition's success contract requires the trusted executor's
+    // reread/verification evidence.  A legacy projection-only result cannot
+    // prove that the Ready effect was applied (or that a retry was a no-op).
     if (evidence === undefined)
-        return true;
+        return false;
     if (evidence.outcome === "returned-existing")
         return evidence.effects.length === 0;
     return (evidence.outcome === "verified" &&

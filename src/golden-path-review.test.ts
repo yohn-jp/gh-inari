@@ -225,6 +225,34 @@ test("DRAFT result without verified execution evidence fails closed", () => {
   assert.equal(output.projection?.change?.state, "DRAFT");
 });
 
+test("a REVIEW projection without executor evidence does not claim verified admission", () => {
+  const output = projectGoldenPathReviewAdmission(identity.rootIssue, { projection: projection(false) });
+
+  assert.equal(output.ok, false);
+  if (output.ok) throw new Error("expected missing execution evidence to fail closed");
+  assert.equal(output.error.code, "GOLDEN_PATH_REVIEW_RESULT_INVALID");
+});
+
+test("projection diagnostics remain available for wrong-state or unavailable evidence", () => {
+  const unavailable: ChangeProjectionResult = {
+    ...projection(true),
+    valid: false,
+    status: "unavailable",
+    diagnostics: [
+      diagnostic("CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE", "$.evidence", "Authoritative evidence is unavailable."),
+    ],
+  };
+  const output = projectGoldenPathReviewAdmission(identity.rootIssue, {
+    projection: unavailable,
+    evidence: evidence("verified"),
+  });
+
+  assert.equal(output.ok, false);
+  if (output.ok) throw new Error("expected unavailable evidence to fail closed");
+  assert.deepEqual(output.diagnostics, unavailable.diagnostics);
+  assert.deepEqual(output.error.diagnostics, unavailable.diagnostics);
+});
+
 test("effect failure remains a bounded failure with existing execution evidence", () => {
   const output = projectGoldenPathReviewAdmission(identity.rootIssue, result(true, "failed"));
 
