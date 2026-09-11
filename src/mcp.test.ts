@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createInariMcpServer } from "./mcp/server.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
+import { ChangeRemoteExecutorError } from "./change-executor.js";
 
 function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
   return { stdout, exitCode, stderr };
@@ -240,6 +241,7 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
         "inari_pr_plan",
         "inari_pr_observe",
         "inari_pr_drift",
+        "inari_change_handoff",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -249,6 +251,147 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
       assert.ok(tool.outputSchema, tool.name);
     }
   });
+});
+
+function changeHandoffProjection(draft = true): Record<string, unknown> {
+  const branch = "feat/42-canonical-change";
+  return {
+    valid: true,
+    status: "healthy",
+    canonicalBranch: branch,
+    canonicalBaseBranch: "main",
+    candidates: {
+      branches: [{ candidate: { name: branch }, classification: "canonical", reason: "canonical" }],
+      pullRequests: [
+        {
+          candidate: { number: 142, head: branch, base: "main", state: "open", draft, merged: false },
+          classification: "canonical",
+          reason: "canonical",
+        },
+      ],
+    },
+    change: {
+      version: 1,
+      identity: { repositoryHost: "github.com", repositoryId: "100000219", rootIssue: 42 },
+      state: draft ? "DRAFT" : "REVIEW",
+      provenance: {},
+      projection: { branch, pullRequest: 142 },
+    },
+    diagnostics: [],
+  };
+}
+
+test("native MCP exposes the canonical implementation handoff through the Change read boundary", async () => {
+  const calls: string[] = [];
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("handoff must not mutate");
+      },
+      async read(request) {
+        calls.push(request.operation);
+        return changeHandoffProjection() as never;
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-change-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const handoff = await client.callTool({ name: "inari_change_handoff", arguments: { issue: 42 } });
+    const content = structuredContent(handoff.structuredContent);
+    assert.equal(handoff.isError, undefined);
+    assert.equal(content.ok, true);
+    assert.deepEqual(content.handoff, {
+      version: 1,
+      kind: "implementation-handoff",
+      repositoryHost: "github.com",
+      repositoryId: "100000219",
+      rootIssue: 42,
+      changeVersion: 1,
+      state: "DRAFT",
+      branch: "feat/42-canonical-change",
+      baseBranch: "main",
+      pullRequest: 142,
+    });
+    assert.deepEqual(calls, ["show"]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("native MCP implementation handoff fails closed for REVIEW evidence", async () => {
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("handoff must not mutate");
+      },
+      async read() {
+        return changeHandoffProjection(false) as never;
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-change-review-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const handoff = await client.callTool({ name: "inari_change_handoff", arguments: { issue: 42 } });
+    const content = structuredContent(handoff.structuredContent);
+    assert.equal(content.ok, false);
+    assert.equal(content.handoff, undefined);
+    assert.ok(Array.isArray(content.diagnostics));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("native MCP implementation handoff preserves bounded Change read diagnostics", async () => {
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("handoff must not mutate");
+      },
+      async read() {
+        throw new ChangeRemoteExecutorError(
+          "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
+          "The Change read executor is unavailable.",
+          undefined,
+          [
+            {
+              version: 1,
+              code: "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE",
+              path: "$.evidence",
+              message: "Evidence read is unavailable.",
+            },
+          ],
+        );
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-change-unavailable-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const handoff = await client.callTool({ name: "inari_change_handoff", arguments: { issue: 42 } });
+    const content = structuredContent(handoff.structuredContent);
+    assert.equal(content.ok, false);
+    assert.deepEqual(content.diagnostics, [
+      {
+        version: 1,
+        code: "CHANGE_PROJECTION_EVIDENCE_UNAVAILABLE",
+        path: "$.evidence",
+        message: "Evidence read is unavailable.",
+      },
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
 
 test("MCP semantic tools call Core directly and preserve contract, artifact, and plan results", async () => {

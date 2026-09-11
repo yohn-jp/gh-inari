@@ -79,6 +79,7 @@ export type CommandId =
   | "template.import"
   | "change.issue"
   | "change.show"
+  | "change.handoff"
   | "change.ready"
   | "change.abort"
   | "authority.generate"
@@ -789,6 +790,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "show",
     ["change", "show"],
     "Read a bounded machine-readable projection of a governed Change.",
+    CHANGE_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "change.handoff",
+    "change",
+    "handoff",
+    ["change", "handoff"],
+    "Read the canonical implementation handoff for an implementation-admissible Change.",
     CHANGE_OPTIONS,
     "<number>",
   ),
