@@ -66,26 +66,53 @@ async function assessKnownGovernance(adapter, request, source) {
     const known = request.known;
     if (known === undefined || known.source !== source)
         return undefined;
-    if (request.expectedGeneration !== undefined && known.provenance.treeSha !== request.expectedGeneration) {
-        return unresolved(request, source, "GENERATION_STALE", "stale", generationDiagnostic("GENERATION_STALE", known.provenance.treeSha, request.expectedGeneration), known.provenance);
+    let provenance;
+    try {
+        provenance = knownContractProvenance(request, source, known.contract);
+    }
+    catch (error) {
+        return unresolvedFromError(request, source, error);
+    }
+    if (request.expectedGeneration !== undefined && provenance.treeSha !== request.expectedGeneration) {
+        return unresolved(request, source, "GENERATION_STALE", "stale", generationDiagnostic("GENERATION_STALE", provenance.treeSha, request.expectedGeneration), provenance);
     }
     try {
         if (source === "native-template") {
-            if (!isContractProvenance(known.provenance))
-                return undefined;
-            await verifyGovernedMutationFreshness(adapter, known.provenance);
+            await verifyGovernedMutationFreshness(adapter, provenance);
         }
         else {
             const tree = await adapter.getRepositoryTree(await adapter.getRepositoryDefaultBranch());
-            if (tree.sha !== known.provenance.treeSha) {
-                return unresolved(request, source, "GENERATION_STALE", "stale", generationDiagnostic("GENERATION_STALE", known.provenance.treeSha, tree.sha), known.provenance);
+            if (tree.sha !== provenance.treeSha) {
+                return unresolved(request, source, "GENERATION_STALE", "stale", generationDiagnostic("GENERATION_STALE", provenance.treeSha, tree.sha), provenance);
             }
         }
-        return resolved(request, source, known.contract, known.provenance);
+        return resolved(request, source, known.contract, provenance);
     }
     catch (error) {
-        return unresolvedFromError(request, source, error, known.provenance);
+        return unresolvedFromError(request, source, error, provenance);
     }
+}
+function knownContractProvenance(request, source, contract) {
+    const provenance = provenanceOf(contract);
+    if (source === "native-template") {
+        if (!isCanonicalContract(contract) || !isContractProvenance(provenance)) {
+            throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "Known native governance must retain native-template provenance.");
+        }
+        const expectedKind = request.domain === "pr" ? "pull_request" : "issue";
+        if (contract.artifactKind !== expectedKind) {
+            throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", `Known native governance kind "${contract.artifactKind}" is incompatible with domain "${request.domain}".`);
+        }
+    }
+    else {
+        if (!isEffectiveContract(contract) || isContractProvenance(provenance)) {
+            throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "Known Artifact Contract governance must retain Artifact Contract provenance.");
+        }
+        const expectedKind = artifactKind(request.domain);
+        if (contract.kind !== expectedKind) {
+            throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", `Known Artifact Contract kind "${contract.kind}" is incompatible with domain "${request.domain}".`);
+        }
+    }
+    return provenance;
 }
 function resolved(request, source, contract, provenance) {
     const nextAction = {
@@ -260,6 +287,12 @@ function provenanceOf(contract) {
         throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "Compiled governance did not retain provenance.");
     }
     return contract.provenance;
+}
+function isCanonicalContract(contract) {
+    return "artifactKind" in contract && "templateIdentity" in contract;
+}
+function isEffectiveContract(contract) {
+    return "generation" in contract && "kind" in contract;
 }
 function isContractProvenance(value) {
     return "template" in value;

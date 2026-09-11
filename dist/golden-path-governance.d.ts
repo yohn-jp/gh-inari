@@ -37,7 +37,6 @@ export interface GoldenPathGovernanceNextAction {
 export interface GoldenPathKnownGovernance {
     readonly source: GoldenPathGovernanceSource;
     readonly contract: GoldenPathGovernanceContract;
-    readonly provenance: GoldenPathGovernanceProvenance;
 }
 export interface GoldenPathGovernanceDiscoveryRequest {
     readonly domain: GoldenPathGovernanceDomain;

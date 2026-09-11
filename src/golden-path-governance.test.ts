@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { discoverGoldenPathGovernance, type GoldenPathGovernanceDiscoveryResult } from "./golden-path-governance.js";
+import {
+  discoverGoldenPathGovernance,
+  type GoldenPathKnownGovernance,
+  type GoldenPathGovernanceDiscoveryResult,
+} from "./golden-path-governance.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
 
 class StubTransport implements GhTransport {
@@ -127,6 +131,74 @@ test("stale expected generation fails closed before direct creation", async () =
   assert.equal(result.reason, "GENERATION_STALE");
   assert.equal(result.nextAction.action, "refresh-governance");
   assert.equal(result.generation?.treeSha, "tree-sha");
+});
+
+test("known contract provenance is authoritative over an unrelated cached provenance", async () => {
+  const oldResult = assertResolved(
+    await discoverGoldenPathGovernance(
+      nativeAdapter(
+        [{ path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "old-sha" }],
+        [{ sha: "old-sha", source: nativeIssueSource("Old") }],
+        "old-tree",
+      ),
+      { domain: "issue", selector: "bug" },
+    ),
+  );
+  if (!("template" in oldResult.provenance)) throw new Error("expected native provenance");
+  const unrelatedFreshProvenance = {
+    ...oldResult.provenance,
+    treeSha: "fresh-tree",
+    template: { ...oldResult.provenance.template, sha: "fresh-sha" },
+  };
+  const knownWithUnrelatedEvidence = {
+    source: "native-template" as const,
+    contract: oldResult.contract,
+    provenance: unrelatedFreshProvenance,
+  } as unknown as GoldenPathKnownGovernance;
+  const result = await discoverGoldenPathGovernance(
+    nativeAdapter(
+      [{ path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "fresh-sha" }],
+      [{ sha: "fresh-sha", source: nativeIssueSource("Fresh") }],
+      "fresh-tree",
+    ),
+    { domain: "issue", known: knownWithUnrelatedEvidence },
+  );
+  assert.equal(result.status, "stale");
+  assert.equal(result.reason, "GENERATION_STALE");
+  assert.equal(result.nextAction.action, "refresh-governance");
+});
+
+test("incompatible Artifact Contract source fails closed with remediation", async () => {
+  const result = await discoverGoldenPathGovernance(
+    nativeAdapter(
+      [{ path: ".github/inari/issues/default.json", sha: "invalid-sha" }],
+      [{ sha: "invalid-sha", source: "{not-json" }],
+    ),
+    { domain: "issue", source: "artifact-contract", selector: "default" },
+  );
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "ARTIFACT_CONTRACT_SOURCE_INVALID");
+  assert.equal(result.nextAction.action, "repair-governance");
+});
+
+test("known source and contract provenance shapes cannot be mixed", async () => {
+  const nativeResult = assertResolved(
+    await discoverGoldenPathGovernance(
+      nativeAdapter(
+        [{ path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "bug-sha" }],
+        [{ sha: "bug-sha", source: nativeIssueSource("Bug") }],
+      ),
+      { domain: "issue", selector: "bug" },
+    ),
+  );
+  const result = await discoverGoldenPathGovernance(new GitHubAdapter({ repository: "acme/repository" }), {
+    domain: "issue",
+    source: "artifact-contract",
+    known: { source: "artifact-contract", contract: nativeResult.contract },
+  });
+  assert.equal(result.status, "incompatible");
+  assert.equal(result.reason, "GOVERNANCE_SOURCE_INVALID");
+  assert.equal(result.nextAction.action, "repair-governance");
 });
 
 test("an explicit selector resumes the bounded route after ambiguity", async () => {
