@@ -104,14 +104,7 @@ test("a governed root Issue yields the exact create Change action", () => {
   assert.equal(result.valid, true);
   assert.deepEqual(result.subject, identity);
   assert.deepEqual(result.action, { operation: "change.issue", issue: 406, mode: "create" });
-  assert.deepEqual(result.nextAction, {
-    kind: "ISSUE_CHANGE",
-    owner: "inari",
-    reasonCode: "CHANGE_ISSUANCE_REQUIRED",
-  });
-  assert.equal(result.status.phase, "CHANGE");
   assert.equal(result.status.projectionStatus, "absent");
-  assert.equal(result.recovery, null);
   assert.equal(result.diagnostics.length, 0);
 });
 
@@ -122,7 +115,6 @@ test("an ungoverned root Issue fails closed before issuance", () => {
   const result = tryProjectGoldenPathEntry({ projection: input });
   assert.equal(result.valid, false);
   assert.equal(result.action, undefined);
-  assert.equal(result.nextAction, null);
   assert.ok(result.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_GOVERNED_ISSUE_REQUIRED"));
 });
 
@@ -143,8 +135,7 @@ test("invalid governed artifact evidence is bounded and machine-readable", () =>
   );
 
   assert.equal(result.valid, false);
-  assert.equal(result.status.availability, "blocked");
-  assert.equal(result.nextAction, null);
+  assert.equal(result.action, undefined);
   assert.ok(result.diagnostics.length > 0);
   assert.ok(result.diagnostics.every((entry) => entry.path.length <= 160 && entry.message.length <= 240));
   assert.equal(validateGoldenPathEntryResult(result).valid, true);
@@ -160,7 +151,6 @@ test("a healthy existing Change is returned idempotently without a second plan e
   assert.equal(result.valid, true);
   assert.deepEqual(result.action, { operation: "change.issue", issue: 406, mode: "return-existing" });
   assert.equal(result.status.changeState, "DRAFT");
-  assert.deepEqual(result.nextAction, { kind: "IMPLEMENT", owner: "worker", reasonCode: "CHANGE_ISSUED" });
 });
 
 test("unhealthy Change evidence fails closed and cannot become a fresh issuance", () => {
@@ -170,14 +160,11 @@ test("unhealthy Change evidence fails closed and cannot become a fresh issuance"
   });
 
   assert.equal(result.valid, false);
-  assert.equal(result.status.availability, "recovery-required");
   assert.equal(result.action, undefined);
-  assert.equal(result.nextAction?.kind, "MANUAL_REVIEW");
-  assert.equal(result.recovery?.class, "ISSUANCE_PARTIAL_PROJECTION");
   assert.equal(validateGoldenPathEntryResult(result).valid, true);
 });
 
-test("recovery evidence is projected as a recovery action rather than a normal Change action", () => {
+test("a recovery-required execution outcome fails closed without exposing a normal action", () => {
   const result = tryProjectGoldenPathEntry({
     projection: existingProjection(),
     requireGovernedIssue: false,
@@ -185,25 +172,33 @@ test("recovery evidence is projected as a recovery action rather than a normal C
   });
 
   assert.equal(result.valid, false);
-  assert.equal(result.status.phase, "RECOVERY");
-  assert.equal(result.status.availability, "recovery-required");
-  assert.equal(result.recovery?.safeAction, "MANUAL_REVIEW");
-  assert.deepEqual(result.nextAction, {
-    kind: "MANUAL_REVIEW",
-    owner: "recovery",
-    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
-  });
+  assert.equal(result.status.executionOutcome, "recovery-required");
   assert.equal(result.action, undefined);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_EXECUTION_INVALID"));
   assert.equal(validateGoldenPathEntryResult(result).valid, true);
+});
+
+test("a Change in RECOVERY_REQUIRED state fails closed without exposing a normal action", () => {
+  const recoveryRequiredProjection: ChangeProjectionResult = {
+    ...existingProjection(),
+    change: { ...existingProjection().change!, state: "RECOVERY_REQUIRED" },
+  };
+  const result = tryProjectGoldenPathEntry({
+    projection: recoveryRequiredProjection,
+    requireGovernedIssue: false,
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.status.changeState, "RECOVERY_REQUIRED");
+  assert.equal(result.action, undefined);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_CHANGE_NOT_ADMISSIBLE"));
 });
 
 test("blocked repository preflight never becomes a Change issuance action", () => {
   const result = tryProjectGoldenPathEntry(entryInput({ preflight: { status: "blocked", diagnostics: [] } }));
 
   assert.equal(result.valid, false);
-  assert.equal(result.status.phase, "ENVIRONMENT");
-  assert.equal(result.status.availability, "blocked");
-  assert.equal(result.nextAction, null);
+  assert.equal(result.action, undefined);
   assert.ok(result.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_PREFLIGHT_BLOCKED"));
 });
 
@@ -319,7 +314,7 @@ test("read and issue transport failures remain bounded entry results", async () 
     },
   });
   assert.equal(readFailure.valid, false);
-  assert.equal(readFailure.nextAction, null);
+  assert.equal(readFailure.action, undefined);
   assert.ok(readFailure.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_EXECUTION_INVALID"));
   assert.doesNotMatch(JSON.stringify(readFailure), /provider token/iu);
 
@@ -335,7 +330,7 @@ test("read and issue transport failures remain bounded entry results", async () 
     },
   });
   assert.equal(issueFailure.valid, false);
-  assert.equal(issueFailure.nextAction?.kind, "MANUAL_REVIEW");
+  assert.equal(issueFailure.action, undefined);
   assert.ok(issueFailure.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_EXECUTION_INVALID"));
   assert.doesNotMatch(JSON.stringify(issueFailure), /provider token/iu);
 });

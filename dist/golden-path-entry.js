@@ -16,66 +16,6 @@ import { tryProjectSemanticIssue } from "./semantic-issue-projection.js";
 /** Version of the transport-neutral entry projection. */
 export const GOLDEN_PATH_ENTRY_CONTRACT_VERSION = 1;
 export const GOLDEN_PATH_ENTRY_CONTRACT_ID = `urn:inari:golden-path-entry:${GOLDEN_PATH_ENTRY_CONTRACT_VERSION}`;
-export const GOLDEN_PATH_ENTRY_PHASES = Object.freeze([
-    "ENVIRONMENT",
-    "GOVERNANCE",
-    "ISSUE",
-    "CHANGE",
-    "IMPLEMENTATION",
-    "READY",
-    "REVIEW",
-    "TERMINAL",
-    "RECOVERY",
-]);
-export const GOLDEN_PATH_ENTRY_AVAILABILITIES = Object.freeze([
-    "actionable",
-    "blocked",
-    "recovery-required",
-    "terminal",
-]);
-export const GOLDEN_PATH_ENTRY_ACTION_KINDS = Object.freeze([
-    "PREFLIGHT",
-    "DISCOVER_GOVERNANCE",
-    "CREATE_ISSUE",
-    "ISSUE_CHANGE",
-    "IMPLEMENT",
-    "READY_CHANGE",
-    "REVIEW",
-    "RETRY",
-    "ABORT",
-    "RECOVER",
-    "MANUAL_REVIEW",
-    "WAIT",
-]);
-export const GOLDEN_PATH_ENTRY_REASON_CODES = Object.freeze([
-    "PACKAGE_CAPABILITY_REQUIRED",
-    "GOVERNANCE_DISCOVERY_REQUIRED",
-    "GOVERNED_ISSUE_REQUIRED",
-    "CHANGE_ISSUANCE_REQUIRED",
-    "CHANGE_ISSUED",
-    "READY_PRECONDITIONS_REQUIRED",
-    "REVIEW_ADMITTED",
-    "AUTHORITATIVE_REREAD_REQUIRED",
-    "IDEMPOTENT_RETRY",
-    "ABORT_CLEANUP_REQUIRED",
-    "RECOVERY_ACTION_REQUIRED",
-    "MANUAL_RECOVERY_REVIEW_REQUIRED",
-    "WAIT_FOR_REPOSITORY_REVIEW",
-]);
-export const GOLDEN_PATH_ENTRY_RECOVERY_CLASSES = Object.freeze([
-    "ISSUANCE_PARTIAL_PROJECTION",
-    "ISSUANCE_COMPENSATION_UNSAFE",
-    "ABORT_CLEANUP_PENDING",
-    "ABORT_CLEANUP_UNSAFE",
-    "POST_EFFECT_VERIFICATION",
-]);
-export const GOLDEN_PATH_ENTRY_RECOVERY_ACTIONS = Object.freeze([
-    "RETRY",
-    "ABORT",
-    "RECOVER",
-    "MANUAL_REVIEW",
-]);
-export const GOLDEN_PATH_ENTRY_CLEANUP_MODES = Object.freeze(["none", "conditional", "forbidden"]);
 /** The fields accepted by the pure entry projection (adapter-only fields are excluded). */
 const GOLDEN_PATH_ENTRY_INPUT_KEYS = new Set([
     "projection",
@@ -85,7 +25,6 @@ const GOLDEN_PATH_ENTRY_INPUT_KEYS = new Set([
     "preflight",
     "requireGovernedIssue",
     "executionOutcome",
-    "recovery",
 ]);
 export class GoldenPathEntryProjectionError extends Error {
     diagnostics;
@@ -112,19 +51,14 @@ const RESULT_KEYS = new Set([
     "governance",
     "status",
     "action",
-    "nextAction",
-    "recovery",
     "change",
     "projection",
     "diagnostics",
 ]);
-const STATUS_KEYS = new Set(["phase", "availability", "changeState", "projectionStatus", "executionOutcome"]);
+const STATUS_KEYS = new Set(["changeState", "projectionStatus", "executionOutcome"]);
 const ACTION_KEYS = new Set(["operation", "issue", "mode"]);
-const NEXT_ACTION_KEYS = new Set(["kind", "owner", "reasonCode", "retryOf"]);
 const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const GOVERNANCE_KEYS = new Set(["kind", "id", "version", "generation"]);
-const RECOVERY_KEYS = new Set(["class", "safeAction", "retryable", "rereadRequired", "automaticCleanup", "retryOf"]);
-const GOLDEN_PATH_ENTRY_OWNER_SET = new Set(["caller", "inari", "worker", "repository", "recovery"]);
 const GOLDEN_PATH_ENTRY_DIAGNOSTIC_CODE_SET = new Set([
     "GOLDEN_PATH_INPUT_INVALID",
     "GOLDEN_PATH_REPOSITORY_MISMATCH",
@@ -436,153 +370,20 @@ function validateSemanticIntent(semanticIntent, identity) {
     }
     return { artifact, diagnostics: normalizeDiagnostics(diagnostics) };
 }
-function statusFor(projection, executionOutcome, admissible, phase, recovery) {
+/**
+ * Bounded evidence carried on the result; this module does not classify it
+ * into a Golden Path phase or availability. Owner: sibling status/recovery
+ * projection (#409/#410).
+ */
+function statusFor(projection, executionOutcome) {
     const state = projection.change?.state;
-    let availability = "blocked";
-    if (recovery !== null) {
-        availability = "recovery-required";
-    }
-    else if (admissible && projection.valid && projection.status === "absent") {
-        availability = "actionable";
-    }
-    else if (admissible && projection.valid && projection.status === "healthy") {
-        if (state === "DRAFT") {
-            availability = "actionable";
-        }
-        else if (state === "REVIEW") {
-            availability = "actionable";
-        }
-        else if (state !== undefined && ["ACCEPTED", "MERGED", "ABORTED"].includes(state)) {
-            phase = "TERMINAL";
-            availability = "terminal";
-        }
-    }
     return {
-        phase,
-        availability,
         ...(state === undefined ? {} : { changeState: state }),
         ...(CHANGE_PROJECTION_STATUS_SET.has(projection.status) ? { projectionStatus: projection.status } : {}),
         ...(executionOutcome === undefined ? {} : { executionOutcome }),
     };
 }
-function phaseFor(projection, diagnostics, preflight, recovery) {
-    if (recovery !== null)
-        return "RECOVERY";
-    if (preflight?.status === "blocked")
-        return "ENVIRONMENT";
-    if (diagnostics.some((entry) => entry.path === "$.governedIssue" || entry.path.startsWith("$.governedIssue."))) {
-        return "ISSUE";
-    }
-    if (diagnostics.some((entry) => entry.code === "GOLDEN_PATH_GOVERNANCE_INVALID" ||
-        entry.code === "GOLDEN_PATH_SEMANTIC_INTENT_INVALID" ||
-        entry.code === "GOLDEN_PATH_REPOSITORY_MISMATCH")) {
-        return "GOVERNANCE";
-    }
-    if (diagnostics.some((entry) => entry.code === "GOLDEN_PATH_GOVERNED_ISSUE_REQUIRED"))
-        return "ISSUE";
-    if (projection.valid && projection.status === "healthy") {
-        switch (projection.change?.state) {
-            case "DRAFT":
-                return "IMPLEMENTATION";
-            case "REVIEW":
-                return "REVIEW";
-            case "ACCEPTED":
-            case "MERGED":
-            case "ABORTED":
-                return "TERMINAL";
-            default:
-                break;
-        }
-    }
-    return "CHANGE";
-}
-function recoveryAction(recovery) {
-    switch (recovery.safeAction) {
-        case "RETRY":
-            return {
-                kind: "RETRY",
-                owner: "recovery",
-                reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
-                retryOf: recovery.retryOf ?? "change.issue",
-            };
-        case "ABORT":
-            return { kind: "ABORT", owner: "recovery", reasonCode: "ABORT_CLEANUP_REQUIRED" };
-        case "RECOVER":
-            return { kind: "RECOVER", owner: "recovery", reasonCode: "RECOVERY_ACTION_REQUIRED" };
-        case "MANUAL_REVIEW":
-            return { kind: "MANUAL_REVIEW", owner: "recovery", reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED" };
-    }
-}
-function nextActionFor(projection, executionOutcome, recovery) {
-    if (recovery !== null)
-        return recoveryAction(recovery);
-    if (!projection.valid || (projection.status !== "healthy" && projection.status !== "absent"))
-        return null;
-    if (projection.status === "absent") {
-        if (executionOutcome === "compensated") {
-            return { kind: "RETRY", owner: "inari", reasonCode: "IDEMPOTENT_RETRY", retryOf: "change.issue" };
-        }
-        return { kind: "ISSUE_CHANGE", owner: "inari", reasonCode: "CHANGE_ISSUANCE_REQUIRED" };
-    }
-    switch (projection.change?.state) {
-        case "DRAFT":
-            return { kind: "IMPLEMENT", owner: "worker", reasonCode: "CHANGE_ISSUED" };
-        case "REVIEW":
-            return { kind: "WAIT", owner: "repository", reasonCode: "WAIT_FOR_REPOSITORY_REVIEW" };
-        default:
-            return null;
-    }
-}
-function validateRecovery(input) {
-    if (!isRecord(input)) {
-        return {
-            diagnostics: [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.recovery", "Recovery must be an object.")],
-        };
-    }
-    const structural = unknownProperties(input, RECOVERY_KEYS, "$.recovery");
-    if (structural.length > 0 ||
-        !GOLDEN_PATH_ENTRY_RECOVERY_CLASSES.includes(input.class) ||
-        !GOLDEN_PATH_ENTRY_RECOVERY_ACTIONS.includes(input.safeAction) ||
-        typeof input.retryable !== "boolean" ||
-        input.rereadRequired !== true ||
-        !GOLDEN_PATH_ENTRY_CLEANUP_MODES.includes(input.automaticCleanup) ||
-        (input.retryOf !== undefined &&
-            (typeof input.retryOf !== "string" || input.retryOf.length === 0 || input.retryOf.length > 160))) {
-        return {
-            diagnostics: structural.length > 0
-                ? structural
-                : [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.recovery", "Recovery values are invalid.")],
-        };
-    }
-    return {
-        recovery: {
-            class: input.class,
-            safeAction: input.safeAction,
-            retryable: input.retryable,
-            rereadRequired: true,
-            automaticCleanup: input.automaticCleanup,
-            ...(input.retryOf === undefined ? {} : { retryOf: input.retryOf }),
-        },
-        diagnostics: [],
-    };
-}
-function defaultRecovery(projection, executionOutcome) {
-    const stateRequiresRecovery = projection.change?.state === "RECOVERY_REQUIRED";
-    const outcomeRequiresRecovery = executionOutcome === "recovery-required";
-    const failedPartialProjection = executionOutcome === "failed" && projection.status !== "healthy";
-    if (!stateRequiresRecovery && !outcomeRequiresRecovery && !failedPartialProjection)
-        return null;
-    const partial = ["partial", "duplicate", "wrong-base", "ambiguous", "unavailable"].includes(projection.status);
-    return {
-        class: partial ? "ISSUANCE_PARTIAL_PROJECTION" : "POST_EFFECT_VERIFICATION",
-        safeAction: "MANUAL_REVIEW",
-        retryable: false,
-        rereadRequired: true,
-        automaticCleanup: "forbidden",
-        retryOf: "change.issue",
-    };
-}
-function resultFor(projection, diagnostics, governedIssue, semanticIntent, executionOutcome, valid, recovery, preflight, subjectOverride) {
+function resultFor(projection, diagnostics, governedIssue, semanticIntent, executionOutcome, valid, subjectOverride) {
     const subject = projectionIdentity(projection) ?? subjectOverride;
     const action = valid &&
         projection.valid &&
@@ -595,13 +396,7 @@ function resultFor(projection, diagnostics, governedIssue, semanticIntent, execu
         }
         : undefined;
     const normalizedDiagnostics = normalizeDiagnostics(diagnostics);
-    const phase = phaseFor(projection, normalizedDiagnostics, preflight, recovery);
-    const status = statusFor(projection, executionOutcome, valid, phase, recovery);
-    const nextAction = recovery !== null
-        ? recoveryAction(recovery)
-        : normalizedDiagnostics.length > 0 || !valid
-            ? null
-            : nextActionFor(projection, executionOutcome, recovery);
+    const status = statusFor(projection, executionOutcome);
     return {
         version: GOLDEN_PATH_ENTRY_CONTRACT_VERSION,
         valid,
@@ -611,8 +406,6 @@ function resultFor(projection, diagnostics, governedIssue, semanticIntent, execu
             : { governance: governanceProjection(semanticIntent, governedIssue) }),
         status,
         ...(action === undefined ? {} : { action }),
-        nextAction,
-        recovery,
         ...(projection.change === undefined ? {} : { change: projection.change }),
         projection,
         diagnostics: normalizedDiagnostics,
@@ -625,7 +418,7 @@ function invalidResult(diagnostics, projection) {
         candidates: { branches: [], pullRequests: [] },
         diagnostics: [],
     };
-    return resultFor(fallback, diagnostics, undefined, undefined, undefined, false, null, undefined, undefined);
+    return resultFor(fallback, diagnostics, undefined, undefined, undefined, false, undefined);
 }
 /**
  * Project a Golden Path entry without any provider effects. The result is
@@ -752,6 +545,12 @@ export function tryProjectGoldenPathEntry(input) {
     else if (projection.status !== "absent" && projection.status !== "healthy") {
         diagnostics.push(diagnostic("GOLDEN_PATH_CHANGE_NOT_ADMISSIBLE", "$.projection.status", `Change projection status "${projection.status}" cannot enter issuance.`));
     }
+    else if (projection.status === "healthy" && projection.change?.state === "RECOVERY_REQUIRED") {
+        // Recovery classification/safe-action selection is owned by the sibling
+        // Golden Path recovery projection; this entry only refuses to treat a
+        // Change awaiting recovery as admissible for ordinary issuance.
+        diagnostics.push(diagnostic("GOLDEN_PATH_CHANGE_NOT_ADMISSIBLE", "$.projection.change.state", "A Change in RECOVERY_REQUIRED state cannot enter ordinary issuance."));
+    }
     let issuancePlan;
     if (diagnostics.length === 0 && projection.status === "absent" && projectionInput !== undefined) {
         try {
@@ -779,15 +578,16 @@ export function tryProjectGoldenPathEntry(input) {
     else if (executionOutcome === "compensated") {
         diagnostics.push(diagnostic("GOLDEN_PATH_EXECUTION_INVALID", "$.executionOutcome", "The Change executor compensated the issuance; no Change was verified."));
     }
-    const suppliedRecovery = input.recovery === undefined ? { diagnostics: [] } : validateRecovery(input.recovery);
-    diagnostics.push(...suppliedRecovery.diagnostics);
-    const recovery = suppliedRecovery.recovery ?? defaultRecovery(projection, executionOutcome);
+    else if (executionOutcome === "recovery-required") {
+        // Recovery projection itself is owned by the sibling Golden Path
+        // recovery contract; this entry only refuses to expose a normal action.
+        diagnostics.push(diagnostic("GOLDEN_PATH_EXECUTION_INVALID", "$.executionOutcome", "The Change executor reported that recovery is required."));
+    }
     const valid = diagnostics.length === 0 &&
-        recovery === null &&
         projection.valid &&
         (projection.status === "absent" || projection.status === "healthy") &&
         (executionOutcome === undefined || executionOutcome === "verified" || executionOutcome === "returned-existing");
-    const result = resultFor(projection, diagnostics, governedIssue, semanticIntent, executionOutcome, valid, recovery, preflight, identity);
+    const result = resultFor(projection, diagnostics, governedIssue, semanticIntent, executionOutcome, valid, identity);
     // Keep the local variable as an explicit assertion that planning is part of
     // admissibility, without leaking the full plan as a second public authority.
     void issuancePlan;
@@ -818,12 +618,7 @@ export function validateGoldenPathEntryResult(input) {
         return { valid: false, diagnostics };
     }
     const status = input.status;
-    if (!isRecord(status) ||
-        unknownProperties(status, STATUS_KEYS, "$.status").length > 0 ||
-        typeof status.phase !== "string" ||
-        !GOLDEN_PATH_ENTRY_PHASES.includes(status.phase) ||
-        typeof status.availability !== "string" ||
-        !GOLDEN_PATH_ENTRY_AVAILABILITIES.includes(status.availability)) {
+    if (!isRecord(status) || unknownProperties(status, STATUS_KEYS, "$.status").length > 0) {
         const diagnostics = [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.status", "Golden Path entry status is invalid.")];
         return { valid: false, diagnostics };
     }
@@ -853,27 +648,6 @@ export function validateGoldenPathEntryResult(input) {
     if (!projectionValidation.valid || projectionValidation.projection === undefined) {
         const diagnostics = projectionValidation.diagnostics.map((entry) => diagnostic("GOLDEN_PATH_CHANGE_INVALID", entry.path, entry.message));
         return { valid: false, diagnostics };
-    }
-    if (!hasOwn(input, "nextAction") || (input.nextAction !== null && !isRecord(input.nextAction))) {
-        const diagnostics = [
-            diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.nextAction", "Next action must be an object or null."),
-        ];
-        return { valid: false, diagnostics };
-    }
-    if (isRecord(input.nextAction)) {
-        const nextActionDiagnostics = unknownProperties(input.nextAction, NEXT_ACTION_KEYS, "$.nextAction");
-        if (nextActionDiagnostics.length > 0 ||
-            !GOLDEN_PATH_ENTRY_ACTION_KINDS.includes(input.nextAction.kind) ||
-            !GOLDEN_PATH_ENTRY_OWNER_SET.has(input.nextAction.owner) ||
-            !GOLDEN_PATH_ENTRY_REASON_CODES.includes(input.nextAction.reasonCode) ||
-            (input.nextAction.kind === "RETRY" &&
-                (typeof input.nextAction.retryOf !== "string" || input.nextAction.retryOf.length === 0)) ||
-            (input.nextAction.kind !== "RETRY" && input.nextAction.retryOf !== undefined)) {
-            const diagnostics = nextActionDiagnostics.length > 0
-                ? nextActionDiagnostics
-                : [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.nextAction", "Next action values are invalid.")];
-            return { valid: false, diagnostics };
-        }
     }
     if (isRecord(input.action)) {
         const action = input.action;
@@ -933,15 +707,6 @@ export function validateGoldenPathEntryResult(input) {
         ];
         return { valid: false, diagnostics };
     }
-    if (!hasOwn(input, "recovery") || (input.recovery !== null && !isRecord(input.recovery))) {
-        const diagnostics = [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.recovery", "Recovery must be an object or null.")];
-        return { valid: false, diagnostics };
-    }
-    if (isRecord(input.recovery)) {
-        const recoveryResult = validateRecovery(input.recovery);
-        if (recoveryResult.diagnostics.length > 0)
-            return { valid: false, diagnostics: recoveryResult.diagnostics };
-    }
     let diagnostics;
     if (!Array.isArray(input.diagnostics)) {
         diagnostics = [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.diagnostics", "Diagnostics must be an array.")];
@@ -957,39 +722,6 @@ export function validateGoldenPathEntryResult(input) {
     }
     if (diagnostics.length === 1 && diagnostics[0]?.code === "GOLDEN_PATH_INPUT_INVALID") {
         return { valid: false, diagnostics };
-    }
-    const nextAction = input.nextAction;
-    if (status.availability === "actionable" && nextAction === null) {
-        const consistency = [
-            diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.nextAction", "Actionable entry results require one next action."),
-        ];
-        return { valid: false, diagnostics: consistency };
-    }
-    if ((status.availability === "blocked" || status.availability === "terminal") && nextAction !== null) {
-        const consistency = [
-            diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.nextAction", "Blocked and terminal entry results cannot expose a next action."),
-        ];
-        return { valid: false, diagnostics: consistency };
-    }
-    if (status.availability === "recovery-required") {
-        if (!isRecord(input.recovery) || nextAction === null) {
-            const consistency = [
-                diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.recovery", "Recovery-required entry results require recovery and one next action."),
-            ];
-            return { valid: false, diagnostics: consistency };
-        }
-        if (nextAction.kind !== input.recovery.safeAction) {
-            const consistency = [
-                diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.nextAction.kind", "Recovery next action must mirror the recovery safe action."),
-            ];
-            return { valid: false, diagnostics: consistency };
-        }
-    }
-    else if (input.recovery !== null) {
-        const consistency = [
-            diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.recovery", "Only recovery-required entry results may expose recovery evidence."),
-        ];
-        return { valid: false, diagnostics: consistency };
     }
     if (input.valid && diagnostics.length > 0) {
         const consistency = [
@@ -1069,7 +801,6 @@ export async function executeGoldenPathEntry(input) {
         ...(input.preflight === undefined ? {} : { preflight: input.preflight }),
         ...(input.requireGovernedIssue === undefined ? {} : { requireGovernedIssue: input.requireGovernedIssue }),
         ...(input.executionOutcome === undefined ? {} : { executionOutcome: input.executionOutcome }),
-        ...(input.recovery === undefined ? {} : { recovery: input.recovery }),
     };
     const preflight = tryProjectGoldenPathEntry(projectionInput);
     if (!preflight.valid || preflight.action === undefined)

@@ -17,20 +17,6 @@ import { type SemanticArtifact } from "./contract/semantic-artifact.js";
 export declare const GOLDEN_PATH_ENTRY_CONTRACT_VERSION: 1;
 export type GoldenPathEntryContractVersion = typeof GOLDEN_PATH_ENTRY_CONTRACT_VERSION;
 export declare const GOLDEN_PATH_ENTRY_CONTRACT_ID: "urn:inari:golden-path-entry:1";
-export declare const GOLDEN_PATH_ENTRY_PHASES: readonly ["ENVIRONMENT", "GOVERNANCE", "ISSUE", "CHANGE", "IMPLEMENTATION", "READY", "REVIEW", "TERMINAL", "RECOVERY"];
-export type GoldenPathEntryPhase = (typeof GOLDEN_PATH_ENTRY_PHASES)[number];
-export declare const GOLDEN_PATH_ENTRY_AVAILABILITIES: readonly ["actionable", "blocked", "recovery-required", "terminal"];
-export type GoldenPathEntryAvailability = (typeof GOLDEN_PATH_ENTRY_AVAILABILITIES)[number];
-export declare const GOLDEN_PATH_ENTRY_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW", "WAIT"];
-export type GoldenPathEntryActionKind = (typeof GOLDEN_PATH_ENTRY_ACTION_KINDS)[number];
-export declare const GOLDEN_PATH_ENTRY_REASON_CODES: readonly ["PACKAGE_CAPABILITY_REQUIRED", "GOVERNANCE_DISCOVERY_REQUIRED", "GOVERNED_ISSUE_REQUIRED", "CHANGE_ISSUANCE_REQUIRED", "CHANGE_ISSUED", "READY_PRECONDITIONS_REQUIRED", "REVIEW_ADMITTED", "AUTHORITATIVE_REREAD_REQUIRED", "IDEMPOTENT_RETRY", "ABORT_CLEANUP_REQUIRED", "RECOVERY_ACTION_REQUIRED", "MANUAL_RECOVERY_REVIEW_REQUIRED", "WAIT_FOR_REPOSITORY_REVIEW"];
-export type GoldenPathEntryReasonCode = (typeof GOLDEN_PATH_ENTRY_REASON_CODES)[number];
-export declare const GOLDEN_PATH_ENTRY_RECOVERY_CLASSES: readonly ["ISSUANCE_PARTIAL_PROJECTION", "ISSUANCE_COMPENSATION_UNSAFE", "ABORT_CLEANUP_PENDING", "ABORT_CLEANUP_UNSAFE", "POST_EFFECT_VERIFICATION"];
-export type GoldenPathEntryRecoveryClass = (typeof GOLDEN_PATH_ENTRY_RECOVERY_CLASSES)[number];
-export declare const GOLDEN_PATH_ENTRY_RECOVERY_ACTIONS: readonly ["RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW"];
-export type GoldenPathEntryRecoveryAction = (typeof GOLDEN_PATH_ENTRY_RECOVERY_ACTIONS)[number];
-export declare const GOLDEN_PATH_ENTRY_CLEANUP_MODES: readonly ["none", "conditional", "forbidden"];
-export type GoldenPathEntryCleanupMode = (typeof GOLDEN_PATH_ENTRY_CLEANUP_MODES)[number];
 export type GoldenPathEntryDiagnosticCode = "GOLDEN_PATH_INPUT_INVALID" | "GOLDEN_PATH_REPOSITORY_MISMATCH" | "GOLDEN_PATH_PREFLIGHT_BLOCKED" | "GOLDEN_PATH_GOVERNANCE_INVALID" | "GOLDEN_PATH_GOVERNED_ISSUE_REQUIRED" | "GOLDEN_PATH_SEMANTIC_INTENT_INVALID" | "GOLDEN_PATH_CHANGE_INVALID" | "GOLDEN_PATH_CHANGE_UNAVAILABLE" | "GOLDEN_PATH_CHANGE_NOT_ADMISSIBLE" | "GOLDEN_PATH_EXECUTION_INVALID";
 export interface GoldenPathEntryDiagnostic {
     readonly version: GoldenPathEntryContractVersion;
@@ -75,36 +61,20 @@ export interface GoldenPathEntryProjectionInput {
     /** Set false only after a trusted Change executor has admitted the operation. */
     readonly requireGovernedIssue?: boolean;
     readonly executionOutcome?: ChangeRemoteExecutionOutcome;
-    /** Existing bounded recovery classification, when a Change executor supplies one. */
-    readonly recovery?: GoldenPathEntryRecovery;
 }
 export interface GoldenPathEntryAction {
     readonly operation: "change.issue";
     readonly issue: number;
     readonly mode: "create" | "return-existing";
 }
+/**
+ * Bounded evidence about the underlying Change; not a Golden Path lifecycle
+ * phase or availability projection. Owner: sibling status projection.
+ */
 export interface GoldenPathEntryStatus {
-    readonly phase: GoldenPathEntryPhase;
-    readonly availability: GoldenPathEntryAvailability;
     readonly changeState?: ChangeState;
     readonly projectionStatus?: ChangeProjectionStatus;
     readonly executionOutcome?: ChangeRemoteExecutionOutcome;
-}
-export interface GoldenPathEntryNextAction {
-    readonly kind: GoldenPathEntryActionKind;
-    readonly owner: "caller" | "inari" | "worker" | "repository" | "recovery";
-    readonly reasonCode: GoldenPathEntryReasonCode;
-    /** Present only for a RETRY action and names the semantic operation retried. */
-    readonly retryOf?: string;
-}
-export interface GoldenPathEntryRecovery {
-    readonly class: GoldenPathEntryRecoveryClass;
-    readonly safeAction: GoldenPathEntryRecoveryAction;
-    readonly retryable: boolean;
-    readonly rereadRequired: true;
-    readonly automaticCleanup: GoldenPathEntryCleanupMode;
-    /** Semantic operation to name when `safeAction` is RETRY. */
-    readonly retryOf?: string;
 }
 /** Bounded governance identity; full contracts remain owned by Core. */
 export interface GoldenPathEntryGovernanceProjection {
@@ -121,8 +91,6 @@ export interface GoldenPathEntryResult {
     readonly status: GoldenPathEntryStatus;
     /** The exact existing Change operation and idempotent mode. */
     readonly action?: GoldenPathEntryAction;
-    readonly nextAction: GoldenPathEntryNextAction | null;
-    readonly recovery: GoldenPathEntryRecovery | null;
     readonly change?: Change;
     readonly projection?: ChangeProjectionResult;
     readonly diagnostics: readonly GoldenPathEntryUnderlyingDiagnostic[];
