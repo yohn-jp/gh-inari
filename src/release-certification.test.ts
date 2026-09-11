@@ -34,12 +34,19 @@ function dogfoodEvidence(overrides: Record<string, unknown> = {}): Record<string
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: [
-      { name: "issue", outcome: "verified" },
-      { name: "repeat-issue", outcome: "returned-existing" },
-      { name: "handoff", outcome: "verified" },
-      { name: "ready-reread", outcome: "verified" },
+      { operation: "preflight.opt-in", outcome: "verified" },
+      { operation: "preflight.installed-executable", outcome: "verified" },
+      { operation: "skill.golden-path", outcome: "verified" },
+      { operation: "disposable-issue.governance-check", outcome: "verified" },
+      { operation: "change.issue.first", outcome: "verified" },
+      { operation: "change.issue.return-existing", outcome: "returned-existing" },
+      { operation: "change.handoff", outcome: "verified" },
+      { operation: "worker.implementation", outcome: "success" },
+      { operation: "change.ready.first", outcome: "verified" },
+      { operation: "change.ready.reread", outcome: "verified" },
+      { operation: "change.ready.retry", outcome: "returned-existing" },
     ],
-    finalState: "REVIEW",
+    finalState: { status: "REVIEW", recovery: { state: "NONE", action: null } },
     ...overrides,
   };
 }
@@ -50,6 +57,8 @@ function input(overrides: Partial<ReleaseCertificationVerificationInput> = {}): 
     expectedPackageName: "gh-inari",
     expectedPackageVersion: "0.12.0",
     expectedTarballSha256: TARBALL_SHA,
+    expectedRepositoryOwner: "yohn-jp",
+    expectedRepositoryName: "gh-inari",
     packedEvidence: packedEvidence(),
     dogfoodEvidence: dogfoodEvidence(),
     ...overrides,
@@ -86,6 +95,14 @@ test("rejects stale and mismatched source identities", () => {
   );
   assert.equal(result.passed, false);
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "SOURCE_SHA_MISMATCH"));
+});
+
+test("binds self-dogfood evidence to the expected release repository", () => {
+  const result = verifyReleaseCertification(
+    input({ dogfoodEvidence: dogfoodEvidence({ repository: { owner: "other", name: "gh-inari" } }) }),
+  );
+  assert.equal(result.passed, false);
+  assert.equal(result.diagnostics[0]?.code, "REPOSITORY_MISMATCH");
 });
 
 test("rejects package, version, and exact tarball digest mismatches", () => {
@@ -144,6 +161,61 @@ test("rejects malformed diagnostics, identity, final state, and unbounded operat
   );
   assert.equal(malformedDogfood.passed, false);
   assert.equal(malformedDogfood.diagnostics[0]?.code, "DOGFOOD_IDENTITY_INVALID");
+});
+
+test("requires the bounded idempotency and handoff operation proofs", () => {
+  const missing = dogfoodEvidence();
+  (missing.operations as Array<Record<string, string>>).splice(5, 1);
+  const missingResult = verifyReleaseCertification(input({ dogfoodEvidence: missing }));
+  assert.equal(missingResult.passed, false);
+  assert.equal(missingResult.diagnostics[0]?.code, "DOGFOOD_OPERATION_MISSING");
+
+  const wrongOutcome = dogfoodEvidence();
+  (wrongOutcome.operations as Array<Record<string, string>>)[5] = {
+    operation: "change.issue.return-existing",
+    outcome: "verified",
+  };
+  const wrongOutcomeResult = verifyReleaseCertification(input({ dogfoodEvidence: wrongOutcome }));
+  assert.equal(wrongOutcomeResult.passed, false);
+  assert.equal(wrongOutcomeResult.diagnostics[0]?.code, "DOGFOOD_OPERATION_OUTCOME_INVALID");
+});
+
+test("requires a structured public REVIEW final state and never releases recovery state", () => {
+  const recovery = verifyReleaseCertification(
+    input({
+      dogfoodEvidence: dogfoodEvidence({
+        finalState: { status: "RECOVERY_REQUIRED", recovery: { state: "RECOVERY_REQUIRED", action: "inspect" } },
+      }),
+    }),
+  );
+  assert.equal(recovery.passed, false);
+  assert.equal(recovery.diagnostics[0]?.code, "DOGFOOD_FINAL_STATE_INVALID");
+
+  const malformed = verifyReleaseCertification(input({ dogfoodEvidence: dogfoodEvidence({ finalState: "REVIEW" }) }));
+  assert.equal(malformed.passed, false);
+  assert.equal(malformed.diagnostics[0]?.code, "DOGFOOD_FINAL_STATE_INVALID");
+});
+
+test("accepts only an exact Core-safe optional abort recovery proof for an ABORTED result", () => {
+  const evidence = dogfoodEvidence({
+    operations: [
+      ...(dogfoodEvidence().operations as Array<Record<string, string>>),
+      { operation: "change.abort.recovery", outcome: "verified" },
+    ],
+    finalState: { status: "ABORTED", recovery: { state: "COMPLETED", action: "none" } },
+  });
+  assert.equal(verifyReleaseCertification(input({ dogfoodEvidence: evidence })).passed, true);
+
+  const unsafe = dogfoodEvidence({
+    operations: [
+      ...(dogfoodEvidence().operations as Array<Record<string, string>>),
+      { operation: "change.abort.recovery", outcome: "verified" },
+    ],
+    finalState: { status: "ABORTED", recovery: { state: "COMPLETED", action: "manual-cleanup" } },
+  });
+  const unsafeResult = verifyReleaseCertification(input({ dogfoodEvidence: unsafe }));
+  assert.equal(unsafeResult.passed, false);
+  assert.equal(unsafeResult.diagnostics[0]?.code, "DOGFOOD_FINAL_STATE_INVALID");
 });
 
 test("rejects malformed release identity before evaluating evidence", () => {

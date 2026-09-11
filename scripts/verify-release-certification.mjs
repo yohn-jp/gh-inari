@@ -7,12 +7,15 @@ import { verifyReleaseCertification } from "../dist/release-certification.js";
 
 const USAGE =
   "usage: node scripts/verify-release-certification.mjs --source-sha <sha> --package-name <name> " +
-  "--package-version <version> --tarball-sha256 sha256:<digest> --packed-evidence <file> --dogfood-evidence <file>";
+  "--package-version <version> --tarball-sha256 sha256:<digest> --repository-owner <owner> " +
+  "--repository-name <name> --packed-evidence <file> --dogfood-evidence <file>";
 const OPTION_NAMES = new Set([
   "--source-sha",
   "--package-name",
   "--package-version",
   "--tarball-sha256",
+  "--repository-owner",
+  "--repository-name",
   "--packed-evidence",
   "--dogfood-evidence",
 ]);
@@ -38,6 +41,8 @@ function parseArgs(argumentsList) {
     packageName: values.get("--package-name"),
     packageVersion: values.get("--package-version"),
     tarballSha256: values.get("--tarball-sha256"),
+    repositoryOwner: values.get("--repository-owner"),
+    repositoryName: values.get("--repository-name"),
     packedEvidence: values.get("--packed-evidence"),
     dogfoodEvidence: values.get("--dogfood-evidence"),
   };
@@ -62,6 +67,8 @@ function main() {
     expectedPackageName: options.packageName,
     expectedPackageVersion: options.packageVersion,
     expectedTarballSha256: options.tarballSha256,
+    expectedRepositoryOwner: options.repositoryOwner,
+    expectedRepositoryName: options.repositoryName,
     packedEvidence: readJson(options.packedEvidence, "packed evidence"),
     dogfoodEvidence: readJson(options.dogfoodEvidence, "dogfood evidence"),
   });

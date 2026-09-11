@@ -42,6 +42,34 @@ export const MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH = 512 as const;
 export const MAX_RELEASE_CERTIFICATION_OPERATIONS = 32 as const;
 export const MAX_RELEASE_CERTIFICATION_STRING_LENGTH = 512 as const;
 
+/**
+ * The self-dogfood lane is complete only when every required proof is present
+ * exactly once and has the expected idempotent outcome.  This list is the
+ * temporary v1 projection of the #416 contract and is intentionally exported
+ * so the producer and verifier can converge on one authority.
+ */
+export const SELF_DOGFOOD_OPERATION_REQUIREMENTS = Object.freeze([
+  { operation: "preflight.opt-in", outcomes: ["verified"] },
+  { operation: "preflight.installed-executable", outcomes: ["verified"] },
+  { operation: "skill.golden-path", outcomes: ["verified"] },
+  { operation: "disposable-issue.governance-check", outcomes: ["verified"] },
+  { operation: "change.issue.first", outcomes: ["verified"] },
+  { operation: "change.issue.return-existing", outcomes: ["returned-existing"] },
+  { operation: "change.handoff", outcomes: ["verified"] },
+  { operation: "worker.implementation", outcomes: ["success"] },
+  { operation: "change.ready.first", outcomes: ["verified"] },
+  { operation: "change.ready.reread", outcomes: ["verified"] },
+  { operation: "change.ready.retry", outcomes: ["verified", "returned-existing"] },
+] as const);
+export const SELF_DOGFOOD_RECOVERY_OPERATION = Object.freeze({
+  operation: "change.abort.recovery",
+  outcomes: ["verified"],
+} as const);
+export type SelfDogfoodOperationName =
+  | (typeof SELF_DOGFOOD_OPERATION_REQUIREMENTS)[number]["operation"]
+  | (typeof SELF_DOGFOOD_RECOVERY_OPERATION)["operation"];
+export type SelfDogfoodOperationOutcome = "verified" | "returned-existing" | "success";
+
 export interface ReleaseCertificationDiagnostic {
   readonly code: string;
   readonly message: string;
@@ -54,8 +82,8 @@ export interface ReleaseCertificationPackageEvidence {
 }
 
 export interface ReleaseCertificationOperationEvidence {
-  readonly name: string;
-  readonly outcome: string;
+  readonly operation: SelfDogfoodOperationName;
+  readonly outcome: SelfDogfoodOperationOutcome;
 }
 
 export interface ReleaseCertificationRepositoryIdentity {
@@ -67,6 +95,24 @@ export interface ReleaseCertificationChangeIdentity {
   readonly issue: number;
   readonly branch: string;
   readonly pullRequest: number;
+}
+
+export interface SelfDogfoodRecoveryEvidence {
+  readonly state:
+    | "NONE"
+    | "none"
+    | "NOT_REQUIRED"
+    | "not-required"
+    | "RECOVERY_REQUIRED"
+    | "recovery-required"
+    | "COMPLETED"
+    | "completed";
+  readonly action: string | null;
+}
+
+export interface SelfDogfoodFinalStateEvidence {
+  readonly status: "REVIEW" | "RECOVERY_REQUIRED" | "ABORTED";
+  readonly recovery: SelfDogfoodRecoveryEvidence;
 }
 
 export interface ReleaseCertificationEnvelopeBase {
@@ -89,7 +135,7 @@ export interface SelfDogfoodCertificationEvidence extends ReleaseCertificationEn
   readonly rootIssue: number;
   readonly change: ReleaseCertificationChangeIdentity;
   readonly operations: readonly ReleaseCertificationOperationEvidence[];
-  readonly finalState: "REVIEW" | "RECOVERY_REQUIRED";
+  readonly finalState: SelfDogfoodFinalStateEvidence;
 }
 
 export type ReleaseCertificationEvidence = PackedArtifactCertificationEvidence | SelfDogfoodCertificationEvidence;
@@ -99,6 +145,8 @@ export interface ReleaseCertificationVerificationInput {
   readonly expectedPackageName: string;
   readonly expectedPackageVersion: string;
   readonly expectedTarballSha256: string;
+  readonly expectedRepositoryOwner: string;
+  readonly expectedRepositoryName: string;
   readonly packedEvidence: unknown;
   readonly dogfoodEvidence: unknown;
 }
@@ -114,7 +162,10 @@ export type ReleaseCertificationDiagnosticCode =
   | "CONTRACT_VERSION_MISMATCH"
   | "PACKAGE_MISMATCH"
   | "TARBALL_DIGEST_MISMATCH"
+  | "REPOSITORY_MISMATCH"
   | "DOGFOOD_IDENTITY_INVALID"
+  | "DOGFOOD_OPERATION_MISSING"
+  | "DOGFOOD_OPERATION_OUTCOME_INVALID"
   | "DOGFOOD_FINAL_STATE_INVALID";
 
 export interface ReleaseCertificationVerificationDiagnostic extends ReleaseCertificationDiagnostic {
@@ -148,7 +199,12 @@ const DIAGNOSTIC_KEYS = new Set(["code", "message"]);
 const PACKAGE_KEYS = new Set(["name", "version", "tarballSha256"]);
 const REPOSITORY_KEYS = new Set(["owner", "name"]);
 const CHANGE_KEYS = new Set(["issue", "branch", "pullRequest"]);
-const OPERATION_KEYS = new Set(["name", "outcome"]);
+const OPERATION_KEYS = new Set(["operation", "outcome"]);
+const FINAL_STATE_KEYS = new Set(["status", "recovery"]);
+const RECOVERY_KEYS = new Set(["state", "action"]);
+const RECOVERY_NONE_STATES = new Set(["NONE", "none", "NOT_REQUIRED", "not-required"]);
+const RECOVERY_REQUIRED_STATES = new Set(["RECOVERY_REQUIRED", "recovery-required"]);
+const RECOVERY_COMPLETED_STATES = new Set(["COMPLETED", "completed"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -178,7 +234,9 @@ function validExpectedIdentity(input: ReleaseCertificationVerificationInput): bo
     PACKAGE_NAME_PATTERN.test(input.expectedPackageName) &&
     isBoundedString(input.expectedPackageVersion) &&
     typeof input.expectedTarballSha256 === "string" &&
-    SHA256_PATTERN.test(input.expectedTarballSha256)
+    SHA256_PATTERN.test(input.expectedTarballSha256) &&
+    isBoundedString(input.expectedRepositoryOwner) &&
+    isBoundedString(input.expectedRepositoryName)
   );
 }
 
@@ -286,7 +344,11 @@ function validatePackedExtension(
   return valid;
 }
 
-function validateDogfoodExtension(value: unknown, diagnostics: ReleaseCertificationVerificationDiagnostic[]): boolean {
+function validateDogfoodExtension(
+  value: unknown,
+  expected: ReleaseCertificationVerificationInput,
+  diagnostics: ReleaseCertificationVerificationDiagnostic[],
+): boolean {
   if (!isRecord(value)) {
     pushDiagnostic(diagnostics, "DOGFOOD_IDENTITY_INVALID", "Self-dogfood evidence is malformed.");
     return false;
@@ -318,7 +380,7 @@ function validateDogfoodExtension(value: unknown, diagnostics: ReleaseCertificat
       (operation) =>
         isRecord(operation) &&
         hasOnlyKeys(operation, OPERATION_KEYS) &&
-        isBoundedString(operation.name) &&
+        isBoundedString(operation.operation) &&
         isBoundedString(operation.outcome),
     )
   ) {
@@ -329,11 +391,94 @@ function validateDogfoodExtension(value: unknown, diagnostics: ReleaseCertificat
     );
     return false;
   }
-  if (value.finalState !== "REVIEW" && value.finalState !== "RECOVERY_REQUIRED") {
+  if (repository.owner !== expected.expectedRepositoryOwner || repository.name !== expected.expectedRepositoryName) {
+    pushDiagnostic(
+      diagnostics,
+      "REPOSITORY_MISMATCH",
+      "Self-dogfood repository does not match the release repository.",
+    );
+    return false;
+  }
+  if (!isRecord(value.finalState) || !hasOnlyKeys(value.finalState, FINAL_STATE_KEYS)) {
     pushDiagnostic(
       diagnostics,
       "DOGFOOD_FINAL_STATE_INVALID",
-      "Self-dogfood final state is not a governed review or recovery state.",
+      "Self-dogfood finalState must include a public status and recovery state/action.",
+    );
+    return false;
+  }
+  const recovery = value.finalState.recovery;
+  if (
+    !isRecord(recovery) ||
+    !hasOnlyKeys(recovery, RECOVERY_KEYS) ||
+    (value.finalState.status !== "REVIEW" &&
+      value.finalState.status !== "RECOVERY_REQUIRED" &&
+      value.finalState.status !== "ABORTED") ||
+    (value.finalState.status === "REVIEW" && !RECOVERY_NONE_STATES.has(recovery.state as string)) ||
+    (value.finalState.status === "REVIEW" && recovery.action !== null && recovery.action !== "none") ||
+    (value.finalState.status === "RECOVERY_REQUIRED" &&
+      (!RECOVERY_REQUIRED_STATES.has(recovery.state as string) || !isBoundedString(recovery.action))) ||
+    (value.finalState.status === "ABORTED" &&
+      (!RECOVERY_COMPLETED_STATES.has(recovery.state as string) || recovery.action !== "none"))
+  ) {
+    pushDiagnostic(
+      diagnostics,
+      "DOGFOOD_FINAL_STATE_INVALID",
+      "Self-dogfood finalState is not a governed review or recovery state/action.",
+    );
+    return false;
+  }
+  const operationValues = operations as readonly Record<string, unknown>[];
+  const hasRecoveryOperation =
+    operationValues.length === SELF_DOGFOOD_OPERATION_REQUIREMENTS.length + 1 &&
+    operationValues.at(-1)?.operation === SELF_DOGFOOD_RECOVERY_OPERATION.operation;
+  const expectedOperationCount =
+    value.finalState.status === "ABORTED"
+      ? SELF_DOGFOOD_OPERATION_REQUIREMENTS.length + 1
+      : SELF_DOGFOOD_OPERATION_REQUIREMENTS.length;
+  if (
+    operationValues.length !== expectedOperationCount ||
+    (value.finalState.status !== "ABORTED" && hasRecoveryOperation)
+  ) {
+    pushDiagnostic(
+      diagnostics,
+      "DOGFOOD_OPERATION_MISSING",
+      "Self-dogfood evidence must contain exactly the bounded required operation proofs.",
+    );
+    return false;
+  }
+  for (const [index, requirement] of SELF_DOGFOOD_OPERATION_REQUIREMENTS.entries()) {
+    const operation = operationValues[index];
+    if (operation?.operation !== requirement.operation) {
+      pushDiagnostic(
+        diagnostics,
+        "DOGFOOD_OPERATION_MISSING",
+        `Missing required self-dogfood operation: ${requirement.operation}.`,
+      );
+      return false;
+    }
+    if (!requirement.outcomes.includes(operation.outcome as never)) {
+      pushDiagnostic(
+        diagnostics,
+        "DOGFOOD_OPERATION_OUTCOME_INVALID",
+        `Self-dogfood operation ${requirement.operation} has an unexpected outcome.`,
+      );
+      return false;
+    }
+  }
+  if (value.finalState.status === "ABORTED" && !hasRecoveryOperation) {
+    pushDiagnostic(
+      diagnostics,
+      "DOGFOOD_OPERATION_MISSING",
+      `Missing required self-dogfood operation: ${SELF_DOGFOOD_RECOVERY_OPERATION.operation}.`,
+    );
+    return false;
+  }
+  if (hasRecoveryOperation && operationValues.at(-1)?.outcome !== SELF_DOGFOOD_RECOVERY_OPERATION.outcomes[0]) {
+    pushDiagnostic(
+      diagnostics,
+      "DOGFOOD_OPERATION_OUTCOME_INVALID",
+      `Self-dogfood operation ${SELF_DOGFOOD_RECOVERY_OPERATION.operation} has an unexpected outcome.`,
     );
     return false;
   }
@@ -358,7 +503,26 @@ function verifyEvidence(
   if (expectedKind === "packed-artifact-golden-path") {
     return validatePackedExtension((value as PackedArtifactCertificationEvidence).package, expected, diagnostics);
   }
-  return validateDogfoodExtension(value, diagnostics);
+  const validDogfood = validateDogfoodExtension(value, expected, diagnostics);
+  if (
+    validDogfood &&
+    !(
+      ((value as SelfDogfoodCertificationEvidence).finalState.status === "REVIEW" &&
+        RECOVERY_NONE_STATES.has((value as SelfDogfoodCertificationEvidence).finalState.recovery.state) &&
+        ((value as SelfDogfoodCertificationEvidence).finalState.recovery.action === null ||
+          (value as SelfDogfoodCertificationEvidence).finalState.recovery.action === "none")) ||
+      ((value as SelfDogfoodCertificationEvidence).finalState.status === "ABORTED" &&
+        RECOVERY_COMPLETED_STATES.has((value as SelfDogfoodCertificationEvidence).finalState.recovery.state))
+    )
+  ) {
+    pushDiagnostic(
+      diagnostics,
+      "DOGFOOD_FINAL_STATE_INVALID",
+      "A passed self-dogfood certification must finish in public REVIEW with no recovery required.",
+    );
+    return false;
+  }
+  return validDogfood;
 }
 
 /**
