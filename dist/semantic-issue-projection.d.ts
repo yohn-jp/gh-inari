@@ -10,6 +10,7 @@
 import { type IssueReference } from "./contract/issue-reference.js";
 import type { ArtifactContractProvenance } from "./contract/ir.js";
 import type { SemanticArtifact } from "./contract/semantic-artifact.js";
+import type { SemanticIssueRelationEffect } from "./semantic-issue-relations.js";
 export declare const SEMANTIC_ISSUE_PROJECTION_VERSION: "1";
 export type SemanticIssueProjectionVersion = typeof SEMANTIC_ISSUE_PROJECTION_VERSION;
 export declare const SEMANTIC_ISSUE_MUTATION_PLAN_VERSION: "1";
@@ -93,7 +94,7 @@ export type SemanticIssuePrecondition = {
 export type SemanticIssueEffect = {
     readonly kind: "CREATE_ISSUE";
     readonly desired: DesiredIssueProjection;
-};
+} | SemanticIssueRelationEffect;
 export interface SemanticIssueArtifactIdentity {
     readonly version: SemanticArtifact["version"];
     readonly effectiveContractVersion: SemanticArtifact["effectiveContractVersion"];
@@ -153,3 +154,4 @@ export declare function validateSemanticIssueMutationPlan(input: unknown): Seman
 export declare function deserializeSemanticIssueMutationPlan(serialized: string): SemanticIssueMutationPlan;
 export declare const serializeSemanticIssuePlan: typeof serializeSemanticIssueMutationPlan;
 export declare const parseSemanticIssueMutationPlan: typeof deserializeSemanticIssueMutationPlan;
+export * from "./semantic-issue-relations.js";

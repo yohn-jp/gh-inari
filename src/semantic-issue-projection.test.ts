@@ -167,6 +167,25 @@ test("mutation plan validation binds desired state and rejects tampering", () =>
   assert.equal(validateSemanticIssueMutationPlan(tampered).valid, false);
 });
 
+test("mutation plan validation rejects relation payloads that are not capability-backed deterministic effects", () => {
+  const relationPlan = planSemanticIssue({ artifact: artifact(), capabilities: native });
+  const noRelationEffect = {
+    ...relationPlan,
+    effects: [relationPlan.effects[0]],
+  };
+  const missingEffectResult = validateSemanticIssueMutationPlan(noRelationEffect);
+  assert.equal(missingEffectResult.valid, false);
+  assert.ok(missingEffectResult.violations.some((violation) => violation.path === "$.effects"));
+
+  const noCapability = {
+    ...relationPlan,
+    capabilities: [],
+  };
+  const unsupportedResult = validateSemanticIssueMutationPlan(noCapability);
+  assert.equal(unsupportedResult.valid, false);
+  assert.ok(unsupportedResult.violations.some((violation) => violation.code === "MUTATION_PLAN_INVALID"));
+});
+
 test("normalizes object capability flags into the same plan capability set", () => {
   const plan = planSemanticIssue({
     artifact: artifact(false),

@@ -14,7 +14,7 @@
  * `requestRepositoryApi` read seam through a narrow interface.
  */
 import { ContractViolationError } from "./errors.js";
-import { normalizeIssueReference } from "../contract/issue-reference.js";
+import { issueReferenceKey, normalizeIssueReference } from "../contract/issue-reference.js";
 const BLOCKED_BY_PAGE_SIZE = 100;
 /** Bounded page limit for blocked_by pagination; caps evidence at 1,000 entries per read. */
 const BLOCKED_BY_MAX_PAGES = 10;
@@ -154,7 +154,18 @@ function classifyBlockedByEntries(entries, context) {
         return { kind: "malformed", references: [], diagnostics };
     if (unresolvedCount > 0)
         return { kind: "unavailable", references: [], diagnostics };
-    return { kind: "present", references, diagnostics: [] };
+    return {
+        kind: "present",
+        references: references.sort(compareReferences),
+        diagnostics: [],
+    };
+}
+/** Match the repository IssueReference canonical order, including numeric issue numbers. */
+function compareReferences(left, right) {
+    return (left.repositoryHost.localeCompare(right.repositoryHost, "en-US") ||
+        left.repositoryId.localeCompare(right.repositoryId, "en-US") ||
+        left.number - right.number ||
+        issueReferenceKey(left).localeCompare(issueReferenceKey(right), "en-US"));
 }
 function resolveRelatedIssue(entry, context, path) {
     if (!isRecord(entry)) {

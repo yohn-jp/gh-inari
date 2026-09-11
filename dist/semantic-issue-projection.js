@@ -89,7 +89,8 @@ const DESIRED_PARENT_RELATION_KEYS = new Set(["relation", "reference", "represen
 const DESIRED_DEPENDS_ON_RELATION_KEYS = new Set(["relation", "references", "representation"]);
 const RELATION_REPRESENTATIONS = new Set(["none", "native", "body-fallback"]);
 const GOVERNANCE_GENERATION_MATCH_KEYS = new Set(["kind", "generation"]);
-const PLAN_EFFECT_KEYS = new Set(["kind", "desired"]);
+const PLAN_CREATE_EFFECT_KEYS = new Set(["kind", "desired"]);
+const PLAN_RELATION_EFFECT_KEYS = new Set(["kind", "parent", "previousParent", "reference"]);
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
 const CAPABILITY_ALIASES = {
     nativeParent: new Set([
@@ -124,6 +125,11 @@ function hasOwn(record, key) {
 }
 function compareStrings(left, right) {
     return left.localeCompare(right, "en-US");
+}
+function compareIssueReferences(left, right) {
+    return (left.repositoryHost.localeCompare(right.repositoryHost, "en-US") ||
+        left.repositoryId.localeCompare(right.repositoryId, "en-US") ||
+        left.number - right.number);
 }
 function addViolation(violations, code, path, message) {
     violations.push({ code, path, message });
@@ -341,7 +347,7 @@ function normalizeReferences(value, path, violations) {
         seen.add(key);
         references.push(result.reference);
     });
-    return references.sort((left, right) => compareStrings(issueReferenceKey(left), issueReferenceKey(right)));
+    return references.sort(compareIssueReferences);
 }
 function validateSemanticArtifact(input) {
     const violations = [];
@@ -560,6 +566,38 @@ function artifactDigest(artifact) {
     };
     return createHash("sha256").update(stableSerialize(payload), "utf8").digest("hex");
 }
+function sameRepositoryIdentity(reference, provenance) {
+    return (reference.repositoryHost.toLocaleLowerCase("en-US") === provenance.repository.host.toLocaleLowerCase("en-US") &&
+        reference.repositoryId === provenance.repository.repositoryId);
+}
+function createRelationEffects(desired, provenance, capabilities, violations) {
+    const effects = [];
+    const parent = desired.relations.parent;
+    if (parent.representation === "native") {
+        if (!hasCapability(capabilities, "nativeParent"))
+            addViolation(violations, "RELATION_UNREPRESENTABLE", "$.capabilities", "Native parent relation requires the declared native parent capability.");
+        else if (parent.reference !== undefined && !sameRepositoryIdentity(parent.reference, provenance)) {
+            addViolation(violations, "RELATION_UNREPRESENTABLE", "$.desired.relations.parent", "Native parent relations must target the repository identified by the Artifact provenance.");
+        }
+        else if (parent.reference !== undefined)
+            effects.push({ kind: "SET_PARENT_RELATION", parent: parent.reference });
+    }
+    const dependsOn = desired.relations.dependsOn;
+    if (dependsOn.representation === "native") {
+        if (!hasCapability(capabilities, "nativeDependsOn"))
+            addViolation(violations, "RELATION_UNREPRESENTABLE", "$.capabilities", "Native dependsOn relation requires the declared native blocked-by capability.");
+        for (const reference of dependsOn.references) {
+            if (!hasCapability(capabilities, "nativeDependsOn"))
+                break;
+            if (!sameRepositoryIdentity(reference, provenance)) {
+                addViolation(violations, "RELATION_UNREPRESENTABLE", "$.desired.relations.dependsOn", "Native blocked-by relations must target the repository identified by the Artifact provenance.");
+            }
+            else
+                effects.push({ kind: "ADD_BLOCKED_BY_RELATION", reference });
+        }
+    }
+    return effects;
+}
 /** Produce a declarative, versioned plan; this function has no GitHub I/O. */
 export function tryPlanSemanticIssue(input, capabilities) {
     const projectionResult = tryProjectSemanticIssue(input, capabilities);
@@ -579,6 +617,10 @@ export function tryPlanSemanticIssue(input, capabilities) {
     }
     const generation = cloneImmutable(artifactResult.artifact.provenance);
     const desired = projectionResult.projection;
+    const relationViolations = [];
+    const relationEffects = createRelationEffects(desired, artifactResult.artifact.provenance, normalizeCapabilities(request.capabilities, []) ?? [], relationViolations);
+    if (relationViolations.length > 0)
+        return invalidPlanResult(relationViolations);
     const plan = {
         version: SEMANTIC_ISSUE_MUTATION_PLAN_VERSION,
         kind: "issue",
@@ -595,7 +637,7 @@ export function tryPlanSemanticIssue(input, capabilities) {
         capabilities: cloneImmutable(normalizeCapabilities(request.capabilities, []) ?? []),
         desired,
         preconditions: [{ kind: "GOVERNANCE_GENERATION_MATCH", generation }],
-        effects: [{ kind: "CREATE_ISSUE", desired }],
+        effects: [{ kind: "CREATE_ISSUE", desired }, ...relationEffects],
     };
     return { valid: true, plan: cloneImmutable(plan), violations: [] };
 }
@@ -666,6 +708,8 @@ function validateDesiredRelations(input, path, violations) {
             if (!result.valid)
                 addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.parent.reference`, "IssueReference is invalid.");
         }
+        if (parent.representation === "none" && hasOwn(parent, "reference"))
+            addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.parent.reference`, "A none parent representation cannot contain a reference.");
     }
     const dependsOn = input.dependsOn;
     if (!isRecord(dependsOn)) {
@@ -693,6 +737,8 @@ function validateDesiredRelations(input, path, violations) {
                     addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.dependsOn.references[${index}]`, "Issue references must be unique.");
                 seen.add(key);
             });
+            if (dependsOn.representation === "none" && dependsOn.references.length > 0)
+                addViolation(violations, "MUTATION_PLAN_INVALID", `${path}.dependsOn.references`, "A none dependsOn representation cannot contain references.");
         }
     }
 }
@@ -754,22 +800,58 @@ function validatePreconditions(input, planGeneration, path, violations) {
         addViolation(violations, "MUTATION_PLAN_INVALID", path, 'Required precondition "GOVERNANCE_GENERATION_MATCH" is missing.');
 }
 function validateEffects(input, planDesired, path, violations) {
-    if (!Array.isArray(input) || input.length !== 1) {
-        addViolation(violations, "MUTATION_PLAN_INVALID", path, "An Issue plan requires exactly one explicit effect.");
+    if (!Array.isArray(input) || input.length < 1) {
+        addViolation(violations, "MUTATION_PLAN_INVALID", path, "An Issue plan requires a CREATE_ISSUE effect.");
         return;
     }
-    const effect = input[0];
-    const effectPath = `${path}[0]`;
-    if (!isRecord(effect)) {
-        addViolation(violations, "MUTATION_PLAN_INVALID", effectPath, "Effect must be an object.");
-        return;
+    const create = input[0];
+    const createPath = `${path}[0]`;
+    if (!isRecord(create)) {
+        addViolation(violations, "MUTATION_PLAN_INVALID", createPath, "Effect must be an object.");
     }
-    unknownProperties(effect, PLAN_EFFECT_KEYS, effectPath, violations, "MUTATION_PLAN_INVALID");
-    if (effect.kind !== "CREATE_ISSUE")
-        addViolation(violations, "MUTATION_PLAN_INVALID", `${effectPath}.kind`, "Effect kind is invalid.");
-    validateDesiredProjectionShape(effect.desired, `${effectPath}.desired`, violations);
-    if (violations.length === 0 && stableSerialize(effect.desired) !== stableSerialize(planDesired)) {
-        addViolation(violations, "MUTATION_PLAN_INVALID", `${effectPath}.desired`, "Effect desired projection must equal plan desired projection.");
+    else {
+        unknownProperties(create, PLAN_CREATE_EFFECT_KEYS, createPath, violations, "MUTATION_PLAN_INVALID");
+        if (create.kind !== "CREATE_ISSUE")
+            addViolation(violations, "MUTATION_PLAN_INVALID", `${createPath}.kind`, "The first effect must be CREATE_ISSUE.");
+        validateDesiredProjectionShape(create.desired, `${createPath}.desired`, violations);
+        if (violations.length === 0 && stableSerialize(create.desired) !== stableSerialize(planDesired)) {
+            addViolation(violations, "MUTATION_PLAN_INVALID", `${createPath}.desired`, "Effect desired projection must equal plan desired projection.");
+        }
+    }
+    const seenRelationEffects = new Set();
+    for (let index = 1; index < input.length; index += 1) {
+        const effect = input[index];
+        const effectPath = `${path}[${index}]`;
+        if (!isRecord(effect)) {
+            addViolation(violations, "MUTATION_PLAN_INVALID", effectPath, "Relation effect must be an object.");
+            continue;
+        }
+        unknownProperties(effect, PLAN_RELATION_EFFECT_KEYS, effectPath, violations, "MUTATION_PLAN_INVALID");
+        const kind = effect.kind;
+        if (kind !== "SET_PARENT_RELATION" &&
+            kind !== "CLEAR_PARENT_RELATION" &&
+            kind !== "ADD_BLOCKED_BY_RELATION" &&
+            kind !== "REMOVE_BLOCKED_BY_RELATION") {
+            addViolation(violations, "MUTATION_PLAN_INVALID", `${effectPath}.kind`, "Relation effect kind is invalid.");
+            continue;
+        }
+        const relationValue = kind === "SET_PARENT_RELATION"
+            ? effect.parent
+            : kind === "CLEAR_PARENT_RELATION"
+                ? effect.previousParent
+                : effect.reference;
+        if (kind === "CLEAR_PARENT_RELATION" && relationValue === undefined) {
+            addViolation(violations, "MUTATION_PLAN_INVALID", `${effectPath}.previousParent`, "CLEAR_PARENT_RELATION requires the observed previous parent.");
+        }
+        else {
+            const result = normalizeIssueReference(relationValue, `${effectPath}.${kind === "SET_PARENT_RELATION" ? "parent" : kind === "CLEAR_PARENT_RELATION" ? "previousParent" : "reference"}`);
+            if (!result.valid || result.reference === undefined)
+                addViolation(violations, "MUTATION_PLAN_INVALID", effectPath, "Relation effect IssueReference is invalid.");
+        }
+        const effectKey = stableSerialize(effect);
+        if (seenRelationEffects.has(effectKey))
+            addViolation(violations, "MUTATION_PLAN_INVALID", effectPath, "Relation effects must be unique.");
+        seenRelationEffects.add(effectKey);
     }
 }
 /** Validate the bounded shape of a transported plan without executing it. */
@@ -816,6 +898,28 @@ export function validateSemanticIssueMutationPlan(input) {
     validateEffects(input.effects, input.desired, "$.effects", violations);
     if (violations.length > 0 || capabilities === undefined)
         return invalidPlanResult(violations);
+    // Transported plans are an admission boundary, not merely a structural
+    // DTO. Recompute the relation effects from the validated desired projection
+    // so a caller cannot alter the relation payload while retaining a valid
+    // CREATE_ISSUE envelope. This also re-applies repository/capability checks
+    // before any adapter effect is allowed to run.
+    if (isRecord(input.desired) && isRecord(input.desired.relations) && provenanceIsValid(input.provenance)) {
+        const desired = input.desired;
+        const relationViolations = [];
+        const expectedRelationEffects = createRelationEffects(desired, input.provenance, capabilities, relationViolations);
+        for (const violation of relationViolations)
+            violations.push({ ...violation, code: "MUTATION_PLAN_INVALID" });
+        if (relationViolations.length === 0 &&
+            Array.isArray(input.effects) &&
+            stableSerialize(input.effects.slice(1)) !== stableSerialize(expectedRelationEffects))
+            violations.push({
+                code: "MUTATION_PLAN_INVALID",
+                path: "$.effects",
+                message: "Relation effects must equal the deterministic effects of the desired projection.",
+            });
+    }
+    if (violations.length > 0)
+        return invalidPlanResult(violations);
     return { valid: true, plan: cloneImmutable(input), violations: [] };
 }
 export function deserializeSemanticIssueMutationPlan(serialized) {
@@ -835,4 +939,8 @@ export function deserializeSemanticIssueMutationPlan(serialized) {
 }
 export const serializeSemanticIssuePlan = serializeSemanticIssueMutationPlan;
 export const parseSemanticIssueMutationPlan = deserializeSemanticIssueMutationPlan;
+// Native relation planning is a Core extension of the Semantic Issue
+// projection.  Re-export the transport-neutral relation contract here so
+// callers do not need a second semantic Issue authority or import path.
+export * from "./semantic-issue-relations.js";
 //# sourceMappingURL=semantic-issue-projection.js.map
