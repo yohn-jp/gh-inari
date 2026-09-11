@@ -14,66 +14,40 @@ import {
   type ChangeTransitionRecoveryPlan,
 } from "./change.js";
 import type { ChangeRemoteExecutionEvidence, ChangeRemoteExecutionResult } from "./change-executor.js";
+import {
+  GOLDEN_PATH_ACTION_OWNERS,
+  GOLDEN_PATH_AUTOMATIC_CLEANUP,
+  GOLDEN_PATH_NORMAL_ACTION_KINDS,
+  GOLDEN_PATH_REASON_CODES,
+  GOLDEN_PATH_RECOVERY_ACTION_KINDS,
+  GOLDEN_PATH_STATUS_RECOVERY_CLASSES,
+  type GoldenPathActionOwner,
+  type GoldenPathAutomaticCleanup,
+  type GoldenPathNormalActionKind,
+  type GoldenPathRecoveryActionKind,
+  type GoldenPathRecoveryProjection,
+  type GoldenPathReasonCode,
+  type GoldenPathStatusRecoveryClass,
+} from "./golden-path-status.js";
 
-export const GOLDEN_PATH_RECOVERY_CLASSES = Object.freeze([
-  "ISSUANCE_PARTIAL_PROJECTION",
-  "ISSUANCE_COMPENSATION_UNSAFE",
-  "ABORT_CLEANUP_PENDING",
-  "ABORT_CLEANUP_UNSAFE",
-  "POST_EFFECT_VERIFICATION",
-] as const);
-export type GoldenPathRecoveryClass = (typeof GOLDEN_PATH_RECOVERY_CLASSES)[number];
+/** Compatibility aliases; the values and types are owned by #409. */
+export {
+  GOLDEN_PATH_ACTION_OWNERS as GOLDEN_PATH_RECOVERY_OWNERS,
+  GOLDEN_PATH_AUTOMATIC_CLEANUP as GOLDEN_PATH_AUTOMATIC_CLEANUP_POLICIES,
+  GOLDEN_PATH_REASON_CODES as GOLDEN_PATH_RECOVERY_REASON_CODES,
+  GOLDEN_PATH_RECOVERY_ACTION_KINDS as GOLDEN_PATH_RECOVERY_ACTIONS,
+  GOLDEN_PATH_STATUS_RECOVERY_CLASSES as GOLDEN_PATH_RECOVERY_CLASSES,
+};
+export type {
+  GoldenPathActionOwner as GoldenPathRecoveryOwner,
+  GoldenPathAutomaticCleanup as GoldenPathAutomaticCleanupPolicy,
+  GoldenPathReasonCode as GoldenPathRecoveryReasonCode,
+  GoldenPathRecoveryActionKind as GoldenPathRecoveryAction,
+  GoldenPathStatusRecoveryClass as GoldenPathRecoveryClass,
+};
 
-export const GOLDEN_PATH_RECOVERY_ACTIONS = Object.freeze([
-  "RETRY",
-  "ABORT",
-  "RECOVER",
-  "MANUAL_REVIEW",
-  "WAIT",
-] as const);
-export type GoldenPathRecoveryAction = (typeof GOLDEN_PATH_RECOVERY_ACTIONS)[number];
-
-export const GOLDEN_PATH_RECOVERY_OWNERS = Object.freeze([
-  "caller",
-  "inari",
-  "worker",
-  "repository",
-  "recovery",
-] as const);
-export type GoldenPathRecoveryOwner = (typeof GOLDEN_PATH_RECOVERY_OWNERS)[number];
-
-export const GOLDEN_PATH_AUTOMATIC_CLEANUP_POLICIES = Object.freeze(["none", "conditional", "forbidden"] as const);
-export type GoldenPathAutomaticCleanupPolicy = (typeof GOLDEN_PATH_AUTOMATIC_CLEANUP_POLICIES)[number];
-
-/** Stable machine-readable reasons shared with the Golden Path status surface. */
-export const GOLDEN_PATH_RECOVERY_REASON_CODES = Object.freeze([
-  "PACKAGE_CAPABILITY_REQUIRED",
-  "GOVERNANCE_DISCOVERY_REQUIRED",
-  "GOVERNED_ISSUE_REQUIRED",
-  "CHANGE_ISSUANCE_REQUIRED",
-  "CHANGE_ISSUED",
-  "READY_PRECONDITIONS_REQUIRED",
-  "REVIEW_ADMITTED",
-  "AUTHORITATIVE_REREAD_REQUIRED",
-  "IDEMPOTENT_RETRY",
-  "ABORT_CLEANUP_REQUIRED",
-  "RECOVERY_ACTION_REQUIRED",
-  "MANUAL_RECOVERY_REVIEW_REQUIRED",
-  "WAIT_FOR_REPOSITORY_REVIEW",
-] as const);
-export type GoldenPathRecoveryReasonCode = (typeof GOLDEN_PATH_RECOVERY_REASON_CODES)[number];
-
-/** The bounded recovery object embedded by the common status envelope. */
-export interface GoldenPathRecovery {
-  readonly class: GoldenPathRecoveryClass;
-  readonly safeAction: GoldenPathRecoveryAction;
-  readonly owner: "recovery";
-  readonly retryable: boolean;
-  /** Recovery decisions always require a current authoritative read. */
-  readonly rereadRequired: true;
-  readonly automaticCleanup: GoldenPathAutomaticCleanupPolicy;
-  readonly reasonCode: GoldenPathRecoveryReasonCode;
-}
+/** Compatibility alias for the #409 recovery envelope shape. */
+export type GoldenPathRecovery = GoldenPathRecoveryProjection;
 
 /** Explicit bounded evidence that a fresh authoritative read has completed. */
 export interface GoldenPathAuthoritativeReread {
@@ -114,10 +88,10 @@ export interface GoldenPathRecoveryValidationResult {
   readonly diagnostics: readonly GoldenPathRecoveryDiagnostic[];
 }
 
-const recoveryClasses = new Set<string>(GOLDEN_PATH_RECOVERY_CLASSES);
-const recoveryActions = new Set<string>(GOLDEN_PATH_RECOVERY_ACTIONS);
-const cleanupPolicies = new Set<string>(GOLDEN_PATH_AUTOMATIC_CLEANUP_POLICIES);
-const reasonCodes = new Set<string>(GOLDEN_PATH_RECOVERY_REASON_CODES);
+const recoveryClasses = new Set<string>(GOLDEN_PATH_STATUS_RECOVERY_CLASSES);
+const recoveryActions = new Set<string>(GOLDEN_PATH_RECOVERY_ACTION_KINDS);
+const cleanupPolicies = new Set<string>(GOLDEN_PATH_AUTOMATIC_CLEANUP);
+const reasonCodes = new Set<string>(GOLDEN_PATH_REASON_CODES);
 
 const ADMISSIBLE_RECOVERY_COMBINATIONS: readonly Pick<
   GoldenPathRecovery,
@@ -323,11 +297,11 @@ function canonicalJson(value: unknown): string {
 }
 
 function recovery(
-  className: GoldenPathRecoveryClass,
-  safeAction: GoldenPathRecoveryAction,
+  className: GoldenPathStatusRecoveryClass,
+  safeAction: GoldenPathRecoveryActionKind,
   retryable: boolean,
-  automaticCleanup: GoldenPathAutomaticCleanupPolicy,
-  reasonCode: GoldenPathRecoveryReasonCode,
+  automaticCleanup: GoldenPathAutomaticCleanup,
+  reasonCode: GoldenPathReasonCode,
 ): GoldenPathRecovery {
   return Object.freeze({
     class: className,
@@ -496,6 +470,7 @@ export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryVa
     "retryable",
     "rereadRequired",
     "automaticCleanup",
+    "retryOf",
     "reasonCode",
   ]);
   if (Object.keys(input).some((key) => !allowed.has(key))) {
@@ -538,6 +513,17 @@ export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryVa
       message: "Recovery reason code is unsupported.",
     });
   }
+  if (
+    input.retryOf !== undefined &&
+    (input.safeAction !== "RETRY" ||
+      !GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(input.retryOf as GoldenPathNormalActionKind))
+  ) {
+    diagnostics.push({
+      code: "INVALID_RECOVERY",
+      path: "$.retryOf",
+      message: "Recovery retry target is unsupported.",
+    });
+  }
   const admissible = ADMISSIBLE_RECOVERY_COMBINATIONS.some(
     (combination) =>
       combination.class === input.class &&
@@ -555,13 +541,14 @@ export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryVa
   }
   if (diagnostics.length > 0) return { valid: false, diagnostics };
   const recoveryValue: GoldenPathRecovery = {
-    class: input.class as GoldenPathRecoveryClass,
-    safeAction: input.safeAction as GoldenPathRecoveryAction,
+    class: input.class as GoldenPathStatusRecoveryClass,
+    safeAction: input.safeAction as GoldenPathRecoveryActionKind,
     owner: "recovery",
     retryable: input.retryable as boolean,
     rereadRequired: true,
-    automaticCleanup: input.automaticCleanup as GoldenPathAutomaticCleanupPolicy,
-    reasonCode: input.reasonCode as GoldenPathRecoveryReasonCode,
+    automaticCleanup: input.automaticCleanup as GoldenPathAutomaticCleanup,
+    ...(input.retryOf === undefined ? {} : { retryOf: input.retryOf as GoldenPathNormalActionKind }),
+    reasonCode: input.reasonCode as GoldenPathReasonCode,
   };
   return { valid: true, recovery: Object.freeze(recoveryValue), diagnostics: [] };
 }

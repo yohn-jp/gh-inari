@@ -380,6 +380,16 @@ test("validation rejects caller-forged owners and recovery combinations", () => 
     reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
   } as const;
   assert.equal(validateGoldenPathRecovery(valid).valid, true);
+  const retryable = {
+    ...valid,
+    safeAction: "RETRY",
+    retryable: true,
+    automaticCleanup: "none",
+    reasonCode: "IDEMPOTENT_RETRY",
+  } as const;
+  assert.equal(validateGoldenPathRecovery({ ...retryable, retryOf: "READY_CHANGE" }).valid, true);
+  assert.equal(validateGoldenPathRecovery({ ...valid, retryOf: "READY_CHANGE" }).valid, false);
+  assert.equal(validateGoldenPathRecovery({ ...valid, retryOf: "RECOVER" }).valid, false);
   assert.equal(validateGoldenPathRecovery({ ...valid, owner: "caller" }).valid, false);
   assert.equal(validateGoldenPathRecovery({ ...valid, safeAction: "RETRY", retryable: false }).valid, false);
   assert.equal(
