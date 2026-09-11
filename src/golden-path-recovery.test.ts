@@ -11,6 +11,7 @@ import {
   type GoldenPathRecoveryInput,
 } from "./golden-path-recovery.js";
 import type { ChangeProjectionResult } from "./change.js";
+import type { ChangeRecoveryPlan } from "./change.js";
 import type { ChangeRemoteExecutionEvidence } from "./change-executor.js";
 
 const branch = "feat/395-golden-path";
@@ -71,12 +72,12 @@ function evidence(
 function input(
   projectionValue: ChangeProjectionResult,
   evidenceValue: ChangeRemoteExecutionEvidence,
-  options: Pick<GoldenPathRecoveryInput, "authoritativeReread" | "idempotencyProof"> = {},
+  options: Pick<GoldenPathRecoveryInput, "authoritativeReread"> = {},
 ): GoldenPathRecoveryInput {
   return { projection: projectionValue, evidence: evidenceValue, ...options };
 }
 
-test("projects a bounded partial issuance into one conditional recovery action", () => {
+test("execution evidence alone cannot authorize issuance cleanup", () => {
   const result = projectGoldenPathRecovery(
     input(
       projection("partial", { branchSha }),
@@ -87,12 +88,13 @@ test("projects a bounded partial issuance into one conditional recovery action",
     ),
   );
   assert.deepEqual(result, {
-    class: "ISSUANCE_PARTIAL_PROJECTION",
-    safeAction: "RECOVER",
+    class: "ISSUANCE_COMPENSATION_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    owner: "recovery",
     retryable: false,
     rereadRequired: true,
-    automaticCleanup: "conditional",
-    reasonCode: "RECOVERY_ACTION_REQUIRED",
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
   });
 });
 
@@ -126,7 +128,7 @@ test("a canonical pull request that is already visible prevents branch cleanup i
   assert.equal(result?.automaticCleanup, "forbidden");
 });
 
-test("projects pending abort cleanup only when canonical closed PR and branch are explicit", () => {
+test("execution evidence alone cannot authorize abort cleanup", () => {
   const result = projectGoldenPathRecovery(
     input(
       projection("partial", { branchSha, pullRequestState: "closed", merged: false }),
@@ -136,12 +138,13 @@ test("projects pending abort cleanup only when canonical closed PR and branch ar
     ),
   );
   assert.deepEqual(result, {
-    class: "ABORT_CLEANUP_PENDING",
-    safeAction: "RECOVER",
+    class: "ABORT_CLEANUP_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    owner: "recovery",
     retryable: false,
     rereadRequired: true,
-    automaticCleanup: "conditional",
-    reasonCode: "ABORT_CLEANUP_REQUIRED",
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
   });
 });
 
@@ -159,7 +162,7 @@ test("unavailable abort evidence waits and never authorizes cleanup", () => {
   assert.equal(result?.automaticCleanup, "forbidden");
 });
 
-test("a merged canonical pull request makes abort cleanup unsafe", () => {
+test("a merged canonical pull request remains unsafe without a Core plan", () => {
   const result = projectGoldenPathRecovery(
     input(
       projection("partial", { branchSha, pullRequestState: "closed", merged: true }),
@@ -173,7 +176,7 @@ test("a merged canonical pull request makes abort cleanup unsafe", () => {
   assert.equal(result?.automaticCleanup, "forbidden");
 });
 
-test("post-effect verification retries only with explicit reread and idempotency proof", () => {
+test("post-effect verification never trusts caller-supplied retry proof", () => {
   const evidenceValue = evidence("ready", "recovery-required", {
     failure: { kind: "MARK_PULL_REQUEST_READY", code: "VERIFY_FAILED", message: "bounded" },
   });
@@ -181,14 +184,13 @@ test("post-effect verification retries only with explicit reread and idempotency
   assert.equal(withoutProof?.safeAction, "MANUAL_REVIEW");
   assert.equal(withoutProof?.retryable, false);
 
-  const withProof = projectGoldenPathRecovery(
+  const withRereadOnly = projectGoldenPathRecovery(
     input(projection("healthy", { branchSha }), evidenceValue, {
-      authoritativeReread: "confirmed",
-      idempotencyProof: "existing",
+      authoritativeReread: { status: "complete", projection: projection("healthy", { branchSha }) },
     }),
   );
-  assert.equal(withProof?.safeAction, "RETRY");
-  assert.equal(withProof?.retryable, true);
+  assert.equal(withRereadOnly?.safeAction, "MANUAL_REVIEW");
+  assert.equal(withRereadOnly?.retryable, false);
 });
 
 test("generic failure and verified compensation do not become recovery classifications", () => {
@@ -214,6 +216,82 @@ test("a recovery-state projection without executor evidence remains fail-closed"
   assert.equal(result?.automaticCleanup, "forbidden");
 });
 
+test("a validated issuance recovery plan supplies cleanup authority without reclassification", () => {
+  const plan = {
+    version: 1,
+    operation: "recover-issue",
+    issuance: { transaction: { idempotencyKey: "change:395" } },
+    failureEvidence: {
+      attemptedEffects: [],
+      failure: { effect: { kind: "CREATE_PULL_REQUEST" }, code: "CREATE_FAILED", message: "bounded" },
+      projection: projection("unavailable"),
+    },
+    compensation: {
+      status: "required",
+      plan: { effects: [{ kind: "DELETE_BRANCH", branch, expectedCommitSha: branchSha }] },
+    },
+    result: { state: "RECOVERY_REQUIRED" },
+  } as unknown as ChangeRecoveryPlan;
+  const result = projectGoldenPathRecovery({ recoveryPlan: plan });
+  assert.deepEqual(result, {
+    class: "ISSUANCE_PARTIAL_PROJECTION",
+    safeAction: "RECOVER",
+    owner: "recovery",
+    retryable: false,
+    rereadRequired: true,
+    automaticCleanup: "conditional",
+    reasonCode: "RECOVERY_ACTION_REQUIRED",
+  });
+});
+
+test("a validated abort recovery plan exposes only its remaining Core-admitted cleanup", () => {
+  const plan = {
+    version: 1,
+    operation: "recover-transition",
+    transition: { request: { transition: "abort" } },
+    failureEvidence: {
+      attemptedEffects: [],
+      failure: { effect: { kind: "CLOSE_PULL_REQUEST" }, code: "CLOSE_FAILED", message: "bounded" },
+      projection: projection("unavailable"),
+    },
+    effects: [
+      { kind: "CLOSE_PULL_REQUEST", pullRequest: 902 },
+      { kind: "DELETE_BRANCH", branch },
+    ],
+    result: { state: "RECOVERY_REQUIRED" },
+  } as unknown as ChangeRecoveryPlan;
+  const result = projectGoldenPathRecovery({ recoveryPlan: plan });
+  assert.deepEqual(result, {
+    class: "ABORT_CLEANUP_PENDING",
+    safeAction: "ABORT",
+    owner: "recovery",
+    retryable: false,
+    rereadRequired: true,
+    automaticCleanup: "conditional",
+    reasonCode: "ABORT_CLEANUP_REQUIRED",
+  });
+});
+
+test("validation rejects caller-forged owners and recovery combinations", () => {
+  const valid = {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "MANUAL_REVIEW",
+    owner: "recovery",
+    retryable: false,
+    rereadRequired: true,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  } as const;
+  assert.equal(validateGoldenPathRecovery(valid).valid, true);
+  assert.equal(validateGoldenPathRecovery({ ...valid, owner: "caller" }).valid, false);
+  assert.equal(validateGoldenPathRecovery({ ...valid, safeAction: "RETRY", retryable: false }).valid, false);
+  assert.equal(
+    validateGoldenPathRecovery({ ...valid, safeAction: "RECOVER", automaticCleanup: "forbidden" }).valid,
+    false,
+  );
+  assert.equal(validateGoldenPathRecovery({ ...valid, extra: true }).valid, false);
+});
+
 test("recovery vocabulary and serialization remain bounded and deterministic", () => {
   assert.deepEqual(GOLDEN_PATH_RECOVERY_CLASSES, [
     "ISSUANCE_PARTIAL_PROJECTION",
@@ -224,10 +302,7 @@ test("recovery vocabulary and serialization remain bounded and deterministic", (
   ]);
   assert.deepEqual(GOLDEN_PATH_RECOVERY_ACTIONS, ["RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW", "WAIT"]);
   const recovery = projectGoldenPathRecovery(
-    input(projection("healthy", { branchSha }), evidence("ready", "recovery-required"), {
-      authoritativeReread: true,
-      idempotencyProof: true,
-    }),
+    input(projection("healthy", { branchSha }), evidence("ready", "recovery-required")),
   );
   assert.ok(recovery);
   const serialized = serializeGoldenPathRecovery(recovery);

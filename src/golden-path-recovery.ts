@@ -61,6 +61,7 @@ export type GoldenPathRecoveryReasonCode = (typeof GOLDEN_PATH_RECOVERY_REASON_C
 export interface GoldenPathRecovery {
   readonly class: GoldenPathRecoveryClass;
   readonly safeAction: GoldenPathRecoveryAction;
+  readonly owner: "recovery";
   readonly retryable: boolean;
   /** Recovery decisions always require a current authoritative read. */
   readonly rereadRequired: true;
@@ -68,18 +69,11 @@ export interface GoldenPathRecovery {
   readonly reasonCode: GoldenPathRecoveryReasonCode;
 }
 
-/** Explicit evidence that a fresh read has completed. */
-export type GoldenPathAuthoritativeReread =
-  | boolean
-  | "complete"
-  | "confirmed"
-  | "performed"
-  | "required"
-  | "unavailable"
-  | {
-      readonly status: "complete" | "confirmed" | "performed" | "required" | "unavailable";
-      readonly projection?: ChangeProjectionResult;
-    };
+/** Explicit bounded evidence that a fresh authoritative read has completed. */
+export interface GoldenPathAuthoritativeReread {
+  readonly status: "complete";
+  readonly projection: ChangeProjectionResult;
+}
 
 /**
  * Input boundary for the projector.  Callers must provide normalized Core or
@@ -93,10 +87,6 @@ export interface GoldenPathRecoveryInput {
   /** Optional operation discriminator when only a Change projection is available. */
   readonly operation?: ChangeRemoteExecutionEvidence["operation"];
   readonly authoritativeReread?: GoldenPathAuthoritativeReread;
-  /** Explicit proof supplied by the existing Change idempotency authority. */
-  readonly idempotencyProof?: boolean | "proven" | "existing";
-  /** Compatibility spelling for callers that already expose this proof. */
-  readonly idempotent?: boolean;
 }
 
 export type GoldenPathRecoverySource =
@@ -122,6 +112,82 @@ const recoveryClasses = new Set<string>(GOLDEN_PATH_RECOVERY_CLASSES);
 const recoveryActions = new Set<string>(GOLDEN_PATH_RECOVERY_ACTIONS);
 const cleanupPolicies = new Set<string>(GOLDEN_PATH_AUTOMATIC_CLEANUP_POLICIES);
 const reasonCodes = new Set<string>(GOLDEN_PATH_RECOVERY_REASON_CODES);
+
+const ADMISSIBLE_RECOVERY_COMBINATIONS: readonly Pick<
+  GoldenPathRecovery,
+  "class" | "safeAction" | "retryable" | "automaticCleanup" | "reasonCode"
+>[] = [
+  {
+    class: "ISSUANCE_PARTIAL_PROJECTION",
+    safeAction: "WAIT",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  },
+  {
+    class: "ISSUANCE_PARTIAL_PROJECTION",
+    safeAction: "RECOVER",
+    retryable: false,
+    automaticCleanup: "conditional",
+    reasonCode: "RECOVERY_ACTION_REQUIRED",
+  },
+  {
+    class: "ISSUANCE_COMPENSATION_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_PENDING",
+    safeAction: "ABORT",
+    retryable: false,
+    automaticCleanup: "conditional",
+    reasonCode: "ABORT_CLEANUP_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_PENDING",
+    safeAction: "RECOVER",
+    retryable: false,
+    automaticCleanup: "conditional",
+    reasonCode: "ABORT_CLEANUP_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_UNSAFE",
+    safeAction: "WAIT",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  },
+  {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "RETRY",
+    retryable: true,
+    automaticCleanup: "none",
+    reasonCode: "IDEMPOTENT_RETRY",
+  },
+  {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "WAIT",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  },
+  {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "MANUAL_REVIEW",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  },
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -196,22 +262,33 @@ function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvide
 
 function rereadProven(input: GoldenPathRecoveryInput): boolean {
   const reread = input.authoritativeReread;
-  if (reread === true || reread === "complete" || reread === "confirmed" || reread === "performed") return true;
-  return isRecord(reread) && ["complete", "confirmed", "performed"].includes(reread.status as string);
+  const projection = input.projection;
+  return (
+    reread !== undefined &&
+    projection !== undefined &&
+    reread.status === "complete" &&
+    canonicalJson(reread.projection) === canonicalJson(projection)
+  );
 }
 
 function idempotencyProven(
   input: GoldenPathRecoveryInput,
   evidence: ChangeRemoteExecutionEvidence | undefined,
 ): boolean {
-  if (input.idempotencyProof === true || input.idempotencyProof === "proven" || input.idempotencyProof === "existing") {
-    return true;
+  if (evidence?.outcome === "returned-existing") return true;
+  const plan = input.recoveryPlan;
+  return plan?.operation === "recover-issue" && plan.issuance.transaction.idempotencyKey.length > 0;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
   }
-  if (input.idempotent === true) return true;
-  // `returned-existing` is itself the existing Core idempotency proof.  It is
-  // never converted into a recovery result, but retaining this check makes
-  // repeated issuance projection deterministic for composed callers.
-  return evidence?.outcome === "returned-existing";
+  return JSON.stringify(value);
 }
 
 function recovery(
@@ -224,54 +301,12 @@ function recovery(
   return Object.freeze({
     class: className,
     safeAction,
+    owner: "recovery" as const,
     retryable,
     rereadRequired: true,
     automaticCleanup,
     reasonCode,
   });
-}
-
-function canonicalBranchState(projection: ChangeProjectionResult): {
-  readonly branchPresent: boolean;
-  readonly branchUnambiguous: boolean;
-  readonly branchAdvancedOrUnproven: boolean;
-  readonly sha?: string;
-} {
-  const canonicalBranch = projection.canonicalBranch;
-  if (canonicalBranch === undefined) {
-    return { branchPresent: false, branchUnambiguous: false, branchAdvancedOrUnproven: true };
-  }
-  const candidates = projection.candidates.branches.filter((candidate) => candidate.candidate.name === canonicalBranch);
-  const branchPresent = candidates.length > 0;
-  const branchUnambiguous = candidates.length === 1 && candidates[0]?.classification === "canonical";
-  const branchAdvancedOrUnproven = !branchUnambiguous || candidates[0]?.candidate.sha === undefined;
-  return { branchPresent, branchUnambiguous, branchAdvancedOrUnproven, sha: candidates[0]?.candidate.sha };
-}
-
-function canonicalPullRequestState(projection: ChangeProjectionResult): {
-  readonly present: boolean;
-  readonly closedUnmerged: boolean;
-  readonly merged: boolean;
-  readonly open: boolean;
-  readonly ambiguous: boolean;
-} {
-  const canonicalBranch = projection.canonicalBranch;
-  const pullRequests = projection.candidates.pullRequests.filter((candidate) =>
-    canonicalBranch === undefined ? false : candidate.candidate.head === canonicalBranch,
-  );
-  if (pullRequests.length === 0)
-    return { present: false, closedUnmerged: false, merged: false, open: false, ambiguous: false };
-  const canonical = pullRequests.filter((candidate) => candidate.classification === "canonical");
-  if (canonical.length !== 1)
-    return { present: true, closedUnmerged: false, merged: false, open: false, ambiguous: true };
-  const candidate = canonical[0]!.candidate;
-  return {
-    present: true,
-    closedUnmerged: candidate.state === "closed" && candidate.merged === false,
-    merged: candidate.state === "closed" && candidate.merged === true,
-    open: candidate.state === "open",
-    ambiguous: false,
-  };
 }
 
 function issuanceRecovery(
@@ -288,24 +323,6 @@ function issuanceRecovery(
     return null;
   }
 
-  const branch = projection === undefined ? undefined : canonicalBranchState(projection);
-  const pullRequest = projection === undefined ? undefined : canonicalPullRequestState(projection);
-  const unavailable =
-    projection === undefined || projection.status === "unavailable" || projection.status === "ambiguous";
-  const expectedCompensationSha =
-    plan?.operation === "recover-issue"
-      ? plan.compensation.plan.effects.find((effect) => effect.kind === "DELETE_BRANCH")?.expectedCommitSha
-      : evidence.effects.find((effect) => effect.kind === "CREATE_BRANCH")?.createdCommitSha;
-  const branchCleanupProven =
-    branch !== undefined &&
-    branch.branchPresent &&
-    branch.branchUnambiguous &&
-    !branch.branchAdvancedOrUnproven &&
-    pullRequest !== undefined &&
-    !pullRequest.present &&
-    expectedCompensationSha !== undefined &&
-    branch.sha === expectedCompensationSha;
-
   if (
     evidence.compensation === "failed" ||
     (plan?.operation === "recover-issue" && plan.compensation.status === "failed")
@@ -318,11 +335,25 @@ function issuanceRecovery(
       "MANUAL_RECOVERY_REVIEW_REQUIRED",
     );
   }
-  if (unavailable) {
-    return recovery("ISSUANCE_PARTIAL_PROJECTION", "WAIT", false, "forbidden", "AUTHORITATIVE_REREAD_REQUIRED");
+  if (plan?.operation === "recover-issue") {
+    // The validated Core plan is the sole cleanup authority.  This projector
+    // only exposes its explicit compensation-required effect; it never
+    // re-evaluates branch generations or constructs a delete effect.
+    if (plan.compensation.status === "required") {
+      return recovery("ISSUANCE_PARTIAL_PROJECTION", "RECOVER", false, "conditional", "RECOVERY_ACTION_REQUIRED");
+    }
+    return recovery(
+      "ISSUANCE_COMPENSATION_UNSAFE",
+      "MANUAL_REVIEW",
+      false,
+      "forbidden",
+      "MANUAL_RECOVERY_REVIEW_REQUIRED",
+    );
   }
-  if (branchCleanupProven) {
-    return recovery("ISSUANCE_PARTIAL_PROJECTION", "RECOVER", false, "conditional", "RECOVERY_ACTION_REQUIRED");
+  // Execution evidence alone does not establish compensation safety.  A
+  // fresh read may still be unavailable, so no cleanup action is admitted.
+  if (projection === undefined || projection.status === "unavailable") {
+    return recovery("ISSUANCE_PARTIAL_PROJECTION", "WAIT", false, "forbidden", "AUTHORITATIVE_REREAD_REQUIRED");
   }
   return recovery(
     "ISSUANCE_COMPENSATION_UNSAFE",
@@ -334,36 +365,24 @@ function issuanceRecovery(
 }
 
 function abortRecovery(
-  input: GoldenPathRecoveryInput,
+  plan: ChangeRecoveryPlan | undefined,
   projection: ChangeProjectionResult | undefined,
-  evidence: ChangeRemoteExecutionEvidence,
 ): GoldenPathRecovery {
-  const reread = rereadProven(input);
+  if (plan?.operation === "recover-transition") {
+    // Core's transition recovery plan already admitted the remaining effect;
+    // classify that decision without re-running cleanup safety here.
+    const failedKind = plan.failureEvidence.failure.effect.kind;
+    if (failedKind === "DELETE_BRANCH" && plan.effects.some((effect) => effect.kind === "DELETE_BRANCH")) {
+      return recovery("ABORT_CLEANUP_PENDING", "RECOVER", false, "conditional", "ABORT_CLEANUP_REQUIRED");
+    }
+    if (failedKind === "CLOSE_PULL_REQUEST" && plan.effects.some((effect) => effect.kind === "CLOSE_PULL_REQUEST")) {
+      return recovery("ABORT_CLEANUP_PENDING", "ABORT", false, "conditional", "ABORT_CLEANUP_REQUIRED");
+    }
+    return recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
+  }
+  // Execution evidence alone cannot prove canonical cleanup ownership.
   if (projection === undefined || projection.status === "unavailable") {
     return recovery("ABORT_CLEANUP_UNSAFE", "WAIT", false, "forbidden", "AUTHORITATIVE_REREAD_REQUIRED");
-  }
-  const branch = canonicalBranchState(projection);
-  const pullRequest = canonicalPullRequestState(projection);
-  if (
-    projection.status === "ambiguous" ||
-    !branch.branchUnambiguous ||
-    pullRequest.ambiguous ||
-    !branch.branchPresent
-  ) {
-    return recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
-  }
-  if (pullRequest.merged || (pullRequest.present && !pullRequest.open && !pullRequest.closedUnmerged)) {
-    return recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
-  }
-  if (pullRequest.closedUnmerged) {
-    return recovery("ABORT_CLEANUP_PENDING", "RECOVER", false, "conditional", "ABORT_CLEANUP_REQUIRED");
-  }
-  if (pullRequest.present && !pullRequest.closedUnmerged) {
-    // A failed close can be retried only through the existing abort transition.
-    if (reread && idempotencyProven(input, evidence)) {
-      return recovery("ABORT_CLEANUP_PENDING", "ABORT", true, "conditional", "IDEMPOTENT_RETRY");
-    }
-    return recovery("ABORT_CLEANUP_PENDING", "ABORT", false, "conditional", "ABORT_CLEANUP_REQUIRED");
   }
   return recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
 }
@@ -416,14 +435,10 @@ export function projectGoldenPathRecovery(source: GoldenPathRecoverySource): Gol
     evidence.operation === "abort" ||
     (plan?.operation === "recover-transition" && plan.transition.request.transition === "abort")
   ) {
-    return abortRecovery(input, projection, evidence);
+    return abortRecovery(plan, projection);
   }
   return postEffectRecovery(input, evidence);
 }
-
-export const classifyGoldenPathRecovery = projectGoldenPathRecovery;
-export const deriveGoldenPathRecovery = projectGoldenPathRecovery;
-export const createGoldenPathRecovery = projectGoldenPathRecovery;
 
 /** Validate a recovery object at the #409 composition boundary. */
 export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryValidationResult {
@@ -432,8 +447,27 @@ export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryVa
     diagnostics.push({ code: "INVALID_RECOVERY", path: "$", message: "Recovery must be an object." });
     return { valid: false, diagnostics };
   }
+  const allowed = new Set([
+    "class",
+    "safeAction",
+    "owner",
+    "retryable",
+    "rereadRequired",
+    "automaticCleanup",
+    "reasonCode",
+  ]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    diagnostics.push({ code: "INVALID_RECOVERY", path: "$", message: "Recovery contains an unknown property." });
+  }
   if (!recoveryClasses.has(input.class as string)) {
     diagnostics.push({ code: "INVALID_RECOVERY", path: "$.class", message: "Recovery class is unsupported." });
+  }
+  if (input.owner !== "recovery") {
+    diagnostics.push({
+      code: "INVALID_RECOVERY",
+      path: "$.owner",
+      message: "Recovery owner must be recovery.",
+    });
   }
   if (!recoveryActions.has(input.safeAction as string)) {
     diagnostics.push({ code: "INVALID_RECOVERY", path: "$.safeAction", message: "Recovery action is unsupported." });
@@ -462,10 +496,26 @@ export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryVa
       message: "Recovery reason code is unsupported.",
     });
   }
+  const admissible = ADMISSIBLE_RECOVERY_COMBINATIONS.some(
+    (combination) =>
+      combination.class === input.class &&
+      combination.safeAction === input.safeAction &&
+      combination.retryable === input.retryable &&
+      combination.automaticCleanup === input.automaticCleanup &&
+      combination.reasonCode === input.reasonCode,
+  );
+  if (!admissible) {
+    diagnostics.push({
+      code: "INVALID_RECOVERY",
+      path: "$",
+      message: "Recovery fields do not form an admissible bounded combination.",
+    });
+  }
   if (diagnostics.length > 0) return { valid: false, diagnostics };
   const recoveryValue: GoldenPathRecovery = {
     class: input.class as GoldenPathRecoveryClass,
     safeAction: input.safeAction as GoldenPathRecoveryAction,
+    owner: "recovery",
     retryable: input.retryable as boolean,
     rereadRequired: true,
     automaticCleanup: input.automaticCleanup as GoldenPathAutomaticCleanupPolicy,
