@@ -20,6 +20,7 @@ export * from "./command-contract.js";
 export * from "./change.js";
 export * from "./change-executor.js";
 export * from "./change-trusted-executor.js";
+export * from "./golden-path-recovery.js";
 export * from "./semantic-pr-projection.js";
 export * from "./semantic-issue-projection.js";
 export * from "./semantic-issue-observation.js";
