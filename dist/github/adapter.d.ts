@@ -21,6 +21,8 @@ export interface GitHubApiResponse {
     readonly status: number;
     readonly body: unknown;
 }
+/** Bounded values accepted by the repository API seam for JSON request fields. */
+export type GitHubApiFieldValue = string | number | boolean;
 export declare class GitHubAdapter {
     private readonly cwd;
     private readonly repository;
@@ -46,7 +48,7 @@ export declare class GitHubAdapter {
      */
     requestActionsApi(actionsPath: string, method: "GET" | "POST", fields?: Readonly<Record<string, string>>): Promise<unknown>;
     /** Read the bounded repository API surface needed by Change projection. */
-    requestRepositoryApi(repositoryPath: string, method?: "GET"): Promise<GitHubApiResponse>;
+    requestRepositoryApi(repositoryPath: string, method?: "GET" | "POST" | "PATCH" | "DELETE", fields?: Readonly<Record<string, GitHubApiFieldValue>>): Promise<GitHubApiResponse>;
     /** Download one bounded Actions artifact archive through the caller's gh session. */
     downloadActionsArtifact(artifactId: number): Promise<Uint8Array>;
     /** Read the target repository metadata used to select the trusted governance ref. */

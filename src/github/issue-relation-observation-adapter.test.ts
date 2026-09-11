@@ -206,6 +206,17 @@ test("observeBlockedBy returns present with every normalized IssueReference", as
   }
 });
 
+test("observeBlockedBy canonicalizes provider ordering by Issue identity", async () => {
+  const reader = new StubReader([{ status: 200, body: [issueBody(11), issueBody(2)] }]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeBlockedBy(288);
+  assert.equal(observation.kind, "present");
+  assert.deepEqual(
+    observation.references.map((reference) => reference.number),
+    [2, 11],
+  );
+});
+
 test("observeBlockedBy paginates across multiple full pages and aggregates all entries", async () => {
   const reader = new StubReader([
     { status: 200, body: page(100, 1) },

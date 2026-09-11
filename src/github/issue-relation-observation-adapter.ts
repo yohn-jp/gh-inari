@@ -17,7 +17,7 @@
 import { ContractViolationError } from "./errors.js";
 import type { GitHubApiResponse } from "./adapter.js";
 import type { RepositoryContext } from "./types.js";
-import { normalizeIssueReference, type IssueReference } from "../contract/issue-reference.js";
+import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "../contract/issue-reference.js";
 
 /** Narrow read seam this module needs from `GitHubAdapter`. */
 export interface IssueRelationApiReader {
@@ -222,7 +222,21 @@ function classifyBlockedByEntries(entries: readonly unknown[], context: Reposito
 
   if (malformedCount > 0) return { kind: "malformed", references: [], diagnostics };
   if (unresolvedCount > 0) return { kind: "unavailable", references: [], diagnostics };
-  return { kind: "present", references, diagnostics: [] };
+  return {
+    kind: "present",
+    references: references.sort(compareReferences),
+    diagnostics: [],
+  };
+}
+
+/** Match the repository IssueReference canonical order, including numeric issue numbers. */
+function compareReferences(left: IssueReference, right: IssueReference): number {
+  return (
+    left.repositoryHost.localeCompare(right.repositoryHost, "en-US") ||
+    left.repositoryId.localeCompare(right.repositoryId, "en-US") ||
+    left.number - right.number ||
+    issueReferenceKey(left).localeCompare(issueReferenceKey(right), "en-US")
+  );
 }
 
 type RelatedIssueResolution =

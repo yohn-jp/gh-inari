@@ -8,6 +8,8 @@
  */
 import { GitHubAdapter } from "./github/index.js";
 import { SEMANTIC_ISSUE_MUTATION_PLAN_VERSION, type SemanticIssueMutationPlan } from "./semantic-issue-projection.js";
+import { type ObservedIssueProjection } from "./semantic-issue-observation.js";
+import type { SemanticIssueRelationEffect } from "./semantic-issue-relations.js";
 export declare const SEMANTIC_ISSUE_EXECUTOR_CONTRACT_VERSION: "1";
 export type SemanticIssueExecutorContractVersion = typeof SEMANTIC_ISSUE_EXECUTOR_CONTRACT_VERSION;
 export declare const SEMANTIC_ISSUE_EXECUTION_OUTCOMES: readonly ["verified", "failed"];
@@ -33,9 +35,11 @@ export interface SemanticIssueObservedProjection {
     readonly labels: readonly string[];
     readonly assignees: readonly string[];
     readonly milestone?: string;
+    /** Native/body relation evidence when relation capabilities were observed. */
+    readonly relations?: ObservedIssueProjection["relations"];
 }
 export interface SemanticIssueExecutionEffectEvidence {
-    readonly kind: "CREATE_ISSUE";
+    readonly kind: "CREATE_ISSUE" | SemanticIssueRelationEffect["kind"];
     readonly status: "succeeded" | "failed";
 }
 export interface SemanticIssueExecutionFailureEvidence {

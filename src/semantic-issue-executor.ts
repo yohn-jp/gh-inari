@@ -11,14 +11,28 @@ import { compileRepositoryEffectiveIssueContract } from "./artifact-contract-gov
 import type { EffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import { createValidatedSemanticIssueArtifact } from "./github/capability.js";
-import { GitHubAdapter, type GitHubIssue } from "./github/index.js";
 import {
+  GitHubAdapter,
+  GitHubIssueRelationMutationAdapter,
+  type GitHubIssue,
+  type IssueRelationCapabilities,
+} from "./github/index.js";
+import {
+  GITHUB_ISSUE_PROJECTION_CAPABILITIES,
   SEMANTIC_ISSUE_MUTATION_PLAN_VERSION,
   serializeSemanticIssueMutationPlan,
   tryPlanSemanticIssue,
   validateSemanticIssueMutationPlan,
   type SemanticIssueMutationPlan,
 } from "./semantic-issue-projection.js";
+import {
+  compareSemanticIssueProjection,
+  tryObserveSemanticIssue,
+  type ObservedIssueProjection,
+  type SemanticIssueRelationEvidenceInput,
+} from "./semantic-issue-observation.js";
+import type { SemanticIssueRelationEffect } from "./semantic-issue-relations.js";
+import type { IssueReference } from "./contract/issue-reference.js";
 
 export const SEMANTIC_ISSUE_EXECUTOR_CONTRACT_VERSION = "1" as const;
 export type SemanticIssueExecutorContractVersion = typeof SEMANTIC_ISSUE_EXECUTOR_CONTRACT_VERSION;
@@ -48,10 +62,12 @@ export interface SemanticIssueObservedProjection {
   readonly labels: readonly string[];
   readonly assignees: readonly string[];
   readonly milestone?: string;
+  /** Native/body relation evidence when relation capabilities were observed. */
+  readonly relations?: ObservedIssueProjection["relations"];
 }
 
 export interface SemanticIssueExecutionEffectEvidence {
-  readonly kind: "CREATE_ISSUE";
+  readonly kind: "CREATE_ISSUE" | SemanticIssueRelationEffect["kind"];
   readonly status: "succeeded" | "failed";
 }
 
@@ -173,15 +189,66 @@ function executionEvidence(
   status: "succeeded" | "failed",
   issue?: Pick<GitHubIssue, "number" | "url">,
   failure?: SemanticIssueExecutionFailureEvidence,
+  effects?: readonly SemanticIssueExecutionEffectEvidence[],
 ): SemanticIssueExecutionEvidence {
   return Object.freeze({
     version: SEMANTIC_ISSUE_EXECUTOR_CONTRACT_VERSION,
     planVersion: SEMANTIC_ISSUE_MUTATION_PLAN_VERSION,
     outcome,
-    effects: Object.freeze([{ kind: "CREATE_ISSUE" as const, status }]),
+    effects: Object.freeze(effects === undefined ? [{ kind: "CREATE_ISSUE" as const, status }] : [...effects]),
     ...(issue === undefined ? {} : { issue: Object.freeze({ number: issue.number, url: issue.url }) }),
     ...(failure === undefined ? {} : { failure: Object.freeze(failure) }),
   });
+}
+
+function relationCapabilities(capabilities: readonly string[]): IssueRelationCapabilities {
+  return {
+    parent: capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation),
+    blockedBy:
+      capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeBlockedByRelation) ||
+      capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation),
+  };
+}
+
+function relationEffectEvidence(
+  effects: readonly SemanticIssueRelationEffect[],
+  statuses: readonly ("succeeded" | "failed")[],
+): readonly SemanticIssueExecutionEffectEvidence[] {
+  return effects.map((effect, index) => ({
+    kind: effect.kind,
+    status: statuses[index] ?? "failed",
+  }));
+}
+
+function issueExecutionEffectEvidence(
+  relationEffects: readonly SemanticIssueRelationEffect[],
+  statuses: readonly ("succeeded" | "failed")[],
+): readonly SemanticIssueExecutionEffectEvidence[] {
+  return [{ kind: "CREATE_ISSUE", status: "succeeded" }, ...relationEffectEvidence(relationEffects, statuses)];
+}
+
+function issueReferenceFor(
+  issue: Pick<GitHubIssue, "number">,
+  context: Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>,
+): IssueReference {
+  if (context.repositoryId === undefined)
+    throw new SemanticIssueExecutorError(
+      "SEMANTIC_ISSUE_EXECUTION_PRECONDITION_FAILED",
+      "A repository database identity is required for native Issue relations.",
+      [
+        diagnostic(
+          "SEMANTIC_ISSUE_RELATION_REPOSITORY_ID_MISSING",
+          "$.repository.repositoryId",
+          "Repository identity is unavailable.",
+        ),
+      ],
+    );
+  return {
+    repositoryHost: context.hostname,
+    repositoryId: context.repositoryId,
+    repository: context.nameWithOwner,
+    number: issue.number,
+  };
 }
 
 function validCapabilities(value: unknown): value is readonly string[] {
@@ -269,7 +336,10 @@ function revalidationFailed(diagnostics: readonly SemanticIssueExecutionDiagnost
   );
 }
 
-function observedProjection(issue: GitHubIssue): SemanticIssueObservedProjection {
+function observedProjection(
+  issue: GitHubIssue,
+  relations?: ObservedIssueProjection["relations"],
+): SemanticIssueObservedProjection {
   return Object.freeze({
     kind: "issue" as const,
     number: issue.number,
@@ -280,6 +350,7 @@ function observedProjection(issue: GitHubIssue): SemanticIssueObservedProjection
     labels: Object.freeze([...issue.labels]),
     assignees: Object.freeze([...issue.assignees]),
     ...(issue.milestone === undefined ? {} : { milestone: issue.milestone.title }),
+    ...(relations === undefined ? {} : { relations }),
   });
 }
 
@@ -297,25 +368,59 @@ function unsupportedDesiredState(
       ),
     );
   }
-  if (desired.relations.parent.representation === "native") {
-    diagnostics.push(
-      diagnostic(
-        "SEMANTIC_ISSUE_DESIRED_STATE_UNSUPPORTED",
-        "$.desired.relations.parent",
-        "The local Executor cannot faithfully apply and verify a native parent relation.",
-      ),
-    );
-  }
-  if (desired.relations.dependsOn.representation === "native") {
-    diagnostics.push(
-      diagnostic(
-        "SEMANTIC_ISSUE_DESIRED_STATE_UNSUPPORTED",
-        "$.desired.relations.dependsOn",
-        "The local Executor cannot faithfully apply and verify a native blocked-by relation.",
-      ),
-    );
-  }
   return diagnostics;
+}
+
+function relationObservationInput(
+  relationAdapter: GitHubIssueRelationMutationAdapter,
+  issueNumber: number,
+  capabilities: IssueRelationCapabilities,
+): Promise<{
+  readonly relations: Readonly<{
+    readonly parent?: SemanticIssueRelationEvidenceInput;
+    readonly dependsOn?: SemanticIssueRelationEvidenceInput;
+  }>;
+  readonly diagnostics: readonly SemanticIssueExecutionDiagnostic[];
+}> {
+  return Promise.all([
+    capabilities.parent ? relationAdapter.observeParent(issueNumber) : Promise.resolve(undefined),
+    capabilities.blockedBy ? relationAdapter.observeBlockedBy(issueNumber) : Promise.resolve(undefined),
+  ]).then(([parent, dependsOn]) => {
+    const diagnostics: SemanticIssueExecutionDiagnostic[] = [];
+    const relations: {
+      parent?: SemanticIssueRelationEvidenceInput;
+      dependsOn?: SemanticIssueRelationEvidenceInput;
+    } = {};
+    if (parent !== undefined) {
+      diagnostics.push(
+        ...parent.diagnostics.map((entry) =>
+          diagnostic(`SEMANTIC_ISSUE_${entry.code}`, `$.relations.parent`, entry.message),
+        ),
+      );
+      if (parent.kind === "present" && parent.reference !== undefined) relations.parent = { native: parent.reference };
+      else if (parent.kind === "empty") relations.parent = { native: [] };
+    }
+    if (dependsOn !== undefined) {
+      diagnostics.push(
+        ...dependsOn.diagnostics.map((entry) =>
+          diagnostic(`SEMANTIC_ISSUE_${entry.code}`, `$.relations.dependsOn`, entry.message),
+        ),
+      );
+      if (dependsOn.kind === "present" || dependsOn.kind === "empty")
+        relations.dependsOn = { native: dependsOn.references };
+    }
+    return { relations, diagnostics };
+  });
+}
+
+function relationMismatches(
+  desired: SemanticIssueMutationPlan["desired"],
+  observed: ObservedIssueProjection,
+): readonly SemanticIssueExecutionDiagnostic[] {
+  const comparison = compareSemanticIssueProjection(desired, observed);
+  return comparison.diagnostics
+    .filter((entry) => entry.path.startsWith("$.relations"))
+    .map((entry) => diagnostic(`SEMANTIC_ISSUE_${entry.code}`, entry.path, entry.message));
 }
 
 function projectionMismatches(
@@ -517,6 +622,107 @@ export class SemanticIssueExecutor implements SemanticIssueExecutionPort {
       );
     }
 
+    const relationEffects = admittedPlan.effects.slice(1) as readonly SemanticIssueRelationEffect[];
+    const nativeCapabilities = relationCapabilities(admittedPlan.capabilities);
+    const relationVerificationRequired =
+      relationEffects.length > 0 ||
+      admittedPlan.desired.relations.parent.representation === "native" ||
+      admittedPlan.desired.relations.dependsOn.representation === "native";
+    let relationAdapter: GitHubIssueRelationMutationAdapter | undefined;
+    let relationContext: Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>> | undefined;
+    const relationStatuses: Array<"succeeded" | "failed"> = [];
+
+    if (relationEffects.length > 0 || relationVerificationRequired) {
+      try {
+        relationContext = await this.#adapter.getRepositoryContext();
+        relationAdapter = new GitHubIssueRelationMutationAdapter(this.#adapter, relationContext, nativeCapabilities);
+      } catch {
+        if (relationEffects.length > 0) {
+          relationStatuses.push(...relationEffects.map(() => "failed" as const));
+          throw new SemanticIssueExecutorError(
+            "SEMANTIC_ISSUE_EXECUTION_EFFECT_FAILED",
+            "Native Issue relation effects could not be admitted after Issue creation.",
+            [
+              diagnostic(
+                "SEMANTIC_ISSUE_RELATION_EFFECT_FAILED",
+                "$.effects[1]",
+                "Native Issue relation effect admission failed.",
+              ),
+            ],
+            undefined,
+            executionEvidence(
+              "failed",
+              "succeeded",
+              { number: created.number, url: created.url },
+              {
+                code: "SEMANTIC_ISSUE_RELATION_EFFECT_FAILED",
+                message: "Native Issue relation effect admission failed.",
+              },
+              issueExecutionEffectEvidence(relationEffects, relationStatuses),
+            ),
+          );
+        }
+        throw new SemanticIssueExecutorError(
+          "SEMANTIC_ISSUE_EXECUTION_READ_FAILED",
+          "Native Issue relation observation could not be admitted after Issue creation.",
+          [
+            diagnostic(
+              "SEMANTIC_ISSUE_RELATION_READ_FAILED",
+              "$.relations",
+              "Native Issue relation observation setup failed.",
+            ),
+          ],
+          undefined,
+          executionEvidence(
+            "failed",
+            "succeeded",
+            { number: created.number, url: created.url },
+            {
+              code: "SEMANTIC_ISSUE_RELATION_READ_FAILED",
+              message: "Native Issue relation observation setup failed.",
+            },
+          ),
+        );
+      }
+    }
+
+    if (relationEffects.length > 0) {
+      const subject = issueReferenceFor(
+        created,
+        relationContext as Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>,
+      );
+      for (const [index, effect] of relationEffects.entries()) {
+        try {
+          await (relationAdapter as GitHubIssueRelationMutationAdapter).execute(effect, subject);
+          relationStatuses.push("succeeded");
+        } catch {
+          relationStatuses.push("failed");
+          throw new SemanticIssueExecutorError(
+            "SEMANTIC_ISSUE_EXECUTION_EFFECT_FAILED",
+            "A native Issue relation effect failed after Issue creation.",
+            [
+              diagnostic(
+                "SEMANTIC_ISSUE_RELATION_EFFECT_FAILED",
+                `$.effects[${index + 1}]`,
+                "Native Issue relation effect did not succeed.",
+              ),
+            ],
+            undefined,
+            executionEvidence(
+              "failed",
+              "succeeded",
+              { number: created.number, url: created.url },
+              {
+                code: "SEMANTIC_ISSUE_RELATION_EFFECT_FAILED",
+                message: "Native Issue relation effect did not succeed.",
+              },
+              issueExecutionEffectEvidence(relationEffects, relationStatuses),
+            ),
+          );
+        }
+      }
+    }
+
     let after: GitHubIssue;
     try {
       after = await this.#adapter.getIssue(created.number);
@@ -540,15 +746,94 @@ export class SemanticIssueExecutor implements SemanticIssueExecutionPort {
             code: "SEMANTIC_ISSUE_POSTCONDITION_READ_FAILED",
             message: "Created Issue state could not be reread.",
           },
+          issueExecutionEffectEvidence(relationEffects, relationStatuses),
         ),
       );
     }
+
+    let observedRelations: ObservedIssueProjection["relations"] | undefined;
+    if (relationVerificationRequired) {
+      const context = relationContext as Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>;
+      const relationEvidence = await relationObservationInput(
+        relationAdapter as GitHubIssueRelationMutationAdapter,
+        after.number,
+        nativeCapabilities,
+      );
+      if (relationEvidence.diagnostics.length > 0) {
+        throw new SemanticIssueExecutorError(
+          "SEMANTIC_ISSUE_EXECUTION_READ_FAILED",
+          "Native Issue relation state could not be reread for postcondition verification.",
+          relationEvidence.diagnostics,
+          undefined,
+          executionEvidence(
+            "failed",
+            "succeeded",
+            { number: after.number, url: after.url },
+            {
+              code: "SEMANTIC_ISSUE_RELATION_READ_FAILED",
+              message: "Native Issue relation state could not be reread.",
+            },
+            issueExecutionEffectEvidence(relationEffects, relationStatuses),
+          ),
+        );
+      }
+      const semanticObserved = tryObserveSemanticIssue({
+        issue: after,
+        repository: {
+          host: context.hostname,
+          repositoryId: context.repositoryId,
+          repository: context.nameWithOwner,
+        },
+        relations: relationEvidence.relations,
+      });
+      if (!semanticObserved.valid || semanticObserved.projection === undefined) {
+        throw new SemanticIssueExecutorError(
+          "SEMANTIC_ISSUE_EXECUTION_READ_FAILED",
+          "Native Issue relation state was malformed during postcondition verification.",
+          semanticObserved.violations.map((entry) =>
+            diagnostic("SEMANTIC_ISSUE_RELATION_OBSERVATION_INVALID", entry.path, entry.message),
+          ),
+          undefined,
+          executionEvidence(
+            "failed",
+            "succeeded",
+            { number: after.number, url: after.url },
+            {
+              code: "SEMANTIC_ISSUE_RELATION_READ_FAILED",
+              message: "Native Issue relation state was malformed during postcondition verification.",
+            },
+            issueExecutionEffectEvidence(relationEffects, relationStatuses),
+          ),
+        );
+      }
+      observedRelations = semanticObserved.projection.relations;
+    }
+
     const mismatches = projectionMismatches(admittedPlan.desired, after);
-    if (mismatches.length > 0) {
+    const relationDrift =
+      observedRelations === undefined
+        ? []
+        : relationMismatches(admittedPlan.desired, {
+            version: "1",
+            kind: "issue",
+            number: after.number,
+            state: after.state,
+            url: after.url,
+            title: after.title,
+            body: after.body ?? "",
+            metadata: {
+              labels: after.labels,
+              assignees: after.assignees,
+              ...(after.milestone === undefined ? {} : { milestone: after.milestone.title }),
+            },
+            relations: observedRelations,
+          });
+    const allMismatches = [...mismatches, ...relationDrift];
+    if (allMismatches.length > 0) {
       throw new SemanticIssueExecutorError(
         "SEMANTIC_ISSUE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
         "Observed Issue does not satisfy the desired Semantic Issue projection.",
-        mismatches,
+        allMismatches,
         undefined,
         executionEvidence(
           "failed",
@@ -558,14 +843,24 @@ export class SemanticIssueExecutor implements SemanticIssueExecutionPort {
             code: "SEMANTIC_ISSUE_PROJECTION_MISMATCH",
             message: "Observed Issue differs from the desired projection.",
           },
+          issueExecutionEffectEvidence(relationEffects, relationStatuses),
         ),
       );
     }
 
     return Object.freeze({
       plan: admittedPlan,
-      projection: observedProjection(after),
-      evidence: executionEvidence("verified", "succeeded", { number: after.number, url: after.url }),
+      projection: observedProjection(after, observedRelations),
+      evidence: executionEvidence(
+        "verified",
+        "succeeded",
+        { number: after.number, url: after.url },
+        undefined,
+        issueExecutionEffectEvidence(
+          relationEffects,
+          relationEffects.map(() => "succeeded" as const),
+        ),
+      ),
     });
   }
 }

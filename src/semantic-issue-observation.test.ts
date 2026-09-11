@@ -133,6 +133,27 @@ test("retains conflicting native and body evidence as drift", () => {
   assert.ok(comparison.diagnostics.some((diagnostic) => diagnostic.code === "RELATION_CONFLICT"));
 });
 
+test("treats explicit native parent emptiness as conflicting with a stale fallback marker", () => {
+  const observed = observeSemanticIssue({
+    issue: githubIssue(fallback.body),
+    repository,
+    relations: {
+      parent: { native: [] },
+    },
+  });
+  assert.equal(observed.relations.parent.representation, "conflict");
+});
+
+test("accepts a compact IssueReference as native parent evidence", () => {
+  const observed = observeSemanticIssue({
+    issue: githubIssue(""),
+    repository,
+    relations: { parent: issue(278) },
+  });
+  assert.equal(observed.relations.parent.representation, "native");
+  assert.deepEqual(observed.relations.parent.reference, issue(278));
+});
+
 test("does not infer relations from arbitrary prose", () => {
   const result = tryObserveSemanticIssue({
     issue: githubIssue("This prose mentions parent #278 and blocked by #281."),

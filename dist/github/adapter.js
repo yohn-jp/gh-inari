@@ -30,6 +30,8 @@ const OPERATION_CLASSES = Object.freeze({
     "pull_request.read": "read",
     "issue.create": "mutation",
     "issue.update": "mutation",
+    "issue.relation.read": "read",
+    "issue.relation.mutate": "mutation",
     "pull_request.create": "mutation",
     "pull_request.update": "mutation",
     "branch.read": "read",
@@ -143,10 +145,11 @@ export class GitHubAdapter {
         return this.runApi(args, "actions.request");
     }
     /** Read the bounded repository API surface needed by Change projection. */
-    async requestRepositoryApi(repositoryPath, method = "GET") {
+    async requestRepositoryApi(repositoryPath, method = "GET", fields = {}) {
         assertRepositoryApiPath(repositoryPath);
         const context = await this.resolveRepositoryContext();
-        const result = await this.runCommand([
+        const operation = method === "GET" ? "issue.relation.read" : "issue.relation.mutate";
+        const args = [
             "api",
             `repos/${context.nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
             "--hostname",
@@ -154,17 +157,20 @@ export class GitHubAdapter {
             "--method",
             method,
             "--include",
-        ], "actions.request");
-        const response = parseIncludedApiResponse(result.stdout, "actions.request");
+        ];
+        for (const [name, value] of Object.entries(fields))
+            appendRepositoryApiField(args, name, value);
+        const result = await this.runCommand(args, operation);
+        const response = parseIncludedApiResponse(result.stdout, operation);
         if (response !== undefined) {
             if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
-                throw new GitHubApiError("actions.request", "GitHub repository read failed.");
+                throw new GitHubApiError(operation, "GitHub repository API request failed.");
             }
             return response;
         }
         if (result.exitCode !== 0)
-            throw new GitHubApiError("actions.request", "GitHub repository read failed.");
-        throw new GitHubApiResponseError("actions.request", "GitHub returned no API response.");
+            throw new GitHubApiError(operation, "GitHub repository API request failed.");
+        throw new GitHubApiResponseError(operation, "GitHub returned no API response.");
     }
     /** Download one bounded Actions artifact archive through the caller's gh session. */
     async downloadActionsArtifact(artifactId) {
@@ -719,6 +725,12 @@ function assertOptionalBoolean(value, path) {
 function appendRawField(args, name, value) {
     if (value !== undefined)
         args.push("--raw-field", `${name}=${value}`);
+}
+function appendRepositoryApiField(args, name, value) {
+    if (typeof value === "string")
+        args.push("--raw-field", `${name}=${value}`);
+    else
+        args.push("--field", `${name}=${String(value)}`);
 }
 function appendRawFields(args, name, values) {
     if (values === undefined)

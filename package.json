@@ -68,6 +68,14 @@
       "types": "./dist/semantic-issue-observation.d.ts",
       "import": "./dist/semantic-issue-observation.js"
     },
+    "./semantic-issue-relations": {
+      "types": "./dist/semantic-issue-relations.d.ts",
+      "import": "./dist/semantic-issue-relations.js"
+    },
+    "./semantic-issue-relation-executor": {
+      "types": "./dist/semantic-issue-relation-executor.d.ts",
+      "import": "./dist/semantic-issue-relation-executor.js"
+    },
     "./semantic-issue-lifecycle": {
       "types": "./dist/semantic-issue-lifecycle.d.ts",
       "import": "./dist/semantic-issue-lifecycle.js"

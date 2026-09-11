@@ -27,6 +27,7 @@ export * from "./semantic-branch-projection.js";
 export * from "./semantic-branch-observation.js";
 export * from "./semantic-pr-executor.js";
 export * from "./semantic-issue-executor.js";
+export * from "./semantic-issue-relation-executor.js";
 export * from "./semantic-branch-executor.js";
 export * from "./artifact-contract-governance.js";
 export * from "./legacy-artifact-convergence.js";
