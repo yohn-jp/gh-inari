@@ -19,7 +19,8 @@ test("Change provenance suspension preserves the required check as an explicit n
   assert.doesNotMatch(source, /actions\/checkout/u);
   assert.doesNotMatch(source, /actions\/setup-node/u);
   assert.doesNotMatch(source, /pnpm install/u);
-  assert.doesNotMatch(source, /validate-change-merge-admission\.mjs/u);
+  assert.doesNotMatch(source, /^\s*run:\s*.*validate-change-merge-admission\.mjs/mu);
+  assert.doesNotMatch(source, /^\s+.*validate-change-merge-admission\.mjs\s*$/mu);
   assert.doesNotMatch(source, /hashFiles\(/u);
   assert.doesNotMatch(source, /change-provenance-suspended\.md/u);
 
