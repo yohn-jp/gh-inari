@@ -47,7 +47,10 @@ export const GOLDEN_PATH_RECOVERY_ACTION_KINDS = Object.freeze([
 ]);
 export const GOLDEN_PATH_ACTION_KINDS = Object.freeze([
     ...GOLDEN_PATH_NORMAL_ACTION_KINDS,
-    ...GOLDEN_PATH_RECOVERY_ACTION_KINDS,
+    "RETRY",
+    "ABORT",
+    "RECOVER",
+    "MANUAL_REVIEW",
 ]);
 export const GOLDEN_PATH_ACTION_OWNERS = Object.freeze([
     "caller",
@@ -130,6 +133,7 @@ const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const RECOVERY_KEYS = new Set([
     "class",
     "safeAction",
+    "owner",
     "retryable",
     "rereadRequired",
     "automaticCleanup",
@@ -228,6 +232,11 @@ function evidenceAvailability(value, kind, diagnostics) {
     }
     const keys = kind === "environment" ? ENVIRONMENT_KEYS : kind === "governance" ? GOVERNANCE_KEYS : ISSUE_KEYS;
     unknownProperties(value, keys, `$.${kind}`, diagnostics);
+    const allowedStatuses = kind === "issue" ? ["present", "absent", "unavailable", "unknown"] : ["available", "unavailable", "unknown"];
+    if (value.status !== undefined && !allowedStatuses.includes(value.status)) {
+        addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", `$.${kind}.status`, `Invalid ${kind} evidence status.`);
+        return "invalid";
+    }
     if (kind === "environment") {
         for (const key of ["available", "ready", "verified"])
             if (value[key] !== undefined && typeof value[key] !== "boolean")
@@ -322,12 +331,33 @@ function parseProjection(input, diagnostics) {
     // evidence below rather than from an invented Change state.
     if (hasOwn(change, "repositoryHost") || hasOwn(change, "repositoryId") || hasOwn(change, "rootIssue")) {
         const identity = change;
+        unknownProperties(change, SUBJECT_KEYS, "$.change", diagnostics);
         const parsed = parseSubject({
             repositoryHost: identity.repositoryHost,
             repositoryId: identity.repositoryId,
             rootIssue: identity.rootIssue,
         }, "$.change", diagnostics);
         return { subject: parsed };
+    }
+    // A complete Change snapshot is already normalized by Change Core.  Keep
+    // that authority intact instead of treating its nested identity/provenance
+    // as an ad-hoc status evidence object.
+    if (hasOwn(change, "version") || hasOwn(change, "identity") || hasOwn(change, "provenance")) {
+        const validation = validateChange(change);
+        if (!validation.valid || validation.change === undefined) {
+            addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.change", "Change evidence is invalid.");
+            return {};
+        }
+        const normalized = validation.change;
+        return {
+            state: normalized.state,
+            projectionStatus: normalized.state === "DEFINED" ? "absent" : "healthy",
+            subject: {
+                repositoryHost: normalized.identity.repositoryHost,
+                repositoryId: normalized.identity.repositoryId,
+                rootIssue: normalized.identity.rootIssue,
+            },
+        };
     }
     if (hasOwn(change, "projection") ||
         hasOwn(change, "state") ||
@@ -355,9 +385,13 @@ function parseProjection(input, diagnostics) {
             state = change.state;
         else if (hasOwn(change, "state"))
             addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.change.state", "Change state is invalid.");
-        if (typeof change.projectionStatus === "string" &&
-            CHANGE_PROJECTION_STATUSES.includes(change.projectionStatus))
-            projectionStatus = change.projectionStatus;
+        if (hasOwn(change, "projectionStatus")) {
+            if (typeof change.projectionStatus === "string" &&
+                CHANGE_PROJECTION_STATUSES.includes(change.projectionStatus))
+                projectionStatus = change.projectionStatus;
+            else
+                addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.change.projectionStatus", "Projection status is invalid.");
+        }
         return { state, projectionStatus, subject: parseSubject(change.subject, "$.change.subject", diagnostics) };
     }
     const validation = validateChange(change);
@@ -444,7 +478,7 @@ function readiness(value, kind, diagnostics) {
     }
     return undefined;
 }
-function parseRecovery(value, diagnostics) {
+function parseRecovery(value, diagnostics, requireCanonicalMetadata = false) {
     if (value === undefined || value === null)
         return value === null ? null : undefined;
     if (!isRecord(value)) {
@@ -452,8 +486,15 @@ function parseRecovery(value, diagnostics) {
         return undefined;
     }
     unknownProperties(value, RECOVERY_KEYS, "$.recovery", diagnostics);
+    if (requireCanonicalMetadata && value.owner !== "recovery") {
+        addDiagnostic(diagnostics, "GOLDEN_PATH_RECOVERY_INVALID", "$.recovery.owner", "Serialized recovery evidence must be recovery-owned.");
+    }
+    if (requireCanonicalMetadata && value.reasonCode === undefined) {
+        addDiagnostic(diagnostics, "GOLDEN_PATH_RECOVERY_INVALID", "$.recovery.reasonCode", "Serialized recovery evidence must include a stable reason code.");
+    }
     if (!GOLDEN_PATH_STATUS_RECOVERY_CLASSES.includes(value.class) ||
         !GOLDEN_PATH_RECOVERY_ACTION_KINDS.includes(value.safeAction) ||
+        (value.owner !== undefined && value.owner !== "recovery") ||
         typeof value.retryable !== "boolean" ||
         value.rereadRequired !== true ||
         !GOLDEN_PATH_AUTOMATIC_CLEANUP.includes(value.automaticCleanup)) {
@@ -463,14 +504,6 @@ function parseRecovery(value, diagnostics) {
     if (value.retryOf !== undefined &&
         !GOLDEN_PATH_NORMAL_ACTION_KINDS.includes(value.retryOf)) {
         addDiagnostic(diagnostics, "GOLDEN_PATH_RECOVERY_INVALID", "$.recovery.retryOf", "Recovery retry target is invalid.");
-        return undefined;
-    }
-    if (value.retryable !== (value.safeAction === "RETRY")) {
-        addDiagnostic(diagnostics, "GOLDEN_PATH_RECOVERY_INVALID", "$.recovery.retryable", "Recovery retryability must be true exactly for RETRY.");
-        return undefined;
-    }
-    if (value.automaticCleanup === "forbidden" && ["RETRY", "ABORT", "RECOVER"].includes(value.safeAction)) {
-        addDiagnostic(diagnostics, "GOLDEN_PATH_RECOVERY_INVALID", "$.recovery.automaticCleanup", "Forbidden cleanup cannot expose an automatic retry, abort, or recover action.");
         return undefined;
     }
     if (value.reasonCode !== undefined && !GOLDEN_PATH_REASON_CODES.includes(value.reasonCode)) {
@@ -484,7 +517,10 @@ function parseRecovery(value, diagnostics) {
         rereadRequired: true,
         automaticCleanup: value.automaticCleanup,
         ...(value.retryOf === undefined ? {} : { retryOf: value.retryOf }),
-        ...(value.reasonCode === undefined ? {} : { reasonCode: value.reasonCode }),
+        owner: "recovery",
+        reasonCode: value.reasonCode === undefined
+            ? recoveryAction(value.safeAction).reasonCode
+            : value.reasonCode,
     };
 }
 function scopeSubject(value, path, diagnostics) {
@@ -762,8 +798,6 @@ function validateStatusShape(input) {
                 : input.recovery.reasonCode;
             if (action.reasonCode !== expectedReason)
                 addDiagnostic(diagnostics, "GOLDEN_PATH_EVIDENCE_CONTRADICTORY", "$.nextAction.reasonCode", "Recovery action reason code does not match recovery evidence.");
-            if (Boolean(input.recovery.retryable) !== (input.recovery.safeAction === "RETRY"))
-                addDiagnostic(diagnostics, "GOLDEN_PATH_RECOVERY_INVALID", "$.recovery.retryable", "Recovery retryability is inconsistent with safeAction.");
         }
         if (action.retryOf !== undefined &&
             (action.kind !== "RETRY" ||
@@ -790,7 +824,7 @@ function validateStatusShape(input) {
         addDiagnostic(diagnostics, "GOLDEN_PATH_EVIDENCE_CONTRADICTORY", "$.recovery", "Recovery is present outside recovery-required status.");
     if (availability === "recovery-required" && isRecord(input.recovery)) {
         const recoveryDiagnostics = [];
-        parseRecovery(input.recovery, recoveryDiagnostics);
+        parseRecovery(input.recovery, recoveryDiagnostics, true);
         diagnostics.push(...recoveryDiagnostics.slice(0, Math.max(0, MAX_DIAGNOSTICS - diagnostics.length)));
     }
     if (input.subject !== undefined)

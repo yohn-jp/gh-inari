@@ -20,10 +20,11 @@ export type GoldenPathNormalActionKind = (typeof GOLDEN_PATH_NORMAL_ACTION_KINDS
 /** Recovery actions are a separate boundary; this module only projects supplied recovery evidence. */
 export declare const GOLDEN_PATH_RECOVERY_ACTION_KINDS: readonly ["RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW", "WAIT"];
 export type GoldenPathRecoveryActionKind = (typeof GOLDEN_PATH_RECOVERY_ACTION_KINDS)[number];
-export declare const GOLDEN_PATH_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "WAIT", "RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW", "WAIT"];
+export declare const GOLDEN_PATH_ACTION_KINDS: readonly ["PREFLIGHT", "DISCOVER_GOVERNANCE", "CREATE_ISSUE", "ISSUE_CHANGE", "IMPLEMENT", "READY_CHANGE", "REVIEW", "WAIT", "RETRY", "ABORT", "RECOVER", "MANUAL_REVIEW"];
 export type GoldenPathActionKind = (typeof GOLDEN_PATH_ACTION_KINDS)[number];
 export declare const GOLDEN_PATH_ACTION_OWNERS: readonly ["caller", "inari", "worker", "repository", "recovery"];
 export type GoldenPathActionOwner = (typeof GOLDEN_PATH_ACTION_OWNERS)[number];
+export type GoldenPathNormalActionOwner = Exclude<GoldenPathActionOwner, "recovery">;
 export declare const GOLDEN_PATH_REASON_CODES: readonly ["PACKAGE_CAPABILITY_REQUIRED", "GOVERNANCE_DISCOVERY_REQUIRED", "GOVERNED_ISSUE_REQUIRED", "CHANGE_ISSUANCE_REQUIRED", "CHANGE_ISSUED", "READY_PRECONDITIONS_REQUIRED", "REVIEW_ADMITTED", "AUTHORITATIVE_REREAD_REQUIRED", "IDEMPOTENT_RETRY", "ABORT_CLEANUP_REQUIRED", "RECOVERY_ACTION_REQUIRED", "MANUAL_RECOVERY_REVIEW_REQUIRED", "WAIT_FOR_REPOSITORY_REVIEW"];
 export type GoldenPathReasonCode = (typeof GOLDEN_PATH_REASON_CODES)[number];
 /**
@@ -82,7 +83,7 @@ export interface GoldenPathStatusFields {
 }
 export interface GoldenPathNextAction {
     readonly kind: GoldenPathNormalActionKind;
-    readonly owner: GoldenPathActionOwner;
+    readonly owner: GoldenPathNormalActionOwner;
     readonly reasonCode: GoldenPathReasonCode;
 }
 export interface GoldenPathRecoveryNextAction {
@@ -95,11 +96,12 @@ export type GoldenPathAdmissibleAction = GoldenPathNextAction | GoldenPathRecove
 export interface GoldenPathRecoveryProjection {
     readonly class: GoldenPathStatusRecoveryClass;
     readonly safeAction: GoldenPathRecoveryActionKind;
+    readonly owner: "recovery";
     readonly retryable: boolean;
     readonly rereadRequired: true;
     readonly automaticCleanup: GoldenPathAutomaticCleanup;
     readonly retryOf?: GoldenPathNormalActionKind;
-    readonly reasonCode?: GoldenPathReasonCode;
+    readonly reasonCode: GoldenPathReasonCode;
 }
 export type GoldenPathDiagnosticCode = "GOLDEN_PATH_INPUT_INVALID" | "GOLDEN_PATH_INPUT_UNKNOWN_PROPERTY" | "GOLDEN_PATH_EVIDENCE_UNAVAILABLE" | "GOLDEN_PATH_EVIDENCE_CONTRADICTORY" | "GOLDEN_PATH_EVIDENCE_INCOMPLETE" | "GOLDEN_PATH_PROJECTION_INVALID" | "GOLDEN_PATH_RECOVERY_INVALID" | "GOLDEN_PATH_RECOVERY_REQUIRED";
 export interface GoldenPathDiagnostic {

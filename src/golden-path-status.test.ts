@@ -161,7 +161,8 @@ test("fails closed for inconsistent recovery action metadata", () => {
       recovery: {
         class: "POST_EFFECT_VERIFICATION",
         safeAction: "RETRY",
-        retryable: true,
+        owner: "worker",
+        retryable: false,
         rereadRequired: true,
         automaticCleanup: "forbidden",
       },
@@ -187,6 +188,25 @@ test("fails closed for inconsistent recovery action metadata", () => {
   );
 });
 
+test("leaves recovery safety classification to the recovery projector", () => {
+  const result = projectGoldenPathStatus(
+    input({
+      change: { state: "RECOVERY_REQUIRED", projectionStatus: "partial" },
+      recovery: {
+        class: "POST_EFFECT_VERIFICATION",
+        safeAction: "RETRY",
+        retryable: false,
+        rereadRequired: true,
+        automaticCleanup: "forbidden",
+      },
+    }),
+  );
+  assert.equal(result.status.availability, "recovery-required");
+  assert.equal(result.nextAction?.kind, "RETRY");
+  assert.equal(result.recovery?.retryable, false);
+  assert.equal(validateGoldenPathStatus(result).valid, true);
+});
+
 test("rejects contradictory or malformed evidence instead of guessing", () => {
   const contradictory = tryProjectGoldenPathStatus(
     input({
@@ -201,6 +221,32 @@ test("rejects contradictory or malformed evidence instead of guessing", () => {
   assert.equal(contradictory.valid, false);
   assert.ok(contradictory.diagnostics.length > 0);
   assert.equal(tryProjectGoldenPathStatus({ environment: true, unsupported: true }).valid, false);
+});
+
+test("accepts a complete Change Core snapshot without reinterpreting its nested authority", () => {
+  const result = projectGoldenPathStatus(
+    input({
+      change: {
+        version: 1,
+        identity: { repositoryHost: "github.com", repositoryId: "1", rootIssue: 42 },
+        state: "DRAFT",
+        provenance: { issuer: "app:inari-issuer" },
+        projection: { branch: "feat/42-example", pullRequest: 7 },
+      },
+    }),
+  );
+  assert.equal(result.status.changeState, "DRAFT");
+  assert.equal(result.status.projectionStatus, "healthy");
+  assert.equal(result.nextAction?.kind, "IMPLEMENT");
+  assert.deepEqual(result.subject, { repositoryHost: "github.com", repositoryId: "1", rootIssue: 42 });
+});
+
+test("rejects unknown evidence status and projection status instead of falling back", () => {
+  assert.equal(tryProjectGoldenPathStatus({ environment: { status: "ready" } }).valid, false);
+  assert.equal(
+    tryProjectGoldenPathStatus(input({ change: { state: "DRAFT", projectionStatus: "not-a-status" } })).valid,
+    false,
+  );
 });
 
 test("validates the zero-or-one action invariant at the public boundary", () => {

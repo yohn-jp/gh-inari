@@ -69,7 +69,10 @@ export type GoldenPathRecoveryActionKind = (typeof GOLDEN_PATH_RECOVERY_ACTION_K
 
 export const GOLDEN_PATH_ACTION_KINDS = Object.freeze([
   ...GOLDEN_PATH_NORMAL_ACTION_KINDS,
-  ...GOLDEN_PATH_RECOVERY_ACTION_KINDS,
+  "RETRY",
+  "ABORT",
+  "RECOVER",
+  "MANUAL_REVIEW",
 ] as const);
 export type GoldenPathActionKind = (typeof GOLDEN_PATH_ACTION_KINDS)[number];
 
@@ -81,6 +84,7 @@ export const GOLDEN_PATH_ACTION_OWNERS = Object.freeze([
   "recovery",
 ] as const);
 export type GoldenPathActionOwner = (typeof GOLDEN_PATH_ACTION_OWNERS)[number];
+export type GoldenPathNormalActionOwner = Exclude<GoldenPathActionOwner, "recovery">;
 
 export const GOLDEN_PATH_REASON_CODES = Object.freeze([
   "PACKAGE_CAPABILITY_REQUIRED",
@@ -142,7 +146,7 @@ export interface GoldenPathStatusFields {
 
 export interface GoldenPathNextAction {
   readonly kind: GoldenPathNormalActionKind;
-  readonly owner: GoldenPathActionOwner;
+  readonly owner: GoldenPathNormalActionOwner;
   readonly reasonCode: GoldenPathReasonCode;
 }
 
@@ -158,11 +162,12 @@ export type GoldenPathAdmissibleAction = GoldenPathNextAction | GoldenPathRecove
 export interface GoldenPathRecoveryProjection {
   readonly class: GoldenPathStatusRecoveryClass;
   readonly safeAction: GoldenPathRecoveryActionKind;
+  readonly owner: "recovery";
   readonly retryable: boolean;
   readonly rereadRequired: true;
   readonly automaticCleanup: GoldenPathAutomaticCleanup;
   readonly retryOf?: GoldenPathNormalActionKind;
-  readonly reasonCode?: GoldenPathReasonCode;
+  readonly reasonCode: GoldenPathReasonCode;
 }
 
 export type GoldenPathDiagnosticCode =
@@ -309,6 +314,7 @@ const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const RECOVERY_KEYS = new Set([
   "class",
   "safeAction",
+  "owner",
   "retryable",
   "rereadRequired",
   "automaticCleanup",
@@ -436,6 +442,12 @@ function evidenceAvailability(
   }
   const keys = kind === "environment" ? ENVIRONMENT_KEYS : kind === "governance" ? GOVERNANCE_KEYS : ISSUE_KEYS;
   unknownProperties(value, keys, `$.${kind}`, diagnostics);
+  const allowedStatuses =
+    kind === "issue" ? ["present", "absent", "unavailable", "unknown"] : ["available", "unavailable", "unknown"];
+  if (value.status !== undefined && !allowedStatuses.includes(value.status as string)) {
+    addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", `$.${kind}.status`, `Invalid ${kind} evidence status.`);
+    return "invalid";
+  }
   if (kind === "environment") {
     for (const key of ["available", "ready", "verified"] as const)
       if (value[key] !== undefined && typeof value[key] !== "boolean")
@@ -577,6 +589,7 @@ function parseProjection(
   // evidence below rather than from an invented Change state.
   if (hasOwn(change, "repositoryHost") || hasOwn(change, "repositoryId") || hasOwn(change, "rootIssue")) {
     const identity = change as RecordValue;
+    unknownProperties(change, SUBJECT_KEYS, "$.change", diagnostics);
     const parsed = parseSubject(
       {
         repositoryHost: identity.repositoryHost,
@@ -587,6 +600,26 @@ function parseProjection(
       diagnostics,
     );
     return { subject: parsed };
+  }
+  // A complete Change snapshot is already normalized by Change Core.  Keep
+  // that authority intact instead of treating its nested identity/provenance
+  // as an ad-hoc status evidence object.
+  if (hasOwn(change, "version") || hasOwn(change, "identity") || hasOwn(change, "provenance")) {
+    const validation = validateChange(change);
+    if (!validation.valid || validation.change === undefined) {
+      addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.change", "Change evidence is invalid.");
+      return {};
+    }
+    const normalized = validation.change;
+    return {
+      state: normalized.state,
+      projectionStatus: normalized.state === "DEFINED" ? "absent" : "healthy",
+      subject: {
+        repositoryHost: normalized.identity.repositoryHost,
+        repositoryId: normalized.identity.repositoryId,
+        rootIssue: normalized.identity.rootIssue,
+      },
+    };
   }
   if (
     hasOwn(change, "projection") ||
@@ -621,11 +654,20 @@ function parseProjection(
       state = change.state as ChangeState;
     else if (hasOwn(change, "state"))
       addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.change.state", "Change state is invalid.");
-    if (
-      typeof change.projectionStatus === "string" &&
-      CHANGE_PROJECTION_STATUSES.includes(change.projectionStatus as ChangeProjectionStatus)
-    )
-      projectionStatus = change.projectionStatus as ChangeProjectionStatus;
+    if (hasOwn(change, "projectionStatus")) {
+      if (
+        typeof change.projectionStatus === "string" &&
+        CHANGE_PROJECTION_STATUSES.includes(change.projectionStatus as ChangeProjectionStatus)
+      )
+        projectionStatus = change.projectionStatus as ChangeProjectionStatus;
+      else
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_INPUT_INVALID",
+          "$.change.projectionStatus",
+          "Projection status is invalid.",
+        );
+    }
     return { state, projectionStatus, subject: parseSubject(change.subject, "$.change.subject", diagnostics) };
   }
   const validation = validateChange(change);
@@ -725,6 +767,7 @@ function readiness(
 function parseRecovery(
   value: unknown,
   diagnostics: GoldenPathDiagnostic[],
+  requireCanonicalMetadata = false,
 ): GoldenPathRecoveryProjection | null | undefined {
   if (value === undefined || value === null) return value === null ? null : undefined;
   if (!isRecord(value)) {
@@ -732,9 +775,26 @@ function parseRecovery(
     return undefined;
   }
   unknownProperties(value, RECOVERY_KEYS, "$.recovery", diagnostics);
+  if (requireCanonicalMetadata && value.owner !== "recovery") {
+    addDiagnostic(
+      diagnostics,
+      "GOLDEN_PATH_RECOVERY_INVALID",
+      "$.recovery.owner",
+      "Serialized recovery evidence must be recovery-owned.",
+    );
+  }
+  if (requireCanonicalMetadata && value.reasonCode === undefined) {
+    addDiagnostic(
+      diagnostics,
+      "GOLDEN_PATH_RECOVERY_INVALID",
+      "$.recovery.reasonCode",
+      "Serialized recovery evidence must include a stable reason code.",
+    );
+  }
   if (
     !GOLDEN_PATH_STATUS_RECOVERY_CLASSES.includes(value.class as GoldenPathStatusRecoveryClass) ||
     !GOLDEN_PATH_RECOVERY_ACTION_KINDS.includes(value.safeAction as GoldenPathRecoveryActionKind) ||
+    (value.owner !== undefined && value.owner !== "recovery") ||
     typeof value.retryable !== "boolean" ||
     value.rereadRequired !== true ||
     !GOLDEN_PATH_AUTOMATIC_CLEANUP.includes(value.automaticCleanup as GoldenPathAutomaticCleanup)
@@ -759,24 +819,6 @@ function parseRecovery(
     );
     return undefined;
   }
-  if (value.retryable !== (value.safeAction === "RETRY")) {
-    addDiagnostic(
-      diagnostics,
-      "GOLDEN_PATH_RECOVERY_INVALID",
-      "$.recovery.retryable",
-      "Recovery retryability must be true exactly for RETRY.",
-    );
-    return undefined;
-  }
-  if (value.automaticCleanup === "forbidden" && ["RETRY", "ABORT", "RECOVER"].includes(value.safeAction as string)) {
-    addDiagnostic(
-      diagnostics,
-      "GOLDEN_PATH_RECOVERY_INVALID",
-      "$.recovery.automaticCleanup",
-      "Forbidden cleanup cannot expose an automatic retry, abort, or recover action.",
-    );
-    return undefined;
-  }
   if (value.reasonCode !== undefined && !GOLDEN_PATH_REASON_CODES.includes(value.reasonCode as GoldenPathReasonCode)) {
     addDiagnostic(
       diagnostics,
@@ -793,7 +835,11 @@ function parseRecovery(
     rereadRequired: true,
     automaticCleanup: value.automaticCleanup as GoldenPathAutomaticCleanup,
     ...(value.retryOf === undefined ? {} : { retryOf: value.retryOf as GoldenPathNormalActionKind }),
-    ...(value.reasonCode === undefined ? {} : { reasonCode: value.reasonCode as GoldenPathReasonCode }),
+    owner: "recovery",
+    reasonCode:
+      value.reasonCode === undefined
+        ? recoveryAction(value.safeAction as GoldenPathRecoveryActionKind).reasonCode
+        : (value.reasonCode as GoldenPathReasonCode),
   };
 }
 
@@ -1190,13 +1236,6 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
           "$.nextAction.reasonCode",
           "Recovery action reason code does not match recovery evidence.",
         );
-      if (Boolean(input.recovery.retryable) !== (input.recovery.safeAction === "RETRY"))
-        addDiagnostic(
-          diagnostics,
-          "GOLDEN_PATH_RECOVERY_INVALID",
-          "$.recovery.retryable",
-          "Recovery retryability is inconsistent with safeAction.",
-        );
     }
     if (
       action.retryOf !== undefined &&
@@ -1259,7 +1298,7 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
     );
   if (availability === "recovery-required" && isRecord(input.recovery)) {
     const recoveryDiagnostics: GoldenPathDiagnostic[] = [];
-    parseRecovery(input.recovery, recoveryDiagnostics);
+    parseRecovery(input.recovery, recoveryDiagnostics, true);
     diagnostics.push(...recoveryDiagnostics.slice(0, Math.max(0, MAX_DIAGNOSTICS - diagnostics.length)));
   }
   if (input.subject !== undefined) parseSubject(input.subject, "$.subject", diagnostics);
