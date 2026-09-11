@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_CONTRACT_VERSIONS,
   CertificationEvidenceError,
   assertCertificationEvidence,
   readCertificationEvidence,
@@ -24,7 +25,7 @@ function packedEvidence(overrides = {}) {
     certificationKind: "packed-artifact-golden-path",
     result: "passed",
     sourceCommitSha,
-    contractVersions: { goldenPath: "402.1.0", statusRecovery: "403.1.0", skill: "404.1.0" },
+    contractVersions: { ...CERTIFICATION_CONTRACT_VERSIONS },
     package: { name: "gh-inari", version: "0.11.0", tarballSha256 },
     diagnostics: [],
     ...overrides,
@@ -53,7 +54,7 @@ test("serializes evidence with deterministic key order", () => {
       certificationKind: "packed-artifact-golden-path",
       result: "passed",
       sourceCommitSha,
-      contractVersions: { goldenPath: "402.1.0", statusRecovery: "403.1.0", skill: "404.1.0" },
+      contractVersions: { ...CERTIFICATION_CONTRACT_VERSIONS },
       package: { name: "gh-inari", version: "0.11.0", tarballSha256 },
       diagnostics: [],
     }) + "\n",
@@ -62,6 +63,10 @@ test("serializes evidence with deterministic key order", () => {
 
 for (const [label, mutate] of [
   ["schema version", (value) => ({ ...value, schemaVersion: "2" })],
+  [
+    "stale contract version",
+    (value) => ({ ...value, contractVersions: { ...value.contractVersions, goldenPath: "402.1.0" } }),
+  ],
   ["source SHA case", (value) => ({ ...value, sourceCommitSha: "A".repeat(40) })],
   ["source SHA length", (value) => ({ ...value, sourceCommitSha: "a".repeat(39) })],
   ["tarball digest prefix", (value) => ({ ...value, package: { ...value.package, tarballSha256: "b".repeat(64) } })],

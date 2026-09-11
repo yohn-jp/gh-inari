@@ -10,6 +10,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
+  CERTIFICATION_CONTRACT_VERSIONS,
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
   sha256Tarball,
   writeCertificationEvidence,
@@ -307,11 +308,7 @@ function sourceCommitSha() {
 }
 
 function certificationContractVersions() {
-  return {
-    goldenPath: process.env.INARI_GOLDEN_PATH_CONTRACT_VERSION ?? "unavailable",
-    statusRecovery: process.env.INARI_STATUS_RECOVERY_CONTRACT_VERSION ?? "unavailable",
-    skill: process.env.INARI_SKILL_CONTRACT_VERSION ?? "unavailable",
-  };
+  return { ...CERTIFICATION_CONTRACT_VERSIONS };
 }
 
 function writePackedEvidence(evidencePath, tarballPath, result = "blocked", diagnostics = []) {
@@ -456,6 +453,144 @@ function certifyNpxFallback(rootDirectory, tarballPath, externalExecutables) {
     fail("npx packed execution modified the fresh consumer package.json");
 }
 
+function readRunnerResult(resultPath, label) {
+  if (!fs.existsSync(resultPath)) fail(`${label} did not write a result`);
+  try {
+    return JSON.parse(fs.readFileSync(resultPath, "utf8"));
+  } catch (error) {
+    fail(`${label} wrote invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function invokePackedGoldenPathRunner(
+  certificationRoot,
+  packageDirectory,
+  consumerDirectory,
+  statePath,
+  sequence,
+  issue,
+  operation,
+  extra = {},
+) {
+  const requestPath = path.join(certificationRoot, `runner-request-${String(sequence)}.json`);
+  const resultPath = path.join(certificationRoot, `runner-result-${String(sequence)}.json`);
+  const request = {
+    version: 1,
+    operation,
+    issue,
+    requester: "github:packed-certification",
+    ...extra,
+  };
+  fs.writeFileSync(requestPath, JSON.stringify(request));
+  const runner = path.join(repoRoot, "scripts", "packed-golden-path-runner.mjs");
+  const result = invoke(
+    process.execPath,
+    [
+      runner,
+      "--package-root",
+      packageDirectory,
+      "--consumer-root",
+      consumerDirectory,
+      "--state",
+      statePath,
+      "--request",
+      JSON.stringify(request),
+      "--result",
+      resultPath,
+    ],
+    { cwd: consumerDirectory },
+  );
+  if (result.error !== undefined) fail(`packed Golden Path runner failed to start: ${result.error.message}`);
+  if (result.status !== 0) fail(`packed Golden Path runner exited ${String(result.status)}: ${result.stderr ?? ""}`);
+  return readRunnerResult(resultPath, `packed Golden Path runner ${operation}`);
+}
+
+function successfulRunnerResult(result, label) {
+  if (result?.ok === false) fail(`${label} failed: ${result.error?.message ?? JSON.stringify(result.error ?? result)}`);
+  if (result?.projection === undefined) fail(`${label} did not return a Change projection`);
+  return result;
+}
+
+function assertExecutionOutcome(result, expected, label) {
+  if (result?.evidence?.outcome !== expected)
+    fail(`${label} returned outcome ${String(result?.evidence?.outcome)}, expected ${expected}`);
+}
+
+function createGovernedConsumer(certificationRoot) {
+  const consumerDirectory = path.join(certificationRoot, "governed-repository");
+  fs.mkdirSync(consumerDirectory);
+  fs.cpSync(path.join(repoRoot, ".github"), path.join(consumerDirectory, ".github"), { recursive: true });
+  return consumerDirectory;
+}
+
+function certifyCompleteGoldenPath(certificationRoot, installedPackageDirectory) {
+  const consumerDirectory = createGovernedConsumer(certificationRoot);
+  const statePath = path.join(certificationRoot, "golden-path-state.json");
+  let sequence = 0;
+  const invokeRunner = (issue, operation, extra = {}) => {
+    sequence += 1;
+    return invokePackedGoldenPathRunner(
+      certificationRoot,
+      installedPackageDirectory,
+      consumerDirectory,
+      statePath,
+      sequence,
+      issue,
+      operation,
+      extra,
+    );
+  };
+
+  const firstIssue = successfulRunnerResult(invokeRunner(415, "issue"), "first Change issuance");
+  assertExecutionOutcome(firstIssue, "verified", "first Change issuance");
+  if (firstIssue.projection.change?.state !== "DRAFT") fail("first Change issuance did not produce DRAFT");
+  const existingIssue = successfulRunnerResult(invokeRunner(415, "issue"), "idempotent Change issuance");
+  assertExecutionOutcome(existingIssue, "returned-existing", "idempotent Change issuance");
+  if (existingIssue.projection.change?.identity.rootIssue !== 415)
+    fail("idempotent Change issuance returned the wrong root Issue");
+
+  const handoff = invokeRunner(415, "handoff");
+  if (handoff.ok === false || handoff.handoff?.state !== "DRAFT")
+    fail(`implementation handoff was not verified: ${JSON.stringify(handoff)}`);
+  if (
+    handoff.handoff.branch !== firstIssue.projection.canonicalBranch ||
+    handoff.handoff.pullRequest !== firstIssue.projection.change?.projection?.pullRequest
+  )
+    fail("implementation handoff did not preserve canonical Change identities");
+
+  const readyStatus = invokeRunner(415, "status");
+  if (readyStatus.status?.status?.phase !== "READY")
+    fail(`status did not expose the implementation-to-Ready boundary: ${JSON.stringify(readyStatus.status)}`);
+
+  const ready = successfulRunnerResult(invokeRunner(415, "ready"), "first Ready transition");
+  assertExecutionOutcome(ready, "verified", "first Ready transition");
+  if (ready.projection.change?.state !== "REVIEW") fail("Ready transition did not produce REVIEW");
+  const reread = successfulRunnerResult(invokeRunner(415, "show"), "authoritative Ready reread");
+  if (reread.projection.change?.state !== "REVIEW") fail("authoritative Ready reread did not prove REVIEW");
+  const retry = successfulRunnerResult(invokeRunner(415, "ready"), "idempotent Ready retry");
+  assertExecutionOutcome(retry, "returned-existing", "idempotent Ready retry");
+  const reviewStatus = invokeRunner(415, "status", { executionOutcome: ready.evidence.outcome });
+  if (reviewStatus.status?.status?.phase !== "REVIEW")
+    fail(`status did not expose REVIEW after Ready: ${JSON.stringify(reviewStatus.status)}`);
+
+  const recoveryIssue = successfulRunnerResult(invokeRunner(416, "issue"), "recovery Change issuance");
+  assertExecutionOutcome(recoveryIssue, "verified", "recovery Change issuance");
+  successfulRunnerResult(invokeRunner(416, "ready"), "recovery Change Ready transition");
+  const abort = invokeRunner(416, "abort");
+  const abortEvidence = abort.ok === false ? abort.error?.details?.evidence : abort.evidence;
+  if (abortEvidence?.outcome !== "recovery-required")
+    fail(`abort failure did not produce bounded recovery evidence: ${JSON.stringify(abort)}`);
+  const recoveryProjection = invokeRunner(416, "recovery", { evidence: abortEvidence });
+  if (recoveryProjection.recovery?.owner !== "recovery" || recoveryProjection.recovery?.rereadRequired !== true)
+    fail(`recovery projection was not bounded: ${JSON.stringify(recoveryProjection)}`);
+  const recovered = successfulRunnerResult(invokeRunner(416, "abort"), "recovery retry");
+  assertExecutionOutcome(recovered, "verified", "recovery retry");
+  if (recovered.projection.change?.state !== "ABORTED") fail("recovery retry did not produce ABORTED");
+  const terminalStatus = invokeRunner(416, "status");
+  if (terminalStatus.status?.status?.phase !== "TERMINAL")
+    fail(`status did not expose terminal recovery state: ${JSON.stringify(terminalStatus.status)}`);
+}
+
 function main() {
   const { tarball, evidence, certifyGoldenPath } = parseArgs(process.argv.slice(2));
   let tarballPath;
@@ -541,15 +676,21 @@ function main() {
     );
     validateVersionOutput(extensionVersion, packageJson);
 
+    if (certifyGoldenPath) {
+      console.log("exercising the complete installed Golden Path with deterministic provider I/O...");
+      certifyCompleteGoldenPath(certificationRoot, installedPackageDirectory);
+    }
+
     console.log("packed Golden Path preflight and entry certification passed.");
     if (evidence !== undefined) {
-      writePackedEvidence(evidence, tarballPath, "blocked", [
-        {
-          code: "DEPENDENCY_CONTRACTS_NOT_INTEGRATED",
-          message:
-            "Complete Golden Path certification remains blocked until the #402/#403/#404 contracts are integrated and exercised.",
-        },
-      ]);
+      if (certifyGoldenPath) writePackedEvidence(evidence, tarballPath, "passed", []);
+      else
+        writePackedEvidence(evidence, tarballPath, "blocked", [
+          {
+            code: "GOLDEN_PATH_CERTIFICATION_NOT_REQUESTED",
+            message: "Complete packed Golden Path certification was not requested by this invocation.",
+          },
+        ]);
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
     }
   } finally {
