@@ -475,7 +475,7 @@ test("skill --json lists the same scenarios as a versioned JSON projection", asy
   const { exitCode, output } = await captureOutput(["skill", "--json"]);
   assert.equal(exitCode, 0);
   const parsed = JSON.parse(output);
-  assert.equal(parsed.version, "1.2.0");
+  assert.equal(parsed.version, "1.3.0");
   assert.deepEqual(
     parsed.scenarios.map((entry: { id: string }) => entry.id),
     [
@@ -511,7 +511,7 @@ test("skill <scenario> --json prints the same playbook as a versioned JSON proje
   const { exitCode, output } = await captureOutput(["skill", "author-issue", "--json"]);
   assert.equal(exitCode, 0);
   const parsed = JSON.parse(output);
-  assert.equal(parsed.version, "1.2.0");
+  assert.equal(parsed.version, "1.3.0");
   assert.equal(parsed.id, "author-issue");
   assert.ok(Array.isArray(parsed.workflow) && parsed.workflow.length > 0);
   assert.ok(Array.isArray(parsed.invariants) && parsed.invariants.length > 0);
