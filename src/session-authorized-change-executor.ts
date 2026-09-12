@@ -27,7 +27,11 @@ import {
   type SessionAgentMetadata,
 } from "./agent-authority/session-bundle.js";
 import type { DelegatedTreeDelta } from "./agent-authority/protected-paths.js";
-import type { BranchAdvanceSemanticRequest, BranchAdvanceSemanticResult } from "./agent-authority/branch-advance.js";
+import {
+  validateBranchAdvanceSemanticRequest,
+  type BranchAdvanceSemanticRequest,
+  type BranchAdvanceSemanticResult,
+} from "./agent-authority/branch-advance.js";
 import { MAX_ISSUE_NUMBER } from "./agent-authority/capability.js";
 import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/issuer-authority.js";
 import {
@@ -404,15 +408,22 @@ function validPostExecutionProjection(projection: ChangeProjectionResult, issue:
 }
 
 function branchRequestFields(input: unknown): {
-  readonly branch: string;
-  readonly treeDelta: DelegatedTreeDelta | undefined;
   readonly request: BranchAdvanceSemanticRequest;
+  readonly treeDelta: DelegatedTreeDelta;
 } {
-  if (!isRecord(input) || !boundedText(input.branch, 255)) throw new TypeError("Branch advance request is invalid.");
+  const validation = validateBranchAdvanceSemanticRequest(input);
+  if (!validation.valid || validation.value === undefined) throw new TypeError("Branch advance request is invalid.");
+  const request = validation.value;
+  if (!("changes" in request) || !Array.isArray(request.changes))
+    throw new TypeError("Branch advance request is not canonical.");
   return {
-    branch: input.branch,
-    treeDelta: input.treeDelta as DelegatedTreeDelta | undefined,
-    request: input as unknown as BranchAdvanceSemanticRequest,
+    request,
+    treeDelta: {
+      changes: request.changes.map((change) => ({
+        operation: change.operation === "delete" ? ("delete" as const) : ("modify" as const),
+        path: change.path,
+      })),
+    },
   };
 }
 
@@ -641,9 +652,8 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     operation: "branch.advance",
   ): Promise<CapabilityAuthorizedSessionExecutionResult> {
     let fields: {
-      readonly branch: string;
-      readonly treeDelta: DelegatedTreeDelta | undefined;
       readonly request: BranchAdvanceSemanticRequest;
+      readonly treeDelta: DelegatedTreeDelta;
     };
     const issue = context.task?.kind === "issue" ? context.task.number : undefined;
     try {
@@ -651,11 +661,16 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     } catch {
       return failure(operation, "request", undefined, "Session execution request is invalid.");
     }
-    if (issue === undefined) return failure(operation, "authorization", undefined, "Session task binding is required.");
+    if (issue === undefined || !("issue" in fields.request) || fields.request.issue !== issue)
+      return failure(operation, "authorization", undefined, "Session task binding is required.");
 
     let authenticated: CapabilityExecutionProvenance;
     try {
-      authenticated = authenticatedProvenance(context, { kind: "branch", issue, branch: fields.branch });
+      authenticated = authenticatedProvenance(context, {
+        kind: "branch",
+        issue,
+        branch: fields.request.branch,
+      });
     } catch {
       return failure(operation, "request", undefined, "Session execution provenance could not be established.");
     }
@@ -674,7 +689,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       admission = admitAuthenticatedSessionCapability({
         context,
         operation,
-        subject: { kind: "branch", issue, branch: fields.branch },
+        subject: { kind: "branch", issue, branch: fields.request.branch },
         projection,
         treeDelta: fields.treeDelta,
       });
@@ -688,7 +703,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     try {
       authorized = authenticatedProvenance(
         context,
-        { kind: "branch", issue, branch: fields.branch },
+        { kind: "branch", issue, branch: fields.request.branch },
         undefined,
         "authorized",
         admission.capability,
