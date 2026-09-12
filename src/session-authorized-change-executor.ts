@@ -27,6 +27,7 @@ import {
   type SessionAgentMetadata,
 } from "./agent-authority/session-bundle.js";
 import type { DelegatedTreeDelta } from "./agent-authority/protected-paths.js";
+import type { BranchAdvanceSemanticRequest, BranchAdvanceSemanticResult } from "./agent-authority/branch-advance.js";
 import { MAX_ISSUE_NUMBER } from "./agent-authority/capability.js";
 import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/issuer-authority.js";
 import {
@@ -89,27 +90,13 @@ export interface CapabilityAuthorizedSessionExecutionFailure {
   readonly evidence?: ChangeRemoteExecutionEvidence;
 }
 
-/** Bounded projection of the #466 delegate result. */
-export interface CapabilityAuthorizedBranchAdvanceResult {
-  readonly version: 1;
-  readonly operation: "branch.advance";
-  readonly status: "succeeded" | "failed";
-  readonly outcome: "advanced" | "idempotent" | "stale" | "failed" | "recovery-required";
-  readonly repositoryId?: string;
-  readonly branch?: string;
-  readonly expectedHead?: string;
-  readonly afterHead?: string;
-  readonly commitSha?: string;
-  readonly treeSha?: string;
-}
-
 export interface CapabilityAuthorizedSessionExecutionResult {
   readonly version: typeof CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION;
   readonly operation?: CapabilityAuthorizedSessionOperation;
   readonly status: "succeeded" | "failed";
   readonly projection?: ChangeProjectionResult;
   readonly execution?: ChangeRemoteExecutionResult;
-  readonly branchAdvance?: CapabilityAuthorizedBranchAdvanceResult;
+  readonly branchAdvance?: BranchAdvanceSemanticResult;
   /** Present only after #376 has established bounded provenance. */
   readonly provenance?: CapabilityExecutionProvenance;
   readonly failure?: CapabilityAuthorizedSessionExecutionFailure;
@@ -137,6 +124,8 @@ export interface CapabilityAuthorizedBranchAdvanceInput {
   readonly envelope: unknown;
   readonly context: AuthenticatedSessionContext;
   readonly admission: AdmittedSessionCapability;
+  /** The exact signed #466 semantic request; #465 does not reinterpret it. */
+  readonly request: BranchAdvanceSemanticRequest;
 }
 
 export interface CapabilityAuthorizedSessionExecutorOptions {
@@ -153,7 +142,7 @@ export interface CapabilityAuthorizedSessionExecutorOptions {
   /** Bounded identity returned by the existing App capability authority. */
   readonly app?: AppProvenance;
   /** #466 owns branch validation and Git tree/ref execution. */
-  readonly branchAdvance?: (input: CapabilityAuthorizedBranchAdvanceInput) => Promise<unknown>;
+  readonly branchAdvance?: (input: CapabilityAuthorizedBranchAdvanceInput) => Promise<BranchAdvanceSemanticResult>;
 }
 
 /** Public transport-neutral executor seam for one authenticated Session envelope. */
@@ -166,8 +155,6 @@ const DIRECT_NON_ISSUE_KEYS = new Set(["version", "issue", "agent"]);
 const AGENT_KEYS = new Set(["name", "version", "runtime", "product"]);
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
 const SAFE_TOKEN = /^[\x21-\x7e]+$/u;
-const SHA = /^[0-9a-f]{40}$/iu;
-const BRANCH_OUTCOMES = new Set(["advanced", "idempotent", "stale", "failed", "recovery-required"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -293,6 +280,7 @@ function failure(
   options: {
     readonly diagnostics?: readonly ChangeDiagnostic[];
     readonly evidence?: ChangeRemoteExecutionEvidence;
+    readonly branchAdvance?: BranchAdvanceSemanticResult;
   } = {},
 ): CapabilityAuthorizedSessionExecutionResult {
   return Object.freeze({
@@ -300,6 +288,7 @@ function failure(
     ...(operation === undefined ? {} : { operation }),
     status: "failed" as const,
     ...(provenance === undefined ? {} : { provenance }),
+    ...(options.branchAdvance === undefined ? {} : { branchAdvance: options.branchAdvance }),
     failure: Object.freeze({
       code: "SESSION_EXECUTION_FAILED" as const,
       phase,
@@ -318,7 +307,7 @@ function success(
   options: {
     readonly projection?: ChangeProjectionResult;
     readonly execution?: ChangeRemoteExecutionResult;
-    readonly branchAdvance?: CapabilityAuthorizedBranchAdvanceResult;
+    readonly branchAdvance?: BranchAdvanceSemanticResult;
   },
 ): CapabilityAuthorizedSessionExecutionResult {
   return Object.freeze({
@@ -414,59 +403,17 @@ function validPostExecutionProjection(projection: ChangeProjectionResult, issue:
   );
 }
 
-function safeSha(value: unknown): value is string {
-  return typeof value === "string" && SHA.test(value);
-}
-
-function boundedBranchResult(input: unknown): CapabilityAuthorizedBranchAdvanceResult | undefined {
-  if (!isRecord(input)) return undefined;
-  if (
-    input.version !== 1 ||
-    input.operation !== "branch.advance" ||
-    (input.status !== "succeeded" && input.status !== "failed") ||
-    typeof input.outcome !== "string" ||
-    !BRANCH_OUTCOMES.has(input.outcome)
-  ) {
-    return undefined;
-  }
-  const optionalText = (key: "repositoryId" | "branch" | "expectedHead" | "afterHead"): string | undefined => {
-    const value = input[key];
-    if (value === undefined) return undefined;
-    return boundedToken(value, 255) ? value : undefined;
-  };
-  const repositoryId = optionalText("repositoryId");
-  const branch = optionalText("branch");
-  const expectedHead =
-    input.expectedHead === undefined ? undefined : safeSha(input.expectedHead) ? input.expectedHead : undefined;
-  const afterHead = input.afterHead === undefined ? undefined : safeSha(input.afterHead) ? input.afterHead : undefined;
-  const commitSha = input.commitSha === undefined ? undefined : safeSha(input.commitSha) ? input.commitSha : undefined;
-  const treeSha = input.treeSha === undefined ? undefined : safeSha(input.treeSha) ? input.treeSha : undefined;
-  return Object.freeze({
-    version: 1,
-    operation: "branch.advance",
-    status: input.status,
-    outcome: input.outcome as CapabilityAuthorizedBranchAdvanceResult["outcome"],
-    ...(repositoryId === undefined ? {} : { repositoryId }),
-    ...(branch === undefined ? {} : { branch }),
-    ...(expectedHead === undefined ? {} : { expectedHead }),
-    ...(afterHead === undefined ? {} : { afterHead }),
-    ...(commitSha === undefined ? {} : { commitSha }),
-    ...(treeSha === undefined ? {} : { treeSha }),
-  });
-}
-
-function branchFailurePhase(outcome: CapabilityAuthorizedBranchAdvanceResult["outcome"]): SessionExecutionPhase {
-  if (outcome === "recovery-required") return "recovery-required";
-  if (outcome === "stale") return "conflict";
-  return "execution";
-}
-
 function branchRequestFields(input: unknown): {
   readonly branch: string;
   readonly treeDelta: DelegatedTreeDelta | undefined;
+  readonly request: BranchAdvanceSemanticRequest;
 } {
   if (!isRecord(input) || !boundedText(input.branch, 255)) throw new TypeError("Branch advance request is invalid.");
-  return { branch: input.branch, treeDelta: input.treeDelta as DelegatedTreeDelta | undefined };
+  return {
+    branch: input.branch,
+    treeDelta: input.treeDelta as DelegatedTreeDelta | undefined,
+    request: input as unknown as BranchAdvanceSemanticRequest,
+  };
 }
 
 export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSessionExecutor {
@@ -693,7 +640,11 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     signedRequest: unknown,
     operation: "branch.advance",
   ): Promise<CapabilityAuthorizedSessionExecutionResult> {
-    let fields: { readonly branch: string; readonly treeDelta: DelegatedTreeDelta | undefined };
+    let fields: {
+      readonly branch: string;
+      readonly treeDelta: DelegatedTreeDelta | undefined;
+      readonly request: BranchAdvanceSemanticRequest;
+    };
     const issue = context.task?.kind === "issue" ? context.task.number : undefined;
     try {
       fields = branchRequestFields(signedRequest);
@@ -755,35 +706,26 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "execution", authorized, "The #466 branch advance delegate is unavailable.");
     }
 
-    let delegated: unknown;
+    let delegated: BranchAdvanceSemanticResult;
     try {
-      delegated = await this.#options.branchAdvance({ envelope, context, admission });
+      delegated = await this.#options.branchAdvance({ envelope, context, admission, request: fields.request });
     } catch {
       return failure(operation, "execution", authorized, "Branch advance delegation failed closed.");
     }
-    const bounded = boundedBranchResult(delegated);
-    if (bounded === undefined) return failure(operation, "execution", authorized, "Branch advance result is invalid.");
-    if (bounded.status === "failed") {
-      return failure(operation, branchFailurePhase(bounded.outcome), authorized, "Branch advance failed closed.");
+    const delegateProvenance = delegated.provenance;
+    const delegateResultProvenance = delegateProvenance ?? authorized;
+    if (delegated.status === "failed") {
+      const phase =
+        delegated.outcome === "recovery-required"
+          ? "recovery-required"
+          : delegated.outcome === "stale"
+            ? "conflict"
+            : "execution";
+      return failure(operation, phase, delegateResultProvenance, "Branch advance failed closed.", {
+        branchAdvance: delegated,
+      });
     }
-    const app = this.#options.app;
-    if (app === undefined) {
-      return success(operation, authorized, { branchAdvance: bounded });
-    }
-    let verified: CapabilityExecutionProvenance;
-    try {
-      verified = authenticatedProvenance(
-        context,
-        { kind: "branch", issue, branch: fields.branch },
-        undefined,
-        "verified",
-        admission.capability,
-        app,
-      );
-    } catch {
-      return failure(operation, "verification", authorized, "Verified execution provenance is invalid.");
-    }
-    return success(operation, verified, { branchAdvance: bounded });
+    return success(operation, delegateResultProvenance, { branchAdvance: delegated });
   }
 }
 
