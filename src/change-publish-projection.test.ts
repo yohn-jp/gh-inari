@@ -4,7 +4,12 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { projectPublishTreeDelta, PublishProjectionError, resolvePublishCommit } from "./change-publish-projection.js";
+import {
+  projectPublishTreeDelta,
+  PublishProjectionError,
+  resolveLocalRepositoryNameWithOwner,
+  resolvePublishCommit,
+} from "./change-publish-projection.js";
 
 function git(cwd: string, args: readonly string[]): string {
   return execFileSync("git", [...args], { cwd, encoding: "utf8" });
@@ -121,6 +126,53 @@ test("fails closed when the commit has no changes relative to the expected head"
       () => projectPublishTreeDelta({ cwd: dir, commit: base, expectedHead: base }),
       (error: unknown) => error instanceof PublishProjectionError && error.code === "PUBLISH_PROJECTION_NO_CHANGES",
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("preserves a path containing tabs and whitespace exactly, via NUL-delimited diff parsing", async () => {
+  const dir = await initRepo();
+  try {
+    await writeFile(path.join(dir, "keep.txt"), "keep\n");
+    const base = await commit(dir, "base");
+
+    const weirdName = "a b\tc.txt";
+    await writeFile(path.join(dir, weirdName), "content\n");
+    const head = await commit(dir, "add odd path");
+
+    const projection = projectPublishTreeDelta({ cwd: dir, commit: head, expectedHead: base });
+    const change = projection.changes.find((entry) => entry.operation === "upsert" && entry.path === weirdName);
+    assert.ok(change !== undefined, "expected the exact tab-containing path to survive parsing untrimmed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveLocalRepositoryNameWithOwner resolves the origin remote's owner/repo", async () => {
+  const dir = await initRepo();
+  try {
+    git(dir, ["remote", "add", "origin", "https://github.com/yohn-jp/gh-inari.git"]);
+    assert.equal(resolveLocalRepositoryNameWithOwner(dir), "yohn-jp/gh-inari");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveLocalRepositoryNameWithOwner resolves an SSH-style origin remote", async () => {
+  const dir = await initRepo();
+  try {
+    git(dir, ["remote", "add", "origin", "git@github.com:yohn-jp/gh-inari.git"]);
+    assert.equal(resolveLocalRepositoryNameWithOwner(dir), "yohn-jp/gh-inari");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveLocalRepositoryNameWithOwner returns undefined without an origin remote", async () => {
+  const dir = await initRepo();
+  try {
+    assert.equal(resolveLocalRepositoryNameWithOwner(dir), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

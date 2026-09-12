@@ -153,7 +153,7 @@ import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
 } from "./agent-authority/branch-advance.js";
-import { projectPublishTreeDelta } from "./change-publish-projection.js";
+import { projectPublishTreeDelta, resolveLocalRepositoryNameWithOwner } from "./change-publish-projection.js";
 import {
   compareSemanticIssueProjection,
   tryObserveSemanticIssue,
@@ -1254,6 +1254,25 @@ async function runChangePublishCommand(
   }
   const commitRev = typeof parsed.options.commit === "string" ? parsed.options.commit : "HEAD";
 
+  const { session, agent } = loadDirectAppSession(path.resolve(root, sessionCredential));
+  const endpoint = resolveAppEndpoint(appEndpoint);
+
+  // #467 requires verifying the local repository identity before publishing:
+  // an ancestor/CAS check alone proves nothing about which repository this
+  // workspace actually is, only that some commit chain exists locally.
+  const certificateRepository = session.certificate?.payload.repository.name;
+  const localRepository = resolveLocalRepositoryNameWithOwner(root);
+  if (
+    certificateRepository === undefined ||
+    localRepository === undefined ||
+    localRepository !== certificateRepository
+  ) {
+    throw new CliError(
+      "CHANGE_PUBLISH_REPOSITORY_MISMATCH",
+      `Local repository origin ("${localRepository ?? "unknown"}") does not match the Session-authorized repository ("${certificateRepository ?? "unknown"}").`,
+    );
+  }
+
   const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
     sessionCredential,
     appEndpoint,
@@ -1277,8 +1296,6 @@ async function runChangePublishCommand(
     );
   }
 
-  const { session, agent } = loadDirectAppSession(path.resolve(root, sessionCredential));
-  const endpoint = resolveAppEndpoint(appEndpoint);
   const treeDelta = projectPublishTreeDelta({ cwd: root, commit: commitRev, expectedHead });
 
   const compiled: BranchAdvanceSemanticRequest = {
@@ -1303,19 +1320,52 @@ async function runChangePublishCommand(
   const result = await sendDirectAppBranchAdvance({ endpoint, session, request: validated.value });
   const resultBranch = result.branch ?? canonicalBranch;
   const resultExpectedHead = result.expectedHead ?? expectedHead;
+  if (result.status !== "succeeded" || result.resultingHead === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        operation: "change.publish",
+        issue,
+        branch: resultBranch,
+        expectedHead: resultExpectedHead,
+        commit: treeDelta.commit,
+        outcome: result.outcome,
+        ...(result.resultingHead === undefined ? {} : { resultingHead: result.resultingHead }),
+      }),
+    );
+    return EXIT_REMOTE;
+  }
+
+  // #467 requires an authoritative reread/verification of the resulting
+  // remote head through the Session/App path before reporting success; the
+  // branch.advance response alone is never sufficient (#466 already proves
+  // its own postcondition, but this leaf's own success report must not rely
+  // on that response without independently rereading it).
+  const verification = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const verifiedBranch = verification.candidates.branches.find(
+    (candidate) => candidate.candidate.name === resultBranch,
+  );
+  if (verifiedBranch?.candidate.sha !== result.resultingHead) {
+    throw new CliError(
+      "CHANGE_PUBLISH_VERIFICATION_FAILED",
+      `Could not verify the published branch head through the App path (expected ${result.resultingHead}, observed ${verifiedBranch?.candidate.sha ?? "unknown"}).`,
+    );
+  }
+
   console.log(
     JSON.stringify({
-      ok: result.status === "succeeded",
+      ok: true,
       operation: "change.publish",
       issue,
       branch: resultBranch,
       expectedHead: resultExpectedHead,
       commit: treeDelta.commit,
       outcome: result.outcome,
-      ...(result.resultingHead === undefined ? {} : { resultingHead: result.resultingHead }),
+      resultingHead: result.resultingHead,
+      verified: true,
     }),
   );
-  return result.status === "succeeded" ? 0 : EXIT_REMOTE;
+  return 0;
 }
 
 async function runChangeCommand(

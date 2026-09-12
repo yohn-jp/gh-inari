@@ -150,15 +150,24 @@ interface DiffEntry {
   readonly path: string;
 }
 
-function parseNameStatus(output: string): readonly DiffEntry[] {
-  return output
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => {
-      const [status, ...rest] = line.split("\t");
-      return { status: status ?? "", path: rest.join("\t") };
-    });
+/**
+ * Parse NUL-delimited `git diff --name-status -z` output. A Git-valid path
+ * may contain tabs, newlines, or leading/trailing whitespace; splitting on
+ * `\n`/`\t` and trimming (as ordinary line-oriented output would require)
+ * can silently corrupt or misidentify the exact path set crossing the
+ * #370/#466 authorization boundary, so this never trims or reflows fields.
+ */
+function parseNameStatusZ(output: string): readonly DiffEntry[] {
+  const fields = output.split("\0");
+  if (fields.length > 0 && fields[fields.length - 1] === "") fields.pop();
+  const entries: DiffEntry[] = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    const status = fields[index];
+    const path = fields[index + 1];
+    if (status === undefined || path === undefined) break;
+    entries.push({ status, path });
+  }
+  return entries;
 }
 
 function readMode(git: (args: readonly string[]) => string, commit: string, filePath: string): string {
@@ -200,8 +209,8 @@ export function projectPublishTreeDelta(options: ProjectPublishTreeDeltaOptions)
   const commit = resolvePublishCommit(options.cwd, options.commit, git);
   assertKnownAncestor(git, options.expectedHead, commit);
 
-  const diffOutput = git(["diff", "--no-renames", "--name-status", options.expectedHead, commit, "--"]);
-  const entries = parseNameStatus(diffOutput);
+  const diffOutput = git(["diff", "--no-renames", "--name-status", "-z", options.expectedHead, commit, "--"]);
+  const entries = parseNameStatusZ(diffOutput);
   const changes: PublishTreeChange[] = [];
   for (const entry of entries) {
     if (entry.path.length === 0) continue;
@@ -237,4 +246,33 @@ export function projectPublishTreeDelta(options: ProjectPublishTreeDeltaOptions)
     changes,
     commitMetadata: readCommitMetadata(git, commit),
   };
+}
+
+const GITHUB_REMOTE_PATTERNS = [
+  /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/u,
+  /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/u,
+  /^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/u,
+];
+
+/**
+ * Resolve the local repository's `origin` remote to a `owner/repo` identity,
+ * or `undefined` when it cannot be determined. This binds the workspace to
+ * an identity comparable against the Session certificate's own repository
+ * name before `change publish` derives or submits anything from it.
+ */
+export function resolveLocalRepositoryNameWithOwner(
+  cwd: string,
+  git: (args: readonly string[]) => string = defaultGit(cwd),
+): string | undefined {
+  let remoteUrl: string;
+  try {
+    remoteUrl = git(["remote", "get-url", "origin"]).trim();
+  } catch {
+    return undefined;
+  }
+  for (const pattern of GITHUB_REMOTE_PATTERNS) {
+    const match = pattern.exec(remoteUrl);
+    if (match?.[1] !== undefined && match[2] !== undefined) return `${match[1]}/${match[2]}`;
+  }
+  return undefined;
 }

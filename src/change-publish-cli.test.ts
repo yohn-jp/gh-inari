@@ -56,6 +56,7 @@ async function initRepo(dir: string): Promise<void> {
   git(dir, ["init", "--quiet", "-b", "main"]);
   git(dir, ["config", "user.email", "agent@example.com"]);
   git(dir, ["config", "user.name", "Agent"]);
+  git(dir, ["remote", "add", "origin", `https://github.com/${REPOSITORY.name}.git`]);
 }
 
 async function commit(dir: string, message: string): Promise<string> {
@@ -159,10 +160,16 @@ test("change publish: Session-only successful request path with exact branch.adv
 
     const bundlePath = await createBundleFile(dir);
     let branchAdvanceRequest: Record<string, unknown> | undefined;
+    let showCallCount = 0;
     const restore = installFakeFetch((url, body) => {
       assert.equal(url.pathname, "/v1/execute");
       const envelope = body as { operation: string; request: Record<string, unknown> };
-      if (envelope.operation === "change.show") return { status: 200, body: showResponseBody(base) };
+      if (envelope.operation === "change.show") {
+        showCallCount += 1;
+        // The first read resolves the pre-publish expected head; the reread
+        // after a successful branch.advance must observe the new head.
+        return { status: 200, body: showResponseBody(showCallCount === 1 ? base : head) };
+      }
       if (envelope.operation === "branch.advance") {
         branchAdvanceRequest = envelope.request;
         return { status: 200, body: branchAdvanceResponseBody(base, head) };
@@ -377,6 +384,98 @@ test("change publish: a bounded App transport failure is reported without leakin
       const combined = [...stdout, ...stderr].join("\n");
       assert.ok(!combined.includes("PRIVATE KEY"));
       assert.ok(!/-----BEGIN/u.test(combined));
+    } finally {
+      restore();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("change publish: fails closed when the local repository origin does not match the Session certificate", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".change-publish-cli-"));
+  try {
+    await initRepo(dir);
+    // Point origin at a different repository than the Session bundle authorizes.
+    execFileSync("git", ["remote", "set-url", "origin", "https://github.com/someone-else/other-repo.git"], {
+      cwd: dir,
+    });
+    await writeFile(path.join(dir, "keep.txt"), "keep\n");
+    await commit(dir, "base");
+
+    const bundlePath = await createBundleFile(dir);
+    let fetchCalled = false;
+    const restore = installFakeFetch(() => {
+      fetchCalled = true;
+      return { status: 200, body: { ok: false, error: { code: "X", message: "unreachable" } } };
+    });
+    try {
+      const { exitCode, stdout } = await captureCli(
+        [
+          "change",
+          "publish",
+          "467",
+          "--session-credential",
+          bundlePath,
+          "--app-endpoint",
+          "https://app.example.com",
+          "--json",
+        ],
+        dir,
+      );
+      assert.notEqual(exitCode, 0);
+      const output = JSON.parse(stdout.join(""));
+      assert.equal(output.error.code, "CHANGE_PUBLISH_REPOSITORY_MISMATCH");
+      assert.equal(fetchCalled, false);
+    } finally {
+      restore();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("change publish: fails closed when the reread cannot verify the published head", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".change-publish-cli-"));
+  try {
+    await initRepo(dir);
+    await writeFile(path.join(dir, "keep.txt"), "keep\n");
+    const base = await commit(dir, "base");
+    await writeFile(path.join(dir, "added.ts"), "export const x = 1;\n");
+    const head = await commit(dir, "implement feature");
+
+    const bundlePath = await createBundleFile(dir);
+    let showCallCount = 0;
+    const restore = installFakeFetch((_url, body) => {
+      const envelope = body as { operation: string };
+      if (envelope.operation === "change.show") {
+        showCallCount += 1;
+        // The App claims success, but the reread still observes the stale
+        // pre-publish head -- change publish must not report success here.
+        return { status: 200, body: showResponseBody(base) };
+      }
+      return { status: 200, body: branchAdvanceResponseBody(base, head) };
+    });
+    try {
+      const { exitCode, stdout } = await captureCli(
+        [
+          "change",
+          "publish",
+          "467",
+          "--session-credential",
+          bundlePath,
+          "--app-endpoint",
+          "https://app.example.com",
+          "--commit",
+          head,
+          "--json",
+        ],
+        dir,
+      );
+      assert.notEqual(exitCode, 0);
+      const output = JSON.parse(stdout.join(""));
+      assert.equal(output.error.code, "CHANGE_PUBLISH_VERIFICATION_FAILED");
+      assert.equal(showCallCount, 2);
     } finally {
       restore();
     }
