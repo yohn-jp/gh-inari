@@ -155,8 +155,8 @@ test("Git-data capability keeps the App credential private and binds the immutab
   );
 
   let result: unknown;
-  await broker.withGitDataCapability({ target }, async (capability) => {
-    assert.deepEqual(Object.keys(capability).sort(), ["scope", "version"]);
+  await broker.withBranchAdvanceCapability({ target }, async (capability) => {
+    assert.deepEqual(Object.keys(capability).sort(), ["scope"]);
     assert.equal("request" in capability, false);
     await capability.readRef("feat/466-session-authorized-branch-advance");
     result = { scope: capability.scope, capability };
