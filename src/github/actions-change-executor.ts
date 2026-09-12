@@ -25,6 +25,7 @@ import {
 } from "../change.js";
 import {
   extractTemplateIdentityMarker,
+  preparePullRequestArtifact,
   renderIssueArtifact,
   selectExistingArtifactCandidate,
   validateExistingIssueArtifact,
@@ -32,6 +33,8 @@ import {
 } from "../artifact.js";
 import { compileLocalGovernedContract } from "../governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
+import { artifactContractProvenanceFromTemplate } from "../contract/ir.js";
+import { effectiveFieldConstraints } from "../contract/constraints.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
   canonicalGitHubRequester,
@@ -81,6 +84,8 @@ import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 import type { CanonicalContract, ContractProvenance, PullRequestBranchGovernance } from "../contract/ir.js";
 import {
+  SEMANTIC_PULL_REQUEST_MUTATION_PLAN_VERSION,
+  SEMANTIC_PULL_REQUEST_PROJECTION_VERSION,
   validateSemanticPullRequestMutationPlan,
   type SemanticPullRequestMutationPlan,
 } from "../semantic-pr-projection.js";
@@ -827,6 +832,12 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       const result = validateSemanticPullRequestMutationPlan(this.#options.semanticPullRequestPlan);
       if (!result.valid || result.plan === undefined) throw new GitHubActionsChangeExecutorError();
       semanticPullRequestPlan = result.plan;
+    } else if (
+      request.operation === "issue" &&
+      this.#options.cwd !== undefined &&
+      !pullRequests.some((candidate) => candidate.head === canonicalBranch && candidate.base === baseBranch)
+    ) {
+      semanticPullRequestPlan = await this.buildGovernedPullRequestPlan(baseBranch, canonicalBranch, request.issue);
     }
     return {
       change: this.#options.identity,
@@ -842,6 +853,98 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       ...(readyEvidence === undefined ? {} : { readyEvidence }),
       ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
     };
+  }
+
+  /**
+   * Render the Draft pull request body through the same governed PR
+   * template/policy authority `change ready` later re-reads, so the created
+   * body carries a real `inari:template` identity marker instead of the
+   * historical `Closes #N` compatibility text. Section content that cannot
+   * be known before implementation exists (summary/changes) is filled with
+   * neutral placeholder text sufficient to satisfy policy-required,
+   * non-empty sections; `change ready` review is expected to replace it with
+   * the real content before merge.
+   */
+  private async buildGovernedPullRequestPlan(
+    baseBranch: string,
+    branch: string,
+    rootIssue: number,
+  ): Promise<SemanticPullRequestMutationPlan | undefined> {
+    const generation = await this.readGovernanceTree(baseBranch);
+    const contract = await this.readGovernedContract("pr", baseBranch, generation, "default");
+    if (contract === undefined || contract.provenance === undefined) return undefined;
+    const fields: Record<string, unknown> = {};
+    for (const section of contract.sections) {
+      for (const field of section.fields) {
+        const constraints = effectiveFieldConstraints(contract, field);
+        if (constraints.linkedIssue) {
+          fields[field.id] = `Closes #${rootIssue}`;
+        } else if (field.type === "checklist") {
+          fields[field.id] = constraints.checklistRequireComplete
+            ? field.items.map((item) => item.id)
+            : constraints.requiredItems;
+        } else if (constraints.required) {
+          fields[field.id] = `Implementation in progress for #${rootIssue}.`;
+        }
+      }
+    }
+    let prepared: ReturnType<typeof preparePullRequestArtifact>;
+    try {
+      prepared = preparePullRequestArtifact(contract, {
+        fields,
+        metadata: { title: `Change #${rootIssue}`, head: branch, base: baseBranch, draft: true },
+      });
+    } catch {
+      return undefined;
+    }
+    const provenance = artifactContractProvenanceFromTemplate(contract.provenance);
+    const desired = {
+      version: SEMANTIC_PULL_REQUEST_PROJECTION_VERSION,
+      kind: "pull_request" as const,
+      title: prepared.artifact.title,
+      head: prepared.artifact.head,
+      base: prepared.artifact.base,
+      body: prepared.artifact.body,
+      metadata: { draft: true },
+      relations: {
+        implements: {
+          relation: "implements" as const,
+          references: [
+            {
+              repositoryHost: this.#options.identity.repositoryHost,
+              repositoryId: this.#options.identity.repositoryId,
+              number: rootIssue,
+            },
+          ],
+          representation: "recognized-convention" as const,
+        },
+      },
+      provenance,
+      generation: provenance,
+    };
+    const plan = {
+      version: SEMANTIC_PULL_REQUEST_MUTATION_PLAN_VERSION,
+      kind: "pull_request" as const,
+      artifact: {
+        version: "1" as const,
+        effectiveContractVersion: "1" as const,
+        artifactContractVersion: "1" as const,
+        kind: "pull_request" as const,
+        id: contract.templateIdentity.id,
+        digest: createHash("sha256").update(desired.body, "utf8").digest("hex"),
+      },
+      provenance,
+      generation: provenance,
+      capabilities: ["recognized"],
+      desired,
+      preconditions: [
+        { kind: "GOVERNANCE_GENERATION_MATCH" as const, generation: provenance },
+        { kind: "PULL_REQUEST_TARGET_ABSENT" as const, head: desired.head, base: desired.base },
+      ],
+      effects: [{ kind: "CREATE_PULL_REQUEST" as const, desired }],
+    };
+    const result = validateSemanticPullRequestMutationPlan(plan);
+    return result.valid ? result.plan : undefined;
   }
 
   private async readReadyEvidence(
@@ -1084,7 +1187,9 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
                 .digest("hex"),
             },
           }),
-      ...(domain === "pr" ? { branchGovernance: this.#options.branchGovernance } : {}),
+      ...(domain === "pr" && this.#options.branchGovernance !== undefined
+        ? { branchGovernance: this.#options.branchGovernance }
+        : {}),
     };
     return { ...contract, provenance };
   }

@@ -129,7 +129,9 @@
     "README.md",
     "LICENSE",
     ".codex-plugin",
-    "skills"
+    "skills",
+    "scripts/certification-evidence.mjs",
+    "scripts/certification-evidence.d.mts"
   ],
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
@@ -140,6 +142,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "smoke-test": "node scripts/smoke-test.mjs",
+    "self-dogfood": "node scripts/self-dogfood.mjs",
     "templates:check": "node --import tsx src/index.ts template sync --check",
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "governance:actions": "node scripts/validate-actions.mjs",

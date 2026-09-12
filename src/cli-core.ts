@@ -79,6 +79,7 @@ import {
   projectSkillIndexToText,
   projectSkillScenarioToJson,
   projectSkillScenarioToText,
+  SKILL_MODEL_VERSION,
   SKILL_SCENARIOS,
 } from "./skill.js";
 import {
@@ -114,6 +115,8 @@ import {
 } from "./change-executor.js";
 import { tryProjectImplementationHandoff } from "./change-handoff.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
+import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
+import { projectSelfDogfoodIssueMarker } from "./self-dogfood-marker.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
 import {
@@ -985,6 +988,11 @@ function projectChangeCommandResult(
     ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
     ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
     ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+    contractVersions: {
+      goldenPath: String(GOLDEN_PATH_STATUS_VERSION),
+      statusRecovery: String(GOLDEN_PATH_STATUS_VERSION),
+      skill: SKILL_MODEL_VERSION,
+    },
     ...(evidence === undefined ? {} : { evidence }),
     projection,
   };
@@ -2057,12 +2065,14 @@ async function runExistingRemediation(
   await adapter.resolveRepositoryContext();
   const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
   const assessment = assessExistingArtifact(domain, read);
+  const disposableMarker = domain === "issue" ? projectSelfDogfoodIssueMarker(read.remote.body) : undefined;
   const base = {
     operation,
     kind: domain === "issue" ? "issue" : "pull_request",
     number: read.remote.number,
     url: read.remote.url,
     ...(read.contract === undefined ? {} : { template: read.contract.templateIdentity }),
+    ...(disposableMarker === undefined ? {} : { disposableMarker }),
   };
 
   if (operation === "check") {
