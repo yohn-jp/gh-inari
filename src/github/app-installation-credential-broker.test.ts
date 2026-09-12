@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import {
+  GITHUB_APP_GIT_DATA_PERMISSIONS,
   GITHUB_APP_REPOSITORY_READ_PERMISSIONS,
   GitHubAppCredentialBrokerError,
   GitHubAppInstallationCredentialBroker,
@@ -124,6 +125,52 @@ test("pre-admission read capability requests the minimum read ceiling and expose
   assert.equal(JSON.stringify(scope).includes("installation-token-secret"), false);
   assert.equal(JSON.stringify(scope).includes(privateKey), false);
   assert.match(String(calls[0]?.headers && JSON.stringify(calls[0]?.headers)), /^.*Bearer [^.]+\.[^.]+\.[^.]+.*$/u);
+});
+
+test("Git-data capability keeps the App credential private and binds the immutable repository", async () => {
+  const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      if (calls.length === 1) {
+        return tokenResponse({
+          permissions: GITHUB_APP_GIT_DATA_PERMISSIONS,
+          repositories: [
+            {
+              id: Number(target.repositoryId),
+              full_name: target.nameWithOwner,
+              node_id: "R_kgDO218000001",
+            },
+          ],
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          ref: "refs/heads/feat/466-session-authorized-branch-advance",
+          object: { type: "commit", sha: "a".repeat(40) },
+        }),
+        { status: 200 },
+      );
+    }),
+  );
+
+  let result: unknown;
+  await broker.withGitDataCapability({ target }, async (capability) => {
+    assert.deepEqual(Object.keys(capability).sort(), ["scope", "version"]);
+    assert.equal("request" in capability, false);
+    await capability.readRef("feat/466-session-authorized-branch-advance");
+    result = { scope: capability.scope, capability };
+  });
+
+  const tokenRequest = JSON.parse(String(calls[0]?.init.body)) as { permissions: Record<string, string> };
+  assert.deepEqual(tokenRequest.permissions, GITHUB_APP_GIT_DATA_PERMISSIONS);
+  assert.equal(JSON.stringify(result).includes("installation-token-secret"), false);
+  assert.equal(JSON.stringify(result).includes(privateKey), false);
+  assert.match(JSON.stringify(calls[1]?.init.headers), /Bearer installation-token-secret/u);
+  assert.equal(
+    calls[1]?.url.endsWith("/repos/acme/inari/git/ref/heads/feat%2F466-session-authorized-branch-advance"),
+    true,
+  );
 });
 
 test("pre-admission reads reject caller-supplied immutable identity", async () => {
