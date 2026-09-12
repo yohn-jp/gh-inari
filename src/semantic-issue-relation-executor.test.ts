@@ -274,6 +274,45 @@ test("relation executor rejects execution with no capabilities asserted at all",
   assert.equal(transport.calls.length, 0);
 });
 
+test("relation executor rejects a same-owner cross-repository parent plan before any provider effect", async () => {
+  const localPlan = plan();
+  const foreignParent = {
+    ...issue(20),
+    repositoryId: "200",
+    repository: "acme/other",
+  };
+  const crossRepositoryPlan = {
+    ...localPlan,
+    desired: { ...localPlan.desired, parent: foreignParent },
+    capabilities: [...localPlan.capabilities, "github.issue.parent.native.cross-repository-same-owner"],
+    effects: [{ kind: "SET_PARENT_RELATION" as const, parent: foreignParent }],
+    graph: {
+      scope: "complete" as const,
+      nodes: [
+        { reference: issue(10), dependsOn: [] },
+        { reference: foreignParent, dependsOn: [] },
+      ],
+    },
+  };
+  const transport = new RelationTransport([]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities: localPlan.capabilities,
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: crossRepositoryPlan }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_PLAN_INVALID" &&
+      error.diagnostics.some(
+        (entry) =>
+          entry.path === "$.desired.parent" &&
+          entry.message.includes("foreign-repository graph evidence is unavailable"),
+      ),
+  );
+  assert.equal(transport.calls.length, 0);
+});
+
 test("relation executor re-establishes the live graph and rejects a cycle formed after planning", async () => {
   // The plan's own transported graph shows no cycle (20 has no parent at
   // planning time). Between planning and execution, issue 20 acquires

@@ -47,7 +47,6 @@ import {
 } from "./types.js";
 
 const DEFAULT_HOSTNAME = "github.com";
-const MAX_CROSS_REPOSITORY_IDENTITY_CACHE = 256;
 const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
 const MAX_PULL_REQUEST_LIST_ITEMS = 100;
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
@@ -169,7 +168,6 @@ export class GitHubAdapter {
   private contextPromise: Promise<RepositoryContext> | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
   private readonly authenticationPromises = new Map<string | undefined, Promise<void>>();
-  private readonly crossRepositoryIdentities = new Map<string, RepositoryContext>();
 
   constructor(options: GitHubAdapterOptions = {}) {
     this.cwd = options.cwd;
@@ -220,29 +218,6 @@ export class GitHubAdapter {
   }
 
   /**
-   * Resolve the host-scoped repository database identity for an explicit
-   * `owner/name` locator, distinct from the adapter's own bound repository.
-   * Used only where a provider capability explicitly admits a cross-repository
-   * relation target (e.g. same-owner native sub-issues); the current
-   * repository context's own resolution is unaffected.
-   */
-  async resolveRepositoryIdentity(nameWithOwner: string): Promise<RepositoryContext> {
-    const hostname = this.normalizedHostname() ?? DEFAULT_HOSTNAME;
-    const cacheKey = `${hostname}/${nameWithOwner.toLowerCase()}`;
-    const cached = this.crossRepositoryIdentities.get(cacheKey);
-    if (cached !== undefined) return cached;
-    await this.ensureGhAvailable();
-    await this.ensureAuthenticated(hostname);
-    const resolved = await this.resolveRepositoryView(`${hostname}/${nameWithOwner}`, hostname);
-    if (this.crossRepositoryIdentities.size >= MAX_CROSS_REPOSITORY_IDENTITY_CACHE) {
-      const oldest = this.crossRepositoryIdentities.keys().next().value;
-      if (typeof oldest === "string") this.crossRepositoryIdentities.delete(oldest);
-    }
-    this.crossRepositoryIdentities.set(cacheKey, resolved);
-    return resolved;
-  }
-
-  /**
    * Request the fixed Actions API surface used by the Change transport.
    * Callers supply only an adapter-owned relative Actions path and bounded form
    * fields; repository, host, and authentication remain resolved here.
@@ -267,22 +242,6 @@ export class GitHubAdapter {
   ): Promise<GitHubApiResponse> {
     const context = await this.resolveRepositoryContext();
     return this.requestRepositoryApiAt(context.nameWithOwner, context.hostname, repositoryPath, method, fields);
-  }
-
-  /**
-   * Request the bounded repository API surface against an explicit
-   * `owner/name` locator instead of this adapter's own bound repository.
-   * Reserved for a provider capability that has already proven the target is
-   * a same-owner cross-repository relation; never used to reach an
-   * arbitrary, unverified repository.
-   */
-  async requestRepositoryApiForIdentity(
-    identity: RepositoryContext,
-    repositoryPath: string,
-    method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
-    fields: Readonly<Record<string, GitHubApiFieldValue>> = {},
-  ): Promise<GitHubApiResponse> {
-    return this.requestRepositoryApiAt(identity.nameWithOwner, identity.hostname, repositoryPath, method, fields);
   }
 
   private async requestRepositoryApiAt(

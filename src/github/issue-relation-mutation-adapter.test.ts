@@ -61,7 +61,6 @@ function issueIdentity(id: number, number = id): GitHubApiResponse {
   return { status: 200, body: { id, number } };
 }
 
-const CROSS_REPOSITORY_CAPABILITIES = Object.freeze({ ...CAPABILITIES, crossRepositoryParent: true });
 const OTHER_REPO: RepositoryContext = Object.freeze({
   hostname: "github.com",
   host: "github.com",
@@ -71,37 +70,6 @@ const OTHER_REPO: RepositoryContext = Object.freeze({
   url: "https://github.com/yohn-jp/other-repo",
   repositoryId: "200000900",
 });
-
-class CrossRepositoryMutator extends StubMutator {
-  readonly identityCalls: string[] = [];
-  readonly identityCalls2: Array<{
-    readonly identity: RepositoryContext;
-    readonly path: string;
-    readonly method: string;
-  }> = [];
-  constructor(
-    responses: Array<GitHubApiResponse | Error>,
-    private readonly identity: RepositoryContext | Error = OTHER_REPO,
-  ) {
-    super(responses);
-  }
-
-  async resolveRepositoryIdentity(nameWithOwner: string): Promise<RepositoryContext> {
-    this.identityCalls.push(nameWithOwner);
-    if (this.identity instanceof Error) throw this.identity;
-    return this.identity;
-  }
-
-  async requestRepositoryApiForIdentity(
-    identity: RepositoryContext,
-    path: string,
-    method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
-    fields: Readonly<Record<string, GitHubApiFieldValue>> = {},
-  ): Promise<GitHubApiResponse> {
-    this.identityCalls2.push({ identity, path, method });
-    return this.requestRepositoryApi(path, method, fields);
-  }
-}
 
 test("projects parent and blocked-by effects onto the documented native endpoints", async () => {
   const mutator = new StubMutator([
@@ -197,66 +165,15 @@ function otherRepoReference(number: number): IssueReference {
   };
 }
 
-test("setParent applies a same-owner cross-repository parent effect through the resolved identity", async () => {
-  const mutator = new CrossRepositoryMutator([issueIdentity(501, 10), { status: 201, body: undefined }]);
-  const adapter = new GitHubIssueRelationMutationAdapter(mutator, CONTEXT, CROSS_REPOSITORY_CAPABILITIES);
-  await adapter.setParent(reference(10), otherRepoReference(20));
-  assert.deepEqual(mutator.identityCalls, ["yohn-jp/other-repo"]);
-  assert.deepEqual(mutator.identityCalls2, [{ identity: OTHER_REPO, path: "issues/20/sub_issues", method: "POST" }]);
-});
-
-test("setParent fails closed for a cross-owner parent target even when the capability grants cross-repository", async () => {
-  const differentOwner: RepositoryContext = { ...OTHER_REPO, owner: "someone-else", nameWithOwner: "someone-else/x" };
-  const mutator = new CrossRepositoryMutator([], differentOwner);
-  const adapter = new GitHubIssueRelationMutationAdapter(mutator, CONTEXT, CROSS_REPOSITORY_CAPABILITIES);
-  await assert.rejects(
-    () =>
-      adapter.setParent(reference(10), {
-        repositoryHost: differentOwner.hostname,
-        repositoryId: differentOwner.repositoryId as string,
-        repository: differentOwner.nameWithOwner,
-        number: 20,
-      }),
-    (error: unknown) =>
-      error instanceof GitHubIssueRelationMutationError && error.code === "RELATION_MUTATION_UNSUPPORTED",
-  );
-  assert.equal(mutator.calls.length, 0);
-});
-
-test("setParent fails closed when cross-repository identity resolution fails", async () => {
-  const mutator = new CrossRepositoryMutator([], new Error("gh: not authenticated"));
-  const adapter = new GitHubIssueRelationMutationAdapter(mutator, CONTEXT, CROSS_REPOSITORY_CAPABILITIES);
-  await assert.rejects(
-    () => adapter.setParent(reference(10), otherRepoReference(20)),
-    (error: unknown) =>
-      error instanceof GitHubIssueRelationMutationError && error.code === "RELATION_MUTATION_READ_FAILED",
-  );
-});
-
-test("setParent fails closed for a cross-repository target without the capability", async () => {
-  const mutator = new CrossRepositoryMutator([]);
+test("setParent fails closed for a same-owner cross-repository target before network I/O", async () => {
+  const mutator = new StubMutator([]);
   const adapter = new GitHubIssueRelationMutationAdapter(mutator, CONTEXT, CAPABILITIES);
   await assert.rejects(
     () => adapter.setParent(reference(10), otherRepoReference(20)),
     (error: unknown) =>
       error instanceof GitHubIssueRelationMutationError && error.code === "RELATION_MUTATION_UNSUPPORTED",
   );
-  assert.equal(mutator.identityCalls.length, 0);
-});
-
-test("setParent fails closed when a cross-repository target lacks a request seam", async () => {
-  class ResolveOnlyMutator extends StubMutator {
-    async resolveRepositoryIdentity(): Promise<RepositoryContext> {
-      return OTHER_REPO;
-    }
-  }
-  const mutator = new ResolveOnlyMutator([issueIdentity(501, 10)]);
-  const adapter = new GitHubIssueRelationMutationAdapter(mutator, CONTEXT, CROSS_REPOSITORY_CAPABILITIES);
-  await assert.rejects(
-    () => adapter.setParent(reference(10), otherRepoReference(20)),
-    (error: unknown) =>
-      error instanceof GitHubIssueRelationMutationError && error.code === "RELATION_MUTATION_UNSUPPORTED",
-  );
+  assert.equal(mutator.calls.length, 0);
 });
 
 test("rejects malformed identity and unexpected mutation status", async () => {

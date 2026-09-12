@@ -113,7 +113,7 @@ test("rejects cross-repository native relations and incomplete graph evidence", 
   assert.ok(incomplete.diagnostics.some((entry) => entry.code === "RELATION_EVIDENCE_UNAVAILABLE"));
 });
 
-test("admits a same-owner cross-repository parent only when the capability is declared", () => {
+test("rejects a same-owner cross-repository parent even when a legacy capability is declared", () => {
   const otherRepo = { repositoryHost: "github.com", repositoryId: "200", repository: "acme/other" };
   const crossRepositoryParent = issue(2, otherRepo);
   const rejected = tryPlanSemanticIssueRelations({
@@ -129,7 +129,7 @@ test("admits a same-owner cross-repository parent only when the capability is de
   assert.equal(rejected.valid, false);
   assert.ok(rejected.diagnostics.some((entry) => entry.code === "RELATION_CROSS_REPOSITORY_UNSUPPORTED"));
 
-  const admitted = tryPlanSemanticIssueRelations({
+  const capabilityGranted = tryPlanSemanticIssueRelations({
     subject: issue(1),
     desired: { parent: crossRepositoryParent, dependsOn: [] },
     observed: { parent: undefined, dependsOn: [] },
@@ -139,8 +139,15 @@ test("admits a same-owner cross-repository parent only when the capability is de
       nodes: [issue(1), crossRepositoryParent].map((reference) => ({ reference, dependsOn: [] })),
     },
   });
-  assert.equal(admitted.valid, true);
-  assert.deepEqual(admitted.plan?.effects, [{ kind: "SET_PARENT_RELATION", parent: crossRepositoryParent }]);
+  assert.equal(capabilityGranted.valid, false);
+  assert.ok(
+    capabilityGranted.diagnostics.some(
+      (entry) =>
+        entry.code === "RELATION_CROSS_REPOSITORY_UNSUPPORTED" &&
+        entry.path === "$.desired.parent" &&
+        entry.message.includes("foreign-repository graph evidence is unavailable"),
+    ),
+  );
 });
 
 test("rejects parent and dependency cycles before effects", () => {

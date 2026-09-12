@@ -169,13 +169,6 @@ const EFFECT_KINDS = new Set([
 ]);
 const NATIVE_PARENT_CAPABILITY = "github.issue.parent.native";
 const NATIVE_DEPENDS_ON_CAPABILITY = "github.issue.blocked-by.native";
-/**
- * GitHub's Sub-issues API permits a native parent relation whose target
- * lives in a different repository under the same owner. Its Issue
- * Dependencies (`blocked_by`) API is not known to, so this scope is
- * deliberately parent-only.
- */
-const NATIVE_CROSS_REPOSITORY_PARENT_CAPABILITY = "github.issue.parent.native.cross-repository-same-owner";
 const MAX_NODES = 1_000;
 const MAX_REFERENCES = 1_000;
 
@@ -895,16 +888,12 @@ function repositoryDiagnostics(
           "Native parent relationship capability is not declared.",
         ),
       );
-    else if (
-      desired.parent !== undefined &&
-      !sameRepository(subject, desired.parent) &&
-      !capabilities.includes(NATIVE_CROSS_REPOSITORY_PARENT_CAPABILITY)
-    )
+    else if (desired.parent !== undefined && !sameRepository(subject, desired.parent))
       diagnostics.push(
         diagnostic(
           "RELATION_CROSS_REPOSITORY_UNSUPPORTED",
           "$.desired.parent",
-          "Native parent relationships require the same repository identity, or the same-owner cross-repository capability.",
+          "Native parent relationships require the same repository identity; foreign-repository graph evidence is unavailable for actionful mutation.",
         ),
       );
   }

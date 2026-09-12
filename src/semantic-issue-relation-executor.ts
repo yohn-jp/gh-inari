@@ -125,7 +125,7 @@ export interface SemanticIssueRelationExecutionPort {
   execute(request: SemanticIssueRelationExecutionRequest): Promise<SemanticIssueRelationExecutionResult>;
 }
 
-type RelationCapability = "parent" | "blockedBy" | "crossRepositoryParent";
+type RelationCapability = "parent" | "blockedBy";
 
 function diagnostic(code: string, path: string, message: string): SemanticIssueRelationExecutionDiagnostic {
   return { code, path, message };
@@ -155,7 +155,6 @@ function relationCapabilities(capabilities: readonly string[]): Readonly<Record<
         entry === "github.issue.blocked_by.native" ||
         entry === "issue.depends-on.native",
     ),
-    crossRepositoryParent: capabilities.includes("github.issue.parent.native.cross-repository-same-owner"),
   };
 }
 
@@ -248,10 +247,9 @@ interface GraphWalkFailure {
  * Live forward-walk from a proposed new edge's target, re-establishing
  * whether the subject is currently reachable (a cycle) through *current*
  * provider state rather than the plan's transported/stale evidence. Only
- * walks within the target's own repository: a cross-repository target
- * (already same-owner-verified at admission) is checked at its immediate
- * hop only, since safely walking a foreign repository's own graph requires
- * a foreign-repository-scoped observation seam this walk does not build.
+ * walks only within the subject's repository. Cross-repository targets are
+ * rejected as unavailable because execution has no foreign-repository-scoped
+ * observation seam with which to re-establish transitive graph safety.
  */
 async function walkForReachability(
   adapter: GitHubIssueRelationMutationAdapter,
@@ -281,12 +279,12 @@ async function walkForReachability(
     if (
       next.repositoryHost.toLowerCase() !== homeContext.hostname.toLowerCase() ||
       next.repositoryId !== homeContext.repositoryId
-    ) {
-      // Foreign-repository hop: checked at this one hop only (already
-      // reached, so already caught above if it were the subject); do not
-      // expand further without a foreign-repository observation seam.
-      continue;
-    }
+    )
+      return {
+        ok: false,
+        code: "RELATION_GRAPH_EVIDENCE_UNAVAILABLE",
+        message: "Foreign-repository relationship graph evidence is unavailable before mutation.",
+      };
     const [parentObservation, blockedByObservation] = await Promise.all([
       adapter.observeParent(next.number),
       adapter.observeBlockedBy(next.number),

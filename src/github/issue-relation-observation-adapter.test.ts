@@ -118,60 +118,9 @@ test("observeParent returns unavailable when the parent belongs to a different r
   assert.equal(observation.diagnostics[0]?.code, "RELATION_REPOSITORY_UNRESOLVED");
 });
 
-test("observeParent resolves a same-owner cross-repository parent when the capability grants it", async () => {
-  const identities: string[] = [];
-  class CrossRepositoryReader extends StubReader {
-    async resolveRepositoryIdentity(nameWithOwner: string): Promise<RepositoryContext> {
-      identities.push(nameWithOwner);
-      return {
-        hostname: "github.com",
-        host: "github.com",
-        owner: "yohn-jp",
-        name: "other-repo",
-        nameWithOwner: "yohn-jp/other-repo",
-        url: "https://github.com/yohn-jp/other-repo",
-        repositoryId: "200000900",
-      };
-    }
-  }
-  const reader = new CrossRepositoryReader([{ status: 200, body: issueBody(9, "yohn-jp/other-repo") }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, {
-    ...SUPPORTED,
-    crossRepositoryParent: true,
-  });
-  const observation = await adapter.observeParent(288);
-  assert.equal(observation.kind, "present");
-  assert.deepEqual(observation.reference, {
-    repositoryHost: "github.com",
-    repositoryId: "200000900",
-    repository: "yohn-jp/other-repo",
-    number: 9,
-  });
-  assert.deepEqual(identities, ["yohn-jp/other-repo"]);
-});
-
-test("observeParent stays unavailable for a cross-owner target even when the capability grants cross-repository", async () => {
+test("observeParent stays unavailable for a foreign-repository target", async () => {
   const reader = new StubReader([{ status: 200, body: issueBody(9, "someone-else/other-repo") }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, {
-    ...SUPPORTED,
-    crossRepositoryParent: true,
-  });
-  const observation = await adapter.observeParent(288);
-  assert.equal(observation.kind, "unavailable");
-  assert.equal(observation.diagnostics[0]?.code, "RELATION_REPOSITORY_UNRESOLVED");
-});
-
-test("observeParent stays unavailable when cross-repository identity resolution fails", async () => {
-  class FailingReader extends StubReader {
-    async resolveRepositoryIdentity(): Promise<RepositoryContext> {
-      throw new Error("gh: not authenticated");
-    }
-  }
-  const reader = new FailingReader([{ status: 200, body: issueBody(9, "yohn-jp/other-repo") }]);
-  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, {
-    ...SUPPORTED,
-    crossRepositoryParent: true,
-  });
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
   const observation = await adapter.observeParent(288);
   assert.equal(observation.kind, "unavailable");
   assert.equal(observation.diagnostics[0]?.code, "RELATION_REPOSITORY_UNRESOLVED");

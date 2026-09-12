@@ -22,14 +22,6 @@ import { issueReferenceKey, normalizeIssueReference, type IssueReference } from 
 /** Narrow read seam this module needs from `GitHubAdapter`. */
 export interface IssueRelationApiReader {
   requestRepositoryApi(repositoryPath: string): Promise<GitHubApiResponse>;
-  /**
-   * Resolve the host-scoped database identity of an explicit `owner/name`
-   * locator. Only consulted when a same-owner cross-repository capability is
-   * granted and a candidate parent target's owner matches the current
-   * repository's owner; its absence just means cross-repository parent
-   * relations stay unavailable rather than resolved.
-   */
-  resolveRepositoryIdentity?(nameWithOwner: string): Promise<RepositoryContext>;
 }
 
 /**
@@ -45,14 +37,6 @@ export interface IssueRelationApiReader {
 export interface IssueRelationCapabilities {
   readonly parent: boolean;
   readonly blockedBy: boolean;
-  /**
-   * Whether the target GitHub host/plan additionally supports a native
-   * parent (sub-issue) relation whose target lives in a different repository
-   * under the same owner. GitHub's Sub-issues API permits this; its Issue
-   * Dependencies (`blocked_by`) API is not known to, so this scope never
-   * widens `blockedBy`.
-   */
-  readonly crossRepositoryParent?: boolean;
 }
 
 /**
@@ -110,7 +94,6 @@ export class GitHubIssueRelationObservationAdapter {
   private readonly reader: IssueRelationApiReader;
   private readonly context: RepositoryContext;
   private readonly capabilities: IssueRelationCapabilities;
-  private readonly crossRepositoryIdentityCache = new Map<string, RepositoryContext | undefined>();
 
   constructor(reader: IssueRelationApiReader, context: RepositoryContext, capabilities: IssueRelationCapabilities) {
     this.reader = reader;
@@ -140,7 +123,7 @@ export class GitHubIssueRelationObservationAdapter {
       };
     }
 
-    const resolved = await this.resolveRelatedParentIssue(response.body, "$");
+    const resolved = resolveRelatedIssue(response.body, this.context, "$");
     if (resolved.status === "resolved") {
       return { kind: "present", reference: resolved.reference, diagnostics: [] };
     }
@@ -149,55 +132,6 @@ export class GitHubIssueRelationObservationAdapter {
       reference: undefined,
       diagnostics: [resolved.diagnostic],
     };
-  }
-
-  /**
-   * Resolve one candidate parent Issue, extending same-repository resolution
-   * with an explicit same-owner cross-repository lookup when the target
-   * capability grants it. Never attempted for `blocked_by` dependencies.
-   */
-  private async resolveRelatedParentIssue(entry: unknown, path: string): Promise<RelatedIssueResolution> {
-    const direct = resolveRelatedIssue(entry, this.context, path);
-    if (direct.status !== "unresolved" || this.capabilities.crossRepositoryParent !== true) return direct;
-    if (!isRecord(entry)) return direct;
-    const relatedRepository = parseRepositoryUrl(entry.repository_url);
-    if (relatedRepository === undefined) return direct;
-    if (relatedRepository.host !== this.context.hostname.toLowerCase()) return direct;
-    const currentOwner = this.context.nameWithOwner.split("/")[0]?.toLowerCase();
-    const relatedOwner = relatedRepository.nameWithOwner.split("/")[0]?.toLowerCase();
-    if (currentOwner === undefined || relatedOwner === undefined || currentOwner !== relatedOwner) return direct;
-    const identity = await this.resolveCrossRepositoryIdentity(relatedRepository.nameWithOwner);
-    if (identity === undefined) return direct;
-    const number = entry.number;
-    if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) return direct;
-    const normalized = normalizeIssueReference(
-      {
-        repositoryHost: identity.hostname,
-        repositoryId: identity.repositoryId,
-        repository: identity.nameWithOwner,
-        number,
-      },
-      path,
-    );
-    if (!normalized.valid || normalized.reference === undefined) return direct;
-    return { status: "resolved", reference: normalized.reference };
-  }
-
-  private async resolveCrossRepositoryIdentity(nameWithOwner: string): Promise<RepositoryContext | undefined> {
-    const key = nameWithOwner.toLowerCase();
-    if (this.crossRepositoryIdentityCache.has(key)) return this.crossRepositoryIdentityCache.get(key);
-    let identity: RepositoryContext | undefined;
-    try {
-      identity =
-        this.reader.resolveRepositoryIdentity === undefined
-          ? undefined
-          : await this.reader.resolveRepositoryIdentity(nameWithOwner);
-    } catch {
-      identity = undefined;
-    }
-    if (identity !== undefined && identity.repositoryId === undefined) identity = undefined;
-    this.crossRepositoryIdentityCache.set(key, identity);
-    return identity;
   }
 
   /**
