@@ -414,17 +414,7 @@ function branchRequestFields(input: unknown): {
   const validation = validateBranchAdvanceSemanticRequest(input);
   if (!validation.valid || validation.value === undefined) throw new TypeError("Branch advance request is invalid.");
   const request = validation.value;
-  if (!("changes" in request) || !Array.isArray(request.changes))
-    throw new TypeError("Branch advance request is not canonical.");
-  return {
-    request,
-    treeDelta: {
-      changes: request.changes.map((change) => ({
-        operation: change.operation === "delete" ? ("delete" as const) : ("modify" as const),
-        path: change.path,
-      })),
-    },
-  };
+  return { request, treeDelta: request.treeDelta };
 }
 
 export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSessionExecutor {
@@ -661,8 +651,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     } catch {
       return failure(operation, "request", undefined, "Session execution request is invalid.");
     }
-    if (issue === undefined || !("issue" in fields.request) || fields.request.issue !== issue)
-      return failure(operation, "authorization", undefined, "Session task binding is required.");
+    if (issue === undefined) return failure(operation, "authorization", undefined, "Session task binding is required.");
 
     let authenticated: CapabilityExecutionProvenance;
     try {
@@ -727,8 +716,6 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     } catch {
       return failure(operation, "execution", authorized, "Branch advance delegation failed closed.");
     }
-    const delegateProvenance = delegated.provenance;
-    const delegateResultProvenance = delegateProvenance ?? authorized;
     if (delegated.status === "failed") {
       const phase =
         delegated.outcome === "recovery-required"
@@ -736,11 +723,21 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
           : delegated.outcome === "stale"
             ? "conflict"
             : "execution";
-      return failure(operation, phase, delegateResultProvenance, "Branch advance failed closed.", {
+      return failure(operation, phase, delegated.provenance ?? authorized, "Branch advance failed closed.", {
         branchAdvance: delegated,
       });
     }
-    return success(operation, delegateResultProvenance, { branchAdvance: delegated });
+    const verified = delegated.provenance;
+    if (verified === undefined || verified.stage !== "verified") {
+      return failure(
+        operation,
+        "verification",
+        verified ?? authorized,
+        "Branch advance succeeded without authoritative verified provenance.",
+        { branchAdvance: delegated },
+      );
+    }
+    return success(operation, verified, { branchAdvance: delegated });
   }
 }
 
