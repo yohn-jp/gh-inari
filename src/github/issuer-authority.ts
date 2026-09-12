@@ -33,6 +33,7 @@ export const ISSUER_AUTHORITY_CONTRACT_VERSION = 1 as const;
 export type IssuerAuthorityContractVersion = typeof ISSUER_AUTHORITY_CONTRACT_VERSION;
 
 export const TRUSTED_EXECUTION_RUNTIME = "github-actions" as const;
+export const DIRECT_APP_TRUSTED_EXECUTION_RUNTIME = "inari-app" as const;
 export const TRUSTED_EXECUTION_EVENTS = Object.freeze(["workflow_dispatch", "workflow_call"] as const);
 export type TrustedExecutionEvent = (typeof TRUSTED_EXECUTION_EVENTS)[number];
 
@@ -152,7 +153,8 @@ export interface IssuerInstallationScope {
   readonly expiresAt: string;
 }
 
-export interface TrustedExecutionContext {
+/** The existing GitHub Actions trusted-execution variant. */
+export interface GitHubActionsTrustedExecutionContext {
   readonly version: IssuerAuthorityContractVersion;
   readonly runtime: typeof TRUSTED_EXECUTION_RUNTIME;
   readonly event: TrustedExecutionEvent;
@@ -170,6 +172,30 @@ export interface TrustedExecutionContext {
   /** Optional requester identity; it is provenance, never a credential. */
   readonly requester?: string;
 }
+
+/** Direct App execution carries only Session-bound identity, never Actions claims. */
+export interface DirectAppTrustedExecutionContext {
+  readonly version: IssuerAuthorityContractVersion;
+  readonly runtime: typeof DIRECT_APP_TRUSTED_EXECUTION_RUNTIME;
+  readonly event: "session-request";
+  readonly repository: IssuerRepositoryIdentity;
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly certificateJti: string;
+}
+
+/**
+ * Tagged union with optional legacy-only fields retained for source
+ * compatibility with callers that inspect an Actions execution after the
+ * runtime tag has been validated.  The direct validator still rejects every
+ * Actions field at runtime.
+ */
+export type TrustedExecutionContext =
+  | GitHubActionsTrustedExecutionContext
+  | (DirectAppTrustedExecutionContext & {
+      readonly workflowTrust?: "protected";
+      readonly requester?: string;
+    });
 
 export interface IssuerMutationRequest {
   readonly version: IssuerAuthorityContractVersion;
@@ -267,6 +293,15 @@ const TRUSTED_EXECUTION_KEYS = new Set([
   "fork",
   "pullRequest",
   "requester",
+]);
+const DIRECT_APP_TRUSTED_EXECUTION_KEYS = new Set([
+  "version",
+  "runtime",
+  "event",
+  "repository",
+  "requestId",
+  "sessionId",
+  "certificateJti",
 ]);
 const MUTATION_REQUEST_KEYS = new Set(["version", "authority", "execution", "target", "effects"]);
 const CREDENTIAL_REQUEST_KEYS = new Set(["version", "authority", "app", "execution", "target", "permissions"]);
@@ -574,10 +609,82 @@ function normalizeRequester(value: unknown, path: string, diagnostics: IssuerDia
   return value;
 }
 
-export function validateTrustedExecutionContext(
+function validateDirectAppTrustedExecutionContext(
+  input: RecordValue,
+  path: string,
+): IssuerValidationResult<DirectAppTrustedExecutionContext> {
+  const diagnostics: IssuerDiagnostic[] = [];
+  addUnknownProperties(input, DIRECT_APP_TRUSTED_EXECUTION_KEYS, path, diagnostics);
+  if (!requireProperty(input, "version", path, diagnostics)) {
+    // Continue checking the direct Session binding.
+  } else if (input.version !== ISSUER_AUTHORITY_CONTRACT_VERSION) {
+    diagnostics.push(
+      createDiagnostic("ISSUER_INVALID_EXECUTION", `${path}.version`, "Execution contract version is unsupported."),
+    );
+  }
+  if (!requireProperty(input, "runtime", path, diagnostics)) {
+    // Continue checking the direct Session binding.
+  } else if (input.runtime !== DIRECT_APP_TRUSTED_EXECUTION_RUNTIME) {
+    diagnostics.push(
+      createDiagnostic("ISSUER_INVALID_EXECUTION", `${path}.runtime`, "Execution runtime is not trusted."),
+    );
+  }
+  if (!requireProperty(input, "event", path, diagnostics)) {
+    // Continue checking the direct Session binding.
+  } else if (input.event !== "session-request") {
+    diagnostics.push(
+      createDiagnostic("ISSUER_UNTRUSTED_EXECUTION", `${path}.event`, "This event cannot obtain issuer credentials."),
+    );
+  }
+
+  const repositoryResult = requireProperty(input, "repository", path, diagnostics)
+    ? validateRepositoryIdentity(input.repository, `${path}.repository`)
+    : report<IssuerRepositoryIdentity>([]);
+  diagnostics.push(...repositoryResult.diagnostics);
+
+  const validateBinding = (key: "requestId" | "sessionId" | "certificateJti"): string | undefined => {
+    if (!requireProperty(input, key, path, diagnostics)) return undefined;
+    if (
+      typeof input[key] !== "string" ||
+      input[key].length === 0 ||
+      input[key].length > 128 ||
+      !/^[\x21-\x7e]+$/u.test(input[key] as string)
+    ) {
+      diagnostics.push(createDiagnostic("ISSUER_INVALID_EXECUTION", `${path}.${key}`, "Session binding is invalid."));
+      return undefined;
+    }
+    return input[key] as string;
+  };
+  const requestId = validateBinding("requestId");
+  const sessionId = validateBinding("sessionId");
+  const certificateJti = validateBinding("certificateJti");
+
+  if (
+    diagnostics.length > 0 ||
+    repositoryResult.value === undefined ||
+    requestId === undefined ||
+    sessionId === undefined ||
+    certificateJti === undefined
+  ) {
+    return report(diagnostics);
+  }
+  return valid(
+    Object.freeze({
+      version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+      runtime: DIRECT_APP_TRUSTED_EXECUTION_RUNTIME,
+      event: "session-request",
+      repository: repositoryResult.value,
+      requestId,
+      sessionId,
+      certificateJti,
+    }),
+  );
+}
+
+function validateGitHubActionsTrustedExecutionContext(
   input: unknown,
   path = "$.execution",
-): IssuerValidationResult<TrustedExecutionContext> {
+): IssuerValidationResult<GitHubActionsTrustedExecutionContext> {
   const diagnostics: IssuerDiagnostic[] = [];
   if (!isRecord(input))
     return report([createDiagnostic("ISSUER_INVALID_EXECUTION", path, "Execution context must be an object.")]);
@@ -689,6 +796,18 @@ export function validateTrustedExecutionContext(
       ...(requester === undefined ? {} : { requester }),
     }),
   );
+}
+
+export function validateTrustedExecutionContext(
+  input: unknown,
+  path = "$.execution",
+): IssuerValidationResult<TrustedExecutionContext> {
+  if (!isRecord(input))
+    return report([createDiagnostic("ISSUER_INVALID_EXECUTION", path, "Execution context must be an object.")]);
+  if (input.runtime === DIRECT_APP_TRUSTED_EXECUTION_RUNTIME) {
+    return validateDirectAppTrustedExecutionContext(input, path);
+  }
+  return validateGitHubActionsTrustedExecutionContext(input, path);
 }
 
 export const assertTrustedExecution = (input: unknown): TrustedExecutionContext => {
