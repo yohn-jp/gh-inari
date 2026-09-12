@@ -155,6 +155,16 @@ function branchNumber(branch) {
   return match === null ? undefined : Number(match[1]);
 }
 
+/** Consume the scenario's one-shot failure at the provider's real delete boundary. */
+function consumeDeleteFailure(state, statePath, branch) {
+  const issue = branchNumber(branch);
+  const issueKey = issue === undefined ? undefined : String(issue);
+  if (issueKey === undefined || state.failDeleteOnce?.[issueKey] !== true) return false;
+  state.failDeleteOnce[issueKey] = false;
+  stateChanged(statePath, state);
+  return true;
+}
+
 function jsonRequest(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -352,11 +362,7 @@ function createProviderServer(state, statePath, consumerRoot) {
           sendJson(response, 200, { errors: [{ message: "invalid controlled ref update" }] });
           return;
         }
-        const issue = branchNumber(branch);
-        const issueKey = issue === undefined ? undefined : String(issue);
-        if (issueKey !== undefined && state.failDeleteOnce?.[issueKey] === true) {
-          state.failDeleteOnce[issueKey] = false;
-          stateChanged(statePath, state);
+        if (consumeDeleteFailure(state, statePath, branch)) {
           sendJson(response, 200, { errors: [{ message: "controlled one-shot delete failure" }] });
           return;
         }
@@ -512,6 +518,10 @@ function createProviderServer(state, statePath, consumerRoot) {
       }
       if (request.method === "DELETE" && resource[0] === "git" && resource[1] === "refs" && resource[2] === "heads") {
         const branch = resource.slice(3).join("/");
+        if (consumeDeleteFailure(state, statePath, branch)) {
+          sendJson(response, 500, { message: "controlled one-shot delete failure" });
+          return;
+        }
         if (state.branches?.[branch] === undefined) sendJson(response, 404, { message: "not found" });
         else {
           delete state.branches[branch];

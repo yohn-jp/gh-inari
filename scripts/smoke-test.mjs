@@ -651,16 +651,30 @@ function certifyCompleteGoldenPath(consumerDirectory, launcher, environment, pac
   assertSuccessfulChange(firstRecoveryIssue, "change.issue", "DRAFT");
   const recoveryReady = invokeChange("ready", 416);
   assertSuccessfulChange(recoveryReady, "change.ready", "REVIEW");
-  const abortFailure = invokeChange("abort", 416, 3);
-  const recoveryEvidence = abortFailure.error?.details?.evidence;
-  if (abortFailure.ok !== false || recoveryEvidence?.outcome !== "recovery-required")
+  const abortFailure = invokeChange("abort", 416, 2);
+  const recoveryEvidence = abortFailure.evidence;
+  if (
+    abortFailure.ok !== false ||
+    recoveryEvidence?.outcome !== "recovery-required" ||
+    recoveryEvidence.compensation !== "failed" ||
+    recoveryEvidence.failure?.kind !== "DELETE_BRANCH" ||
+    !Array.isArray(recoveryEvidence.effects) ||
+    recoveryEvidence.effects.length !== 2 ||
+    recoveryEvidence.effects[0]?.kind !== "CLOSE_PULL_REQUEST" ||
+    recoveryEvidence.effects[0]?.status !== "succeeded" ||
+    recoveryEvidence.effects[1]?.kind !== "DELETE_BRANCH" ||
+    recoveryEvidence.effects[1]?.status !== "failed"
+  )
     fail("installed abort did not expose the bounded recovery-required outcome");
 
-  const recoveryProjection = invokeChange("show", 416);
+  const recoveryProjection = invokeChange("show", 416, 2);
   if (
     recoveryProjection.ok !== false ||
     recoveryProjection.status !== "partial" ||
-    recoveryProjection.state !== "RECOVERY_REQUIRED"
+    recoveryProjection.state !== "RECOVERY_REQUIRED" ||
+    recoveryProjection.canonicalBranch !== "test/416-certify-packed-artifact-recovery" ||
+    recoveryProjection.projection?.change?.projection?.branch !== "test/416-certify-packed-artifact-recovery" ||
+    recoveryProjection.projection?.change?.projection?.pullRequest !== 4160
   )
     fail("installed Change reread did not expose the partial recovery projection");
   const recoveryStatus = callMcp(launcher, consumerDirectory, environment, "inari_golden_path_status", {
@@ -672,12 +686,38 @@ function certifyCompleteGoldenPath(consumerDirectory, launcher, environment, pac
     recoveryStatus.valid !== true ||
     recoveryStatus.status?.phase !== "RECOVERY" ||
     recoveryStatus.nextAction?.owner !== "recovery" ||
-    recoveryStatus.recovery?.rereadRequired !== true
+    recoveryStatus.nextAction?.kind !== "MANUAL_REVIEW" ||
+    recoveryStatus.nextAction?.reasonCode !== "MANUAL_RECOVERY_REVIEW_REQUIRED" ||
+    recoveryStatus.recovery?.class !== "ABORT_CLEANUP_UNSAFE" ||
+    recoveryStatus.recovery?.safeAction !== "MANUAL_REVIEW" ||
+    recoveryStatus.recovery?.retryable !== false ||
+    recoveryStatus.recovery?.rereadRequired !== true ||
+    recoveryStatus.recovery?.automaticCleanup !== "forbidden" ||
+    recoveryStatus.recovery?.owner !== "recovery" ||
+    recoveryStatus.recovery?.reasonCode !== "MANUAL_RECOVERY_REVIEW_REQUIRED"
   )
     fail("installed Golden Path recovery/status boundary did not project a recovery-owned action");
 
   const recoveredAbort = invokeChange("abort", 416);
   assertSuccessfulChange(recoveredAbort, "change.abort", "ABORTED");
+  if (
+    recoveredAbort.evidence?.outcome !== "verified" ||
+    !Array.isArray(recoveredAbort.evidence.effects) ||
+    recoveredAbort.evidence.effects.length !== 1 ||
+    recoveredAbort.evidence.effects[0]?.kind !== "DELETE_BRANCH" ||
+    recoveredAbort.evidence.effects[0]?.status !== "succeeded"
+  )
+    fail("installed abort recovery retry was not bounded to the pending branch deletion");
+
+  const repeatedRecoveredAbort = invokeChange("abort", 416);
+  assertSuccessfulChange(repeatedRecoveredAbort, "change.abort", "ABORTED");
+  if (
+    repeatedRecoveredAbort.evidence?.outcome !== "returned-existing" ||
+    !Array.isArray(repeatedRecoveredAbort.evidence.effects) ||
+    repeatedRecoveredAbort.evidence.effects.length !== 0
+  )
+    fail("installed terminal abort retry duplicated a destructive effect");
+
   const terminal = invokeChange("show", 416);
   if (terminal.ok !== true || terminal.status !== "healthy" || terminal.state !== "ABORTED")
     fail("installed abort retry did not complete the canonical cleanup transition");
