@@ -23,6 +23,7 @@ import {
   type Stats,
 } from "node:fs";
 import { createPrivateKey, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import {
   MAX_UNIX_TIME_SECONDS,
@@ -636,6 +637,13 @@ function ensureParentDirectory(directory: string, createMissing: boolean): void 
   }
 }
 
+function isWithinDirectory(candidatePath: string, directoryPath: string): boolean {
+  const candidate = path.resolve(candidatePath);
+  const directory = path.resolve(directoryPath);
+  const relative = path.relative(directory, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function targetPath(filePath: string): string {
   if (typeof filePath !== "string" || filePath.trim().length === 0 || filePath === "-") {
     throw storageError("SESSION_BUNDLE_INVALID_PATH", "Session bundle file path is required.", filePath);
@@ -643,6 +651,14 @@ function targetPath(filePath: string): string {
   const resolved = path.resolve(filePath);
   if (path.basename(resolved) === "." || path.basename(resolved) === ".." || path.basename(resolved).length === 0) {
     throw storageError("SESSION_BUNDLE_INVALID_PATH", "Session bundle file path is invalid.", resolved);
+  }
+  const osTempDirectory = path.resolve(os.tmpdir());
+  if (isWithinDirectory(resolved, osTempDirectory)) {
+    throw storageError(
+      "SESSION_BUNDLE_UNSAFE_STORAGE",
+      "Session bundle file path cannot be inside the operating system temporary directory.",
+      resolved,
+    );
   }
   return resolved;
 }
