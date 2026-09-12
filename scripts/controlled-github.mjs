@@ -211,6 +211,10 @@ function findPull(state, number) {
   return Object.values(state.pulls ?? {}).find((candidate) => candidate.number === number);
 }
 
+function findPullByNodeId(state, nodeId) {
+  return Object.values(state.pulls ?? {}).find((candidate) => candidate.nodeId === nodeId);
+}
+
 function findIssue(state, number) {
   return state.issues?.[String(number)];
 }
@@ -322,6 +326,24 @@ function createProviderServer(state, statePath, consumerRoot) {
       }
       if (request.method === "POST" && parts.length === 1 && parts[0] === "graphql") {
         const input = await jsonRequest(request);
+        if (input?.operationName === "PullRequestReadyForReview") {
+          const pullRequestId = input?.variables?.input?.pullRequestId;
+          const pull = typeof pullRequestId === "string" ? findPullByNodeId(state, pullRequestId) : undefined;
+          if (pull === undefined || pull.state !== "open" || pull.draft !== true) {
+            sendJson(response, 200, { errors: [{ message: "controlled pull request is not a ready-eligible draft" }] });
+            return;
+          }
+          pull.draft = false;
+          stateChanged(statePath, state);
+          sendJson(response, 200, {
+            data: {
+              markPullRequestReadyForReview: {
+                pullRequest: { id: pull.nodeId, number: pull.number, state: "OPEN", isDraft: false },
+              },
+            },
+          });
+          return;
+        }
         const updates = input?.variables?.input?.refUpdates;
         const update = Array.isArray(updates) ? updates[0] : undefined;
         const reference = typeof update?.name === "string" ? update.name : "";
