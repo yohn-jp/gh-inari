@@ -1445,12 +1445,12 @@ async function writeRepositoryFile(absolutePath: string, content: string): Promi
   try {
     // O_NOFOLLOW binds the final path element to the descriptor before any
     // content is written, eliminating the check-then-write replacement race.
-    // This is a repository projection, not an OS temporary file.
-    // lgtm [js/insecure-temporary-file]
+    // Create files as owner-only to avoid insecure permissions when roots are
+    // located in shared temporary directories.
     handle = await open(
       absolutePath,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
-      0o666,
+      0o600,
     );
     if (!(await handle.stat()).isFile())
       throw new SemanticTemplateError([
