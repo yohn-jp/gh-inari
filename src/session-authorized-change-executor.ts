@@ -95,12 +95,9 @@ export interface CapabilityAuthorizedBranchAdvanceResult {
   readonly operation: "branch.advance";
   readonly status: "succeeded" | "failed";
   readonly outcome: "advanced" | "idempotent" | "stale" | "failed" | "recovery-required";
-  readonly repositoryId?: string;
   readonly branch?: string;
   readonly expectedHead?: string;
-  readonly afterHead?: string;
-  readonly commitSha?: string;
-  readonly treeSha?: string;
+  readonly resultingHead?: string;
 }
 
 export interface CapabilityAuthorizedSessionExecutionResult {
@@ -429,29 +426,24 @@ function boundedBranchResult(input: unknown): CapabilityAuthorizedBranchAdvanceR
   ) {
     return undefined;
   }
-  const optionalText = (key: "repositoryId" | "branch" | "expectedHead" | "afterHead"): string | undefined => {
+  const optionalText = (key: "branch"): string | undefined => {
     const value = input[key];
     if (value === undefined) return undefined;
     return boundedToken(value, 255) ? value : undefined;
   };
-  const repositoryId = optionalText("repositoryId");
   const branch = optionalText("branch");
   const expectedHead =
     input.expectedHead === undefined ? undefined : safeSha(input.expectedHead) ? input.expectedHead : undefined;
-  const afterHead = input.afterHead === undefined ? undefined : safeSha(input.afterHead) ? input.afterHead : undefined;
-  const commitSha = input.commitSha === undefined ? undefined : safeSha(input.commitSha) ? input.commitSha : undefined;
-  const treeSha = input.treeSha === undefined ? undefined : safeSha(input.treeSha) ? input.treeSha : undefined;
+  const resultingHead =
+    input.resultingHead === undefined ? undefined : safeSha(input.resultingHead) ? input.resultingHead : undefined;
   return Object.freeze({
     version: 1,
     operation: "branch.advance",
     status: input.status,
     outcome: input.outcome as CapabilityAuthorizedBranchAdvanceResult["outcome"],
-    ...(repositoryId === undefined ? {} : { repositoryId }),
     ...(branch === undefined ? {} : { branch }),
     ...(expectedHead === undefined ? {} : { expectedHead }),
-    ...(afterHead === undefined ? {} : { afterHead }),
-    ...(commitSha === undefined ? {} : { commitSha }),
-    ...(treeSha === undefined ? {} : { treeSha }),
+    ...(resultingHead === undefined ? {} : { resultingHead }),
   });
 }
 
@@ -463,10 +455,18 @@ function branchFailurePhase(outcome: CapabilityAuthorizedBranchAdvanceResult["ou
 
 function branchRequestFields(input: unknown): {
   readonly branch: string;
-  readonly treeDelta: DelegatedTreeDelta | undefined;
+  readonly treeDelta: DelegatedTreeDelta;
 } {
   if (!isRecord(input) || !boundedText(input.branch, 255)) throw new TypeError("Branch advance request is invalid.");
-  return { branch: input.branch, treeDelta: input.treeDelta as DelegatedTreeDelta | undefined };
+  if (!Array.isArray(input.changes) || input.changes.length === 0)
+    throw new TypeError("Branch advance request is invalid.");
+  const changes = input.changes.map((change) => {
+    if (!isRecord(change) || typeof change.path !== "string") throw new TypeError("Branch advance request is invalid.");
+    if (change.operation === "delete") return { operation: "delete" as const, path: change.path };
+    if (change.operation === "upsert") return { operation: "modify" as const, path: change.path };
+    throw new TypeError("Branch advance request is invalid.");
+  });
+  return { branch: input.branch, treeDelta: { changes } };
 }
 
 export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSessionExecutor {
@@ -693,7 +693,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     signedRequest: unknown,
     operation: "branch.advance",
   ): Promise<CapabilityAuthorizedSessionExecutionResult> {
-    let fields: { readonly branch: string; readonly treeDelta: DelegatedTreeDelta | undefined };
+    let fields: { readonly branch: string; readonly treeDelta: DelegatedTreeDelta };
     const issue = context.task?.kind === "issue" ? context.task.number : undefined;
     try {
       fields = branchRequestFields(signedRequest);

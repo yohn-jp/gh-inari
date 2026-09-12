@@ -3,8 +3,8 @@ import { test } from "node:test";
 import {
   GIT_DATA_CAPABILITY_VERSION,
   GitDataCapabilityError,
-  GitHubGitDataCapability,
-  type GitDataCapabilityTransport,
+  GitHubBranchAdvanceCapabilityImpl,
+  type BranchAdvanceCapabilityTransport,
 } from "./git-data-capability.js";
 import type { IssuerInstallationScope } from "./issuer-authority.js";
 
@@ -29,13 +29,13 @@ const commit = "d".repeat(40);
 const branch = "feat/466-session-authorized-branch-advance";
 
 function transportFor(): {
-  readonly transport: GitDataCapabilityTransport;
+  readonly transport: BranchAdvanceCapabilityTransport;
   readonly requests: Array<Record<string, unknown>>;
   readonly graphql: Array<Record<string, unknown>>;
 } {
   const requests: Array<Record<string, unknown>> = [];
   const graphql: Array<Record<string, unknown>> = [];
-  const transport: GitDataCapabilityTransport = {
+  const transport: BranchAdvanceCapabilityTransport = {
     async request(request) {
       requests.push(request as unknown as Record<string, unknown>);
       if (request.method === "GET" && request.path.includes("/git/ref/heads/")) {
@@ -67,8 +67,8 @@ function transportFor(): {
   return { transport, requests, graphql };
 }
 
-function capability(transport: GitDataCapabilityTransport) {
-  return new GitHubGitDataCapability({
+function capability(transport: BranchAdvanceCapabilityTransport) {
+  return new GitHubBranchAdvanceCapabilityImpl({
     repository,
     repositoryId: repositoryIdentity.repositoryId,
     repositoryNodeId: "R_kgDO466000001",
@@ -80,7 +80,6 @@ function capability(transport: GitDataCapabilityTransport) {
 test("exposes only bounded Git object operations and uses conditional updateRefs", async () => {
   const fake = transportFor();
   const data = capability(fake.transport);
-  assert.equal(data.version, GIT_DATA_CAPABILITY_VERSION);
   assert.deepEqual(await data.readRef(branch), { name: branch, ref: `refs/heads/${branch}`, sha: head });
   assert.deepEqual(await data.readTree(tree), {
     sha: tree,
@@ -103,7 +102,7 @@ test("exposes only bounded Git object operations and uses conditional updateRefs
     }),
     { sha: commit },
   );
-  assert.deepEqual(await data.updateRefs({ branch, beforeOid: head, afterOid: commit, force: false }), {
+  assert.deepEqual(await data.compareAndAdvanceRef({ branch, beforeOid: head, afterOid: commit, force: false }), {
     status: "updated",
   });
   const mutation = fake.graphql[0];
@@ -118,7 +117,7 @@ test("exposes only bounded Git object operations and uses conditional updateRefs
     fake.requests.some((request) => String(request.path).includes("/git/refs")),
     false,
   );
-  assert.equal(Object.keys(data).sort().join(","), "scope,version");
+  assert.equal(Object.keys(data).sort().join(","), "scope");
 });
 
 test("rejects unsupported modes, force updates, malformed provider trees, and scope drift", async () => {
@@ -135,7 +134,7 @@ test("rejects unsupported modes, force updates, malformed provider trees, and sc
     data.updateRefs({ branch, beforeOid: head, afterOid: commit, force: true } as never),
     GitDataCapabilityError,
   );
-  const malformedTransport: GitDataCapabilityTransport = {
+  const malformedTransport: BranchAdvanceCapabilityTransport = {
     ...fake.transport,
     request: async (request) =>
       request.path.includes("/git/trees/")
@@ -144,7 +143,7 @@ test("rejects unsupported modes, force updates, malformed provider trees, and sc
   };
   assert.throws(
     () =>
-      new GitHubGitDataCapability({
+      new GitHubBranchAdvanceCapabilityImpl({
         repository,
         repositoryId: "466000002",
         repositoryNodeId: "R_kgDO466000001",
