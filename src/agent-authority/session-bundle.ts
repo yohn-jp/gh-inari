@@ -22,7 +22,7 @@ import {
   writeSync,
   type Stats,
 } from "node:fs";
-import { createPrivateKey, type KeyObject } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, type KeyObject } from "node:crypto";
 import path from "node:path";
 import {
   MAX_UNIX_TIME_SECONDS,
@@ -39,10 +39,9 @@ import {
   type RuntimeAuthority,
 } from "./runtime-authority.js";
 import {
-  exportManagedSessionPrivateKey,
-  createManagedSession,
   issueSessionCertificate,
-  type ManagedSession,
+  opaqueId,
+  SESSION_ID_BYTES,
   type ManagedSessionIssuanceRequest,
 } from "./session-issuance.js";
 import { exportRuntimeAuthorityPublicKey, type RuntimeAuthorityKeyPair } from "./runtime-key.js";
@@ -112,9 +111,7 @@ export interface ParsedSessionCredentialBundle {
   readonly certificate: DecodedSessionCertificate;
 }
 
-export interface CreatedSessionCredentialBundle extends ParsedSessionCredentialBundle {
-  readonly session: ManagedSession;
-}
+export type CreatedSessionCredentialBundle = ParsedSessionCredentialBundle;
 
 export interface SessionCredentialBundleInspection {
   readonly ok: true;
@@ -524,36 +521,24 @@ export function canonicalSessionCredentialBundleJson(input: SessionCredentialBun
   return canonicalJsonString(parsed.bundle as unknown as CanonicalJsonValue);
 }
 
-/** Generate a fresh Session, issue the canonical #367 certificate, and package it. */
+/** Generate a fresh Session keypair, issue the canonical #367 certificate, and package it. */
 export function createSessionCredentialBundle(options: {
   readonly request: unknown;
   readonly runtimeKey: KeyObject | RuntimeAuthorityKeyPair;
   readonly now?: Date;
 }): CreatedSessionCredentialBundle {
   const request = parseSessionIssuanceRequest(options.request);
-  const session = createManagedSession();
-  let issuanceRequest: ManagedSessionIssuanceRequest;
-  try {
-    issuanceRequest = session.createIssuanceRequest({
-      repository: request.repository,
-      ...(request.task === undefined ? {} : { task: request.task }),
-      capabilities: request.capabilities,
-      ttlSeconds: request.ttlSeconds,
-    });
-  } catch (error: unknown) {
-    throw bundleError(
-      "SESSION_BUNDLE_INVALID_REQUEST",
-      "Session issuance request is outside the managed Session certificate contract.",
-      "$.request",
-      [
-        diagnostic(
-          "SESSION_BUNDLE_INVALID_REQUEST",
-          "$.request",
-          error instanceof Error ? error.message : "Request is invalid.",
-        ),
-      ],
-    );
-  }
+  const sessionId = opaqueId(SESSION_ID_BYTES);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const sessionKey = exportRuntimeAuthorityPublicKey(publicKey);
+  const issuanceRequest: ManagedSessionIssuanceRequest = Object.freeze({
+    sessionId,
+    sessionKey,
+    repository: request.repository,
+    ...(request.task === undefined ? {} : { task: request.task }),
+    capabilities: request.capabilities,
+    ttlSeconds: request.ttlSeconds,
+  });
   let issued;
   try {
     issued = issueSessionCertificate({
@@ -563,7 +548,6 @@ export function createSessionCredentialBundle(options: {
       request: issuanceRequest,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
-    session.acceptCertificate(issued.compact);
   } catch (error: unknown) {
     if (error instanceof SessionCredentialBundleError) throw error;
     const code =
@@ -580,12 +564,11 @@ export function createSessionCredentialBundle(options: {
   const bundle: SessionCredentialBundle = Object.freeze({
     version: SESSION_CREDENTIAL_BUNDLE_VERSION,
     kind: SESSION_CREDENTIAL_BUNDLE_KIND,
-    sessionPrivateKey: sessionPrivateKeyPem(exportManagedSessionPrivateKey(session)),
+    sessionPrivateKey: sessionPrivateKeyPem(privateKey),
     certificate: issued.compact,
     ...(request.agent === undefined ? {} : { agent: request.agent }),
   });
-  const parsed = parseSessionCredentialBundle(bundle);
-  return Object.freeze({ session, ...parsed });
+  return parseSessionCredentialBundle(bundle);
 }
 
 function currentUserId(): number | undefined {

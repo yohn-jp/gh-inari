@@ -46,7 +46,7 @@ import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 import { capabilityClaimWithinCeiling, type CapabilityClaim } from "./capability.js";
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
-const SESSION_ID_BYTES = 18;
+export const SESSION_ID_BYTES = 18;
 const CERTIFICATE_ID_BYTES = 18;
 const VALIDATION_RUNTIME_ID = "session-issuance-validation-runtime";
 const VALIDATION_CERTIFICATE_ID = "session-issuance-validation-certificate";
@@ -223,7 +223,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function opaqueId(bytes: number): string {
+export function opaqueId(bytes: number): string {
   return randomBytes(bytes).toString("base64url");
 }
 
@@ -595,24 +595,6 @@ export function createManagedSession(): ManagedSession {
   Object.freeze(session);
   sessionStates.set(session, Object.freeze({ privateKey }));
   return session;
-}
-
-/**
- * Return the module-owned Session private key for local credential packaging.
- *
- * This is intentionally not a property or method on `ManagedSession`: the
- * managed issuance boundary still exposes only the public key.  Manual
- * packaging is the sole caller that needs to serialize this local secret.
- */
-export function exportManagedSessionPrivateKey(session: ManagedSession): KeyObject {
-  const state = sessionStates.get(session);
-  if (state === undefined) {
-    throw new SessionBootstrapError(
-      "SESSION_BOOTSTRAP_INVALID_REQUEST",
-      "Managed Session signing state is unavailable.",
-    );
-  }
-  return state.privateKey;
 }
 
 /**
