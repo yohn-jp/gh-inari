@@ -103,15 +103,17 @@ function governanceEntries(consumerRoot) {
   const entries = [];
   const blobs = new Map();
   const visit = (directory, prefix) => {
-    for (const name of fs.readdirSync(directory).sort()) {
-      const filePath = path.join(directory, name);
-      const relative = `${prefix}/${name}`;
-      const stat = fs.statSync(filePath);
-      if (stat.isDirectory()) {
+    const dirents = fs
+      .readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const dirent of dirents) {
+      const filePath = path.join(directory, dirent.name);
+      const relative = `${prefix}/${dirent.name}`;
+      if (dirent.isDirectory()) {
         visit(filePath, relative);
         continue;
       }
-      if (!stat.isFile()) throw new Error(`unsupported governance entry: ${relative}`);
+      if (!dirent.isFile()) throw new Error(`unsupported governance entry: ${relative}`);
       const source = fs.readFileSync(filePath, "utf8");
       const sha = sha1Blob(source);
       entries.push({ path: relative, type: "blob", sha });
@@ -454,6 +456,10 @@ function createProviderServer(state, statePath, consumerRoot) {
           return;
         }
         const branch = reference.slice("refs/heads/".length);
+        if (!/^[\w-]+\/\d+-[\w-]+$/u.test(branch)) {
+          sendJson(response, 422, { message: "invalid ref" });
+          return;
+        }
         state.branches[branch] = sha;
         stateChanged(statePath, state);
         sendJson(response, 201, branchBody(branch, sha));
