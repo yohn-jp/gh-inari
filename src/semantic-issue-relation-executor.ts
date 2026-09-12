@@ -19,7 +19,10 @@ import {
   type SemanticIssueRelationMutationPlanResult,
   type SemanticIssueRelationObservedState,
 } from "./semantic-issue-relations.js";
-import type { IssueReference } from "./contract/issue-reference.js";
+import { issueReferenceKey, type IssueReference } from "./contract/issue-reference.js";
+
+/** Bound on the live forward-walk used to re-establish graph safety at execution time. */
+const MAX_GRAPH_WALK_NODES = 200;
 
 function stableSerialize(value: unknown, stack = new WeakSet<object>()): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -236,6 +239,77 @@ function relationState(
   };
 }
 
+interface GraphWalkFailure {
+  readonly code: string;
+  readonly message: string;
+}
+
+/**
+ * Live forward-walk from a proposed new edge's target, re-establishing
+ * whether the subject is currently reachable (a cycle) through *current*
+ * provider state rather than the plan's transported/stale evidence. Only
+ * walks within the target's own repository: a cross-repository target
+ * (already same-owner-verified at admission) is checked at its immediate
+ * hop only, since safely walking a foreign repository's own graph requires
+ * a foreign-repository-scoped observation seam this walk does not build.
+ */
+async function walkForReachability(
+  adapter: GitHubIssueRelationMutationAdapter,
+  homeContext: RepositoryContext,
+  subjectKey: string,
+  start: IssueReference,
+): Promise<{ readonly ok: true } | ({ readonly ok: false } & GraphWalkFailure)> {
+  const visited = new Set<string>();
+  const queue: IssueReference[] = [start];
+  while (queue.length > 0) {
+    const next = queue.shift() as IssueReference;
+    const key = issueReferenceKey(next);
+    if (key === subjectKey)
+      return {
+        ok: false,
+        code: "RELATION_GRAPH_CYCLE",
+        message: "The subject is currently reachable from the proposed new edge; applying it would create a cycle.",
+      };
+    if (visited.has(key)) continue;
+    if (visited.size >= MAX_GRAPH_WALK_NODES)
+      return {
+        ok: false,
+        code: "RELATION_GRAPH_EVIDENCE_UNAVAILABLE",
+        message: "The current relationship graph exceeds the bounded live re-establishment limit.",
+      };
+    visited.add(key);
+    if (
+      next.repositoryHost.toLowerCase() !== homeContext.hostname.toLowerCase() ||
+      next.repositoryId !== homeContext.repositoryId
+    ) {
+      // Foreign-repository hop: checked at this one hop only (already
+      // reached, so already caught above if it were the subject); do not
+      // expand further without a foreign-repository observation seam.
+      continue;
+    }
+    const [parentObservation, blockedByObservation] = await Promise.all([
+      adapter.observeParent(next.number),
+      adapter.observeBlockedBy(next.number),
+    ]);
+    if (parentObservation.kind !== "empty" && parentObservation.kind !== "present")
+      return {
+        ok: false,
+        code: "RELATION_GRAPH_EVIDENCE_UNAVAILABLE",
+        message: "Current parent evidence for a node in the live relationship graph is unavailable.",
+      };
+    if (blockedByObservation.kind !== "empty" && blockedByObservation.kind !== "present")
+      return {
+        ok: false,
+        code: "RELATION_GRAPH_EVIDENCE_UNAVAILABLE",
+        message: "Current dependsOn evidence for a node in the live relationship graph is unavailable.",
+      };
+    if (parentObservation.kind === "present" && parentObservation.reference !== undefined)
+      queue.push(parentObservation.reference);
+    if (blockedByObservation.kind === "present") queue.push(...blockedByObservation.references);
+  }
+  return { ok: true };
+}
+
 function failureEvidence(
   effects: readonly SemanticIssueRelationEffect[],
   statuses: readonly ("succeeded" | "failed")[],
@@ -291,12 +365,25 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
         evidence: evidence("verified", []),
       };
 
-    // Re-evaluate provider capabilities at execution time: capabilities are an
-    // out-of-band operator declaration (never derived from Canon content), so
-    // freshness means comparing what the caller currently asserts against the
-    // frozen snapshot baked into the plan, not trusting the plan alone.
+    // Re-evaluate provider capabilities at execution time. A plan carries only
+    // a frozen snapshot; execution requires the caller to independently
+    // (re-)assert current capabilities every time — silently trusting the
+    // plan when nothing is asserted is exactly the fail-open gap this
+    // rejects.
     const requestedCapabilities = request.capabilities ?? this.#capabilities;
-    if (requestedCapabilities !== undefined && !sameCapabilitySet(requestedCapabilities, plan.capabilities))
+    if (requestedCapabilities === undefined)
+      throw new SemanticIssueRelationExecutorError(
+        "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE",
+        "Execution requires an explicit current-capabilities assertion; a transported plan snapshot cannot be trusted alone.",
+        [
+          diagnostic(
+            "RELATION_CAPABILITIES_UNASSERTED",
+            "$.capabilities",
+            "Current capabilities must be asserted before execution.",
+          ),
+        ],
+      );
+    if (!sameCapabilitySet(requestedCapabilities, plan.capabilities))
       throw new SemanticIssueRelationExecutorError(
         "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE",
         "Execution capabilities do not match the versioned plan.",
@@ -308,39 +395,38 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
           ),
         ],
       );
-    // When the plan is bound to a specific repository Canon generation,
-    // re-resolve the current Effective Issue Contract and reject a plan whose
-    // governance has since changed, before any provider effect.
-    if (plan.generation !== undefined) {
-      let effective: Awaited<ReturnType<typeof compileRepositoryEffectiveIssueContract>>;
-      try {
-        effective = await compileRepositoryEffectiveIssueContract(this.#adapter, this.#selector);
-      } catch (error: unknown) {
-        throw new SemanticIssueRelationExecutorError(
-          "SEMANTIC_ISSUE_RELATION_EXECUTION_READ_FAILED",
-          "The authoritative Issue Canon could not be resolved for native relation execution.",
-          [
-            diagnostic(
-              "RELATION_CANON_RESOLUTION_FAILED",
-              "$.generation",
-              error instanceof Error ? error.message : "Authoritative Issue Canon could not be resolved.",
-            ),
-          ],
-        );
-      }
-      if (stableSerialize(plan.generation) !== stableSerialize(effective.generation))
-        throw new SemanticIssueRelationExecutorError(
-          "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE",
-          "Repository governance changed after the plan was produced.",
-          [
-            diagnostic(
-              "RELATION_GENERATION_MISMATCH",
-              "$.generation",
-              "Plan generation does not match the current repository Canon generation.",
-            ),
-          ],
-        );
+    // Unconditionally re-resolve the current Effective Issue Contract and
+    // reject a plan whose governance has since changed, before any provider
+    // effect — mirroring SemanticIssueExecutor's own always-refresh pattern
+    // rather than skipping the check when a plan happens to omit generation.
+    let effective: Awaited<ReturnType<typeof compileRepositoryEffectiveIssueContract>>;
+    try {
+      effective = await compileRepositoryEffectiveIssueContract(this.#adapter, this.#selector);
+    } catch (error: unknown) {
+      throw new SemanticIssueRelationExecutorError(
+        "SEMANTIC_ISSUE_RELATION_EXECUTION_READ_FAILED",
+        "The authoritative Issue Canon could not be resolved for native relation execution.",
+        [
+          diagnostic(
+            "RELATION_CANON_RESOLUTION_FAILED",
+            "$.generation",
+            error instanceof Error ? error.message : "Authoritative Issue Canon could not be resolved.",
+          ),
+        ],
+      );
     }
+    if (plan.generation === undefined || stableSerialize(plan.generation) !== stableSerialize(effective.generation))
+      throw new SemanticIssueRelationExecutorError(
+        "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE",
+        "Repository governance changed after the plan was produced, or the plan never bound one.",
+        [
+          diagnostic(
+            "RELATION_GENERATION_MISMATCH",
+            "$.generation",
+            "Plan generation does not match the current repository Canon generation.",
+          ),
+        ],
+      );
     const capabilities = relationCapabilities(plan.capabilities);
 
     let context: RepositoryContext;
@@ -397,6 +483,26 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
           ),
         ],
       );
+
+    // Re-establish and validate the bounded relationship graph immediately
+    // before effects: the transported plan.graph is a planning-time snapshot,
+    // and an edge added elsewhere after planning can close a cycle even
+    // though the subject's own direct observed relation is unchanged.
+    const subjectKey = issueReferenceKey(subject);
+    for (const effect of plan.effects) {
+      const walkTarget = effect.kind === "SET_PARENT_RELATION" ? effect.parent : undefined;
+      const walkTargets = effect.kind === "ADD_BLOCKED_BY_RELATION" ? [effect.reference] : [];
+      const targets = walkTarget === undefined ? walkTargets : [walkTarget, ...walkTargets];
+      for (const target of targets) {
+        const walk = await walkForReachability(adapter, context, subjectKey, target);
+        if (!walk.ok)
+          throw new SemanticIssueRelationExecutorError(
+            "SEMANTIC_ISSUE_RELATION_EXECUTION_STALE",
+            "The current relationship graph could not be re-established as safe immediately before effects.",
+            [diagnostic(walk.code, "$.graph", walk.message)],
+          );
+      }
+    }
 
     const statuses: Array<"succeeded" | "failed"> = [];
     for (const effect of plan.effects) {
@@ -502,7 +608,10 @@ export interface ExistingIssueRelationPlanRequest {
   readonly desired: unknown;
   /** Bounded relationship graph evidence; required by Core whenever effects result. */
   readonly graph?: unknown;
+  /** Caller-declared capabilities, bound to the compiled Effective Issue Contract. */
   readonly capabilities: readonly string[];
+  /** Issue Canon template selector, when the repository declares more than one. */
+  readonly selector?: string;
 }
 
 /**
@@ -534,6 +643,44 @@ export async function planExistingIssueRelationReconciliation(
         planDiagnostic("RELATION_INPUT_INVALID", "$.subject.number", "Issue number must be a positive safe integer."),
       ],
     };
+  // Relationship semantics are governed by the repository's Issue Canon, not
+  // an independent authority: refuse to plan when the Canon does not declare
+  // `parent`/`dependsOn` as governed properties, before touching GitHub.
+  let effective: Awaited<ReturnType<typeof compileRepositoryEffectiveIssueContract>>;
+  try {
+    effective = await compileRepositoryEffectiveIssueContract(adapter, request.selector, {
+      capabilities: request.capabilities,
+    });
+  } catch (error: unknown) {
+    return {
+      valid: false,
+      diagnostics: [
+        planDiagnostic(
+          "RELATION_EVIDENCE_UNAVAILABLE",
+          "$.generation",
+          error instanceof Error ? error.message : "Authoritative Issue Canon could not be resolved.",
+        ),
+      ],
+    };
+  }
+  const properties = effective.contract.properties as Readonly<Record<string, { presence?: string }>> | undefined;
+  const governsRelations =
+    properties !== undefined &&
+    properties.parent?.presence !== undefined &&
+    properties.parent.presence !== "unused" &&
+    properties.dependsOn?.presence !== undefined &&
+    properties.dependsOn.presence !== "unused";
+  if (!governsRelations)
+    return {
+      valid: false,
+      diagnostics: [
+        planDiagnostic(
+          "RELATION_INPUT_INVALID",
+          "$.generation",
+          "The repository Issue Canon does not govern parent/dependsOn as relationship properties.",
+        ),
+      ],
+    };
   let context: RepositoryContext;
   let subject: IssueReference;
   try {
@@ -550,7 +697,7 @@ export async function planExistingIssueRelationReconciliation(
   const relationAdapter = new GitHubIssueRelationMutationAdapter(
     adapter,
     context,
-    relationCapabilities(request.capabilities),
+    relationCapabilities(effective.capabilities),
   );
   let parentObservation: Awaited<ReturnType<typeof relationAdapter.observeParent>>;
   let blockedByObservation: Awaited<ReturnType<typeof relationAdapter.observeBlockedBy>>;
@@ -572,7 +719,8 @@ export async function planExistingIssueRelationReconciliation(
     subject,
     desired: request.desired,
     observed,
-    capabilities: request.capabilities,
+    capabilities: effective.capabilities,
+    generation: effective.generation,
     ...(request.graph === undefined ? {} : { graph: request.graph }),
   });
 }

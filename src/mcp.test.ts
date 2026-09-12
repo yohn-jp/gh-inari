@@ -596,6 +596,18 @@ test("native MCP exposes bounded observation tools for Issue, Branch, and PR", a
   }
 });
 
+const issueRelationsCanonSource = JSON.stringify({
+  version: "1",
+  kind: "issue",
+  id: "default",
+  properties: {
+    title: { presence: "required", authority: { kind: "supplied" } },
+    parent: { presence: "optional", authority: { kind: "supplied" } },
+    dependsOn: { presence: "optional", authority: { kind: "supplied" } },
+  },
+  fields: [],
+});
+
 class IssueRelationsMcpTransport implements GhTransport {
   readonly calls: string[][] = [];
   private readonly responses: GhCommandResult[];
@@ -609,6 +621,26 @@ class IssueRelationsMcpTransport implements GhTransport {
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
     if (args.includes("--jq")) return command("100000900\n");
+    if (args.includes("repos/acme/repository-b") && args.includes("GET"))
+      return command(JSON.stringify({ default_branch: "main" }));
+    if (args.some((value) => value.includes("git/trees/")))
+      return command(
+        JSON.stringify({
+          sha: "tree-sha",
+          truncated: false,
+          tree: [{ path: ".github/inari/issues/default.json", type: "blob", sha: "canon-sha" }],
+        }),
+      );
+    if (args.some((value) => value.includes("git/blobs/canon-sha")))
+      return command(
+        JSON.stringify({
+          sha: "canon-sha",
+          encoding: "base64",
+          content: Buffer.from(issueRelationsCanonSource, "utf8").toString("base64"),
+        }),
+      );
+    const path = args.find((value) => value.startsWith("repos/acme/repository-b")) ?? "";
+    if (path.includes("/dependencies/blocked_by")) return command("HTTP/2 200 OK\n\n[]");
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
     return response;
@@ -616,10 +648,7 @@ class IssueRelationsMcpTransport implements GhTransport {
 }
 
 test("native MCP previews an existing-Issue relationship plan without mutation", async () => {
-  const transport = new IssueRelationsMcpTransport([
-    command("HTTP/2 404 Not Found\n\n"),
-    command("HTTP/2 200 OK\n\n[]"),
-  ]);
+  const transport = new IssueRelationsMcpTransport([command("HTTP/2 404 Not Found\n\n")]);
   const server = createInariMcpServer({
     repository: "acme/repository-b",
     createAdapter: (options) => new GitHubAdapter({ ...options, transport }),

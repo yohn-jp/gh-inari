@@ -121,6 +121,7 @@ function plan() {
     desired: { parent: issue(20), dependsOn: [] },
     observed: { parent: undefined, dependsOn: [] },
     capabilities,
+    generation: canonProvenance,
     graph: {
       scope: "complete",
       nodes: [issue(10), issue(20)].map((reference) => ({ reference, dependsOn: [] })),
@@ -134,6 +135,7 @@ function reparentPlan() {
     desired: { parent: issue(20), dependsOn: [] },
     observed: { parent: issue(15), dependsOn: [] },
     capabilities,
+    generation: canonProvenance,
     graph: {
       scope: "complete",
       nodes: [issue(10), issue(15), issue(20)].map((reference) => ({ reference, dependsOn: [] })),
@@ -142,9 +144,14 @@ function reparentPlan() {
 }
 
 test("relation executor reports partial application when a later effect fails", async () => {
-  const transport = new RelationTransport([`HTTP/2 200 OK\n\n${relationIssue(15)}`], "tree-sha", true);
+  const transport = new RelationTransport(
+    [`HTTP/2 200 OK\n\n${relationIssue(15)}`, "HTTP/2 404 Not Found\n\n"],
+    "tree-sha",
+    true,
+  );
   const executor = new SemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
   });
   await assert.rejects(
     executor.execute({ version: "1", plan: reparentPlan() }),
@@ -161,9 +168,14 @@ test("relation executor reports partial application when a later effect fails", 
 });
 
 test("relation executor observes, applies, rereads, and verifies a native parent effect", async () => {
-  const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
+  const transport = new RelationTransport([
+    "HTTP/2 404 Not Found\n\n", // before: subject's own current parent (empty)
+    "HTTP/2 404 Not Found\n\n", // graph walk: the new parent target's own current parent
+    `HTTP/2 200 OK\n\n${relationIssue(20)}`, // after: subject's parent now present
+  ]);
   const executor = new SemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
   });
   const result = await executor.execute({ version: "1", plan: plan() });
   assert.equal(result.evidence.outcome, "verified");
@@ -197,6 +209,7 @@ test("relation executor rejects a plan bound to stale repository governance", as
   const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
   const executor = new SemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
   });
   await assert.rejects(
     executor.execute({ version: "1", plan: staleGenerationPlan }),
@@ -213,9 +226,14 @@ test("relation executor rejects a plan bound to stale repository governance", as
 
 test("relation executor accepts a plan bound to the current repository governance", async () => {
   const currentGenerationPlan = { ...plan(), generation: canonProvenance };
-  const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
+  const transport = new RelationTransport([
+    "HTTP/2 404 Not Found\n\n",
+    "HTTP/2 404 Not Found\n\n",
+    `HTTP/2 200 OK\n\n${relationIssue(20)}`,
+  ]);
   const executor = new SemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
   });
   const result = await executor.execute({ version: "1", plan: currentGenerationPlan });
   assert.equal(result.evidence.outcome, "verified");
@@ -224,10 +242,12 @@ test("relation executor accepts a plan bound to the current repository governanc
 test("relation executor fails closed when the post-effect reread does not match the desired state", async () => {
   const transport = new RelationTransport([
     "HTTP/2 404 Not Found\n\n", // before: matches plan.observed (empty), not stale
+    "HTTP/2 404 Not Found\n\n", // graph walk: the new parent target's own current parent
     "HTTP/2 404 Not Found\n\n", // after: still empty, disagreeing with the desired parent
   ]);
   const executor = new SemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
   });
   await assert.rejects(
     executor.execute({ version: "1", plan: plan() }),
@@ -239,10 +259,51 @@ test("relation executor fails closed when the post-effect reread does not match 
   assert.ok(transport.calls.some((args) => args.includes("POST")));
 });
 
+test("relation executor rejects execution with no capabilities asserted at all", async () => {
+  const transport = new RelationTransport([]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: plan() }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE" &&
+      error.diagnostics.some((entry) => entry.code === "RELATION_CAPABILITIES_UNASSERTED"),
+  );
+  assert.equal(transport.calls.length, 0);
+});
+
+test("relation executor re-establishes the live graph and rejects a cycle formed after planning", async () => {
+  // The plan's own transported graph shows no cycle (20 has no parent at
+  // planning time). Between planning and execution, issue 20 acquires
+  // subject(10) as its own parent out of band -- closing 10 -> 20 -> 10.
+  const transport = new RelationTransport([
+    "HTTP/2 404 Not Found\n\n", // before: subject's own current parent (still empty, not stale)
+    `HTTP/2 200 OK\n\n${relationIssue(10, 1010)}`, // graph walk: issue 20's current parent is now subject(10)
+  ]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: plan() }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_STALE" &&
+      error.diagnostics.some((entry) => entry.code === "RELATION_GRAPH_CYCLE"),
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
 test("relation executor fails stale plans before applying an effect", async () => {
   const transport = new RelationTransport([`HTTP/2 200 OK\n\n${relationIssue(21)}`, "HTTP/2 200 OK\n\n[]"]);
   const executor = new SemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities,
   });
   await assert.rejects(
     executor.execute({ version: "1", plan: plan() }),
