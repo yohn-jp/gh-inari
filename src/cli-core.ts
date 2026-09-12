@@ -2621,7 +2621,16 @@ function isObjectWithCode(value: unknown): value is {
   return typeof value === "object" && value !== null && "code" in value && typeof value.code === "string";
 }
 
+// The precompiled `gh` extension executable (scripts/build-gh-extension-release.sh)
+// bundles this module standalone with no sibling package.json on disk, so its
+// build step injects this constant via esbuild `--define`. The npm/dist build
+// leaves it undefined and this falls back to reading the real package.json.
+declare const __GH_INARI_EMBEDDED_METADATA__: PackageMetadata | undefined;
+
 function readPackageMetadata(): PackageMetadata {
+  if (typeof __GH_INARI_EMBEDDED_METADATA__ !== "undefined") {
+    return __GH_INARI_EMBEDDED_METADATA__;
+  }
   const packagePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
   const value = JSON.parse(requireFile(packagePath)) as Record<string, unknown>;
   if (typeof value.name !== "string" || typeof value.version !== "string") {

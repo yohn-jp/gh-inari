@@ -52,9 +52,12 @@ gh inari --version --json
 
 The package name is `gh-inari`; its npm executables are `gh-inari` and
 `inari`, both resolving to the same entrypoint. The GitHub CLI extension
-command is `gh inari`. The extension launcher bootstraps only production
-dependencies inside its own installation directory and never changes the
-consumer repository.
+command is `gh inari`. On a supported platform, `gh extension install`
+downloads a precompiled, dependency-free `gh-inari` binary from the
+matching GitHub Release; there is no Node runtime requirement and no
+consumer-repository changes are ever made. On an unsupported platform,
+`gh` falls back to a git-clone install that bootstraps only production
+dependencies inside its own installation directory.
 
 Global npm bin directories are environment-specific; use `npx --yes gh-inari`
 instead of repairing shell startup files when `inari` is not found.

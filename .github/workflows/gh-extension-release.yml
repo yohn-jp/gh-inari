@@ -1,0 +1,16 @@
+name: gh extension precompiled release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: yohn-jp/.github/.github/workflows/gh-extension-release.yml@main
+    with:
+      release-tag: ${{ github.event.release.tag_name }}
+    permissions:
+      contents: write

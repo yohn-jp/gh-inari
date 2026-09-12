@@ -69,7 +69,11 @@ try {
 } catch {
   invokedPath = undefined;
 }
-if (invokedPath === fileURLToPath(import.meta.url)) {
+// `import.meta.url` is empty when this module is bundled to CommonJS for the
+// precompiled `gh` extension executable (scripts/build-gh-extension-release.sh
+// uses a dedicated entrypoint instead, so this self-invocation never applies
+// there) — guard so `fileURLToPath` isn't called on an empty URL.
+if (import.meta.url !== "" && invokedPath === fileURLToPath(import.meta.url)) {
   runCli(process.argv.slice(2))
     .then((exitCode) => {
       process.exitCode = exitCode;
