@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createPublicKey, verify as ed25519Verify } from "node:crypto";
 import { test } from "node:test";
+import * as sessionIssuance from "./session-issuance.js";
 import {
   createManagedSession,
   issueSessionCertificate,
@@ -58,6 +59,35 @@ test("managed Sessions generate distinct ephemeral public identities without exp
   assert.equal(first.publicKey.kty, "OKP");
   assert.equal(first.publicKey.crv, "Ed25519");
   assert.equal("d" in first.publicKey, false);
+});
+
+test("no export on this module can recover a managed Session's private key", () => {
+  const session = createManagedSession();
+
+  assert.equal(
+    Reflect.has(sessionIssuance, "exportManagedSessionPrivateKey"),
+    false,
+    "session-issuance.js must not export a private-key extractor for ManagedSession",
+  );
+  const forbiddenNamePattern = /private[-_]?key|privatekey|exportkey|keyobject/iu;
+  for (const exportName of Object.keys(sessionIssuance)) {
+    assert.equal(
+      forbiddenNamePattern.test(exportName),
+      false,
+      `session-issuance.js export "${exportName}" looks like a private-key accessor`,
+    );
+  }
+  for (const propertyName of Object.keys(session)) {
+    assert.notEqual(propertyName, "privateKey");
+  }
+  assert.deepEqual(Object.keys(session).sort(), [
+    "acceptCertificate",
+    "certificate",
+    "createIssuanceRequest",
+    "publicKey",
+    "sessionId",
+    "sign",
+  ]);
 });
 
 test("Session issuance request is a frozen public-only boundary", () => {
