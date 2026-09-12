@@ -4,6 +4,7 @@ export * from "./capability.js";
 export * from "./protected-paths.js";
 export * from "./runtime-authority.js";
 export * from "./runtime-authority-trust.js";
+export * from "./runtime-authority-lifecycle.js";
 export * from "./runtime-key.js";
 export * from "./session-certificate.js";
 export * from "./session-issuance.js";

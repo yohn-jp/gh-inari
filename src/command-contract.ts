@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.5.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.6.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -86,6 +86,9 @@ export type CommandId =
   | "change.ready"
   | "change.abort"
   | "authority.generate"
+  | "authority.register"
+  | "authority.rotate"
+  | "authority.revoke"
   | "session.issue"
   | "session.inspect"
   | "mcp.serve"
@@ -150,6 +153,8 @@ const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
+const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
+const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
 const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
@@ -854,6 +859,35 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     AUTHORITY_OPTIONS,
   ),
   command(
+    "authority.register",
+    "authority",
+    "register",
+    ["authority", "register"],
+    "Register one active Runtime Authority public trust record in the local repository.",
+    AUTHORITY_INPUT_OPTIONS,
+    undefined,
+    "--from <authority.json>",
+  ),
+  command(
+    "authority.rotate",
+    "authority",
+    "rotate",
+    ["authority", "rotate"],
+    "Add one distinct active Runtime Authority for phase-one overlap rotation.",
+    AUTHORITY_INPUT_OPTIONS,
+    undefined,
+    "--from <rotation.json>",
+  ),
+  command(
+    "authority.revoke",
+    "authority",
+    "revoke",
+    ["authority", "revoke"],
+    "Disable one canonical Runtime Authority trust record without deleting it.",
+    AUTHORITY_REVOKE_OPTIONS,
+    "<authority-id>",
+  ),
+  command(
     "session.issue",
     "session",
     "issue",
@@ -1149,8 +1183,14 @@ export function commandUsage(entry: CommandDefinition): string {
           id === "from") ||
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
-        (entry.id === "session.inspect" && id === "from");
-      const syntax = optionSyntax(optionDefinition);
+        (entry.id === "session.inspect" && id === "from") ||
+        ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from");
+      const syntax =
+        entry.id === "authority.register" && id === "from"
+          ? "--from <authority.json>"
+          : entry.id === "authority.rotate" && id === "from"
+            ? "--from <rotation.json>"
+            : optionSyntax(optionDefinition);
       return required ? syntax : `[${syntax}]`;
     })
     .join(" ");
