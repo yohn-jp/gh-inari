@@ -26,6 +26,24 @@ export const CERTIFICATION_ENTRY_COMMANDS = Object.freeze([
   Object.freeze({ name: "Skill discovery", args: ["skill", "--json"] }),
 ]);
 
+export const GOLDEN_PATH_CERTIFICATION_UNAVAILABLE_CODE = "GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE";
+
+function boundedCertificationMessage(value) {
+  const normalized = String(value)
+    .replace(/[\u0000-\u001F\u007F]/gu, " ")
+    .trim();
+  if (normalized.length === 0) return "Certification authority is unavailable.";
+  return normalized.length <= 512 ? normalized : `${normalized.slice(0, 511)}…`;
+}
+
+export class CertificationAuthorityUnavailableError extends Error {
+  constructor(message) {
+    super(boundedCertificationMessage(message));
+    this.name = "CertificationAuthorityUnavailableError";
+    this.code = GOLDEN_PATH_CERTIFICATION_UNAVAILABLE_CODE;
+  }
+}
+
 function isPathInside(directory, candidate) {
   const relativePath = path.relative(path.resolve(directory), path.resolve(candidate));
   return (
@@ -330,12 +348,33 @@ function writePackedEvidence(evidencePath, tarballPath, result = "blocked", diag
 
 function certifyGoldenPathSkill(consumerDirectory, environment) {
   const launcher = path.join(consumerDirectory, "node_modules", ".bin", "inari");
-  const result = jsonOutput(
-    invoke(launcher, ["skill", "golden-path", "--json"], { cwd: consumerDirectory, env: environment }),
-    "installed inari skill golden-path --json",
-  );
-  if (result.id !== "golden-path" || !Array.isArray(result.workflow) || result.workflow.length === 0)
-    fail("installed inari skill golden-path returned an invalid playbook");
+  const invocation = invoke(launcher, ["skill", "golden-path", "--json"], {
+    cwd: consumerDirectory,
+    env: environment,
+  });
+  if (invocation.error !== undefined) {
+    throw new CertificationAuthorityUnavailableError(
+      `installed inari skill golden-path could not be started: ${invocation.error.message}`,
+    );
+  }
+  if (invocation.status !== 0) {
+    throw new CertificationAuthorityUnavailableError(
+      "installed artifact does not expose the finalized inari skill golden-path contract",
+    );
+  }
+  let result;
+  try {
+    result = JSON.parse((invocation.stdout ?? "").trim());
+  } catch {
+    throw new CertificationAuthorityUnavailableError(
+      "installed artifact returned a non-JSON inari skill golden-path result",
+    );
+  }
+  if (result.id !== "golden-path" || !Array.isArray(result.workflow) || result.workflow.length === 0) {
+    throw new CertificationAuthorityUnavailableError(
+      "installed artifact returned no finalized inari skill golden-path playbook",
+    );
+  }
   return result;
 }
 
@@ -453,144 +492,6 @@ function certifyNpxFallback(rootDirectory, tarballPath, externalExecutables) {
     fail("npx packed execution modified the fresh consumer package.json");
 }
 
-function readRunnerResult(resultPath, label) {
-  if (!fs.existsSync(resultPath)) fail(`${label} did not write a result`);
-  try {
-    return JSON.parse(fs.readFileSync(resultPath, "utf8"));
-  } catch (error) {
-    fail(`${label} wrote invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-function invokePackedGoldenPathRunner(
-  certificationRoot,
-  packageDirectory,
-  consumerDirectory,
-  statePath,
-  sequence,
-  issue,
-  operation,
-  extra = {},
-) {
-  const requestPath = path.join(certificationRoot, `runner-request-${String(sequence)}.json`);
-  const resultPath = path.join(certificationRoot, `runner-result-${String(sequence)}.json`);
-  const request = {
-    version: 1,
-    operation,
-    issue,
-    requester: "github:packed-certification",
-    ...extra,
-  };
-  fs.writeFileSync(requestPath, JSON.stringify(request));
-  const runner = path.join(repoRoot, "scripts", "packed-golden-path-runner.mjs");
-  const result = invoke(
-    process.execPath,
-    [
-      runner,
-      "--package-root",
-      packageDirectory,
-      "--consumer-root",
-      consumerDirectory,
-      "--state",
-      statePath,
-      "--request",
-      JSON.stringify(request),
-      "--result",
-      resultPath,
-    ],
-    { cwd: consumerDirectory },
-  );
-  if (result.error !== undefined) fail(`packed Golden Path runner failed to start: ${result.error.message}`);
-  if (result.status !== 0) fail(`packed Golden Path runner exited ${String(result.status)}: ${result.stderr ?? ""}`);
-  return readRunnerResult(resultPath, `packed Golden Path runner ${operation}`);
-}
-
-function successfulRunnerResult(result, label) {
-  if (result?.ok === false) fail(`${label} failed: ${result.error?.message ?? JSON.stringify(result.error ?? result)}`);
-  if (result?.projection === undefined) fail(`${label} did not return a Change projection`);
-  return result;
-}
-
-function assertExecutionOutcome(result, expected, label) {
-  if (result?.evidence?.outcome !== expected)
-    fail(`${label} returned outcome ${String(result?.evidence?.outcome)}, expected ${expected}`);
-}
-
-function createGovernedConsumer(certificationRoot) {
-  const consumerDirectory = path.join(certificationRoot, "governed-repository");
-  fs.mkdirSync(consumerDirectory);
-  fs.cpSync(path.join(repoRoot, ".github"), path.join(consumerDirectory, ".github"), { recursive: true });
-  return consumerDirectory;
-}
-
-function certifyCompleteGoldenPath(certificationRoot, installedPackageDirectory) {
-  const consumerDirectory = createGovernedConsumer(certificationRoot);
-  const statePath = path.join(certificationRoot, "golden-path-state.json");
-  let sequence = 0;
-  const invokeRunner = (issue, operation, extra = {}) => {
-    sequence += 1;
-    return invokePackedGoldenPathRunner(
-      certificationRoot,
-      installedPackageDirectory,
-      consumerDirectory,
-      statePath,
-      sequence,
-      issue,
-      operation,
-      extra,
-    );
-  };
-
-  const firstIssue = successfulRunnerResult(invokeRunner(415, "issue"), "first Change issuance");
-  assertExecutionOutcome(firstIssue, "verified", "first Change issuance");
-  if (firstIssue.projection.change?.state !== "DRAFT") fail("first Change issuance did not produce DRAFT");
-  const existingIssue = successfulRunnerResult(invokeRunner(415, "issue"), "idempotent Change issuance");
-  assertExecutionOutcome(existingIssue, "returned-existing", "idempotent Change issuance");
-  if (existingIssue.projection.change?.identity.rootIssue !== 415)
-    fail("idempotent Change issuance returned the wrong root Issue");
-
-  const handoff = invokeRunner(415, "handoff");
-  if (handoff.ok === false || handoff.handoff?.state !== "DRAFT")
-    fail(`implementation handoff was not verified: ${JSON.stringify(handoff)}`);
-  if (
-    handoff.handoff.branch !== firstIssue.projection.canonicalBranch ||
-    handoff.handoff.pullRequest !== firstIssue.projection.change?.projection?.pullRequest
-  )
-    fail("implementation handoff did not preserve canonical Change identities");
-
-  const readyStatus = invokeRunner(415, "status");
-  if (readyStatus.status?.status?.phase !== "READY")
-    fail(`status did not expose the implementation-to-Ready boundary: ${JSON.stringify(readyStatus.status)}`);
-
-  const ready = successfulRunnerResult(invokeRunner(415, "ready"), "first Ready transition");
-  assertExecutionOutcome(ready, "verified", "first Ready transition");
-  if (ready.projection.change?.state !== "REVIEW") fail("Ready transition did not produce REVIEW");
-  const reread = successfulRunnerResult(invokeRunner(415, "show"), "authoritative Ready reread");
-  if (reread.projection.change?.state !== "REVIEW") fail("authoritative Ready reread did not prove REVIEW");
-  const retry = successfulRunnerResult(invokeRunner(415, "ready"), "idempotent Ready retry");
-  assertExecutionOutcome(retry, "returned-existing", "idempotent Ready retry");
-  const reviewStatus = invokeRunner(415, "status", { executionOutcome: ready.evidence.outcome });
-  if (reviewStatus.status?.status?.phase !== "REVIEW")
-    fail(`status did not expose REVIEW after Ready: ${JSON.stringify(reviewStatus.status)}`);
-
-  const recoveryIssue = successfulRunnerResult(invokeRunner(416, "issue"), "recovery Change issuance");
-  assertExecutionOutcome(recoveryIssue, "verified", "recovery Change issuance");
-  successfulRunnerResult(invokeRunner(416, "ready"), "recovery Change Ready transition");
-  const abort = invokeRunner(416, "abort");
-  const abortEvidence = abort.ok === false ? abort.error?.details?.evidence : abort.evidence;
-  if (abortEvidence?.outcome !== "recovery-required")
-    fail(`abort failure did not produce bounded recovery evidence: ${JSON.stringify(abort)}`);
-  const recoveryProjection = invokeRunner(416, "recovery", { evidence: abortEvidence });
-  if (recoveryProjection.recovery?.owner !== "recovery" || recoveryProjection.recovery?.rereadRequired !== true)
-    fail(`recovery projection was not bounded: ${JSON.stringify(recoveryProjection)}`);
-  const recovered = successfulRunnerResult(invokeRunner(416, "abort"), "recovery retry");
-  assertExecutionOutcome(recovered, "verified", "recovery retry");
-  if (recovered.projection.change?.state !== "ABORTED") fail("recovery retry did not produce ABORTED");
-  const terminalStatus = invokeRunner(416, "status");
-  if (terminalStatus.status?.status?.phase !== "TERMINAL")
-    fail(`status did not expose terminal recovery state: ${JSON.stringify(terminalStatus.status)}`);
-}
-
 function main() {
   const { tarball, evidence, certifyGoldenPath } = parseArgs(process.argv.slice(2));
   let tarballPath;
@@ -646,6 +547,9 @@ function main() {
     if (certifyGoldenPath) {
       console.log("checking the installed inari skill golden-path contract...");
       certifyGoldenPathSkill(consumerDirectory, installedEnvironment);
+      throw new CertificationAuthorityUnavailableError(
+        "complete packed Golden Path certification is blocked until the integrated entry, handoff, review, and status/recovery contracts are shipped by the installed artifact",
+      );
     }
     certifyNpxFallback(certificationRoot, tarballPath, externalExecutables);
 
@@ -676,12 +580,7 @@ function main() {
     );
     validateVersionOutput(extensionVersion, packageJson);
 
-    if (certifyGoldenPath) {
-      console.log("exercising the complete installed Golden Path with deterministic provider I/O...");
-      certifyCompleteGoldenPath(certificationRoot, installedPackageDirectory);
-    }
-
-    console.log("packed Golden Path preflight and entry certification passed.");
+    console.log("packed artifact preflight and entry certification passed.");
     if (evidence !== undefined) {
       if (certifyGoldenPath) writePackedEvidence(evidence, tarballPath, "passed", []);
       else
@@ -693,6 +592,21 @@ function main() {
         ]);
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
     }
+  } catch (error) {
+    const authorityUnavailable = error instanceof CertificationAuthorityUnavailableError;
+    if (evidence !== undefined) {
+      writePackedEvidence(evidence, tarballPath, authorityUnavailable ? "blocked" : "failed", [
+        {
+          code: authorityUnavailable ? error.code : "PACKED_CERTIFICATION_FAILED",
+          message: boundedCertificationMessage(error instanceof Error ? error.message : error),
+        },
+      ]);
+      console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
+    }
+    if (authorityUnavailable) {
+      console.error(`packed Golden Path certification blocked: ${error.message}`);
+      process.exitCode = 1;
+    } else throw error;
   } finally {
     fs.rmSync(certificationRoot, { recursive: true, force: true });
     if (ownsTarball && tarballPath !== undefined) fs.rmSync(tarballPath, { force: true });

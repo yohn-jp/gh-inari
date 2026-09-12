@@ -45,6 +45,25 @@ test("validates the frozen packed-artifact evidence envelope", () => {
   );
 });
 
+test("accepts blocked packed evidence with bounded authority diagnostics", () => {
+  const evidence = packedEvidence({
+    result: "blocked",
+    diagnostics: [
+      {
+        code: "GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE",
+        message: "The integrated Golden Path contract is not present in the installed artifact.",
+      },
+    ],
+  });
+  assert.deepEqual(validateCertificationEvidence(evidence), {
+    valid: true,
+    errors: [],
+    evidence,
+    diagnostics: evidence.diagnostics,
+  });
+  assert.doesNotThrow(() => assertCertificationEvidence(evidence));
+});
+
 test("serializes evidence with deterministic key order", () => {
   const evidence = packedEvidence();
   assert.equal(

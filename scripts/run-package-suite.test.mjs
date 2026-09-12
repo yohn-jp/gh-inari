@@ -169,3 +169,10 @@ test("packed certification has no checked-out source execution path", () => {
   assert.match(script, /--diagnose/u);
   assert.doesNotMatch(script, /src[\\/]index\.ts|sourceEntry|workspace:\s/u);
 });
+
+test("complete certification fails closed instead of emulating unavailable Golden Path contracts", () => {
+  const smokeScript = fs.readFileSync(path.join(import.meta.dirname, "smoke-test.mjs"), "utf8");
+  assert.match(smokeScript, /GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE/u);
+  assert.match(smokeScript, /tarballPath, "blocked"/u);
+  assert.doesNotMatch(smokeScript, /packed-golden-path-runner|TrustedChangeExecutor|CREATE_PULL_REQUEST/u);
+});
