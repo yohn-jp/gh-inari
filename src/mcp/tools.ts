@@ -62,6 +62,7 @@ import {
   type ChangeRemoteExecutorOptions,
 } from "../change-executor.js";
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
+import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
@@ -84,6 +85,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_plan",
   "inari_pr_observe",
   "inari_pr_drift",
+  "inari_golden_path_entry",
   "inari_change_handoff",
 ] as const);
 
@@ -203,6 +205,13 @@ export const implementationHandoffInputSchema = z.strictObject({
 /** Compatibility name for callers that prefix the handoff with Change. */
 export const changeImplementationHandoffInputSchema = implementationHandoffInputSchema;
 
+/** Input schema for the read-only Golden Path entry/action projection. */
+export const goldenPathEntryInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  issue: artifactNumberSchema,
+});
+export type GoldenPathEntryInput = z.infer<typeof goldenPathEntryInputSchema>;
+
 export type SemanticPullRequestContractInput = z.infer<typeof semanticPullRequestContractInputSchema>;
 export type SemanticPullRequestMaterializeInput = z.infer<typeof semanticPullRequestMaterializeInputSchema>;
 export type SemanticPullRequestPlanInput = z.infer<typeof semanticPullRequestPlanInputSchema>;
@@ -316,6 +325,20 @@ export const implementationHandoffOutputSchema = z
   .strict();
 
 export const changeImplementationHandoffOutputSchema = implementationHandoffOutputSchema;
+
+/** Structured output schema for a read-only Golden Path entry projection. */
+export const goldenPathEntryOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("golden-path.entry"),
+    issue: artifactNumberSchema,
+    entry: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+    preview: z.literal(true),
+    mutation: z.literal(false),
+  })
+  .strict();
 
 function adapterFor(
   requestRepository: string | undefined,
@@ -547,6 +570,51 @@ async function handleImplementationHandoff(
         diagnostics: diagnosticsForError(error),
       },
       "Implementation handoff is unavailable; see diagnostics.",
+    );
+  }
+}
+
+/**
+ * Read the existing Change projection and expose the shared Golden Path
+ * entry/action result without allowing the read-only MCP surface to issue a
+ * Change. A missing Change remains fail-closed because this adapter cannot
+ * establish governed root-Issue evidence for a create action.
+ */
+async function handleGoldenPathEntry(
+  input: GoldenPathEntryInput,
+  dependencies: NativeChangeDependencies,
+): Promise<CallToolResult> {
+  try {
+    const executor = changeExecutorFor(input.repository, dependencies);
+    const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    const entry = tryProjectGoldenPathEntry({ projection, requireGovernedIssue: false });
+    return result(
+      {
+        ok: entry.valid,
+        valid: entry.valid,
+        operation: "golden-path.entry",
+        issue: input.issue,
+        entry,
+        diagnostics: entry.diagnostics,
+        preview: true,
+        mutation: false,
+      },
+      entry.valid
+        ? "Read the Golden Path entry and existing Change action through Core."
+        : "Golden Path entry is not actionable; see diagnostics.",
+    );
+  } catch (error: unknown) {
+    return result(
+      {
+        ok: false,
+        valid: false,
+        operation: "golden-path.entry",
+        issue: input.issue,
+        diagnostics: diagnosticsForError(error),
+        preview: true,
+        mutation: false,
+      },
+      "Golden Path entry is unavailable; see diagnostics.",
     );
   }
 }
@@ -1360,6 +1428,18 @@ export function registerChangeTools(
   server: McpServer,
   dependencies: NativeChangeDependencies = {},
 ): readonly RegisteredTool[] {
+  const goldenPathEntry = server.registerTool(
+    "inari_golden_path_entry",
+    {
+      title: "Read Golden Path entry",
+      description:
+        "Read the existing Change projection and expose the shared Golden Path entry/action result. This MCP tool is read-only; Change issuance remains owned by the existing CLI/Actions executor boundary.",
+      inputSchema: goldenPathEntryInputSchema,
+      outputSchema: goldenPathEntryOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: GoldenPathEntryInput) => handleGoldenPathEntry(input, dependencies),
+  );
   const handoff = server.registerTool(
     "inari_change_handoff",
     {
@@ -1372,10 +1452,11 @@ export function registerChangeTools(
     },
     async (input: ImplementationHandoffInput) => handleImplementationHandoff(input, dependencies),
   );
-  return Object.freeze([handoff]);
+  return Object.freeze([goldenPathEntry, handoff]);
 }
 
 /** Publicly expose the protocol annotations without allowing mutation. */
 export const SEMANTIC_PULL_REQUEST_MCP_ANNOTATIONS = READ_ONLY;
 export const SEMANTIC_ISSUE_MCP_ANNOTATIONS = READ_ONLY;
 export const SEMANTIC_BRANCH_MCP_ANNOTATIONS = READ_ONLY;
+export const GOLDEN_PATH_ENTRY_MCP_ANNOTATIONS = READ_ONLY;

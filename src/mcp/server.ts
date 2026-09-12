@@ -34,7 +34,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
     },
     {
       instructions:
-        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, and the canonical Change implementation handoff. Inari Core and the repository Canon remain authoritative; this server performs no GitHub mutation.",
+        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action projection, and the canonical Change implementation handoff. Inari Core and the repository Canon remain authoritative; this server performs no GitHub mutation.",
     },
   );
   registerSemanticIssueTools(server, options);

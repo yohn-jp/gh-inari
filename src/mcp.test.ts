@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createInariMcpServer } from "./mcp/server.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
 import { ChangeRemoteExecutorError } from "./change-executor.js";
+import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 
 function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
   return { stdout, exitCode, stderr };
@@ -242,6 +243,7 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
         "inari_pr_plan",
         "inari_pr_observe",
         "inari_pr_drift",
+        "inari_golden_path_entry",
         "inari_change_handoff",
       ].sort(),
     );
@@ -281,6 +283,101 @@ function changeHandoffProjection(draft = true): Record<string, unknown> {
     diagnostics: [],
   };
 }
+
+test("native MCP exposes the shared Golden Path entry/action projection read-only", async () => {
+  const calls: string[] = [];
+  let mutations = 0;
+  const projection = changeHandoffProjection();
+  const expected = tryProjectGoldenPathEntry({ projection, requireGovernedIssue: false });
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        mutations += 1;
+        throw new Error("Golden Path entry must not mutate");
+      },
+      async read(request) {
+        calls.push(request.operation);
+        return projection as never;
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-golden-path-entry-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({
+      name: "inari_golden_path_entry",
+      arguments: { issue: 42 },
+    });
+    const content = structuredContent(response.structuredContent);
+    assert.equal(response.isError, undefined);
+    assert.equal(content.ok, true);
+    assert.equal(content.valid, true);
+    assert.equal(content.preview, true);
+    assert.equal(content.mutation, false);
+    assert.deepEqual(content.entry, expected);
+    assert.deepEqual(record(record(content.entry).action), {
+      operation: "change.issue",
+      issue: 42,
+      mode: "return-existing",
+    });
+    assert.deepEqual(calls, ["show"]);
+    assert.equal(mutations, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("native MCP Golden Path entry fails closed for an absent Change", async () => {
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("Golden Path entry must not mutate");
+      },
+      async read() {
+        return {
+          valid: true,
+          status: "absent",
+          canonicalBranch: "feat/42-canonical-change",
+          canonicalBaseBranch: "main",
+          candidates: { branches: [], pullRequests: [] },
+          change: {
+            version: 1,
+            identity: { repositoryHost: "github.com", repositoryId: "100000219", rootIssue: 42 },
+            state: "DEFINED",
+            provenance: {},
+          },
+          diagnostics: [],
+        } as never;
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-golden-path-entry-absent-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({
+      name: "inari_golden_path_entry",
+      arguments: { issue: 42 },
+    });
+    const content = structuredContent(response.structuredContent);
+    const entry = record(content.entry);
+    assert.equal(content.ok, false);
+    assert.equal(content.valid, false);
+    assert.equal(entry.action, undefined);
+    assert.ok(
+      (entry.diagnostics as unknown[]).some(
+        (diagnostic) => record(diagnostic).code === "GOLDEN_PATH_GOVERNED_ISSUE_REQUIRED",
+      ),
+    );
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
 
 test("native MCP exposes the canonical implementation handoff through the Change read boundary", async () => {
   const calls: string[] = [];
