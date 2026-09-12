@@ -40,6 +40,26 @@ export const RUNTIME_AUTHORITY_ROTATION_KIND = "runtime-authority-rotation" as c
 export const RUNTIME_AUTHORITY_ROTATION_VERSION = 1 as const;
 export const MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES = 1_048_576 as const;
 
+/**
+ * Return the platform's race-safe no-follow flag, failing closed when it is
+ * unavailable.  The supplied value keeps the unsupported-platform boundary
+ * directly testable without mutating Node's read-only fs constants.
+ */
+export function requireRuntimeAuthorityNoFollowFlag(
+  value: unknown,
+  operation: RuntimeAuthorityLifecycleOperation = "register",
+): number {
+  if (typeof value !== "number") {
+    throw lifecycleError(
+      "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED",
+      "This platform cannot safely reject Runtime Authority artifact symlinks.",
+      operation,
+      { reason: "O_NOFOLLOW is unavailable" },
+    );
+  }
+  return value;
+}
+
 export interface RuntimeAuthorityRotation {
   readonly version: typeof RUNTIME_AUTHORITY_ROTATION_VERSION;
   readonly kind: typeof RUNTIME_AUTHORITY_ROTATION_KIND;
@@ -252,7 +272,10 @@ function ensureAuthorityDirectory(root: string, operation: RuntimeAuthorityLifec
 function readBoundedFile(filePath: string, operation: RuntimeAuthorityLifecycleOperation): string {
   let fd: number | undefined;
   try {
-    fd = openSync(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    fd = openSync(
+      filePath,
+      fsConstants.O_RDONLY | requireRuntimeAuthorityNoFollowFlag(fsConstants.O_NOFOLLOW, operation),
+    );
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw lifecycleError(
@@ -611,7 +634,7 @@ function writeExclusive(
   content: string,
   operation: RuntimeAuthorityLifecycleOperation,
 ): void {
-  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  const noFollow = requireRuntimeAuthorityNoFollowFlag(fsConstants.O_NOFOLLOW, operation);
   const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow;
   let fd: number | undefined;
   let created = false;
@@ -666,7 +689,7 @@ function writeExisting(
   content: string,
   operation: RuntimeAuthorityLifecycleOperation,
 ): void {
-  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  const noFollow = requireRuntimeAuthorityNoFollowFlag(fsConstants.O_NOFOLLOW, operation);
   let fd: number | undefined;
   try {
     fd = openSync(absolutePath, fsConstants.O_WRONLY | fsConstants.O_TRUNC | noFollow);

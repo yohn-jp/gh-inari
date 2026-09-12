@@ -13,6 +13,10 @@ import {
   type RuntimeAuthority,
 } from "./agent-authority/runtime-authority.js";
 import { loadRuntimeAuthorityKeyPair } from "./agent-authority/runtime-key.js";
+import {
+  RuntimeAuthorityLifecycleError,
+  requireRuntimeAuthorityNoFollowFlag,
+} from "./agent-authority/runtime-authority-lifecycle.js";
 
 interface CapturedOutput {
   readonly exitCode: number;
@@ -72,6 +76,16 @@ async function writeInput(repositoryRoot: string, name: string, value: unknown):
 function jsonOutput(result: CapturedOutput): Record<string, unknown> {
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
+
+test("Runtime Authority storage fails closed when O_NOFOLLOW is unavailable", () => {
+  assert.throws(
+    () => requireRuntimeAuthorityNoFollowFlag(undefined, "register"),
+    (error: unknown) =>
+      error instanceof RuntimeAuthorityLifecycleError &&
+      error.code === "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED" &&
+      error.details.reason === "O_NOFOLLOW is unavailable",
+  );
+});
 
 test("authority generate writes a local key, exports public material, and does not register trust", async () => {
   const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-cli-"));
