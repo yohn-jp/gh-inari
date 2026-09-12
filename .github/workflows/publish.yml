@@ -14,6 +14,9 @@ permissions:
 jobs:
   publish:
     uses: yohn-jp/.github/.github/workflows/npm-publish.yml@main
+    with:
+      certification-verification-script: scripts/verify-release-certification.mjs
     permissions:
+      actions: read
       contents: read
       id-token: write
