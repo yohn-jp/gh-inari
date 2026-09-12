@@ -36,7 +36,7 @@ export const TRUSTED_EXECUTION_RUNTIME = "github-actions" as const;
 export const TRUSTED_EXECUTION_EVENTS = Object.freeze(["workflow_dispatch", "workflow_call"] as const);
 export type TrustedExecutionEvent = (typeof TRUSTED_EXECUTION_EVENTS)[number];
 
-export const ISSUER_PERMISSION_NAMES = Object.freeze(["contents", "pull_requests", "metadata"] as const);
+export const ISSUER_PERMISSION_NAMES = Object.freeze(["contents", "issues", "pull_requests", "metadata"] as const);
 export type IssuerPermissionName = (typeof ISSUER_PERMISSION_NAMES)[number];
 export const ISSUER_PERMISSION_ACCESS = Object.freeze(["read", "write"] as const);
 export type IssuerPermissionAccess = (typeof ISSUER_PERMISSION_ACCESS)[number];
@@ -45,11 +45,13 @@ export type IssuerPermissionAccess = (typeof ISSUER_PERMISSION_ACCESS)[number];
 export type IssuerPermissionSet = Readonly<Partial<Record<IssuerPermissionName, IssuerPermissionAccess>>>;
 
 /**
- * The App manifest ceiling. No Issues, administration, Actions, contents
- * administration, review, or merge permission is part of the issuer role.
+ * The App manifest ceiling. Issues are read-only for pre-admission evidence;
+ * no Issue mutation, administration, Actions, contents administration,
+ * review, or merge permission is part of the issuer role.
  */
 export const INARI_ISSUER_MAXIMUM_PERMISSIONS: IssuerPermissionSet = Object.freeze({
   contents: "write",
+  issues: "read",
   pull_requests: "write",
 });
 
@@ -508,6 +510,18 @@ function validatePermissionSet(
   if (requiredPermissions !== undefined) {
     const requiredResult = validatePermissionSet(requiredPermissions, "$.requiredPermissions", undefined, diagnostics);
     if (requiredResult !== undefined) {
+      for (const [key, requiredAccess] of Object.entries(requiredResult)) {
+        const maximum = INARI_ISSUER_MAXIMUM_PERMISSIONS[key as keyof typeof INARI_ISSUER_MAXIMUM_PERMISSIONS];
+        if (key !== "metadata" && (maximum === undefined || (maximum === "read" && requiredAccess === "write"))) {
+          diagnostics.push(
+            createDiagnostic(
+              "ISSUER_PERMISSION_MISMATCH",
+              `$.requiredPermissions.${key}`,
+              "Requested permission exceeds the issuer App ceiling.",
+            ),
+          );
+        }
+      }
       for (const [key, requiredAccess] of Object.entries(requiredResult)) {
         const actualAccess = normalized[key as IssuerPermissionName];
         if (actualAccess !== requiredAccess) {

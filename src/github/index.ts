@@ -1,4 +1,5 @@
 export * from "./adapter.js";
+export * from "./app-installation-credential-broker.js";
 export * from "./change-effect-adapter.js";
 export * from "./actions-change-executor.js";
 export * from "./change-actions-remote-executor.js";
