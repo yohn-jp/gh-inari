@@ -43,6 +43,13 @@ test("plans reparenting and dependency removal/addition in stable order", () => 
     desired: { parent: issue(8), dependsOn: [issue(5)] },
     observed: { parent: issue(2), dependsOn: [issue(3), issue(5)] },
     capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(1), issue(2), issue(3), issue(5), issue(8)].map((reference) => ({
+        reference,
+        dependsOn: [],
+      })),
+    },
   });
   assert.deepEqual(plan.effects, [
     { kind: "CLEAR_PARENT_RELATION", previousParent: issue(2) },
@@ -68,6 +75,10 @@ test("supports an explicit native empty target for no-op and parent removal", ()
     desired: { parent: { representation: "native" }, dependsOn: [] },
     observed: { parent: issue(2), dependsOn: [] },
     capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(1), issue(2)].map((reference) => ({ reference, dependsOn: [] })),
+    },
   });
   assert.deepEqual(remove.effects, [{ kind: "CLEAR_PARENT_RELATION", previousParent: issue(2) }]);
 
@@ -102,6 +113,43 @@ test("rejects cross-repository native relations and incomplete graph evidence", 
   assert.ok(incomplete.diagnostics.some((entry) => entry.code === "RELATION_EVIDENCE_UNAVAILABLE"));
 });
 
+test("rejects a same-owner cross-repository parent even when a legacy capability is declared", () => {
+  const otherRepo = { repositoryHost: "github.com", repositoryId: "200", repository: "acme/other" };
+  const crossRepositoryParent = issue(2, otherRepo);
+  const rejected = tryPlanSemanticIssueRelations({
+    subject: issue(1),
+    desired: { parent: crossRepositoryParent, dependsOn: [] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(1), crossRepositoryParent].map((reference) => ({ reference, dependsOn: [] })),
+    },
+  });
+  assert.equal(rejected.valid, false);
+  assert.ok(rejected.diagnostics.some((entry) => entry.code === "RELATION_CROSS_REPOSITORY_UNSUPPORTED"));
+
+  const capabilityGranted = tryPlanSemanticIssueRelations({
+    subject: issue(1),
+    desired: { parent: crossRepositoryParent, dependsOn: [] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities: [...capabilities, "github.issue.parent.native.cross-repository-same-owner"],
+    graph: {
+      scope: "complete",
+      nodes: [issue(1), crossRepositoryParent].map((reference) => ({ reference, dependsOn: [] })),
+    },
+  });
+  assert.equal(capabilityGranted.valid, false);
+  assert.ok(
+    capabilityGranted.diagnostics.some(
+      (entry) =>
+        entry.code === "RELATION_CROSS_REPOSITORY_UNSUPPORTED" &&
+        entry.path === "$.desired.parent" &&
+        entry.message.includes("foreign-repository graph evidence is unavailable"),
+    ),
+  );
+});
+
 test("rejects parent and dependency cycles before effects", () => {
   const parentCycle = validateIssueRelationshipGraph({
     nodes: [
@@ -120,6 +168,95 @@ test("rejects parent and dependency cycles before effects", () => {
   });
   assert.equal(dependencyCycle.valid, false);
   assert.ok(dependencyCycle.diagnostics.some((entry) => entry.code === "RELATION_DEPENDENCY_CYCLE"));
+});
+
+test("rejects a new parent edge that closes an already-existing multi-hop cycle path", () => {
+  // Existing chain: 1's parent is 2; 2's parent is 3. Proposing 3's parent as
+  // 1 would close the cycle 3 -> 1 -> 2 -> 3, not just a direct 2-node cycle.
+  const result = tryPlanSemanticIssueRelations({
+    subject: issue(3),
+    desired: { parent: issue(1), dependsOn: [] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [
+        { reference: issue(1), parent: issue(2), dependsOn: [] },
+        { reference: issue(2), parent: issue(3), dependsOn: [] },
+        { reference: issue(3), dependsOn: [] },
+      ],
+    },
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "RELATION_PARENT_CYCLE"));
+
+  // The equivalent dependency chain must also be rejected when the new edge
+  // would close a multi-hop `dependsOn` cycle.
+  const dependencyResult = tryPlanSemanticIssueRelations({
+    subject: issue(3),
+    desired: { parent: undefined, dependsOn: [issue(1)] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [
+        { reference: issue(1), dependsOn: [issue(2)] },
+        { reference: issue(2), dependsOn: [issue(3)] },
+        { reference: issue(3), dependsOn: [] },
+      ],
+    },
+  });
+  assert.equal(dependencyResult.valid, false);
+  assert.ok(dependencyResult.diagnostics.some((entry) => entry.code === "RELATION_DEPENDENCY_CYCLE"));
+});
+
+test("rejects omitted, ambiguous, or incomplete graph evidence when effects are planned", () => {
+  const omitted = tryPlanSemanticIssueRelations({
+    subject: issue(1),
+    desired: { parent: issue(2), dependsOn: [] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities,
+  });
+  assert.equal(omitted.valid, false);
+  assert.ok(
+    omitted.diagnostics.some((entry) => entry.code === "RELATION_EVIDENCE_UNAVAILABLE" && entry.path === "$.graph"),
+  );
+
+  const noOpWithoutGraph = tryPlanSemanticIssueRelations({
+    subject: issue(1),
+    desired: { parent: undefined, dependsOn: [] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities,
+  });
+  assert.equal(noOpWithoutGraph.valid, true);
+  assert.equal(noOpWithoutGraph.plan?.graph, undefined);
+});
+
+test("transports the admitted graph on the plan and requires it at revalidation", () => {
+  const plan = planSemanticIssueRelations({
+    subject: issue(1),
+    desired: { parent: issue(2), dependsOn: [] },
+    observed: { parent: undefined, dependsOn: [] },
+    capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(1), issue(2)].map((reference) => ({ reference, dependsOn: [] })),
+    },
+  });
+  assert.ok(plan.graph);
+  assert.equal(plan.graph?.scope, "complete");
+  assert.equal(validateSemanticIssueRelationMutationPlan(plan).valid, true);
+
+  const strippedGraph = validateSemanticIssueRelationMutationPlan({ ...plan, graph: undefined });
+  assert.equal(strippedGraph.valid, false);
+  assert.ok(strippedGraph.diagnostics.some((entry) => entry.path === "$.graph"));
+
+  const tamperedGraph = validateSemanticIssueRelationMutationPlan({
+    ...plan,
+    graph: { scope: "complete", nodes: [{ reference: issue(1), parent: issue(2), dependsOn: [] }] },
+  });
+  assert.equal(tamperedGraph.valid, false);
+  assert.ok(tamperedGraph.diagnostics.some((entry) => entry.code === "RELATION_PLAN_INVALID"));
 });
 
 test("rejects a supposedly complete graph that omits an edge target", () => {
@@ -141,6 +278,10 @@ test("accepts compact relation objects and treats non-empty omitted representati
       relations: { parent: { representation: "none" }, dependsOn: { representation: "none", references: [] } },
     },
     capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(1), issue(2), issue(3)].map((reference) => ({ reference, dependsOn: [] })),
+    },
   });
   assert.equal(result.desired.parentRepresentation, "native");
   assert.equal(result.desired.dependsOnRepresentation, "native");

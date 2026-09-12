@@ -44,6 +44,8 @@ export type CommandId =
   | "issue.semantic.materialize"
   | "issue.semantic.plan"
   | "issue.semantic.check"
+  | "issue.relations.plan"
+  | "issue.relations.execute"
   | "issue.render"
   | "issue.create"
   | "issue.explain"
@@ -147,6 +149,7 @@ const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
+const ISSUE_RELATIONS_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
 const PR_CREATE_OPTIONS = [
   "help",
   "json",
@@ -491,6 +494,24 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["issue", "semantic", "check"],
     "Compare a desired semantic Issue projection with bounded GitHub observation.",
     ["help", "json", "template", "repository", "from", "capability"],
+    "<number>",
+  ),
+  command(
+    "issue.relations.plan",
+    "issue",
+    "relations-plan",
+    ["issue", "relations", "plan"],
+    "Preview the deterministic Core Issue relationship Mutation Plan for an existing Issue without GitHub mutation.",
+    [...ISSUE_RELATIONS_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "issue.relations.execute",
+    "issue",
+    "relations-execute",
+    ["issue", "relations", "execute"],
+    "Reconcile an existing Issue's native parent/dependency relationships through the governed Core executor.",
+    [...ISSUE_RELATIONS_OPTIONS],
     "<number>",
   ),
   command(

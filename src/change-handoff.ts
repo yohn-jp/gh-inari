@@ -41,6 +41,8 @@ export interface ImplementationHandoff {
   readonly kind: typeof IMPLEMENTATION_HANDOFF_KIND;
   readonly repositoryHost: string;
   readonly repositoryId: string;
+  /** `owner/name` locator, present whenever the caller resolved it alongside the stable repository ID. */
+  readonly repositoryNameWithOwner?: string;
   readonly rootIssue: number;
   readonly changeVersion: typeof CHANGE_CONTRACT_VERSION;
   readonly state: "DRAFT";
@@ -84,6 +86,7 @@ const HANDOFF_KEYS = new Set([
   "kind",
   "repositoryHost",
   "repositoryId",
+  "repositoryNameWithOwner",
   "rootIssue",
   "changeVersion",
   "state",
@@ -127,6 +130,17 @@ function statusDiagnostic(status: ChangeProjectionStatus): ChangeDiagnostic | un
   const code = NON_ADMISSIBLE_STATUS_CODES[status];
   if (code === undefined) return undefined;
   return diagnostic(code, "$.status", `Change projection status "${status}" is not implementation-admissible.`);
+}
+
+const MAX_REPOSITORY_NAME_WITH_OWNER_LENGTH = 256;
+
+function validNameWithOwner(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_REPOSITORY_NAME_WITH_OWNER_LENGTH &&
+    /^[^\s/]+\/[^\s/]+$/u.test(value)
+  );
 }
 
 function validBranch(value: unknown, path: string): value is string {
@@ -175,6 +189,14 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
     diagnostics.push(
       diagnostic("CHANGE_INVALID_PROJECTION", "$.pullRequest", "pullRequest must be a positive safe integer."),
     );
+  if (input.repositoryNameWithOwner !== undefined && !validNameWithOwner(input.repositoryNameWithOwner))
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_INVALID_PROJECTION",
+        "$.repositoryNameWithOwner",
+        "repositoryNameWithOwner must be an owner/name locator.",
+      ),
+    );
   if (!identityResult.valid) diagnostics.push(...identityResult.diagnostics);
   if (diagnostics.length > 0) return invalid(diagnostics);
   const normalizedIdentity = identityResult.identity;
@@ -185,6 +207,9 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
     kind: IMPLEMENTATION_HANDOFF_KIND,
     repositoryHost: normalizedIdentity.repositoryHost,
     repositoryId: normalizedIdentity.repositoryId,
+    ...(input.repositoryNameWithOwner === undefined
+      ? {}
+      : { repositoryNameWithOwner: input.repositoryNameWithOwner as string }),
     rootIssue: normalizedIdentity.rootIssue,
     changeVersion: CHANGE_CONTRACT_VERSION,
     state: "DRAFT",
@@ -223,13 +248,25 @@ function canonicalCandidateCount(
   };
 }
 
+export interface ImplementationHandoffProjectionOptions {
+  /**
+   * `owner/name` repository locator, supplied by the caller alongside the
+   * stable repository ID it already resolved (e.g. from `RepositoryContext`).
+   * This function performs no GitHub I/O and cannot derive it independently.
+   */
+  readonly repositoryNameWithOwner?: string;
+}
+
 /**
  * Project a worker handoff from one already-validated Change projection.
  *
  * No GitHub I/O occurs here.  Callers acquire fresh evidence through the
  * existing Change read/executor boundary before invoking this function.
  */
-export function tryProjectImplementationHandoff(input: unknown): ImplementationHandoffProjectionResult {
+export function tryProjectImplementationHandoff(
+  input: unknown,
+  options: ImplementationHandoffProjectionOptions = {},
+): ImplementationHandoffProjectionResult {
   const validation = validateChangeProjectionResult(input);
   if (!validation.valid || validation.projection === undefined) return invalid(validation.diagnostics);
   const projection = validation.projection;
@@ -368,12 +405,23 @@ export function tryProjectImplementationHandoff(input: unknown): ImplementationH
       );
     }
   }
+  if (options.repositoryNameWithOwner !== undefined && !validNameWithOwner(options.repositoryNameWithOwner))
+    extraDiagnostics.push(
+      diagnostic(
+        "CHANGE_INVALID_PROJECTION",
+        "$.repositoryNameWithOwner",
+        "repositoryNameWithOwner must be an owner/name locator.",
+      ),
+    );
   if (extraDiagnostics.length > 0) return invalid(extraDiagnostics);
   const handoff: ImplementationHandoff = {
     version: IMPLEMENTATION_HANDOFF_CONTRACT_VERSION,
     kind: IMPLEMENTATION_HANDOFF_KIND,
     repositoryHost: change.identity.repositoryHost,
     repositoryId: change.identity.repositoryId,
+    ...(options.repositoryNameWithOwner === undefined
+      ? {}
+      : { repositoryNameWithOwner: options.repositoryNameWithOwner }),
     rootIssue: change.identity.rootIssue,
     changeVersion: change.version,
     state: "DRAFT",
@@ -388,8 +436,11 @@ export function tryProjectImplementationHandoff(input: unknown): ImplementationH
 export const tryProjectChangeImplementationHandoff = tryProjectImplementationHandoff;
 
 /** Throwing Core entry point for callers that require an admissible handoff. */
-export function projectImplementationHandoff(input: unknown): ImplementationHandoff {
-  const result = tryProjectImplementationHandoff(input);
+export function projectImplementationHandoff(
+  input: unknown,
+  options: ImplementationHandoffProjectionOptions = {},
+): ImplementationHandoff {
+  const result = tryProjectImplementationHandoff(input, options);
   if (!result.valid || result.handoff === undefined) throw new ImplementationHandoffProjectionError(result.diagnostics);
   return result.handoff;
 }

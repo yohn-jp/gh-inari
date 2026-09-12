@@ -191,6 +191,31 @@ test("change handoff rejects an already-review Change without mutation", async (
   assert.ok(Array.isArray(result.output?.diagnostics));
 });
 
+test("change handoff includes the repository locator when an adapter is available", async () => {
+  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const result = await capture(["change", "handoff", "42", "--json"], {
+    changeExecutor: executor(calls),
+    createAdapter: () =>
+      ({
+        async getRepositoryContext() {
+          return {
+            hostname: "github.com",
+            host: "github.com",
+            owner: "acme",
+            name: "inari",
+            nameWithOwner: "acme/inari",
+            url: "https://github.com/acme/inari",
+            repositoryId: identity.repositoryId,
+          };
+        },
+      }) as unknown as GitHubAdapter,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.output?.ok, true);
+  assert.equal((result.output?.handoff as Record<string, unknown> | undefined)?.repositoryNameWithOwner, "acme/inari");
+});
+
 test("authoritative Change commands use semantic executor requests only", async () => {
   const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
   const factoryCalls: Record<string, unknown>[] = [];

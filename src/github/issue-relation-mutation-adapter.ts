@@ -149,11 +149,14 @@ export class GitHubIssueRelationMutationAdapter {
       });
 
     const childId = await this.issueDatabaseId(normalizedChild);
+    // GitHub's Sub-issues API returns 200 (with the updated parent Issue body)
+    // on a successful removal, not 204; encoding 204 here would make a
+    // successful mutation surface locally as RELATION_MUTATION_RESPONSE_INVALID.
     await this.request(
       `issues/${normalizedParent.number}/sub_issue`,
       "DELETE",
       { sub_issue_id: databaseIdField(childId) },
-      [204],
+      [200],
     );
   }
 
@@ -191,7 +194,9 @@ export class GitHubIssueRelationMutationAdapter {
       });
 
     const blockerId = await this.issueDatabaseId(normalizedBlocker);
-    await this.request(`issues/${normalizedChild.number}/dependencies/blocked_by/${blockerId}`, "DELETE", {}, [204]);
+    // GitHub's Issue Dependencies API also returns 200 on a successful
+    // blocked-by removal (see removeParent above), not 204.
+    await this.request(`issues/${normalizedChild.number}/dependencies/blocked_by/${blockerId}`, "DELETE", {}, [200]);
   }
 
   private assertReference(value: unknown, path: string): IssueReference {

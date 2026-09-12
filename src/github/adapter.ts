@@ -240,14 +240,24 @@ export class GitHubAdapter {
     method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
     fields: Readonly<Record<string, GitHubApiFieldValue>> = {},
   ): Promise<GitHubApiResponse> {
-    assertRepositoryApiPath(repositoryPath);
     const context = await this.resolveRepositoryContext();
+    return this.requestRepositoryApiAt(context.nameWithOwner, context.hostname, repositoryPath, method, fields);
+  }
+
+  private async requestRepositoryApiAt(
+    nameWithOwner: string,
+    hostname: string,
+    repositoryPath: string,
+    method: "GET" | "POST" | "PATCH" | "DELETE",
+    fields: Readonly<Record<string, GitHubApiFieldValue>>,
+  ): Promise<GitHubApiResponse> {
+    assertRepositoryApiPath(repositoryPath);
     const operation = method === "GET" ? "issue.relation.read" : "issue.relation.mutate";
     const args = [
       "api",
-      `repos/${context.nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
+      `repos/${nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
       "--hostname",
-      context.hostname,
+      hostname,
       "--method",
       method,
       "--include",

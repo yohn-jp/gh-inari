@@ -62,6 +62,7 @@ import {
   type ChangeRemoteExecutorOptions,
 } from "../change-executor.js";
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
+import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
@@ -72,6 +73,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_issue_plan",
   "inari_issue_observe",
   "inari_issue_drift",
+  "inari_issue_relations_plan",
   "inari_branch_contract",
   "inari_branch_materialize",
   "inari_branch_plan",
@@ -176,6 +178,21 @@ export const semanticPullRequestDriftInputSchema = z.strictObject({
   number: artifactNumberSchema,
   input: inputValueSchema,
 });
+
+/**
+ * Input schema for previewing existing-Issue native relationship
+ * reconciliation. Read-only: this composes live observation with Core
+ * planning but never mutates GitHub, matching the read-only MCP boundary
+ * every other semantic artifact tool uses (mutation stays CLI/Actions-only).
+ */
+export const issueRelationsPlanInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  capabilities: z.array(capabilitySchema).max(MAX_CAPABILITIES).optional(),
+  number: artifactNumberSchema,
+  desired: inputValueSchema,
+  graph: z.unknown().optional(),
+});
+export type IssueRelationsPlanInput = z.infer<typeof issueRelationsPlanInputSchema>;
 
 /** Input schema for the read-only canonical implementation handoff. */
 export const implementationHandoffInputSchema = z.strictObject({
@@ -469,10 +486,11 @@ function result<T extends Record<string, unknown>>(data: T, summary: string): Ca
 function projectChangeHandoffResult(
   issue: number,
   projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+  options: { readonly repositoryNameWithOwner?: string } = {},
 ): Record<string, unknown> {
   const change = projection.change;
   const changeProjection = change?.projection;
-  const handoff = tryProjectImplementationHandoff(projection);
+  const handoff = tryProjectImplementationHandoff(projection, options);
   return {
     ok: handoff.valid,
     valid: handoff.valid,
@@ -498,8 +516,25 @@ async function handleImplementationHandoff(
   try {
     const executor = changeExecutorFor(input.repository, dependencies);
     const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    let repositoryNameWithOwner: string | undefined;
+    // Resolve a locator only when an adapter is actually available: either the
+    // caller injected one directly, or no changeExecutor override exists (the
+    // default path already builds a real adapter). Avoids a spurious `gh`
+    // call when a caller/test stubs only the Change transport.
+    if (
+      dependencies.adapter !== undefined ||
+      dependencies.createAdapter !== undefined ||
+      dependencies.changeExecutor === undefined
+    ) {
+      try {
+        const context = await adapterFor(input.repository, dependencies).getRepositoryContext();
+        repositoryNameWithOwner = context.nameWithOwner;
+      } catch {
+        repositoryNameWithOwner = undefined;
+      }
+    }
     return result(
-      projectChangeHandoffResult(input.issue, projection),
+      projectChangeHandoffResult(input.issue, projection, { repositoryNameWithOwner }),
       "Read the canonical implementation handoff through the Change Core boundary.",
     );
   } catch (error: unknown) {
@@ -1154,6 +1189,30 @@ async function handleArtifactPlan(
   );
 }
 
+async function handleIssueRelationsPlan(
+  input: IssueRelationsPlanInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  const planResult = await planExistingIssueRelationReconciliation(adapter, {
+    subjectNumber: input.number,
+    desired: input.desired,
+    ...(input.graph === undefined ? {} : { graph: input.graph }),
+    capabilities: input.capabilities ?? [],
+  });
+  if (!planResult.valid || planResult.plan === undefined) {
+    const diagnostics = boundedDiagnostics(planResult.diagnostics);
+    return result(
+      { ok: false, valid: false, diagnostics, violations: diagnostics },
+      "Existing-Issue relationship plan preview failed; see diagnostics.",
+    );
+  }
+  return result(
+    { ok: true, valid: true, plan: planResult.plan, preview: true, mutation: false },
+    "Produced a deterministic read-only existing-Issue relationship plan preview.",
+  );
+}
+
 /** Register the typed Issue semantic artifact catalog without adding policy. */
 export function registerSemanticIssueTools(
   server: McpServer,
@@ -1216,7 +1275,19 @@ export function registerSemanticIssueTools(
     },
     async (input: SemanticIssueDriftInput) => handleIssueDrift(input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan, observe, drift]);
+  const relationsPlan = server.registerTool(
+    "inari_issue_relations_plan",
+    {
+      title: "Preview existing-Issue relationship plan",
+      description:
+        "Compose live native parent/dependency observation with Core planning to preview an existing Issue's relationship reconciliation, without GitHub mutation.",
+      inputSchema: issueRelationsPlanInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: IssueRelationsPlanInput) => handleIssueRelationsPlan(input, dependencies),
+  );
+  return Object.freeze([contract, materialize, plan, observe, drift, relationsPlan]);
 }
 
 /** Register the typed Branch semantic artifact catalog without adding policy. */

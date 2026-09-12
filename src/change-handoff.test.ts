@@ -56,6 +56,32 @@ test("healthy DRAFT Change projects to a bounded immutable implementation handof
   assert.doesNotMatch(JSON.stringify(result.handoff), /worktree|session|process|checkout|runtime/iu);
 });
 
+test("handoff includes the repository locator when the caller supplies one", () => {
+  const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "acme/inari" });
+  assert.equal(result.valid, true);
+  assert.equal(result.handoff?.repositoryNameWithOwner, "acme/inari");
+});
+
+test("handoff omits the repository locator when the caller does not supply one", () => {
+  const result = tryProjectImplementationHandoff(projection());
+  assert.equal(result.valid, true);
+  assert.equal("repositoryNameWithOwner" in (result.handoff ?? {}), false);
+});
+
+test("handoff fails closed on a malformed repository locator", () => {
+  const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "not-a-locator" });
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.path === "$.repositoryNameWithOwner"));
+});
+
+test("validateImplementationHandoff accepts a transported repositoryNameWithOwner", () => {
+  const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "acme/inari" });
+  assert.equal(result.valid, true);
+  const revalidated = validateImplementationHandoff(result.handoff);
+  assert.equal(revalidated.valid, true);
+  assert.equal(revalidated.handoff?.repositoryNameWithOwner, "acme/inari");
+});
+
 test("healthy REVIEW evidence is not implementation-admissible", () => {
   const result = tryProjectImplementationHandoff(projection(false));
   assert.equal(result.valid, false);

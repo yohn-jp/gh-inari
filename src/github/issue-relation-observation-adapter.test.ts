@@ -118,6 +118,14 @@ test("observeParent returns unavailable when the parent belongs to a different r
   assert.equal(observation.diagnostics[0]?.code, "RELATION_REPOSITORY_UNRESOLVED");
 });
 
+test("observeParent stays unavailable for a foreign-repository target", async () => {
+  const reader = new StubReader([{ status: 200, body: issueBody(9, "someone-else/other-repo") }]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeParent(288);
+  assert.equal(observation.kind, "unavailable");
+  assert.equal(observation.diagnostics[0]?.code, "RELATION_REPOSITORY_UNRESOLVED");
+});
+
 test("observeParent returns unavailable when repository_url is missing", async () => {
   const body = issueBody(9);
   delete body.repository_url;

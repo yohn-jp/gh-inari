@@ -19,6 +19,7 @@ test("SKILL_SCENARIOS has a fixed, deterministic order", () => {
     "author-pr",
     "inspect-governance",
     "repair-invalid-artifact",
+    "manage-issue-relationships",
     "manage-change",
   ]);
 });

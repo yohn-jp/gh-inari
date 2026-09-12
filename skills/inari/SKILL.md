@@ -26,6 +26,8 @@ Prefer `inari` over raw `gh` for:
 - Creating a governed Issue or PR (schema, validate, render, create).
 - Reading the governance classification of an existing Issue or PR.
 - Repairing an invalid or non-normalized Issue or PR.
+- Reconciling an existing Issue's native parent (sub-issue) or blocked-by
+  relationships instead of hand-editing relationship prose.
 - Syncing semantic template contracts to their GitHub-native projections.
 - Issuing, inspecting, reviewing, or stopping a governed Change through the
   semantic Change command surface.
