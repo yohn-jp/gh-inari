@@ -116,6 +116,32 @@ test("worker handoff rejects forged lifecycle or identity values", () => {
   }
 });
 
+test("worker handoff preserves the canonical optional repository locator", () => {
+  const handoff = {
+    version: 1,
+    kind: "implementation-handoff",
+    repositoryHost: "github.com",
+    repositoryId: "123239",
+    repositoryNameWithOwner: "yohn-jp/gh-inari",
+    rootIssue: 239,
+    changeVersion: 1,
+    state: "DRAFT",
+    branch: "feat/239-disposable-dogfood",
+    baseBranch: "main",
+    pullRequest: 9239,
+  };
+  assert.equal(projectWorkerHandoff(handoff).repositoryNameWithOwner, "yohn-jp/gh-inari");
+  assert.equal(
+    JSON.parse(sanitizeWorkerEnvironment({}, handoff, "a".repeat(40)).INARI_IMPLEMENTATION_HANDOFF)
+      .repositoryNameWithOwner,
+    "yohn-jp/gh-inari",
+  );
+  assert.throws(
+    () => projectWorkerHandoff({ ...handoff, repositoryNameWithOwner: "not-a-locator" }),
+    /repository locator/u,
+  );
+});
+
 test("live dogfood is opt-in and emits bounded blocked evidence without mutation", () => {
   const workerDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "inari-self-dogfood-test-"));
   try {

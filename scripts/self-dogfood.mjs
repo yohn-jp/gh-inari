@@ -97,6 +97,7 @@ export const WORKER_HANDOFF_FIELDS = Object.freeze([
   "kind",
   "repositoryHost",
   "repositoryId",
+  "repositoryNameWithOwner",
   "rootIssue",
   "changeVersion",
   "state",
@@ -105,6 +106,9 @@ export const WORKER_HANDOFF_FIELDS = Object.freeze([
   "pullRequest",
 ]);
 const WORKER_HANDOFF_FIELD_SET = new Set(WORKER_HANDOFF_FIELDS);
+const REQUIRED_WORKER_HANDOFF_FIELDS = new Set(
+  WORKER_HANDOFF_FIELDS.filter((field) => field !== "repositoryNameWithOwner"),
+);
 const IMPLEMENTATION_HANDOFF_CONTRACT_VERSION = 1;
 const IMPLEMENTATION_HANDOFF_KIND = "implementation-handoff";
 const CHANGE_CONTRACT_VERSION = 1;
@@ -438,9 +442,17 @@ export function projectWorkerHandoff(handoff) {
   }
   if (!Number.isSafeInteger(handoff.pullRequest) || handoff.pullRequest < 1)
     throw new Error("implementation handoff has an invalid pull request");
+  if (
+    handoff.repositoryNameWithOwner !== undefined &&
+    (typeof handoff.repositoryNameWithOwner !== "string" || !REPOSITORY_PATTERN.test(handoff.repositoryNameWithOwner))
+  )
+    throw new Error("implementation handoff has an invalid repository locator");
   const projected = {};
   for (const field of WORKER_HANDOFF_FIELDS) {
-    if (!Object.hasOwn(handoff, field)) throw new Error(`implementation handoff omitted ${field}`);
+    if (!Object.hasOwn(handoff, field)) {
+      if (!REQUIRED_WORKER_HANDOFF_FIELDS.has(field)) continue;
+      throw new Error(`implementation handoff omitted ${field}`);
+    }
     const value = handoff[field];
     if (typeof value === "string" && SECRET_KEY_PATTERN.test(value))
       throw new Error(`implementation handoff field ${field} contains sensitive text`);
