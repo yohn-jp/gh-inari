@@ -598,6 +598,24 @@ export function createManagedSession(): ManagedSession {
 }
 
 /**
+ * Return the module-owned Session private key for local credential packaging.
+ *
+ * This is intentionally not a property or method on `ManagedSession`: the
+ * managed issuance boundary still exposes only the public key.  Manual
+ * packaging is the sole caller that needs to serialize this local secret.
+ */
+export function exportManagedSessionPrivateKey(session: ManagedSession): KeyObject {
+  const state = sessionStates.get(session);
+  if (state === undefined) {
+    throw new SessionBootstrapError(
+      "SESSION_BOOTSTRAP_INVALID_REQUEST",
+      "Managed Session signing state is unavailable.",
+    );
+  }
+  return state.privateKey;
+}
+
+/**
  * Issue a Runtime-signed certificate from a public-only Session request.
  * The request's repository name is diagnostic input; the certificate uses the
  * Runtime-resolved repository identity and compares its immutable ID.

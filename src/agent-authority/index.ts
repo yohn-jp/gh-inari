@@ -8,3 +8,4 @@ export * from "./runtime-key.js";
 export * from "./session-certificate.js";
 export * from "./session-issuance.js";
 export * from "./session-request.js";
+export * from "./session-bundle.js";

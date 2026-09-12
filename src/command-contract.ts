@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.4.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.5.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -26,7 +26,8 @@ export const RUNTIME_CAPABILITIES = [
 ] as const;
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
-export type CommandDomain = "root" | "issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp" | "skill";
+export type CommandDomain =
+  "root" | "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -85,6 +86,8 @@ export type CommandId =
   | "change.ready"
   | "change.abort"
   | "authority.generate"
+  | "session.issue"
+  | "session.inspect"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -147,6 +150,7 @@ const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
+const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
 const ISSUE_RELATIONS_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
@@ -850,6 +854,22 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     AUTHORITY_OPTIONS,
   ),
   command(
+    "session.issue",
+    "session",
+    "issue",
+    ["session", "issue"],
+    "Generate a fresh Session keypair, issue a canonical Runtime-signed certificate, and persist one secret bundle.",
+    SESSION_OPTIONS,
+  ),
+  command(
+    "session.inspect",
+    "session",
+    "inspect",
+    ["session", "inspect"],
+    "Validate a Session credential bundle and print only safe identity and scope metadata.",
+    ["help", "json", "from"],
+  ),
+  command(
     "mcp.serve",
     "mcp",
     "serve",
@@ -1018,7 +1038,7 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string 
 }
 
 export function helpInvocation(
-  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp" | "skill",
+  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill",
 ): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
@@ -1103,6 +1123,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "branch" ||
     domain === "change" ||
     domain === "authority" ||
+    domain === "session" ||
     domain === "mcp"
   )
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
@@ -1126,7 +1147,9 @@ export function commandUsage(entry: CommandDefinition): string {
           entry.id === "pr.semantic.check" ||
           entry.id === "branch.semantic.check") &&
           id === "from") ||
-        (entry.id === "template.import" && id === "from");
+        (entry.id === "template.import" && id === "from") ||
+        (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
+        (entry.id === "session.inspect" && id === "from");
       const syntax = optionSyntax(optionDefinition);
       return required ? syntax : `[${syntax}]`;
     })
