@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import path from "node:path";
 import {
   compileRepositoryGovernedContract,
   createRemoteArtifactContractIdentities,
@@ -307,7 +308,7 @@ test("remote schema output exposes repository and trusted source provenance", as
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "schema", "remote", "--repository", "acme/repository-b", "--json"], {
-      repositoryRoot: "/tmp/stale-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -981,7 +982,7 @@ test("existing-artifact validation acquires the contract from the artifact targe
     const exitCode = await runCli(
       ["issue", "validate", "42", "--template", "remote", "--repository", "acme/repository-b", "--json"],
       {
-        repositoryRoot: "/tmp/stale-local-copy/.github/false",
+        repositoryRoot: path.resolve("test-fixtures/stale-local-copy/.github/false"),
         createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
       },
     );

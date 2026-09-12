@@ -10,11 +10,12 @@
 import {
   closeSync,
   constants as fsConstants,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   readdirSync,
   unlinkSync,
   writeSync,
@@ -249,10 +250,44 @@ function ensureAuthorityDirectory(root: string, operation: RuntimeAuthorityLifec
 }
 
 function readBoundedFile(filePath: string, operation: RuntimeAuthorityLifecycleOperation): string {
-  let stat: Stats;
+  let fd: number | undefined;
   try {
-    stat = lstatSync(filePath);
+    fd = openSync(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw lifecycleError(
+        "RUNTIME_AUTHORITY_LIFECYCLE_ARTIFACT_INVALID",
+        "Runtime Authority artifacts must be regular files.",
+        operation,
+        { path: filePath, reason: "symbolic link or non-file artifact" },
+      );
+    }
+    if (stat.size > MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES) {
+      throw lifecycleError(
+        "RUNTIME_AUTHORITY_LIFECYCLE_ARTIFACT_INVALID",
+        `Runtime Authority artifact exceeds the ${MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES}-byte limit.`,
+        operation,
+        { path: filePath, reason: "artifact is too large" },
+      );
+    }
+    const buffer = Buffer.alloc(MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, null);
+      offset += bytesRead;
+      if (bytesRead === 0) break;
+    }
+    if (offset > MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES) {
+      throw lifecycleError(
+        "RUNTIME_AUTHORITY_LIFECYCLE_ARTIFACT_INVALID",
+        `Runtime Authority artifact exceeds the ${MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES}-byte limit.`,
+        operation,
+        { path: filePath, reason: "artifact is too large" },
+      );
+    }
+    return buffer.subarray(0, offset).toString("utf8");
   } catch (error: unknown) {
+    if (error instanceof RuntimeAuthorityLifecycleError) throw error;
     throw lifecycleError(
       "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED",
       "Unable to inspect a Runtime Authority artifact.",
@@ -261,34 +296,14 @@ function readBoundedFile(filePath: string, operation: RuntimeAuthorityLifecycleO
       [],
       error,
     );
-  }
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw lifecycleError(
-      "RUNTIME_AUTHORITY_LIFECYCLE_ARTIFACT_INVALID",
-      "Runtime Authority artifacts must be regular files.",
-      operation,
-      { path: filePath, reason: "symbolic link or non-file artifact" },
-    );
-  }
-  if (stat.size > MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES) {
-    throw lifecycleError(
-      "RUNTIME_AUTHORITY_LIFECYCLE_ARTIFACT_INVALID",
-      `Runtime Authority artifact exceeds the ${MAX_RUNTIME_AUTHORITY_ARTIFACT_BYTES}-byte limit.`,
-      operation,
-      { path: filePath, reason: "artifact is too large" },
-    );
-  }
-  try {
-    return readFileSync(filePath, "utf8");
-  } catch (error: unknown) {
-    throw lifecycleError(
-      "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED",
-      "Unable to read a Runtime Authority artifact.",
-      operation,
-      { path: filePath, reason: "artifact read failed" },
-      [],
-      error,
-    );
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Preserve the original lifecycle diagnostic.
+      }
+    }
   }
 }
 
@@ -580,8 +595,7 @@ function assertNonTemporaryRepositoryRoot(root: string, operation: RuntimeAuthor
   const resolvedRoot = path.resolve(root);
   const resolvedTemp = path.resolve(os.tmpdir());
   const relativeToTemp = path.relative(resolvedTemp, resolvedRoot);
-  const isTempRoot =
-    relativeToTemp === "" || (!relativeToTemp.startsWith("..") && !path.isAbsolute(relativeToTemp));
+  const isTempRoot = relativeToTemp === "" || (!relativeToTemp.startsWith("..") && !path.isAbsolute(relativeToTemp));
   if (!isTempRoot) return;
   throw lifecycleError(
     "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED",

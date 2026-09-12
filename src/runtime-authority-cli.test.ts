@@ -137,7 +137,7 @@ test("authority generate has an explicit human-readable trust boundary", async (
 });
 
 test("authority register creates one canonical active trust artifact exclusively", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-register-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-register-"));
   try {
     const record = authority("runtime-register");
     const inputPath = await writeInput(repositoryRoot, "authority.json", record);
@@ -162,7 +162,7 @@ test("authority register creates one canonical active trust artifact exclusively
 });
 
 test("authority register rejects inactive, malformed, duplicate-key, and private-key inputs", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-register-invalid-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-register-invalid-"));
   try {
     const first = authority("runtime-first");
     const firstPath = await writeInput(repositoryRoot, "first.json", first);
@@ -213,7 +213,7 @@ test("authority register rejects inactive, malformed, duplicate-key, and private
 });
 
 test("authority rotate adds an active overlap record and never rewrites the current artifact", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-rotate-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-rotate-"));
   try {
     const current = authority("runtime-old");
     const currentInput = await writeInput(repositoryRoot, "current.json", current);
@@ -260,7 +260,7 @@ test("authority rotate adds an active overlap record and never rewrites the curr
 });
 
 test("authority revoke is active-to-disabled only and deterministically idempotent", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-revoke-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-revoke-"));
   try {
     const record = authority("runtime-revoke", { capabilityCeiling: ["change.implement", "change.ready"] });
     const inputPath = await writeInput(repositoryRoot, "authority.json", record);
