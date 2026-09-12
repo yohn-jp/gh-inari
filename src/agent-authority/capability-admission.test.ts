@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { authenticateSessionRequest, type AuthenticatedSessionContext } from "./session-authentication.js";
 import {
   CAPABILITY_ADMISSION_CONTRACT_VERSION,
   CapabilityAdmissionError,
   admitAuthenticatedSessionCapability,
-  type AdmitAuthenticatedSessionCapabilityOptions,
-  type CapabilityAdmissionCanonicalState,
+  type CapabilityAdmissionRequest,
+  type CapabilityAdmissionOperation,
+  type CapabilityAdmissionSubject,
 } from "./capability-admission.js";
+import { authenticateSessionRequest, type AuthenticatedSessionContext } from "./session-authentication.js";
+import type { CapabilityClaim } from "./capability.js";
 import {
   canonicalRuntimeAuthorityJson,
   createManagedSession,
@@ -17,18 +19,11 @@ import {
   signSessionRequest,
   type RuntimeAuthority,
 } from "./index.js";
-import type { CapabilityClaim } from "./capability.js";
 import { assertRuntimeAuthority } from "./runtime-authority.js";
-import type { RuntimeAuthoritySourceReader } from "./runtime-authority-trust.js";
-import type { SemanticSessionRequest } from "./session-request.js";
 import type { GitHubAppRepositoryReadCapability } from "../github/app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository } from "../github/change-effect-adapter.js";
-import {
-  projectChangeFromGitHubEvidence,
-  type Change,
-  type ChangeGitHubEvidence,
-  type ChangeProjectionResult,
-} from "../change.js";
+import { projectChangeFromGitHubEvidence, type ChangeGitHubEvidence, type ChangeProjectionResult } from "../change.js";
+import type { SemanticSessionRequest } from "./session-request.js";
 
 const NOW = new Date("2026-09-12T00:00:30.000Z");
 const NOW_SECONDS = Math.floor(NOW.getTime() / 1000);
@@ -42,10 +37,10 @@ const BRANCH_SHA = "d".repeat(40);
 const CANONICAL_BRANCH = "feat/375-semantic-capability-admission";
 const BASE_BRANCH = "main";
 
-function runtimeAuthority(
-  key = generateRuntimeAuthorityKeyPair(),
-  overrides: Record<string, unknown> = {},
-): { readonly authority: RuntimeAuthority; readonly key: ReturnType<typeof generateRuntimeAuthorityKeyPair> } {
+function runtimeAuthority(key = generateRuntimeAuthorityKeyPair()): {
+  readonly authority: RuntimeAuthority;
+  readonly key: ReturnType<typeof generateRuntimeAuthorityKeyPair>;
+} {
   return {
     key,
     authority: assertRuntimeAuthority({
@@ -65,12 +60,11 @@ function runtimeAuthority(
         "branch.advance",
         "pullRequest.create",
       ],
-      ...overrides,
     }),
   };
 }
 
-function requestEnvelope(
+function signedRequest(
   authority: RuntimeAuthority,
   key: ReturnType<typeof generateRuntimeAuthorityKeyPair>,
   operation: string,
@@ -106,16 +100,15 @@ function requestEnvelope(
 function appReadCapability(authority: RuntimeAuthority): GitHubAppRepositoryReadCapability {
   const content = Buffer.from(canonicalRuntimeAuthorityJson(authority), "utf8").toString("base64");
   const artifact = renderRuntimeAuthorityArtifact(authority);
-  const scope: GitHubAppRepositoryReadCapability["scope"] = {
-    app: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
-    installation: { appId: "1", installationId: "2", repositoryHost: "github.com" },
-    repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID, nameWithOwner: "acme/inari" },
-    repositorySelection: "selected",
-    permissions: { contents: "read", issues: "read", pull_requests: "read" },
-    expiresAt: "2026-09-12T00:10:00Z",
-  };
   return {
-    scope,
+    scope: {
+      app: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
+      installation: { appId: "1", installationId: "2", repositoryHost: "github.com" },
+      repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID, nameWithOwner: "acme/inari" },
+      repositorySelection: "selected",
+      permissions: { contents: "read", issues: "read", pull_requests: "read" },
+      expiresAt: "2026-09-12T00:10:00Z",
+    },
     transport: {
       async request(request) {
         if (request.path === "repos/acme/inari") {
@@ -145,44 +138,15 @@ function appReadCapability(authority: RuntimeAuthority): GitHubAppRepositoryRead
   };
 }
 
-function trustReader(authority: RuntimeAuthority, policySha = POLICY_SHA): RuntimeAuthoritySourceReader {
-  const artifact = renderRuntimeAuthorityArtifact(authority);
-  return {
-    async resolveRepositoryContext() {
-      return {
-        hostname: "github.com",
-        host: "github.com",
-        owner: "acme",
-        name: "inari",
-        nameWithOwner: "acme/inari",
-        url: "https://github.com/acme/inari",
-        repositoryId: REPOSITORY_ID,
-      };
-    },
-    async getRepositoryDefaultBranch() {
-      return "main";
-    },
-    async findBranch(branch) {
-      return { name: branch, ref: `refs/heads/${branch}`, sha: policySha };
-    },
-    async getRepositoryTree() {
-      return { sha: TREE_SHA, entries: [{ path: artifact.path, type: "blob", sha: BLOB_SHA }] };
-    },
-    async getRepositoryBlob() {
-      return canonicalRuntimeAuthorityJson(authority);
-    },
-  };
-}
-
 async function authenticatedContext(
   authority: RuntimeAuthority,
   key: ReturnType<typeof generateRuntimeAuthorityKeyPair>,
-  operation: string,
+  operation: CapabilityAdmissionOperation,
   request: Record<string, unknown>,
   capabilities: readonly CapabilityClaim[],
-  issue: number,
+  issue = 375,
 ): Promise<AuthenticatedSessionContext> {
-  const envelope = requestEnvelope(authority, key, operation, request, capabilities, issue);
+  const envelope = signedRequest(authority, key, operation, request, capabilities, issue);
   return authenticateSessionRequest({
     broker: {
       async withRepositoryReadCapability<T>(
@@ -198,34 +162,36 @@ async function authenticatedContext(
   });
 }
 
-function evidence(
+function projection(
   issue: number,
-  state: "absent" | "draft" | "review" | "aborted" | "partial" = "absent",
-): CapabilityAdmissionCanonicalState {
-  const canonicalBranch = `feat/${issue}-semantic-capability-admission`;
+  state: "absent" | "branch-only" | "draft" | "review" | "aborted" | "recovery" = "absent",
+): ChangeProjectionResult {
   const branchEvidence: ChangeGitHubEvidence["branches"] =
     state === "absent" || state === "aborted"
       ? { status: "available", value: [] }
-      : { status: "available", value: [{ name: canonicalBranch, sha: BRANCH_SHA, rootIssue: issue }] };
+      : {
+          status: "available",
+          value: [{ name: `feat/${issue}-semantic-capability-admission`, sha: BRANCH_SHA, rootIssue: issue }],
+        };
   const pullRequestEvidence: ChangeGitHubEvidence["pullRequests"] =
-    state === "absent"
+    state === "absent" || state === "branch-only"
       ? { status: "available", value: [] }
       : {
           status: "available",
           value: [
             {
               number: 5375,
-              head: canonicalBranch,
+              head: `feat/${issue}-semantic-capability-admission`,
               base: BASE_BRANCH,
-              state: state === "aborted" || state === "partial" ? "closed" : "open",
+              state: state === "aborted" || state === "recovery" ? "closed" : "open",
               draft: state === "draft",
               merged: false,
-              ...(state === "aborted" || state === "partial" ? {} : { accepted: state === "review" }),
+              ...(state === "review" ? {} : {}),
               rootIssue: issue,
             },
           ],
         };
-  const projection = projectChangeFromGitHubEvidence({
+  return projectChangeFromGitHubEvidence({
     change: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID, rootIssue: issue },
     branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
     naming: { type: "feat", slug: "semantic-capability-admission" },
@@ -236,331 +202,275 @@ function evidence(
       pullRequests: pullRequestEvidence,
     },
   });
-  assert.equal(projection.canonicalBranch, canonicalBranch);
-  return { projection, authority: { ref: "main", sha: POLICY_SHA } };
 }
 
-function options(
+function subject(kind: "change" | "branch" | "pullRequest", issue = 375): CapabilityAdmissionSubject {
+  if (kind === "change") return { kind, issue };
+  if (kind === "branch") return { kind, issue, branch: CANONICAL_BRANCH };
+  return { kind, issue, head: CANONICAL_BRANCH, base: BASE_BRANCH };
+}
+
+function admission(
   context: AuthenticatedSessionContext,
-  authority: RuntimeAuthority,
-  canonicalState: CapabilityAdmissionCanonicalState,
-  overrides: Partial<AdmitAuthenticatedSessionCapabilityOptions> = {},
-): AdmitAuthenticatedSessionCapabilityOptions {
-  return {
+  operation: CapabilityAdmissionOperation,
+  requestSubject: CapabilityAdmissionSubject,
+  currentProjection: ChangeProjectionResult,
+  treeDelta?: CapabilityAdmissionRequest["treeDelta"],
+) {
+  return admitAuthenticatedSessionCapability({
     context,
-    runtimeAuthorityReader: trustReader(authority),
-    canonicalState,
-    now: NOW,
-    ...overrides,
-  };
+    operation,
+    subject: requestSubject,
+    projection: currentProjection,
+    ...(treeDelta === undefined ? {} : { treeDelta }),
+  });
 }
 
-async function denial(promise: Promise<unknown>, reason: CapabilityAdmissionError["reason"]): Promise<void> {
-  await assert.rejects(
-    promise,
-    (error: unknown) =>
+function assertDenied(action: () => unknown, reason: CapabilityAdmissionError["reason"]): void {
+  assert.throws(action, (error: unknown) => {
+    return (
       error instanceof CapabilityAdmissionError &&
       error.code === "CAPABILITY_ADMISSION_DENIED" &&
-      error.reason === reason,
-  );
+      error.reason === reason
+    );
+  });
 }
 
-test("admits change.implement before issuance and retains Core's canonical target", async () => {
-  const runtime = runtimeAuthority();
-  const capabilities: readonly CapabilityClaim[] = [{ kind: "change.implement", issue: 375 }];
-  const context = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.implement",
-    { issue: 375 },
-    capabilities,
-    375,
-  );
-  const admitted = await admitAuthenticatedSessionCapability(options(context, runtime.authority, evidence(375)));
-
-  assert.equal(admitted.version, CAPABILITY_ADMISSION_CONTRACT_VERSION);
-  assert.equal(admitted.canonical.status, "absent");
-  assert.equal(admitted.canonical.state, "DEFINED");
-  assert.equal(admitted.canonical.branch, CANONICAL_BRANCH);
-  assert.equal(admitted.canonical.pullRequest, undefined);
-  assert.equal(admitted.lifecycle?.operation, "issue");
-  assert.equal(admitted.lifecycle?.to, "DRAFT");
-  assert.equal(admitted.capability.kind, "change.implement");
-  assert.equal(Object.isFrozen(admitted), true);
-  assert.equal(Object.isFrozen(admitted.change.identity), true);
-});
-
-test("attenuates post-issuance implementation to the exact canonical branch and PR", async () => {
-  const runtime = runtimeAuthority();
-  const capabilities: readonly CapabilityClaim[] = [{ kind: "change.implement", issue: 375 }];
-  const context = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.implement",
-    { issue: 375, branch: CANONICAL_BRANCH, pullRequest: 5375 },
-    capabilities,
-    375,
-  );
-  const admitted = await admitAuthenticatedSessionCapability(
-    options(context, runtime.authority, evidence(375, "draft")),
-  );
-
-  assert.deepEqual(admitted.canonical, {
-    status: "healthy",
-    issue: 375,
-    state: "DRAFT",
-    branch: CANONICAL_BRANCH,
-    baseBranch: BASE_BRANCH,
-    pullRequest: 5375,
-  });
-  assert.equal(admitted.operation, "change.implement");
-  assert.equal(admitted.change.projection?.branch, CANONICAL_BRANCH);
-  assert.equal(admitted.change.projection?.pullRequest, 5375);
-
-  const handoffContext = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.handoff",
-    { issue: 375, branch: CANONICAL_BRANCH, pullRequest: 5375 },
-    capabilities,
-    375,
-  );
-  const handoff = await admitAuthenticatedSessionCapability(
-    options(handoffContext, runtime.authority, evidence(375, "draft")),
-  );
-  assert.equal(handoff.operation, "change.handoff");
-});
-
-test("keeps ready and abort claims separate and admits Core idempotent states", async () => {
-  const runtime = runtimeAuthority();
-  const readyContext = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.ready",
-    { issue: 375 },
-    [{ kind: "change.ready", issue: 375 }],
-    375,
-  );
-  const ready = await admitAuthenticatedSessionCapability(
-    options(readyContext, runtime.authority, evidence(375, "draft")),
-  );
-  assert.deepEqual(ready.lifecycle, { operation: "ready", from: "DRAFT", to: "REVIEW", idempotent: false });
-
-  const abortContext = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.abort",
-    { issue: 375 },
-    [{ kind: "change.abort", issue: 375 }],
-    375,
-  );
-  const aborted = await admitAuthenticatedSessionCapability(
-    options(abortContext, runtime.authority, evidence(375, "aborted")),
-  );
-  assert.deepEqual(aborted.lifecycle, { operation: "abort", from: "ABORTED", to: "ABORTED", idempotent: true });
-
-  const implementContext = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.ready",
-    { issue: 375 },
-    [{ kind: "change.implement", issue: 375 }],
-    375,
-  );
-  await denial(
-    admitAuthenticatedSessionCapability(options(implementContext, runtime.authority, evidence(375, "draft"))),
-    "session-capability",
-  );
-});
-
-test("intersects claims with the current Runtime ceiling", async () => {
-  const key = generateRuntimeAuthorityKeyPair();
-  const issuedRuntime = runtimeAuthority(key);
-  const context = await authenticatedContext(
-    issuedRuntime.authority,
-    key,
-    "change.ready",
-    { issue: 375 },
-    [{ kind: "change.ready", issue: 375 }],
-    375,
-  );
-  const revokedCeiling = runtimeAuthority(key, { capabilityCeiling: ["change.implement"] });
-  await denial(
-    admitAuthenticatedSessionCapability(options(context, revokedCeiling.authority, evidence(375, "draft"))),
-    "runtime-ceiling",
-  );
-});
-
-test("rejects cross-repository and cross-Issue substitutions", async () => {
-  const runtime = runtimeAuthority();
-  const context = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.implement",
-    { issue: 375 },
-    [{ kind: "change.implement", issue: 375 }],
-    375,
-  );
-  const foreign = structuredClone(evidence(375)) as CapabilityAdmissionCanonicalState;
-  const foreignProjection = foreign.projection as ChangeProjectionResult;
-  assert.ok(foreignProjection.change);
-  const foreignChange: Change = {
-    ...structuredClone(foreignProjection.change),
-    identity: { repositoryHost: "github.com", repositoryId: "987654321", rootIssue: 375 },
-  };
-  const tamperedProjection = { ...foreignProjection, change: foreignChange };
-  await denial(
-    admitAuthenticatedSessionCapability(
-      options(context, runtime.authority, { ...foreign, projection: tamperedProjection }),
-    ),
-    "repository",
-  );
-
-  await denial(admitAuthenticatedSessionCapability(options(context, runtime.authority, evidence(376))), "task");
-});
-
-test("rejects wrong branch and pull-request identities", async () => {
-  const runtime = runtimeAuthority();
-  const branchContext = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "branch.advance",
-    {
-      issue: 375,
-      branch: "feat/375-wrong",
-      expectedHead: BRANCH_SHA,
-      treeDelta: { changes: [{ operation: "modify", path: "src/a.ts" }] },
-    },
-    [{ kind: "branch.advance", branch: CANONICAL_BRANCH }],
-    375,
-  );
-  await denial(
-    admitAuthenticatedSessionCapability(options(branchContext, runtime.authority, evidence(375, "draft"))),
-    "canonical-state",
-  );
-
-  const prContext = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "pullRequest.create",
-    { issue: 375, head: CANONICAL_BRANCH, base: "develop" },
-    [{ kind: "pullRequest.create", head: CANONICAL_BRANCH, base: BASE_BRANCH, max: 1 }],
-    375,
-  );
-  await denial(
-    admitAuthenticatedSessionCapability(options(prContext, runtime.authority, evidence(375, "draft"))),
-    "canonical-state",
-  );
-});
-
-test("fails closed when Runtime trust is revoked or expired", async () => {
-  const key = generateRuntimeAuthorityKeyPair();
-  const issuedRuntime = runtimeAuthority(key);
-  const context = await authenticatedContext(
-    issuedRuntime.authority,
-    key,
-    "change.implement",
-    { issue: 375 },
-    [{ kind: "change.implement", issue: 375 }],
-    375,
-  );
-  const disabled = runtimeAuthority(key, { status: "disabled" });
-  await denial(
-    admitAuthenticatedSessionCapability(options(context, disabled.authority, evidence(375))),
-    "runtime-trust",
-  );
-  const expired = runtimeAuthority(key, { notAfter: "2026-09-11T00:00:00Z" });
-  await denial(
-    admitAuthenticatedSessionCapability(options(context, expired.authority, evidence(375))),
-    "runtime-trust",
-  );
-});
-
-test("applies the #370 protected-path deny-set to every delegated write", async () => {
-  const runtime = runtimeAuthority();
-  const treeDelta = {
-    changes: [{ operation: "modify", path: ".github/inari/authorities/runtime.json" }],
-  };
-  const context = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "branch.advance",
-    { issue: 375, branch: CANONICAL_BRANCH, expectedHead: BRANCH_SHA, treeDelta },
-    [{ kind: "branch.advance", branch: CANONICAL_BRANCH }],
-    375,
-  );
-  await denial(
-    admitAuthenticatedSessionCapability(options(context, runtime.authority, evidence(375, "draft"))),
-    "protected-path",
-  );
-});
-
-test("requires a current named path policy and permits only its narrower paths", async () => {
-  const runtime = runtimeAuthority();
-  const treeDelta = { changes: [{ operation: "modify", path: "src/implementation.ts" }] };
-  const context = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "branch.advance",
-    { issue: 375, branch: CANONICAL_BRANCH, expectedHead: BRANCH_SHA, treeDelta },
-    [{ kind: "branch.advance", branch: CANONICAL_BRANCH, pathPolicy: "implementation-only" }],
-    375,
-  );
-  await denial(
-    admitAuthenticatedSessionCapability(options(context, runtime.authority, evidence(375, "draft"))),
-    "path-policy",
-  );
-
-  const allowed = await admitAuthenticatedSessionCapability(
-    options(context, runtime.authority, evidence(375, "draft"), {
-      pathPolicyResolver: {
-        async resolve(name, input) {
-          assert.equal(name, "implementation-only");
-          assert.equal(input.authority.policySha, POLICY_SHA);
-          return { name, ref: "main", sha: POLICY_SHA, allowsPath: (path) => path.startsWith("src/") };
-        },
-      },
-    }),
-  );
-  assert.deepEqual(allowed.write?.pathPolicy, { name: "implementation-only", ref: "main", sha: POLICY_SHA });
-});
-
-test("rejects stale canonical evidence and accepts the same generation only", async () => {
-  const runtime = runtimeAuthority();
-  const context = await authenticatedContext(
-    runtime.authority,
-    runtime.key,
-    "change.implement",
-    { issue: 375 },
-    [{ kind: "change.implement", issue: 375 }],
-    375,
-  );
-  await denial(
-    admitAuthenticatedSessionCapability(
-      options(context, runtime.authority, {
-        projection: evidence(375).projection,
-        authority: { ref: "main", sha: "e".repeat(40) },
-      }),
-    ),
-    "stale-evidence",
-  );
-  const admitted = await admitAuthenticatedSessionCapability(options(context, runtime.authority, evidence(375)));
-  assert.equal(admitted.authority.sha, POLICY_SHA);
-});
-
-test("returns idempotent admission for an already-applied Change issuance", async () => {
+test("admits pre-issuance change.issue from change.implement and freezes the result", async () => {
   const runtime = runtimeAuthority();
   const context = await authenticatedContext(
     runtime.authority,
     runtime.key,
     "change.issue",
-    { issue: 375 },
+    { version: 1, issue: 375 },
     [{ kind: "change.implement", issue: 375 }],
-    375,
   );
-  const admitted = await admitAuthenticatedSessionCapability(
-    options(context, runtime.authority, evidence(375, "draft")),
+  const admitted = admission(context, "change.issue", subject("change"), projection(375));
+
+  assert.equal(admitted.version, CAPABILITY_ADMISSION_CONTRACT_VERSION);
+  assert.equal(admitted.canonical.state, "DEFINED");
+  assert.equal(admitted.canonical.branch, CANONICAL_BRANCH);
+  assert.equal(admitted.canonical.pullRequest, undefined);
+  assert.deepEqual(admitted.subject, subject("change"));
+  assert.equal(admitted.capability.kind, "change.implement");
+  assert.equal(Object.isFrozen(admitted), true);
+  assert.equal(Object.isFrozen(admitted.canonical), true);
+});
+
+test("narrows an issued Change to its exact branch and pull request", async () => {
+  const runtime = runtimeAuthority();
+  const context = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.show",
+    { version: 1, issue: 375 },
+    [{ kind: "change.implement", issue: 375 }],
   );
-  assert.deepEqual(admitted.lifecycle, { operation: "issue", from: "DRAFT", to: "DRAFT", idempotent: true });
-  assert.equal(admitted.canonical.pullRequest, 5375);
+  const admitted = admission(context, "change.show", subject("change"), projection(375, "draft"));
+  assert.deepEqual(admitted.canonical, { state: "DRAFT", branch: CANONICAL_BRANCH, pullRequest: 5375 });
+
+  assertDenied(() => admission(context, "change.show", subject("change", 376), projection(375, "draft")), "task");
+  assertDenied(
+    () =>
+      admission(
+        context,
+        "change.show",
+        { kind: "change", issue: 375, branch: "not-allowed" } as unknown as CapabilityAdmissionSubject,
+        projection(375, "draft"),
+      ),
+    "canonical-identity",
+  );
+});
+
+test("requires separate ready and abort claims and delegates lifecycle legality to Core/XState", async () => {
+  const runtime = runtimeAuthority();
+  const readyContext = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.ready",
+    { version: 1, issue: 375 },
+    [{ kind: "change.ready", issue: 375 }],
+  );
+  const ready = admission(readyContext, "change.ready", subject("change"), projection(375, "draft"));
+  assert.equal(ready.canonical.state, "DRAFT");
+
+  const review = admission(readyContext, "change.ready", subject("change"), projection(375, "review"));
+  assert.equal(review.canonical.state, "REVIEW");
+
+  const abortContext = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.abort",
+    { version: 1, issue: 375 },
+    [{ kind: "change.abort", issue: 375 }],
+  );
+  const aborted = admission(abortContext, "change.abort", subject("change"), projection(375, "aborted"));
+  assert.equal(aborted.canonical.state, "ABORTED");
+
+  const implementContext = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.ready",
+    { version: 1, issue: 375 },
+    [{ kind: "change.implement", issue: 375 }],
+  );
+  assertDenied(
+    () => admission(implementContext, "change.ready", subject("change"), projection(375, "draft")),
+    "session-capability",
+  );
+});
+
+test("admits exact lower-level create and advance claims without widening canonical identity", async () => {
+  const runtime = runtimeAuthority();
+  const branchContext = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.create",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH },
+    [{ kind: "branch.create", branch: CANONICAL_BRANCH, max: 1 }],
+  );
+  assert.equal(
+    admission(branchContext, "branch.create", subject("branch"), projection(375)).capability.kind,
+    "branch.create",
+  );
+
+  const pullRequestContext = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "pullRequest.create",
+    { version: 1, issue: 375, head: CANONICAL_BRANCH, base: BASE_BRANCH },
+    [{ kind: "pullRequest.create", head: CANONICAL_BRANCH, base: BASE_BRANCH, max: 1 }],
+  );
+  assert.equal(
+    admission(pullRequestContext, "pullRequest.create", subject("pullRequest"), projection(375, "branch-only"))
+      .capability.kind,
+    "pullRequest.create",
+  );
+
+  const advanceContext = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.advance",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH },
+    [{ kind: "branch.advance", branch: CANONICAL_BRANCH }],
+  );
+  const advanced = admission(advanceContext, "branch.advance", subject("branch"), projection(375, "draft"), {
+    changes: [{ operation: "modify", path: "src/implementation.ts" }],
+  });
+  assert.equal(advanced.capability.kind, "branch.advance");
+
+  assertDenied(
+    () =>
+      admission(
+        advanceContext,
+        "branch.advance",
+        { kind: "branch", issue: 375, branch: "feat/375-other" },
+        projection(375, "draft"),
+        { changes: [{ operation: "modify", path: "src/implementation.ts" }] },
+      ),
+    "canonical-identity",
+  );
+});
+
+test("supports a high-level implementation claim for lower-level effects only at Core identities", async () => {
+  const runtime = runtimeAuthority();
+  const context = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.advance",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH },
+    [{ kind: "change.implement", issue: 375 }],
+  );
+  const admitted = admission(context, "branch.advance", subject("branch"), projection(375, "draft"), {
+    changes: [{ operation: "modify", path: "src/implementation.ts" }],
+  });
+  assert.equal(admitted.capability.kind, "change.implement");
+});
+
+test("fails closed for cross-repository, cross-task, stale, and conflicting evidence", async () => {
+  const runtime = runtimeAuthority();
+  const context = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.show",
+    { version: 1, issue: 375 },
+    [{ kind: "change.implement", issue: 375 }],
+  );
+  const foreign = structuredClone(projection(375, "draft")) as ChangeProjectionResult;
+  assert.ok(foreign.change);
+  const foreignProjection = {
+    ...foreign,
+    change: { ...foreign.change, identity: { ...foreign.change.identity, repositoryId: "987654321" } },
+  };
+  assertDenied(() => admission(context, "change.show", subject("change"), foreignProjection), "repository");
+  assertDenied(() => admission(context, "change.show", subject("change"), projection(376, "draft")), "task");
+  assertDenied(
+    () =>
+      admission(context, "change.show", subject("change"), {
+        ...projection(375, "draft"),
+        status: "unavailable",
+        valid: false,
+      }),
+    "stale-evidence",
+  );
+  assertDenied(
+    () => admission(context, "change.show", subject("change"), projection(375, "branch-only")),
+    "canonical-state",
+  );
+});
+
+test("applies the immutable #370 deny-set before admitting a branch write", async () => {
+  const runtime = runtimeAuthority();
+  const context = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.advance",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH },
+    [{ kind: "branch.advance", branch: CANONICAL_BRANCH }],
+  );
+  assertDenied(
+    () =>
+      admission(context, "branch.advance", subject("branch"), projection(375, "draft"), {
+        changes: [{ operation: "modify", path: ".github/inari/authorities/runtime.json" }],
+      }),
+    "protected-path",
+  );
+  assertDenied(
+    () => admission(context, "branch.advance", subject("branch"), projection(375, "draft")),
+    "protected-path",
+  );
+});
+
+test("fails closed for an unresolved named path policy and never treats it as widening", async () => {
+  const runtime = runtimeAuthority();
+  const context = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.advance",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH },
+    [{ kind: "branch.advance", branch: CANONICAL_BRANCH, pathPolicy: "implementation-only" }],
+  );
+  assertDenied(
+    () =>
+      admission(context, "branch.advance", subject("branch"), projection(375, "draft"), {
+        changes: [{ operation: "modify", path: "src/implementation.ts" }],
+      }),
+    "path-policy",
+  );
+});
+
+test("does not expose Runtime trust readers, provider credentials, or unsupported authority", () => {
+  const error = new CapabilityAdmissionError("operation");
+  assert.equal(error.code, "CAPABILITY_ADMISSION_DENIED");
+  assert.equal(error.message, "Capability admission denied.");
+  assertDenied(
+    () =>
+      admitAuthenticatedSessionCapability({
+        context: {} as AuthenticatedSessionContext,
+        operation: "change.implement" as CapabilityAdmissionOperation,
+        subject: subject("change"),
+        projection: projection(375),
+      }),
+    "operation",
+  );
 });
