@@ -18,9 +18,8 @@ import { validateBranchName } from "../../branch-naming-authority.mjs";
 import { classifyRepositoryPath } from "../agent-authority/protected-paths.js";
 
 export const GIT_DATA_CAPABILITY_VERSION = 1 as const;
-export type GitDataCapabilityVersion = typeof GIT_DATA_CAPABILITY_VERSION;
 
-export const GIT_DATA_WRITE_MODES = Object.freeze(["100644", "100755", "120000"] as const);
+export const GIT_DATA_WRITE_MODES = Object.freeze(["100644", "100755"] as const);
 export type GitDataWriteMode = (typeof GIT_DATA_WRITE_MODES)[number];
 
 export type GitDataObjectType = "blob" | "tree" | "commit";
@@ -50,7 +49,7 @@ export interface GitDataBlobInput {
 
 export interface GitDataTreeWriteEntry {
   readonly path: string;
-  readonly mode: GitDataWriteMode;
+  readonly mode: "100644" | "100755";
   readonly type: "blob";
   /** `null` deletes the path from the base tree. */
   readonly sha: string | null;
@@ -63,14 +62,14 @@ export interface GitDataTreeInput {
 
 export interface GitDataCommitAuthor {
   readonly name: string;
-  readonly email: string;
+  readonly email?: string;
 }
 
 export interface GitDataCommitInput {
   readonly message: string;
   readonly treeSha: string;
   readonly parents: readonly string[];
-  readonly author: GitDataCommitAuthor;
+  readonly author?: GitDataCommitAuthor;
 }
 
 export interface GitDataRefUpdateInput {
@@ -84,15 +83,16 @@ export interface GitDataRefUpdateResult {
   readonly status: "updated" | "rejected";
 }
 
-export interface GitDataCapability {
-  readonly version: GitDataCapabilityVersion;
+/** The only App-internal Git surface used by branch advancement. */
+export interface GitHubBranchAdvanceCapability {
   readonly scope: IssuerInstallationScope;
   readRef(branch: string): Promise<GitDataRef | undefined>;
+  readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }>;
   readTree(refOrSha: string): Promise<GitDataTree>;
   createBlob(input: GitDataBlobInput): Promise<{ readonly sha: string }>;
   createTree(input: GitDataTreeInput): Promise<{ readonly sha: string }>;
   createCommit(input: GitDataCommitInput): Promise<{ readonly sha: string }>;
-  updateRefs(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult>;
+  compareAndAdvanceRef(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult>;
 }
 
 export interface GitDataGraphqlRequest {
@@ -111,17 +111,17 @@ export interface GitDataGraphqlRequest {
 type GitDataGraphqlValue =
   string | number | boolean | null | readonly GitDataGraphqlValue[] | { readonly [key: string]: GitDataGraphqlValue };
 
-export interface GitDataCapabilityTransport extends Pick<GitHubChangeEffectTransport, "request"> {
+export interface BranchAdvanceCapabilityTransport extends Pick<GitHubChangeEffectTransport, "request"> {
   requestGraphql(request: GitDataGraphqlRequest): Promise<GitHubChangeEffectResponse>;
 }
 
-export interface GitHubGitDataCapabilityOptions {
+export interface GitHubBranchAdvanceCapabilityOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly repositoryId: string;
   /** Provider node ID is retained only inside the credential-bound facade. */
   readonly repositoryNodeId: string;
   readonly scope: IssuerInstallationScope;
-  readonly transport: GitDataCapabilityTransport;
+  readonly transport: BranchAdvanceCapabilityTransport;
 }
 
 const UPDATE_REFS_MUTATION =
@@ -141,14 +141,13 @@ export class GitDataCapabilityError extends Error {
 }
 
 /** Credential-free facade over one broker-owned GitHub transport. */
-export class GitHubGitDataCapability implements GitDataCapability {
-  readonly version = GIT_DATA_CAPABILITY_VERSION;
+export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCapability {
   readonly scope: IssuerInstallationScope;
   readonly #repository: GitHubChangeEffectRepository;
   readonly #repositoryNodeId: string;
-  readonly #transport: GitDataCapabilityTransport;
+  readonly #transport: BranchAdvanceCapabilityTransport;
 
-  constructor(options: GitHubGitDataCapabilityOptions) {
+  constructor(options: GitHubBranchAdvanceCapabilityOptions) {
     if (
       !isRecord(options) ||
       !isRecord(options.repository) ||
@@ -213,6 +212,13 @@ export class GitHubGitDataCapability implements GitDataCapability {
     return Object.freeze({ sha: body.sha, entries: Object.freeze(entries) });
   }
 
+  async readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }> {
+    if (!validSha(sha)) throw new GitDataCapabilityError();
+    const body = await this.#request("GET", `${this.repositoryPath()}/git/commits/${sha}`, undefined, 200);
+    if (body.sha !== sha || !isRecord(body.tree) || !validSha(body.tree.sha)) throw new GitDataCapabilityError();
+    return Object.freeze({ sha, treeSha: body.tree.sha });
+  }
+
   async createBlob(input: GitDataBlobInput): Promise<{ readonly sha: string }> {
     if (!isRecord(input) || typeof input.content !== "string" || !validBase64(input.content)) {
       throw new GitDataCapabilityError();
@@ -261,9 +267,10 @@ export class GitHubGitDataCapability implements GitDataCapability {
       !Array.isArray(input.parents) ||
       input.parents.length !== 1 ||
       !validSha(input.parents[0]) ||
-      !isRecord(input.author) ||
-      !validText(input.author.name, 256) ||
-      !validText(input.author.email, 320)
+      (input.author !== undefined &&
+        (!isRecord(input.author) ||
+          !validText(input.author.name, 256) ||
+          (input.author.email !== undefined && !validText(input.author.email, 320))))
     ) {
       throw new GitDataCapabilityError();
     }
@@ -274,7 +281,14 @@ export class GitHubGitDataCapability implements GitDataCapability {
         message: input.message,
         tree: input.treeSha,
         parents: input.parents,
-        author: { name: input.author.name, email: input.author.email },
+        ...(input.author === undefined
+          ? {}
+          : {
+              author: {
+                name: input.author.name,
+                ...(input.author.email === undefined ? {} : { email: input.author.email }),
+              },
+            }),
       },
       201,
     );
@@ -319,6 +333,10 @@ export class GitHubGitDataCapability implements GitDataCapability {
     }
     if (!isRecord(body.data) || !isRecord(body.data.updateRefs)) throw new GitDataCapabilityError();
     return Object.freeze({ status: "updated" });
+  }
+
+  async compareAndAdvanceRef(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult> {
+    return this.updateRefs(input);
   }
 
   async #request(
@@ -399,7 +417,8 @@ function assertRefOrSha(value: unknown): asserts value is string {
 }
 
 function validBase64(value: string): boolean {
-  return value.length <= 65_536 && BASE64_PATTERN.test(value);
+  if (value.length > 65_536 || !BASE64_PATTERN.test(value)) return false;
+  return Buffer.from(value, "base64").toString("base64") === value;
 }
 
 function validRepositoryId(value: unknown): value is string {

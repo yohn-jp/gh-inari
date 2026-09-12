@@ -19,9 +19,8 @@ import {
   type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import {
-  GitHubGitDataCapability,
-  type GitDataCapability,
-  type GitDataCapabilityTransport,
+  GitHubBranchAdvanceCapabilityImpl,
+  type BranchAdvanceCapabilityTransport,
   type GitDataGraphqlRequest,
 } from "./git-data-capability.js";
 import {
@@ -471,12 +470,12 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
   }
 
   /**
-   * Execute a bounded Git-data operation while retaining the App token
-   * internally. The callback receives no generic transport or credential.
+   * Execute one bounded branch-advance operation while retaining the App
+   * token internally. The callback receives no generic transport or credential.
    */
-  async withGitDataCapability<T>(
+  async withBranchAdvanceCapability<T>(
     request: { readonly target: IssuerRepositoryIdentity },
-    operation: (capability: GitDataCapability) => Promise<T>,
+    operation: (capability: import("./git-data-capability.js").GitHubBranchAdvanceCapability) => Promise<T>,
   ): Promise<T> {
     if (!isRecord(request) || !isRecord(request.target) || typeof operation !== "function") {
       throw this.safeFailure("installation-scope");
@@ -499,11 +498,11 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       failureStage: "projection-execution",
       failure: this.#failure,
     });
-    const capabilityTransport: GitDataCapabilityTransport = Object.freeze({
-      request: (input: Parameters<GitDataCapabilityTransport["request"]>[0]) => transport.request(input),
+    const capabilityTransport: BranchAdvanceCapabilityTransport = Object.freeze({
+      request: (input: Parameters<BranchAdvanceCapabilityTransport["request"]>[0]) => transport.request(input),
       requestGraphql: (input: GitDataGraphqlRequest) => transport.requestGraphql(input),
     });
-    const capability = new GitHubGitDataCapability({
+    const capability = new GitHubBranchAdvanceCapabilityImpl({
       repository: this.#repository,
       repositoryId: credential.scope.repository.repositoryId,
       repositoryNodeId,
