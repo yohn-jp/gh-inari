@@ -8,7 +8,7 @@ import {
 
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 
-export const SKILL_MODEL_VERSION = "1.1.0";
+export const SKILL_MODEL_VERSION = "1.2.0";
 
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
 export const MAX_SKILL_OUTPUT_BYTES = 4096;
@@ -21,11 +21,23 @@ export interface SkillWorkflowStep {
   readonly command: string;
 }
 
+/**
+ * A pointer to an existing Golden Path contract. The skill only tells a
+ * caller which canonical output to consume; it does not reproduce the
+ * contract's lifecycle or recovery decisions.
+ */
+export interface SkillContractReference {
+  readonly contract: "golden-path-entry" | "change-handoff" | "golden-path-status" | "golden-path-recovery";
+  readonly output: "action" | "handoff" | "nextAction" | "recovery";
+  readonly instruction: string;
+}
+
 export interface SkillScenario {
   readonly id: string;
   readonly title: string;
   readonly whenToUse: string;
   readonly workflow: readonly SkillWorkflowStep[];
+  readonly contractReferences: readonly SkillContractReference[];
   readonly invariants: readonly string[];
   readonly canonicalCommandId: CommandId;
   readonly helpDomain: Exclude<CommandDomain, "root">;
@@ -44,6 +56,7 @@ function skillScenario(input: {
   readonly title: string;
   readonly whenToUse: string;
   readonly workflow: readonly (readonly [summary: string, commandId: CommandId])[];
+  readonly contractReferences?: readonly SkillContractReference[];
   readonly invariants: readonly string[];
   readonly canonicalCommandId: CommandId;
   readonly helpDomain: Exclude<CommandDomain, "root">;
@@ -53,6 +66,7 @@ function skillScenario(input: {
     title: input.title,
     whenToUse: input.whenToUse,
     workflow: input.workflow.map(([summary, commandId]) => workflowStep(summary, commandId)),
+    contractReferences: input.contractReferences ?? [],
     invariants: input.invariants,
     canonicalCommandId: input.canonicalCommandId,
     helpDomain: input.helpDomain,
@@ -149,6 +163,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     title: "Reconcile an existing Issue's native parent/dependency relationships",
     whenToUse:
       "Use when an existing Issue's GitHub-native parent (sub-issue) or blocked-by relationships must be set, changed, or removed through Inari's semantic authority, instead of editing relationship prose by hand.",
+    scope: "specialized-alternative",
     workflow: [
       [
         "Preview the deterministic relationship plan from live observation before mutating anything.",
@@ -189,6 +204,64 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     canonicalCommandId: "change.issue",
     helpDomain: "change",
   }),
+  skillScenario({
+    id: "golden-path",
+    title: "Follow the Inari Golden Path",
+    whenToUse: "Use when taking governed intent from entry through implementation and governed review admission.",
+    workflow: [
+      ["Verify the canonical runtime is available before starting governed work.", "root.diagnose"],
+      ["Resolve repository-native governance, then create the governed root Issue when it is absent.", "issue.create"],
+      ["Issue the semantic Change and consume its canonical entry result before implementation.", "change.issue"],
+      [
+        "Hand implementation responsibility to the canonical worker boundary and wait for completion evidence.",
+        "change.show",
+      ],
+      ["After implementation evidence is ready, request the governed transition to review.", "change.ready"],
+      [
+        "Reread the canonical status after each operation and follow its returned action until REVIEW, WAIT, or stop.",
+        "change.show",
+      ],
+      [
+        "If recovery returns ABORT, request governed termination; retry only when recovery says it is safe.",
+        "change.abort",
+      ],
+    ],
+    contractReferences: [
+      {
+        contract: "golden-path-entry",
+        output: "action",
+        instruction: "Use the entry result's action; never infer Change issuance or create a branch/PR manually.",
+      },
+      {
+        contract: "change-handoff",
+        output: "handoff",
+        instruction:
+          "Use the canonical implementation handoff; keep worker, worktree, and process internals out of this skill.",
+      },
+      {
+        contract: "golden-path-status",
+        output: "nextAction",
+        instruction:
+          "Treat nextAction as the only normal-path routing signal; do not create a second transition model.",
+      },
+      {
+        contract: "golden-path-recovery",
+        output: "recovery",
+        instruction:
+          "On recovery, obey safeAction, retryable, rereadRequired, and automaticCleanup exactly as returned.",
+      },
+    ],
+    invariants: [
+      "Use repository-native governance and semantic Change contracts; do not invent branch names, PR identity, or raw GitHub mutations.",
+      "The normal route is governed intent -> Change issuance -> implementation handoff -> governed readiness -> REVIEW; exact routing comes from canonical nextAction output.",
+      "Inari emits the implementation handoff; Nawabari owns the worktree, session, process, and local Git execution without exposing its internals here.",
+      "Never infer retry safety or cleanup. Reread authoritative recovery evidence before any retry, abort, or recovery action.",
+      "Stop on MANUAL_REVIEW, unavailable or ambiguous evidence, unsupported capability, or any terminal result that provides no safe action.",
+      HELP_DISCLAIMER,
+    ],
+    canonicalCommandId: "change.issue",
+    helpDomain: "change",
+  }),
 ];
 
 export function findSkillScenario(id: string): SkillScenario | undefined {
@@ -212,6 +285,7 @@ export interface SkillScenarioProjection {
   readonly title: string;
   readonly whenToUse: string;
   readonly workflow: readonly SkillWorkflowStep[];
+  readonly contractReferences: readonly SkillContractReference[];
   readonly invariants: readonly string[];
   readonly canonicalCommandId: CommandId;
   readonly helpDomain: Exclude<CommandDomain, "root">;
@@ -248,6 +322,7 @@ export function projectSkillScenarioToJson(scenario: SkillScenario): SkillScenar
     title: scenario.title,
     whenToUse: scenario.whenToUse,
     workflow: scenario.workflow,
+    contractReferences: scenario.contractReferences,
     invariants: scenario.invariants,
     canonicalCommandId: scenario.canonicalCommandId,
     helpDomain: scenario.helpDomain,
@@ -268,6 +343,13 @@ export function projectSkillScenarioToText(scenario: SkillScenario): string {
     lines.push(`  ${index + 1}. ${step.summary}`);
     lines.push(`     ${step.command}`);
   });
+  if (scenario.contractReferences.length > 0) {
+    lines.push("");
+    lines.push("Canonical contract references:");
+    for (const reference of scenario.contractReferences) {
+      lines.push(`  - ${reference.contract}.${reference.output}: ${reference.instruction}`);
+    }
+  }
   lines.push("");
   lines.push("Invariants:");
   for (const invariant of scenario.invariants) lines.push(`  - ${invariant}`);
