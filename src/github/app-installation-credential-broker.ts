@@ -517,6 +517,16 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     }
   }
 
+  /** Narrow branch-advance seam; no generalized Git capability crosses it. */
+  async withBranchAdvanceCapability<T>(
+    request: { readonly target: IssuerRepositoryIdentity },
+    operation: (capability: import("./git-data-capability.js").GitHubBranchAdvanceCapability) => Promise<T>,
+  ): Promise<T> {
+    return this.withGitDataCapability(request, (capability) =>
+      operation(capability as unknown as import("./git-data-capability.js").GitHubBranchAdvanceCapability),
+    );
+  }
+
   private async issueInstallationToken(request: CredentialRequest): Promise<InstallationCredential> {
     if (
       request.app.appId !== this.#app.appId ||
