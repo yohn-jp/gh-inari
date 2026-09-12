@@ -424,7 +424,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
    * Caller input may corroborate that identity, but can never replace it.
    */
   private bindRequester<T extends ChangeRemoteMutationRequest | ChangeRemoteReadRequest>(request: T): T {
-    const trustedRequester = this.#execution.requester;
+    const trustedRequester = this.#execution.runtime === "github-actions" ? this.#execution.requester : undefined;
     if (trustedRequester !== undefined && request.requester !== undefined && request.requester !== trustedRequester) {
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_PRECONDITION_FAILED",

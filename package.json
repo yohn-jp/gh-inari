@@ -104,6 +104,10 @@
       "types": "./dist/agent-authority/index.d.ts",
       "import": "./dist/agent-authority/index.js"
     },
+    "./session-authorized-change-executor": {
+      "types": "./dist/session-authorized-change-executor.d.ts",
+      "import": "./dist/session-authorized-change-executor.js"
+    },
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
