@@ -73,6 +73,12 @@ ABORT_GRAPH_EXCLUSIONS.set(
   "recoveryRequired.cleanupPending",
   "The recovery-required cleanup marker is an internal final state consumed by the compound onDone transition.",
 );
+const ABORT_GRAPH_EDGE_EXCLUSIONS = new Map([
+  [
+    "change-abort-execution.recoveryRequired:0:0",
+    "The recovery-required compound onDone edge is an internal atomic handoff with no stable source snapshot.",
+  ],
+]);
 const ISSUANCE_GRAPH_EXCLUSIONS = new Map(
   [
     "validatingInitialGovernance",
@@ -222,6 +228,14 @@ function graphNodes(root: DirectedGraphNode): readonly DirectedGraphNode[] {
   return [root, ...root.children.flatMap((child) => graphNodes(child))];
 }
 
+interface ProductionGraphEdge {
+  readonly id: string;
+  readonly source: string;
+  readonly event: string;
+  readonly target: string;
+  readonly guard?: (args: { readonly context: unknown; readonly event: GraphEvent }) => boolean;
+}
+
 function stateSuffix(machineId: string, stateId: string): string {
   if (stateId === machineId) return "";
   return stateId.startsWith(`${machineId}.`) ? stateId.slice(machineId.length + 1) : stateId;
@@ -235,6 +249,21 @@ function productionEventTypes(machine: AnyStateMachine): readonly string[] {
   return [
     ...new Set(graphNodes(toDirectedGraph(machine)).flatMap((node) => node.edges.map((edge) => edge.label.text))),
   ];
+}
+
+function productionGraphEdges(machine: AnyStateMachine): readonly ProductionGraphEdge[] {
+  return graphNodes(toDirectedGraph(machine)).flatMap((node) =>
+    node.edges.map((edge) => ({
+      id: edge.id,
+      source: stateSuffix(machine.id, edge.source.id),
+      event: edge.label.text,
+      target: stateSuffix(machine.id, edge.target.id),
+      guard:
+        typeof edge.transition.guard === "function"
+          ? (edge.transition.guard as unknown as ProductionGraphEdge["guard"])
+          : undefined,
+    })),
+  );
 }
 
 interface GraphEvent {
@@ -275,23 +304,104 @@ function coveredStateIds(paths: readonly GraphPath[]): ReadonlySet<string> {
   return new Set(paths.flatMap((path) => stateValueSuffixes(path.state.value)));
 }
 
-function coveredSourceEvents(paths: readonly GraphPath[]): ReadonlySet<string> {
+function stateDepth(state: string): number {
+  return state === "" ? 0 : state.split(".").length;
+}
+
+function coveredGraphEdges(
+  paths: readonly GraphPath[],
+  graphEdges: readonly ProductionGraphEdge[],
+): ReadonlySet<string> {
   const covered = new Set<string>();
   for (const path of paths) {
     for (let index = 1; index < path.steps.length; index += 1) {
-      const source = path.steps[index - 1]?.state.value;
-      const event = path.steps[index]?.event.type;
-      if (event === undefined) continue;
-      for (const sourceState of stateValueSuffixes(source)) covered.add(`${sourceState}|${event}`);
+      const previous = path.steps[index - 1];
+      const step = path.steps[index];
+      if (previous === undefined || step === undefined || step.event.type === "xstate.init") continue;
+
+      const activeStates = [...stateValueSuffixes(previous.state.value)].sort((left, right) => {
+        return stateDepth(right) - stateDepth(left);
+      });
+      const edge = selectGraphEdge(activeStates, previous.state.context, step.event, graphEdges);
+      if (edge !== undefined) covered.add(edge.id);
     }
   }
   return covered;
+}
+
+function selectGraphEdge(
+  activeStates: readonly string[],
+  context: unknown,
+  event: GraphEvent,
+  graphEdges: readonly ProductionGraphEdge[],
+): ProductionGraphEdge | undefined {
+  for (const source of activeStates) {
+    const candidates = graphEdges.filter((edge) => edge.source === source && edge.event === event.type);
+    if (candidates.length === 0) continue;
+
+    const selected = candidates.find((edge) => {
+      if (edge.guard === undefined) return true;
+      try {
+        return edge.guard?.({ context, event }) === true;
+      } catch {
+        return false;
+      }
+    });
+    return selected;
+  }
+  return undefined;
+}
+
+function coverReachableGraphEdges(
+  machine: AnyStateMachine,
+  paths: readonly GraphPath[],
+  graphEdges: readonly ProductionGraphEdge[],
+  events: readonly GraphEvent[],
+  input: unknown,
+  observed: Set<string>,
+): void {
+  const sourceSnapshots = paths.flatMap((path) => path.steps.map((step) => step.state));
+  for (const edge of graphEdges) {
+    if (observed.has(edge.id)) continue;
+    const matchingSnapshots = sourceSnapshots.filter((snapshot) =>
+      stateValueSuffixes(snapshot.value).includes(edge.source),
+    );
+    for (const sourceSnapshot of matchingSnapshots) {
+      for (const event of events.filter((candidate) => candidate.type === edge.event)) {
+        const selected = selectGraphEdge(
+          [...stateValueSuffixes(sourceSnapshot.value)].sort((left, right) => stateDepth(right) - stateDepth(left)),
+          sourceSnapshot.context,
+          event,
+          graphEdges,
+        );
+        if (selected?.id !== edge.id) continue;
+        try {
+          const edgePaths = getPathsFromEvents(machine, [event], {
+            fromState: sourceSnapshot as never,
+            input: input as never,
+            events: [event] as never,
+            limit: GRAPH_TRAVERSAL_LIMIT,
+            serializeState: serializeGraphSnapshot,
+          });
+          if (edgePaths.length > 0) {
+            observed.add(edge.id);
+            break;
+          }
+        } catch {
+          // Keep the edge uncovered; the assertion below requires coverage or an explicit exclusion.
+        }
+      }
+      if (observed.has(edge.id)) break;
+    }
+  }
 }
 
 function assertProductionGraphCoverage(
   machine: AnyStateMachine,
   paths: readonly GraphPath[],
   excludedStates: ReadonlyMap<string, string> = new Map(),
+  excludedEdges: ReadonlyMap<string, string> = new Map(),
+  events: readonly GraphEvent[] = [],
   input?: unknown,
 ): void {
   const machineId = machine.id;
@@ -307,31 +417,18 @@ function assertProductionGraphCoverage(
     assert.ok(reason.length > 0, `${machineId} exclusion reason must be bounded and non-empty`);
   }
 
-  const graphEdges = graphNodes(toDirectedGraph(machine)).flatMap((node) =>
-    node.edges.map((edge) => `${stateSuffix(machineId, node.id)}|${edge.label.text}`),
-  );
-  const observed = coveredSourceEvents(paths);
-  const missingEdges = [...new Set(graphEdges)].filter((edge) => {
-    const source = edge.split("|", 1)[0];
-    if (observed.has(edge) || excludedStates.has(source)) return false;
-    const event = edge.slice(source.length + 1);
-    const sourceSnapshot = paths
-      .flatMap((path) => path.steps.map((step) => step.state))
-      .find((snapshot) => stateValueSuffixes(snapshot.value).includes(source));
-    if (sourceSnapshot === undefined) return true;
-    try {
-      const edgePaths = getPathsFromEvents(machine, [{ type: event }], {
-        fromState: sourceSnapshot as never,
-        input: input as never,
-        events: [{ type: event }] as never,
-        limit: GRAPH_TRAVERSAL_LIMIT,
-        serializeState: serializeGraphSnapshot,
-      });
-      return edgePaths.length === 0;
-    } catch {
-      return true;
-    }
-  });
+  const graphEdges = productionGraphEdges(machine);
+  const graphEdgeIds = new Set(graphEdges.map((edge) => edge.id));
+  for (const [edge, reason] of excludedEdges) {
+    assert.ok(graphEdgeIds.has(edge), `${machineId} edge exclusion is stale: ${edge} (${reason})`);
+    assert.ok(reason.length > 0, `${machineId} edge exclusion reason must be bounded and non-empty`);
+  }
+
+  const observed = new Set(coveredGraphEdges(paths, graphEdges));
+  coverReachableGraphEdges(machine, paths, graphEdges, events, input, observed);
+  const missingEdges = graphEdges
+    .filter((edge) => !observed.has(edge.id) && !excludedEdges.has(edge.id))
+    .map((edge) => `${edge.id} (${edge.source}|${edge.event}|${edge.target})`);
   assert.deepEqual(missingEdges, [], `${machineId} has uncovered production event edges`);
 }
 
@@ -556,6 +653,8 @@ test("production lifecycle graph covers every public reachable state/event path"
     lifecycleMachine,
     paths,
     new Map([["admit", "transient authoritative-state admission"]]),
+    new Map(),
+    events,
   );
 
   for (const path of paths) {
@@ -574,25 +673,29 @@ test("production lifecycle graph covers every public reachable state/event path"
 });
 
 test("production Ready, Abort, and Issuance graphs cover all bounded machine states and event edges", () => {
-  const readyPaths = graphPaths(
-    readyExecutionMachine,
-    readyGraphServices(),
-    machineGraphEvents(readyExecutionMachine, ["valid", "existing", "precondition", "verify", "effect-failure"]),
-  );
-  const abortPaths = graphPaths(
-    abortExecutionMachine,
-    abortGraphServices(),
-    machineGraphEvents(abortExecutionMachine, [
-      "valid",
-      "existing",
-      "precondition",
-      "plan-failure",
-      "verify",
-      "unsafe-recovery",
-      "recovery",
-    ]),
-  );
-  const issuancePaths = graphPathProfiles(issuanceExecutionMachine, issuanceGraphServices(), [
+  const readyServices = readyGraphServices();
+  const readyEvents = machineGraphEvents(readyExecutionMachine, [
+    "valid",
+    "existing",
+    "precondition",
+    "verify",
+    "effect-failure",
+  ]);
+  const readyPaths = graphPaths(readyExecutionMachine, readyServices, readyEvents);
+  const abortServices = abortGraphServices();
+  const abortEvents = machineGraphEvents(abortExecutionMachine, [
+    "valid",
+    "existing",
+    "precondition",
+    "plan-failure",
+    "verify",
+    "unsafe-recovery",
+    "recovery",
+  ]);
+  const abortPaths = graphPaths(abortExecutionMachine, abortServices, abortEvents);
+  const issuanceServices = issuanceGraphServices();
+  const issuanceEvents = machineGraphEvents(issuanceExecutionMachine);
+  const issuancePaths = graphPathProfiles(issuanceExecutionMachine, issuanceServices, [
     () => ["valid"],
     () => ["existing"],
     () => ["precondition"],
@@ -617,13 +720,29 @@ test("production Ready, Abort, and Issuance graphs cover all bounded machine sta
           : ["valid"],
   ]);
 
-  assertProductionGraphCoverage(readyExecutionMachine, readyPaths, READY_GRAPH_EXCLUSIONS, readyGraphServices());
-  assertProductionGraphCoverage(abortExecutionMachine, abortPaths, ABORT_GRAPH_EXCLUSIONS, abortGraphServices());
+  assertProductionGraphCoverage(
+    readyExecutionMachine,
+    readyPaths,
+    READY_GRAPH_EXCLUSIONS,
+    new Map(),
+    readyEvents,
+    readyServices,
+  );
+  assertProductionGraphCoverage(
+    abortExecutionMachine,
+    abortPaths,
+    ABORT_GRAPH_EXCLUSIONS,
+    ABORT_GRAPH_EDGE_EXCLUSIONS,
+    abortEvents,
+    abortServices,
+  );
   assertProductionGraphCoverage(
     issuanceExecutionMachine,
     issuancePaths,
     ISSUANCE_GRAPH_EXCLUSIONS,
-    issuanceGraphServices(),
+    new Map(),
+    issuanceEvents,
+    issuanceServices,
   );
 });
 
