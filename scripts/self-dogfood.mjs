@@ -12,66 +12,33 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import {
+  appendCertificationDiagnostic,
+  appendSelfDogfoodOperation,
+  CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_KINDS,
+  CERTIFICATION_RESULTS,
+  MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH,
+  MAX_CERTIFICATION_DIAGNOSTICS,
+  MAX_CERTIFICATION_OPERATIONS,
+  serializeCertificationEvidence,
+  SELF_DOGFOOD_OPERATIONS as CERTIFICATION_SELF_DOGFOOD_OPERATIONS,
+  SELF_DOGFOOD_OUTCOMES as CERTIFICATION_SELF_DOGFOOD_OUTCOMES,
+  validateDisposableGovernedIssue,
+  validateSelfDogfoodEvidence,
+  writeCertificationEvidence,
+} from "./certification-evidence.mjs";
 
-// Temporary wire labels used only to construct a bounded blocked envelope.
-// A successful run must load and validate the shared #415 authority below;
-// these are not a second long-term evidence schema.
-export const SELF_DOGFOOD_SCHEMA_VERSION = "1";
-export const SELF_DOGFOOD_KIND = "self-dogfood-golden-path";
-export const GOLDEN_PATH_CONTRACT_VERSION = "1";
-export const MAX_DIAGNOSTICS = 20;
-export const MAX_OPERATIONS = 32;
-export const MAX_DIAGNOSTIC_MESSAGE = 512;
-export const SELF_DOGFOOD_OPERATIONS = Object.freeze({
-  OPT_IN: "preflight.opt-in",
-  EXECUTABLE: "preflight.installed-executable",
-  SKILL: "skill.golden-path",
-  GOVERNANCE: "disposable-issue.governance-check",
-  FIRST_ISSUANCE: "change.issue.first",
-  RETURN_EXISTING: "change.issue.return-existing",
-  HANDOFF: "change.handoff",
-  WORKER: "worker.implementation",
-  FIRST_READY: "change.ready.first",
-  REREAD: "change.ready.reread",
-  READY_RETRY: "change.ready.retry",
-  ABORT: "change.abort.recovery",
-});
-export const SELF_DOGFOOD_OUTCOMES = Object.freeze({
-  VERIFIED: "verified",
-  RETURNED_EXISTING: "returned-existing",
-  SUCCESS: "success",
-});
-export const SELF_DOGFOOD_REQUIRED_SEQUENCE = Object.freeze([
-  SELF_DOGFOOD_OPERATIONS.OPT_IN,
-  SELF_DOGFOOD_OPERATIONS.EXECUTABLE,
-  SELF_DOGFOOD_OPERATIONS.SKILL,
-  SELF_DOGFOOD_OPERATIONS.GOVERNANCE,
-  SELF_DOGFOOD_OPERATIONS.FIRST_ISSUANCE,
-  SELF_DOGFOOD_OPERATIONS.RETURN_EXISTING,
-  SELF_DOGFOOD_OPERATIONS.HANDOFF,
-  SELF_DOGFOOD_OPERATIONS.WORKER,
-  SELF_DOGFOOD_OPERATIONS.FIRST_READY,
-  SELF_DOGFOOD_OPERATIONS.REREAD,
-  SELF_DOGFOOD_OPERATIONS.READY_RETRY,
-]);
-export const SELF_DOGFOOD_OPERATION_OUTCOMES = Object.freeze({
-  [SELF_DOGFOOD_OPERATIONS.OPT_IN]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.EXECUTABLE]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.SKILL]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.GOVERNANCE]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.FIRST_ISSUANCE]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.RETURN_EXISTING]: Object.freeze([SELF_DOGFOOD_OUTCOMES.RETURNED_EXISTING]),
-  [SELF_DOGFOOD_OPERATIONS.HANDOFF]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.WORKER]: Object.freeze([SELF_DOGFOOD_OUTCOMES.SUCCESS]),
-  [SELF_DOGFOOD_OPERATIONS.FIRST_READY]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.REREAD]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-  [SELF_DOGFOOD_OPERATIONS.READY_RETRY]: Object.freeze([
-    SELF_DOGFOOD_OUTCOMES.VERIFIED,
-    SELF_DOGFOOD_OUTCOMES.RETURNED_EXISTING,
-  ]),
-  [SELF_DOGFOOD_OPERATIONS.ABORT]: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
-});
+export const SELF_DOGFOOD_SCHEMA_VERSION = CERTIFICATION_EVIDENCE_SCHEMA_VERSION;
+export const SELF_DOGFOOD_KIND = CERTIFICATION_KINDS[1];
+export const MAX_DIAGNOSTICS = MAX_CERTIFICATION_DIAGNOSTICS;
+export const MAX_OPERATIONS = MAX_CERTIFICATION_OPERATIONS;
+export const MAX_DIAGNOSTIC_MESSAGE = MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH;
+
+const [CERTIFICATION_RESULT_PASSED, , CERTIFICATION_RESULT_BLOCKED] = CERTIFICATION_RESULTS;
+export const SELF_DOGFOOD_OPERATIONS = CERTIFICATION_SELF_DOGFOOD_OPERATIONS;
+export const SELF_DOGFOOD_OUTCOMES = CERTIFICATION_SELF_DOGFOOD_OUTCOMES;
 const COMMAND_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -115,25 +82,16 @@ const CHANGE_CONTRACT_VERSION = 1;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function boundedMessage(value) {
-  const text = String(value)
-    .replace(/[\u0000-\u001f\u007f]/gu, " ")
-    .trim();
-  return text.length <= MAX_DIAGNOSTIC_MESSAGE ? text : `${text.slice(0, MAX_DIAGNOSTIC_MESSAGE - 1)}…`;
-}
-
 function redact(value) {
-  return boundedMessage(value)
+  return String(value)
+    .replace(/[\u0000-\u001f\u007f]/gu, " ")
+    .trim()
     .replace(/(bearer\s+|token[=:]\s*|secret[=:]\s*|password[=:]\s*)[^\s,;]+/giu, "$1[REDACTED]")
     .replace(/[A-Za-z0-9_\-/+=]{32,}/gu, "[REDACTED]");
 }
 
-function diagnostic(code, message) {
-  return { code, message: redact(message) };
-}
-
 function addDiagnostic(diagnostics, code, message) {
-  if (diagnostics.length < MAX_DIAGNOSTICS) diagnostics.push(diagnostic(code, message));
+  appendCertificationDiagnostic(diagnostics, code, redact(message));
 }
 
 function parsePositiveInteger(value, option) {
@@ -159,7 +117,6 @@ function requireValue(argv, index, option) {
 export function parseArguments(argv) {
   const options = {
     inari: process.env.INARI_BIN ?? "inari",
-    evidenceAuthority: process.env.INARI_CERTIFICATION_EVIDENCE_AUTHORITY,
     repository: undefined,
     issue: undefined,
     confirmDisposable: undefined,
@@ -169,12 +126,7 @@ export function parseArguments(argv) {
     abort: false,
     timeoutMs: COMMAND_TIMEOUT_MS,
   };
-  let skipConsumedValue = false;
   for (let index = 0; index < argv.length; index += 1) {
-    if (skipConsumedValue) {
-      skipConsumedValue = false;
-      continue;
-    }
     const token = argv[index];
     if (token === "--help" || token === "-h") return { help: true, options };
     if (token === "--abort") {
@@ -184,11 +136,6 @@ export function parseArguments(argv) {
     if (token === "--inari") {
       options.inari = requireValue(argv, index, token);
       index += 1;
-      continue;
-    }
-    if (token === "--evidence-authority") {
-      options.evidenceAuthority = requireValue(argv, index, token);
-      skipConsumedValue = true;
       continue;
     }
     if (token === "--repository") {
@@ -245,7 +192,6 @@ function usage() {
     "Usage:",
     "  INARI_SELF_DOGFOOD=1 node scripts/self-dogfood.mjs --repository owner/name --issue N",
     '    --confirm-disposable N --worker-cwd /path/to/clone --worker-command \'["command","arg"]\'',
-    "    --evidence-authority <#415 shared authority module>",
     "",
     "The Issue number must be explicitly confirmed as disposable. The worker is",
     "invoked only after Inari has issued the canonical branch and Draft PR.",
@@ -389,14 +335,13 @@ function isSuccess(value) {
 }
 
 function contractVersion(value, ...keys) {
+  const paths = [];
   for (const key of keys) {
-    const candidate = outputField(
-      value,
-      [key],
-      ["contractVersions", key],
-      ["projection", key],
-      ["projection", "change", key],
-    );
+    paths.push([key], ["contractVersions", key], ["projection", key], ["projection", "change", key]);
+    if (key === "goldenPath") paths.push(["entry", "version"], ["entry", "contractVersion"]);
+  }
+  for (const pathParts of paths) {
+    const candidate = outputField(value, pathParts);
     if (typeof candidate === "string" && candidate.length > 0) return candidate;
     if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 1) return String(candidate);
   }
@@ -492,7 +437,7 @@ function initialEvidence(options, sha) {
   return {
     schemaVersion: SELF_DOGFOOD_SCHEMA_VERSION,
     certificationKind: SELF_DOGFOOD_KIND,
-    result: "blocked",
+    result: CERTIFICATION_RESULT_BLOCKED,
     sourceCommitSha: sha ?? null,
     contractVersions: { goldenPath: "unknown", statusRecovery: "unknown", skill: "unknown" },
     repository: options.repository,
@@ -505,71 +450,21 @@ function initialEvidence(options, sha) {
 }
 
 function recordOperation(evidence, operation, operationOutcome) {
-  const allowedOutcomes = SELF_DOGFOOD_OPERATION_OUTCOMES[operation];
-  if (allowedOutcomes === undefined || !allowedOutcomes.includes(operationOutcome))
-    throw new Error(`unsupported self-dogfood operation outcome: ${operation}/${operationOutcome}`);
-  const expected = SELF_DOGFOOD_REQUIRED_SEQUENCE[evidence.operations.length];
-  const optionalAbort =
-    evidence.operations.length >= SELF_DOGFOOD_REQUIRED_SEQUENCE.length && operation === SELF_DOGFOOD_OPERATIONS.ABORT;
-  if (operation !== expected && !optionalAbort)
-    throw new Error(`self-dogfood operation order mismatch: expected ${expected ?? "completion"}, got ${operation}`);
-  if (evidence.operations.length >= MAX_OPERATIONS) throw new Error("self-dogfood operation limit exceeded");
-  evidence.operations.push({ operation, outcome: operationOutcome });
+  evidence.operations = appendSelfDogfoodOperation(evidence.operations, operation, operationOutcome);
 }
 
-function assertCertificationOperations(evidence) {
-  const actual = evidence.operations.map(({ operation }) => operation);
-  const required = [...SELF_DOGFOOD_REQUIRED_SEQUENCE];
-  const hasOptionalAbort = actual.length === required.length + 1;
-  if (!hasOptionalAbort && actual.length !== required.length)
-    throw new Error("self-dogfood operation sequence is incomplete");
-  if (hasOptionalAbort) required.push(SELF_DOGFOOD_OPERATIONS.ABORT);
-  if (actual.some((operation, index) => operation !== required[index]))
-    throw new Error("self-dogfood operation sequence is not canonical");
-  for (const entry of evidence.operations) {
-    if (!SELF_DOGFOOD_OPERATION_OUTCOMES[entry.operation]?.includes(entry.outcome))
-      throw new Error("self-dogfood operation contains an unsupported outcome");
-  }
-}
-
-function failEvidence(evidence, code, message, result = "blocked") {
+function failEvidence(evidence, code, message, result = CERTIFICATION_RESULT_BLOCKED) {
   evidence.result = result;
   addDiagnostic(evidence.diagnostics, code, message);
   return evidence;
 }
 
 function writeEvidence(evidence, output) {
-  const serialized = `${JSON.stringify(evidence, null, 2)}\n`;
   if (output !== undefined) {
-    fs.mkdirSync(path.dirname(output), { recursive: true });
-    fs.writeFileSync(output, serialized, { encoding: "utf8", mode: 0o600 });
+    writeCertificationEvidence(output, evidence);
   } else {
-    process.stdout.write(serialized);
+    process.stdout.write(serializeCertificationEvidence(evidence));
   }
-}
-
-async function loadSharedEvidenceAuthority(options) {
-  if (typeof options.evidenceAuthority !== "string" || options.evidenceAuthority.length === 0)
-    throw new Error("shared certification evidence authority is unavailable; integrate #415 authority");
-  const resolvedPath = path.resolve(options.evidenceAuthority);
-  const specifier =
-    options.evidenceAuthority.startsWith("file:") || fs.existsSync(resolvedPath)
-      ? options.evidenceAuthority.startsWith("file:")
-        ? options.evidenceAuthority
-        : pathToFileURL(resolvedPath).href
-      : options.evidenceAuthority;
-  const authority = await import(specifier);
-  if (
-    typeof authority.validateDisposableGovernedIssue !== "function" ||
-    typeof authority.validateSelfDogfoodEvidence !== "function"
-  )
-    throw new Error("shared certification evidence authority has an unsupported interface");
-  return authority;
-}
-
-function assertAuthorityResult(result, operation) {
-  const valid = result === true || (result !== null && typeof result === "object" && result.valid === true);
-  if (!valid) throw new Error(`shared authority rejected ${operation}`);
 }
 
 function assertPreconditions(options, evidence) {
@@ -627,7 +522,6 @@ async function runDogfood(options) {
   const evidence = initialEvidence(options, sha);
   try {
     assertPreconditions(options, evidence);
-    const authority = await loadSharedEvidenceAuthority(options);
     const invoke = (args) => runInari(options, args, evidence);
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.OPT_IN, SELF_DOGFOOD_OUTCOMES.VERIFIED);
 
@@ -641,7 +535,6 @@ async function runDogfood(options) {
     if (typeof skillVersion !== "string" || skillVersion.length === 0 || skill.id !== "golden-path")
       throw new Error("golden-path Skill contract is unavailable");
     evidence.contractVersions.skill = skillVersion;
-    evidence.contractVersions.goldenPath = GOLDEN_PATH_CONTRACT_VERSION;
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.SKILL, SELF_DOGFOOD_OUTCOMES.VERIFIED);
 
     const issueCheck = invoke([
@@ -651,7 +544,7 @@ async function runDogfood(options) {
       "--repository",
       `${options.repository.owner}/${options.repository.name}`,
     ]);
-    assertAuthorityResult(await authority.validateDisposableGovernedIssue(issueCheck), "disposable Issue marker");
+    if (!validateDisposableGovernedIssue(issueCheck).valid) throw new Error("disposable Issue marker is invalid");
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.GOVERNANCE, SELF_DOGFOOD_OUTCOMES.VERIFIED);
 
     const firstIssue = invoke([
@@ -664,12 +557,10 @@ async function runDogfood(options) {
     if (!isSuccess(firstIssue) || isReturnedExisting(firstIssue) || publicStatus(firstIssue) !== "DRAFT")
       throw new Error("first issuance did not prove a new verified Draft Change");
     evidence.change = changeIdentity(firstIssue, options.issue);
-    evidence.contractVersions.statusRecovery = contractVersion(
-      firstIssue,
-      "statusRecovery",
-      "changeContractVersion",
-      "version",
-    );
+    evidence.contractVersions.goldenPath = contractVersion(firstIssue, "goldenPath");
+    if (evidence.contractVersions.goldenPath === "unknown")
+      throw new Error("Change response omitted the Golden Path contract version");
+    evidence.contractVersions.statusRecovery = contractVersion(firstIssue, "statusRecovery");
     if (evidence.contractVersions.statusRecovery === "unknown")
       throw new Error("Change response omitted the status/recovery contract version");
     const issuedBaseBranch = outputField(firstIssue, ["canonicalBaseBranch"], ["projection", "canonicalBaseBranch"]);
@@ -781,14 +672,13 @@ async function runDogfood(options) {
         throw new Error("Abort reread did not verify ABORTED state");
       recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.ABORT, SELF_DOGFOOD_OUTCOMES.VERIFIED);
     }
-    assertCertificationOperations(evidence);
     const expectedFinalStatus = options.abort ? "ABORTED" : "REVIEW";
     if (evidence.finalState.status !== expectedFinalStatus)
       throw new Error(`authoritative final status was not ${expectedFinalStatus}`);
     if (evidence.finalState.recovery.state === "unavailable")
       throw new Error("authoritative recovery state is unavailable; integrate the status/recovery contract");
-    evidence.result = "passed";
-    assertAuthorityResult(await authority.validateSelfDogfoodEvidence(evidence), "self-dogfood evidence");
+    evidence.result = CERTIFICATION_RESULT_PASSED;
+    if (!validateSelfDogfoodEvidence(evidence).valid) throw new Error("self-dogfood evidence is invalid");
     evidence.diagnostics = [];
   } catch (error) {
     failEvidence(evidence, "SELF_DOGFOOD_BLOCKED", error instanceof Error ? error.message : String(error));
@@ -825,7 +715,7 @@ export async function main(argv = process.argv.slice(2)) {
     );
     return 1;
   }
-  return evidence.result === "passed" ? 0 : 2;
+  return evidence.result === CERTIFICATION_RESULT_PASSED ? 0 : 2;
 }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))

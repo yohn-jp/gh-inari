@@ -1,148 +1,99 @@
 /**
- * Release-boundary certification evidence.
+ * Release-boundary certification composition.
  *
- * This module is deliberately transport and workflow neutral.  The packed
- * and self-dogfood harnesses produce the evidence; a release workflow passes
- * it to `verifyReleaseCertification`.  No provider payload, mutable "last
- * green" pointer, or entry-only smoke result is accepted here.
+ * The serialized evidence contract is owned by
+ * scripts/certification-evidence.mjs. This module only binds validated
+ * evidence to the immutable release identity and checks that both required
+ * certification lanes are present and complete.
  */
 
-import { SKILL_MODEL_VERSION } from "./skill.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
+import { SKILL_MODEL_VERSION } from "./skill.js";
+import {
+  appendCertificationDiagnostic,
+  CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_KINDS,
+  CERTIFICATION_RESULTS,
+  isCertificationBoundedString,
+  isCertificationCompletedRecoveryState,
+  isCertificationPackageName,
+  isCertificationRepositoryPart,
+  isCertificationReviewState,
+  isCertificationSourceCommitSha,
+  isCertificationTarballSha256,
+  MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH,
+  MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH,
+  MAX_CERTIFICATION_DIAGNOSTICS,
+  MAX_CERTIFICATION_OPERATIONS,
+  MAX_CERTIFICATION_STRING_LENGTH,
+  SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_RECOVERY_OPERATION,
+  validateCertificationEvidence,
+  type CertificationChangeIdentity,
+  type CertificationContractVersions,
+  type CertificationDiagnostic,
+  type CertificationDiagnosticCode,
+  type CertificationEnvelopeBase,
+  type CertificationEvidence,
+  type CertificationFinalStateEvidence,
+  type CertificationOperationEvidence,
+  type CertificationPackageEvidence,
+  type CertificationRecoveryEvidence,
+  type CertificationRepositoryIdentity,
+  type CertificationSchemaVersion,
+} from "../scripts/certification-evidence.mjs";
 
-export const RELEASE_CERTIFICATION_SCHEMA_VERSION = "1" as const;
-export type ReleaseCertificationSchemaVersion = typeof RELEASE_CERTIFICATION_SCHEMA_VERSION;
+export const RELEASE_CERTIFICATION_SCHEMA_VERSION = CERTIFICATION_EVIDENCE_SCHEMA_VERSION;
+export type ReleaseCertificationSchemaVersion = CertificationSchemaVersion;
 
-export const RELEASE_CERTIFICATION_KINDS = Object.freeze([
-  "packed-artifact-golden-path",
-  "self-dogfood-golden-path",
-] as const);
+export const RELEASE_CERTIFICATION_KINDS = CERTIFICATION_KINDS;
 export type ReleaseCertificationKind = (typeof RELEASE_CERTIFICATION_KINDS)[number];
 
-export const RELEASE_CERTIFICATION_RESULTS = Object.freeze(["passed", "failed", "blocked"] as const);
+export const RELEASE_CERTIFICATION_RESULTS = CERTIFICATION_RESULTS;
 export type ReleaseCertificationResult = (typeof RELEASE_CERTIFICATION_RESULTS)[number];
 
 /**
- * These are the only contract versions accepted by this verifier.  They are
- * strings in the serialized envelope so producers cannot accidentally mix
- * JSON number and string representations of the same contract version.
- *
- * Golden Path status and its recovery projection are one contract owned by
- * `golden-path-status.ts` (`GOLDEN_PATH_STATUS_VERSION`); recovery has no
- * separate version because `golden-path-recovery.ts` is a read-only
- * projection over that same module, not an independent contract.  Skill uses
- * the version exposed by the existing Skill authority.
+ * Product contract versions are observed from their canonical authorities.
+ * The evidence authority validates their shape and compares producer values
+ * with this release-specific expected set.
  */
 export const RELEASE_CERTIFICATION_CONTRACT_VERSIONS = Object.freeze({
   goldenPath: String(GOLDEN_PATH_STATUS_VERSION),
   statusRecovery: String(GOLDEN_PATH_STATUS_VERSION),
   skill: SKILL_MODEL_VERSION,
-} as const);
-export type ReleaseCertificationContractVersions = typeof RELEASE_CERTIFICATION_CONTRACT_VERSIONS;
+}) satisfies CertificationContractVersions;
+export type ReleaseCertificationContractVersions = CertificationContractVersions;
 
-export const MAX_RELEASE_CERTIFICATION_DIAGNOSTICS = 20 as const;
-export const MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH = 128 as const;
-export const MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH = 512 as const;
-export const MAX_RELEASE_CERTIFICATION_OPERATIONS = 32 as const;
-export const MAX_RELEASE_CERTIFICATION_STRING_LENGTH = 512 as const;
+// Compatibility exports retained while the canonical values live in the
+// evidence authority.
+export { SELF_DOGFOOD_OPERATION_REQUIREMENTS, SELF_DOGFOOD_RECOVERY_OPERATION };
 
-/**
- * The self-dogfood lane is complete only when every required proof is present
- * exactly once and has the expected idempotent outcome.  This list is the
- * temporary v1 projection of the #416 contract and is intentionally exported
- * so the producer and verifier can converge on one authority.
- */
-export const SELF_DOGFOOD_OPERATION_REQUIREMENTS = Object.freeze([
-  { operation: "preflight.opt-in", outcomes: ["verified"] },
-  { operation: "preflight.installed-executable", outcomes: ["verified"] },
-  { operation: "skill.golden-path", outcomes: ["verified"] },
-  { operation: "disposable-issue.governance-check", outcomes: ["verified"] },
-  { operation: "change.issue.first", outcomes: ["verified"] },
-  { operation: "change.issue.return-existing", outcomes: ["returned-existing"] },
-  { operation: "change.handoff", outcomes: ["verified"] },
-  { operation: "worker.implementation", outcomes: ["success"] },
-  { operation: "change.ready.first", outcomes: ["verified"] },
-  { operation: "change.ready.reread", outcomes: ["verified"] },
-  { operation: "change.ready.retry", outcomes: ["verified", "returned-existing"] },
-] as const);
-export const SELF_DOGFOOD_RECOVERY_OPERATION = Object.freeze({
-  operation: "change.abort.recovery",
-  outcomes: ["verified"],
-} as const);
-export type SelfDogfoodOperationName =
-  | (typeof SELF_DOGFOOD_OPERATION_REQUIREMENTS)[number]["operation"]
-  | (typeof SELF_DOGFOOD_RECOVERY_OPERATION)["operation"];
-export type SelfDogfoodOperationOutcome = "verified" | "returned-existing" | "success";
+// Backward-compatible names retained as aliases of the canonical bounds.
+export const MAX_RELEASE_CERTIFICATION_DIAGNOSTICS = MAX_CERTIFICATION_DIAGNOSTICS;
+export const MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH = MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH;
+export const MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH = MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH;
+export const MAX_RELEASE_CERTIFICATION_OPERATIONS = MAX_CERTIFICATION_OPERATIONS;
+export const MAX_RELEASE_CERTIFICATION_STRING_LENGTH = MAX_CERTIFICATION_STRING_LENGTH;
 
-export interface ReleaseCertificationDiagnostic {
-  readonly code: string;
-  readonly message: string;
-}
-
-export interface ReleaseCertificationPackageEvidence {
-  readonly name: string;
-  readonly version: string;
-  readonly tarballSha256: string;
-}
-
-export interface ReleaseCertificationOperationEvidence {
-  readonly operation: SelfDogfoodOperationName;
-  readonly outcome: SelfDogfoodOperationOutcome;
-}
-
-export interface ReleaseCertificationRepositoryIdentity {
-  readonly owner: string;
-  readonly name: string;
-}
-
-export interface ReleaseCertificationChangeIdentity {
-  readonly issue: number;
-  readonly branch: string;
-  readonly pullRequest: number;
-}
-
-export interface SelfDogfoodRecoveryEvidence {
-  readonly state:
-    | "NONE"
-    | "none"
-    | "NOT_REQUIRED"
-    | "not-required"
-    | "RECOVERY_REQUIRED"
-    | "recovery-required"
-    | "COMPLETED"
-    | "completed";
-  readonly action: string | null;
-}
-
-export interface SelfDogfoodFinalStateEvidence {
-  readonly status: "REVIEW" | "RECOVERY_REQUIRED" | "ABORTED";
-  readonly recovery: SelfDogfoodRecoveryEvidence;
-}
-
-export interface ReleaseCertificationEnvelopeBase {
-  readonly schemaVersion: ReleaseCertificationSchemaVersion;
-  readonly certificationKind: ReleaseCertificationKind;
-  readonly result: ReleaseCertificationResult;
-  readonly sourceCommitSha: string;
-  readonly contractVersions: ReleaseCertificationContractVersions;
-  readonly diagnostics: readonly ReleaseCertificationDiagnostic[];
-}
-
-export interface PackedArtifactCertificationEvidence extends ReleaseCertificationEnvelopeBase {
-  readonly certificationKind: "packed-artifact-golden-path";
-  readonly package: ReleaseCertificationPackageEvidence;
-}
-
-export interface SelfDogfoodCertificationEvidence extends ReleaseCertificationEnvelopeBase {
-  readonly certificationKind: "self-dogfood-golden-path";
-  readonly repository: ReleaseCertificationRepositoryIdentity;
-  readonly rootIssue: number;
-  readonly change: ReleaseCertificationChangeIdentity;
-  readonly operations: readonly ReleaseCertificationOperationEvidence[];
-  readonly finalState: SelfDogfoodFinalStateEvidence;
-}
-
-export type ReleaseCertificationEvidence = PackedArtifactCertificationEvidence | SelfDogfoodCertificationEvidence;
+export type ReleaseCertificationDiagnostic = CertificationDiagnostic;
+export type ReleaseCertificationPackageEvidence = CertificationPackageEvidence;
+export type ReleaseCertificationOperationEvidence = CertificationOperationEvidence;
+export type SelfDogfoodOperationName = CertificationOperationEvidence["operation"];
+export type SelfDogfoodOperationOutcome = CertificationOperationEvidence["outcome"];
+export type ReleaseCertificationRepositoryIdentity = CertificationRepositoryIdentity;
+export type ReleaseCertificationChangeIdentity = CertificationChangeIdentity;
+export type SelfDogfoodRecoveryEvidence = CertificationRecoveryEvidence;
+export type SelfDogfoodFinalStateEvidence = CertificationFinalStateEvidence;
+export type ReleaseCertificationEnvelopeBase = CertificationEnvelopeBase;
+export type PackedArtifactCertificationEvidence = Extract<
+  CertificationEvidence,
+  { readonly certificationKind: "packed-artifact-golden-path" }
+>;
+export type SelfDogfoodCertificationEvidence = Extract<
+  CertificationEvidence,
+  { readonly certificationKind: "self-dogfood-golden-path" }
+>;
+export type ReleaseCertificationEvidence = CertificationEvidence;
 
 export interface ReleaseCertificationVerificationInput {
   readonly expectedReleaseSourceCommitSha: string;
@@ -155,24 +106,9 @@ export interface ReleaseCertificationVerificationInput {
   readonly dogfoodEvidence: unknown;
 }
 
-export type ReleaseCertificationDiagnosticCode =
-  | "EXPECTED_IDENTITY_INVALID"
-  | "EVIDENCE_MISSING"
-  | "EVIDENCE_MALFORMED"
-  | "SCHEMA_UNSUPPORTED"
-  | "KIND_MISMATCH"
-  | "RESULT_NOT_PASSED"
-  | "SOURCE_SHA_MISMATCH"
-  | "CONTRACT_VERSION_MISMATCH"
-  | "PACKAGE_MISMATCH"
-  | "TARBALL_DIGEST_MISMATCH"
-  | "REPOSITORY_MISMATCH"
-  | "DOGFOOD_IDENTITY_INVALID"
-  | "DOGFOOD_OPERATION_MISSING"
-  | "DOGFOOD_OPERATION_OUTCOME_INVALID"
-  | "DOGFOOD_FINAL_STATE_INVALID";
+export type ReleaseCertificationDiagnosticCode = CertificationDiagnosticCode;
 
-export interface ReleaseCertificationVerificationDiagnostic extends ReleaseCertificationDiagnostic {
+export interface ReleaseCertificationVerificationDiagnostic extends CertificationDiagnostic {
   readonly code: ReleaseCertificationDiagnosticCode;
 }
 
@@ -181,330 +117,39 @@ export interface ReleaseCertificationVerificationResult {
   readonly diagnostics: readonly ReleaseCertificationVerificationDiagnostic[];
 }
 
-const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
-const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
-const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
-const COMMON_EVIDENCE_KEYS = new Set([
-  "schemaVersion",
-  "certificationKind",
-  "result",
-  "sourceCommitSha",
-  "contractVersions",
-  "diagnostics",
-]);
-const PACKED_EVIDENCE_KEYS = new Set([...COMMON_EVIDENCE_KEYS, "package"]);
-const DOGFOOD_EVIDENCE_KEYS = new Set([
-  ...COMMON_EVIDENCE_KEYS,
-  "repository",
-  "rootIssue",
-  "change",
-  "operations",
-  "finalState",
-]);
-const CONTRACT_VERSION_KEYS = new Set(["goldenPath", "statusRecovery", "skill"]);
-const DIAGNOSTIC_KEYS = new Set(["code", "message"]);
-const PACKAGE_KEYS = new Set(["name", "version", "tarballSha256"]);
-const REPOSITORY_KEYS = new Set(["owner", "name"]);
-const CHANGE_KEYS = new Set(["issue", "branch", "pullRequest"]);
-const OPERATION_KEYS = new Set(["operation", "outcome"]);
-const FINAL_STATE_KEYS = new Set(["status", "recovery"]);
-const RECOVERY_KEYS = new Set(["state", "action"]);
-const RECOVERY_NONE_STATES = new Set(["NONE", "none", "NOT_REQUIRED", "not-required"]);
-const RECOVERY_REQUIRED_STATES = new Set(["RECOVERY_REQUIRED", "recovery-required"]);
-const RECOVERY_COMPLETED_STATES = new Set(["COMPLETED", "completed"]);
-const DIAGNOSTIC_CODE_PATTERN = /^[A-Z][A-Z0-9_.-]{0,127}$/u;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, keys: ReadonlySet<string>): boolean {
-  return Object.keys(value).every((key) => keys.has(key));
-}
-
-function isBoundedString(value: unknown, maximum: number = MAX_RELEASE_CERTIFICATION_STRING_LENGTH): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maximum;
-}
-
 function pushDiagnostic(
   diagnostics: ReleaseCertificationVerificationDiagnostic[],
   code: ReleaseCertificationDiagnosticCode,
   message: string,
 ): void {
-  if (diagnostics.length < MAX_RELEASE_CERTIFICATION_DIAGNOSTICS) diagnostics.push({ code, message });
+  appendCertificationDiagnostic(diagnostics, code, message);
 }
 
 function validExpectedIdentity(input: ReleaseCertificationVerificationInput): boolean {
   return (
-    typeof input.expectedReleaseSourceCommitSha === "string" &&
-    SOURCE_SHA_PATTERN.test(input.expectedReleaseSourceCommitSha) &&
-    isBoundedString(input.expectedPackageName) &&
-    PACKAGE_NAME_PATTERN.test(input.expectedPackageName) &&
-    isBoundedString(input.expectedPackageVersion) &&
-    typeof input.expectedTarballSha256 === "string" &&
-    SHA256_PATTERN.test(input.expectedTarballSha256) &&
-    isBoundedString(input.expectedRepositoryOwner) &&
-    isBoundedString(input.expectedRepositoryName)
+    isCertificationSourceCommitSha(input.expectedReleaseSourceCommitSha) &&
+    isCertificationPackageName(input.expectedPackageName) &&
+    isCertificationBoundedString(input.expectedPackageVersion, MAX_CERTIFICATION_STRING_LENGTH) &&
+    isCertificationTarballSha256(input.expectedTarballSha256) &&
+    isCertificationRepositoryPart(input.expectedRepositoryOwner) &&
+    isCertificationRepositoryPart(input.expectedRepositoryName)
   );
 }
 
-function validateDiagnostics(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length > MAX_RELEASE_CERTIFICATION_DIAGNOSTICS) return false;
-  return value.every((diagnostic) => {
-    if (!isRecord(diagnostic) || !hasOnlyKeys(diagnostic, DIAGNOSTIC_KEYS)) return false;
-    return (
-      isBoundedString(diagnostic.code, MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH) &&
-      DIAGNOSTIC_CODE_PATTERN.test(diagnostic.code) &&
-      isBoundedString(diagnostic.message, MAX_RELEASE_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH)
-    );
-  });
-}
-
-function validateContractVersions(value: unknown): value is ReleaseCertificationContractVersions {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, CONTRACT_VERSION_KEYS) &&
-    value.goldenPath === RELEASE_CERTIFICATION_CONTRACT_VERSIONS.goldenPath &&
-    value.statusRecovery === RELEASE_CERTIFICATION_CONTRACT_VERSIONS.statusRecovery &&
-    value.skill === RELEASE_CERTIFICATION_CONTRACT_VERSIONS.skill
-  );
-}
-
-function validateEnvelope(
+function validatedEvidence(
   value: unknown,
   expectedKind: ReleaseCertificationKind,
   diagnostics: ReleaseCertificationVerificationDiagnostic[],
-): value is ReleaseCertificationEvidence {
-  if (!isRecord(value)) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence must be a JSON object.");
-    return false;
+): CertificationEvidence | undefined {
+  const validation = validateCertificationEvidence(value, {
+    certificationKind: expectedKind,
+    contractVersions: RELEASE_CERTIFICATION_CONTRACT_VERSIONS,
+  });
+  if (validation.valid) return validation.evidence;
+  for (const diagnostic of validation.diagnostics) {
+    pushDiagnostic(diagnostics, diagnostic.code as ReleaseCertificationDiagnosticCode, diagnostic.message);
   }
-  const allowedKeys = expectedKind === "packed-artifact-golden-path" ? PACKED_EVIDENCE_KEYS : DOGFOOD_EVIDENCE_KEYS;
-  if (!hasOnlyKeys(value, allowedKeys)) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence contains unknown fields.");
-    return false;
-  }
-  if (typeof value.schemaVersion !== "string") {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence schemaVersion is missing or malformed.");
-    return false;
-  }
-  if (value.schemaVersion !== RELEASE_CERTIFICATION_SCHEMA_VERSION) {
-    pushDiagnostic(diagnostics, "SCHEMA_UNSUPPORTED", "Certification evidence schema version is unsupported.");
-    return false;
-  }
-  if (value.certificationKind !== expectedKind) {
-    pushDiagnostic(diagnostics, "KIND_MISMATCH", "Certification evidence kind does not match the required lane.");
-    return false;
-  }
-  if (!RELEASE_CERTIFICATION_RESULTS.includes(value.result as ReleaseCertificationResult)) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence result is unknown.");
-    return false;
-  }
-  if (typeof value.sourceCommitSha !== "string" || !SOURCE_SHA_PATTERN.test(value.sourceCommitSha)) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence sourceCommitSha is invalid.");
-    return false;
-  }
-  if (!validateContractVersions(value.contractVersions)) {
-    pushDiagnostic(diagnostics, "CONTRACT_VERSION_MISMATCH", "Certification evidence contract versions are not known.");
-    return false;
-  }
-  if (!validateDiagnostics(value.diagnostics)) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Certification evidence diagnostics are missing or unbounded.");
-    return false;
-  }
-  if (value.result === "passed" && Array.isArray(value.diagnostics) && value.diagnostics.length !== 0) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Passed certification evidence must not contain diagnostics.");
-    return false;
-  }
-  return true;
-}
-
-function validatePackedExtension(
-  value: unknown,
-  expected: ReleaseCertificationVerificationInput,
-  diagnostics: ReleaseCertificationVerificationDiagnostic[],
-): boolean {
-  if (!isRecord(value) || !hasOnlyKeys(value, PACKAGE_KEYS)) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Packed certification package evidence is malformed.");
-    return false;
-  }
-  if (
-    !isBoundedString(value.name) ||
-    !PACKAGE_NAME_PATTERN.test(value.name) ||
-    !isBoundedString(value.version) ||
-    typeof value.tarballSha256 !== "string" ||
-    !SHA256_PATTERN.test(value.tarballSha256)
-  ) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MALFORMED", "Packed certification package identity is malformed.");
-    return false;
-  }
-  let valid = true;
-  if (value.name !== expected.expectedPackageName || value.version !== expected.expectedPackageVersion) {
-    pushDiagnostic(
-      diagnostics,
-      "PACKAGE_MISMATCH",
-      "Packed certification package identity does not match the release.",
-    );
-    valid = false;
-  }
-  if (value.tarballSha256 !== expected.expectedTarballSha256) {
-    pushDiagnostic(
-      diagnostics,
-      "TARBALL_DIGEST_MISMATCH",
-      "Packed certification tarball digest does not match the release.",
-    );
-    valid = false;
-  }
-  return valid;
-}
-
-function validateDogfoodExtension(
-  value: unknown,
-  expected: ReleaseCertificationVerificationInput,
-  diagnostics: ReleaseCertificationVerificationDiagnostic[],
-): boolean {
-  if (!isRecord(value)) {
-    pushDiagnostic(diagnostics, "DOGFOOD_IDENTITY_INVALID", "Self-dogfood evidence is malformed.");
-    return false;
-  }
-  const repository = value.repository;
-  const change = value.change;
-  const operations = value.operations;
-  if (
-    !isRecord(repository) ||
-    !hasOnlyKeys(repository, REPOSITORY_KEYS) ||
-    !isBoundedString(repository.owner) ||
-    !isBoundedString(repository.name) ||
-    typeof value.rootIssue !== "number" ||
-    !Number.isSafeInteger(value.rootIssue) ||
-    value.rootIssue <= 0 ||
-    !isRecord(change) ||
-    !hasOnlyKeys(change, CHANGE_KEYS) ||
-    typeof change.issue !== "number" ||
-    !Number.isSafeInteger(change.issue) ||
-    change.issue <= 0 ||
-    !isBoundedString(change.branch) ||
-    typeof change.pullRequest !== "number" ||
-    !Number.isSafeInteger(change.pullRequest) ||
-    change.pullRequest <= 0 ||
-    !Array.isArray(operations) ||
-    operations.length === 0 ||
-    operations.length > MAX_RELEASE_CERTIFICATION_OPERATIONS ||
-    !operations.every(
-      (operation) =>
-        isRecord(operation) &&
-        hasOnlyKeys(operation, OPERATION_KEYS) &&
-        isBoundedString(operation.operation) &&
-        isBoundedString(operation.outcome),
-    )
-  ) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_IDENTITY_INVALID",
-      "Self-dogfood identity or bounded operations are malformed.",
-    );
-    return false;
-  }
-  if (repository.owner !== expected.expectedRepositoryOwner || repository.name !== expected.expectedRepositoryName) {
-    pushDiagnostic(
-      diagnostics,
-      "REPOSITORY_MISMATCH",
-      "Self-dogfood repository does not match the release repository.",
-    );
-    return false;
-  }
-  if (change.issue !== value.rootIssue) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_IDENTITY_INVALID",
-      "Self-dogfood Change issue must match the evidence root Issue.",
-    );
-    return false;
-  }
-  if (!isRecord(value.finalState) || !hasOnlyKeys(value.finalState, FINAL_STATE_KEYS)) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_FINAL_STATE_INVALID",
-      "Self-dogfood finalState must include a public status and recovery state/action.",
-    );
-    return false;
-  }
-  const recovery = value.finalState.recovery;
-  if (
-    !isRecord(recovery) ||
-    !hasOnlyKeys(recovery, RECOVERY_KEYS) ||
-    (value.finalState.status !== "REVIEW" &&
-      value.finalState.status !== "RECOVERY_REQUIRED" &&
-      value.finalState.status !== "ABORTED") ||
-    (value.finalState.status === "REVIEW" && !RECOVERY_NONE_STATES.has(recovery.state as string)) ||
-    (value.finalState.status === "REVIEW" && recovery.action !== null && recovery.action !== "none") ||
-    (value.finalState.status === "RECOVERY_REQUIRED" &&
-      (!RECOVERY_REQUIRED_STATES.has(recovery.state as string) || !isBoundedString(recovery.action))) ||
-    (value.finalState.status === "ABORTED" &&
-      (!RECOVERY_COMPLETED_STATES.has(recovery.state as string) || recovery.action !== "none"))
-  ) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_FINAL_STATE_INVALID",
-      "Self-dogfood finalState is not a governed review or recovery state/action.",
-    );
-    return false;
-  }
-  const operationValues = operations as readonly Record<string, unknown>[];
-  const hasRecoveryOperation =
-    operationValues.length === SELF_DOGFOOD_OPERATION_REQUIREMENTS.length + 1 &&
-    operationValues.at(-1)?.operation === SELF_DOGFOOD_RECOVERY_OPERATION.operation;
-  const expectedOperationCount =
-    value.finalState.status === "ABORTED"
-      ? SELF_DOGFOOD_OPERATION_REQUIREMENTS.length + 1
-      : SELF_DOGFOOD_OPERATION_REQUIREMENTS.length;
-  if (
-    operationValues.length !== expectedOperationCount ||
-    (value.finalState.status !== "ABORTED" && hasRecoveryOperation)
-  ) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_OPERATION_MISSING",
-      "Self-dogfood evidence must contain exactly the bounded required operation proofs.",
-    );
-    return false;
-  }
-  for (const [index, requirement] of SELF_DOGFOOD_OPERATION_REQUIREMENTS.entries()) {
-    const operation = operationValues[index];
-    if (operation?.operation !== requirement.operation) {
-      pushDiagnostic(
-        diagnostics,
-        "DOGFOOD_OPERATION_MISSING",
-        `Missing required self-dogfood operation: ${requirement.operation}.`,
-      );
-      return false;
-    }
-    if (!requirement.outcomes.includes(operation.outcome as never)) {
-      pushDiagnostic(
-        diagnostics,
-        "DOGFOOD_OPERATION_OUTCOME_INVALID",
-        `Self-dogfood operation ${requirement.operation} has an unexpected outcome.`,
-      );
-      return false;
-    }
-  }
-  if (value.finalState.status === "ABORTED" && !hasRecoveryOperation) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_OPERATION_MISSING",
-      `Missing required self-dogfood operation: ${SELF_DOGFOOD_RECOVERY_OPERATION.operation}.`,
-    );
-    return false;
-  }
-  if (hasRecoveryOperation && operationValues.at(-1)?.outcome !== SELF_DOGFOOD_RECOVERY_OPERATION.outcomes[0]) {
-    pushDiagnostic(
-      diagnostics,
-      "DOGFOOD_OPERATION_OUTCOME_INVALID",
-      `Self-dogfood operation ${SELF_DOGFOOD_RECOVERY_OPERATION.operation} has an unexpected outcome.`,
-    );
-    return false;
-  }
-  return true;
+  return undefined;
 }
 
 function verifyEvidence(
@@ -512,45 +157,72 @@ function verifyEvidence(
   expectedKind: ReleaseCertificationKind,
   expected: ReleaseCertificationVerificationInput,
   diagnostics: ReleaseCertificationVerificationDiagnostic[],
-): value is ReleaseCertificationEvidence {
-  if (!validateEnvelope(value, expectedKind, diagnostics)) return false;
-  if (value.result !== "passed") {
+): boolean {
+  const evidence = validatedEvidence(value, expectedKind, diagnostics);
+  if (evidence === undefined) return false;
+
+  if (evidence.result !== CERTIFICATION_RESULTS[0]) {
     pushDiagnostic(diagnostics, "RESULT_NOT_PASSED", "Certification evidence did not pass.");
     return false;
   }
-  if (value.sourceCommitSha !== expected.expectedReleaseSourceCommitSha) {
+  if (evidence.sourceCommitSha !== expected.expectedReleaseSourceCommitSha) {
     pushDiagnostic(diagnostics, "SOURCE_SHA_MISMATCH", "Certification evidence source SHA does not match the release.");
     return false;
   }
-  if (expectedKind === "packed-artifact-golden-path") {
-    return validatePackedExtension((value as PackedArtifactCertificationEvidence).package, expected, diagnostics);
+
+  if (expectedKind === CERTIFICATION_KINDS[0]) {
+    const packed = evidence as PackedArtifactCertificationEvidence;
+    let valid = true;
+    if (
+      packed.package.name !== expected.expectedPackageName ||
+      packed.package.version !== expected.expectedPackageVersion
+    ) {
+      pushDiagnostic(
+        diagnostics,
+        "PACKAGE_MISMATCH",
+        "Packed certification package identity does not match the release.",
+      );
+      valid = false;
+    }
+    if (packed.package.tarballSha256 !== expected.expectedTarballSha256) {
+      pushDiagnostic(
+        diagnostics,
+        "TARBALL_DIGEST_MISMATCH",
+        "Packed certification tarball digest does not match the release.",
+      );
+      valid = false;
+    }
+    return valid;
   }
-  const validDogfood = validateDogfoodExtension(value, expected, diagnostics);
+
+  const dogfood = evidence as SelfDogfoodCertificationEvidence;
+  let valid = true;
   if (
-    validDogfood &&
-    !(
-      ((value as SelfDogfoodCertificationEvidence).finalState.status === "REVIEW" &&
-        RECOVERY_NONE_STATES.has((value as SelfDogfoodCertificationEvidence).finalState.recovery.state) &&
-        ((value as SelfDogfoodCertificationEvidence).finalState.recovery.action === null ||
-          (value as SelfDogfoodCertificationEvidence).finalState.recovery.action === "none")) ||
-      ((value as SelfDogfoodCertificationEvidence).finalState.status === "ABORTED" &&
-        RECOVERY_COMPLETED_STATES.has((value as SelfDogfoodCertificationEvidence).finalState.recovery.state))
-    )
+    dogfood.repository.owner !== expected.expectedRepositoryOwner ||
+    dogfood.repository.name !== expected.expectedRepositoryName
   ) {
+    pushDiagnostic(
+      diagnostics,
+      "REPOSITORY_MISMATCH",
+      "Self-dogfood repository does not match the release repository.",
+    );
+    valid = false;
+  }
+  if (!(isCertificationReviewState(dogfood.finalState) || isCertificationCompletedRecoveryState(dogfood.finalState))) {
     pushDiagnostic(
       diagnostics,
       "DOGFOOD_FINAL_STATE_INVALID",
       "A passed self-dogfood certification must finish in public REVIEW with no recovery required.",
     );
-    return false;
+    valid = false;
   }
-  return validDogfood;
+  return valid;
 }
 
 /**
  * Verify both complete Golden Path lanes against one immutable release
- * identity.  Diagnostics are ordered packed-then-dogfood and capped at 20,
- * making the result safe for workflow logs and deterministic for tests.
+ * identity. Evidence schema, operation semantics, field validation, and
+ * diagnostic bounds are delegated to the canonical evidence authority.
  */
 export function verifyReleaseCertification(
   input: ReleaseCertificationVerificationInput,
@@ -563,12 +235,16 @@ export function verifyReleaseCertification(
   if (input.packedEvidence === undefined || input.packedEvidence === null) {
     pushDiagnostic(diagnostics, "EVIDENCE_MISSING", "Packed-artifact certification evidence is required.");
   } else {
-    verifyEvidence(input.packedEvidence, "packed-artifact-golden-path", input, diagnostics);
+    verifyEvidence(input.packedEvidence, CERTIFICATION_KINDS[0], input, diagnostics);
   }
   if (input.dogfoodEvidence === undefined || input.dogfoodEvidence === null) {
     pushDiagnostic(diagnostics, "EVIDENCE_MISSING", "Self-dogfood certification evidence is required.");
   } else {
-    verifyEvidence(input.dogfoodEvidence, "self-dogfood-golden-path", input, diagnostics);
+    verifyEvidence(input.dogfoodEvidence, CERTIFICATION_KINDS[1], input, diagnostics);
   }
   return { passed: diagnostics.length === 0, diagnostics };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

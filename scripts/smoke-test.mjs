@@ -10,7 +10,10 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
+  appendCertificationDiagnostic,
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_KINDS,
+  CERTIFICATION_RESULTS,
   sha256Tarball,
   writeCertificationEvidence,
 } from "./certification-evidence.mjs";
@@ -24,14 +27,6 @@ export const CERTIFICATION_ENTRY_COMMANDS = Object.freeze([
   Object.freeze({ name: "canonical preflight", args: ["--diagnose", "--json"] }),
   Object.freeze({ name: "Skill discovery", args: ["skill", "--json"] }),
 ]);
-
-function boundedCertificationMessage(value) {
-  const normalized = String(value)
-    .replace(/[\u0000-\u001F\u007F]/gu, " ")
-    .trim();
-  if (normalized.length === 0) return "Certification authority is unavailable.";
-  return normalized.length <= 512 ? normalized : `${normalized.slice(0, 511)}…`;
-}
 
 function isPathInside(directory, candidate) {
   const relativePath = path.relative(path.resolve(directory), path.resolve(candidate));
@@ -335,7 +330,7 @@ function writePackedEvidence(evidencePath, tarballPath, result, diagnostics = []
   fs.mkdirSync(path.dirname(path.resolve(evidencePath)), { recursive: true });
   writeCertificationEvidence(evidencePath, {
     schemaVersion: CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
-    certificationKind: "packed-artifact-golden-path",
+    certificationKind: CERTIFICATION_KINDS[0],
     result,
     sourceCommitSha: sourceCommitSha(),
     contractVersions: certificationContractVersions(observedContractVersions),
@@ -914,23 +909,18 @@ function main() {
 
     console.log("packed artifact preflight, entry, and complete Golden Path certification passed.");
     if (evidence !== undefined) {
-      writePackedEvidence(evidence, tarballPath, "passed", [], observedContractVersions);
+      writePackedEvidence(evidence, tarballPath, CERTIFICATION_RESULTS[0], [], observedContractVersions);
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
     }
   } catch (error) {
     if (evidence !== undefined) {
-      writePackedEvidence(
-        evidence,
-        tarballPath,
-        "failed",
-        [
-          {
-            code: "PACKED_CERTIFICATION_FAILED",
-            message: boundedCertificationMessage(error instanceof Error ? error.message : error),
-          },
-        ],
-        observedContractVersions,
+      const diagnostics = [];
+      appendCertificationDiagnostic(
+        diagnostics,
+        "PACKED_CERTIFICATION_FAILED",
+        error instanceof Error ? error.message : error,
       );
+      writePackedEvidence(evidence, tarballPath, CERTIFICATION_RESULTS[1], diagnostics, observedContractVersions);
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
     }
     throw error;
