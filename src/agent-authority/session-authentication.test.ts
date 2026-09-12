@@ -73,7 +73,12 @@ function sessionRequest(authority: RuntimeAuthority, key: ReturnType<typeof gene
 
 function capability(
   authority: RuntimeAuthority,
-  overrides: { readonly repositoryId?: string; readonly root?: Record<string, unknown> } = {},
+  overrides: {
+    readonly repositoryId?: string;
+    readonly scopeRepositoryId?: string;
+    readonly root?: Record<string, unknown>;
+    readonly scopeNameWithOwner?: string;
+  } = {},
 ): {
   readonly capability: GitHubAppRepositoryReadCapability;
   readonly calls: string[];
@@ -93,7 +98,11 @@ function capability(
   const scope: GitHubAppRepositoryReadCapability["scope"] = {
     app: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
     installation: { appId: "1", installationId: "2", repositoryHost: "github.com" },
-    repository: { repositoryHost: "github.com", repositoryId, nameWithOwner: "acme/inari" },
+    repository: {
+      repositoryHost: "github.com",
+      repositoryId: overrides.scopeRepositoryId ?? repositoryId,
+      nameWithOwner: overrides.scopeNameWithOwner ?? "acme/inari",
+    },
     repositorySelection: "selected" as const,
     permissions: { contents: "read" as const, issues: "read" as const, pull_requests: "read" as const },
     expiresAt: "2026-09-12T00:10:00Z",
@@ -189,6 +198,51 @@ test("authenticates from one fresh App read capability and emits only bounded au
     "repos/acme/inari/git/blobs/cccccccccccccccccccccccccccccccccccccccc",
   ]);
   assert.equal(fixture.enter.value, true);
+});
+
+test("succeeds across a provider-resolved repository rename with unchanged immutable repository ID", async () => {
+  const runtime = runtimeAuthority();
+  const request = sessionRequest(runtime.authority, runtime.key);
+  const fixture = capability(runtime.authority, { scopeNameWithOwner: "acme/old-inari-name" });
+  const broker = {
+    async withRepositoryReadCapability<T>(
+      _input: unknown,
+      operation: (value: GitHubAppRepositoryReadCapability) => Promise<T>,
+    ): Promise<T> {
+      return operation(fixture.capability);
+    },
+  };
+
+  const context = await authenticateSessionRequest({
+    broker,
+    repository: REPOSITORY,
+    request,
+    now: NOW,
+  });
+
+  assert.deepEqual(context.repository, {
+    repositoryHost: "github.com",
+    repositoryId: REPOSITORY_ID,
+    nameWithOwner: "acme/inari",
+  });
+});
+
+test("fails closed when the scoped credential's immutable repository ID differs from the freshly resolved one", async () => {
+  const runtime = runtimeAuthority();
+  const request = sessionRequest(runtime.authority, runtime.key);
+  const fixture = capability(runtime.authority, { scopeRepositoryId: "987654321" });
+  const broker = {
+    async withRepositoryReadCapability<T>(
+      _input: unknown,
+      operation: (value: GitHubAppRepositoryReadCapability) => Promise<T>,
+    ): Promise<T> {
+      return operation(fixture.capability);
+    },
+  };
+  await assert.rejects(
+    authenticateSessionRequest({ broker, repository: REPOSITORY, request, now: NOW }),
+    (error: unknown) => error instanceof SessionAuthenticationError && error.reason === "repository",
+  );
 });
 
 test("rejects a Runtime key substitution and an invalid Session PoP", async () => {

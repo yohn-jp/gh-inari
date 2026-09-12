@@ -167,40 +167,14 @@ function certificateFromRequest(input: unknown): {
   return { compact: input.certificate, certificate: decoded.value };
 }
 
-function repositoryFromScope(capability: GitHubAppRepositoryReadCapability): GitHubChangeEffectRepository {
-  const scope = capability.scope;
-  const target = scope.repository;
-  if (
-    !isRecord(target) ||
-    !isBoundedProviderText(target.repositoryHost, 255) ||
-    !isBoundedProviderText(target.nameWithOwner, 255)
-  ) {
-    fail("repository");
-  }
-  const identity = validateIssuerRepositoryIdentity(target);
-  if (!identity.valid || identity.value === undefined) fail("repository");
-  const parts = target.nameWithOwner.split("/");
-  if (parts.length !== 2 || parts.some((part) => !isBoundedProviderText(part, 255))) fail("repository");
-  return Object.freeze({
-    hostname: identity.value.repositoryHost,
-    owner: parts[0] as string,
-    name: parts[1] as string,
-  });
-}
-
-function sameRepositoryLocator(left: GitHubChangeEffectRepository, right: GitHubChangeEffectRepository): boolean {
-  return (
-    left.hostname.toLowerCase() === right.hostname.toLowerCase() &&
-    left.owner.toLowerCase() === right.owner.toLowerCase() &&
-    left.name.toLowerCase() === right.name.toLowerCase()
-  );
-}
-
+/**
+ * Security identity is canonical host + immutable repository ID only.
+ * `nameWithOwner` is diagnostic metadata: a provider-resolved rename must not
+ * invalidate an otherwise identical immutable repository identity.
+ */
 function sameRepositoryIdentity(left: IssuerRepositoryIdentity, right: IssuerRepositoryIdentity): boolean {
   return (
-    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() &&
-    left.repositoryId === right.repositoryId &&
-    left.nameWithOwner.toLowerCase() === right.nameWithOwner.toLowerCase()
+    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() && left.repositoryId === right.repositoryId
   );
 }
 
@@ -410,9 +384,6 @@ export async function authenticateSessionRequest(
 
   try {
     return await options.broker.withRepositoryReadCapability({}, async (capability) => {
-      const scopedRepository = repositoryFromScope(capability);
-      if (!sameRepositoryLocator(options.repository, scopedRepository)) fail("repository");
-
       let resolvedRepository: Awaited<ReturnType<typeof resolveGitHubRepository>>;
       try {
         resolvedRepository = await resolveGitHubRepository(options.repository, capability.transport);
@@ -460,9 +431,3 @@ export async function authenticateSessionRequest(
     throw new SessionAuthenticationError("repository-read");
   }
 }
-
-/** Explicit boundary-oriented alias for consumers that use `verify` terminology. */
-export const verifySessionRequestAtAppBoundary = authenticateSessionRequest;
-
-/** Alias matching the App/executor terminology used by the architecture. */
-export const authenticateAppSession = authenticateSessionRequest;
