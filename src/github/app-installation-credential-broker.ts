@@ -329,6 +329,7 @@ export interface GitHubAppInstallationCredentialBrokerOptions {
 interface InstallationCredential {
   readonly token: string;
   readonly scope: IssuerInstallationScope;
+  readonly repositoryNodeId?: string;
 }
 
 type CredentialRequest =
@@ -477,16 +478,23 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     request: { readonly target: IssuerRepositoryIdentity },
     operation: (capability: GitDataCapability) => Promise<T>,
   ): Promise<T> {
-    if (!isRecord(request) || !isRecord(request.target)) throw this.safeFailure("installation-scope");
+    if (!isRecord(request) || !isRecord(request.target) || typeof operation !== "function") {
+      throw this.safeFailure("installation-scope");
+    }
+    const targetResult = validateIssuerRepositoryIdentity(request.target);
+    if (!targetResult.valid || targetResult.value === undefined) throw this.safeFailure("installation-scope");
     const credential = await this.issueInstallationToken({
       app: this.#app,
-      target: request.target,
+      target: targetResult.value,
       permissions: GITHUB_APP_GIT_DATA_PERMISSIONS,
       kind: "git-data",
     });
+    const repositoryNodeId = credential.repositoryNodeId ?? this.#repositoryNodeId;
+    if (repositoryNodeId === undefined) throw this.safeFailure("installation-scope");
     const transport = new GitHubAppApiTransport({
       apiUrl: this.#apiUrl,
       token: credential.token,
+      repositoryNodeId,
       fetch: this.#fetch,
       failureStage: "projection-execution",
       failure: this.#failure,
@@ -498,6 +506,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     const capability = new GitHubGitDataCapability({
       repository: this.#repository,
       repositoryId: credential.scope.repository.repositoryId,
+      repositoryNodeId,
       scope: credential.scope,
       transport: capabilityTransport,
     });
@@ -573,7 +582,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     const selectedRepository = selectedRepositoryIdentity(selected, this.#repository);
     if (selectedRepository === undefined) throw this.safeFailure("installation-scope");
     if (
-      request.kind === "mutation" &&
+      request.kind !== "read" &&
       (request.target === undefined || !sameRepository(selectedRepository, request.target))
     ) {
       throw this.safeFailure("installation-scope");
@@ -600,7 +609,19 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       now: this.#now(),
     });
     if (!scopeResult.valid || scopeResult.value === undefined) throw this.safeFailure("installation-scope");
-    return { token, scope: scopeResult.value };
+    const selectedNodeId = repositoryNodeIdFrom(selected);
+    if (
+      selectedNodeId !== undefined &&
+      this.#repositoryNodeId !== undefined &&
+      selectedNodeId !== this.#repositoryNodeId
+    ) {
+      throw this.safeFailure("installation-scope");
+    }
+    return {
+      token,
+      scope: scopeResult.value,
+      ...(selectedNodeId === undefined ? {} : { repositoryNodeId: selectedNodeId }),
+    };
   }
 
   private safeFailure(stage: GitHubAppCredentialFailureStage): Error {
@@ -784,6 +805,14 @@ function selectedRepositoryIdentity(
     return undefined;
   }
   return target.value;
+}
+
+function repositoryNodeIdFrom(value: unknown): string | undefined {
+  if (!isRecord(value) || typeof value.node_id !== "string") return undefined;
+  if (value.node_id.length === 0 || value.node_id.length > 255 || /[\u0000-\u001F\u007F]/u.test(value.node_id)) {
+    return undefined;
+  }
+  return value.node_id;
 }
 
 function isAuthoritativeRepositoryRead(

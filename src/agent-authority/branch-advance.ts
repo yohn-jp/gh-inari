@@ -10,11 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { validateBranchName } from "../../branch-naming-authority.mjs";
-import {
-  MAX_SESSION_REQUEST_BYTES,
-  canonicalizeSemanticRequest,
-  type SemanticSessionRequest,
-} from "./session-request.js";
+import { MAX_SESSION_REQUEST_BYTES, canonicalizeSemanticRequest } from "./session-request.js";
 import {
   classifyDelegatedTreeDelta,
   admitDelegatedWrite,
@@ -23,12 +19,9 @@ import {
   type DelegatedTreePathChange,
   type DelegatedTreeSnapshotEntry,
 } from "./protected-paths.js";
-import { validateCapabilityClaim, type BranchAdvanceCapabilityClaim, type CapabilityClaim } from "./capability.js";
-import type {
-  AuthenticatedSessionAuthorityRef,
-  AuthenticatedSessionContext,
-  AuthenticatedSessionRepository,
-} from "./session-authentication.js";
+import { MAX_ISSUE_NUMBER, validateCapabilityClaim, type BranchAdvanceCapabilityClaim } from "./capability.js";
+import { createCapabilityExecutionProvenance, type CapabilityExecutionProvenance } from "./capability-provenance.js";
+import type { AuthenticatedSessionContext, AuthenticatedSessionRepository } from "./session-authentication.js";
 import { MAX_UNIX_TIME_SECONDS } from "./session-certificate.js";
 import {
   GIT_DATA_WRITE_MODES,
@@ -38,7 +31,6 @@ import {
   type GitDataTreeWriteEntry,
 } from "../github/git-data-capability.js";
 import type { IssuerInstallationScope, IssuerRepositoryIdentity } from "../github/issuer-authority.js";
-import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 
 export const BRANCH_ADVANCE_CONTRACT_VERSION = 1 as const;
 export type BranchAdvanceContractVersion = typeof BRANCH_ADVANCE_CONTRACT_VERSION;
@@ -125,42 +117,7 @@ export interface BranchAdvanceExecutionFailure {
 }
 
 /** Bounded #376 delegation and execution provenance. */
-export interface BranchAdvanceExecutionProvenance {
-  readonly version: 1;
-  readonly repository: {
-    readonly host: string;
-    readonly repositoryId: string;
-    readonly nameWithOwner: string;
-  };
-  readonly runtimeAuthority: {
-    readonly id: string;
-    readonly kid: string;
-  };
-  readonly session: {
-    readonly id: string;
-    readonly certificateJti: string;
-  };
-  readonly request: {
-    readonly requestId: string;
-    readonly operation: typeof BRANCH_ADVANCE_OPERATION;
-    readonly issuedAt: number;
-    readonly expiresAt: number;
-  };
-  readonly subject?: string;
-  readonly authority: AuthenticatedSessionAuthorityRef;
-  readonly policy?: {
-    readonly name: string;
-    readonly ref: string;
-    readonly sha: string;
-  };
-  readonly app: {
-    readonly principal: string;
-    readonly appId?: string;
-    readonly installationId?: string;
-  };
-  /** Commit author is not the App actor. */
-  readonly commitAuthor: BranchAdvanceCommitAuthor;
-}
+export type BranchAdvanceExecutionProvenance = CapabilityExecutionProvenance;
 
 export interface BranchAdvanceSemanticResult {
   readonly version: BranchAdvanceContractVersion;
@@ -183,24 +140,6 @@ export interface BranchAdvanceValidationResult {
   readonly diagnostics: readonly BranchAdvanceDiagnostic[];
 }
 
-export interface BranchAdvanceResolvedPathPolicy {
-  readonly name: string;
-  readonly ref: string;
-  readonly sha: string;
-  readonly allowsPath: (path: string) => boolean;
-}
-
-/** Same narrow current-policy resolver seam used by semantic admission. */
-export interface BranchAdvancePathPolicyResolver {
-  resolve(
-    name: string,
-    input: {
-      readonly repository: AuthenticatedSessionRepository;
-      readonly authority: AuthenticatedSessionAuthorityRef;
-    },
-  ): Promise<BranchAdvanceResolvedPathPolicy | undefined>;
-}
-
 export interface BranchAdvanceCapabilityBroker {
   withGitDataCapability<T>(
     request: { readonly target: IssuerRepositoryIdentity },
@@ -215,7 +154,6 @@ export interface ExecuteBranchAdvanceOptions {
   readonly broker: BranchAdvanceCapabilityBroker;
   /** Optional assertion; otherwise the signed semantic request is consumed. */
   readonly request?: unknown;
-  readonly pathPolicyResolver?: BranchAdvancePathPolicyResolver;
   readonly now?: Date | number | (() => Date | number);
 }
 
@@ -230,7 +168,7 @@ const REPOSITORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/u;
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 const MAX_BRANCH_ADVANCE_MESSAGE_LENGTH = 4_096;
-const MAX_BRANCH_ADVANCE_AUTHOR_NAME_LENGTH = 256;
+const MAX_BRANCH_ADVANCE_AUTHOR_NAME_LENGTH = 128;
 const MAX_BRANCH_ADVANCE_AUTHOR_EMAIL_LENGTH = 320;
 const MAX_BRANCH_ADVANCE_DELTA_ENTRIES = 4_096;
 const MAX_BRANCH_ADVANCE_CONTENT_BYTES = MAX_SESSION_REQUEST_BYTES;
@@ -347,7 +285,7 @@ function validateSnapshot(
     ) {
       diagnostics.push(
         diagnostic(
-          validMode(raw.mode) ? "TREE_DELTA_INVALID" : "INVALID_REQUEST",
+          "TREE_DELTA_INVALID",
           entryPath,
           "Tree entries must be canonical blob identities with a supported Git object mode.",
         ),
@@ -531,8 +469,9 @@ function validateDelta(
   }
   for (const entry of after) {
     const beforeEntry = beforeMap.get(entry.path);
-    const changed = beforeEntry === undefined || snapshotFingerprint(beforeEntry) !== snapshotFingerprint(entry);
-    if (changed && entry.content === undefined) {
+    const contentChanged =
+      beforeEntry === undefined || beforeEntry.sha !== entry.sha || beforeEntry.type !== entry.type;
+    if (contentChanged && entry.content === undefined) {
       diagnostics.push(
         diagnostic("TREE_DELTA_INVALID", `${path}.after.${entry.path}`, "Changed blobs require content."),
       );
@@ -561,8 +500,17 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
     if (Buffer.byteLength(canonical, "utf8") > MAX_SESSION_REQUEST_BYTES) {
       diagnostics.push(diagnostic("REQUEST_TOO_LARGE", "$", "The semantic request exceeds the Session request bound."));
     }
-  } catch {
-    diagnostics.push(diagnostic("REQUEST_TOO_LARGE", "$", "The semantic request is not valid bounded JSON."));
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "";
+    diagnostics.push(
+      diagnostic(
+        message.includes(`${MAX_SESSION_REQUEST_BYTES}`) ? "REQUEST_TOO_LARGE" : "INVALID_REQUEST",
+        "$",
+        message.includes(`${MAX_SESSION_REQUEST_BYTES}`)
+          ? "The semantic request exceeds the Session request bound."
+          : "The semantic request is not valid canonical JSON.",
+      ),
+    );
   }
   unknownProperties(input, REQUEST_KEYS, "$", diagnostics);
   if (input.version !== BRANCH_ADVANCE_CONTRACT_VERSION)
@@ -602,7 +550,7 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
   const delta = validateDelta(input.treeDelta, "$.treeDelta", diagnostics);
   if (diagnostics.length > 0 || delta === undefined)
     return { valid: false, diagnostics: Object.freeze(diagnostics.slice(0, 32)) };
-  const request: BranchAdvanceSemanticRequest = Object.freeze({
+  const request = freezeDeep({
     version: BRANCH_ADVANCE_CONTRACT_VERSION,
     repositoryId: input.repositoryId as string,
     branch: input.branch as string,
@@ -615,7 +563,7 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
         email: ((input.commit as Record<string, unknown>).author as Record<string, unknown>).email as string,
       }),
     }),
-  });
+  }) as BranchAdvanceSemanticRequest;
   return { valid: true, value: request, diagnostics: [] };
 }
 
@@ -676,6 +624,14 @@ function sameRepository(left: AuthenticatedSessionRepository, right: BranchAdvan
   return left.repositoryId === right.repositoryId;
 }
 
+function sameCapabilityRepository(context: AuthenticatedSessionContext, scope: IssuerInstallationScope): boolean {
+  return (
+    scope.repository.repositoryHost.toLowerCase() === context.repository.repositoryHost.toLowerCase() &&
+    scope.repository.repositoryId === context.repository.repositoryId &&
+    scope.repository.nameWithOwner.toLowerCase() === context.repository.nameWithOwner.toLowerCase()
+  );
+}
+
 function sameSnapshot(tree: GitDataTree, expected: ReadonlyMap<string, BranchAdvanceTreeSnapshotEntry>): boolean {
   const actual = new Map<string, string>();
   for (const entry of tree.entries) {
@@ -683,6 +639,7 @@ function sameSnapshot(tree: GitDataTree, expected: ReadonlyMap<string, BranchAdv
       if (entry.type === "commit") return false;
       continue;
     }
+    if (actual.has(entry.path)) return false;
     actual.set(entry.path, snapshotFingerprint({ sha: entry.sha, mode: entry.mode, type: entry.type }));
   }
   if (actual.size !== expected.size) return false;
@@ -727,71 +684,128 @@ function writeEntries(
 
 function claimFor(context: AuthenticatedSessionContext, branch: string): BranchAdvanceCapabilityClaim | undefined {
   if (context.request.operation !== BRANCH_ADVANCE_OPERATION || !Array.isArray(context.capabilities)) return undefined;
+  let found: BranchAdvanceCapabilityClaim | undefined;
   for (const rawClaim of context.capabilities) {
     const result = validateCapabilityClaim(rawClaim);
-    if (result.valid && result.value?.kind === "branch.advance" && result.value.branch === branch) {
-      return result.value;
+    if (!result.valid || result.value === undefined) return undefined;
+    if (result.value.kind === "branch.advance" && result.value.branch === branch) {
+      if (found !== undefined) return undefined;
+      found = result.value;
     }
   }
-  return undefined;
+  return found;
 }
 
 function contextFresh(context: AuthenticatedSessionContext, now: Date): BranchAdvanceFailureCode | undefined {
-  const nowSeconds = Math.floor(now.getTime() / 1000);
-  const payload = context.verifiedRequest?.certificate?.payload;
-  const envelope = context.verifiedRequest?.envelope;
-  if (
-    envelope === undefined ||
-    payload === undefined ||
-    envelope.operation !== BRANCH_ADVANCE_OPERATION ||
-    context.request.operation !== envelope.operation ||
-    context.request.requestId !== envelope.requestId ||
-    context.request.issuedAt !== envelope.issuedAt ||
-    context.request.expiresAt !== envelope.expiresAt ||
-    context.session.certificateJti !== envelope.certificateJti ||
-    nowSeconds < envelope.issuedAt ||
-    nowSeconds >= envelope.expiresAt ||
-    nowSeconds < payload.nbf ||
-    nowSeconds >= payload.exp
-  ) {
-    return nowSeconds >= context.request.expiresAt ? "SESSION_EXPIRED" : "SESSION_BINDING_FAILED";
+  try {
+    const shape = {
+      context: isRecord(context),
+      repository: isRecord(context?.repository),
+      runtime: isRecord(context?.runtimeAuthority),
+      session: isRecord(context?.session),
+      authority: isRecord(context?.authority),
+      request: isRecord(context?.request),
+      verified: isRecord(context?.verifiedRequest),
+      envelope: isRecord(context?.verifiedRequest?.envelope),
+      certificate: isRecord(context?.verifiedRequest?.certificate),
+      payload: isRecord(context?.verifiedRequest?.certificate?.payload),
+      header: isRecord(context?.verifiedRequest?.certificate?.header),
+    };
+    if (!Object.values(shape).every(Boolean)) return "SESSION_BINDING_FAILED";
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    const envelope = context.verifiedRequest.envelope;
+    const payload = context.verifiedRequest.certificate.payload;
+    const header = context.verifiedRequest.certificate.header;
+    const requestTimesValid =
+      Number.isSafeInteger(context.request.issuedAt) &&
+      Number.isSafeInteger(context.request.expiresAt) &&
+      context.request.expiresAt > context.request.issuedAt;
+    const envelopeTimesValid =
+      Number.isSafeInteger(envelope.issuedAt) &&
+      Number.isSafeInteger(envelope.expiresAt) &&
+      envelope.expiresAt > envelope.issuedAt;
+    const certificateTimesValid =
+      Number.isSafeInteger(payload.nbf) && Number.isSafeInteger(payload.exp) && payload.exp > payload.nbf;
+    const bindingValid =
+      typeof context.repository.repositoryId === "string" &&
+      REPOSITORY_ID_PATTERN.test(context.repository.repositoryId) &&
+      typeof context.runtimeAuthority.id === "string" &&
+      typeof context.runtimeAuthority.kid === "string" &&
+      typeof context.session.id === "string" &&
+      typeof context.session.certificateJti === "string" &&
+      typeof context.authority.ref === "string" &&
+      typeof context.authority.sha === "string" &&
+      typeof context.request.requestId === "string" &&
+      typeof context.request.operation === "string" &&
+      requestTimesValid &&
+      envelopeTimesValid &&
+      certificateTimesValid &&
+      envelope.operation === BRANCH_ADVANCE_OPERATION &&
+      context.request.operation === envelope.operation &&
+      context.request.requestId === envelope.requestId &&
+      context.request.issuedAt === envelope.issuedAt &&
+      context.request.expiresAt === envelope.expiresAt &&
+      context.repository.repositoryId === envelope.repositoryId &&
+      context.session.certificateJti === envelope.certificateJti &&
+      context.session.certificateJti === payload.jti &&
+      header.kid === context.runtimeAuthority.kid &&
+      payload.iss === `runtime:${context.runtimeAuthority.id}` &&
+      payload.sub === `session:${context.session.id}` &&
+      isRecord(payload.repository) &&
+      payload.repository.id === context.repository.repositoryId &&
+      Array.isArray(context.capabilities) &&
+      Array.isArray(payload.capabilities) &&
+      canonicalizeSemanticRequest({ capabilities: context.capabilities }) ===
+        canonicalizeSemanticRequest({ capabilities: payload.capabilities });
+    if (!bindingValid) return "SESSION_BINDING_FAILED";
+    if (nowSeconds >= envelope.expiresAt || nowSeconds >= payload.exp) return "SESSION_EXPIRED";
+    if (nowSeconds < envelope.issuedAt || nowSeconds < payload.nbf) return "SESSION_BINDING_FAILED";
+    if (context.task !== undefined) {
+      if (
+        !isRecord(context.task) ||
+        context.task.kind !== "issue" ||
+        !Number.isSafeInteger(context.task.number) ||
+        context.task.number < 1 ||
+        context.task.number > MAX_ISSUE_NUMBER ||
+        !isRecord(payload.task) ||
+        payload.task.kind !== context.task.kind ||
+        payload.task.number !== context.task.number
+      ) {
+        return "SESSION_BINDING_FAILED";
+      }
+    } else if (payload.task !== undefined) {
+      return "SESSION_BINDING_FAILED";
+    }
+    return undefined;
+  } catch {
+    return "SESSION_BINDING_FAILED";
   }
-  return undefined;
 }
 
 function provenance(
   context: AuthenticatedSessionContext,
   author: BranchAdvanceCommitAuthor,
   scope: IssuerInstallationScope | undefined,
-  policy: { readonly name: string; readonly ref: string; readonly sha: string } | undefined,
+  claim: BranchAdvanceCapabilityClaim,
+  branch: string,
 ): BranchAdvanceExecutionProvenance {
-  const app = scope?.app;
-  const installation = scope?.installation;
-  return {
+  if (scope === undefined || context.task === undefined) throw new Error("provenance scope is incomplete");
+  return createCapabilityExecutionProvenance({
     version: 1,
-    repository: {
-      host: context.repository.repositoryHost,
-      repositoryId: context.repository.repositoryId,
-      nameWithOwner: context.repository.nameWithOwner,
-    },
-    runtimeAuthority: { id: context.runtimeAuthority.id, kid: context.runtimeAuthority.kid },
-    session: { id: context.session.id, certificateJti: context.session.certificateJti },
-    request: {
-      requestId: context.request.requestId,
-      operation: BRANCH_ADVANCE_OPERATION,
-      issuedAt: context.request.issuedAt,
-      expiresAt: context.request.expiresAt,
-    },
-    ...(context.task === undefined ? {} : { subject: `issue:${context.task.number}` }),
-    authority: { ref: context.authority.ref, sha: context.authority.sha },
-    ...(policy === undefined ? {} : { policy }),
+    stage: "verified",
+    repository: context.repository,
+    runtimeAuthority: context.runtimeAuthority,
+    session: context.session,
+    authority: context.authority,
+    request: context.request,
+    subject: { kind: "branch", issue: context.task.number, branch },
+    capability: claim,
     app: {
-      principal: app?.principal ?? INARI_ISSUER_PRINCIPAL,
-      ...(app?.appId === undefined ? {} : { appId: app.appId }),
-      ...(installation?.installationId === undefined ? {} : { installationId: installation.installationId }),
+      ...scope.app,
+      installationId: scope.installation.installationId,
     },
-    commitAuthor: { name: author.name, email: author.email },
-  };
+    commitAuthor: author,
+  });
 }
 
 async function authoritativeState(
@@ -811,7 +825,7 @@ async function resolveAfterProviderFailure(
   context: AuthenticatedSessionContext,
   author: BranchAdvanceCommitAuthor,
   scope: IssuerInstallationScope,
-  policy: { readonly name: string; readonly ref: string; readonly sha: string } | undefined,
+  claim: BranchAdvanceCapabilityClaim,
   knownCommitSha?: string,
 ): Promise<BranchAdvanceSemanticResult> {
   try {
@@ -821,7 +835,7 @@ async function resolveAfterProviderFailure(
         request,
         knownCommitSha !== undefined && state.ref.sha === knownCommitSha ? "advanced" : "idempotent",
         state.ref.sha,
-        provenance(context, author, scope, policy),
+        provenance(context, author, scope, claim, request.branch),
         knownCommitSha === undefined ? {} : { commitSha: knownCommitSha },
       );
     }
@@ -851,7 +865,7 @@ async function executeWithCapability(
   context: AuthenticatedSessionContext,
   author: BranchAdvanceCommitAuthor,
   scope: IssuerInstallationScope,
-  policy: { readonly name: string; readonly ref: string; readonly sha: string } | undefined,
+  claim: BranchAdvanceCapabilityClaim,
 ): Promise<BranchAdvanceSemanticResult> {
   let initial: { readonly ref: GitDataRef; readonly tree: GitDataTree } | undefined;
   try {
@@ -862,7 +876,12 @@ async function executeWithCapability(
   if (initial === undefined) return failed(request, "BRANCH_NOT_FOUND", "The authorized branch does not exist.");
   if (initial.ref.sha !== request.expectedHead) {
     if (sameSnapshot(initial.tree, validated.after)) {
-      return successful(request, "idempotent", initial.ref.sha, provenance(context, author, scope, policy));
+      return successful(
+        request,
+        "idempotent",
+        initial.ref.sha,
+        provenance(context, author, scope, claim, request.branch),
+      );
     }
     return failed(
       request,
@@ -930,7 +949,7 @@ async function executeWithCapability(
         request,
         after.ref.sha === commitSha ? "advanced" : "idempotent",
         after.ref.sha,
-        provenance(context, author, scope, policy),
+        provenance(context, author, scope, claim, request.branch),
         {
           commitSha,
           treeSha,
@@ -962,7 +981,7 @@ async function executeWithCapability(
       },
     );
   } catch {
-    return resolveAfterProviderFailure(capability, request, validated, context, author, scope, policy, commitSha);
+    return resolveAfterProviderFailure(capability, request, validated, context, author, scope, claim, commitSha);
   }
 }
 
@@ -1014,6 +1033,15 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   const claim = claimFor(context, request.branch);
   if (claim === undefined)
     return failed(request, "CAPABILITY_DENIED", "The Session has no exact branch.advance claim for this branch.");
+  if (
+    context.task === undefined ||
+    context.task.kind !== "issue" ||
+    !Number.isSafeInteger(context.task.number) ||
+    context.task.number < 1 ||
+    context.task.number > MAX_ISSUE_NUMBER
+  ) {
+    return failed(request, "SESSION_BINDING_FAILED", "Branch advancement requires a Session Issue subject.");
+  }
   const delegated = admitDelegatedWrite({ capability: claim, treeDelta: request.treeDelta });
   if (!delegated.allowed || delegated.treeDelta === undefined) {
     return failed(
@@ -1028,36 +1056,11 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
     const first = validationDiagnostics[0];
     return failed(request, first?.code ?? "TREE_DELTA_INVALID", first?.message ?? "Tree delta is invalid.");
   }
-  let policy: { readonly name: string; readonly ref: string; readonly sha: string } | undefined;
   if (claim.pathPolicy !== undefined) {
-    if (options.pathPolicyResolver === undefined)
-      return failed(request, "PATH_POLICY_DENIED", "Named path policy resolution is required.");
-    let resolved: BranchAdvanceResolvedPathPolicy | undefined;
-    try {
-      resolved = await options.pathPolicyResolver.resolve(claim.pathPolicy, {
-        repository: context.repository,
-        authority: context.authority,
-      });
-    } catch {
-      return failed(request, "PATH_POLICY_DENIED", "Named path policy resolution failed closed.");
-    }
-    if (
-      resolved === undefined ||
-      resolved.name !== claim.pathPolicy ||
-      resolved.ref !== context.authority.ref ||
-      resolved.sha !== context.authority.sha ||
-      typeof resolved.allowsPath !== "function"
-    ) {
-      return failed(request, "PATH_POLICY_DENIED", "Named path policy is not bound to current canonical authority.");
-    }
-    try {
-      if (!validated.classification.touchedPaths.every((path) => resolved?.allowsPath(path))) {
-        return failed(request, "PATH_POLICY_DENIED", "Tree delta exceeds the named path policy.");
-      }
-    } catch {
-      return failed(request, "PATH_POLICY_DENIED", "Named path policy evaluation failed closed.");
-    }
-    policy = { name: resolved.name, ref: resolved.ref, sha: resolved.sha };
+    // #375 deliberately exposes no second policy authority. Until a named
+    // policy has been resolved by that frozen seam, it is fail-closed rather
+    // than treated as an unrestricted pattern.
+    return failed(request, "PATH_POLICY_DENIED", "Named path policy cannot be resolved by the frozen authority seam.");
   }
   const target: IssuerRepositoryIdentity = {
     repositoryHost: context.repository.repositoryHost,
@@ -1066,7 +1069,7 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   };
   try {
     return await options.broker.withGitDataCapability({ target }, async (capability) => {
-      if (capability.scope.repository.repositoryId !== context.repository.repositoryId) {
+      if (!sameCapabilityRepository(context, capability.scope)) {
         return failed(request, "REPOSITORY_MISMATCH", "Git-data capability repository ID does not match the Session.");
       }
       return executeWithCapability(
@@ -1076,7 +1079,7 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
         context,
         request.commit.author,
         capability.scope,
-        policy,
+        claim,
       );
     });
   } catch {

@@ -15,6 +15,7 @@ import {
 import { MAX_CHANGE_BRANCH_LENGTH } from "../change.js";
 import type { IssuerInstallationScope } from "./issuer-authority.js";
 import { validateBranchName } from "../../branch-naming-authority.mjs";
+import { classifyRepositoryPath } from "../agent-authority/protected-paths.js";
 
 export const GIT_DATA_CAPABILITY_VERSION = 1 as const;
 export type GitDataCapabilityVersion = typeof GIT_DATA_CAPABILITY_VERSION;
@@ -117,6 +118,8 @@ export interface GitDataCapabilityTransport extends Pick<GitHubChangeEffectTrans
 export interface GitHubGitDataCapabilityOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly repositoryId: string;
+  /** Provider node ID is retained only inside the credential-bound facade. */
+  readonly repositoryNodeId: string;
   readonly scope: IssuerInstallationScope;
   readonly transport: GitDataCapabilityTransport;
 }
@@ -142,7 +145,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
   readonly version = GIT_DATA_CAPABILITY_VERSION;
   readonly scope: IssuerInstallationScope;
   readonly #repository: GitHubChangeEffectRepository;
-  readonly #repositoryId: string;
+  readonly #repositoryNodeId: string;
   readonly #transport: GitDataCapabilityTransport;
 
   constructor(options: GitHubGitDataCapabilityOptions) {
@@ -153,7 +156,10 @@ export class GitHubGitDataCapability implements GitDataCapability {
       !validText(options.repository.owner, 255) ||
       !validText(options.repository.name, 255) ||
       !validRepositoryId(options.repositoryId) ||
+      !validNodeId(options.repositoryNodeId) ||
       !isRecord(options.scope) ||
+      !isRecord(options.scope.repository) ||
+      options.scope.repository.repositoryId !== options.repositoryId ||
       !isRecord(options.transport) ||
       typeof options.transport.request !== "function" ||
       typeof options.transport.requestGraphql !== "function"
@@ -161,7 +167,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
       throw new GitDataCapabilityError();
     }
     this.#repository = Object.freeze({ ...options.repository });
-    this.#repositoryId = options.repositoryId;
+    this.#repositoryNodeId = options.repositoryNodeId;
     this.scope = options.scope;
     this.#transport = options.transport;
   }
@@ -194,7 +200,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
 
   async readTree(refOrSha: string): Promise<GitDataTree> {
     assertRefOrSha(refOrSha);
-    const body = await this.request(
+    const body = await this.#request(
       "GET",
       `${this.repositoryPath()}/git/trees/${encodeURIComponent(refOrSha)}?recursive=1`,
       undefined,
@@ -211,7 +217,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
     if (!isRecord(input) || typeof input.content !== "string" || !validBase64(input.content)) {
       throw new GitDataCapabilityError();
     }
-    const body = await this.request(
+    const body = await this.#request(
       "POST",
       `${this.repositoryPath()}/git/blobs`,
       { content: input.content, encoding: "base64" },
@@ -238,7 +244,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
       }
       return { path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha };
     });
-    const body = await this.request(
+    const body = await this.#request(
       "POST",
       `${this.repositoryPath()}/git/trees`,
       { base_tree: input.baseTreeSha, tree: entries },
@@ -261,7 +267,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
     ) {
       throw new GitDataCapabilityError();
     }
-    const body = await this.request(
+    const body = await this.#request(
       "POST",
       `${this.repositoryPath()}/git/commits`,
       {
@@ -291,7 +297,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
         query: UPDATE_REFS_MUTATION,
         variables: {
           input: {
-            repositoryId: this.#repositoryId,
+            repositoryId: this.#repositoryNodeId,
             refUpdates: [
               {
                 name: `refs/heads/${input.branch}`,
@@ -308,12 +314,14 @@ export class GitHubGitDataCapability implements GitDataCapability {
     }
     if (response.status !== 200) throw new GitDataCapabilityError();
     const body = responseRecord(response.body);
-    if (Array.isArray(body.errors) && body.errors.length > 0) return Object.freeze({ status: "rejected" });
+    if (body.errors !== undefined) {
+      if (!Array.isArray(body.errors) || body.errors.length > 0) return Object.freeze({ status: "rejected" });
+    }
     if (!isRecord(body.data) || !isRecord(body.data.updateRefs)) throw new GitDataCapabilityError();
     return Object.freeze({ status: "updated" });
   }
 
-  private async request(
+  async #request(
     method: "GET" | "POST",
     path: string,
     body: Record<string, unknown> | undefined,
@@ -373,13 +381,9 @@ function validText(value: unknown, maximum: number): value is string {
 }
 
 function validPath(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= REPOSITORY_PATH_MAX &&
-    !value.includes("..") &&
-    !value.includes("\\")
-  );
+  if (typeof value !== "string" || value.length > REPOSITORY_PATH_MAX) return false;
+  const classification = classifyRepositoryPath(value);
+  return classification.kind !== "invalid";
 }
 
 function validBranch(value: unknown): value is string {
@@ -400,6 +404,10 @@ function validBase64(value: string): boolean {
 
 function validRepositoryId(value: unknown): value is string {
   return typeof value === "string" && /^[1-9][0-9]{0,19}$/u.test(value);
+}
+
+function validNodeId(value: unknown): value is string {
+  return validText(value, 255);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
