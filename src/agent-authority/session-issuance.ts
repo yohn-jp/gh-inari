@@ -83,9 +83,27 @@ export interface ManagedSession {
   readonly publicKey: Ed25519PublicJwk;
   /** The last accepted certificate, if this Session has received one. */
   readonly certificate: DecodedSessionCertificate | undefined;
+  /** Sign exactly the supplied bytes with this Session's module-owned key. */
+  sign(bytes: Uint8Array): Uint8Array;
   createIssuanceRequest(input: ManagedSessionIssuanceRequestInput): ManagedSessionIssuanceRequest;
   /** Accept only a certificate issued for this exact Session identity/key. */
   acceptCertificate(certificate: ManagedSessionCertificate): DecodedSessionCertificate;
+}
+
+/** Maximum raw input accepted by the opaque Session signing seam. */
+export const MAX_MANAGED_SESSION_SIGN_INPUT_BYTES = 64 * 1024;
+
+export type ManagedSessionSigningErrorCode = "MANAGED_SESSION_SIGN_INVALID_INPUT";
+
+/** Deterministic, non-secret error for invalid or oversized Session signing input. */
+export class ManagedSessionSigningError extends Error {
+  readonly code: ManagedSessionSigningErrorCode;
+
+  constructor(code: ManagedSessionSigningErrorCode, message: string) {
+    super(message);
+    this.name = "ManagedSessionSigningError";
+    this.code = code;
+  }
 }
 
 export type SessionBootstrapErrorCode =
@@ -175,6 +193,31 @@ interface SessionState {
 }
 
 const sessionStates = new WeakMap<ManagedSession, SessionState>();
+
+function assertManagedSessionSigningInput(value: unknown): asserts value is Uint8Array {
+  if (
+    !(value instanceof Uint8Array) ||
+    !ArrayBuffer.isView(value) ||
+    value.byteLength > MAX_MANAGED_SESSION_SIGN_INPUT_BYTES
+  ) {
+    throw new ManagedSessionSigningError(
+      "MANAGED_SESSION_SIGN_INVALID_INPUT",
+      `Managed Session signing input must be a Uint8Array no larger than ${MAX_MANAGED_SESSION_SIGN_INPUT_BYTES} bytes.`,
+    );
+  }
+}
+
+function signManagedSessionBytes(session: ManagedSession, bytes: Uint8Array): Uint8Array {
+  assertManagedSessionSigningInput(bytes);
+  const state = sessionStates.get(session);
+  if (state === undefined) {
+    throw new ManagedSessionSigningError(
+      "MANAGED_SESSION_SIGN_INVALID_INPUT",
+      "Managed Session signing state is unavailable.",
+    );
+  }
+  return Uint8Array.from(ed25519Sign(null, bytes, state.privateKey));
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -545,6 +588,7 @@ export function createManagedSession(): ManagedSession {
     get certificate() {
       return acceptedCertificate;
     },
+    sign: (bytes) => signManagedSessionBytes(session, bytes),
     createIssuanceRequest: createRequest,
     acceptCertificate,
   };
