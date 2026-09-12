@@ -13,6 +13,14 @@ import {
   type ContractProvenanceSource,
   type PullRequestBranchGovernance,
 } from "./contract/ir.js";
+import { validateGovernedRootIssueEvidence, type ChangeReadyArtifactEvidence } from "./change.js";
+import {
+  extractTemplateIdentityMarker,
+  renderIssueArtifact,
+  selectExistingArtifactCandidate,
+  validateExistingIssueArtifact,
+  type ExistingArtifactCandidate,
+} from "./artifact.js";
 import type { ArtifactContract } from "./contract/artifact-contract.js";
 import {
   GitHubAdapter,
@@ -221,7 +229,7 @@ async function resolveLocalPolicyPath(
  * No local repository files are consulted by this path.
  */
 export async function compileRepositoryGovernedContract(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   domain: GovernedArtifactDomain,
   selector?: string | TemplateSelector,
   options: GovernedContractCompileOptions = {},
@@ -277,7 +285,7 @@ export type CompiledTemplateOutcome =
  * compileRepositoryGovernedContract instead.
  */
 export async function compileRepositoryGovernedContracts(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   domain: GovernedArtifactDomain,
 ): Promise<readonly CompiledTemplateOutcome[]> {
   const source = await readRepositoryGovernanceSource(adapter);
@@ -348,7 +356,7 @@ export async function resolveRepositoryBranchGovernance(
 }
 
 async function compileRepositoryGovernedContractFromSource(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   source: RepositoryGovernanceSource,
   domain: GovernedArtifactDomain,
   selectedTemplate: TemplateDiscoveryResult["templates"][number],
@@ -404,7 +412,7 @@ async function compileRepositoryGovernedContractFromSource(
 }
 
 async function compileRepositorySemanticContractFromSource(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   source: RepositoryGovernanceSource,
   identity: SemanticTemplateIdentity,
   templateResolutionSource?: ContractProvenanceSource,
@@ -506,8 +514,85 @@ async function readRepositoryPolicySource(
 }
 
 /** Discover all authoritative templates without compiling or reading a body. */
-export async function discoverRepositoryTemplates(adapter: GitHubAdapter): Promise<TemplateDiscoveryResult> {
+export async function discoverRepositoryTemplates(
+  adapter: RepositoryGovernanceSourceReader,
+): Promise<TemplateDiscoveryResult> {
   return (await readRepositoryGovernanceSource(adapter)).discovery;
+}
+
+/**
+ * Resolve a root Issue's governed Issue Form evidence entirely from the
+ * target repository's trusted default-branch generation. This is the
+ * acquisition-neutral counterpart to a local-checkout governed Issue read:
+ * every governance input (template, resolution config) is compiled and
+ * verified from `adapter`'s repository-read authority, never from a local
+ * filesystem. Any provider adapter over #464-scoped read evidence, a local
+ * `gh` session, or another repository-read transport can supply `adapter`.
+ */
+export async function resolveGovernedIssueEvidence(
+  adapter: RepositoryGovernanceSourceReader,
+  body: string | null | undefined,
+  ref: string,
+): Promise<ChangeReadyArtifactEvidence> {
+  if (body === undefined || body === null) {
+    throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "A governed Issue requires a readable body.", {
+      ref,
+      reason: "missing issue body",
+    });
+  }
+  const marker = extractTemplateIdentityMarker(body);
+  if (marker.status !== "absent") {
+    if (marker.status !== "valid" || marker.marker === undefined || marker.marker.kind !== "issue") {
+      throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "The Issue body's template identity marker is invalid.", {
+        ref,
+        reason: "invalid template identity marker",
+      });
+    }
+    const contract = await compileRepositoryGovernedContract(adapter, "issue", marker.marker.path);
+    const diagnostics = validateGovernedRootIssueEvidence({ contract, body });
+    if (diagnostics.length > 0) {
+      throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "The Issue body does not match its governed template.", {
+        ref,
+        path: marker.marker.path,
+        reason: "governed Issue evidence mismatch",
+      });
+    }
+    return { contract, body };
+  }
+  const outcomes = await compileRepositoryGovernedContracts(adapter, "issue");
+  const candidates: ExistingArtifactCandidate[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status !== "compiled") continue;
+    candidates.push({ contract: outcome.contract, result: validateExistingIssueArtifact(outcome.contract, body) });
+  }
+  const selected = selectExistingArtifactCandidate(candidates);
+  if (selected.contract === undefined || !selected.result.valid) {
+    throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "No governed template matches the Issue body.", {
+      ref,
+      reason: "no matching governed template",
+    });
+  }
+  let canonical: string;
+  try {
+    canonical = renderIssueArtifact(selected.contract, {
+      fields: selected.result.parse.values,
+      ...(selected.result.parse.dependencies === undefined ? {} : { dependencies: selected.result.parse.dependencies }),
+    });
+  } catch (cause: unknown) {
+    throw new GovernanceError(
+      "GOVERNANCE_SOURCE_INVALID",
+      "The governed Issue template could not be rendered for comparison.",
+      { ref, reason: "governed template render failed" },
+      { cause },
+    );
+  }
+  if (canonical !== body) {
+    throw new GovernanceError("GOVERNANCE_SOURCE_INVALID", "The Issue body does not match its governed template.", {
+      ref,
+      reason: "rendered governed Issue body mismatch",
+    });
+  }
+  return { contract: selected.contract, body };
 }
 
 /**
@@ -527,7 +612,7 @@ export async function discoverRepositoryTemplates(adapter: GitHubAdapter): Promi
  * before mutating.
  */
 export async function verifyGovernedMutationFreshness(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   provenance: ContractProvenance,
 ): Promise<void> {
   const source = await readRepositoryGovernanceSource(adapter);
@@ -638,7 +723,7 @@ export interface GovernedMutationResult<T> {
 }
 
 async function reconcileGovernanceAfterMutation(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   provenance: ContractProvenance,
 ): Promise<GovernanceReconciliation> {
   const source = await readRepositoryGovernanceSource(adapter);
@@ -785,7 +870,7 @@ interface RepositoryTemplateResolutionSource {
 }
 
 async function readRepositoryTemplateResolutionConfig(
-  adapter: GitHubAdapter,
+  adapter: RepositoryGovernanceSourceReader,
   source: RepositoryGovernanceSource,
   parseConfig: boolean,
 ): Promise<RepositoryTemplateResolutionSource | undefined> {

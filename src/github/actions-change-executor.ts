@@ -31,7 +31,12 @@ import {
   validateExistingIssueArtifact,
   type ExistingArtifactCandidate,
 } from "../artifact.js";
-import { compileLocalGovernedContract } from "../governance.js";
+import {
+  compileLocalGovernedContract,
+  compileRepositoryGovernedContract,
+  resolveGovernedIssueEvidence,
+  type RepositoryGovernanceSourceReader,
+} from "../governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import { artifactContractProvenanceFromTemplate } from "../contract/ir.js";
 import { effectiveFieldConstraints } from "../contract/constraints.js";
@@ -460,6 +465,12 @@ export interface GitHubActionsEvidenceReaderOptions {
   /** Trusted checkout containing the repository's default-branch governance. */
   readonly cwd?: string;
   /**
+   * Acquisition-neutral #464-backed alternative to `cwd`, used when no
+   * local trusted checkout is available (for example, a stateless direct
+   * App deployment). Ignored when `cwd` is present.
+   */
+  readonly remoteGovernance?: RepositoryGovernanceSourceReader;
+  /**
    * Core-produced PR plan supplied by the semantic preparation boundary.
    * Omitted only while the explicit v1 Change payload remains in compatibility mode.
    */
@@ -478,7 +489,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
 
   constructor(options: GitHubActionsEvidenceReaderOptions) {
     this.#options = options;
-    this.requiresGovernedIssueValidation = options.cwd !== undefined;
+    this.requiresGovernedIssueValidation = options.cwd !== undefined || options.remoteGovernance !== undefined;
   }
 
   async read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput> {
@@ -569,7 +580,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       throw new GitHubActionsChangeExecutorError();
     }
     const governedIssue =
-      request.operation === "issue" && this.#options.cwd !== undefined
+      request.operation === "issue" && (this.#options.cwd !== undefined || this.#options.remoteGovernance !== undefined)
         ? await this.readGovernedIssue(issueBody, baseBranch)
         : undefined;
     const readyEvidence =
@@ -584,7 +595,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       semanticPullRequestPlan = result.plan;
     } else if (
       request.operation === "issue" &&
-      this.#options.cwd !== undefined &&
+      (this.#options.cwd !== undefined || this.#options.remoteGovernance !== undefined) &&
       !pullRequests.some((candidate) => candidate.head === canonicalBranch && candidate.base === baseBranch)
     ) {
       semanticPullRequestPlan = await this.buildGovernedPullRequestPlan(baseBranch, canonicalBranch, request.issue);
@@ -621,7 +632,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     rootIssue: number,
   ): Promise<SemanticPullRequestMutationPlan | undefined> {
     const generation = await this.readGovernanceTree(baseBranch);
-    const contract = await this.readGovernedContract("pr", baseBranch, generation, "default");
+    const contract = await this.resolveGovernedContract("pr", baseBranch, generation, "default");
     if (contract === undefined || contract.provenance === undefined) return undefined;
     const fields: Record<string, unknown> = {};
     for (const section of contract.sections) {
@@ -703,7 +714,13 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     pullRequests: readonly ChangePullRequestEvidence[],
     branch: string,
   ): Promise<ChangeReadyEvidence | undefined> {
-    if (this.#options.cwd === undefined || issueBody === undefined || issueBody === null) return undefined;
+    if (
+      (this.#options.cwd === undefined && this.#options.remoteGovernance === undefined) ||
+      issueBody === undefined ||
+      issueBody === null
+    ) {
+      return undefined;
+    }
     const canonical = pullRequests.filter((candidate) => candidate.head === branch && candidate.base === baseBranch);
     if (canonical.length !== 1) return undefined;
     const pullRequest = canonical[0];
@@ -714,12 +731,12 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     const issueMarker = extractTemplateIdentityMarker(issueBody);
     const issueContract =
       issueMarker.status === "valid" && issueMarker.marker !== undefined
-        ? await this.readGovernedContract("issue", baseBranch, generation, issueMarker.marker.path)
+        ? await this.resolveGovernedContract("issue", baseBranch, generation, issueMarker.marker.path)
         : undefined;
     const pullRequestMarker = extractTemplateIdentityMarker(pullRequestBody);
     const pullRequestContract =
       pullRequestMarker.status === "valid" && pullRequestMarker.marker !== undefined
-        ? await this.readGovernedContract("pr", baseBranch, generation, pullRequestMarker.marker.path)
+        ? await this.resolveGovernedContract("pr", baseBranch, generation, pullRequestMarker.marker.path)
         : undefined;
     if (issueContract === undefined || pullRequestContract === undefined) return undefined;
     return {
@@ -738,6 +755,15 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     ref: string,
   ): Promise<{ readonly contract: CanonicalContract; readonly body: string }> {
     if (body === undefined || body === null) throw new GitHubActionsChangeExecutorError();
+    if (this.#options.cwd === undefined) {
+      if (this.#options.remoteGovernance === undefined) throw new GitHubActionsChangeExecutorError();
+      try {
+        const evidence = await resolveGovernedIssueEvidence(this.#options.remoteGovernance, body, ref);
+        return { contract: evidence.contract, body };
+      } catch (error: unknown) {
+        throw withFailureStage(error, "repository-evidence");
+      }
+    }
     const generation = await this.readGovernanceTree(ref);
     const marker = extractTemplateIdentityMarker(body);
     if (marker.status !== "absent") {
@@ -836,6 +862,28 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       return { path: boundedString(candidate.path, 512), type, sha: boundedString(candidate.sha, 255) };
     });
     return { sha, entries };
+  }
+
+  /**
+   * Dispatch one governed-contract compile to whichever acquisition source
+   * is configured: the trusted local checkout (`cwd`) when present, or the
+   * acquisition-neutral #464-backed `remoteGovernance` reader otherwise.
+   */
+  private async resolveGovernedContract(
+    domain: "issue" | "pr",
+    ref: string,
+    generation: GovernanceTree,
+    selector: string,
+  ): Promise<CanonicalContract | undefined> {
+    if (this.#options.cwd !== undefined) {
+      return this.readGovernedContract(domain, ref, generation, selector);
+    }
+    if (this.#options.remoteGovernance === undefined) return undefined;
+    try {
+      return await compileRepositoryGovernedContract(this.#options.remoteGovernance, domain, selector);
+    } catch {
+      return undefined;
+    }
   }
 
   private async readGovernedContract(

@@ -1,5 +1,7 @@
 export * from "./adapter.js";
 export * from "./app-installation-credential-broker.js";
+export * from "./app-repository-evidence-reader.js";
+export * from "./direct-app-execution.js";
 export * from "./change-effect-adapter.js";
 export * from "./git-data-capability.js";
 export * from "./actions-change-executor.js";
