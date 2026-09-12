@@ -369,3 +369,72 @@ test("provider failures and operation errors never disclose App secrets", async 
     },
   );
 });
+
+function neverRespondingFetch(): typeof globalThis.fetch {
+  return (async (_input, init) => {
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = (init as RequestInit | undefined)?.signal;
+      if (signal !== undefined && signal !== null) {
+        if (signal.aborted) {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+      }
+    });
+  }) as typeof globalThis.fetch;
+}
+
+test("a hung installation-token request fails closed after the bounded deadline", async () => {
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(neverRespondingFetch(), { requestTimeoutMs: 5 }),
+  );
+  const start = Date.now();
+  await assert.rejects(
+    broker.withRepositoryReadCapability({}, async () => undefined),
+    (error: unknown) => {
+      assert.ok(error instanceof GitHubAppCredentialBrokerError);
+      assert.equal(error.stage, "installation-token");
+      assert.equal(JSON.stringify(error).includes(privateKey), false);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - start < 5_000, "the hung request must fail well before an unbounded wait");
+});
+
+test("a hung provider read request fails closed after the bounded deadline once credentialed", async () => {
+  let calls = 0;
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(
+      async (input, init) => {
+        calls += 1;
+        if (calls === 1) return tokenResponse();
+        return neverRespondingFetch()(input, init);
+      },
+      { requestTimeoutMs: 5 },
+    ),
+  );
+  const start = Date.now();
+  await assert.rejects(
+    broker.withRepositoryReadCapability({}, (capability) =>
+      capability.transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari" }),
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof GitHubAppCredentialBrokerError);
+      assert.equal(error.stage, "repository-read");
+      assert.equal(JSON.stringify(error).includes(privateKey), false);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - start < 5_000, "the hung request must fail well before an unbounded wait");
+});
+
+test("requestTimeoutMs is bounded within the compile-time ceiling", () => {
+  assert.throws(
+    () => new GitHubAppInstallationCredentialBroker(brokerOptions(neverRespondingFetch(), { requestTimeoutMs: 0 })),
+  );
+  assert.throws(
+    () =>
+      new GitHubAppInstallationCredentialBroker(brokerOptions(neverRespondingFetch(), { requestTimeoutMs: 999_999 })),
+  );
+});

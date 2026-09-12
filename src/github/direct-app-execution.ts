@@ -51,6 +51,8 @@ export interface DirectAppSessionExecutorConfig {
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly now?: () => Date;
+  /** Bounded deadline applied to every GitHub provider request. Defaults to 10s; hard ceiling 30s. */
+  readonly requestTimeoutMs?: number;
 }
 
 function isMutationRequest(
@@ -111,6 +113,7 @@ export function createDirectAppSessionExecutor(
     ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
     ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
     ...(config.now === undefined ? {} : { now: config.now }),
+    ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
   };
   const broker = new GitHubAppInstallationCredentialBroker(brokerOptions);
 

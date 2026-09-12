@@ -40,6 +40,8 @@ export interface Env {
   readonly INARI_GITHUB_API_URL?: string;
   /** Non-secret deployment configuration. Bounded downward/upward only within the transport's compile-time ceiling. */
   readonly INARI_MAX_BODY_BYTES?: string;
+  /** Non-secret deployment configuration. Bounded GitHub provider request deadline (ms). Defaults to 10s; hard ceiling 30s. */
+  readonly INARI_GITHUB_API_REQUEST_TIMEOUT_MS?: string;
 }
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
@@ -69,7 +71,7 @@ function optionalString(value: unknown, maxLength: number): string | undefined {
   return requiredString(value, maxLength);
 }
 
-function optionalMaxBodyBytes(value: unknown): number | undefined {
+function optionalPositiveInteger(value: unknown): number | undefined {
   const raw = optionalString(value, 16);
   if (raw === undefined) return undefined;
   const parsed = Number(raw);
@@ -92,7 +94,8 @@ function buildRuntime(env: Env): WorkerRuntime {
   const hostname = optionalString(env.INARI_TARGET_REPOSITORY_HOST, MAX_HOST_LENGTH) ?? DEFAULT_REPOSITORY_HOST;
   const repositoryNodeId = optionalString(env.INARI_TARGET_REPOSITORY_NODE_ID, MAX_OWNER_OR_NAME_LENGTH);
   const apiUrl = optionalString(env.INARI_GITHUB_API_URL, MAX_API_URL_LENGTH);
-  const maxBodyBytes = optionalMaxBodyBytes(env.INARI_MAX_BODY_BYTES);
+  const maxBodyBytes = optionalPositiveInteger(env.INARI_MAX_BODY_BYTES);
+  const requestTimeoutMs = optionalPositiveInteger(env.INARI_GITHUB_API_REQUEST_TIMEOUT_MS);
 
   const executor = createDirectAppSessionExecutor({
     appId,
@@ -101,6 +104,7 @@ function buildRuntime(env: Env): WorkerRuntime {
     repository: { hostname, owner, name },
     ...(repositoryNodeId === undefined ? {} : { repositoryNodeId }),
     ...(apiUrl === undefined ? {} : { apiUrl }),
+    ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
   });
   const handler = createDirectAppHttpHandler({
     executor,

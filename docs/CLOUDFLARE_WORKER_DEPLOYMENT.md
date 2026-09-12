@@ -50,15 +50,16 @@ at the end of the request.
 
 ### Non-secret configuration (`wrangler.toml` `[vars]`)
 
-| Name                               | Description                                                                                         | Default                  |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------ |
-| `INARI_GITHUB_APP_INSTALLATION_ID` | GitHub App installation identity for the target repository.                                         | none (required)          |
-| `INARI_TARGET_REPOSITORY_OWNER`    | Fixed target repository owner.                                                                      | none (required)          |
-| `INARI_TARGET_REPOSITORY_NAME`     | Fixed target repository name.                                                                       | none (required)          |
-| `INARI_TARGET_REPOSITORY_HOST`     | GitHub host.                                                                                        | `github.com`             |
-| `INARI_TARGET_REPOSITORY_NODE_ID`  | Skips one installation-repository-selection round trip when set.                                    | none (optional)          |
-| `INARI_GITHUB_API_URL`             | GitHub API origin, for GitHub Enterprise Server.                                                    | `https://api.github.com` |
-| `INARI_MAX_BODY_BYTES`             | Bounded downward/upward override of the #377 HTTP body ceiling, within its compile-time hard limit. | 1 MiB (#377 default)     |
+| Name                                  | Description                                                                                                                                                                                                                                  | Default                  |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `INARI_GITHUB_APP_INSTALLATION_ID`    | GitHub App installation identity for the target repository.                                                                                                                                                                                  | none (required)          |
+| `INARI_TARGET_REPOSITORY_OWNER`       | Fixed target repository owner.                                                                                                                                                                                                               | none (required)          |
+| `INARI_TARGET_REPOSITORY_NAME`        | Fixed target repository name.                                                                                                                                                                                                                | none (required)          |
+| `INARI_TARGET_REPOSITORY_HOST`        | GitHub host.                                                                                                                                                                                                                                 | `github.com`             |
+| `INARI_TARGET_REPOSITORY_NODE_ID`     | Skips one installation-repository-selection round trip when set.                                                                                                                                                                             | none (optional)          |
+| `INARI_GITHUB_API_URL`                | GitHub API origin, for GitHub Enterprise Server.                                                                                                                                                                                             | `https://api.github.com` |
+| `INARI_MAX_BODY_BYTES`                | Bounded downward/upward override of the #377 HTTP body ceiling, within its compile-time hard limit.                                                                                                                                          | 1 MiB (#377 default)     |
+| `INARI_GITHUB_API_REQUEST_TIMEOUT_MS` | Bounded deadline (ms) applied to every GitHub provider request (installation token, repository/tree/blob reads, mutations), within a 30s compile-time hard ceiling. A hung provider fails the request closed instead of executing unbounded. | 10000 (10s)              |
 
 Caller input can never override any of these values: they are read only from
 the Worker's own environment, never from the request. Missing or malformed

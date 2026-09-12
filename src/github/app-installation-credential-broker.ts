@@ -43,6 +43,10 @@ import type { ChangeEffect } from "../change.js";
 const DEFAULT_API_URL = "https://api.github.com";
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_API_URL_LENGTH = 2_048;
+/** Default bounded deadline for every provider request. */
+const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 10_000;
+/** Compile-time hard ceiling. No runtime configuration may exceed this bound. */
+const MAX_PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_TOKEN_LENGTH = 4_096;
 const MAX_PRIVATE_KEY_LENGTH = 16_384;
 const MAX_ID_LENGTH = 20;
@@ -88,6 +92,18 @@ export class GitHubAppCredentialBrokerError extends Error {
     this.name = "GitHubAppCredentialBrokerError";
     this.stage = stage;
   }
+}
+
+/**
+ * A ref'd (not `AbortSignal.timeout`'s unref'd) deadline: this deliberately
+ * keeps the event loop alive until the bounded request settles one way or
+ * the other, so a hung provider request fails closed instead of the runtime
+ * exiting first. Always call `clear()` once the request settles.
+ */
+function boundedRequestSignal(timeoutMs: number): { readonly signal: AbortSignal; readonly clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
 }
 
 export interface GitHubAppRepositoryReadTransport {
@@ -182,6 +198,8 @@ export interface GitHubAppApiTransportOptions {
   readonly fetch?: typeof globalThis.fetch;
   readonly failureStage?: GitHubAppCredentialFailureStage;
   readonly failure?: (stage: GitHubAppCredentialFailureStage) => Error;
+  /** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 10s. */
+  readonly requestTimeoutMs?: number;
 }
 
 /** Credential-bound GitHub transport shared by read and mutation capabilities. */
@@ -193,6 +211,7 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
   readonly #fetch: typeof globalThis.fetch;
   readonly #failureStage: GitHubAppCredentialFailureStage;
   readonly #failure: (stage: GitHubAppCredentialFailureStage) => Error;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: GitHubAppApiTransportOptions) {
     this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, MAX_API_URL_LENGTH).replace(/\/+$/u, "");
@@ -205,6 +224,7 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#failureStage = options.failureStage ?? "repository-read";
     this.#failure = options.failure ?? ((stage) => new GitHubAppCredentialBrokerError(stage));
+    this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
   }
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
@@ -222,6 +242,7 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
   }
 
   private async requestAt(baseUrl: string, request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    const bounded = boundedRequestSignal(this.#requestTimeoutMs);
     try {
       const response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
         method: request.method,
@@ -232,10 +253,13 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
           ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
         },
         ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        signal: bounded.signal,
       });
       return { status: response.status, body: await boundedBody(response) };
     } catch {
       throw this.safeFailure(this.#failureStage);
+    } finally {
+      bounded.clear();
     }
   }
 
@@ -323,6 +347,8 @@ export interface GitHubAppInstallationCredentialBrokerOptions {
   readonly now?: () => Date;
   readonly failure?: (stage: GitHubAppCredentialFailureStage) => Error;
   readonly mutationFailure?: (effect: ChangeEffect) => Error;
+  /** Bounded deadline applied to every provider request. Defaults to 10s; hard ceiling 30s. */
+  readonly requestTimeoutMs?: number;
 }
 
 interface InstallationCredential {
@@ -362,6 +388,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
   readonly #now: () => Date;
   readonly #failure: (stage: GitHubAppCredentialFailureStage) => Error;
   readonly #mutationFailure: (effect: ChangeEffect) => Error;
+  readonly #requestTimeoutMs: number;
 
   constructor(options: GitHubAppInstallationCredentialBrokerOptions) {
     this.#failure = options.failure ?? ((stage) => new GitHubAppCredentialBrokerError(stage));
@@ -369,6 +396,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       options.mutationFailure ?? (() => new GitHubAppCredentialBrokerError("projection-execution"));
     try {
       if (Object.prototype.hasOwnProperty.call(options, "target")) throw new Error("repository target is not accepted");
+      this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
       this.#app = createInariIssuerAppIdentity(options.appId);
       this.#installationId = boundedDecimalId(options.installationId);
       this.#privateKeyPem = boundedSecret(options.privateKeyPem, MAX_PRIVATE_KEY_LENGTH);
@@ -405,6 +433,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       fetch: this.#fetch,
       failureStage: "repository-read",
       failure: this.#failure,
+      requestTimeoutMs: this.#requestTimeoutMs,
     });
     const capability: GitHubAppRepositoryReadCapability = Object.freeze({
       scope: credential.scope,
@@ -452,6 +481,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       fetch: this.#fetch,
       failureStage: "projection-execution",
       failure: this.#failure,
+      requestTimeoutMs: this.#requestTimeoutMs,
     });
     const adapter = new GitHubChangeEffectAdapter({ repository: this.#repository, transport });
     const capability: IssuerScopedMutationCapability = {
@@ -497,6 +527,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       fetch: this.#fetch,
       failureStage: "projection-execution",
       failure: this.#failure,
+      requestTimeoutMs: this.#requestTimeoutMs,
     });
     const capabilityTransport: BranchAdvanceCapabilityTransport = Object.freeze({
       request: (input: Parameters<BranchAdvanceCapabilityTransport["request"]>[0]) => transport.request(input),
@@ -530,6 +561,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     }
     const apiUrl = this.#apiUrl;
     let response: Response;
+    const bounded = boundedRequestSignal(this.#requestTimeoutMs);
     try {
       response = await this.#fetch(`${apiUrl}/app/installations/${this.#installationId}/access_tokens`, {
         method: "POST",
@@ -543,9 +575,12 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
           repositories: [this.#repository.name],
           permissions: request.permissions,
         }),
+        signal: bounded.signal,
       });
     } catch {
       throw this.safeFailure("installation-token");
+    } finally {
+      bounded.clear();
     }
     if (response.status !== 201) throw this.safeFailure("installation-token");
 
@@ -706,6 +741,15 @@ function boundedDecimalId(value: unknown): string {
   const id = boundedString(value, MAX_ID_LENGTH);
   if (!DECIMAL_ID_PATTERN.test(id)) throw new Error("id invalid");
   return id;
+}
+
+/** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 10s. */
+function normalizedRequestTimeoutMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_PROVIDER_REQUEST_TIMEOUT_MS) {
+    throw new Error("request timeout invalid");
+  }
+  return value;
 }
 
 function record(value: unknown): Record<string, unknown> {
