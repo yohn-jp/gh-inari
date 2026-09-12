@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Validates that every `uses:` reference in GitHub Actions workflow/action
 // YAML follows the organization reference policy:
-//   - yohn-jp/.github reusable workflows: `@main`
+//   - yohn-jp/.github reusable workflows: `@main` or a full commit SHA
 //   - other external actions: `owner/repo[/path]@<40-char commit SHA>`
 //   - docker actions:   `docker://image@sha256:<digest>`
 //   - local actions:    `./path/to/action` (not applicable; skipped)
 //
 // A moving ref (branch or tag, e.g. `@v4`) is rejected for third-party actions.
-// The organization-owned reusable workflows intentionally follow `@main`, so
-// the shared authority is updated for all consumers at one explicit branch.
+// Organization-owned reusable workflows may follow `@main` for synchronized
+// consumers or use an explicit commit SHA when immutable execution is required.
 //
 // Also validates that a workflow calling this organization's
 // issue-governance.yml (Issue contract validation) doesn't locally
@@ -26,7 +26,7 @@ const DOCKER_DIGEST_PIN = /@sha256:[0-9a-f]{64}$/;
 const ORG_REUSABLE_WORKFLOW =
   /^yohn-jp\/\.github\/\.github\/workflows\/[^@]+@([^@]+)$/u;
 const ORG_ISSUE_GOVERNANCE_WORKFLOW =
-  "yohn-jp/.github/.github/workflows/issue-governance.yml@main";
+  "yohn-jp/.github/.github/workflows/issue-governance.yml";
 const LOCAL_ISSUE_VALIDATION_SCRIPT = /scripts\/validate-issue\.mjs/u;
 
 /**
@@ -73,9 +73,9 @@ export function validateActionPins(node, sourceLabel) {
 
     const organizationWorkflow = ref.match(ORG_REUSABLE_WORKFLOW);
     if (organizationWorkflow !== null) {
-      if (organizationWorkflow[1] !== "main") {
+      if (organizationWorkflow[1] !== "main" && !/^[0-9a-f]{40}$/u.test(organizationWorkflow[1])) {
         errors.push(
-          `${where}: organization-owned reusable workflow "${ref}" must use @main (third-party Actions remain SHA-pinned)`
+          `${where}: organization-owned reusable workflow "${ref}" must use @main or a full 40-character commit SHA (third-party Actions remain SHA-pinned)`
         );
       }
       return;
@@ -108,7 +108,11 @@ export function validateActionPins(node, sourceLabel) {
  * @returns {string[]} errors
  */
 export function validateIssueGovernanceDelegation(raw, sourceLabel) {
-  if (!raw.includes(`uses: ${ORG_ISSUE_GOVERNANCE_WORKFLOW}`)) {
+  const sharedReference = new RegExp(
+    `uses:\\s+${ORG_ISSUE_GOVERNANCE_WORKFLOW.replaceAll(".", "\\.")}@(main|[0-9a-f]{40})(?:\\s|$)`,
+    "mu",
+  );
+  if (!sharedReference.test(raw)) {
     return [];
   }
   if (LOCAL_ISSUE_VALIDATION_SCRIPT.test(raw)) {

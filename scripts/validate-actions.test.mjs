@@ -23,7 +23,7 @@ test("accepts immutable external actions, repository-local actions, and organiza
   assert.equal(result.references.filter((reference) => reference.local).length, 1);
 });
 
-test("requires organization-owned reusable workflows to use @main", () => {
+test("requires organization-owned reusable workflows to use @main or a full commit SHA", () => {
   const result = validateActionText(
     [
       "      uses: yohn-jp/.github/.github/workflows/typescript-cli-ci.yml@" + sha,
@@ -32,8 +32,14 @@ test("requires organization-owned reusable workflows to use @main", () => {
     ".github/workflows/example.yml",
   );
 
-  assert.equal(result.errors.length, 1);
-  assert.match(result.errors[0], /organization-owned reusable workflows.*@main/u);
+  assert.equal(result.errors.length, 0);
+
+  const mutable = validateActionText(
+    "      uses: yohn-jp/.github/.github/workflows/typescript-cli-ci.yml@release",
+    ".github/workflows/example.yml",
+  );
+  assert.equal(mutable.errors.length, 1);
+  assert.match(mutable.errors[0], /organization-owned reusable workflows.*full 40-character commit SHA/u);
 });
 
 test("rejects mutable, incomplete, and missing external action refs", () => {
@@ -66,7 +72,7 @@ test("Issue Governance delegates semantic validation to the shared workflow", ()
   ].join("\n");
 
   assert.deepEqual(validateIssueGovernanceWorkflow(valid).errors, []);
-  assert.ok(validateIssueGovernanceWorkflow(valid.replace("@main", "@" + sha)).errors.length > 0);
+  assert.deepEqual(validateIssueGovernanceWorkflow(valid.replace("@main", "@" + sha)).errors, []);
   assert.ok(
     validateIssueGovernanceWorkflow(valid + "\nnode --import tsx scripts/validate-issue.mjs").errors.length > 0,
   );

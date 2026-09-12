@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   validate-issue:
-    uses: yohn-jp/.github/.github/workflows/issue-governance.yml@main
+    uses: yohn-jp/.github/.github/workflows/issue-governance.yml@ff82994d70761f3f40557ea867cfe4915e193965
     permissions:
       contents: read
       issues: write

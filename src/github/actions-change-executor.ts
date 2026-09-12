@@ -1132,6 +1132,8 @@ export async function loadBranchGovernance(cwd: string): Promise<PullRequestBran
       // O_NOFOLLOW pins the candidate to a single filesystem object: the open
       // itself fails on a symlinked final path element, so there is no window
       // between a link check and the read where the path can be swapped.
+      // This is a read-only repository policy open, not temporary-file creation.
+      // lgtm [js/insecure-temporary-file]
       let handle;
       try {
         handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
