@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   canonicalRuntimeAuthorityJson,
@@ -493,35 +492,20 @@ function verifiedBranchProvenance(admission: {
   });
 }
 
-function shaForBranchAdvanceContent(content: string): string {
-  const bytes = Buffer.from(content, "utf8");
-  return createHash("sha1")
-    .update(Buffer.concat([Buffer.from(`blob ${bytes.byteLength}\0`, "utf8"), bytes]))
-    .digest("hex");
-}
-
 function branchAdvanceRequest(): Record<string, unknown> {
-  const path = "src/session.txt";
-  const afterContent = "after";
   return {
     version: 1,
-    repositoryId: REPOSITORY_ID,
+    issue: ISSUE,
     branch: BRANCH,
     expectedHead: "d".repeat(40),
-    treeDelta: {
-      changes: [{ operation: "modify", path }],
-      before: [{ path, sha: shaForBranchAdvanceContent("before"), mode: "100644", type: "blob" }],
-      after: [
-        {
-          path,
-          sha: shaForBranchAdvanceContent(afterContent),
-          mode: "100644",
-          type: "blob",
-          content: Buffer.from(afterContent, "utf8").toString("base64"),
-          encoding: "base64",
-        },
-      ],
-    },
+    changes: [
+      {
+        operation: "upsert",
+        path: "src/session.txt",
+        mode: "100644",
+        content: Buffer.from("after", "utf8").toString("base64"),
+      },
+    ],
     commit: { message: "bounded test commit", author: { name: "Test Author", email: "test@example.test" } },
   };
 }
@@ -541,12 +525,9 @@ test("branch.advance performs composition and delegates without owning Git mutat
         operation: "branch.advance",
         status: "succeeded",
         outcome: "advanced",
-        repositoryId: REPOSITORY_ID,
         branch: BRANCH,
         expectedHead: "d".repeat(40),
-        afterHead: "e".repeat(40),
-        commitSha: "e".repeat(40),
-        treeSha: "f".repeat(40),
+        resultingHead: "e".repeat(40),
         provenance: verifiedBranchProvenance(input.admission),
       };
     },
@@ -566,12 +547,9 @@ test("branch.advance success without #466 verified provenance fails closed inste
     operation: "branch.advance" as const,
     status: "succeeded" as const,
     outcome: "advanced" as const,
-    repositoryId: REPOSITORY_ID,
     branch: BRANCH,
     expectedHead: "d".repeat(40),
-    afterHead: "e".repeat(40),
-    commitSha: "e".repeat(40),
-    treeSha: "f".repeat(40),
+    resultingHead: "e".repeat(40),
   };
   const missingProvenance = await createCapabilityAuthorizedSessionExecutor({
     authentication: signed.authentication,

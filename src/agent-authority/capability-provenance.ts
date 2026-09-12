@@ -8,6 +8,7 @@
  */
 
 import { validateCapabilityClaim, MAX_ISSUE_NUMBER, type CapabilityClaim } from "./capability.js";
+import type { CapabilityAdmissionSubject } from "./capability-admission.js";
 import { MAX_OPAQUE_ID_LENGTH, MAX_UNIX_TIME_SECONDS } from "./session-certificate.js";
 import { validateBranchName } from "../../branch-naming-authority.mjs";
 import {
@@ -26,20 +27,6 @@ import {
 
 export const CAPABILITY_PROVENANCE_VERSION = 1 as const;
 export type CapabilityProvenanceStage = "authenticated" | "authorized" | "app-scoped" | "verified";
-
-/**
- * This is the frozen #375 subject projection. It is intentionally structural:
- * #376 does not import or implement capability admission.
- */
-type CapabilityAdmissionSubject =
-  | { readonly kind: "change"; readonly issue: number }
-  | { readonly kind: "branch"; readonly issue: number; readonly branch: string }
-  | {
-      readonly kind: "pullRequest";
-      readonly issue: number;
-      readonly head: string;
-      readonly base: string;
-    };
 
 export interface CapabilityExecutionProvenance {
   readonly version: 1;

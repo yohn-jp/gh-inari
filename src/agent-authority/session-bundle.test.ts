@@ -193,7 +193,7 @@ test("bundle import rejects tampering, expiry drift, and cross-session substitut
 });
 
 test("bundle files are exclusive, owner-only, and fail closed for symlinks and unsafe permissions", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-session-bundle-storage-"));
+  const directory = await mkdtemp(path.join(process.cwd(), ".inari-session-bundle-storage-"));
   try {
     const runtimeKey = generateRuntimeAuthorityKeyPair();
     const created = createSessionCredentialBundle({ request: requestFor(runtimeKey), runtimeKey, now: NOW });
@@ -257,7 +257,7 @@ test("bundle files are exclusive, owner-only, and fail closed for symlinks and u
 });
 
 test("session CLI issues and inspects a packed-format bundle without disclosing either private key", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-session-bundle-cli-"));
+  const directory = await mkdtemp(path.join(process.cwd(), ".inari-session-bundle-cli-"));
   try {
     const runtimeKey = generateRuntimeAuthorityKeyPair();
     const runtimeKeyPath = await writeRuntimeKey(directory, runtimeKey);

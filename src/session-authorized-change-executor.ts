@@ -158,7 +158,6 @@ const DIRECT_REQUEST_KEYS = new Set(["version", "issue", "semanticPullRequestPla
 const DIRECT_NON_ISSUE_KEYS = new Set(["version", "issue", "agent"]);
 const AGENT_KEYS = new Set(["name", "version", "runtime", "product"]);
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
-const SAFE_TOKEN = /^[\x21-\x7e]+$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -180,10 +179,6 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
 
 function boundedText(value: unknown, maximum: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maximum && SAFE_TEXT.test(value);
-}
-
-function boundedToken(value: unknown, maximum: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maximum && SAFE_TOKEN.test(value);
 }
 
 function safeIssue(value: unknown): value is number {
@@ -414,7 +409,15 @@ function branchRequestFields(input: unknown): {
   const validation = validateBranchAdvanceSemanticRequest(input);
   if (!validation.valid || validation.value === undefined) throw new TypeError("Branch advance request is invalid.");
   const request = validation.value;
-  return { request, treeDelta: request.treeDelta };
+  return {
+    request,
+    treeDelta: {
+      changes: request.changes.map((change) => ({
+        operation: change.operation === "delete" ? ("delete" as const) : ("modify" as const),
+        path: change.path,
+      })),
+    },
+  };
 }
 
 export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSessionExecutor {
@@ -651,7 +654,8 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     } catch {
       return failure(operation, "request", undefined, "Session execution request is invalid.");
     }
-    if (issue === undefined) return failure(operation, "authorization", undefined, "Session task binding is required.");
+    if (issue === undefined || fields.request.issue !== issue)
+      return failure(operation, "authorization", undefined, "Session task binding is required.");
 
     let authenticated: CapabilityExecutionProvenance;
     try {
