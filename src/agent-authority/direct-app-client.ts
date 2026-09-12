@@ -38,8 +38,7 @@ import {
   type DirectAppHttpFailureEnvelope,
   type DirectAppHttpResponseEnvelope,
 } from "./direct-app-http.js";
-import type { CapabilityAuthorizedBranchAdvanceResult } from "../session-authorized-change-executor.js";
-import type { BranchAdvanceSemanticRequest } from "./branch-advance.js";
+import type { BranchAdvanceSemanticRequest, BranchAdvanceSemanticResult } from "./branch-advance.js";
 
 const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -331,7 +330,7 @@ export interface SendBranchAdvanceOptions {
 /** Sign and submit the exact canonical #466 `branch.advance` request compiled by `change publish` (#467). */
 export async function sendDirectAppBranchAdvance(
   options: SendBranchAdvanceOptions,
-): Promise<CapabilityAuthorizedBranchAdvanceResult> {
+): Promise<BranchAdvanceSemanticResult> {
   const semanticRequest = asJson(options.request) as SemanticSessionRequest;
   const response = await sendDirectAppRequest({
     endpoint: options.endpoint,
