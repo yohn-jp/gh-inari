@@ -580,8 +580,7 @@ function assertNonTemporaryRepositoryRoot(root: string, operation: RuntimeAuthor
   const resolvedRoot = path.resolve(root);
   const resolvedTemp = path.resolve(os.tmpdir());
   const relativeToTemp = path.relative(resolvedTemp, resolvedRoot);
-  const isTempRoot =
-    relativeToTemp === "" || (!relativeToTemp.startsWith("..") && !path.isAbsolute(relativeToTemp));
+  const isTempRoot = relativeToTemp === "" || (!relativeToTemp.startsWith("..") && !path.isAbsolute(relativeToTemp));
   if (!isTempRoot) return;
   throw lifecycleError(
     "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED",
