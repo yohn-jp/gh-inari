@@ -73,6 +73,13 @@ export interface SemanticIssueRelationMutationPlan {
   readonly generation?: ArtifactContractProvenance;
   readonly preconditions: readonly SemanticIssueRelationPrecondition[];
   readonly effects: readonly SemanticIssueRelationEffect[];
+  /**
+   * The complete bounded relationship graph (subject included) that admitted
+   * these effects. Required whenever `effects` is non-empty so an executor
+   * can re-validate cycle/self-relation safety immediately before mutation
+   * instead of trusting a transported plan's admission at face value.
+   */
+  readonly graph?: SemanticIssueRelationGraph;
 }
 
 export type SemanticIssueRelationDiagnosticCode =
@@ -143,6 +150,7 @@ const RELATION_PLAN_KEYS = new Set([
   "generation",
   "preconditions",
   "effects",
+  "graph",
 ]);
 const RELATION_STATE_KEYS = new Set([
   "parent",
@@ -161,6 +169,13 @@ const EFFECT_KINDS = new Set([
 ]);
 const NATIVE_PARENT_CAPABILITY = "github.issue.parent.native";
 const NATIVE_DEPENDS_ON_CAPABILITY = "github.issue.blocked-by.native";
+/**
+ * GitHub's Sub-issues API permits a native parent relation whose target
+ * lives in a different repository under the same owner. Its Issue
+ * Dependencies (`blocked_by`) API is not known to, so this scope is
+ * deliberately parent-only.
+ */
+const NATIVE_CROSS_REPOSITORY_PARENT_CAPABILITY = "github.issue.parent.native.cross-repository-same-owner";
 const MAX_NODES = 1_000;
 const MAX_REFERENCES = 1_000;
 
@@ -880,12 +895,16 @@ function repositoryDiagnostics(
           "Native parent relationship capability is not declared.",
         ),
       );
-    else if (desired.parent !== undefined && !sameRepository(subject, desired.parent))
+    else if (
+      desired.parent !== undefined &&
+      !sameRepository(subject, desired.parent) &&
+      !capabilities.includes(NATIVE_CROSS_REPOSITORY_PARENT_CAPABILITY)
+    )
       diagnostics.push(
         diagnostic(
           "RELATION_CROSS_REPOSITORY_UNSUPPORTED",
           "$.desired.parent",
-          "Native parent relationships require the same repository identity.",
+          "Native parent relationships require the same repository identity, or the same-owner cross-repository capability.",
         ),
       );
   }
@@ -990,6 +1009,14 @@ export function tryPlanSemanticIssueRelations(input: unknown): SemanticIssueRela
     );
   repositoryDiagnostics(subject, desired, capabilities, diagnostics);
   const effects = relationEffects(desired, observed);
+  if (input.graph === undefined && effects.length > 0)
+    diagnostics.push(
+      diagnostic(
+        "RELATION_EVIDENCE_UNAVAILABLE",
+        "$.graph",
+        "Complete relationship graph evidence is required before applying a relation delta.",
+      ),
+    );
   const graph = relationGraphWithDesired(subject, desired, input.graph, diagnostics);
   if (graph?.graph?.scope === "unavailable" && effects.length > 0)
     diagnostics.push(
@@ -1015,6 +1042,7 @@ export function tryPlanSemanticIssueRelations(input: unknown): SemanticIssueRela
       : { generation: cloneImmutable(input.generation as ArtifactContractProvenance) }),
     preconditions: [{ kind: "RELATION_OBSERVATION_MATCH", observed }],
     effects,
+    ...(graph?.graph === undefined ? {} : { graph: graph.graph }),
   };
   return { valid: true, plan: cloneImmutable(plan), diagnostics: [] };
 }
@@ -1162,6 +1190,39 @@ export function validateSemanticIssueRelationMutationPlan(input: unknown): Seman
       if (effect.kind === "ADD_BLOCKED_BY_RELATION" || effect.kind === "REMOVE_BLOCKED_BY_RELATION")
         normalizeReference(effect.reference, `${path}.reference`, diagnostics);
     });
+  }
+  const effectsPresent = Array.isArray(input.effects) && input.effects.length > 0;
+  if (input.graph === undefined) {
+    if (effectsPresent)
+      diagnostics.push(
+        diagnostic(
+          "RELATION_PLAN_INVALID",
+          "$.graph",
+          "Complete relationship graph evidence is required before applying a relation delta.",
+        ),
+      );
+  } else {
+    const graphResult = validateIssueRelationshipGraph(input.graph);
+    if (!graphResult.valid) {
+      for (const entry of graphResult.diagnostics)
+        diagnostics.push(diagnostic("RELATION_PLAN_INVALID", entry.path, entry.message));
+    } else if (graphResult.graph?.scope === "unavailable" && effectsPresent) {
+      diagnostics.push(
+        diagnostic(
+          "RELATION_PLAN_INVALID",
+          "$.graph.scope",
+          "Complete relationship graph evidence is required before applying a relation delta.",
+        ),
+      );
+    } else if (
+      subject !== undefined &&
+      graphResult.graph !== undefined &&
+      !graphResult.graph.nodes.some((node) => issueReferenceKey(node.reference) === issueReferenceKey(subject))
+    ) {
+      diagnostics.push(
+        diagnostic("RELATION_PLAN_INVALID", "$.graph.nodes", "The transported graph must include the plan subject."),
+      );
+    }
   }
   if (subject !== undefined && capabilities !== undefined && diagnostics.length === 0) {
     const semanticDiagnostics: SemanticIssueRelationDiagnostic[] = [];

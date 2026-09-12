@@ -478,7 +478,14 @@ test("skill --json lists the same scenarios as a versioned JSON projection", asy
   assert.equal(parsed.version, "1.1.0");
   assert.deepEqual(
     parsed.scenarios.map((entry: { id: string }) => entry.id),
-    ["author-issue", "author-pr", "inspect-governance", "repair-invalid-artifact", "manage-change"],
+    [
+      "author-issue",
+      "author-pr",
+      "inspect-governance",
+      "repair-invalid-artifact",
+      "manage-issue-relationships",
+      "manage-change",
+    ],
   );
 });
 

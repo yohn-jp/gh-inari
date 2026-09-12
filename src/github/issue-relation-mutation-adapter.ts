@@ -28,6 +28,19 @@ export interface IssueRelationApiMutator extends IssueRelationApiReader {
     method?: "GET" | "POST" | "PATCH" | "DELETE",
     fields?: Readonly<Record<string, GitHubApiFieldValue>>,
   ): Promise<GitHubApiResponse>;
+  /**
+   * Request the same bounded repository API surface against an explicit,
+   * already-resolved repository identity instead of this mutator's own bound
+   * repository. Only consulted for a same-owner cross-repository parent
+   * effect whose target identity `resolveRepositoryIdentity` has already
+   * proven; its absence just means such an effect fails closed.
+   */
+  requestRepositoryApiForIdentity?(
+    identity: RepositoryContext,
+    repositoryPath: string,
+    method?: "GET" | "POST" | "PATCH" | "DELETE",
+    fields?: Readonly<Record<string, GitHubApiFieldValue>>,
+  ): Promise<GitHubApiResponse>;
 }
 
 export type IssueRelationMutationErrorCode =
@@ -76,9 +89,17 @@ export class GitHubIssueRelationMutationAdapter {
     assertRepositoryContext(context);
     if (typeof capabilities?.parent !== "boolean" || typeof capabilities?.blockedBy !== "boolean")
       throw new ContractViolationError("Issue relation capabilities must be boolean flags.", "capabilities");
+    if (capabilities.crossRepositoryParent !== undefined && typeof capabilities.crossRepositoryParent !== "boolean")
+      throw new ContractViolationError("Issue relation capabilities must be boolean flags.", "capabilities");
     this.mutator = mutator;
     this.context = context;
-    this.capabilities = { parent: capabilities.parent, blockedBy: capabilities.blockedBy };
+    this.capabilities = {
+      parent: capabilities.parent,
+      blockedBy: capabilities.blockedBy,
+      ...(capabilities.crossRepositoryParent === undefined
+        ? {}
+        : { crossRepositoryParent: capabilities.crossRepositoryParent }),
+    };
     this.observation = new GitHubIssueRelationObservationAdapter(mutator, context, this.capabilities);
   }
 
@@ -121,14 +142,15 @@ export class GitHubIssueRelationMutationAdapter {
     const normalizedParent = this.assertReference(parent, "parent");
     this.assertParentCapability();
     this.assertSameRepository(normalizedChild, "child");
-    this.assertSameRepository(normalizedParent, "parent");
     if (normalizedChild.number === normalizedParent.number)
       throw new GitHubIssueRelationMutationError("RELATION_MUTATION_INVALID", "An Issue cannot be its own parent.", {
         path: "parent",
       });
+    const parentIdentity = await this.resolveEffectTargetIdentity(normalizedParent, "parent");
 
     const childId = await this.issueDatabaseId(normalizedChild);
     await this.request(
+      parentIdentity,
       `issues/${normalizedParent.number}/sub_issues`,
       "POST",
       { sub_issue_id: databaseIdField(childId) },
@@ -142,19 +164,82 @@ export class GitHubIssueRelationMutationAdapter {
     const normalizedParent = this.assertReference(previousParent, "previousParent");
     this.assertParentCapability();
     this.assertSameRepository(normalizedChild, "child");
-    this.assertSameRepository(normalizedParent, "previousParent");
     if (normalizedChild.number === normalizedParent.number)
       throw new GitHubIssueRelationMutationError("RELATION_MUTATION_INVALID", "An Issue cannot be its own parent.", {
         path: "previousParent",
       });
+    const parentIdentity = await this.resolveEffectTargetIdentity(normalizedParent, "previousParent");
 
     const childId = await this.issueDatabaseId(normalizedChild);
+    // GitHub's Sub-issues API returns 200 (with the updated parent Issue body)
+    // on a successful removal, not 204; encoding 204 here would make a
+    // successful mutation surface locally as RELATION_MUTATION_RESPONSE_INVALID.
     await this.request(
+      parentIdentity,
       `issues/${normalizedParent.number}/sub_issue`,
       "DELETE",
       { sub_issue_id: databaseIdField(childId) },
-      [204],
+      [200],
     );
+  }
+
+  /**
+   * Resolve the repository identity that owns a parent-relation effect's
+   * endpoint. Same-repository targets resolve to this adapter's own bound
+   * context with no extra call. A different repository is admitted only when
+   * the target capability explicitly grants same-owner cross-repository
+   * parent relations and a fresh lookup proves both the owner and the
+   * reference's claimed identity; anything else fails closed.
+   */
+  private async resolveEffectTargetIdentity(reference: IssueReference, path: string): Promise<RepositoryContext> {
+    if (
+      reference.repositoryHost.toLowerCase() === this.context.hostname.toLowerCase() &&
+      reference.repositoryId === this.context.repositoryId
+    )
+      return this.context;
+    if (this.capabilities.crossRepositoryParent !== true)
+      throw new GitHubIssueRelationMutationError(
+        "RELATION_MUTATION_UNSUPPORTED",
+        "Native Issue relations must stay within the resolved repository identity.",
+        { path },
+      );
+    if (reference.repositoryHost.toLowerCase() !== this.context.hostname.toLowerCase())
+      throw new GitHubIssueRelationMutationError(
+        "RELATION_MUTATION_UNSUPPORTED",
+        "Cross-repository native parent relations are supported only on the same GitHub host.",
+        { path },
+      );
+    if (reference.repository === undefined || this.mutator.resolveRepositoryIdentity === undefined)
+      throw new GitHubIssueRelationMutationError(
+        "RELATION_MUTATION_UNSUPPORTED",
+        "A cross-repository parent target requires a resolvable repository locator.",
+        { path },
+      );
+    let identity: RepositoryContext;
+    try {
+      identity = await this.mutator.resolveRepositoryIdentity(reference.repository);
+    } catch (error) {
+      throw new GitHubIssueRelationMutationError(
+        "RELATION_MUTATION_READ_FAILED",
+        "The cross-repository parent target's repository identity could not be resolved.",
+        { path, cause: error },
+      );
+    }
+    const currentOwner = this.context.nameWithOwner.split("/")[0]?.toLowerCase();
+    const targetOwner = identity.nameWithOwner.split("/")[0]?.toLowerCase();
+    if (
+      currentOwner === undefined ||
+      targetOwner === undefined ||
+      currentOwner !== targetOwner ||
+      identity.hostname.toLowerCase() !== reference.repositoryHost.toLowerCase() ||
+      identity.repositoryId !== reference.repositoryId
+    )
+      throw new GitHubIssueRelationMutationError(
+        "RELATION_MUTATION_UNSUPPORTED",
+        "Cross-repository native parent relations are supported only within the same owner, and only when the resolved identity matches the reference.",
+        { path },
+      );
+    return identity;
   }
 
   /** Add one native blocked-by dependency to an Issue. */
@@ -171,6 +256,7 @@ export class GitHubIssueRelationMutationAdapter {
 
     const blockerId = await this.issueDatabaseId(normalizedBlocker);
     await this.request(
+      this.context,
       `issues/${normalizedChild.number}/dependencies/blocked_by`,
       "POST",
       { issue_id: databaseIdField(blockerId) },
@@ -191,7 +277,15 @@ export class GitHubIssueRelationMutationAdapter {
       });
 
     const blockerId = await this.issueDatabaseId(normalizedBlocker);
-    await this.request(`issues/${normalizedChild.number}/dependencies/blocked_by/${blockerId}`, "DELETE", {}, [204]);
+    // GitHub's Issue Dependencies API also returns 200 on a successful
+    // blocked-by removal (see removeParent above), not 204.
+    await this.request(
+      this.context,
+      `issues/${normalizedChild.number}/dependencies/blocked_by/${blockerId}`,
+      "DELETE",
+      {},
+      [200],
+    );
   }
 
   private assertReference(value: unknown, path: string): IssueReference {
@@ -291,14 +385,28 @@ export class GitHubIssueRelationMutationAdapter {
   }
 
   private async request(
+    identity: RepositoryContext,
     path: string,
     method: "POST" | "DELETE",
     fields: Readonly<Record<string, GitHubApiFieldValue>>,
     expectedStatuses: readonly number[],
   ): Promise<void> {
+    if (identity !== this.context && this.mutator.requestRepositoryApiForIdentity === undefined)
+      throw new GitHubIssueRelationMutationError(
+        "RELATION_MUTATION_UNSUPPORTED",
+        "A cross-repository parent mutation seam is required to reach the target repository.",
+        { path },
+      );
     let response: GitHubApiResponse;
     try {
-      response = await this.mutator.requestRepositoryApi(path, method, fields);
+      response =
+        identity === this.context
+          ? await this.mutator.requestRepositoryApi(path, method, fields)
+          : await (
+              this.mutator.requestRepositoryApiForIdentity as NonNullable<
+                IssueRelationApiMutator["requestRepositoryApiForIdentity"]
+              >
+            )(identity, path, method, fields);
     } catch (error) {
       throw new GitHubIssueRelationMutationError(
         "RELATION_MUTATION_FAILED",

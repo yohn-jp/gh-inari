@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type { GhCommandResult, GhTransport, GhTransportOptions } from "./github/index.js";
 import { GitHubAdapter } from "./github/index.js";
@@ -7,10 +8,40 @@ import {
   SemanticIssueRelationExecutorError,
 } from "./semantic-issue-relation-executor.js";
 import { planSemanticIssueRelations } from "./semantic-issue-relations.js";
+import type { ArtifactContractProvenance } from "./contract/ir.js";
 
 function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
   return { stdout, exitCode, stderr };
 }
+
+const canonSource = JSON.stringify({
+  version: "1",
+  kind: "issue",
+  id: "relations",
+  properties: {
+    title: { presence: "required", authority: { kind: "supplied" } },
+  },
+  fields: [],
+});
+
+const canonProvenance: ArtifactContractProvenance = {
+  authority: "repository-default-branch",
+  repository: {
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    repositoryId: "100",
+  },
+  ref: "main",
+  treeSha: "tree-sha",
+  source: {
+    path: ".github/inari/issues/default.json",
+    ref: "main",
+    sha: "canon-sha",
+    digest: createHash("sha256").update(canonSource, "utf8").digest("hex"),
+  },
+};
 
 const capabilities = ["github.issue.blocked-by.native", "github.issue.parent.native"];
 const context = { host: "github.com", repositoryId: "100", repository: "acme/inari" };
@@ -35,9 +66,13 @@ function relationIssue(number: number, id = number + 1000): string {
 class RelationTransport implements GhTransport {
   readonly calls: string[][] = [];
   readonly parentResponses: string[];
+  readonly canonTreeSha: string;
+  readonly failSetParent: boolean;
 
-  constructor(parentResponses: readonly string[]) {
+  constructor(parentResponses: readonly string[], canonTreeSha = "tree-sha", failSetParent = false) {
     this.parentResponses = [...parentResponses];
+    this.canonTreeSha = canonTreeSha;
+    this.failSetParent = failSetParent;
   }
 
   async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
@@ -45,6 +80,24 @@ class RelationTransport implements GhTransport {
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
     if (args.includes("--jq")) return command("100\n");
+    if (args.includes("repos/acme/inari") && args.includes("GET"))
+      return command(JSON.stringify({ default_branch: "main" }));
+    if (args.some((value) => value.includes("git/trees/")))
+      return command(
+        JSON.stringify({
+          sha: this.canonTreeSha,
+          truncated: false,
+          tree: [{ path: ".github/inari/issues/default.json", type: "blob", sha: "canon-sha" }],
+        }),
+      );
+    if (args.some((value) => value.includes("git/blobs/canon-sha")))
+      return command(
+        JSON.stringify({
+          sha: "canon-sha",
+          encoding: "base64",
+          content: Buffer.from(canonSource, "utf8").toString("base64"),
+        }),
+      );
     const path = args.find((value) => value.startsWith("repos/acme/inari")) ?? "";
     if (path.endsWith("/parent")) {
       const response = this.parentResponses.shift() ?? "HTTP/2 404 Not Found\n\n";
@@ -53,7 +106,11 @@ class RelationTransport implements GhTransport {
     if (path.includes("/dependencies/blocked_by")) return command("HTTP/2 200 OK\n\n[]");
     if (path.endsWith("/issues/10") && args.includes("GET"))
       return command(`HTTP/2 200 OK\n\n${relationIssue(10, 1010)}`);
-    if (path.endsWith("/sub_issues") && args.includes("POST")) return command("HTTP/2 201 Created\n\n{}");
+    if (path.endsWith("/sub_issue") && args.includes("DELETE")) return command("HTTP/2 200 OK\n\n{}");
+    if (path.endsWith("/sub_issues") && args.includes("POST"))
+      return this.failSetParent
+        ? command("HTTP/2 422 Unprocessable Entity\n\n{}")
+        : command("HTTP/2 201 Created\n\n{}");
     throw new Error(`Unexpected gh call: ${args.join(" ")}`);
   }
 }
@@ -64,8 +121,44 @@ function plan() {
     desired: { parent: issue(20), dependsOn: [] },
     observed: { parent: undefined, dependsOn: [] },
     capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(10), issue(20)].map((reference) => ({ reference, dependsOn: [] })),
+    },
   });
 }
+
+function reparentPlan() {
+  return planSemanticIssueRelations({
+    subject: issue(10),
+    desired: { parent: issue(20), dependsOn: [] },
+    observed: { parent: issue(15), dependsOn: [] },
+    capabilities,
+    graph: {
+      scope: "complete",
+      nodes: [issue(10), issue(15), issue(20)].map((reference) => ({ reference, dependsOn: [] })),
+    },
+  });
+}
+
+test("relation executor reports partial application when a later effect fails", async () => {
+  const transport = new RelationTransport([`HTTP/2 200 OK\n\n${relationIssue(15)}`], "tree-sha", true);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: reparentPlan() }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_EFFECT_FAILED" &&
+      error.evidence?.effects[0]?.kind === "CLEAR_PARENT_RELATION" &&
+      error.evidence?.effects[0]?.status === "succeeded" &&
+      error.evidence?.effects[1]?.kind === "SET_PARENT_RELATION" &&
+      error.evidence?.effects[1]?.status === "failed",
+  );
+  assert.ok(transport.calls.some((args) => args.includes("DELETE")));
+  assert.ok(transport.calls.some((args) => args.includes("POST")));
+});
 
 test("relation executor observes, applies, rereads, and verifies a native parent effect", async () => {
   const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
@@ -76,6 +169,73 @@ test("relation executor observes, applies, rereads, and verifies a native parent
   assert.equal(result.evidence.outcome, "verified");
   assert.deepEqual(result.observed.parent, issue(20));
   assert.equal(result.evidence.effects[0]?.kind, "SET_PARENT_RELATION");
+  assert.ok(transport.calls.some((args) => args.includes("POST")));
+});
+
+test("relation executor rejects a capabilities mismatch before touching the plan's effects", async () => {
+  const transport = new RelationTransport([]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+    capabilities: ["github.issue.parent.native"],
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: plan(), capabilities: ["github.issue.parent.native"] }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE" &&
+      error.diagnostics.some((entry) => entry.code === "RELATION_CAPABILITIES_MISMATCH"),
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("relation executor rejects a plan bound to stale repository governance", async () => {
+  const staleGeneration = { ...canonProvenance, treeSha: "old-tree-sha" };
+  const staleGenerationPlan = { ...plan(), generation: staleGeneration };
+  const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: staleGenerationPlan }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE" &&
+      error.diagnostics.some((entry) => entry.code === "RELATION_GENERATION_MISMATCH"),
+  );
+  assert.equal(
+    transport.calls.some((args) => args.includes("POST")),
+    false,
+  );
+});
+
+test("relation executor accepts a plan bound to the current repository governance", async () => {
+  const currentGenerationPlan = { ...plan(), generation: canonProvenance };
+  const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+  });
+  const result = await executor.execute({ version: "1", plan: currentGenerationPlan });
+  assert.equal(result.evidence.outcome, "verified");
+});
+
+test("relation executor fails closed when the post-effect reread does not match the desired state", async () => {
+  const transport = new RelationTransport([
+    "HTTP/2 404 Not Found\n\n", // before: matches plan.observed (empty), not stale
+    "HTTP/2 404 Not Found\n\n", // after: still empty, disagreeing with the desired parent
+  ]);
+  const executor = new SemanticIssueRelationExecutor({
+    adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
+  });
+  await assert.rejects(
+    executor.execute({ version: "1", plan: plan() }),
+    (error: unknown) =>
+      error instanceof SemanticIssueRelationExecutorError &&
+      error.code === "SEMANTIC_ISSUE_RELATION_EXECUTION_POSTCONDITION_FAILED" &&
+      error.evidence?.effects[0]?.status === "succeeded",
+  );
   assert.ok(transport.calls.some((args) => args.includes("POST")));
 });
 

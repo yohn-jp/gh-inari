@@ -7,16 +7,45 @@
  * adapter; this module performs no direct GitHub API construction.
  */
 
+import { compileRepositoryEffectiveIssueContract } from "./artifact-contract-governance.js";
 import { GitHubAdapter, GitHubIssueRelationMutationAdapter, type RepositoryContext } from "./github/index.js";
 import {
   SEMANTIC_ISSUE_RELATION_PLAN_VERSION,
   sameSemanticIssueRelationState,
+  tryPlanSemanticIssueRelations,
   validateSemanticIssueRelationMutationPlan,
   type SemanticIssueRelationEffect,
   type SemanticIssueRelationMutationPlan,
+  type SemanticIssueRelationMutationPlanResult,
   type SemanticIssueRelationObservedState,
 } from "./semantic-issue-relations.js";
 import type { IssueReference } from "./contract/issue-reference.js";
+
+function stableSerialize(value: unknown, stack = new WeakSet<object>()): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (stack.has(value)) throw new TypeError("Cyclic JSON data is not supported.");
+  stack.add(value);
+  const serialized = Array.isArray(value)
+    ? `[${value.map((entry) => stableSerialize(entry, stack)).join(",")}]`
+    : `{${Object.keys(value as Record<string, unknown>)
+        .sort((left, right) => left.localeCompare(right, "en-US"))
+        .map((key) => `${JSON.stringify(key)}:${stableSerialize((value as Record<string, unknown>)[key], stack)}`)
+        .join(",")}}`;
+  stack.delete(value);
+  return serialized;
+}
+
+function sameCapabilitySet(left: readonly string[], right: readonly string[]): boolean {
+  return stableSerialize([...left].sort()) === stableSerialize([...right].sort());
+}
+
+function validCapabilities(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((capability) => typeof capability === "string" && capability.length > 0) &&
+    new Set(value).size === value.length
+  );
+}
 
 export const SEMANTIC_ISSUE_RELATION_EXECUTOR_CONTRACT_VERSION = "1" as const;
 export type SemanticIssueRelationExecutorContractVersion = typeof SEMANTIC_ISSUE_RELATION_EXECUTOR_CONTRACT_VERSION;
@@ -24,6 +53,8 @@ export type SemanticIssueRelationExecutorContractVersion = typeof SEMANTIC_ISSUE
 export interface SemanticIssueRelationExecutionRequest {
   readonly version: SemanticIssueRelationExecutorContractVersion;
   readonly plan: unknown;
+  /** Caller-asserted current capabilities, checked against the plan's snapshot. */
+  readonly capabilities?: readonly string[];
 }
 
 export interface SemanticIssueRelationExecutionEffectEvidence {
@@ -51,7 +82,8 @@ export type SemanticIssueRelationExecutorErrorCode =
   | "SEMANTIC_ISSUE_RELATION_EXECUTION_READ_FAILED"
   | "SEMANTIC_ISSUE_RELATION_EXECUTION_STALE"
   | "SEMANTIC_ISSUE_RELATION_EXECUTION_EFFECT_FAILED"
-  | "SEMANTIC_ISSUE_RELATION_EXECUTION_POSTCONDITION_FAILED";
+  | "SEMANTIC_ISSUE_RELATION_EXECUTION_POSTCONDITION_FAILED"
+  | "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE";
 
 export interface SemanticIssueRelationExecutionDiagnostic {
   readonly code: string;
@@ -80,13 +112,17 @@ export class SemanticIssueRelationExecutorError extends Error {
 
 export interface SemanticIssueRelationExecutorOptions {
   readonly adapter: GitHubAdapter;
+  /** Issue Canon template selector, when the repository declares more than one. */
+  readonly selector?: string;
+  /** Caller-asserted current capabilities, checked against the plan's snapshot. */
+  readonly capabilities?: readonly string[];
 }
 
 export interface SemanticIssueRelationExecutionPort {
   execute(request: SemanticIssueRelationExecutionRequest): Promise<SemanticIssueRelationExecutionResult>;
 }
 
-type RelationCapability = "parent" | "blockedBy";
+type RelationCapability = "parent" | "blockedBy" | "crossRepositoryParent";
 
 function diagnostic(code: string, path: string, message: string): SemanticIssueRelationExecutionDiagnostic {
   return { code, path, message };
@@ -116,6 +152,7 @@ function relationCapabilities(capabilities: readonly string[]): Readonly<Record<
         entry === "github.issue.blocked_by.native" ||
         entry === "issue.depends-on.native",
     ),
+    crossRepositoryParent: capabilities.includes("github.issue.parent.native.cross-repository-same-owner"),
   };
 }
 
@@ -215,9 +252,13 @@ function failureEvidence(
 /** Executes exactly the bounded native effects admitted by Core. */
 export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecutionPort {
   readonly #adapter: GitHubAdapter;
+  readonly #selector: string | undefined;
+  readonly #capabilities: readonly string[] | undefined;
 
   constructor(options: SemanticIssueRelationExecutorOptions) {
     this.#adapter = options.adapter;
+    this.#selector = options.selector;
+    this.#capabilities = options.capabilities;
   }
 
   async execute(request: SemanticIssueRelationExecutionRequest): Promise<SemanticIssueRelationExecutionResult> {
@@ -227,6 +268,12 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
         "Semantic Issue relation execution request version is unsupported.",
         [diagnostic("RELATION_EXECUTION_REQUEST_INVALID", "$.version", "Execution request version is unsupported.")],
       );
+    if (request.capabilities !== undefined && !validCapabilities(request.capabilities))
+      throw new SemanticIssueRelationExecutorError(
+        "SEMANTIC_ISSUE_RELATION_EXECUTION_REQUEST_INVALID",
+        "Semantic Issue relation execution capabilities are invalid.",
+        [diagnostic("RELATION_EXECUTION_REQUEST_INVALID", "$.capabilities", "Capabilities must be unique strings.")],
+      );
     const result = validateSemanticIssueRelationMutationPlan(request.plan);
     if (!result.valid || result.plan === undefined)
       throw new SemanticIssueRelationExecutorError(
@@ -235,7 +282,6 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
         result.diagnostics.map((entry) => diagnostic(entry.code, entry.path, entry.message)),
       );
     const plan = result.plan;
-    const capabilities = relationCapabilities(plan.capabilities);
     const needParent = relationNeeded(plan, "parent");
     const needBlockedBy = relationNeeded(plan, "blockedBy");
     if (!needParent && !needBlockedBy)
@@ -244,6 +290,58 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
         observed: plan.observed,
         evidence: evidence("verified", []),
       };
+
+    // Re-evaluate provider capabilities at execution time: capabilities are an
+    // out-of-band operator declaration (never derived from Canon content), so
+    // freshness means comparing what the caller currently asserts against the
+    // frozen snapshot baked into the plan, not trusting the plan alone.
+    const requestedCapabilities = request.capabilities ?? this.#capabilities;
+    if (requestedCapabilities !== undefined && !sameCapabilitySet(requestedCapabilities, plan.capabilities))
+      throw new SemanticIssueRelationExecutorError(
+        "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE",
+        "Execution capabilities do not match the versioned plan.",
+        [
+          diagnostic(
+            "RELATION_CAPABILITIES_MISMATCH",
+            "$.capabilities",
+            "Capabilities must equal the plan capabilities.",
+          ),
+        ],
+      );
+    // When the plan is bound to a specific repository Canon generation,
+    // re-resolve the current Effective Issue Contract and reject a plan whose
+    // governance has since changed, before any provider effect.
+    if (plan.generation !== undefined) {
+      let effective: Awaited<ReturnType<typeof compileRepositoryEffectiveIssueContract>>;
+      try {
+        effective = await compileRepositoryEffectiveIssueContract(this.#adapter, this.#selector);
+      } catch (error: unknown) {
+        throw new SemanticIssueRelationExecutorError(
+          "SEMANTIC_ISSUE_RELATION_EXECUTION_READ_FAILED",
+          "The authoritative Issue Canon could not be resolved for native relation execution.",
+          [
+            diagnostic(
+              "RELATION_CANON_RESOLUTION_FAILED",
+              "$.generation",
+              error instanceof Error ? error.message : "Authoritative Issue Canon could not be resolved.",
+            ),
+          ],
+        );
+      }
+      if (stableSerialize(plan.generation) !== stableSerialize(effective.generation))
+        throw new SemanticIssueRelationExecutorError(
+          "SEMANTIC_ISSUE_RELATION_EXECUTION_GOVERNANCE_STALE",
+          "Repository governance changed after the plan was produced.",
+          [
+            diagnostic(
+              "RELATION_GENERATION_MISMATCH",
+              "$.generation",
+              "Plan generation does not match the current repository Canon generation.",
+            ),
+          ],
+        );
+    }
+    const capabilities = relationCapabilities(plan.capabilities);
 
     let context: RepositoryContext;
     try {
@@ -397,3 +495,84 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
 }
 
 export const LocalSemanticIssueRelationExecutor = SemanticIssueRelationExecutor;
+
+export interface ExistingIssueRelationPlanRequest {
+  readonly subjectNumber: number;
+  /** Desired relation state, in any shape `tryPlanSemanticIssueRelations` accepts. */
+  readonly desired: unknown;
+  /** Bounded relationship graph evidence; required by Core whenever effects result. */
+  readonly graph?: unknown;
+  readonly capabilities: readonly string[];
+}
+
+/**
+ * Compose live native-relation observation with Core planning for an
+ * already-existing Issue. This is the one shared entry every transport (CLI,
+ * MCP, Actions, Skill) calls for existing-Issue relationship reconciliation,
+ * so none re-derives the observe-then-plan glue independently.
+ */
+function planDiagnostic(
+  code: "RELATION_INPUT_INVALID" | "RELATION_EVIDENCE_UNAVAILABLE",
+  path: string,
+  message: string,
+): {
+  readonly code: "RELATION_INPUT_INVALID" | "RELATION_EVIDENCE_UNAVAILABLE";
+  readonly path: string;
+  readonly message: string;
+} {
+  return { code, path, message };
+}
+
+export async function planExistingIssueRelationReconciliation(
+  adapter: GitHubAdapter,
+  request: ExistingIssueRelationPlanRequest,
+): Promise<SemanticIssueRelationMutationPlanResult> {
+  if (!Number.isSafeInteger(request.subjectNumber) || request.subjectNumber < 1)
+    return {
+      valid: false,
+      diagnostics: [
+        planDiagnostic("RELATION_INPUT_INVALID", "$.subject.number", "Issue number must be a positive safe integer."),
+      ],
+    };
+  let context: RepositoryContext;
+  let subject: IssueReference;
+  try {
+    context = await adapter.getRepositoryContext();
+    subject = issueReference(context, request.subjectNumber);
+  } catch {
+    return {
+      valid: false,
+      diagnostics: [
+        planDiagnostic("RELATION_EVIDENCE_UNAVAILABLE", "$.subject", "Repository context resolution failed."),
+      ],
+    };
+  }
+  const relationAdapter = new GitHubIssueRelationMutationAdapter(
+    adapter,
+    context,
+    relationCapabilities(request.capabilities),
+  );
+  let parentObservation: Awaited<ReturnType<typeof relationAdapter.observeParent>>;
+  let blockedByObservation: Awaited<ReturnType<typeof relationAdapter.observeBlockedBy>>;
+  try {
+    [parentObservation, blockedByObservation] = await Promise.all([
+      relationAdapter.observeParent(request.subjectNumber),
+      relationAdapter.observeBlockedBy(request.subjectNumber),
+    ]);
+  } catch {
+    return {
+      valid: false,
+      diagnostics: [
+        planDiagnostic("RELATION_EVIDENCE_UNAVAILABLE", "$.observed", "Native Issue relation observation failed."),
+      ],
+    };
+  }
+  const observed = relationState(parentObservation, blockedByObservation);
+  return tryPlanSemanticIssueRelations({
+    subject,
+    desired: request.desired,
+    observed,
+    capabilities: request.capabilities,
+    ...(request.graph === undefined ? {} : { graph: request.graph }),
+  });
+}
