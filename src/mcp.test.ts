@@ -4,8 +4,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createInariMcpServer } from "./mcp/server.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
-import { ChangeRemoteExecutorError } from "./change-executor.js";
+import { ChangeRemoteExecutorError, type ChangeRemoteExecutionResult } from "./change-executor.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
+import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
+import { projectGoldenPathStatus, type GoldenPathStatusInput } from "./golden-path-status.js";
+import {
+  absentEvidenceInput,
+  createGoldenPathActors,
+  draftEvidenceInput,
+  mutationRequest,
+} from "./golden-path-status/fixtures.js";
 
 function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
   return { stdout, exitCode, stderr };
@@ -183,6 +191,41 @@ const semanticBranchCanon = JSON.stringify({
   },
 });
 
+const goldenPathScope = {
+  environment: { status: "available", verified: true },
+  governance: {
+    status: "available",
+    valid: true,
+    repositoryHost: "github.com",
+    repositoryId: "411000001",
+  },
+  issue: { status: "present", governed: true, number: 411, state: "open" },
+  subject: { repositoryHost: "github.com", repositoryId: "411000001", rootIssue: 411 },
+} as const;
+
+function goldenPathInput(
+  result: ChangeRemoteExecutionResult,
+  extras: Record<string, unknown> = {},
+): GoldenPathStatusInput {
+  return {
+    ...goldenPathScope,
+    changeProjection: result.projection,
+    ...(result.evidence === undefined ? {} : { execution: { outcome: result.evidence.outcome } }),
+    ...extras,
+  };
+}
+
+function goldenPathEnvelope(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    version: value.version,
+    ...(value.subject === undefined ? {} : { subject: value.subject }),
+    status: value.status,
+    nextAction: value.nextAction,
+    recovery: value.recovery,
+    diagnostics: value.diagnostics,
+  };
+}
+
 function createAdapterFactory(
   source: string,
   transports: SemanticPrTransport[],
@@ -227,6 +270,7 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
       [
+        "inari_golden_path_status",
         "inari_issue_contract",
         "inari_issue_materialize",
         "inari_issue_plan",
@@ -530,6 +574,112 @@ test("native MCP implementation handoff preserves bounded Change read diagnostic
     await client.close();
     await server.close();
   }
+});
+
+test("MCP Golden Path status preserves the canonical normal projection", async () => {
+  await withClient(async (client, transports) => {
+    const actors = createGoldenPathActors(draftEvidenceInput());
+    const execution = await actors.executor.execute(mutationRequest("ready"));
+    const input = goldenPathInput(execution, { review: { status: "required", action: "review" } });
+    const expected = projectGoldenPathStatus(input);
+
+    const response = await client.callTool({
+      name: "inari_golden_path_status",
+      arguments: { input, recoveryInput: execution },
+    });
+    assert.equal(response.isError, undefined);
+    const content = structuredContent(response.structuredContent);
+    assert.equal(content.ok, true);
+    assert.equal(content.valid, true);
+    assert.deepEqual(goldenPathEnvelope(content), expected);
+    assert.deepEqual(content.status, {
+      phase: "REVIEW",
+      availability: "actionable",
+      changeState: "REVIEW",
+      projectionStatus: "healthy",
+      executionOutcome: "verified",
+    });
+    assert.deepEqual(content.nextAction, {
+      kind: "REVIEW",
+      owner: "repository",
+      reasonCode: "REVIEW_ADMITTED",
+    });
+    assert.equal(content.recovery, null);
+    assert.equal(transports.length, 0, "Golden Path projection must not construct a GitHub adapter");
+  });
+});
+
+test("MCP Golden Path status preserves the canonical recovery projection", async () => {
+  await withClient(async (client, transports) => {
+    const actors = createGoldenPathActors(absentEvidenceInput(), {
+      failEffect: "CREATE_PULL_REQUEST",
+      applyFailedEffect: true,
+    });
+    const execution = await actors.executor.execute(mutationRequest("issue"));
+    const recovery = projectGoldenPathRecovery(execution);
+    assert.ok(recovery);
+    const input = goldenPathInput(execution);
+    const expected = projectGoldenPathStatus({ ...input, recovery });
+
+    const response = await client.callTool({
+      name: "inari_golden_path_status",
+      arguments: { input, recoveryInput: execution },
+    });
+    assert.equal(response.isError, undefined);
+    const content = structuredContent(response.structuredContent);
+    assert.equal(content.ok, true);
+    assert.equal(content.valid, true);
+    assert.deepEqual(goldenPathEnvelope(content), expected);
+    assert.deepEqual(content.status, {
+      phase: "RECOVERY",
+      availability: "recovery-required",
+      changeState: "RECOVERY_REQUIRED",
+      projectionStatus: "partial",
+      executionOutcome: "recovery-required",
+    });
+    assert.deepEqual(content.nextAction, {
+      kind: "MANUAL_REVIEW",
+      owner: "recovery",
+      reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+    });
+    assert.deepEqual(content.recovery, recovery);
+    assert.equal(transports.length, 0, "Golden Path projection must not construct a GitHub adapter");
+  });
+});
+
+test("MCP Golden Path status fails closed without a Core-authorized recovery source", async () => {
+  await withClient(async (client) => {
+    const actors = createGoldenPathActors(absentEvidenceInput(), {
+      failEffect: "CREATE_PULL_REQUEST",
+      applyFailedEffect: true,
+    });
+    const execution = await actors.executor.execute(mutationRequest("issue"));
+    const input = goldenPathInput(execution, {
+      recovery: {
+        class: "POST_EFFECT_VERIFICATION",
+        safeAction: "RETRY",
+        owner: "recovery",
+        retryable: true,
+        rereadRequired: true,
+        automaticCleanup: "none",
+        reasonCode: "IDEMPOTENT_RETRY",
+      },
+    });
+    const expected = projectGoldenPathStatus({ ...input, recovery: null });
+
+    const response = await client.callTool({
+      name: "inari_golden_path_status",
+      arguments: { input },
+    });
+    assert.equal(response.isError, undefined);
+    const content = structuredContent(response.structuredContent);
+    assert.equal(content.ok, true);
+    assert.equal(content.valid, true);
+    assert.deepEqual(goldenPathEnvelope(content), expected);
+    assert.equal(record(content.status).availability, "blocked");
+    assert.equal(content.nextAction, null);
+    assert.equal(content.recovery, null);
+  });
 });
 
 test("MCP semantic tools call Core directly and preserve contract, artifact, and plan results", async () => {

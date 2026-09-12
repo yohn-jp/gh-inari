@@ -10,6 +10,7 @@
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { GoldenPathRecoverySource } from "../golden-path-recovery.js";
 import {
   ArtifactContractResolutionError,
   compileRepositoryEffectiveArtifactContract,
@@ -45,6 +46,8 @@ import {
   type SemanticPullRequestMutationPlan,
 } from "../semantic-pr-projection.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
+import { projectGoldenPathRecovery } from "../golden-path-recovery.js";
+import { tryProjectGoldenPathStatus } from "../golden-path-status.js";
 import {
   createGitHubActionsChangeRemoteExecutor,
   GitHubAdapter,
@@ -69,6 +72,7 @@ import { planExistingIssueRelationReconciliation } from "../semantic-issue-relat
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
 
 export const INARI_MCP_TOOL_NAMES = Object.freeze([
+  "inari_golden_path_status",
   "inari_issue_contract",
   "inari_issue_materialize",
   "inari_issue_plan",
@@ -171,6 +175,14 @@ export const semanticBranchDriftInputSchema = z.strictObject({
   ...commonRequestShape,
   input: inputValueSchema,
 });
+
+/** Input schema for the read-only Golden Path status composition. */
+export const goldenPathStatusInputSchema = z.strictObject({
+  input: inputValueSchema.describe("Bounded evidence consumed by the Golden Path status projector."),
+  recoveryInput: inputValueSchema
+    .optional()
+    .describe("Optional bounded Change execution or recovery-plan evidence consumed by the recovery projector."),
+});
 export const semanticPullRequestObserveInputSchema = z.strictObject({
   ...commonRequestShape,
   number: artifactNumberSchema,
@@ -229,6 +241,7 @@ export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequest
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
 export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
 export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
+export type GoldenPathStatusMcpInput = z.infer<typeof goldenPathStatusInputSchema>;
 
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
@@ -339,6 +352,24 @@ export const goldenPathEntryOutputSchema = z
     mutation: z.literal(false),
   })
   .strict();
+
+/** Output schema for the transport-neutral Golden Path envelope. */
+export const goldenPathStatusOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    phase: z.literal("projection").optional(),
+    version: z.number().int().optional(),
+    subject: z.unknown().optional(),
+    status: z.unknown().optional(),
+    nextAction: z.unknown().nullable().optional(),
+    recovery: z.unknown().nullable().optional(),
+    diagnostics: z.array(z.unknown()),
+    violations: z.array(z.unknown()).optional(),
+  })
+  .strict();
+
+export type GoldenPathStatusMcpOutput = z.infer<typeof goldenPathStatusOutputSchema>;
 
 function adapterFor(
   requestRepository: string | undefined,
@@ -615,6 +646,57 @@ async function handleGoldenPathEntry(
         mutation: false,
       },
       "Golden Path entry is unavailable; see diagnostics.",
+    );
+  }
+}
+
+function goldenPathResult(data: GoldenPathStatusMcpOutput, summary: string): CallToolResult {
+  return {
+    structuredContent: data,
+    content: [{ type: "text", text: summary }],
+  };
+}
+
+function goldenPathFailure(diagnostics: readonly unknown[]): GoldenPathStatusMcpOutput {
+  const bounded = boundedDiagnostics(diagnostics);
+  return {
+    ok: false,
+    valid: false,
+    phase: "projection",
+    diagnostics: bounded,
+    violations: bounded,
+  };
+}
+
+/** Compose the existing recovery and status projectors without adding policy. */
+async function handleGoldenPathStatus(input: GoldenPathStatusMcpInput): Promise<CallToolResult> {
+  try {
+    // A caller cannot supply a precomputed recovery object as status evidence;
+    // recovery must cross the #410 projector boundary first.
+    const statusInput = { ...input.input };
+    delete statusInput.recovery;
+    const recovery =
+      input.recoveryInput === undefined
+        ? null
+        : projectGoldenPathRecovery(input.recoveryInput as GoldenPathRecoverySource);
+    const projected = tryProjectGoldenPathStatus({
+      ...statusInput,
+      recovery,
+    });
+    if (!projected.valid || projected.projection === undefined) {
+      return goldenPathResult(
+        goldenPathFailure(projected.diagnostics),
+        "Golden Path status projection failed; see diagnostics.",
+      );
+    }
+    return goldenPathResult(
+      { ok: true, valid: true, ...projected.projection, diagnostics: [...projected.projection.diagnostics] },
+      "Projected Golden Path status through the bounded Core projectors.",
+    );
+  } catch (error: unknown) {
+    return goldenPathResult(
+      goldenPathFailure(diagnosticsForError(error)),
+      "Golden Path status projection failed; see diagnostics.",
     );
   }
 }
@@ -1078,6 +1160,23 @@ async function handlePlan(
     },
     "Produced a deterministic read-only semantic PR plan preview.",
   );
+}
+
+/** Register the read-only Golden Path status/next-action/recovery projection. */
+export function registerGoldenPathTools(server: McpServer): readonly RegisteredTool[] {
+  const status = server.registerTool(
+    "inari_golden_path_status",
+    {
+      title: "Project Golden Path status",
+      description:
+        "Project bounded Golden Path status, next action, and recovery from supplied normalized evidence through the existing #409/#410 Core projectors. This tool performs no lifecycle or GitHub mutation.",
+      inputSchema: goldenPathStatusInputSchema,
+      outputSchema: goldenPathStatusOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: GoldenPathStatusMcpInput) => handleGoldenPathStatus(input),
+  );
+  return Object.freeze([status]);
 }
 
 /** Register the canonical semantic PR tool catalog on any MCP transport. */
