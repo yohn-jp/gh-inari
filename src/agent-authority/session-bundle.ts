@@ -706,24 +706,6 @@ export function persistSessionCredentialBundle(filePath: string, input: SessionC
     throw storageError("SESSION_BUNDLE_UNSAFE_STORAGE", "This platform cannot reject Session bundle symlinks.", target);
   }
 
-  try {
-    const existing = lstatSync(target);
-    if (existing.isSymbolicLink() || !existing.isFile() || !isOwner(existing)) {
-      throw storageError("SESSION_BUNDLE_UNSAFE_STORAGE", "Session bundle output path is unsafe.", target);
-    }
-    assertSafeBundleFile(existing, target);
-    throw storageError(
-      "SESSION_BUNDLE_OUTPUT_EXISTS",
-      "Session bundle output already exists; overwrite is not allowed.",
-      target,
-    );
-  } catch (error: unknown) {
-    if (error instanceof SessionCredentialBundleError) throw error;
-    const errno = error as NodeJS.ErrnoException;
-    if (errno.code !== "ENOENT")
-      throw storageError("SESSION_BUNDLE_UNSAFE_STORAGE", "Session bundle output path is unsafe.", target);
-  }
-
   const noFollow = fsConstants.O_NOFOLLOW;
   let fd: number | undefined;
   let created = false;
@@ -752,8 +734,11 @@ export function persistSessionCredentialBundle(filePath: string, input: SessionC
       } catch {
         // The path raced away; report a generic fail-closed storage error.
       }
-      if (existing?.isSymbolicLink())
+      if (existing !== undefined && (!existing.isFile() || existing.isSymbolicLink() || !isOwner(existing)))
         throw storageError("SESSION_BUNDLE_UNSAFE_STORAGE", "Session bundle output path is unsafe.", target);
+      if (existing !== undefined) {
+        assertSafeBundleFile(existing, target);
+      }
       throw storageError(
         "SESSION_BUNDLE_OUTPUT_EXISTS",
         "Session bundle output already exists; overwrite is not allowed.",

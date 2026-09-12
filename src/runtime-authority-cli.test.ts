@@ -13,6 +13,10 @@ import {
   type RuntimeAuthority,
 } from "./agent-authority/runtime-authority.js";
 import { loadRuntimeAuthorityKeyPair } from "./agent-authority/runtime-key.js";
+import {
+  RuntimeAuthorityLifecycleError,
+  requireRuntimeAuthorityNoFollowFlag,
+} from "./agent-authority/runtime-authority-lifecycle.js";
 
 interface CapturedOutput {
   readonly exitCode: number;
@@ -72,6 +76,16 @@ async function writeInput(repositoryRoot: string, name: string, value: unknown):
 function jsonOutput(result: CapturedOutput): Record<string, unknown> {
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
+
+test("Runtime Authority storage fails closed when O_NOFOLLOW is unavailable", () => {
+  assert.throws(
+    () => requireRuntimeAuthorityNoFollowFlag(undefined, "register"),
+    (error: unknown) =>
+      error instanceof RuntimeAuthorityLifecycleError &&
+      error.code === "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED" &&
+      error.details.reason === "O_NOFOLLOW is unavailable",
+  );
+});
 
 test("authority generate writes a local key, exports public material, and does not register trust", async () => {
   const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-cli-"));
@@ -137,7 +151,7 @@ test("authority generate has an explicit human-readable trust boundary", async (
 });
 
 test("authority register creates one canonical active trust artifact exclusively", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-register-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-register-"));
   try {
     const record = authority("runtime-register");
     const inputPath = await writeInput(repositoryRoot, "authority.json", record);
@@ -162,7 +176,7 @@ test("authority register creates one canonical active trust artifact exclusively
 });
 
 test("authority register rejects inactive, malformed, duplicate-key, and private-key inputs", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-register-invalid-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-register-invalid-"));
   try {
     const first = authority("runtime-first");
     const firstPath = await writeInput(repositoryRoot, "first.json", first);
@@ -213,7 +227,7 @@ test("authority register rejects inactive, malformed, duplicate-key, and private
 });
 
 test("authority rotate adds an active overlap record and never rewrites the current artifact", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-rotate-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-rotate-"));
   try {
     const current = authority("runtime-old");
     const currentInput = await writeInput(repositoryRoot, "current.json", current);
@@ -260,7 +274,7 @@ test("authority rotate adds an active overlap record and never rewrites the curr
 });
 
 test("authority revoke is active-to-disabled only and deterministically idempotent", async () => {
-  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-revoke-"));
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-revoke-"));
   try {
     const record = authority("runtime-revoke", { capabilityCeiling: ["change.implement", "change.ready"] });
     const inputPath = await writeInput(repositoryRoot, "authority.json", record);
