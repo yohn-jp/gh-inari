@@ -10,8 +10,7 @@ const USES_LINE_PATTERN = /^\s*(?:-\s+)?uses:\s*(.*)$/u;
 const VALUE_PATTERN = /^(\S+)(?:\s+#.*)?$/u;
 const IMMUTABLE_EXTERNAL_ACTION_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/u;
 const ORGANIZATION_WORKFLOW_PREFIX = "yohn-jp/.github/.github/workflows/";
-const ORGANIZATION_WORKFLOW_SHA_PATTERN = /^[0-9a-f]{40}$/u;
-const SHARED_ISSUE_GOVERNANCE_PATH = "yohn-jp/.github/.github/workflows/issue-governance.yml";
+const SHARED_ISSUE_GOVERNANCE_REFERENCE = "yohn-jp/.github/.github/workflows/issue-governance.yml@main";
 
 export function validateActionText(source, filePath = "<text>") {
   const references = [];
@@ -38,19 +37,12 @@ export function validateActionText(source, filePath = "<text>") {
     const local = reference.startsWith("./");
     references.push({ file: filePath, line: lineNumber, reference, local });
     const organizationWorkflow = reference.startsWith(ORGANIZATION_WORKFLOW_PREFIX);
-    const organizationRef = organizationWorkflow
-      ? reference.slice(ORGANIZATION_WORKFLOW_PREFIX.length).split("@")[1]
-      : undefined;
-    if (
-      organizationWorkflow &&
-      organizationRef !== "main" &&
-      (organizationRef === undefined || !ORGANIZATION_WORKFLOW_SHA_PATTERN.test(organizationRef))
-    ) {
+    if (organizationWorkflow && !reference.endsWith("@main")) {
       errors.push(
         filePath +
           ":" +
           lineNumber +
-          ": organization-owned reusable workflows under yohn-jp/.github must use @main or a full 40-character commit SHA: " +
+          ": organization-owned reusable workflows under yohn-jp/.github must use @main: " +
           reference,
       );
     } else if (!local && !organizationWorkflow && !IMMUTABLE_EXTERNAL_ACTION_PATTERN.test(reference)) {
@@ -76,17 +68,8 @@ export function validateIssueGovernanceWorkflow(source, filePath = ISSUE_GOVERNA
   if (!/^\s+issues:\s*(?:\[|$)/mu.test(source)) {
     errors.push(filePath + ": missing issues event trigger");
   }
-  const sharedIssueGovernanceReference = new RegExp(
-    `uses:\\s+${SHARED_ISSUE_GOVERNANCE_PATH.replaceAll(".", "\\.")}@(main|[0-9a-f]{40})(?:\\s|$)`,
-    "mu",
-  );
-  if (!sharedIssueGovernanceReference.test(source)) {
-    errors.push(
-      filePath +
-        ": must delegate Issue governance to " +
-        SHARED_ISSUE_GOVERNANCE_PATH +
-        "@main or a full 40-character commit SHA",
-    );
+  if (!source.includes("uses: " + SHARED_ISSUE_GOVERNANCE_REFERENCE)) {
+    errors.push(filePath + ": must delegate Issue governance to " + SHARED_ISSUE_GOVERNANCE_REFERENCE);
   }
   if (/scripts\/validate-issue\.mjs/u.test(source)) {
     errors.push(filePath + ": must not duplicate gh-inari Issue semantic validation locally");

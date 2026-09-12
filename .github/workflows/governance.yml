@@ -17,6 +17,6 @@ permissions:
 
 jobs:
   validate-pr:
-    uses: yohn-jp/.github/.github/workflows/pr-governance.yml@ff82994d70761f3f40557ea867cfe4915e193965
+    uses: yohn-jp/.github/.github/workflows/pr-governance.yml@main
     permissions:
       contents: read

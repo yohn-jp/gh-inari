@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   release:
-    uses: yohn-jp/.github/.github/workflows/gh-extension-release.yml@ff82994d70761f3f40557ea867cfe4915e193965
+    uses: yohn-jp/.github/.github/workflows/gh-extension-release.yml@main
     with:
       release-tag: ${{ github.event.release.tag_name }}
       certification-verification-script: scripts/verify-gh-extension-release-certification.mjs

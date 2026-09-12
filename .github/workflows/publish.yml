@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   publish:
-    uses: yohn-jp/.github/.github/workflows/npm-publish.yml@ff82994d70761f3f40557ea867cfe4915e193965
+    uses: yohn-jp/.github/.github/workflows/npm-publish.yml@main
     with:
       certification-verification-script: scripts/verify-release-certification.mjs
     permissions:
