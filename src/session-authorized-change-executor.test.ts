@@ -474,10 +474,10 @@ test("branch.advance performs composition and delegates without owning Git mutat
     "branch.advance",
     {
       version: 1,
-      repositoryId: REPOSITORY_ID,
+      issue: 466,
       branch: BRANCH,
       expectedHead: "d".repeat(40),
-      treeDelta: { changes: [] },
+      changes: [{ operation: "upsert", path: "src/file.txt", mode: "100644", content: "aGVsbG8=" }],
       commit: { message: "bounded test commit", author: { name: "Test Author", email: "test@example.test" } },
     },
     [{ kind: "branch.advance", branch: BRANCH }],
@@ -494,12 +494,9 @@ test("branch.advance performs composition and delegates without owning Git mutat
         operation: "branch.advance",
         status: "succeeded",
         outcome: "advanced",
-        repositoryId: REPOSITORY_ID,
         branch: BRANCH,
         expectedHead: "d".repeat(40),
-        afterHead: "e".repeat(40),
-        commitSha: "e".repeat(40),
-        treeSha: "f".repeat(40),
+        resultingHead: "e".repeat(40),
       };
     },
   }).execute(signed.envelope);

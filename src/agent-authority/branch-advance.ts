@@ -3,17 +3,17 @@ import { createHash } from "node:crypto";
 import { validateBranchName } from "../../branch-naming-authority.mjs";
 import { MAX_SESSION_REQUEST_BYTES, canonicalizeSemanticRequest } from "./session-request.js";
 import { classifyDelegatedTreeDelta } from "./protected-paths.js";
-import { MAX_ISSUE_NUMBER, validateCapabilityClaim, type BranchAdvanceCapabilityClaim } from "./capability.js";
+import { MAX_ISSUE_NUMBER, type BranchAdvanceCapabilityClaim } from "./capability.js";
 import { createCapabilityExecutionProvenance, type CapabilityExecutionProvenance } from "./capability-provenance.js";
 import type { AuthenticatedSessionContext } from "./session-authentication.js";
 import type { SessionAgentMetadata } from "./session-bundle.js";
 import {
   GitDataCapabilityError,
-  type GitDataCommitInput,
-  type GitDataRefUpdateInput,
   type GitDataTree,
+  type GitDataRefUpdateInput,
   type GitHubBranchAdvanceCapability,
 } from "../github/git-data-capability.js";
+import type { AdmittedSessionCapability } from "./capability-admission.js";
 import type { IssuerRepositoryIdentity } from "../github/issuer-authority.js";
 
 export const BRANCH_ADVANCE_CONTRACT_VERSION = 1 as const;
@@ -52,20 +52,12 @@ export type BranchAdvanceChange =
   | { readonly operation: "delete"; readonly path: string };
 export interface BranchAdvanceSemanticRequest {
   readonly version: 1;
-  readonly issue?: number;
+  readonly issue: number;
   readonly branch: string;
   readonly expectedHead: string;
-  readonly changes?: readonly BranchAdvanceChange[];
+  readonly changes: readonly BranchAdvanceChange[];
   readonly commit: Readonly<{ message: string; author?: Readonly<BranchAdvanceCommitAuthor> }>;
   readonly agent?: SessionAgentMetadata;
-  /** @internal compile-time tolerance for pre-#466 callers; validator rejects it. */
-  readonly repositoryId?: string;
-  // Legacy source compatibility only; the runtime validator rejects this key.
-  readonly treeDelta: {
-    readonly changes: readonly unknown[];
-    readonly before: readonly { readonly sha: string }[];
-    readonly after: readonly { readonly sha: string }[];
-  };
 }
 export interface BranchAdvanceExecutionFailure {
   readonly code: "BRANCH_ADVANCE_FAILED";
@@ -80,7 +72,6 @@ export interface BranchAdvanceSemanticResult {
   readonly branch: string;
   readonly expectedHead: string;
   readonly resultingHead?: string;
-  readonly afterHead: string | undefined;
   readonly provenance?: CapabilityExecutionProvenance;
   readonly failure?: BranchAdvanceExecutionFailure;
 }
@@ -96,15 +87,15 @@ export interface BranchAdvanceValidationResult {
   readonly diagnostics: readonly BranchAdvanceDiagnostic[];
 }
 export interface BranchAdvanceCapabilityBroker {
-  withBranchAdvanceCapability?: <T>(
+  withBranchAdvanceCapability: <T>(
     request: { readonly target: IssuerRepositoryIdentity },
     operation: (capability: GitHubBranchAdvanceCapability) => Promise<T>,
   ) => Promise<T>;
-  withGitDataCapability?: unknown;
 }
 export interface ExecuteBranchAdvanceOptions {
   readonly context: AuthenticatedSessionContext;
   readonly broker: BranchAdvanceCapabilityBroker;
+  readonly admission: AdmittedSessionCapability;
   readonly request?: unknown;
   readonly now?: Date | number | (() => Date | number);
 }
@@ -142,8 +133,14 @@ function freeze<T>(x: T): T {
   for (const v of Object.values(x as Record<string, unknown>)) freeze(v);
   return Object.freeze(x);
 }
+function decodeBase64(content: string): Buffer | undefined {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(content)) return undefined;
+  const bytes = Buffer.from(content, "base64");
+  return bytes.toString("base64") === content ? bytes : undefined;
+}
 function blobSha(content: string): string {
-  const b = Buffer.from(content, "utf8");
+  const b = decodeBase64(content);
+  if (b === undefined) return "";
   return createHash("sha1")
     .update(Buffer.concat([Buffer.from(`blob ${b.byteLength}\0`), b]))
     .digest("hex");
@@ -180,7 +177,7 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
         unknowns(input.commit.author, AUTHOR_KEYS, "$.commit.author", d);
         if (!text(input.commit.author.name, 128)) d.push(diag("$.commit.author.name", "Author name is invalid."));
         if (
-          input.commit.email !== undefined &&
+          input.commit.author.email !== undefined &&
           (!text(input.commit.author.email, 320) || !input.commit.author.email.includes("@"))
         )
           d.push(diag("$.commit.author.email", "Author email is invalid."));
@@ -216,8 +213,8 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
         typeof raw.content === "string" &&
         raw.content.length <= MAX_SESSION_REQUEST_BYTES
       ) {
-        if (blobSha(raw.content) === "") d.push(diag(p, "Content is invalid."));
-        changes.push({ operation: "upsert", path: raw.path as string, mode: raw.mode, content: raw.content });
+        if (decodeBase64(raw.content) === undefined) d.push(diag(`${p}.content`, "Content must be canonical base64."));
+        else changes.push({ operation: "upsert", path: raw.path as string, mode: raw.mode, content: raw.content });
       } else d.push(diag(p, "Only upsert (100644/100755/content) and delete operations are accepted."));
     }
   if (d.length) return { valid: false, diagnostics: Object.freeze(d.slice(0, 32)) };
@@ -257,7 +254,6 @@ function result(
     outcome,
     branch: request?.branch ?? "",
     expectedHead: request?.expectedHead ?? "",
-    afterHead: resultingHead,
     ...(resultingHead === undefined ? {} : { resultingHead }),
     ...(provenance === undefined ? {} : { provenance }),
     ...(failure === undefined ? {} : { failure }),
@@ -272,18 +268,6 @@ function fail(
   return result(r, outcome, { code: "BRANCH_ADVANCE_FAILED", reason, message });
 }
 
-function claim(context: AuthenticatedSessionContext, branch: string): BranchAdvanceCapabilityClaim | undefined {
-  let found: BranchAdvanceCapabilityClaim | undefined;
-  for (const c of context.capabilities) {
-    const v = validateCapabilityClaim(c);
-    if (!v.valid || v.value?.kind !== "branch.advance") continue;
-    if (v.value.branch === branch) {
-      if (found) return undefined;
-      found = v.value;
-    }
-  }
-  return found;
-}
 function provesTarget(tree: GitDataTree, request: BranchAdvanceSemanticRequest): boolean {
   const entries = new Map(tree.entries.filter((e) => e.type === "blob").map((e) => [e.path, e]));
   return (request.changes ?? []).every((change) => {
@@ -324,10 +308,7 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   const candidate = options?.request ?? signed;
   const v = validateBranchAdvanceSemanticRequest(candidate);
   if (!v.valid || !v.value) return fail(undefined, "request", v.diagnostics[0]?.message ?? "Request is invalid.");
-  const r = v.value as BranchAdvanceSemanticRequest & {
-    readonly issue: number;
-    readonly changes: readonly BranchAdvanceChange[];
-  };
+  const r = v.value;
   const context = options.context;
   if (options.request !== undefined) {
     try {
@@ -346,8 +327,9 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
     return fail(r, "authorization", "The request is not admitted for this Issue.");
   if (r.branch === context.authority.ref || r.branch === "main")
     return fail(r, "branch-state", "Default-branch writes are forbidden.");
-  const c = claim(context, r.branch);
-  if (!c) return fail(r, "authorization", "No exact branch.advance capability was admitted.");
+  const c = options.admission.capability;
+  if (c.kind !== "branch.advance" || c.branch !== r.branch)
+    return fail(r, "authorization", "No exact branch.advance capability was admitted.");
   const projected = { changes: r.changes.map((x) => ({ operation: "modify" as const, path: x.path })) };
   const classification = classifyDelegatedTreeDelta(projected);
   if (classification.kind !== "allowed") return fail(r, "protected-path", classification.message);
@@ -358,16 +340,7 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
     nameWithOwner: context.repository.nameWithOwner,
   };
   try {
-    const legacy =
-      typeof options.broker.withGitDataCapability === "function"
-        ? (options.broker.withGitDataCapability as (
-            request: unknown,
-            operation: (capability: GitHubBranchAdvanceCapability) => Promise<BranchAdvanceSemanticResult>,
-          ) => Promise<BranchAdvanceSemanticResult>)
-        : undefined;
-    const invoke = options.broker.withBranchAdvanceCapability ?? legacy;
-    if (invoke === undefined) return fail(r, "provider", "Branch capability is unavailable.");
-    return await invoke({ target }, async (capability) => {
+    return await options.broker.withBranchAdvanceCapability({ target }, async (capability) => {
       if (capability.scope.repository.repositoryId !== target.repositoryId)
         return fail(r, "authorization", "Capability repository does not match.");
       const ref = await capability.readRef(r.branch);
@@ -400,7 +373,7 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
             type: "blob" as const,
           });
         } else {
-          const blob = await capability.createBlob({ content: Buffer.from(ch.content, "utf8").toString("base64") });
+          const blob = await capability.createBlob({ content: ch.content });
           if (blob.sha !== blobSha(ch.content))
             return fail(r, "verification", "Created blob identity could not be verified.");
           writes.push({ path: ch.path, sha: blob.sha, mode: ch.mode, type: "blob" as const });
@@ -412,7 +385,7 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
         treeSha: newTree.sha,
         parents: [r.expectedHead],
         ...(r.commit.author === undefined ? {} : { author: r.commit.author }),
-      } as GitDataCommitInput);
+      });
       const update = await capability.compareAndAdvanceRef({
         branch: r.branch,
         beforeOid: r.expectedHead,
@@ -440,5 +413,3 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
     return fail(r, "provider", "Branch advancement failed closed.");
   }
 }
-export const advanceBranch = executeBranchAdvance;
-export const executeSessionBranchAdvance = executeBranchAdvance;

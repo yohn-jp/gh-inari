@@ -455,9 +455,18 @@ function branchFailurePhase(outcome: CapabilityAuthorizedBranchAdvanceResult["ou
 
 function branchRequestFields(input: unknown): {
   readonly branch: string;
+  readonly treeDelta: DelegatedTreeDelta;
 } {
   if (!isRecord(input) || !boundedText(input.branch, 255)) throw new TypeError("Branch advance request is invalid.");
-  return { branch: input.branch };
+  if (!Array.isArray(input.changes) || input.changes.length === 0)
+    throw new TypeError("Branch advance request is invalid.");
+  const changes = input.changes.map((change) => {
+    if (!isRecord(change) || typeof change.path !== "string") throw new TypeError("Branch advance request is invalid.");
+    if (change.operation === "delete") return { operation: "delete" as const, path: change.path };
+    if (change.operation === "upsert") return { operation: "modify" as const, path: change.path };
+    throw new TypeError("Branch advance request is invalid.");
+  });
+  return { branch: input.branch, treeDelta: { changes } };
 }
 
 export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSessionExecutor {
@@ -684,7 +693,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     signedRequest: unknown,
     operation: "branch.advance",
   ): Promise<CapabilityAuthorizedSessionExecutionResult> {
-    let fields: { readonly branch: string };
+    let fields: { readonly branch: string; readonly treeDelta: DelegatedTreeDelta };
     const issue = context.task?.kind === "issue" ? context.task.number : undefined;
     try {
       fields = branchRequestFields(signedRequest);
@@ -716,7 +725,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
         operation,
         subject: { kind: "branch", issue, branch: fields.branch },
         projection,
-        treeDelta: undefined,
+        treeDelta: fields.treeDelta,
       });
     } catch (error: unknown) {
       if (error instanceof CapabilityAdmissionError) {
