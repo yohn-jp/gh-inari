@@ -20,6 +20,7 @@ test("SKILL_SCENARIOS has a fixed, deterministic order", () => {
     "inspect-governance",
     "repair-invalid-artifact",
     "manage-change",
+    "golden-path",
   ]);
 });
 
@@ -41,6 +42,42 @@ test("index projection preserves scenario order and identity", () => {
 test("findSkillScenario resolves known ids and returns undefined for unknown ids", () => {
   assert.equal(findSkillScenario("author-issue")?.title, "Author a governed Issue");
   assert.equal(findSkillScenario("bogus-scenario"), undefined);
+});
+
+test("golden-path projects canonical entry, status, and recovery references", () => {
+  const scenario = findSkillScenario("golden-path");
+  assert.ok(scenario);
+
+  assert.deepEqual(
+    scenario.contractReferences.map((reference) => `${reference.contract}.${reference.output}`),
+    [
+      "golden-path-entry.action",
+      "change-handoff.handoff",
+      "golden-path-status.nextAction",
+      "golden-path-recovery.recovery",
+    ],
+  );
+  assert.deepEqual(
+    scenario.workflow.map((step) => step.command),
+    [
+      "inari diagnose",
+      "inari issue create",
+      "inari change issue <number>",
+      "inari change show <number>",
+      "inari change ready <number>",
+      "inari change show <number>",
+      "inari change abort <number>",
+    ],
+  );
+
+  const content = JSON.stringify(scenario);
+  assert.match(content, /nextAction/);
+  assert.match(content, /safeAction/);
+  assert.match(content, /MANUAL_REVIEW/);
+  assert.match(content, /Nawabari/);
+  assert.match(content, /worktree/);
+  assert.match(content, /raw GitHub mutations/);
+  assert.doesNotMatch(content, /gh (?:issue|pr) create/);
 });
 
 test("authoring scenarios make direct governed creation the conditional golden path", () => {
@@ -93,6 +130,7 @@ for (const scenario of SKILL_SCENARIOS) {
     assert.equal(json.title, scenario.title);
     assert.equal(json.whenToUse, scenario.whenToUse);
     assert.deepEqual(json.workflow, scenario.workflow);
+    assert.deepEqual(json.contractReferences, scenario.contractReferences);
     assert.deepEqual(json.invariants, scenario.invariants);
     assert.equal(json.canonicalEntrypoint, scenario.canonicalEntrypoint);
     assert.equal(json.helpPointer, scenario.helpPointer);
@@ -102,6 +140,10 @@ for (const scenario of SKILL_SCENARIOS) {
     for (const step of scenario.workflow) {
       assert.ok(text.includes(step.summary));
       assert.ok(text.includes(step.command));
+    }
+    for (const reference of scenario.contractReferences) {
+      assert.ok(text.includes(`${reference.contract}.${reference.output}`));
+      assert.ok(text.includes(reference.instruction));
     }
     for (const invariant of scenario.invariants) {
       assert.ok(text.includes(invariant));
@@ -125,7 +167,8 @@ for (const scenario of SKILL_SCENARIOS) {
 
   test(`${scenario.id}: contains no cross-product content`, () => {
     const haystack = JSON.stringify(scenario).toLowerCase();
-    for (const name of CROSS_PRODUCT_NAMES) {
+    const allowedNames = scenario.id === "golden-path" ? new Set(["nawabari"]) : new Set<string>();
+    for (const name of CROSS_PRODUCT_NAMES.filter((candidate) => !allowedNames.has(candidate))) {
       assert.ok(!haystack.includes(name), `${scenario.id} unexpectedly references "${name}"`);
     }
   });
