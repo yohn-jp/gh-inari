@@ -272,6 +272,14 @@ function compareStrings(left: string, right: string): number {
   return left.localeCompare(right, "en-US");
 }
 
+function compareIssueReferences(left: IssueReference, right: IssueReference): number {
+  return (
+    left.repositoryHost.localeCompare(right.repositoryHost, "en-US") ||
+    left.repositoryId.localeCompare(right.repositoryId, "en-US") ||
+    left.number - right.number
+  );
+}
+
 function boundedMessage(value: string): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
   return normalized.length > SEMANTIC_ISSUE_OBSERVATION_LIMITS.diagnosticMessageLength
@@ -453,7 +461,7 @@ function normalizeReferences(
     seen.add(key);
     result.push(normalized.reference);
   });
-  return result.sort((left, right) => compareStrings(issueReferenceKey(left), issueReferenceKey(right)));
+  return result.sort(compareIssueReferences);
 }
 
 function sameReference(left: IssueReference | undefined, right: IssueReference | undefined): boolean {
@@ -681,6 +689,11 @@ function relationInput(
 ): { readonly native?: unknown; readonly bodyFallback?: unknown } {
   if (input === undefined) return {};
   if (!isRecord(input)) return { native: input };
+  // The compact relation API accepts an IssueReference directly.  It must not
+  // be mistaken for the `{ native, bodyFallback }` evidence wrapper, whose
+  // unknown-property check would otherwise discard the identity fields.
+  if (hasOwn(input, "repositoryHost") || hasOwn(input, "repositoryId") || hasOwn(input, "number"))
+    return { native: input };
   unknownProperties(input, RELATION_EVIDENCE_KEYS, path, violations, "OBSERVED_RELATION_UNKNOWN_PROPERTY");
   return {
     native: input.native ?? input.blockedBy,
@@ -903,7 +916,12 @@ function buildObservedProjection(
   const parentConflict =
     nativeParentValues.length > 1 ||
     bodyParentValues.length > 1 ||
-    (nativeParent !== undefined && bodyParent !== undefined && !sameReference(nativeParent, bodyParent));
+    // An explicitly observed native empty set is still evidence.  Treating it
+    // as "missing" would allow a stale body fallback marker to override the
+    // provider's authoritative empty relation.
+    (parentInput.native !== undefined &&
+      ((nativeParent === undefined && bodyParent !== undefined) ||
+        (nativeParent !== undefined && bodyParent !== undefined && !sameReference(nativeParent, bodyParent))));
   const dependsConflict =
     parsed.conflict || (nativeDependsOn !== undefined && !sameReferences(nativeDependsOn, bodyDependsOn));
   const parentEvidence: ObservedIssueParentRelationEvidence = {

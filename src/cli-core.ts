@@ -112,6 +112,8 @@ import {
   type ChangeRemoteExecutorOptions,
   type ChangeRemoteMutation,
 } from "./change-executor.js";
+import { tryProjectImplementationHandoff } from "./change-handoff.js";
+import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
 import {
@@ -139,6 +141,14 @@ import {
   type SemanticPullRequestExecutorOptions,
   SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION,
 } from "./semantic-pr-executor.js";
+import {
+  SemanticIssueRelationExecutor,
+  SemanticIssueRelationExecutorError,
+  planExistingIssueRelationReconciliation,
+  SEMANTIC_ISSUE_RELATION_EXECUTOR_CONTRACT_VERSION,
+  type SemanticIssueRelationExecutionPort,
+  type SemanticIssueRelationExecutorOptions,
+} from "./semantic-issue-relation-executor.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -206,6 +216,12 @@ export interface CliDependencies {
   readonly createSemanticPullRequestExecutor?: (
     options: SemanticPullRequestExecutorOptions,
   ) => SemanticPullRequestExecutionPort;
+  /** Injectable Semantic Issue Relation Executor; it never carries App credentials. */
+  readonly semanticIssueRelationExecutor?: SemanticIssueRelationExecutionPort;
+  /** Factory seam for a repository-scoped Semantic Issue Relation Executor. */
+  readonly createSemanticIssueRelationExecutor?: (
+    options: SemanticIssueRelationExecutorOptions,
+  ) => SemanticIssueRelationExecutionPort;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -974,6 +990,21 @@ function projectChangeCommandResult(
   };
 }
 
+function projectChangeHandoffCommandResult(
+  issue: number,
+  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+  options: { readonly repositoryNameWithOwner?: string } = {},
+): Readonly<Record<string, unknown>> {
+  const handoff = tryProjectImplementationHandoff(projection, options);
+  return {
+    ...projectChangeCommandResult("handoff", issue, projection),
+    ok: handoff.valid,
+    valid: handoff.valid,
+    diagnostics: handoff.diagnostics,
+    ...(handoff.handoff === undefined ? {} : { handoff: handoff.handoff }),
+  };
+}
+
 function rejectUnsupportedChangeOptions(command: string, options: Readonly<Record<string, string | boolean>>): void {
   const definition = getCommandForPositionals(["change", command]);
   if (definition === undefined) return;
@@ -1007,19 +1038,46 @@ async function runChangeCommand(
   const issue = Number(rest[0]);
   const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
   const result =
-    definition.operation === "show"
+    definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
       : await executeChangeRemoteMutationResult(
           executor,
           changeRemoteMutationRequest(definition.operation as ChangeRemoteMutation, issue),
         );
   const projection = result.projection;
-  console.log(JSON.stringify(projectChangeCommandResult(definition.operation, issue, projection, result.evidence)));
+  if (definition.operation === "handoff") {
+    let repositoryNameWithOwner: string | undefined;
+    // Resolve a locator only when an adapter is actually available: either the
+    // caller injected one directly, or no changeExecutor override exists (the
+    // default path already builds a real adapter). Avoids a spurious `gh`
+    // call when a caller/test stubs only the Change transport.
+    if (dependencies.createAdapter !== undefined || dependencies.changeExecutor === undefined) {
+      try {
+        const context = await createAdapter(dependencies, root, parsed.options.repository).getRepositoryContext();
+        repositoryNameWithOwner = context.nameWithOwner;
+      } catch {
+        repositoryNameWithOwner = undefined;
+      }
+    }
+    const handoffResult = projectChangeHandoffCommandResult(issue, projection, { repositoryNameWithOwner });
+    console.log(JSON.stringify(handoffResult));
+    return handoffResult.ok === true ? 0 : EXIT_VALIDATION;
+  }
+  const commandResult = projectChangeCommandResult(definition.operation, issue, projection, result.evidence);
+  const entry =
+    definition.operation === "issue"
+      ? tryProjectGoldenPathEntry({
+          projection,
+          requireGovernedIssue: false,
+          ...(result.evidence?.outcome === undefined ? {} : { executionOutcome: result.evidence.outcome }),
+        })
+      : undefined;
+  console.log(JSON.stringify({ ...commandResult, ...(entry === undefined ? {} : { entry }) }));
   const executionSucceeded =
     result.evidence === undefined ||
     result.evidence.outcome === "verified" ||
     result.evidence.outcome === "returned-existing";
-  return projection.valid && executionSucceeded ? 0 : EXIT_VALIDATION;
+  return projection.valid && executionSucceeded && (entry === undefined || entry.valid) ? 0 : EXIT_VALIDATION;
 }
 
 async function runMcpCommand(
@@ -1058,6 +1116,9 @@ async function runArtifactCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  if (domain === "issue" && command === "relations") {
+    return runIssueRelationsCommand(rest, parsed, root, dependencies);
+  }
   if (domain === "issue") {
     const semantic = semanticIssueOperation(command, rest);
     if (semantic !== undefined) {
@@ -1358,6 +1419,127 @@ async function runSemanticIssueCommand(
     }),
   );
   return 0;
+}
+
+async function runIssueRelationsCommand(
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const operation = rest[0];
+  if (operation !== "plan" && operation !== "execute")
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Issue relations command "${operation ?? ""}".`);
+  if (rest.length !== 2 || !isPositiveInteger(rest[1])) throw invalidArtifactNumberError("issue", rest[1]);
+
+  const allowed = new Set(["json", "repository", "from", "capability"]);
+  const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by the Issue relations ${operation} command.`,
+      "$argv",
+      { command: `issue relations ${operation}`, option: option.id },
+    );
+  }
+  if (parsed.fields.length > 0) {
+    throw new CliError(
+      "INVALID_OPTION",
+      "Issue relations commands accept caller input only through --from; --field is not a Core semantic input adapter.",
+      "--field",
+    );
+  }
+
+  const subjectNumber = Number(rest[1]);
+  const input = await readJsonValue(parsed.options.from);
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    throw new CliError(
+      "INVALID_INPUT",
+      'Issue relations input must be a JSON object with a "desired" property.',
+      "--from",
+    );
+  const desired = (input as Record<string, unknown>).desired;
+  const graph = (input as Record<string, unknown>).graph;
+
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const planResult = await planExistingIssueRelationReconciliation(adapter, {
+    subjectNumber,
+    desired,
+    ...(graph === undefined ? {} : { graph }),
+    capabilities: parsed.capabilities,
+  });
+  if (!planResult.valid || planResult.plan === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        valid: false,
+        operation: `issue.relations.${operation}`,
+        issue: subjectNumber,
+        diagnostics: planResult.diagnostics,
+        violations: planResult.diagnostics,
+      }),
+    );
+    return EXIT_VALIDATION;
+  }
+  if (operation === "plan") {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        valid: true,
+        operation: "issue.relations.plan",
+        issue: subjectNumber,
+        plan: planResult.plan,
+        preview: true,
+        mutation: false,
+      }),
+    );
+    return 0;
+  }
+
+  const executor =
+    dependencies.semanticIssueRelationExecutor ??
+    (dependencies.createSemanticIssueRelationExecutor ?? ((options) => new SemanticIssueRelationExecutor(options)))({
+      adapter: createAdapter(dependencies, root, parsed.options.repository),
+      capabilities: parsed.capabilities,
+    });
+  try {
+    const execution = await executor.execute({
+      version: SEMANTIC_ISSUE_RELATION_EXECUTOR_CONTRACT_VERSION,
+      plan: planResult.plan,
+      capabilities: parsed.capabilities,
+    });
+    console.log(
+      JSON.stringify({
+        ok: true,
+        valid: true,
+        operation: "issue.relations.execute",
+        issue: subjectNumber,
+        plan: execution.plan,
+        observed: execution.observed,
+        evidence: execution.evidence,
+        preview: false,
+        mutation: true,
+      }),
+    );
+    return 0;
+  } catch (error: unknown) {
+    if (error instanceof SemanticIssueRelationExecutorError) {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          valid: false,
+          operation: "issue.relations.execute",
+          issue: subjectNumber,
+          diagnostics: error.diagnostics,
+          violations: error.diagnostics,
+          ...(error.evidence === undefined ? {} : { evidence: error.evidence }),
+        }),
+      );
+      return EXIT_VALIDATION;
+    }
+    throw error;
+  }
 }
 
 type SemanticPullRequestOperation = "contract" | "materialize" | "plan" | "execute" | "check";

@@ -92,7 +92,7 @@ async function capture(
 }
 
 test("Change commands are additions to the existing canonical command authority", () => {
-  const ids = ["change.issue", "change.show", "change.ready", "change.abort"] as const;
+  const ids = ["change.issue", "change.show", "change.handoff", "change.ready", "change.abort"] as const;
   const contract = projectCommandContract();
   assert.equal(contract.id, COMMAND_CONTRACT_ID);
   assert.equal(contract.invocation, AGENT_INVOCATION_CONTRACT);
@@ -103,7 +103,7 @@ test("Change commands are additions to the existing canonical command authority"
     assert.equal(getCommandForPositionals(definition.path)?.id, id);
     assert.equal(projected.invocation, commandInvocation(id));
     assert.equal(projected.example, commandExample(id));
-    assert.match(commandUsage(definition), /^change (issue|show|ready|abort) <number>/u);
+    assert.match(commandUsage(definition), /^change (issue|show|handoff|ready|abort) <number>/u);
   }
   assert.deepEqual(
     projectCommandHelp(["change"]).commands.map((entry) => entry.id),
@@ -144,6 +144,76 @@ test("change show forwards an explicit repository target to its executor factory
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(factoryOptions, { cwd: process.cwd(), repository: "acme/target" });
+});
+
+test("change handoff reads the same Change projection and exposes only canonical identity", async () => {
+  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const result = await capture(["change", "handoff", "42", "--json"], {
+    changeExecutor: executor(calls),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(calls, [
+    {
+      version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+      operation: "show",
+      issue: 42,
+    },
+  ]);
+  assert.equal(result.output?.ok, true);
+  assert.equal(result.output?.valid, true);
+  assert.deepEqual(result.output?.handoff, {
+    version: 1,
+    kind: "implementation-handoff",
+    repositoryHost: identity.repositoryHost,
+    repositoryId: identity.repositoryId,
+    rootIssue: identity.rootIssue,
+    changeVersion: 1,
+    state: "DRAFT",
+    branch,
+    baseBranch: "main",
+    pullRequest: 142,
+  });
+  assert.doesNotMatch(JSON.stringify(result.output?.handoff), /worktree|session|process|checkout/iu);
+});
+
+test("change handoff rejects an already-review Change without mutation", async () => {
+  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const result = await capture(["change", "handoff", "42", "--json"], {
+    changeExecutor: executor(calls, projection(false)),
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(calls[0]?.operation, "show");
+  assert.equal(result.output?.ok, false);
+  assert.equal(result.output?.valid, false);
+  assert.equal(result.output?.handoff, undefined);
+  assert.ok(Array.isArray(result.output?.diagnostics));
+});
+
+test("change handoff includes the repository locator when an adapter is available", async () => {
+  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const result = await capture(["change", "handoff", "42", "--json"], {
+    changeExecutor: executor(calls),
+    createAdapter: () =>
+      ({
+        async getRepositoryContext() {
+          return {
+            hostname: "github.com",
+            host: "github.com",
+            owner: "acme",
+            name: "inari",
+            nameWithOwner: "acme/inari",
+            url: "https://github.com/acme/inari",
+            repositoryId: identity.repositoryId,
+          };
+        },
+      }) as unknown as GitHubAdapter,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.output?.ok, true);
+  assert.equal((result.output?.handoff as Record<string, unknown> | undefined)?.repositoryNameWithOwner, "acme/inari");
 });
 
 test("authoritative Change commands use semantic executor requests only", async () => {

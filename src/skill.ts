@@ -145,6 +145,31 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     helpDomain: "issue",
   }),
   skillScenario({
+    id: "manage-issue-relationships",
+    title: "Reconcile an existing Issue's native parent/dependency relationships",
+    whenToUse:
+      "Use when an existing Issue's GitHub-native parent (sub-issue) or blocked-by relationships must be set, changed, or removed through Inari's semantic authority, instead of editing relationship prose by hand.",
+    workflow: [
+      [
+        "Preview the deterministic relationship plan from live observation before mutating anything.",
+        "issue.relations.plan",
+      ],
+      [
+        "Apply the previewed plan through the governed executor once the preview looks correct.",
+        "issue.relations.execute",
+      ],
+    ],
+    invariants: [
+      "Always preview before executing; execute re-observes and rejects a plan the repository state has outgrown.",
+      "A real relationship mutation requires complete bounded relationship-graph evidence; omitted or incomplete evidence fails closed.",
+      "Desired relationship state is expressed only through `parent`/`dependsOn`; `children`/`blocks` remain derived, never caller-supplied input.",
+      "Markdown `Parent Epic:`/task-list references are compatibility projections only, never semantic authority once this command is used.",
+      HELP_DISCLAIMER,
+    ],
+    canonicalCommandId: "issue.relations.plan",
+    helpDomain: "issue",
+  }),
+  skillScenario({
     id: "manage-change",
     title: "Manage a governed Change",
     whenToUse: "Use when implementation work must be issued, inspected, admitted to review, or intentionally stopped.",

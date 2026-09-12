@@ -75,6 +75,8 @@ const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.fre
   "pull_request.read": "read",
   "issue.create": "mutation",
   "issue.update": "mutation",
+  "issue.relation.read": "read",
+  "issue.relation.mutate": "mutation",
   "pull_request.create": "mutation",
   "pull_request.update": "mutation",
   "branch.read": "read",
@@ -150,6 +152,9 @@ export interface GitHubApiResponse {
   readonly status: number;
   readonly body: unknown;
 }
+
+/** Bounded values accepted by the repository API seam for JSON request fields. */
+export type GitHubApiFieldValue = string | number | boolean;
 
 export class GitHubAdapter {
   private readonly cwd: string | undefined;
@@ -230,30 +235,44 @@ export class GitHubAdapter {
   }
 
   /** Read the bounded repository API surface needed by Change projection. */
-  async requestRepositoryApi(repositoryPath: string, method: "GET" = "GET"): Promise<GitHubApiResponse> {
-    assertRepositoryApiPath(repositoryPath);
+  async requestRepositoryApi(
+    repositoryPath: string,
+    method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
+    fields: Readonly<Record<string, GitHubApiFieldValue>> = {},
+  ): Promise<GitHubApiResponse> {
     const context = await this.resolveRepositoryContext();
-    const result = await this.runCommand(
-      [
-        "api",
-        `repos/${context.nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
-        "--hostname",
-        context.hostname,
-        "--method",
-        method,
-        "--include",
-      ],
-      "actions.request",
-    );
-    const response = parseIncludedApiResponse(result.stdout, "actions.request");
+    return this.requestRepositoryApiAt(context.nameWithOwner, context.hostname, repositoryPath, method, fields);
+  }
+
+  private async requestRepositoryApiAt(
+    nameWithOwner: string,
+    hostname: string,
+    repositoryPath: string,
+    method: "GET" | "POST" | "PATCH" | "DELETE",
+    fields: Readonly<Record<string, GitHubApiFieldValue>>,
+  ): Promise<GitHubApiResponse> {
+    assertRepositoryApiPath(repositoryPath);
+    const operation = method === "GET" ? "issue.relation.read" : "issue.relation.mutate";
+    const args = [
+      "api",
+      `repos/${nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
+      "--hostname",
+      hostname,
+      "--method",
+      method,
+      "--include",
+    ];
+    for (const [name, value] of Object.entries(fields)) appendRepositoryApiField(args, name, value);
+    const result = await this.runCommand(args, operation);
+    const response = parseIncludedApiResponse(result.stdout, operation);
     if (response !== undefined) {
       if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
-        throw new GitHubApiError("actions.request", "GitHub repository read failed.");
+        throw new GitHubApiError(operation, "GitHub repository API request failed.");
       }
       return response;
     }
-    if (result.exitCode !== 0) throw new GitHubApiError("actions.request", "GitHub repository read failed.");
-    throw new GitHubApiResponseError("actions.request", "GitHub returned no API response.");
+    if (result.exitCode !== 0) throw new GitHubApiError(operation, "GitHub repository API request failed.");
+    throw new GitHubApiResponseError(operation, "GitHub returned no API response.");
   }
 
   /** Download one bounded Actions artifact archive through the caller's gh session. */
@@ -742,7 +761,11 @@ export class GitHubAdapter {
     }
   }
 
-  private apiArguments(context: RepositoryContext, endpoint: string, method: "GET" | "POST" | "PATCH"): string[] {
+  private apiArguments(
+    context: RepositoryContext,
+    endpoint: string,
+    method: "GET" | "POST" | "PATCH" | "DELETE",
+  ): string[] {
     return ["api", endpoint, "--hostname", context.hostname, "--method", method];
   }
 }
@@ -931,6 +954,11 @@ function assertOptionalBoolean(value: unknown, path: string): asserts value is b
 
 function appendRawField(args: string[], name: string, value: string | undefined): void {
   if (value !== undefined) args.push("--raw-field", `${name}=${value}`);
+}
+
+function appendRepositoryApiField(args: string[], name: string, value: GitHubApiFieldValue): void {
+  if (typeof value === "string") args.push("--raw-field", `${name}=${value}`);
+  else args.push("--field", `${name}=${String(value)}`);
 }
 
 function appendRawFields(args: string[], name: string, values: readonly string[] | undefined): void {

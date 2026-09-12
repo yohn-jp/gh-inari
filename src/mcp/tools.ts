@@ -46,6 +46,7 @@ import {
 } from "../semantic-pr-projection.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
 import {
+  createGitHubActionsChangeRemoteExecutor,
   GitHubAdapter,
   GitHubIssueRelationObservationAdapter,
   isGitHubAdapterError,
@@ -53,6 +54,16 @@ import {
   type IssueRelationDiagnostic,
 } from "../github/index.js";
 import { GITHUB_ISSUE_PROJECTION_CAPABILITIES } from "../semantic-issue-projection.js";
+import {
+  changeRemoteReadRequest,
+  ChangeRemoteExecutorError,
+  readChangeRemoteProjection,
+  type ChangeRemoteExecutor,
+  type ChangeRemoteExecutorOptions,
+} from "../change-executor.js";
+import { tryProjectImplementationHandoff } from "../change-handoff.js";
+import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
+import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
@@ -63,6 +74,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_issue_plan",
   "inari_issue_observe",
   "inari_issue_drift",
+  "inari_issue_relations_plan",
   "inari_branch_contract",
   "inari_branch_materialize",
   "inari_branch_plan",
@@ -73,6 +85,8 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_plan",
   "inari_pr_observe",
   "inari_pr_drift",
+  "inari_golden_path_entry",
+  "inari_change_handoff",
 ] as const);
 
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
@@ -167,6 +181,37 @@ export const semanticPullRequestDriftInputSchema = z.strictObject({
   input: inputValueSchema,
 });
 
+/**
+ * Input schema for previewing existing-Issue native relationship
+ * reconciliation. Read-only: this composes live observation with Core
+ * planning but never mutates GitHub, matching the read-only MCP boundary
+ * every other semantic artifact tool uses (mutation stays CLI/Actions-only).
+ */
+export const issueRelationsPlanInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  capabilities: z.array(capabilitySchema).max(MAX_CAPABILITIES).optional(),
+  number: artifactNumberSchema,
+  desired: inputValueSchema,
+  graph: z.unknown().optional(),
+});
+export type IssueRelationsPlanInput = z.infer<typeof issueRelationsPlanInputSchema>;
+
+/** Input schema for the read-only canonical implementation handoff. */
+export const implementationHandoffInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  issue: artifactNumberSchema,
+});
+
+/** Compatibility name for callers that prefix the handoff with Change. */
+export const changeImplementationHandoffInputSchema = implementationHandoffInputSchema;
+
+/** Input schema for the read-only Golden Path entry/action projection. */
+export const goldenPathEntryInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  issue: artifactNumberSchema,
+});
+export type GoldenPathEntryInput = z.infer<typeof goldenPathEntryInputSchema>;
+
 export type SemanticPullRequestContractInput = z.infer<typeof semanticPullRequestContractInputSchema>;
 export type SemanticPullRequestMaterializeInput = z.infer<typeof semanticPullRequestMaterializeInputSchema>;
 export type SemanticPullRequestPlanInput = z.infer<typeof semanticPullRequestPlanInputSchema>;
@@ -182,6 +227,8 @@ export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInp
 export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
 export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
+export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
+export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
 
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
@@ -197,6 +244,14 @@ export interface NativeSemanticPullRequestDependencies {
 
 /** Shared dependency seam for all read-only semantic artifact catalogs. */
 export interface NativeSemanticArtifactDependencies extends NativeSemanticPullRequestDependencies {}
+
+/** Injectable read boundary for Change projections exposed through MCP. */
+export interface NativeChangeDependencies extends NativeSemanticPullRequestDependencies {
+  /** Direct semantic executor seam for tests or embedding applications. */
+  readonly changeExecutor?: ChangeRemoteExecutor;
+  /** Factory seam for repository-scoped Change executor construction. */
+  readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+}
 
 const READ_ONLY: ToolAnnotations = Object.freeze({
   readOnlyHint: true,
@@ -249,6 +304,42 @@ export type SemanticBranchMcpOutput = SemanticPullRequestMcpOutput;
 export const semanticIssueOutputSchema = semanticPullRequestOutputSchema;
 export const semanticBranchOutputSchema = semanticPullRequestOutputSchema;
 
+/** Structured output schema for the canonical Change implementation handoff. */
+export const implementationHandoffOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("change.handoff"),
+    issue: artifactNumberSchema,
+    change: artifactNumberSchema.optional(),
+    status: z.string().optional(),
+    state: z.string().optional(),
+    canonicalBranch: z.string().optional(),
+    canonicalBaseBranch: z.string().optional(),
+    branch: z.string().optional(),
+    pullRequest: artifactNumberSchema.optional(),
+    handoff: z.unknown().optional(),
+    projection: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+  })
+  .strict();
+
+export const changeImplementationHandoffOutputSchema = implementationHandoffOutputSchema;
+
+/** Structured output schema for a read-only Golden Path entry projection. */
+export const goldenPathEntryOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("golden-path.entry"),
+    issue: artifactNumberSchema,
+    entry: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+    preview: z.literal(true),
+    mutation: z.literal(false),
+  })
+  .strict();
+
 function adapterFor(
   requestRepository: string | undefined,
   dependencies: NativeSemanticPullRequestDependencies,
@@ -260,6 +351,22 @@ function adapterFor(
     ...(repository === undefined ? {} : { repository }),
   };
   return (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))(options);
+}
+
+function changeExecutorFor(
+  requestRepository: string | undefined,
+  dependencies: NativeChangeDependencies,
+): ChangeRemoteExecutor {
+  if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
+  const cwd = dependencies.repositoryRoot ?? process.cwd();
+  const repository = requestRepository ?? dependencies.repository;
+  const options: ChangeRemoteExecutorOptions = {
+    cwd,
+    ...(repository === undefined ? {} : { repository }),
+  };
+  if (dependencies.createChangeExecutor !== undefined) return dependencies.createChangeExecutor(options);
+  const adapter = adapterFor(requestRepository, dependencies);
+  return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
 }
 
 /** Resolve the repository Canon through the existing repository/Core boundary. */
@@ -369,6 +476,12 @@ function diagnosticsForError(error: unknown): unknown[] {
   if (error instanceof EffectiveArtifactContractCompilationError) {
     return [{ code: "EFFECTIVE_CONTRACT_INVALID", path: "$", message: boundedErrorMessage(error) }];
   }
+  if (error instanceof ChangeRemoteExecutorError) {
+    const diagnostics = error.diagnostics === undefined ? [] : boundedDiagnostics(error.diagnostics);
+    return diagnostics.length > 0
+      ? diagnostics
+      : [{ code: error.code, path: "$", message: boundedErrorMessage(error) }];
+  }
   return [{ code: "CORE_OPERATION_FAILED", path: "$", message: boundedErrorMessage(error) }];
 }
 
@@ -386,11 +499,124 @@ function failure(
   };
 }
 
-function result(data: SemanticPullRequestMcpOutput, summary: string): CallToolResult {
+function result<T extends Record<string, unknown>>(data: T, summary: string): CallToolResult {
   return {
     structuredContent: data,
     content: [{ type: "text", text: summary }],
   };
+}
+
+function projectChangeHandoffResult(
+  issue: number,
+  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+  options: { readonly repositoryNameWithOwner?: string } = {},
+): Record<string, unknown> {
+  const change = projection.change;
+  const changeProjection = change?.projection;
+  const handoff = tryProjectImplementationHandoff(projection, options);
+  return {
+    ok: handoff.valid,
+    valid: handoff.valid,
+    operation: "change.handoff",
+    issue,
+    change: change?.identity.rootIssue ?? issue,
+    status: projection.status,
+    ...(change === undefined ? {} : { state: change.state }),
+    ...(projection.canonicalBranch === undefined ? {} : { canonicalBranch: projection.canonicalBranch }),
+    ...(projection.canonicalBaseBranch === undefined ? {} : { canonicalBaseBranch: projection.canonicalBaseBranch }),
+    ...(changeProjection?.branch === undefined ? {} : { branch: changeProjection.branch }),
+    ...(changeProjection?.pullRequest === undefined ? {} : { pullRequest: changeProjection.pullRequest }),
+    diagnostics: handoff.diagnostics,
+    ...(handoff.handoff === undefined ? {} : { handoff: handoff.handoff }),
+    projection,
+  };
+}
+
+async function handleImplementationHandoff(
+  input: ImplementationHandoffInput,
+  dependencies: NativeChangeDependencies,
+): Promise<CallToolResult> {
+  try {
+    const executor = changeExecutorFor(input.repository, dependencies);
+    const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    let repositoryNameWithOwner: string | undefined;
+    // Resolve a locator only when an adapter is actually available: either the
+    // caller injected one directly, or no changeExecutor override exists (the
+    // default path already builds a real adapter). Avoids a spurious `gh`
+    // call when a caller/test stubs only the Change transport.
+    if (
+      dependencies.adapter !== undefined ||
+      dependencies.createAdapter !== undefined ||
+      dependencies.changeExecutor === undefined
+    ) {
+      try {
+        const context = await adapterFor(input.repository, dependencies).getRepositoryContext();
+        repositoryNameWithOwner = context.nameWithOwner;
+      } catch {
+        repositoryNameWithOwner = undefined;
+      }
+    }
+    return result(
+      projectChangeHandoffResult(input.issue, projection, { repositoryNameWithOwner }),
+      "Read the canonical implementation handoff through the Change Core boundary.",
+    );
+  } catch (error: unknown) {
+    return result(
+      {
+        ok: false,
+        valid: false,
+        operation: "change.handoff",
+        issue: input.issue,
+        diagnostics: diagnosticsForError(error),
+      },
+      "Implementation handoff is unavailable; see diagnostics.",
+    );
+  }
+}
+
+/**
+ * Read the existing Change projection and expose the shared Golden Path
+ * entry/action result without allowing the read-only MCP surface to issue a
+ * Change. A missing Change remains fail-closed because this adapter cannot
+ * establish governed root-Issue evidence for a create action.
+ */
+async function handleGoldenPathEntry(
+  input: GoldenPathEntryInput,
+  dependencies: NativeChangeDependencies,
+): Promise<CallToolResult> {
+  try {
+    const executor = changeExecutorFor(input.repository, dependencies);
+    const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    const entry = tryProjectGoldenPathEntry({ projection, requireGovernedIssue: false });
+    return result(
+      {
+        ok: entry.valid,
+        valid: entry.valid,
+        operation: "golden-path.entry",
+        issue: input.issue,
+        entry,
+        diagnostics: entry.diagnostics,
+        preview: true,
+        mutation: false,
+      },
+      entry.valid
+        ? "Read the Golden Path entry and existing Change action through Core."
+        : "Golden Path entry is not actionable; see diagnostics.",
+    );
+  } catch (error: unknown) {
+    return result(
+      {
+        ok: false,
+        valid: false,
+        operation: "golden-path.entry",
+        issue: input.issue,
+        diagnostics: diagnosticsForError(error),
+        preview: true,
+        mutation: false,
+      },
+      "Golden Path entry is unavailable; see diagnostics.",
+    );
+  }
 }
 
 function observationRepository(
@@ -1031,6 +1257,30 @@ async function handleArtifactPlan(
   );
 }
 
+async function handleIssueRelationsPlan(
+  input: IssueRelationsPlanInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  const planResult = await planExistingIssueRelationReconciliation(adapter, {
+    subjectNumber: input.number,
+    desired: input.desired,
+    ...(input.graph === undefined ? {} : { graph: input.graph }),
+    capabilities: input.capabilities ?? [],
+  });
+  if (!planResult.valid || planResult.plan === undefined) {
+    const diagnostics = boundedDiagnostics(planResult.diagnostics);
+    return result(
+      { ok: false, valid: false, diagnostics, violations: diagnostics },
+      "Existing-Issue relationship plan preview failed; see diagnostics.",
+    );
+  }
+  return result(
+    { ok: true, valid: true, plan: planResult.plan, preview: true, mutation: false },
+    "Produced a deterministic read-only existing-Issue relationship plan preview.",
+  );
+}
+
 /** Register the typed Issue semantic artifact catalog without adding policy. */
 export function registerSemanticIssueTools(
   server: McpServer,
@@ -1093,7 +1343,19 @@ export function registerSemanticIssueTools(
     },
     async (input: SemanticIssueDriftInput) => handleIssueDrift(input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan, observe, drift]);
+  const relationsPlan = server.registerTool(
+    "inari_issue_relations_plan",
+    {
+      title: "Preview existing-Issue relationship plan",
+      description:
+        "Compose live native parent/dependency observation with Core planning to preview an existing Issue's relationship reconciliation, without GitHub mutation.",
+      inputSchema: issueRelationsPlanInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: IssueRelationsPlanInput) => handleIssueRelationsPlan(input, dependencies),
+  );
+  return Object.freeze([contract, materialize, plan, observe, drift, relationsPlan]);
 }
 
 /** Register the typed Branch semantic artifact catalog without adding policy. */
@@ -1161,7 +1423,40 @@ export function registerSemanticBranchTools(
   return Object.freeze([contract, materialize, plan, observe, drift]);
 }
 
+/** Register the read-only worker handoff projection over the existing Change read boundary. */
+export function registerChangeTools(
+  server: McpServer,
+  dependencies: NativeChangeDependencies = {},
+): readonly RegisteredTool[] {
+  const goldenPathEntry = server.registerTool(
+    "inari_golden_path_entry",
+    {
+      title: "Read Golden Path entry",
+      description:
+        "Read the existing Change projection and expose the shared Golden Path entry/action result. This MCP tool is read-only; Change issuance remains owned by the existing CLI/Actions executor boundary.",
+      inputSchema: goldenPathEntryInputSchema,
+      outputSchema: goldenPathEntryOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: GoldenPathEntryInput) => handleGoldenPathEntry(input, dependencies),
+  );
+  const handoff = server.registerTool(
+    "inari_change_handoff",
+    {
+      title: "Read implementation handoff",
+      description:
+        "Read the bounded canonical implementation handoff for a healthy DRAFT Change. Inari owns remote identity only; the worker owns local worktree and session state.",
+      inputSchema: implementationHandoffInputSchema,
+      outputSchema: implementationHandoffOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: ImplementationHandoffInput) => handleImplementationHandoff(input, dependencies),
+  );
+  return Object.freeze([goldenPathEntry, handoff]);
+}
+
 /** Publicly expose the protocol annotations without allowing mutation. */
 export const SEMANTIC_PULL_REQUEST_MCP_ANNOTATIONS = READ_ONLY;
 export const SEMANTIC_ISSUE_MCP_ANNOTATIONS = READ_ONLY;
 export const SEMANTIC_BRANCH_MCP_ANNOTATIONS = READ_ONLY;
+export const GOLDEN_PATH_ENTRY_MCP_ANNOTATIONS = READ_ONLY;

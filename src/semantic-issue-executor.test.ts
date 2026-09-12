@@ -31,6 +31,8 @@ const source = JSON.stringify({
     labels: { presence: "optional", authority: { kind: "supplied" } },
     assignees: { presence: "optional", authority: { kind: "supplied" } },
     milestone: { presence: "optional", authority: { kind: "supplied" } },
+    parent: { presence: "optional", authority: { kind: "supplied" } },
+    dependsOn: { presence: "optional", authority: { kind: "supplied" } },
   },
   fields: [
     { id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } },
@@ -89,6 +91,7 @@ function issuePayload(
 ): string {
   return JSON.stringify({
     number: 701,
+    id: 9001,
     title: values.title,
     body: values.body,
     state: "open",
@@ -113,6 +116,38 @@ class ExecutorTransport implements GhTransport {
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
     if (args.includes("--jq")) return command("100000200\n");
+    if (args.includes("--include") && args.includes("GET") && args.some((value) => value.includes("/issues/2")))
+      return command(
+        'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":9002,"number":2,"repository_url":"https://api.github.com/repos/acme/repository-b"}',
+      );
+    if (args.includes("--include") && args.includes("GET") && args.some((value) => value.includes("/issues/3")))
+      return command(
+        'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":9003,"number":3,"repository_url":"https://api.github.com/repos/acme/repository-b"}',
+      );
+    if (
+      args.includes("--include") &&
+      args.includes("GET") &&
+      args.some((value) => value.includes("/issues/701/parent"))
+    )
+      return command("HTTP/2 404 Not Found\ncontent-type: application/json\n\n");
+    if (
+      args.includes("--include") &&
+      args.includes("GET") &&
+      args.some((value) => value.includes("/issues/701/dependencies/blocked_by"))
+    )
+      return command("HTTP/2 200 OK\ncontent-type: application/json\n\n[]");
+    if (args.includes("--include") && args.includes("GET") && args.some((value) => value.includes("/issues/701")))
+      return command(
+        'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":9001,"number":701,"repository_url":"https://api.github.com/repos/acme/repository-b"}',
+      );
+    if (args.includes("--include") && args.includes("POST") && args.some((value) => value.includes("/sub_issues")))
+      return command("HTTP/2 201 Created\ncontent-type: application/json\n\n{}");
+    if (
+      args.includes("--include") &&
+      args.includes("POST") &&
+      args.some((value) => value.includes("/dependencies/blocked_by"))
+    )
+      return command("HTTP/2 201 Created\ncontent-type: application/json\n\n{}");
     if (args.includes("repos/acme/repository-b") && args.includes("GET"))
       return command(JSON.stringify({ default_branch: "main" }));
     if (args.some((value) => value.endsWith("/issues")) && args.includes("POST")) {

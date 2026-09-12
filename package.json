@@ -40,9 +40,21 @@
       "types": "./dist/change-executor.d.ts",
       "import": "./dist/change-executor.js"
     },
+    "./change-handoff": {
+      "types": "./dist/change-handoff.d.ts",
+      "import": "./dist/change-handoff.js"
+    },
     "./change-trusted-executor": {
       "types": "./dist/change-trusted-executor.d.ts",
       "import": "./dist/change-trusted-executor.js"
+    },
+    "./golden-path-review": {
+      "types": "./dist/golden-path-review.d.ts",
+      "import": "./dist/golden-path-review.js"
+    },
+    "./golden-path-entry": {
+      "types": "./dist/golden-path-entry.d.ts",
+      "import": "./dist/golden-path-entry.js"
     },
     "./semantic-pr-projection": {
       "types": "./dist/semantic-pr-projection.d.ts",
@@ -55,6 +67,14 @@
     "./semantic-issue-observation": {
       "types": "./dist/semantic-issue-observation.d.ts",
       "import": "./dist/semantic-issue-observation.js"
+    },
+    "./semantic-issue-relations": {
+      "types": "./dist/semantic-issue-relations.d.ts",
+      "import": "./dist/semantic-issue-relations.js"
+    },
+    "./semantic-issue-relation-executor": {
+      "types": "./dist/semantic-issue-relation-executor.d.ts",
+      "import": "./dist/semantic-issue-relation-executor.js"
     },
     "./semantic-issue-lifecycle": {
       "types": "./dist/semantic-issue-lifecycle.d.ts",
