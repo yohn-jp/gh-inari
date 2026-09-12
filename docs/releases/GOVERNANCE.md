@@ -11,6 +11,9 @@ The exact machine-enforced rules live here, not in this document:
 
 - [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) —
   build, verify-version, pack, smoke-test, publish pipeline.
+- [`.github/workflows/gh-extension-release.yml`](../../.github/workflows/gh-extension-release.yml)
+  and [`scripts/build-gh-extension-release.sh`](../../scripts/build-gh-extension-release.sh) —
+  precompiled `gh` extension binary build and Release upload.
 - [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — format,
   lint, typecheck, test, build, package-contents checks that run on every
   PR and must be green before merge.
@@ -38,9 +41,7 @@ the release tag.
 
 1. **Land changes through PR.** Every change to `main` goes through a
    pull request with a linked Issue and a passing `CI` + `Governance` +
-   `CodeQL` run (see `CONTRIBUTING.md`). No direct pushes to `main` —
-   with one narrow, machine-enforced exception: see "Trusted dist sync"
-   below.
+   `CodeQL` run (see `CONTRIBUTING.md`). No direct pushes to `main`.
 2. **Update the release notes.** Add `docs/releases/<version>.md`
    (this file's sibling) in the same PR or a follow-up PR, following the
    structure of [`0.1.0.md`](0.1.0.md): Summary, Highlights, Fixed,
@@ -81,7 +82,14 @@ the release tag.
    commit (`git log -1 v<version>`) before relying on the release.
 
 5. **Publishing the Release is the only trigger for
-   `.github/workflows/publish.yml`.**
+   `.github/workflows/publish.yml`** (npm publish) **and
+   `.github/workflows/gh-extension-release.yml`** (precompiled `gh`
+   extension binaries, built by
+   [`scripts/build-gh-extension-release.sh`](../../scripts/build-gh-extension-release.sh)
+   and uploaded to the same Release by the shared
+   `yohn-jp/.github/.github/workflows/gh-extension-release.yml@main`
+   workflow). Both run independently off the same `release: published`
+   event; a failure in one does not block the other.
 6. **Automated pipeline runs, in order, and stops at the first failure:**
    - `pnpm install --frozen-lockfile`
    - `pnpm run typecheck`
@@ -107,36 +115,23 @@ inari` extension.
    - Any `npm warn publish` output is treated as a failure even if `npm
 publish` itself exits 0.
 
-## Trusted dist sync
+## Precompiled `gh` extension binaries
 
-`dist/**` is generated output, tracked in git so that `gh extension
-install`/`gh extension upgrade` have a runnable artifact without a build
-step. Regenerating and committing it is not a PR author's
-responsibility (see `CONTRIBUTING.md`).
-
-[`.github/workflows/dist-sync.yml`](../../.github/workflows/dist-sync.yml)
-is the sole permitted direct-push path to `main`: it runs after a merge
-lands, rebuilds from canonical source, and — only if `dist/**` actually
-changed — commits and pushes that diff directly to `main`. Its write
-scope is mechanically limited to `dist/**`; it never touches source or
-configuration.
-
-Authentication uses a dedicated GitHub App (`inari-dist-sync`), not the
-ambient `GITHUB_TOKEN` — GitHub Rulesets cannot list the built-in
-`github-actions` identity as a bypass actor, only installed Apps, Deploy
-keys, Teams, and roles. The workflow mints a short-lived installation
-token via `actions/create-github-app-token` (job permission stays
-`contents: read`; only the App's own installation token can write) and
-uses it for the checkout and push. This is enforced by a GitHub Ruleset
-bypass scoped narrowly to the `inari-dist-sync` App on the `main` branch
-pattern, not by anything tracked in this repository (there is no
-Rulesets-as-code file here). No human or agent identity holds equivalent
-bypass authority. Because Ruleset bypass is scoped per-actor, this App
-is installed with `contents: write` on this repository only and no
-other permission — it cannot open PRs, read Issues, or act on any other
-repository. `CODEOWNERS` requires `@yohnark` review on all of
-`/.github/`, so any future addition of `contents: write` to a workflow
-file should be treated as security-sensitive during review.
+`dist/**` is build output and is gitignored — it is never committed and
+`gh extension install`/`gh extension upgrade` no longer depend on it
+being present in the repository. Instead, publishing a Release triggers
+[`.github/workflows/gh-extension-release.yml`](../../.github/workflows/gh-extension-release.yml),
+a thin wrapper around the shared, organization-owned
+`yohn-jp/.github/.github/workflows/gh-extension-release.yml@main`
+workflow. That shared workflow checks out the exact release tag, runs
+this repository's own
+[`scripts/build-gh-extension-release.sh`](../../scripts/build-gh-extension-release.sh)
+(which owns the Node/TypeScript build, packaging, and target-platform
+list end to end), verifies the produced artifacts follow the GitHub CLI
+naming contract (`gh-inari-<os>-<arch>[.exe]`), and uploads them to that
+same Release. `gh extension install`/`gh extension upgrade` pick up
+these precompiled binaries directly; no build step or Node runtime is
+required on the installing machine.
 
 ## What this buys
 
