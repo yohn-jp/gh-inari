@@ -132,6 +132,11 @@ import {
   loadRuntimeAuthorityKeyPair,
 } from "./agent-authority/runtime-key.js";
 import {
+  registerRuntimeAuthority,
+  revokeRuntimeAuthority,
+  rotateRuntimeAuthority,
+} from "./agent-authority/runtime-authority-lifecycle.js";
+import {
   createSessionCredentialBundle,
   inspectSessionCredentialBundle,
   loadSessionCredentialBundle,
@@ -341,7 +346,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "authority") {
-      return runAuthorityCommand(command, rest, parsed, root, json);
+      return await runAuthorityCommand(command, rest, parsed, root, json);
     }
     if (domain === "session") {
       return await runSessionCommand(command, rest, parsed, root, json);
@@ -853,39 +858,98 @@ function rejectUnsupportedAuthorityOptions(
   );
 }
 
-function runAuthorityCommand(
+async function runAuthorityCommand(
   command: string | undefined,
   rest: readonly string[],
   parsed: ParsedArgs,
   root: string,
   json: boolean,
-): number {
-  if (command !== "generate" || rest.length > 0) {
+): Promise<number> {
+  if (
+    (command !== "generate" && command !== "register" && command !== "rotate" && command !== "revoke") ||
+    (command !== "revoke" && rest.length > 0) ||
+    (command === "revoke" && rest.length !== 1)
+  ) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
   }
-  rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
-  const requestedPath = parsed.options.privateKey;
-  const privateKeyPath =
-    typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
-  const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
-    replace: parsed.options.replace === true,
-  });
-  const output = {
-    ok: true,
-    operation: "authority.generate",
-    privateKeyPath,
-    publicKey: pair.publicKeyJwk,
-    publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
-    repositoryTrustChanged: false,
-  } as const;
+
+  if (command === "generate") {
+    rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
+    const requestedPath = parsed.options.privateKey;
+    const privateKeyPath =
+      typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
+    const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
+      replace: parsed.options.replace === true,
+    });
+    const output = {
+      ok: true,
+      operation: "authority.generate",
+      privateKeyPath,
+      publicKey: pair.publicKeyJwk,
+      publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
+      repositoryTrustChanged: false,
+    } as const;
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Generated local Runtime Authority keypair.");
+      console.log(`Private key: ${privateKeyPath}`);
+      console.log(`Public key: ${output.publicKeyJson}`);
+      console.log("Repository trust was not modified.");
+    }
+    return 0;
+  }
+
+  rejectUnsupportedAuthorityLifecycleOptions(command, parsed.options, parsed.capabilities);
+  const result =
+    command === "revoke"
+      ? revokeRuntimeAuthority(root, rest[0] as string)
+      : command === "register"
+        ? registerRuntimeAuthority(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))))
+        : rotateRuntimeAuthority(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))));
+  const output = { ...result } as const;
   if (json) console.log(JSON.stringify(output));
   else {
-    console.log("Generated local Runtime Authority keypair.");
-    console.log(`Private key: ${privateKeyPath}`);
-    console.log(`Public key: ${output.publicKeyJson}`);
-    console.log("Repository trust was not modified.");
+    if (command === "register") console.log("Registered a Runtime Authority trust record.");
+    else if (command === "rotate") console.log("Added a Runtime Authority trust record for overlap rotation.");
+    else if (result.changed) console.log("Disabled the Runtime Authority trust record.");
+    else console.log("Runtime Authority trust record is already disabled.");
+    console.log(`Artifact: ${path.join(root, result.path)}`);
   }
   return 0;
+}
+
+function requiredAuthorityFrom(parsed: ParsedArgs): string {
+  const value = parsed.options.from;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new CliError("INPUT_REQUIRED", "Use --from <authority.json>.", "--from");
+  }
+  return value;
+}
+
+function authorityInputPath(root: string, value: string): string {
+  return value === "-" ? value : path.resolve(root, value);
+}
+
+function rejectUnsupportedAuthorityLifecycleOptions(
+  command: "register" | "rotate" | "revoke",
+  options: Readonly<Record<string, string | boolean>>,
+  capabilities: readonly string[],
+): void {
+  if (capabilities.length > 0) {
+    throw new CliError("INVALID_OPTION", "Option --capability is not supported by authority commands.", "--capability");
+  }
+  const definition = getCommand(
+    `authority.${command}` as "authority.register" | "authority.rotate" | "authority.revoke",
+  );
+  const unsupported = Object.keys(options).find((id) => !definition.optionIds.includes(id as OptionId));
+  if (unsupported === undefined) return;
+  const option = getOption(unsupported as OptionId);
+  throw new CliError(
+    "INVALID_OPTION",
+    `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority ${command}.`,
+    "$argv",
+    { command: `authority ${command}`, option: option.id },
+  );
 }
 
 function requiredSessionOption(
@@ -2834,6 +2898,7 @@ function classifyExitCode(error: unknown): number {
   )
     return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
