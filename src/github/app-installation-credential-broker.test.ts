@@ -52,7 +52,6 @@ function brokerOptions(
     installationId: "219",
     privateKeyPem: privateKey,
     repository,
-    target,
     fetch,
     now: () => now,
     ...overrides,
@@ -86,13 +85,19 @@ test("pre-admission read capability requests the minimum read ceiling and expose
   const broker = new GitHubAppInstallationCredentialBroker(
     brokerOptions(async (_input, init) => {
       calls.push(init ?? {});
-      return calls.length === 1 ? tokenResponse() : new Response(JSON.stringify({ number: 1 }), { status: 200 });
+      return calls.length === 1
+        ? tokenResponse({ repositories: [{ id: 218000009, full_name: target.nameWithOwner }] })
+        : new Response(JSON.stringify({ number: 1 }), { status: 200 });
     }),
   );
 
   let scope: unknown;
-  await broker.withRepositoryReadCapability({ target }, async (capability) => {
+  await broker.withRepositoryReadCapability({}, async (capability) => {
     scope = capability.scope;
+    assert.deepEqual(Object.keys(capability).sort(), ["scope", "transport"]);
+    assert.deepEqual(Object.keys(capability.transport), ["request"]);
+    assert.equal("withScopedRepositoryRead" in broker, false);
+    assert.equal("withRepositoryRead" in broker, false);
     const result = await capability.transport.request({
       hostname: "github.com",
       method: "GET",
@@ -111,15 +116,38 @@ test("pre-admission read capability requests the minimum read ceiling and expose
 
   const issued = JSON.parse(String(calls[0]?.body)) as { permissions: unknown };
   assert.deepEqual(issued.permissions, GITHUB_APP_REPOSITORY_READ_PERMISSIONS);
+  assert.deepEqual((scope as { repository: IssuerRepositoryIdentity }).repository, {
+    repositoryHost: "github.com",
+    repositoryId: "218000009",
+    nameWithOwner: "acme/inari",
+  });
   assert.equal(JSON.stringify(scope).includes("installation-token-secret"), false);
   assert.equal(JSON.stringify(scope).includes(privateKey), false);
   assert.match(String(calls[0]?.headers && JSON.stringify(calls[0]?.headers)), /^.*Bearer [^.]+\.[^.]+\.[^.]+.*$/u);
 });
 
+test("pre-admission reads reject caller-supplied immutable identity", async () => {
+  let calls = 0;
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(async () => {
+      calls += 1;
+      return tokenResponse();
+    }),
+  );
+  await assert.rejects(
+    broker.withRepositoryReadCapability(
+      { target } as unknown as { readonly permissions?: typeof GITHUB_APP_REPOSITORY_READ_PERMISSIONS },
+      async () => undefined,
+    ),
+    (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "installation-scope",
+  );
+  assert.equal(calls, 0);
+});
+
 test("read capability binds host and repository path independently of owner/name-only input", async () => {
   const broker = new GitHubAppInstallationCredentialBroker(brokerOptions(async () => tokenResponse()));
   await assert.rejects(
-    broker.withRepositoryReadCapability({ target }, async (capability) => {
+    broker.withRepositoryReadCapability({}, async (capability) => {
       await capability.transport.request({ hostname: "ghe.example.com", method: "GET", path: "repos/acme/inari" });
     }),
     (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "repository-read",
@@ -133,7 +161,7 @@ test("read capability binds host and repository path independently of owner/name
     }),
   );
   await assert.rejects(
-    pathBroker.withRepositoryReadCapability({ target }, async (capability) => {
+    pathBroker.withRepositoryReadCapability({}, async (capability) => {
       await capability.transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/other" });
     }),
     (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "repository-read",
@@ -187,13 +215,15 @@ test("mutation capability rejects read-only evidence permissions and target iden
     ),
     (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "installation-scope",
   );
-  assert.equal(calls, 0);
+  assert.equal(calls, 1);
 });
 
-test("installation response must select exactly the immutable target repository", async () => {
+test("installation response must select exactly one well-formed configured repository", async () => {
   for (const repositories of [
     [],
-    [{ id: 218000002, full_name: target.nameWithOwner }],
+    [{ id: Number(target.repositoryId), full_name: "acme/other" }],
+    [{ id: "not-a-repository-id", full_name: target.nameWithOwner }],
+    [{ id: Number(target.repositoryId) }],
     [
       { id: Number(target.repositoryId), full_name: target.nameWithOwner },
       { id: 218000002, full_name: "acme/other" },
@@ -203,7 +233,7 @@ test("installation response must select exactly the immutable target repository"
       brokerOptions(async () => tokenResponse({ repositories })),
     );
     await assert.rejects(
-      broker.withRepositoryReadCapability({ target }, async () => undefined),
+      broker.withRepositoryReadCapability({}, async () => undefined),
       (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "installation-scope",
     );
   }
@@ -211,10 +241,30 @@ test("installation response must select exactly the immutable target repository"
   for (const identity of [{ app_id: "220" }, { installation_id: "220" }]) {
     const broker = new GitHubAppInstallationCredentialBroker(brokerOptions(async () => tokenResponse(identity)));
     await assert.rejects(
-      broker.withRepositoryReadCapability({ target }, async () => undefined),
+      broker.withRepositoryReadCapability({}, async () => undefined),
       (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "installation-scope",
     );
   }
+});
+
+test("repository rereads must retain the provider-derived immutable identity", async () => {
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(async (_input, init) => {
+      return typeof init?.body === "string"
+        ? tokenResponse({ repositories: [{ id: 218000009, full_name: target.nameWithOwner }] })
+        : new Response(JSON.stringify({ id: 218000010, full_name: target.nameWithOwner }), { status: 200 });
+    }),
+  );
+  await assert.rejects(
+    broker.withRepositoryReadCapability({}, async (capability) => {
+      await capability.transport.request({
+        hostname: "github.com",
+        method: "GET",
+        path: "repos/acme/inari/",
+      });
+    }),
+    (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "repository-read",
+  );
 });
 
 test("expired, malformed, and over-granted installation responses fail closed", async () => {
@@ -226,7 +276,7 @@ test("expired, malformed, and over-granted installation responses fail closed", 
   for (const testCase of cases) {
     const broker = new GitHubAppInstallationCredentialBroker(brokerOptions(async () => testCase.response));
     await assert.rejects(
-      broker.withRepositoryReadCapability({ target }, async () => undefined),
+      broker.withRepositoryReadCapability({}, async () => undefined),
       (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === testCase.stage,
     );
   }
@@ -235,7 +285,7 @@ test("expired, malformed, and over-granted installation responses fail closed", 
     brokerOptions(async () => tokenResponse({}, { contents: "read", issues: "read", pull_requests: "write" })),
   );
   await assert.rejects(
-    excessPermissionBroker.withRepositoryReadCapability({ target }, async () => undefined),
+    excessPermissionBroker.withRepositoryReadCapability({}, async () => undefined),
     (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "installation-scope",
   );
 });
@@ -248,7 +298,7 @@ test("provider failures and operation errors never disclose App secrets", async 
     }),
   );
   await assert.rejects(
-    failingBroker.withRepositoryReadCapability({ target }, async () => undefined),
+    failingBroker.withRepositoryReadCapability({}, async () => undefined),
     (error: unknown) => {
       assert.ok(error instanceof GitHubAppCredentialBrokerError);
       assert.equal(error.stage, "installation-token");
@@ -260,7 +310,7 @@ test("provider failures and operation errors never disclose App secrets", async 
   const operationBroker = new GitHubAppInstallationCredentialBroker(brokerOptions(async () => tokenResponse()));
   const operationSecret = "operation-secret";
   await assert.rejects(
-    operationBroker.withRepositoryReadCapability({ target }, async () => {
+    operationBroker.withRepositoryReadCapability({}, async () => {
       throw new Error(operationSecret);
     }),
     (error: unknown) => {

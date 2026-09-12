@@ -111,8 +111,12 @@ Every issuer operation carries all of these identities:
 The broker must return scope evidence proving that:
 
 - the App and installation identities match;
-- the installation host matches the target repository host;
-- the selected repository ID and locator match the target;
+- for pre-admission reads, the selected repository ID and locator are derived
+  from the provider response, with the host fixed to the configured canonical
+  host;
+- for post-admission mutations, the selected repository ID and locator match
+  the admitted `IssuerCredentialRequest.target`;
+- the installation host matches the scoped repository host;
 - the credential is restricted to the selected repository;
 - the granted permissions exactly match the requested effect capability,
   apart from GitHub's automatic metadata read permission; and

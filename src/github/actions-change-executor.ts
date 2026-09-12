@@ -1375,7 +1375,6 @@ export async function createGitHubActionsChangeExecutor(
       installationId,
       privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
       repository,
-      target,
       repositoryNodeId,
       apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
       fetch: options.fetch,
