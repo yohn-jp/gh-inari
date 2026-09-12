@@ -386,21 +386,47 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
         parents: [r.expectedHead],
         ...(r.commit.author === undefined ? {} : { author: r.commit.author }),
       });
-      const update = await capability.compareAndAdvanceRef({
-        branch: r.branch,
-        beforeOid: r.expectedHead,
-        afterOid: newCommit.sha,
-        force: false,
-      });
-      if (update.status !== "updated") {
-        const reread = await capability.readRef(r.branch);
-        if (reread?.sha === newCommit.sha)
-          return result(r, "idempotent", undefined, reread.sha, provenance(context, capability, r, c));
-        if (reread?.sha !== r.expectedHead)
-          return fail(r, "recovery-required", "Provider ambiguity requires recovery.", "recovery-required");
-        return fail(r, "stale-head", "Concurrent branch update rejected the compare-and-swap.", "stale");
+
+      const resolveUncertainUpdate = async (providerThrew: boolean): Promise<BranchAdvanceSemanticResult> => {
+        let reread: Awaited<ReturnType<GitHubBranchAdvanceCapability["readRef"]>>;
+        try {
+          reread = await capability.readRef(r.branch);
+        } catch {
+          return fail(r, "recovery-required", "Authoritative provider reread failed.", "recovery-required");
+        }
+        if (reread?.sha === newCommit.sha) {
+          const p = provenance(context, capability, r, c);
+          if (!p) return fail(r, "verification", "Verified provenance is unavailable.", "recovery-required");
+          return result(r, "idempotent", undefined, reread.sha, p);
+        }
+        if (reread?.sha === r.expectedHead) {
+          return providerThrew
+            ? fail(r, "provider", "Provider mutation was not proven.")
+            : fail(r, "stale-head", "Concurrent branch update rejected the compare-and-swap.", "stale");
+        }
+        return fail(r, "recovery-required", "Provider ambiguity requires recovery.", "recovery-required");
+      };
+
+      let update: Awaited<ReturnType<GitHubBranchAdvanceCapability["compareAndAdvanceRef"]>>;
+      try {
+        update = await capability.compareAndAdvanceRef({
+          branch: r.branch,
+          beforeOid: r.expectedHead,
+          afterOid: newCommit.sha,
+          force: false,
+        });
+      } catch {
+        return resolveUncertainUpdate(true);
       }
-      const reread = await capability.readRef(r.branch);
+      if (update.status !== "updated") {
+        return resolveUncertainUpdate(false);
+      }
+      let reread: Awaited<ReturnType<GitHubBranchAdvanceCapability["readRef"]>>;
+      try {
+        reread = await capability.readRef(r.branch);
+      } catch {
+        return fail(r, "recovery-required", "Authoritative provider reread failed.", "recovery-required");
+      }
       if (!reread || reread.sha !== newCommit.sha)
         return fail(r, "verification", "Authoritative postcondition verification failed.", "recovery-required");
       const p = provenance(context, capability, r, c);
