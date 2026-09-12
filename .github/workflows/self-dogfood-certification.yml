@@ -1,0 +1,223 @@
+name: Self-dogfood certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      disposable_issue:
+        description: "Existing governed Issue containing the exact inari:self-dogfood:v1 marker"
+        required: true
+        type: string
+      confirm_disposable:
+        description: "Repeat the disposable Issue number exactly"
+        required: true
+        type: string
+      exercise_abort:
+        description: "After REVIEW, request only Core-governed abort/recovery"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: self-dogfood-${{ inputs.disposable_issue }}
+  cancel-in-progress: false
+
+# This workflow is the explicit privileged opt-in boundary. Ordinary CI never
+# dispatches the trusted Change executor or mutates GitHub state.
+permissions:
+  actions: write
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  certify:
+    name: Certify exact installed artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact dispatched source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact source revision
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.18.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install source dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build, pack, and install outside the source checkout
+        id: artifact
+        shell: bash
+        env:
+          EXPECTED_ISSUE: ${{ inputs.disposable_issue }}
+          EXPECTED_CONFIRMATION: ${{ inputs.confirm_disposable }}
+          EXERCISE_ABORT: ${{ inputs.exercise_abort }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_ISSUE" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_CONFIRMATION" == "$EXPECTED_ISSUE" ]]
+
+          source_sha="$(git rev-parse HEAD)"
+          test "$source_sha" = "$GITHUB_SHA"
+          dogfood_root="$RUNNER_TEMP/self-dogfood"
+          package_dir="$dogfood_root/package"
+          consumer_dir="$dogfood_root/consumer"
+          worker_cwd="$dogfood_root/worker-cwd"
+          mkdir -p "$package_dir" "$consumer_dir" "$worker_cwd"
+
+          pnpm run build
+          pnpm pack --pack-destination "$package_dir" >/dev/null
+          tarball="$(find "$package_dir" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          tarball_sha256="sha256:$(sha256sum "$tarball" | awk '{print $1}')"
+
+          printf '%s\n' '{"name":"gh-inari-self-dogfood-consumer","private":true}' > "$consumer_dir/package.json"
+          (
+            cd "$consumer_dir"
+            pnpm add --ignore-scripts --save-exact "$tarball"
+          )
+          installed_package="$consumer_dir/node_modules/gh-inari"
+          installed_executable="$consumer_dir/node_modules/.bin/inari"
+          test -d "$installed_package"
+          test -x "$installed_executable"
+          source_root="$(pwd -P)"
+          installed_package_real="$(realpath "$installed_package")"
+          installed_executable_real="$(realpath "$installed_executable")"
+          [[ "$installed_package_real" != "$source_root"/* ]]
+          [[ "$installed_executable_real" != "$source_root"/* ]]
+
+          runtime_info="$dogfood_root/installed-runtime.json"
+          "$installed_executable" --version --json > "$runtime_info"
+          node --input-type=module - "$runtime_info" <<'NODE'
+          import fs from "node:fs";
+          const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (value.ok !== true || value.name !== "gh-inari" || value.invocation?.canonical !== "inari")
+            throw new Error("the installed executable did not report the canonical gh-inari identity");
+          if (!value.capabilities?.includes("canonical-invocation"))
+            throw new Error("the installed executable did not report its runtime capability contract");
+          NODE
+
+          worker_script="$dogfood_root/self-dogfood-worker.mjs"
+          worker_observation="$dogfood_root/worker-observation.json"
+          evidence="$dogfood_root/self-dogfood-golden-path.json"
+          metadata="$dogfood_root/certification-metadata.json"
+          cat > "$worker_script" <<'NODE'
+          import fs from "node:fs";
+          const output = process.argv[2];
+          const sensitiveEnvironmentKeys = Object.keys(process.env).filter((key) =>
+            /(token|secret|private|password|credential|app[_-]?key)/iu.test(key),
+          );
+          if (sensitiveEnvironmentKeys.length !== 0) throw new Error("worker received credential-bearing environment keys");
+          const handoff = JSON.parse(process.env.INARI_IMPLEMENTATION_HANDOFF ?? "null");
+          if (handoff?.kind !== "implementation-handoff" || handoff?.state !== "DRAFT")
+            throw new Error("worker did not receive the canonical Draft handoff");
+          fs.writeFileSync(
+            output,
+            `${JSON.stringify({ sourceCommitSha: process.env.INARI_SOURCE_COMMIT_SHA, sensitiveEnvironmentKeys, handoff })}\n`,
+            { encoding: "utf8", mode: 0o600 },
+          );
+          NODE
+
+          {
+            echo "DOGFOOD_SOURCE_SHA=$source_sha"
+            echo "DOGFOOD_TARBALL=$tarball"
+            echo "DOGFOOD_TARBALL_SHA256=$tarball_sha256"
+            echo "DOGFOOD_CONSUMER=$consumer_dir"
+            echo "DOGFOOD_INSTALLED_PACKAGE=$installed_package"
+            echo "DOGFOOD_INSTALLED_EXECUTABLE=$installed_executable"
+            echo "DOGFOOD_WORKER_CWD=$worker_cwd"
+            echo "DOGFOOD_WORKER_SCRIPT=$worker_script"
+            echo "DOGFOOD_WORKER_OBSERVATION=$worker_observation"
+            echo "DOGFOOD_EVIDENCE=$evidence"
+            echo "DOGFOOD_METADATA=$metadata"
+            echo "DOGFOOD_EXERCISE_ABORT=$EXERCISE_ABORT"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the real self-dogfood coordinator with the installed artifact
+        id: dogfood
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INARI_SELF_DOGFOOD: "1"
+          DOGFOOD_ISSUE: ${{ inputs.disposable_issue }}
+          DOGFOOD_CONFIRMATION: ${{ inputs.confirm_disposable }}
+        run: |
+          set -euo pipefail
+          [[ "$DOGFOOD_ISSUE" == "$DOGFOOD_CONFIRMATION" ]]
+          worker_command="$(node -e 'process.stdout.write(JSON.stringify([process.execPath, process.argv[1], process.argv[2]]))' "$DOGFOOD_WORKER_SCRIPT" "$DOGFOOD_WORKER_OBSERVATION")"
+          args=(
+            --inari "$DOGFOOD_INSTALLED_EXECUTABLE"
+            --repository "$GITHUB_REPOSITORY"
+            --issue "$DOGFOOD_ISSUE"
+            --confirm-disposable "$DOGFOOD_CONFIRMATION"
+            --worker-cwd "$DOGFOOD_WORKER_CWD"
+            --worker-command "$worker_command"
+            --output "$DOGFOOD_EVIDENCE"
+          )
+          if [[ "$DOGFOOD_EXERCISE_ABORT" == "true" ]]; then
+            export INARI_SELF_DOGFOOD_ALLOW_RECOVERY=1
+            args+=(--abort)
+          fi
+          node scripts/self-dogfood.mjs "${args[@]}"
+
+      - name: Validate canonical evidence and record residual state
+        id: evidence
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          DOGFOOD_ISSUE: ${{ inputs.disposable_issue }}
+          DOGFOOD_EXERCISE_ABORT: ${{ inputs.exercise_abort }}
+        run: |
+          set -euo pipefail
+          args=(
+            --evidence "$DOGFOOD_EVIDENCE"
+            --source-sha "$DOGFOOD_SOURCE_SHA"
+            --repository "$GITHUB_REPOSITORY"
+            --issue "$DOGFOOD_ISSUE"
+            --tarball "$DOGFOOD_TARBALL"
+            --tarball-sha256 "$DOGFOOD_TARBALL_SHA256"
+            --installed-package "$DOGFOOD_INSTALLED_PACKAGE"
+            --installed-executable "$DOGFOOD_INSTALLED_EXECUTABLE"
+            --worker-observation "$DOGFOOD_WORKER_OBSERVATION"
+            --metadata "$DOGFOOD_METADATA"
+            --summary "$GITHUB_STEP_SUMMARY"
+            --source-root "$GITHUB_WORKSPACE"
+            --exercise-abort "$DOGFOOD_EXERCISE_ABORT"
+          )
+          node scripts/self-dogfood-workflow.mjs "${args[@]}"
+
+      - name: Retain source-addressable certification artifact
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: self-dogfood-golden-path-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/self-dogfood/self-dogfood-golden-path.json
+            ${{ runner.temp }}/self-dogfood/certification-metadata.json
+            ${{ runner.temp }}/self-dogfood/worker-observation.json
+            ${{ runner.temp }}/self-dogfood/installed-runtime.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Require a passed certification
+        if: always()
+        run: |
+          test "${{ steps.dogfood.outcome }}" = success
+          test "${{ steps.evidence.outcome }}" = success

@@ -2095,10 +2095,41 @@ test("issue check is read-only and classifies a canonical artifact as current", 
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     assert.equal(output.status, "valid-current");
     assert.equal(output.normalizable, false);
+    assert.equal("disposableMarker" in output, false);
     assert.equal(
       transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
       false,
     );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("issue check exposes disposability only for the exact self-dogfood marker", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: disposable dogfood",
+        body: `${REMOTE_ISSUE_BODY.replace("A deterministic proposal", "inari:self-dogfood:v1")}\n<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/81",
+        labels: [],
+        assignees: [],
+      },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "81", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.deepEqual(output.disposableMarker, { version: 1, kind: "self-dogfood" });
   } finally {
     console.log = originalLog;
   }
