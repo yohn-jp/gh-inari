@@ -84,6 +84,20 @@ export interface GitDataRefUpdateResult {
   readonly status: "updated" | "rejected";
 }
 
+/** The only App-internal Git surface used by branch advancement. */
+export interface GitHubBranchAdvanceCapability {
+  readonly scope: IssuerInstallationScope;
+  readRef(branch: string): Promise<GitDataRef | undefined>;
+  readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }>;
+  readTree(refOrSha: string): Promise<GitDataTree>;
+  createBlob(input: GitDataBlobInput): Promise<{ readonly sha: string }>;
+  createTree(input: GitDataTreeInput): Promise<{ readonly sha: string }>;
+  createCommit(
+    input: Omit<GitDataCommitInput, "author"> & { readonly author?: GitDataCommitAuthor },
+  ): Promise<{ readonly sha: string }>;
+  compareAndAdvanceRef(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult>;
+}
+
 export interface GitDataCapability {
   readonly version: GitDataCapabilityVersion;
   readonly scope: IssuerInstallationScope;
@@ -213,6 +227,13 @@ export class GitHubGitDataCapability implements GitDataCapability {
     return Object.freeze({ sha: body.sha, entries: Object.freeze(entries) });
   }
 
+  async readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }> {
+    if (!validSha(sha)) throw new GitDataCapabilityError();
+    const body = await this.#request("GET", `${this.repositoryPath()}/git/commits/${sha}`, undefined, 200);
+    if (body.sha !== sha || !isRecord(body.tree) || !validSha(body.tree.sha)) throw new GitDataCapabilityError();
+    return Object.freeze({ sha, treeSha: body.tree.sha });
+  }
+
   async createBlob(input: GitDataBlobInput): Promise<{ readonly sha: string }> {
     if (!isRecord(input) || typeof input.content !== "string" || !validBase64(input.content)) {
       throw new GitDataCapabilityError();
@@ -253,7 +274,9 @@ export class GitHubGitDataCapability implements GitDataCapability {
     return Object.freeze({ sha: bodyRecordSha(body) });
   }
 
-  async createCommit(input: GitDataCommitInput): Promise<{ readonly sha: string }> {
+  async createCommit(
+    input: GitDataCommitInput | (Omit<GitDataCommitInput, "author"> & { readonly author?: GitDataCommitAuthor }),
+  ): Promise<{ readonly sha: string }> {
     if (
       !isRecord(input) ||
       !validText(input.message, 4_096) ||
@@ -261,9 +284,8 @@ export class GitHubGitDataCapability implements GitDataCapability {
       !Array.isArray(input.parents) ||
       input.parents.length !== 1 ||
       !validSha(input.parents[0]) ||
-      !isRecord(input.author) ||
-      !validText(input.author.name, 256) ||
-      !validText(input.author.email, 320)
+      (input.author !== undefined &&
+        (!isRecord(input.author) || !validText(input.author.name, 256) || !validText(input.author.email, 320)))
     ) {
       throw new GitDataCapabilityError();
     }
@@ -274,7 +296,7 @@ export class GitHubGitDataCapability implements GitDataCapability {
         message: input.message,
         tree: input.treeSha,
         parents: input.parents,
-        author: { name: input.author.name, email: input.author.email },
+        ...(input.author === undefined ? {} : { author: { name: input.author.name, email: input.author.email } }),
       },
       201,
     );
@@ -319,6 +341,10 @@ export class GitHubGitDataCapability implements GitDataCapability {
     }
     if (!isRecord(body.data) || !isRecord(body.data.updateRefs)) throw new GitDataCapabilityError();
     return Object.freeze({ status: "updated" });
+  }
+
+  async compareAndAdvanceRef(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult> {
+    return this.updateRefs(input);
   }
 
   async #request(
