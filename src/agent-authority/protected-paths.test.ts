@@ -80,6 +80,27 @@ test("detects implicit protected changes from complete before/after snapshots", 
   assert.deepEqual(result.protectedPaths, [authorityPath]);
 });
 
+test("treats same-SHA mode/type transitions as protected and rejects incomplete identity", () => {
+  for (const after of [
+    { ...entry(authorityPath, "same-sha"), mode: "120000" },
+    { ...entry(authorityPath, "same-sha"), type: "tree" as const },
+  ]) {
+    const result = classifyDelegatedTreeDelta({
+      changes: [],
+      before: [entry(authorityPath, "same-sha")],
+      after: [after],
+    });
+    assert.equal(result.kind, "protected");
+  }
+
+  const incomplete = classifyDelegatedTreeDelta({
+    changes: [],
+    before: [{ path: authorityPath, sha: "same-sha" }],
+    after: [{ path: authorityPath, sha: "same-sha" }],
+  });
+  assert.equal(incomplete.kind, "invalid");
+});
+
 test("requires snapshot differences to be represented by the complete delta", () => {
   const result = classifyDelegatedTreeDelta({
     changes: [],

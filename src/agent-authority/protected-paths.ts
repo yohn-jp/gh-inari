@@ -136,12 +136,12 @@ export interface DelegatedTreePathChange {
   readonly previousPath?: string;
 }
 
-/** Minimum immutable identity required for complete before/after tree snapshots. */
+/** Complete immutable identity required for before/after tree snapshots. */
 export interface DelegatedTreeSnapshotEntry {
   readonly path: string;
   readonly sha: string;
-  readonly mode?: string | number;
-  readonly type?: "blob" | "tree" | "commit";
+  readonly mode: string | number;
+  readonly type: "blob" | "tree" | "commit";
 }
 
 export interface DelegatedTreeDelta {
@@ -217,19 +217,16 @@ interface SnapshotMap {
 
 function snapshotFingerprint(entry: Record<string, unknown>): string | undefined {
   if (typeof entry.sha !== "string" || entry.sha.length === 0) return undefined;
-  if (
-    entry.mode !== undefined &&
-    !(
-      (typeof entry.mode === "string" && entry.mode.length > 0) ||
-      (typeof entry.mode === "number" && Number.isFinite(entry.mode))
-    )
-  ) {
+  if (!(
+    (typeof entry.mode === "string" && entry.mode.length > 0) ||
+    (typeof entry.mode === "number" && Number.isFinite(entry.mode))
+  )) {
     return undefined;
   }
-  if (entry.type !== undefined && entry.type !== "blob" && entry.type !== "tree" && entry.type !== "commit") {
+  if (entry.type !== "blob" && entry.type !== "tree" && entry.type !== "commit") {
     return undefined;
   }
-  return JSON.stringify([entry.sha, entry.mode ?? null, entry.type ?? null]);
+  return JSON.stringify([entry.sha, entry.mode, entry.type]);
 }
 
 function readSnapshot(value: unknown, label: string): SnapshotMap | undefined {
