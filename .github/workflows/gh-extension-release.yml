@@ -1,5 +1,9 @@
 name: gh extension precompiled release
 
+# Canonical wrapper distributed via .github/sync.yml (SKIP_PR: true, direct
+# push) — do not hand-edit in a consumer repository; edit this file in
+# yohn-jp/.github instead.
+
 on:
   release:
     types: [published]
@@ -12,5 +16,7 @@ jobs:
     uses: yohn-jp/.github/.github/workflows/gh-extension-release.yml@main
     with:
       release-tag: ${{ github.event.release.tag_name }}
+      certification-verification-script: scripts/verify-gh-extension-release-certification.mjs
     permissions:
+      actions: read
       contents: write
