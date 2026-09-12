@@ -19,6 +19,8 @@ const EXPECTED_PACKED_FILES = [
   "package.json",
   "branch-naming-authority.d.mts",
   "branch-naming-authority.mjs",
+  "scripts/certification-evidence.d.mts",
+  "scripts/certification-evidence.mjs",
   ".codex-plugin/plugin.json",
   "skills/inari/SKILL.md",
   "dist/artifact.d.ts",

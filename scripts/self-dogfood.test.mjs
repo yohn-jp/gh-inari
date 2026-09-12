@@ -6,6 +6,11 @@ import path from "node:path";
 import process from "node:process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import {
+  CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_KINDS,
+  SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+} from "./certification-evidence.mjs";
 import { parseArguments, projectWorkerHandoff, sanitizeWorkerEnvironment } from "./self-dogfood.mjs";
 
 const scriptPath = fileURLToPath(new URL("./self-dogfood.mjs", import.meta.url));
@@ -20,20 +25,21 @@ test("self-dogfood requires an exact disposable Issue confirmation", () => {
   );
 });
 
-test("evidence authority does not skip the following repository option", () => {
-  const parsed = parseArguments([
-    "--evidence-authority",
-    "/tmp/shared-certification-authority.mjs",
-    "--repository",
-    "yohn-jp/gh-inari",
-    "--issue",
-    "416",
-    "--confirm-disposable",
-    "416",
-  ]);
-  assert.equal(parsed.options.evidenceAuthority, "/tmp/shared-certification-authority.mjs");
-  assert.deepEqual(parsed.options.repository, { owner: "yohn-jp", name: "gh-inari" });
-  assert.equal(parsed.options.issue, 416);
+test("self-dogfood does not accept a replaceable evidence authority", () => {
+  assert.throws(
+    () =>
+      parseArguments([
+        "--evidence-authority",
+        "/tmp/shared-certification-authority.mjs",
+        "--repository",
+        "yohn-jp/gh-inari",
+        "--issue",
+        "416",
+        "--confirm-disposable",
+        "416",
+      ]),
+    /unknown option/u,
+  );
 });
 
 test("worker handoff allowlists environment and carries only bounded identities", () => {
@@ -164,8 +170,8 @@ test("live dogfood is opt-in and emits bounded blocked evidence without mutation
     );
     assert.equal(result.status, 2);
     const evidence = JSON.parse(result.stdout);
-    assert.equal(evidence.schemaVersion, "1");
-    assert.equal(evidence.certificationKind, "self-dogfood-golden-path");
+    assert.equal(evidence.schemaVersion, CERTIFICATION_EVIDENCE_SCHEMA_VERSION);
+    assert.equal(evidence.certificationKind, CERTIFICATION_KINDS[1]);
     assert.equal(evidence.result, "blocked");
     assert.match(evidence.sourceCommitSha, /^[0-9a-f]{40}$/u);
     assert.ok(evidence.diagnostics.length > 0);
@@ -186,7 +192,6 @@ test("opt-in flow consumes canonical handoff and keeps worker credentials isolat
   const outputFile = path.join(root, "evidence.json");
   const fakeInari = path.join(root, "fake-inari.mjs");
   const worker = path.join(root, "worker.mjs");
-  const authority = path.join(root, "authority.mjs");
   fs.writeFileSync(
     fakeInari,
     `#!/usr/bin/env node
@@ -200,10 +205,10 @@ const readyStateFile = process.env.FAKE_INARI_READY_STATE;
 const readyCount = Number(fs.existsSync(readyStateFile) ? fs.readFileSync(readyStateFile, "utf8") : "0");
 const ready = args.includes("ready");
 if (ready) fs.writeFileSync(readyStateFile, String(readyCount + 1));
-const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1 };
+const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1, contractVersions: { goldenPath: "1", statusRecovery: "1" } };
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
-else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", workflow: [] };
+else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
 else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
 else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
@@ -218,13 +223,6 @@ console.log(JSON.stringify(output));
     worker,
     `import fs from "node:fs";
 fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: process.env.GH_TOKEN, branch: process.env.INARI_IMPLEMENTATION_BRANCH }));
-`,
-    { encoding: "utf8", mode: 0o600 },
-  );
-  fs.writeFileSync(
-    authority,
-    `export function validateDisposableGovernedIssue(value) { return { valid: value.disposableMarker?.kind === "self-dogfood" }; }
-export function validateSelfDogfoodEvidence(value) { return { valid: value.result === "passed" && value.schemaVersion === "1" }; }
 `,
     { encoding: "utf8", mode: 0o600 },
   );
@@ -245,8 +243,6 @@ export function validateSelfDogfoodEvidence(value) { return { valid: value.resul
         workerDirectory,
         "--worker-command",
         JSON.stringify([process.execPath, worker]),
-        "--evidence-authority",
-        authority,
         "--output",
         outputFile,
       ],
@@ -272,19 +268,7 @@ export function validateSelfDogfoodEvidence(value) { return { valid: value.resul
     assert.equal(evidence.change.pullRequest, 9239);
     assert.deepEqual(
       evidence.operations.map(({ operation }) => operation),
-      [
-        "preflight.opt-in",
-        "preflight.installed-executable",
-        "skill.golden-path",
-        "disposable-issue.governance-check",
-        "change.issue.first",
-        "change.issue.return-existing",
-        "change.handoff",
-        "worker.implementation",
-        "change.ready.first",
-        "change.ready.reread",
-        "change.ready.retry",
-      ],
+      SELF_DOGFOOD_OPERATION_REQUIREMENTS.map(({ operation }) => operation),
     );
     const observation = JSON.parse(fs.readFileSync(workerObservation, "utf8"));
     assert.equal(observation.token, undefined);

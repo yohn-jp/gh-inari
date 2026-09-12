@@ -1,19 +1,36 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  appendSelfDogfoodOperation,
+  CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_KINDS,
+  CERTIFICATION_RESULTS,
+  SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_RECOVERY_OPERATION,
+} from "../scripts/certification-evidence.mjs";
+import {
   RELEASE_CERTIFICATION_CONTRACT_VERSIONS,
+  RELEASE_CERTIFICATION_SCHEMA_VERSION,
   verifyReleaseCertification,
+  type ReleaseCertificationOperationEvidence,
   type ReleaseCertificationVerificationInput,
 } from "./release-certification.js";
 
 const SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567";
 const TARBALL_SHA = `sha256:${"a".repeat(64)}`;
 
+function dogfoodOperations(): ReleaseCertificationOperationEvidence[] {
+  let operations: ReleaseCertificationOperationEvidence[] = [];
+  for (const requirement of SELF_DOGFOOD_OPERATION_REQUIREMENTS)
+    operations = [...appendSelfDogfoodOperation(operations, requirement.operation, requirement.outcomes[0])];
+  return operations;
+}
+
 function packedEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schemaVersion: "1",
-    certificationKind: "packed-artifact-golden-path",
-    result: "passed",
+    schemaVersion: RELEASE_CERTIFICATION_SCHEMA_VERSION,
+    certificationKind: CERTIFICATION_KINDS[0],
+    result: CERTIFICATION_RESULTS[0],
     sourceCommitSha: SOURCE_SHA,
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     diagnostics: [],
@@ -24,28 +41,16 @@ function packedEvidence(overrides: Record<string, unknown> = {}): Record<string,
 
 function dogfoodEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schemaVersion: "1",
-    certificationKind: "self-dogfood-golden-path",
-    result: "passed",
+    schemaVersion: CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+    certificationKind: CERTIFICATION_KINDS[1],
+    result: CERTIFICATION_RESULTS[0],
     sourceCommitSha: SOURCE_SHA,
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
-    operations: [
-      { operation: "preflight.opt-in", outcome: "verified" },
-      { operation: "preflight.installed-executable", outcome: "verified" },
-      { operation: "skill.golden-path", outcome: "verified" },
-      { operation: "disposable-issue.governance-check", outcome: "verified" },
-      { operation: "change.issue.first", outcome: "verified" },
-      { operation: "change.issue.return-existing", outcome: "returned-existing" },
-      { operation: "change.handoff", outcome: "verified" },
-      { operation: "worker.implementation", outcome: "success" },
-      { operation: "change.ready.first", outcome: "verified" },
-      { operation: "change.ready.reread", outcome: "verified" },
-      { operation: "change.ready.retry", outcome: "returned-existing" },
-    ],
+    operations: dogfoodOperations(),
     finalState: { status: "REVIEW", recovery: { state: "NONE", action: null } },
     ...overrides,
   };
@@ -203,7 +208,7 @@ test("requires the bounded idempotency and handoff operation proofs", () => {
 
   const wrongOutcome = dogfoodEvidence();
   (wrongOutcome.operations as Array<Record<string, string>>)[5] = {
-    operation: "change.issue.return-existing",
+    operation: SELF_DOGFOOD_OPERATION_REQUIREMENTS[5].operation,
     outcome: "verified",
   };
   const wrongOutcomeResult = verifyReleaseCertification(input({ dogfoodEvidence: wrongOutcome }));
@@ -230,8 +235,11 @@ test("requires a structured public REVIEW final state and never releases recover
 test("accepts only an exact Core-safe optional abort recovery proof for an ABORTED result", () => {
   const evidence = dogfoodEvidence({
     operations: [
-      ...(dogfoodEvidence().operations as Array<Record<string, string>>),
-      { operation: "change.abort.recovery", outcome: "verified" },
+      ...dogfoodOperations(),
+      {
+        operation: SELF_DOGFOOD_RECOVERY_OPERATION.operation,
+        outcome: SELF_DOGFOOD_RECOVERY_OPERATION.outcomes[0],
+      },
     ],
     finalState: { status: "ABORTED", recovery: { state: "COMPLETED", action: "none" } },
   });
@@ -239,8 +247,11 @@ test("accepts only an exact Core-safe optional abort recovery proof for an ABORT
 
   const unsafe = dogfoodEvidence({
     operations: [
-      ...(dogfoodEvidence().operations as Array<Record<string, string>>),
-      { operation: "change.abort.recovery", outcome: "verified" },
+      ...dogfoodOperations(),
+      {
+        operation: SELF_DOGFOOD_RECOVERY_OPERATION.operation,
+        outcome: SELF_DOGFOOD_RECOVERY_OPERATION.outcomes[0],
+      },
     ],
     finalState: { status: "ABORTED", recovery: { state: "COMPLETED", action: "manual-cleanup" } },
   });

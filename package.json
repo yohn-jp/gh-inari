@@ -129,7 +129,9 @@
     "README.md",
     "LICENSE",
     ".codex-plugin",
-    "skills"
+    "skills",
+    "scripts/certification-evidence.mjs",
+    "scripts/certification-evidence.d.mts"
   ],
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",

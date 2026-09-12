@@ -22,7 +22,8 @@ import {
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { runCli } from "./cli.js";
 import { GhUnauthenticatedError, GitHubAdapter } from "./github/index.js";
-import { findSkillScenario } from "./skill.js";
+import { findSkillScenario, SKILL_MODEL_VERSION } from "./skill.js";
+import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -131,6 +132,11 @@ test("change show reads a bounded projection without invoking mutation", async (
   assert.equal(result.output?.branch, branch);
   assert.equal(result.output?.pullRequest, 142);
   assert.equal(result.output?.operation, "change.show");
+  assert.deepEqual(result.output?.contractVersions, {
+    goldenPath: String(GOLDEN_PATH_STATUS_VERSION),
+    statusRecovery: String(GOLDEN_PATH_STATUS_VERSION),
+    skill: SKILL_MODEL_VERSION,
+  });
 });
 
 test("change show forwards an explicit repository target to its executor factory", async () => {
