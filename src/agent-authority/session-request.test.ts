@@ -6,7 +6,6 @@ import {
   SESSION_REQUEST_DOMAIN,
   SESSION_REQUEST_ENVELOPE_VERSION,
   canonicalizeSemanticRequest,
-  createSignedSessionRequestEnvelope,
   encodeSessionCertificateCompact,
   semanticRequestDigest,
   sessionRequestSigningInput,
@@ -138,6 +137,15 @@ test("V1 JCS and SHA-256 conformance vector is byte-stable", () => {
   assert.equal(input.signingInput.endsWith("\n"), false);
 });
 
+test("JCS canonicalization fails closed on unpaired UTF-16 surrogates and accepts valid pairs", () => {
+  assert.throws(() => canonicalizeSemanticRequest({ value: "\ud800" }), TypeError);
+  assert.throws(() => canonicalizeSemanticRequest({ value: "\udc00" }), TypeError);
+  assert.throws(() => canonicalizeSemanticRequest({ "\ud800": "x" }), TypeError);
+  assert.throws(() => canonicalizeSemanticRequest({ "\udc00": "x" }), TypeError);
+  assert.doesNotThrow(() => canonicalizeSemanticRequest({ value: "😀" }));
+  assert.equal(canonicalizeSemanticRequest({ value: "😀" }), '{"value":"😀"}');
+});
+
 test("signer and verifier share the exact V1 bytes and produce a transport-neutral result", () => {
   const captured: { bytes?: Uint8Array } = {};
   const envelope = signSessionRequest({
@@ -173,7 +181,7 @@ test("signer uses only the ManagedSession signing seam and refuses certificate s
       return originalSign(bytes);
     },
   };
-  const envelope = createSignedSessionRequestEnvelope({
+  const envelope = signSessionRequest({
     session: instrumented,
     request: VECTOR_REQUEST,
     operation: "change.implement",

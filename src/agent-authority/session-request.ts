@@ -230,12 +230,27 @@ function compareUtf16CodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+const LONE_SURROGATE_PATTERN = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u;
+
+function assertNoLoneSurrogates(value: string, description: string): void {
+  if (LONE_SURROGATE_PATTERN.test(value)) {
+    throw new TypeError(
+      `Semantic request ${description} contains an unpaired UTF-16 surrogate, which RFC 8785 forbids.`,
+    );
+  }
+}
+
+function serializeJcsString(value: string): string {
+  assertNoLoneSurrogates(value, "string value");
+  return JSON.stringify(value);
+}
+
 function serializeJcs(value: unknown, depth: number, ancestors: Set<object>): string {
   if (depth > MAX_CANONICAL_JSON_DEPTH) {
     throw new TypeError(`Semantic request exceeds the maximum nesting depth of ${MAX_CANONICAL_JSON_DEPTH}.`);
   }
   if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") return serializeJcsString(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("Semantic request contains a non-finite number.");
@@ -261,7 +276,7 @@ function serializeJcs(value: unknown, depth: number, ancestors: Set<object>): st
     }
     if (!isRecord(value)) throw new TypeError("Semantic request contains a non-plain object.");
     const keys = Object.keys(value).sort(compareUtf16CodeUnits);
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${serializeJcs(value[key], depth + 1, ancestors)}`).join(",")}}`;
+    return `{${keys.map((key) => `${serializeJcsString(key)}:${serializeJcs(value[key], depth + 1, ancestors)}`).join(",")}}`;
   } finally {
     ancestors.delete(value);
   }
@@ -892,9 +907,3 @@ export function assertVerifiedSessionRequest(
   }
   return result.value;
 }
-
-/** Explicit aliases for callers using the envelope terminology. */
-export const createSignedSessionRequestEnvelope = signSessionRequest;
-export const verifySignedSessionRequestEnvelope = verifySessionRequest;
-export const verifySessionRequestEnvelope = verifySessionRequest;
-export const hashSemanticRequest = semanticRequestDigest;
