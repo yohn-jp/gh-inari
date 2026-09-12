@@ -200,7 +200,7 @@ const readyStateFile = process.env.FAKE_INARI_READY_STATE;
 const readyCount = Number(fs.existsSync(readyStateFile) ? fs.readFileSync(readyStateFile, "utf8") : "0");
 const ready = args.includes("ready");
 if (ready) fs.writeFileSync(readyStateFile, String(readyCount + 1));
-const common = { branch: "feat/239-self-dogfood", pullRequest: 9239, version: 1 };
+const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1 };
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
 else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", workflow: [] };

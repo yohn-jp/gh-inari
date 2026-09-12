@@ -672,6 +672,9 @@ async function runDogfood(options) {
     );
     if (evidence.contractVersions.statusRecovery === "unknown")
       throw new Error("Change response omitted the status/recovery contract version");
+    const issuedBaseBranch = outputField(firstIssue, ["canonicalBaseBranch"], ["projection", "canonicalBaseBranch"]);
+    if (typeof issuedBaseBranch !== "string" || issuedBaseBranch.length === 0)
+      throw new Error("Change response omitted canonical base branch");
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.FIRST_ISSUANCE, SELF_DOGFOOD_OUTCOMES.VERIFIED);
 
     const repeatedIssue = invoke([
@@ -689,6 +692,12 @@ async function runDogfood(options) {
       repeatedIdentity.pullRequest !== evidence.change.pullRequest
     )
       throw new Error("repeat issuance returned a different Change identity");
+    const repeatedBaseBranch = outputField(
+      repeatedIssue,
+      ["canonicalBaseBranch"],
+      ["projection", "canonicalBaseBranch"],
+    );
+    if (repeatedBaseBranch !== issuedBaseBranch) throw new Error("repeat issuance returned a different base branch");
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.RETURN_EXISTING, SELF_DOGFOOD_OUTCOMES.RETURNED_EXISTING);
 
     const handoffResult = invoke([
@@ -706,9 +715,10 @@ async function runDogfood(options) {
       handoff.state !== "DRAFT" ||
       handoff.branch !== evidence.change.branch ||
       handoff.pullRequest !== evidence.change.pullRequest ||
-      handoff.rootIssue !== options.issue
+      handoff.rootIssue !== options.issue ||
+      handoff.baseBranch !== issuedBaseBranch
     )
-      throw new Error("canonical implementation handoff did not match the issued Draft Change");
+      throw new Error("canonical implementation handoff did not match the issued Draft Change identity");
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.HANDOFF, SELF_DOGFOOD_OUTCOMES.VERIFIED);
     runWorker(options, handoff, sha);
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.WORKER, SELF_DOGFOOD_OUTCOMES.SUCCESS);
