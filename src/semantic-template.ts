@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, open, readFile, readdir, stat, unlink, type FileHandle } from "node:fs/promises";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1440,8 +1441,29 @@ function safeRepositoryPath(root: string, relativePath: string): string {
 }
 
 async function writeRepositoryFile(absolutePath: string, content: string): Promise<void> {
+  let handle: FileHandle | undefined;
   try {
-    if ((await lstat(absolutePath)).isSymbolicLink())
+    // O_NOFOLLOW binds the final path element to the descriptor before any
+    // content is written, eliminating the check-then-write replacement race.
+    // This is a repository projection, not an OS temporary file.
+    // lgtm [js/insecure-temporary-file]
+    handle = await open(
+      absolutePath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+      0o666,
+    );
+    if (!(await handle.stat()).isFile())
+      throw new SemanticTemplateError([
+        {
+          code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+          path: absolutePath,
+          message: "Refusing to write a non-regular generated file.",
+        },
+      ]);
+    await handle.writeFile(content, "utf8");
+  } catch (cause) {
+    if (cause instanceof SemanticTemplateError) throw cause;
+    if ((cause as NodeJS.ErrnoException).code === "ELOOP")
       throw new SemanticTemplateError([
         {
           code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
@@ -1449,10 +1471,10 @@ async function writeRepositoryFile(absolutePath: string, content: string): Promi
           message: "Refusing to write through a symbolic link.",
         },
       ]);
-  } catch (cause) {
-    if (cause instanceof SemanticTemplateError) throw cause;
+    throw cause;
+  } finally {
+    if (handle !== undefined) await handle.close();
   }
-  await writeFile(absolutePath, content, "utf8");
 }
 
 async function removeRepositoryFile(absolutePath: string): Promise<void> {
