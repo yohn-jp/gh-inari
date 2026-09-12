@@ -66,12 +66,20 @@ const context = {
   verifiedRequest: { envelope: { request } },
 } as unknown as AuthenticatedSessionContext;
 
-function fake(mode: "updated" | "rejected" = "updated") {
-  const calls: { blobs: string[]; updates: GitDataRefUpdateInput[] } = { blobs: [], updates: [] };
+function fake(mode: "updated" | "rejected" | "throws-applied" | "throws-not-applied" | "throws-reread" = "updated") {
+  const calls: { blobs: string[]; updates: GitDataRefUpdateInput[]; readRefs: number } = {
+    blobs: [],
+    updates: [],
+    readRefs: 0,
+  };
   let head = HEAD;
   const capability: GitHubBranchAdvanceCapability = {
     scope,
-    readRef: async () => ({ name: BRANCH, ref: `refs/heads/${BRANCH}`, sha: head }),
+    readRef: async () => {
+      calls.readRefs += 1;
+      if (mode === "throws-reread" && calls.readRefs === 2) throw new Error("reread unavailable");
+      return { name: BRANCH, ref: `refs/heads/${BRANCH}`, sha: head };
+    },
     readCommit: async (sha) => ({ sha, treeSha: sha === COMMIT ? COMMIT : TREE }),
     readTree: async (sha) => ({
       sha,
@@ -85,7 +93,9 @@ function fake(mode: "updated" | "rejected" = "updated") {
     createCommit: async (_input: GitDataCommitInput) => ({ sha: COMMIT }),
     compareAndAdvanceRef: async (input) => {
       calls.updates.push(input);
-      if (mode === "updated") head = COMMIT;
+      if (mode === "updated" || mode === "throws-applied" || mode === "throws-reread") head = COMMIT;
+      if (mode === "throws-applied" || mode === "throws-not-applied" || mode === "throws-reread")
+        throw new Error("provider outcome is ambiguous");
       return { status: mode };
     },
   };
@@ -120,4 +130,32 @@ test("rejects CAS conflict without force", async () => {
   const result = await executeBranchAdvance({ context, broker, admission });
   assert.equal(result.outcome, "stale");
   assert.equal(calls.updates[0]?.force, false);
+});
+test("resolves an applied mutation after the provider throws", async () => {
+  const { calls, broker } = fake("throws-applied");
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.outcome, "idempotent");
+  assert.equal(result.resultingHead, COMMIT);
+  assert.ok(result.provenance);
+  assert.equal(calls.readRefs, 2);
+});
+test("does not claim mutation when the provider throws before applying it", async () => {
+  const { calls, broker } = fake("throws-not-applied");
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failure?.reason, "provider");
+  assert.equal(result.resultingHead, undefined);
+  assert.equal(result.provenance, undefined);
+  assert.equal(calls.readRefs, 2);
+});
+test("requires recovery when reread is unavailable after an ambiguous mutation", async () => {
+  const { calls, broker } = fake("throws-reread");
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "recovery-required");
+  assert.equal(result.failure?.reason, "recovery-required");
+  assert.equal(result.provenance, undefined);
+  assert.equal(calls.readRefs, 2);
 });
