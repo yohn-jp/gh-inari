@@ -174,7 +174,7 @@ function assertReleaseTagMatchesPackageVersion(releaseTag, packageVersion) {
     );
 }
 
-function readCurrentSourceSha(repositoryRoot, runCommand = defaultCommandRunner) {
+export function readCurrentSourceSha(repositoryRoot, runCommand = defaultCommandRunner) {
   const result = runCommand("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" });
   if (result.error !== undefined || result.status !== 0)
     throw workflowError("CHECKOUT_SOURCE_UNAVAILABLE", "the checked-out source SHA could not be determined");
