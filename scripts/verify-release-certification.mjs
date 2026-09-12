@@ -3,10 +3,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyReleaseCertification } from "../dist/release-certification.js";
+import { verifyReleaseCertification } from "../src/release-certification.js";
 
 const USAGE =
-  "usage: node scripts/verify-release-certification.mjs --source-sha <sha> --package-name <name> " +
+  "usage: node --import tsx scripts/verify-release-certification.mjs --source-sha <sha> --package-name <name> " +
   "--package-version <version> --tarball-sha256 sha256:<digest> --repository-owner <owner> " +
   "--repository-name <name> --packed-evidence <file> --dogfood-evidence <file>";
 const OPTION_NAMES = new Set([
@@ -76,11 +76,13 @@ function main() {
   if (!result.passed) process.exitCode = 1;
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(`release certification verifier failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+if (process.argv[1]?.endsWith("verify-release-certification.mjs")) {
+  try {
+    main();
+  } catch (error) {
+    console.error(`release certification verifier failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }
 
 export { parseArgs };

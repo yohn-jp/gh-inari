@@ -8,6 +8,7 @@
  */
 
 import { SKILL_MODEL_VERSION } from "./skill.js";
+import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
 
 export const RELEASE_CERTIFICATION_SCHEMA_VERSION = "1" as const;
 export type ReleaseCertificationSchemaVersion = typeof RELEASE_CERTIFICATION_SCHEMA_VERSION;
@@ -26,12 +27,15 @@ export type ReleaseCertificationResult = (typeof RELEASE_CERTIFICATION_RESULTS)[
  * strings in the serialized envelope so producers cannot accidentally mix
  * JSON number and string representations of the same contract version.
  *
- * Golden Path and status/recovery are v1 in the public architecture contract;
- * Skill uses the version exposed by the existing Skill authority.
+ * Golden Path status and its recovery projection are one contract owned by
+ * `golden-path-status.ts` (`GOLDEN_PATH_STATUS_VERSION`); recovery has no
+ * separate version because `golden-path-recovery.ts` is a read-only
+ * projection over that same module, not an independent contract.  Skill uses
+ * the version exposed by the existing Skill authority.
  */
 export const RELEASE_CERTIFICATION_CONTRACT_VERSIONS = Object.freeze({
-  goldenPath: "1",
-  statusRecovery: "1",
+  goldenPath: String(GOLDEN_PATH_STATUS_VERSION),
+  statusRecovery: String(GOLDEN_PATH_STATUS_VERSION),
   skill: SKILL_MODEL_VERSION,
 } as const);
 export type ReleaseCertificationContractVersions = typeof RELEASE_CERTIFICATION_CONTRACT_VERSIONS;
