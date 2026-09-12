@@ -166,7 +166,8 @@ function lifecyclePreconditionFailure(state: Change["state"]): ReadyExecutionFai
   };
 }
 
-const readyExecutionMachine = setup({
+/** @internal Test-only access to the production graph; not re-exported publicly. */
+export const readyExecutionMachine = setup({
   types: {
     context: {} as ReadyMachineContext,
     input: {} as ReadyExecutionServices,

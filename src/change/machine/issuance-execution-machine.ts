@@ -269,7 +269,8 @@ function failedEffectEvidence(
   return { effect, code: failure.code, message: failure.message };
 }
 
-const issuanceExecutionMachine = setup({
+/** @internal Test-only access to the production graph; not re-exported publicly. */
+export const issuanceExecutionMachine = setup({
   types: {
     context: {} as IssuanceMachineContext,
     input: {} as IssuanceExecutionServices,

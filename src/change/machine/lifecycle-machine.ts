@@ -22,7 +22,8 @@ const LIFECYCLE_STATES: readonly ChangeState[] = [
   "RECOVERY_REQUIRED",
 ];
 
-const lifecycleMachine = setup({
+/** @internal Test-only access to the production graph; not re-exported publicly. */
+export const lifecycleMachine = setup({
   types: {
     context: {} as LifecycleContext,
     events: {} as LifecycleEvent,
