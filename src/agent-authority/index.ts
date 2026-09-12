@@ -1,6 +1,7 @@
 export * from "./codec.js";
 export * from "./ed25519-jwk.js";
 export * from "./capability.js";
+export * from "./protected-paths.js";
 export * from "./runtime-authority.js";
 export * from "./runtime-authority-trust.js";
 export * from "./runtime-key.js";
