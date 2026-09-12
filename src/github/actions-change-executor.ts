@@ -7,7 +7,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash, createSign } from "node:crypto";
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -58,22 +58,21 @@ import {
 import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
-  GitHubChangeEffectAdapter,
-  type GitHubChangeEffectCompareAndDeleteOutcome,
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
-  type GitHubChangeEffectResponse,
-  type GitHubChangeEffectSuccessEvidence,
-  type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
+import {
+  GitHubAppApiTransport,
+  GitHubAppInstallationCredentialBroker,
+  resolveGitHubRepository,
+  type GitHubAppInstallationCredentialBrokerOptions,
+  type GitHubAppRepositoryReadTransport,
+  type GitHubAppCredentialFailureStage,
+} from "./app-installation-credential-broker.js";
 import {
   InariIssuerAppAuthority,
   assertTrustedExecution,
   TRUSTED_EXECUTION_EVENTS,
-  type IssuerInstallationScope,
-  type IssuerCredentialRequest,
-  type IssuerScopedMutationCapability,
-  type TrustedInstallationCredentialBroker,
   type IssuerRepositoryIdentity,
   type TrustedExecutionEvent,
   type TrustedExecutionContext,
@@ -90,7 +89,6 @@ import {
   type SemanticPullRequestMutationPlan,
 } from "../semantic-pr-projection.js";
 
-const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_BRANCH_MATCHES = 100;
 const MAX_CANONICAL_PULL_REQUEST_MATCHES = 100;
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
@@ -99,13 +97,10 @@ const MAX_LOGIN_LENGTH = 160;
 const MAX_TIMESTAMP_LENGTH = 64;
 const DEFAULT_API_URL = "https://api.github.com";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/iu;
-const EMPTY_COMMIT_SHA = "0".repeat(40);
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
 const GITHUB_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
-const CONDITIONAL_DELETE_REF_MUTATION =
-  "mutation ConditionalDeleteRef($input: UpdateRefsInput!) { " + "updateRefs(input: $input) { clientMutationId } }";
 
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
@@ -118,6 +113,22 @@ export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
   "projection-execution",
 ] as const);
 export type TrustedActionsFailureStage = (typeof TRUSTED_ACTIONS_FAILURE_STAGES)[number];
+
+function actionsToAppFailureStage(
+  stage: TrustedActionsFailureStage | undefined,
+): GitHubAppCredentialFailureStage | undefined {
+  switch (stage) {
+    case "repository-evidence":
+      return "repository-read";
+    case "issuer-configuration":
+    case "installation-token":
+    case "installation-scope":
+    case "projection-execution":
+      return stage;
+    default:
+      return "projection-execution";
+  }
+}
 
 /**
  * Bounded, secret-safe reasons within the `repository-evidence` stage. Fixed at the
@@ -342,46 +353,9 @@ function parseRepository(value: string, hostname = "github.com"): GitHubChangeEf
   }
 }
 
-function repositoryName(repository: GitHubChangeEffectRepository): string {
-  return `${repository.owner}/${repository.name}`;
-}
-
 function apiPath(repository: GitHubChangeEffectRepository, suffix: string): string {
   const base = `repos/${repository.owner}/${repository.name}`;
   return suffix === "" ? base : `${base}/${suffix}`;
-}
-
-async function boundedBody(response: Response): Promise<unknown> {
-  if (response.status === 204) return undefined;
-  if (response.body === null) return undefined;
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      size += next.value.byteLength;
-      if (size > MAX_RESPONSE_BYTES) throw new GitHubActionsChangeExecutorError();
-      chunks.push(next.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  if (chunks.length === 0) return undefined;
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  if (text.trim().length === 0) return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new GitHubActionsChangeExecutorError();
-  }
 }
 
 export interface GitHubActionsApiTransportOptions {
@@ -393,260 +367,36 @@ export interface GitHubActionsApiTransportOptions {
   readonly failureStage?: TrustedActionsFailureStage;
 }
 
-/** A bounded credential-bound transport. The bearer never appears in results. */
-export class GitHubActionsApiTransport implements GitHubChangeEffectTransport {
-  readonly #apiUrl: string;
-  readonly #graphqlApiUrl: string;
-  readonly #token: string;
-  readonly #repositoryNodeId: string | undefined;
-  readonly #fetch: typeof globalThis.fetch;
-  readonly #failureStage: TrustedActionsFailureStage;
-
+/** Compatibility wrapper; the credential-bound implementation lives in the App module. */
+export class GitHubActionsApiTransport extends GitHubAppApiTransport {
   constructor(options: GitHubActionsApiTransportOptions) {
-    // Bound the input length before the trailing-slash regex runs, so it cannot be handed an
-    // unbounded string (CodeQL polynomial-regex guard).
-    this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
-    this.#graphqlApiUrl = this.#apiUrl.endsWith("/api/v3")
-      ? `${this.#apiUrl.slice(0, -7)}/api/graphql`
-      : `${this.#apiUrl}/graphql`;
-    this.#token = boundedString(options.token, 4096);
-    this.#repositoryNodeId =
-      options.repositoryNodeId === undefined ? undefined : boundedString(options.repositoryNodeId, 255);
-    this.#fetch = options.fetch ?? globalThis.fetch;
-    this.#failureStage = options.failureStage ?? "repository-evidence";
-  }
-
-  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
-    return this.requestAt(this.#apiUrl, request);
-  }
-
-  private async requestAt(baseUrl: string, request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
-    try {
-      const response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
-        method: request.method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${this.#token}`,
-          "X-GitHub-Api-Version": "2022-11-28",
-          ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-      });
-      return { status: response.status, body: await boundedBody(response) };
-    } catch {
-      throw new GitHubActionsChangeExecutorError(undefined, this.#failureStage);
-    }
-  }
-
-  /**
-   * Delete only when GitHub's GraphQL ref update still points at the expected
-   * OID. A missing node ID or any GraphQL error is a safe mismatch; callers
-   * must not emulate this with a REST GET followed by DELETE.
-   */
-  async compareAndDeleteBranch(request: {
-    readonly branch: string;
-    readonly expectedCommitSha: string;
-  }): Promise<GitHubChangeEffectCompareAndDeleteOutcome> {
-    if (
-      this.#repositoryNodeId === undefined ||
-      typeof request.branch !== "string" ||
-      request.branch.length === 0 ||
-      request.branch.length > 255 ||
-      /[\u0000-\u001F\u007F]/u.test(request.branch) ||
-      typeof request.expectedCommitSha !== "string" ||
-      !COMMIT_SHA_PATTERN.test(request.expectedCommitSha)
-    ) {
-      return "mismatch";
-    }
-    const response = await this.requestAt(this.#graphqlApiUrl, {
-      hostname: "github.com",
-      method: "POST",
-      path: "",
-      body: {
-        query: CONDITIONAL_DELETE_REF_MUTATION,
-        variables: {
-          input: {
-            repositoryId: this.#repositoryNodeId,
-            refUpdates: [
-              {
-                name: `refs/heads/${request.branch}`,
-                beforeOid: request.expectedCommitSha.toLowerCase(),
-                afterOid: EMPTY_COMMIT_SHA,
-                force: true,
-              },
-            ],
-          },
-        },
-      },
+    super({
+      ...options,
+      failureStage: actionsToAppFailureStage(options.failureStage),
+      failure: (stage) =>
+        new GitHubActionsChangeExecutorError(
+          undefined,
+          stage === "repository-read" ? "repository-evidence" : (stage as TrustedActionsFailureStage),
+        ),
     });
-    if (
-      response.status !== 200 ||
-      typeof response.body !== "object" ||
-      response.body === null ||
-      Array.isArray(response.body)
-    ) {
-      return "mismatch";
-    }
-    const body = response.body as Record<string, unknown>;
-    if (body.errors !== undefined) return "mismatch";
-    const data = body.data;
-    if (
-      typeof data !== "object" ||
-      data === null ||
-      Array.isArray(data) ||
-      typeof (data as Record<string, unknown>).updateRefs !== "object" ||
-      (data as Record<string, unknown>).updateRefs === null ||
-      Array.isArray((data as Record<string, unknown>).updateRefs)
-    ) {
-      return "mismatch";
-    }
-    return "deleted";
   }
 }
 
-interface InstallationTokenResponse {
-  readonly token: string;
-  readonly scope: IssuerInstallationScope;
-}
+export interface GitHubActionsCredentialBrokerOptions extends GitHubAppInstallationCredentialBrokerOptions {}
 
-function base64Url(value: string): string {
-  return Buffer.from(value, "utf8").toString("base64url");
-}
-
-function createAppJwt(appId: string, privateKeyPem: string, now = Date.now()): string {
-  const issuedAt = Math.floor(now / 1000) - 60;
-  const payload = { iat: issuedAt, exp: issuedAt + 540, iss: appId };
-  const encodedHeader = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const encodedPayload = base64Url(JSON.stringify(payload));
-  const signer = createSign("RSA-SHA256");
-  signer.update(`${encodedHeader}.${encodedPayload}`);
-  return `${encodedHeader}.${encodedPayload}.${signer.sign(privateKeyPem, "base64url")}`;
-}
-
-export interface GitHubActionsCredentialBrokerOptions {
-  readonly appId: string;
-  readonly installationId: string;
-  readonly privateKeyPem: string;
-  readonly repository: GitHubChangeEffectRepository;
-  readonly target: IssuerRepositoryIdentity;
-  readonly repositoryNodeId?: string;
-  readonly apiUrl?: string;
-  readonly fetch?: typeof globalThis.fetch;
-}
-
-/** #217 broker implementation used only inside the protected Actions job. */
-export class GitHubActionsCredentialBroker implements TrustedInstallationCredentialBroker {
-  readonly #options: GitHubActionsCredentialBrokerOptions;
-  readonly #fetch: typeof globalThis.fetch;
-
+/** Compatibility wrapper; Actions and direct App runtimes share the broker implementation. */
+export class GitHubActionsCredentialBroker extends GitHubAppInstallationCredentialBroker {
   constructor(options: GitHubActionsCredentialBrokerOptions) {
-    try {
-      this.#options = options;
-      this.#fetch = options.fetch ?? globalThis.fetch;
-      boundedString(options.appId, 20);
-      boundedString(options.installationId, 20);
-      boundedSecret(options.privateKeyPem, 16_384);
-    } catch (error: unknown) {
-      throw withFailureStage(error, "issuer-configuration");
-    }
-  }
-
-  async withScopedInstallationCredential(
-    request: IssuerCredentialRequest,
-    operation: (capability: IssuerScopedMutationCapability) => Promise<void>,
-  ): Promise<void> {
-    const credential = await this.issueInstallationToken(request);
-    const transport = new GitHubActionsApiTransport({
-      apiUrl: this.#options.apiUrl,
-      token: credential.token,
-      repositoryNodeId: this.#options.repositoryNodeId,
-      fetch: this.#fetch,
-      failureStage: "projection-execution",
+    super({
+      ...options,
+      failure: (stage) =>
+        new GitHubActionsChangeExecutorError(
+          undefined,
+          stage === "repository-read" ? "repository-evidence" : (stage as TrustedActionsFailureStage),
+        ),
+      mutationFailure: (effect) =>
+        new GitHubActionsChangeExecutorError(GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind]),
     });
-    const adapter = new GitHubChangeEffectAdapter({ repository: this.#options.repository, transport });
-    const capability: IssuerScopedMutationCapability = {
-      scope: credential.scope,
-      apply: async (effect) => {
-        const result = await adapter.execute(effect);
-        if (result.status === "failed") {
-          // #217 deliberately sanitizes this provider failure at its boundary.
-          throw new GitHubActionsChangeExecutorError(GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind]);
-        }
-        return result.evidence as GitHubChangeEffectSuccessEvidence;
-      },
-    };
-    try {
-      await operation(capability);
-    } catch (error: unknown) {
-      throw withFailureStage(error, "projection-execution");
-    }
-  }
-
-  private async issueInstallationToken(request: IssuerCredentialRequest): Promise<InstallationTokenResponse> {
-    if (
-      request.target.repositoryHost !== this.#options.target.repositoryHost ||
-      request.target.repositoryId !== this.#options.target.repositoryId ||
-      request.target.nameWithOwner !== this.#options.target.nameWithOwner ||
-      repositoryName(this.#options.repository) !== this.#options.target.nameWithOwner
-    ) {
-      throw new GitHubActionsChangeExecutorError(undefined, "installation-scope");
-    }
-    const apiUrl = boundedString(this.#options.apiUrl ?? DEFAULT_API_URL, 2048).replace(/\/+$/u, "");
-    let response: Response;
-    try {
-      response = await this.#fetch(`${apiUrl}/app/installations/${this.#options.installationId}/access_tokens`, {
-        method: "POST",
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${createAppJwt(this.#options.appId, this.#options.privateKeyPem)}`,
-          "Content-Type": "application/json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-        body: JSON.stringify({
-          repositories: [this.#options.repository.name],
-          permissions: request.permissions,
-        }),
-      });
-    } catch (error: unknown) {
-      throw withFailureStage(error, "installation-token");
-    }
-    if (response.status !== 201) throw new GitHubActionsChangeExecutorError(undefined, "installation-token");
-    let body: Record<string, unknown>;
-    try {
-      body = record(await boundedBody(response));
-    } catch (error: unknown) {
-      throw withFailureStage(error, "installation-token");
-    }
-    let token: string;
-    let expiresAt: string;
-    let permissions: Record<string, unknown>;
-    try {
-      token = boundedString(body.token, 4096);
-      expiresAt = boundedString(body.expires_at, 64);
-      permissions = record(body.permissions);
-    } catch (error: unknown) {
-      throw withFailureStage(error, "installation-token");
-    }
-    const repositories = Array.isArray(body.repositories) ? body.repositories : [];
-    const selected = repositories.some((candidate) => {
-      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
-      const value = candidate as Record<string, unknown>;
-      return String(value.id) === request.target.repositoryId && value.full_name === request.target.nameWithOwner;
-    });
-    if (!selected) throw new GitHubActionsChangeExecutorError(undefined, "installation-scope");
-    const scope: IssuerInstallationScope = {
-      app: request.app,
-      installation: {
-        appId: request.app.appId,
-        installationId: this.#options.installationId,
-        repositoryHost: request.target.repositoryHost,
-      },
-      repository: request.target,
-      repositorySelection: "selected",
-      permissions: permissions as IssuerInstallationScope["permissions"],
-      expiresAt,
-    };
-    return { token, scope };
   }
 }
 
@@ -706,7 +456,7 @@ export interface GitHubActionsEvidenceReaderOptions {
   readonly pullRequestNumber?: number;
   /** Absent when the repository's PR policy declares no branch rule; the canonical branch grammar still applies. */
   readonly branchGovernance?: PullRequestBranchGovernance;
-  readonly transport: GitHubChangeEffectTransport;
+  readonly transport: GitHubAppRepositoryReadTransport;
   /** Trusted checkout containing the repository's default-branch governance. */
   readonly cwd?: string;
   /**
@@ -1362,7 +1112,10 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     };
   }
 
-  private async request(request: Omit<GitHubChangeEffectRequest, "hostname">, expected: number): Promise<unknown> {
+  private async request(
+    request: { readonly method: "GET"; readonly path: string },
+    expected: number,
+  ): Promise<unknown> {
     const response = await this.#options.transport.request({
       ...request,
       hostname: this.#options.repository.hostname,
@@ -1529,41 +1282,12 @@ export async function createGitHubActionsChangeExecutor(
     throw atRepositoryEvidenceReason("repository-configuration")(error);
   }
   const repository = parseRepository(repositoryNameWithOwner, hostname);
-  const repositoryResponse = await readTransport
-    .request({
-      hostname: repository.hostname,
-      method: "GET",
-      path: apiPath(repository, ""),
-    })
-    .catch(atRepositoryEvidenceReason("repository-request"));
-  if (repositoryResponse.status !== 200) {
-    throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-status");
-  }
-  let repositoryBody: Record<string, unknown>;
-  try {
-    repositoryBody = record(repositoryResponse.body);
-  } catch (error: unknown) {
-    throw atRepositoryEvidenceReason("repository-body")(error);
-  }
-  const repositoryId = String(repositoryBody.id);
-  if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId)) {
-    throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-id");
-  }
-  const repositoryNodeId =
-    typeof repositoryBody.node_id === "string" &&
-    repositoryBody.node_id.length > 0 &&
-    repositoryBody.node_id.length <= 255 &&
-    !/[\u0000-\u001F\u007F]/u.test(repositoryBody.node_id)
-      ? repositoryBody.node_id
-      : undefined;
-  if (typeof repositoryBody.fork !== "boolean") {
-    throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", "repository-fork");
-  }
-  const target: IssuerRepositoryIdentity = {
-    repositoryHost: repository.hostname,
-    repositoryId,
-    nameWithOwner: repositoryNameWithOwner,
-  };
+  const resolvedRepository = await resolveGitHubRepository(
+    repository,
+    readTransport,
+    (reason) => new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason),
+  );
+  const { target, repositoryNodeId } = resolvedRepository;
 
   const event = requiredEnvironment(environment, "GITHUB_EVENT_NAME", "trusted-execution");
   if (!TRUSTED_EXECUTION_EVENTS.includes(event as TrustedExecutionEvent)) {
@@ -1602,7 +1326,7 @@ export async function createGitHubActionsChangeExecutor(
       codeExecution: "trusted-only",
       // repositoryBody.fork is an auxiliary scope check on the target repository identity;
       // the primary proof against untrusted/forked execution is the workflow-ref match above.
-      fork: repositoryBody.fork,
+      fork: resolvedRepository.fork,
       pullRequest: event === "pull_request" || event === "pull_request_target",
       requester: canonicalGitHubRequester(actor),
     });
@@ -1612,7 +1336,11 @@ export async function createGitHubActionsChangeExecutor(
   const branchGovernance = await atFailureStage("branch-governance", () => loadBranchGovernance(options.cwd));
   const reader = new GitHubActionsEvidenceReader({
     repository,
-    identity: { repositoryHost: repository.hostname, repositoryId, rootIssue: options.request.issue },
+    identity: {
+      repositoryHost: repository.hostname,
+      repositoryId: target.repositoryId,
+      rootIssue: options.request.issue,
+    },
     branchGovernance,
     transport: readTransport,
     cwd: options.cwd,
