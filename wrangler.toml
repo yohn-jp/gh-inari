@@ -1,0 +1,17 @@
+name = "gh-inari-direct-app"
+main = "dist-worker/worker.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# Non-secret deployment configuration only. INARI_GITHUB_APP_ID and
+# INARI_GITHUB_APP_PRIVATE_KEY are never set here -- they are Worker
+# secrets, set with `wrangler secret put` and never committed. See
+# docs/CLOUDFLARE_WORKER_DEPLOYMENT.md for the full one-time setup.
+[vars]
+INARI_GITHUB_APP_INSTALLATION_ID = ""
+INARI_TARGET_REPOSITORY_HOST = "github.com"
+INARI_TARGET_REPOSITORY_OWNER = "yohn-jp"
+INARI_TARGET_REPOSITORY_NAME = "gh-inari"

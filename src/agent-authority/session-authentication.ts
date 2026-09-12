@@ -14,8 +14,8 @@ import {
   type GitHubAppRepositoryReadCapability,
   type GitHubAppRepositoryReadPermissionSet,
 } from "../github/app-installation-credential-broker.js";
+import { createAppRepositoryEvidenceReader } from "../github/app-repository-evidence-reader.js";
 import type { GitHubChangeEffectRepository } from "../github/change-effect-adapter.js";
-import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "../github/types.js";
 import {
   MAX_UNIX_TIME_SECONDS,
   SESSION_CERTIFICATE_ALG,
@@ -25,20 +25,10 @@ import {
   type DecodedSessionCertificate,
   type SessionCertificateTask,
 } from "./session-certificate.js";
-import {
-  resolveRuntimeAuthority,
-  type RuntimeAuthoritySourceReader,
-  type LoadedRuntimeAuthority,
-} from "./runtime-authority-trust.js";
+import { resolveRuntimeAuthority, type LoadedRuntimeAuthority } from "./runtime-authority-trust.js";
 import type { CapabilityClaim } from "./capability.js";
 import { verifySessionRequest, type VerifiedSessionRequest } from "./session-request.js";
 import { validateIssuerRepositoryIdentity, type IssuerRepositoryIdentity } from "../github/issuer-authority.js";
-
-const MAX_REPOSITORY_REF_LENGTH = 255;
-const MAX_REPOSITORY_SHA_LENGTH = 128;
-const MAX_BLOB_CONTENT_LENGTH = 1_048_576;
-const SAFE_REPOSITORY_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
-const BASE64_CONTENT_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 /** The only broker operation accepted by this boundary. */
 export interface SessionAuthenticationReadCapabilityBroker {
@@ -136,10 +126,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isBoundedProviderText(value: unknown, maximum: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maximum && SAFE_REPOSITORY_TEXT.test(value);
-}
-
 function normalizeVerificationTime(input: Date | number | (() => Date | number) | undefined): Date {
   if (input === undefined) return new Date();
   if (typeof input === "function") {
@@ -176,130 +162,6 @@ function sameRepositoryIdentity(left: IssuerRepositoryIdentity, right: IssuerRep
   return (
     left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() && left.repositoryId === right.repositoryId
   );
-}
-
-function repositoryContext(identity: IssuerRepositoryIdentity): RepositoryContext {
-  const parts = identity.nameWithOwner.split("/");
-  if (parts.length !== 2) fail("repository");
-  const owner = parts[0] as string;
-  const name = parts[1] as string;
-  return Object.freeze({
-    hostname: identity.repositoryHost,
-    host: identity.repositoryHost,
-    owner,
-    name,
-    nameWithOwner: identity.nameWithOwner,
-    url: `https://${identity.repositoryHost}/${identity.nameWithOwner}`,
-    repositoryId: identity.repositoryId,
-  });
-}
-
-async function readProvider(
-  capability: GitHubAppRepositoryReadCapability,
-  repository: GitHubChangeEffectRepository,
-  path: string,
-): Promise<Record<string, unknown>> {
-  let response: { readonly status: number; readonly body?: unknown };
-  try {
-    response = await capability.transport.request({ hostname: repository.hostname, method: "GET", path });
-  } catch {
-    fail("repository-read");
-  }
-  if (response.status !== 200 || !isRecord(response.body)) fail("repository-read");
-  return response.body;
-}
-
-function repositoryPath(repository: GitHubChangeEffectRepository, suffix = ""): string {
-  const root = `repos/${repository.owner}/${repository.name}`;
-  return suffix.length === 0 ? root : `${root}/${suffix}`;
-}
-
-function createRuntimeAuthoritySourceReader(
-  capability: GitHubAppRepositoryReadCapability,
-  repository: GitHubChangeEffectRepository,
-  identity: IssuerRepositoryIdentity,
-): RuntimeAuthoritySourceReader {
-  const context = repositoryContext(identity);
-  return {
-    resolveRepositoryContext: async () => context,
-    getRepositoryDefaultBranch: async () => {
-      const body = await readProvider(capability, repository, repositoryPath(repository));
-      if (!isBoundedProviderText(body.default_branch, MAX_REPOSITORY_REF_LENGTH)) fail("repository-read");
-      return body.default_branch;
-    },
-    findBranch: async (branch: string): Promise<GitHubBranch | undefined> => {
-      if (!isBoundedProviderText(branch, MAX_REPOSITORY_REF_LENGTH)) fail("repository-read");
-      let response: { readonly status: number; readonly body?: unknown };
-      try {
-        response = await capability.transport.request({
-          hostname: repository.hostname,
-          method: "GET",
-          path: repositoryPath(repository, `git/ref/heads/${encodeURIComponent(branch)}`),
-        });
-      } catch {
-        fail("repository-read");
-      }
-      if (response.status === 404) return undefined;
-      if (response.status !== 200 || !isRecord(response.body)) fail("repository-read");
-      const body = response.body;
-      if (
-        body.ref !== `refs/heads/${branch}` ||
-        !isRecord(body.object) ||
-        body.object.type !== "commit" ||
-        !isBoundedProviderText(body.object.sha, MAX_REPOSITORY_SHA_LENGTH)
-      ) {
-        fail("repository-read");
-      }
-      return { name: branch, ref: body.ref, sha: body.object.sha };
-    },
-    getRepositoryTree: async (ref: string): Promise<RepositoryTree> => {
-      if (!isBoundedProviderText(ref, MAX_REPOSITORY_SHA_LENGTH)) fail("repository-read");
-      const body = await readProvider(
-        capability,
-        repository,
-        repositoryPath(repository, `git/trees/${encodeURIComponent(ref)}?recursive=1`),
-      );
-      if (body.truncated !== false || !isBoundedProviderText(body.sha, MAX_REPOSITORY_SHA_LENGTH)) {
-        fail("repository-read");
-      }
-      if (!Array.isArray(body.tree)) fail("repository-read");
-      const entries: RepositoryTreeEntry[] = body.tree.map((entry: unknown) => {
-        if (
-          !isRecord(entry) ||
-          !isBoundedProviderText(entry.path, MAX_REPOSITORY_REF_LENGTH) ||
-          !isBoundedProviderText(entry.sha, MAX_REPOSITORY_SHA_LENGTH) ||
-          (entry.type !== "blob" && entry.type !== "tree")
-        ) {
-          fail("repository-read");
-        }
-        return { path: entry.path, type: entry.type, sha: entry.sha };
-      });
-      return { sha: body.sha, entries };
-    },
-    getRepositoryBlob: async (sha: string): Promise<string> => {
-      if (!isBoundedProviderText(sha, MAX_REPOSITORY_SHA_LENGTH)) fail("repository-read");
-      const body = await readProvider(
-        capability,
-        repository,
-        repositoryPath(repository, `git/blobs/${encodeURIComponent(sha)}`),
-      );
-      if (
-        body.sha !== sha ||
-        body.encoding !== "base64" ||
-        typeof body.content !== "string" ||
-        body.content.length > MAX_BLOB_CONTENT_LENGTH
-      ) {
-        fail("repository-read");
-      }
-      const content = body.content.replace(/\s/gu, "");
-      if (!BASE64_CONTENT_PATTERN.test(content)) fail("repository-read");
-      try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(content, "base64"));
-      } catch {
-        fail("repository-read");
-      }
-    },
-  };
 }
 
 function verifyRuntimeSignature(certificate: DecodedSessionCertificate, runtime: LoadedRuntimeAuthority): void {
@@ -394,7 +256,7 @@ export async function authenticateSessionRequest(
       if (!resolvedIdentity.valid || resolvedIdentity.value === undefined) fail("repository");
       if (!sameRepositoryIdentity(resolvedIdentity.value, capability.scope.repository)) fail("repository");
 
-      const reader = createRuntimeAuthoritySourceReader(capability, options.repository, resolvedIdentity.value);
+      const reader = createAppRepositoryEvidenceReader(capability, options.repository, resolvedIdentity.value);
       let runtime: LoadedRuntimeAuthority;
       try {
         runtime = await resolveRuntimeAuthority(reader, certificate.header.kid, { now });
