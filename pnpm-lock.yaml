@@ -24,6 +24,9 @@ importers:
       '@types/node':
         specifier: ^26.1.2
         version: 26.4.0
+      '@xstate/graph':
+        specifier: 3.0.4
+        version: 3.0.4(xstate@5.32.6)
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
@@ -340,6 +343,11 @@ packages:
   '@typescript-eslint/visitor-keys@8.69.0':
     resolution: {integrity: sha512-+rmdgPA+EXkNgKYvHvFfhrs35utXbwaC5PGpDquSXcoXQDKUA5UjV0LmTucG/4JXkM31BTu4TilHtrN8IVBe8w==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+
+  '@xstate/graph@3.0.4':
+    resolution: {integrity: sha512-b12RA7E//+7FJVrD09Td+BhHRJbeKZnK+98xXBd+JmccG360xVP1lyzVhUZPgBgwPdmIGBJqhKzmWYJQ9c8ojQ==}
+    peerDependencies:
+      xstate: ^5.19.4
 
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
@@ -1216,6 +1224,10 @@ snapshots:
     dependencies:
       '@typescript-eslint/types': 8.69.0
       eslint-visitor-keys: 5.0.1
+
+  '@xstate/graph@3.0.4(xstate@5.32.6)':
+    dependencies:
+      xstate: 5.32.6
 
   accepts@2.0.0:
     dependencies:

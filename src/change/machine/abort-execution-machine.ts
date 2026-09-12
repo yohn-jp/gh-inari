@@ -220,7 +220,8 @@ function recoveryReadFailure(context: AbortMachineContext): AbortExecutionFailur
     : context.services.recoveryReadFailure(context.services.request, context.attempts, context.effectFailure);
 }
 
-const abortExecutionMachine = setup({
+/** @internal Test-only access to the production graph; not re-exported publicly. */
+export const abortExecutionMachine = setup({
   types: {
     context: {} as AbortMachineContext,
     input: {} as AbortExecutionServices,
