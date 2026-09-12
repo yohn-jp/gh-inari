@@ -57,7 +57,14 @@ function parseStdioArgs(argv: readonly string[]): ParsedStdioArgs {
   };
 }
 
+// See the matching declaration in cli-core.ts: the precompiled `gh` extension
+// executable bundles this module standalone with no sibling package.json.
+declare const __GH_INARI_EMBEDDED_METADATA__: { readonly version: string } | undefined;
+
 function packageVersion(): string {
+  if (typeof __GH_INARI_EMBEDDED_METADATA__ !== "undefined") {
+    return __GH_INARI_EMBEDDED_METADATA__.version;
+  }
   const packagePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
   try {
     const value = JSON.parse(readFileSync(packagePath, "utf8")) as { version?: unknown };
@@ -116,7 +123,9 @@ try {
 } catch {
   invokedPath = undefined;
 }
-if (invokedPath === fileURLToPath(import.meta.url)) {
+// See the matching guard in index.ts: `import.meta.url` is empty when this
+// module is bundled to CommonJS for the precompiled `gh` extension executable.
+if (import.meta.url !== "" && invokedPath === fileURLToPath(import.meta.url)) {
   runInariMcpStdio()
     .then((exitCode) => {
       process.exitCode = exitCode;
