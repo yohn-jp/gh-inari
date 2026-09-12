@@ -327,7 +327,27 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
     return fail(r, "authorization", "The request is not admitted for this Issue.");
   if (r.branch === context.authority.ref || r.branch === "main")
     return fail(r, "branch-state", "Default-branch writes are forbidden.");
-  const c = options.admission.capability;
+  const admission = options.admission;
+  const subject = admission?.subject;
+  if (
+    admission?.operation !== BRANCH_ADVANCE_OPERATION ||
+    subject?.kind !== "branch" ||
+    subject.issue !== r.issue ||
+    subject.branch !== r.branch ||
+    admission.canonical?.branch !== r.branch ||
+    admission.repository?.repositoryHost?.toLowerCase() !== context.repository.repositoryHost.toLowerCase() ||
+    admission.repository?.repositoryId !== context.repository.repositoryId ||
+    admission.session?.id !== context.session.id ||
+    admission.session?.certificateJti !== context.session.certificateJti ||
+    admission.request?.requestId !== context.request.requestId ||
+    admission.request?.operation !== context.request.operation
+  )
+    return fail(
+      r,
+      "authorization",
+      "The supplied admission is not the exact branch.advance admission for this request.",
+    );
+  const c = admission.capability;
   if (c.kind !== "branch.advance" || c.branch !== r.branch)
     return fail(r, "authorization", "No exact branch.advance capability was admitted.");
   const projected = { changes: r.changes.map((x) => ({ operation: "modify" as const, path: x.path })) };

@@ -159,3 +159,184 @@ test("requires recovery when reread is unavailable after an ambiguous mutation",
   assert.equal(result.provenance, undefined);
   assert.equal(calls.readRefs, 2);
 });
+
+// Issue #466 acceptance: the full frozen negative-case matrix. These exercise
+// the current bounded `changes` wire schema and the single
+// `BRANCH_ADVANCE_FAILED` code + stable `reason` taxonomy — not the retired
+// `repositoryId`/`treeDelta`/alternate-code-vocabulary shape.
+
+test("fails closed for the wrong Issue", async () => {
+  const { calls, broker } = fake();
+  const wrongContext = {
+    ...context,
+    task: { kind: "issue", number: 999 },
+  } as unknown as AuthenticatedSessionContext;
+  const result = await executeBranchAdvance({ context: wrongContext, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("fails closed for the wrong repository", async () => {
+  const { calls, broker } = fake();
+  const wrongRepository = { ...repository, repositoryId: "466000002" };
+  const wrongContext = { ...context, repository: wrongRepository } as unknown as AuthenticatedSessionContext;
+  const result = await executeBranchAdvance({ context: wrongContext, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("fails closed when the supplied admission names a different branch than the signed request", async () => {
+  const { calls, broker } = fake();
+  const otherBranch = "feat/466-other-branch";
+  const mismatchedAdmission = {
+    ...admission,
+    capability: { kind: "branch.advance", branch: otherBranch },
+    subject: { kind: "branch", issue: 466, branch: otherBranch },
+    canonical: { branch: otherBranch },
+  } as unknown as AdmittedSessionCapability;
+  const result = await executeBranchAdvance({ context, broker, admission: mismatchedAdmission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("fails closed for the default branch", async () => {
+  const { calls, broker } = fake();
+  const defaultRequest = { ...request, branch: "main" };
+  // "main" is rejected as a non-canonical branch name by request validation
+  // itself, which is a stricter, earlier fail-closed than branch-state.
+  const validation = validateBranchAdvanceSemanticRequest(defaultRequest);
+  assert.equal(validation.valid, false);
+  const result = await executeBranchAdvance({ context, broker, admission, request: defaultRequest });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "request");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("fails closed when the request's branch equals the authenticated default ref", async () => {
+  const { calls, broker } = fake();
+  const defaultAsRef = {
+    ...context,
+    authority: { ...context.authority, ref: BRANCH },
+  } as unknown as AuthenticatedSessionContext;
+  const result = await executeBranchAdvance({ context: defaultAsRef, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "branch-state");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("classifies a protected path before any Git object is created", async () => {
+  const { calls, broker } = fake();
+  const protectedRequest = {
+    ...request,
+    changes: [
+      {
+        operation: "upsert" as const,
+        path: ".github/inari/authorities/runtime.json",
+        mode: "100644" as const,
+        content,
+      },
+    ],
+  };
+  const protectedContext = {
+    ...context,
+    verifiedRequest: { envelope: { request: protectedRequest } },
+  } as unknown as AuthenticatedSessionContext;
+  const result = await executeBranchAdvance({ context: protectedContext, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "protected-path");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("rejects stale expected head without overwriting concurrent work", async () => {
+  const { calls, broker } = fake();
+  const staleRequest = { ...request, expectedHead: "9".repeat(40) };
+  const staleContext = {
+    ...context,
+    verifiedRequest: { envelope: { request: staleRequest } },
+  } as unknown as AuthenticatedSessionContext;
+  // The provider's current head still traces to a tree that does not already
+  // prove the target state, so a stale head must never be treated as
+  // idempotent success.
+  const result = await executeBranchAdvance({ context: staleContext, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "stale");
+  assert.equal(result.failure?.reason, "stale-head");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("rejects a concurrent head update via compare-and-swap rejection", async () => {
+  const { calls, broker } = fake("rejected");
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "stale");
+  assert.equal(result.failure?.reason, "stale-head");
+  assert.deepEqual(calls.updates[0], { branch: BRANCH, beforeOid: HEAD, afterOid: COMMIT, force: false });
+});
+
+test("fails closed once the Session request is no longer admitted for this operation", async () => {
+  const { calls, broker } = fake();
+  // Expiry is #374's authentication boundary: an envelope/context that is no
+  // longer bound to this exact branch.advance operation must never reach
+  // execution, regardless of how the caller phrases the mismatch.
+  const expiredContext = {
+    ...context,
+    request: { ...context.request, operation: "change.issue" },
+  } as unknown as AuthenticatedSessionContext;
+  const result = await executeBranchAdvance({ context: expiredContext, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("rejects an oversized request before any capability is acquired", async () => {
+  const { calls, broker } = fake();
+  const oversized = {
+    ...request,
+    commit: { ...request.commit, message: "x".repeat(70_000) },
+  };
+  const result = await executeBranchAdvance({ context, broker, admission, request: oversized });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "request");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("rejects an unsupported Git mode such as a symlink", async () => {
+  const unsupported = {
+    ...request,
+    changes: [{ operation: "upsert", path: "src/link", mode: "120000", content }],
+  };
+  const validation = validateBranchAdvanceSemanticRequest(unsupported);
+  assert.equal(validation.valid, false);
+  assert.equal(validation.diagnostics[0]?.code, "BRANCH_ADVANCE_FAILED");
+
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({ context, broker, admission, request: unsupported });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "request");
+  assert.equal(calls.blobs.length, 0);
+});
+
+test("resolves provider ambiguity authoritatively instead of guessing an outcome", async () => {
+  const { calls, broker } = fake("throws-applied");
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.outcome, "idempotent");
+  assert.ok(calls.readRefs >= 2, "must reread authoritatively rather than trust the throw");
+});
+
+test("keeps App and commit identities separate and leaks no credential or token", async () => {
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.provenance?.app?.principal, "app:inari-issuer");
+  assert.equal(result.provenance?.commitAuthor?.name, "Session author");
+  assert.notEqual(result.provenance?.app?.principal, result.provenance?.commitAuthor?.name);
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("installation-token"), false);
+  assert.equal(serialized.includes("private-key"), false);
+  assert.equal(serialized.includes("secret"), false);
+  assert.deepEqual(calls.blobs, [content]);
+});
