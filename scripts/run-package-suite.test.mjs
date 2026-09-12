@@ -170,9 +170,13 @@ test("packed certification has no checked-out source execution path", () => {
   assert.doesNotMatch(script, /src[\\/]index\.ts|sourceEntry|workspace:\s/u);
 });
 
-test("complete certification fails closed instead of emulating unavailable Golden Path contracts", () => {
+test("complete certification uses the installed Golden Path and provider boundary", () => {
   const smokeScript = fs.readFileSync(path.join(import.meta.dirname, "smoke-test.mjs"), "utf8");
-  assert.match(smokeScript, /GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE/u);
-  assert.match(smokeScript, /tarballPath, "blocked"/u);
-  assert.doesNotMatch(smokeScript, /packed-golden-path-runner|TrustedChangeExecutor|CREATE_PULL_REQUEST/u);
+  assert.match(smokeScript, /executing the complete Golden Path through the installed package/u);
+  assert.match(smokeScript, /change.*issue/u);
+  assert.match(smokeScript, /inari_golden_path_status/u);
+  assert.match(smokeScript, /inari_change_handoff/u);
+  assert.match(smokeScript, /INARI_PACKED_PROVIDER_STATE/u);
+  assert.doesNotMatch(smokeScript, /GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE|certification.*blocked/u);
+  assert.doesNotMatch(smokeScript, /packed-golden-path-runner/u);
 });

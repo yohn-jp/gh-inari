@@ -10,7 +10,6 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
-  CERTIFICATION_CONTRACT_VERSIONS,
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
   sha256Tarball,
   writeCertificationEvidence,
@@ -26,22 +25,12 @@ export const CERTIFICATION_ENTRY_COMMANDS = Object.freeze([
   Object.freeze({ name: "Skill discovery", args: ["skill", "--json"] }),
 ]);
 
-export const GOLDEN_PATH_CERTIFICATION_UNAVAILABLE_CODE = "GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE";
-
 function boundedCertificationMessage(value) {
   const normalized = String(value)
     .replace(/[\u0000-\u001F\u007F]/gu, " ")
     .trim();
   if (normalized.length === 0) return "Certification authority is unavailable.";
   return normalized.length <= 512 ? normalized : `${normalized.slice(0, 511)}…`;
-}
-
-export class CertificationAuthorityUnavailableError extends Error {
-  constructor(message) {
-    super(boundedCertificationMessage(message));
-    this.name = "CertificationAuthorityUnavailableError";
-    this.code = GOLDEN_PATH_CERTIFICATION_UNAVAILABLE_CODE;
-  }
 }
 
 function isPathInside(directory, candidate) {
@@ -248,9 +237,10 @@ function executablePath(name) {
   return result.stdout.trim();
 }
 
-function boundedPath(binDirectory, externalExecutables) {
+function boundedPath(binDirectory, externalExecutables, additionalExecutables = []) {
   const directories = [
     binDirectory,
+    ...additionalExecutables.map((executable) => path.dirname(executable)),
     ...externalExecutables.map((executable) => path.dirname(executable)),
     path.dirname(process.execPath),
     "/usr/local/bin",
@@ -304,18 +294,26 @@ function packArtifact() {
 function parseArgs(argv) {
   const index = argv.indexOf("--tarball");
   const evidenceIndex = argv.indexOf("--evidence");
-  const goldenPathIndex = argv.indexOf("--certify-golden-path");
   const readValue = (option, optionIndex) => {
     if (optionIndex === -1) return undefined;
     const value = argv[optionIndex + 1];
     if (value === undefined || value.startsWith("--")) fail(`${option} requires a value`);
     return value;
   };
+  for (const argument of argv) {
+    if (
+      argument !== "--tarball" &&
+      argument !== "--evidence" &&
+      argument !== readValue("--tarball", index) &&
+      argument !== readValue("--evidence", evidenceIndex)
+    ) {
+      fail(`unsupported option: ${argument}`);
+    }
+  }
   const value = readValue("--tarball", index);
   return {
     tarball: value,
     evidence: readValue("--evidence", evidenceIndex),
-    certifyGoldenPath: goldenPathIndex !== -1,
   };
 }
 
@@ -325,18 +323,22 @@ function sourceCommitSha() {
   return value;
 }
 
-function certificationContractVersions() {
-  return { ...CERTIFICATION_CONTRACT_VERSIONS };
+function certificationContractVersions(observed = {}) {
+  return {
+    goldenPath: typeof observed.goldenPath === "string" ? observed.goldenPath : "unobserved",
+    statusRecovery: typeof observed.statusRecovery === "string" ? observed.statusRecovery : "unobserved",
+    skill: typeof observed.skill === "string" ? observed.skill : "unobserved",
+  };
 }
 
-function writePackedEvidence(evidencePath, tarballPath, result = "blocked", diagnostics = []) {
+function writePackedEvidence(evidencePath, tarballPath, result, diagnostics = [], observedContractVersions = {}) {
   fs.mkdirSync(path.dirname(path.resolve(evidencePath)), { recursive: true });
   writeCertificationEvidence(evidencePath, {
     schemaVersion: CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
     certificationKind: "packed-artifact-golden-path",
     result,
     sourceCommitSha: sourceCommitSha(),
-    contractVersions: certificationContractVersions(),
+    contractVersions: certificationContractVersions(observedContractVersions),
     package: {
       name: packageJson.name,
       version: packageJson.version,
@@ -344,38 +346,6 @@ function writePackedEvidence(evidencePath, tarballPath, result = "blocked", diag
     },
     diagnostics,
   });
-}
-
-function certifyGoldenPathSkill(consumerDirectory, environment) {
-  const launcher = path.join(consumerDirectory, "node_modules", ".bin", "inari");
-  const invocation = invoke(launcher, ["skill", "golden-path", "--json"], {
-    cwd: consumerDirectory,
-    env: environment,
-  });
-  if (invocation.error !== undefined) {
-    throw new CertificationAuthorityUnavailableError(
-      `installed inari skill golden-path could not be started: ${invocation.error.message}`,
-    );
-  }
-  if (invocation.status !== 0) {
-    throw new CertificationAuthorityUnavailableError(
-      "installed artifact does not expose the finalized inari skill golden-path contract",
-    );
-  }
-  let result;
-  try {
-    result = JSON.parse((invocation.stdout ?? "").trim());
-  } catch {
-    throw new CertificationAuthorityUnavailableError(
-      "installed artifact returned a non-JSON inari skill golden-path result",
-    );
-  }
-  if (result.id !== "golden-path" || !Array.isArray(result.workflow) || result.workflow.length === 0) {
-    throw new CertificationAuthorityUnavailableError(
-      "installed artifact returned no finalized inari skill golden-path playbook",
-    );
-  }
-  return result;
 }
 
 function createConsumer(directory, name) {
@@ -389,6 +359,7 @@ function createConsumer(directory, name) {
 
 function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, binTargets, environment) {
   const binDirectory = path.join(consumerDirectory, "node_modules", ".bin");
+  let skillVersion;
   for (const name of REQUIRED_BIN_NAMES) {
     const target = binTargets.find((entry) => entry.name === name);
     if (target === undefined) fail(`no installed bin target for "${name}"`);
@@ -424,18 +395,307 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
       `${name} skill --json`,
     );
     const validatedSkillIndex = validateSkillIndex(skillIndex);
-    const firstScenario = validatedSkillIndex.scenarios[0].id;
+    if (!validatedSkillIndex.scenarios.some((scenario) => scenario.id === "golden-path"))
+      fail(`installed ${name} does not expose the Golden Path Skill scenario`);
     const skillScenario = jsonOutput(
-      invoke(launcher, ["skill", firstScenario, "--json"], { cwd: consumerDirectory, env: environment }),
-      `${name} skill ${firstScenario} --json`,
+      invoke(launcher, ["skill", "golden-path", "--json"], { cwd: consumerDirectory, env: environment }),
+      `${name} skill golden-path --json`,
     );
-    if (skillScenario.id !== firstScenario || !Array.isArray(skillScenario.workflow))
+    if (
+      skillScenario.id !== "golden-path" ||
+      !Array.isArray(skillScenario.workflow) ||
+      skillScenario.workflow.length === 0
+    )
       fail(`installed ${name} returned an invalid Skill scenario`);
+    if (skillVersion === undefined) skillVersion = validatedSkillIndex.version;
+    else if (skillVersion !== validatedSkillIndex.version)
+      fail("installed executables disagree on Skill contract version");
   }
   const canonical = executableOnPath("inari", environment.PATH);
   const expectedCanonical = path.join(consumerDirectory, "node_modules", ".bin", "inari");
   if (canonical === undefined || fs.realpathSync(canonical) !== fs.realpathSync(expectedCanonical))
     fail("canonical preflight resolved an executable outside the fresh consumer environment");
+  return { skillVersion };
+}
+
+function prepareGovernedConsumer(consumerDirectory) {
+  fs.cpSync(path.join(repoRoot, ".github"), path.join(consumerDirectory, ".github"), { recursive: true });
+  run("git", ["init", "--quiet"], { cwd: consumerDirectory });
+  run("git", ["config", "user.name", "packed-certification"], { cwd: consumerDirectory });
+  run("git", ["config", "user.email", "packed-certification@example.invalid"], { cwd: consumerDirectory });
+  run("git", ["add", ".github"], { cwd: consumerDirectory });
+  run("git", ["commit", "--quiet", "-m", "controlled governance generation"], { cwd: consumerDirectory });
+  const workflowSha = run("git", ["rev-parse", "HEAD"], { cwd: consumerDirectory }).stdout.trim();
+  if (!/^[0-9a-f]{40}$/u.test(workflowSha)) fail("controlled consumer governance commit has no exact SHA");
+  return workflowSha;
+}
+
+function installControlledGh(certificationRoot) {
+  const directory = path.join(certificationRoot, "controlled-gh");
+  fs.mkdirSync(directory);
+  const executable = path.join(directory, "gh");
+  fs.copyFileSync(path.join(repoRoot, "scripts", "controlled-github.mjs"), executable);
+  fs.chmodSync(executable, 0o755);
+  return executable;
+}
+
+function createGoldenPathInputs(certificationRoot) {
+  const directory = path.join(certificationRoot, "golden-path-input");
+  fs.mkdirSync(directory);
+  const issueInput = path.join(directory, "issue.json");
+  fs.writeFileSync(
+    issueInput,
+    JSON.stringify({
+      fields: {
+        problem: "The packed artifact must execute the governed Change lifecycle.",
+        capability: "Certify the installed package through the complete Golden Path.",
+        contract: "The certification harness must exercise the production lifecycle contracts.",
+        acceptance: "- [ ] Verify the complete installed-package path",
+        non_goals: "Live GitHub dogfood remains outside this deterministic provider.",
+      },
+    }),
+  );
+  return { issueInput };
+}
+
+function createProviderState(statePath, workflowSha, issueBody) {
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify(
+      {
+        workflowSha,
+        issues: {
+          415: {
+            number: 415,
+            title: "test: certify packed artifact Golden Path",
+            body: issueBody,
+            state: "open",
+          },
+          416: {
+            number: 416,
+            title: "test: certify packed artifact recovery",
+            body: issueBody,
+            state: "open",
+          },
+        },
+        branches: { main: "0123456789abcdef0123456789abcdef01234567" },
+        pulls: {},
+        runs: [],
+        artifacts: {},
+        nextRunId: 1000,
+        nextArtifactId: 2000,
+        failDeleteOnce: { 416: true },
+      },
+      null,
+      2,
+    )}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
+
+function callMcp(launcher, consumerDirectory, environment, name, args) {
+  const requests = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "packed-certification", version: "1" },
+      },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } },
+  ];
+  const invocation = invoke(launcher, ["mcp", "serve", "--repository", "yohn-jp/gh-inari"], {
+    cwd: consumerDirectory,
+    env: environment,
+    input: `${requests.map((request) => JSON.stringify(request)).join("\n")}\n`,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  if (invocation.error !== undefined) fail(`MCP ${name} failed to start: ${invocation.error.message}`);
+  if (invocation.status !== 0)
+    fail(`MCP ${name} exited ${String(invocation.status)}:\n${invocation.stdout ?? ""}\n${invocation.stderr ?? ""}`);
+  const responses = (invocation.stdout ?? "")
+    .trim()
+    .split(/\r?\n/u)
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        fail(`MCP ${name} emitted non-JSON output: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+  const response = responses.find((candidate) => candidate?.id === 2);
+  if (response === undefined) fail(`MCP ${name} emitted no response for the tool call`);
+  if (response.error !== undefined) fail(`MCP ${name} returned a protocol error: ${JSON.stringify(response.error)}`);
+  const structuredContent = response.result?.structuredContent;
+  if (structuredContent === undefined) fail(`MCP ${name} returned no structured content`);
+  return structuredContent;
+}
+
+function statusInput(issue, projection, packageVersion, executionOutcome, review) {
+  return {
+    environment: { status: "available", packageIdentity: `gh-inari@${packageVersion}`, capabilities: ["golden-path"] },
+    governance: { status: "available", repositoryHost: "github.com", repositoryId: "415000001" },
+    issue: {
+      status: "present",
+      number: issue,
+      state: "open",
+      governed: true,
+    },
+    changeProjection: projection,
+    implementation: { status: "ready", ready: true, complete: true, evidence: true },
+    ready: { status: "eligible", eligible: true, preconditions: true, evidence: true },
+    ...(executionOutcome === undefined ? {} : { executionOutcome }),
+    ...(review === undefined ? {} : { review }),
+    subject: { repositoryHost: "github.com", repositoryId: "415000001", rootIssue: issue },
+  };
+}
+
+function assertSuccessfulChange(result, operation, expectedState) {
+  if (result.ok !== true || result.operation !== operation || result.status !== "healthy")
+    fail(`${operation} did not return a healthy installed-package Change projection`);
+  if (expectedState !== undefined && result.state !== expectedState)
+    fail(`${operation} returned state ${String(result.state)}, expected ${expectedState}`);
+  if (result.evidence?.outcome !== "verified" && result.evidence?.outcome !== "returned-existing")
+    fail(`${operation} did not return verified or idempotent execution evidence`);
+}
+
+function certifyCompleteGoldenPath(consumerDirectory, launcher, environment, packageVersion, statePath) {
+  const repository = "yohn-jp/gh-inari";
+  const invokeChange = (operation, issue, expectedStatus = 0) =>
+    jsonOutput(
+      invoke(launcher, ["change", operation, String(issue), "--repository", repository, "--json"], {
+        cwd: consumerDirectory,
+        env: environment,
+      }),
+      `installed change ${operation} ${issue}`,
+      expectedStatus,
+    );
+
+  const firstIssue = invokeChange("issue", 415);
+  assertSuccessfulChange(firstIssue, "change.issue", "DRAFT");
+  if (firstIssue.entry?.valid !== true || firstIssue.entry?.action?.operation !== "change.issue")
+    fail("installed Change issuance did not expose the canonical Golden Path entry action");
+  if (
+    firstIssue.entry.action.mode !== "return-existing" ||
+    firstIssue.entry.status?.executionOutcome !== "verified" ||
+    typeof firstIssue.entry.version !== "number"
+  )
+    fail("installed Golden Path entry did not expose the verified return-existing action and version");
+  const goldenPathVersion = String(firstIssue.entry.version);
+
+  const repeatedIssue = invokeChange("issue", 415);
+  assertSuccessfulChange(repeatedIssue, "change.issue", "DRAFT");
+  if (repeatedIssue.evidence.outcome !== "returned-existing" || repeatedIssue.entry?.action?.mode !== "return-existing")
+    fail("repeated installed Change issuance did not prove idempotency");
+
+  const entry = callMcp(launcher, consumerDirectory, environment, "inari_golden_path_entry", {
+    repository,
+    issue: 415,
+  });
+  if (entry.ok !== true || entry.valid !== true || entry.entry?.action?.mode !== "return-existing")
+    fail(
+      `installed Golden Path entry MCP boundary did not read the canonical idempotent action: ${JSON.stringify(entry)}`,
+    );
+
+  const handoff = callMcp(launcher, consumerDirectory, environment, "inari_change_handoff", {
+    repository,
+    issue: 415,
+  });
+  if (
+    handoff.ok !== true ||
+    handoff.valid !== true ||
+    handoff.handoff?.state !== "DRAFT" ||
+    handoff.handoff?.rootIssue !== 415 ||
+    typeof handoff.handoff?.branch !== "string" ||
+    typeof handoff.handoff?.pullRequest !== "number"
+  )
+    fail("installed implementation handoff MCP boundary did not expose canonical identities");
+
+  const readyStatus = callMcp(launcher, consumerDirectory, environment, "inari_golden_path_status", {
+    input: statusInput(415, firstIssue.projection, packageVersion, firstIssue.evidence.outcome),
+  });
+  if (
+    readyStatus.ok !== true ||
+    readyStatus.valid !== true ||
+    readyStatus.version === undefined ||
+    readyStatus.status?.phase !== "READY" ||
+    readyStatus.nextAction?.kind !== "READY_CHANGE"
+  )
+    fail(`installed Golden Path status MCP boundary did not project the ready action: ${JSON.stringify(readyStatus)}`);
+  const statusRecoveryVersion = String(readyStatus.version);
+
+  const firstReady = invokeChange("ready", 415);
+  assertSuccessfulChange(firstReady, "change.ready", "REVIEW");
+  const shownReview = invokeChange("show", 415);
+  if (shownReview.ok !== true || shownReview.state !== "REVIEW" || shownReview.status !== "healthy")
+    fail("installed Change show did not reread the REVIEW projection");
+  const repeatedReady = invokeChange("ready", 415);
+  assertSuccessfulChange(repeatedReady, "change.ready", "REVIEW");
+  if (repeatedReady.evidence.outcome !== "returned-existing") fail("Ready retry did not prove idempotency");
+
+  const reviewStatus = callMcp(launcher, consumerDirectory, environment, "inari_golden_path_status", {
+    input: statusInput(415, shownReview.projection, packageVersion, firstReady.evidence.outcome, {
+      status: "required",
+      action: "review",
+    }),
+  });
+  if (reviewStatus.ok !== true || reviewStatus.valid !== true || reviewStatus.status?.phase !== "REVIEW")
+    fail("installed Golden Path status MCP boundary did not project REVIEW");
+
+  const firstRecoveryIssue = invokeChange("issue", 416);
+  assertSuccessfulChange(firstRecoveryIssue, "change.issue", "DRAFT");
+  const recoveryReady = invokeChange("ready", 416);
+  assertSuccessfulChange(recoveryReady, "change.ready", "REVIEW");
+  const abortFailure = invokeChange("abort", 416, 3);
+  const recoveryEvidence = abortFailure.error?.details?.evidence;
+  if (abortFailure.ok !== false || recoveryEvidence?.outcome !== "recovery-required")
+    fail("installed abort did not expose the bounded recovery-required outcome");
+
+  const recoveryProjection = invokeChange("show", 416);
+  if (
+    recoveryProjection.ok !== false ||
+    recoveryProjection.status !== "partial" ||
+    recoveryProjection.state !== "RECOVERY_REQUIRED"
+  )
+    fail("installed Change reread did not expose the partial recovery projection");
+  const recoveryStatus = callMcp(launcher, consumerDirectory, environment, "inari_golden_path_status", {
+    input: statusInput(416, recoveryProjection.projection, packageVersion),
+    recoveryInput: { projection: recoveryProjection.projection, evidence: recoveryEvidence },
+  });
+  if (
+    recoveryStatus.ok !== true ||
+    recoveryStatus.valid !== true ||
+    recoveryStatus.status?.phase !== "RECOVERY" ||
+    recoveryStatus.nextAction?.owner !== "recovery" ||
+    recoveryStatus.recovery?.rereadRequired !== true
+  )
+    fail("installed Golden Path recovery/status boundary did not project a recovery-owned action");
+
+  const recoveredAbort = invokeChange("abort", 416);
+  assertSuccessfulChange(recoveredAbort, "change.abort", "ABORTED");
+  const terminal = invokeChange("show", 416);
+  if (terminal.ok !== true || terminal.status !== "healthy" || terminal.state !== "ABORTED")
+    fail("installed abort retry did not complete the canonical cleanup transition");
+  const terminalStatus = callMcp(launcher, consumerDirectory, environment, "inari_golden_path_status", {
+    input: statusInput(416, terminal.projection, packageVersion),
+  });
+  if (
+    terminalStatus.ok !== true ||
+    terminalStatus.valid !== true ||
+    terminalStatus.status?.phase !== "TERMINAL" ||
+    terminalStatus.nextAction !== null
+  )
+    fail("installed Golden Path status MCP boundary did not project terminal completion");
+
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  if (state.branches?.["test/416-certify-packed-artifact-recovery"] !== undefined)
+    fail("recovered abort left the canonical branch behind");
+  return { goldenPathVersion, statusRecoveryVersion };
 }
 
 function createEntryFixture(consumerDirectory) {
@@ -493,9 +753,10 @@ function certifyNpxFallback(rootDirectory, tarballPath, externalExecutables) {
 }
 
 function main() {
-  const { tarball, evidence, certifyGoldenPath } = parseArgs(process.argv.slice(2));
+  const { tarball, evidence } = parseArgs(process.argv.slice(2));
   let tarballPath;
   let ownsTarball = false;
+  const observedContractVersions = {};
   if (tarball === undefined) {
     console.log("packing certification artifact with npm pack...");
     tarballPath = packArtifact();
@@ -537,20 +798,51 @@ function main() {
     const installedPackageDirectory = packageDirectoryForName(consumerDirectory, packageJson.name);
     const packageData = validateInstalledPackage(installedPackageDirectory, consumerDirectory, packageJson);
     const binDirectory = path.join(consumerDirectory, "node_modules", ".bin");
-    const installedEnvironment = { ...environment, PATH: boundedPath(binDirectory, externalExecutables) };
-    checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, packageData.binTargets, installedEnvironment);
+    const installedLauncher = path.join(binDirectory, "inari");
+    const workflowSha = prepareGovernedConsumer(consumerDirectory);
+    const { issueInput } = createGoldenPathInputs(certificationRoot);
+    const renderedIssue = jsonOutput(
+      invoke(installedLauncher, ["issue", "render", "--template", "feature", "--from", issueInput, "--json"], {
+        cwd: consumerDirectory,
+        env: environment,
+      }),
+      "installed issue render",
+    );
+    if (renderedIssue.valid !== true || typeof renderedIssue.body !== "string")
+      fail("installed package did not render the governed Golden Path Issue body");
+    const statePath = path.join(certificationRoot, "provider-state.json");
+    createProviderState(statePath, workflowSha, renderedIssue.body);
+    const controlledGh = installControlledGh(certificationRoot);
+    const installedEnvironment = {
+      ...environment,
+      INARI_PACKED_ENTRY: path.join(installedPackageDirectory, "dist", "index.js"),
+      INARI_PACKED_PACKAGE_ROOT: installedPackageDirectory,
+      INARI_PACKED_CONSUMER_ROOT: consumerDirectory,
+      INARI_PACKED_PROVIDER_STATE: statePath,
+      PATH: boundedPath(binDirectory, externalExecutables, [controlledGh]),
+    };
+    const launcherChecks = checkInstalledLaunchers(
+      consumerDirectory,
+      installedPackageDirectory,
+      packageData.binTargets,
+      installedEnvironment,
+    );
+    observedContractVersions.skill = launcherChecks.skillVersion;
     console.log(
       `packed preflight passed: ${packageData.binTargets.length} executable(s), ${packageData.exportTargets.length} export target(s), runtime dependencies installed in the fresh consumer.`,
     );
 
     certifyEntryBoundary(consumerDirectory, installedEnvironment);
-    if (certifyGoldenPath) {
-      console.log("checking the installed inari skill golden-path contract...");
-      certifyGoldenPathSkill(consumerDirectory, installedEnvironment);
-      throw new CertificationAuthorityUnavailableError(
-        "complete packed Golden Path certification is blocked until the integrated entry, handoff, review, and status/recovery contracts are shipped by the installed artifact",
-      );
-    }
+    console.log("executing the complete Golden Path through the installed package and controlled Actions provider...");
+    const goldenPathVersions = certifyCompleteGoldenPath(
+      consumerDirectory,
+      installedLauncher,
+      installedEnvironment,
+      packageJson.version,
+      statePath,
+    );
+    observedContractVersions.goldenPath = goldenPathVersions.goldenPathVersion;
+    observedContractVersions.statusRecovery = goldenPathVersions.statusRecoveryVersion;
     certifyNpxFallback(certificationRoot, tarballPath, externalExecutables);
 
     // Compatibility certification is also fed from the installed package. It
@@ -580,35 +872,31 @@ function main() {
     );
     validateVersionOutput(extensionVersion, packageJson);
 
-    console.log("packed artifact preflight and entry certification passed.");
+    console.log("packed artifact preflight, entry, and complete Golden Path certification passed.");
     if (evidence !== undefined) {
-      if (certifyGoldenPath) writePackedEvidence(evidence, tarballPath, "passed", []);
-      else
-        writePackedEvidence(evidence, tarballPath, "blocked", [
-          {
-            code: "GOLDEN_PATH_CERTIFICATION_NOT_REQUESTED",
-            message: "Complete packed Golden Path certification was not requested by this invocation.",
-          },
-        ]);
+      writePackedEvidence(evidence, tarballPath, "passed", [], observedContractVersions);
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
     }
   } catch (error) {
-    const authorityUnavailable = error instanceof CertificationAuthorityUnavailableError;
     if (evidence !== undefined) {
-      writePackedEvidence(evidence, tarballPath, authorityUnavailable ? "blocked" : "failed", [
-        {
-          code: authorityUnavailable ? error.code : "PACKED_CERTIFICATION_FAILED",
-          message: boundedCertificationMessage(error instanceof Error ? error.message : error),
-        },
-      ]);
+      writePackedEvidence(
+        evidence,
+        tarballPath,
+        "failed",
+        [
+          {
+            code: "PACKED_CERTIFICATION_FAILED",
+            message: boundedCertificationMessage(error instanceof Error ? error.message : error),
+          },
+        ],
+        observedContractVersions,
+      );
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);
     }
-    if (authorityUnavailable) {
-      console.error(`packed Golden Path certification blocked: ${error.message}`);
-      process.exitCode = 1;
-    } else throw error;
+    throw error;
   } finally {
-    fs.rmSync(certificationRoot, { recursive: true, force: true });
+    if (process.env.INARI_KEEP_CERTIFICATION_ROOT !== "1")
+      fs.rmSync(certificationRoot, { recursive: true, force: true });
     if (ownsTarball && tarballPath !== undefined) fs.rmSync(tarballPath, { force: true });
   }
 }
@@ -618,7 +906,7 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
     main();
   } catch (error) {
-    console.error(`packed Golden Path certification failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`packed certification failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   }
 }

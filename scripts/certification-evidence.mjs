@@ -3,17 +3,13 @@ import fs from "node:fs";
 
 /**
  * Versioned evidence authority shared by the packed, dogfood, and release
- * certification lanes. Producers may emit failed/blocked evidence for
- * diagnostics, but only a complete passed envelope is release evidence.
+ * certification lanes. Only a complete passed envelope is release evidence.
  */
 export const CERTIFICATION_EVIDENCE_SCHEMA_VERSION = "1";
 export const CERTIFICATION_KINDS = Object.freeze(["packed-artifact-golden-path", "self-dogfood-golden-path"]);
 export const CERTIFICATION_RESULTS = Object.freeze(["passed", "failed", "blocked"]);
-export const CERTIFICATION_CONTRACT_VERSIONS = Object.freeze({
-  goldenPath: "1",
-  statusRecovery: "1",
-  skill: "1.1.0",
-});
+/** Contract fields recorded by a producer; values come from that artifact's authorities. */
+export const CERTIFICATION_CONTRACT_VERSION_KEYS = Object.freeze(["goldenPath", "statusRecovery", "skill"]);
 
 export const SELF_DOGFOOD_OPERATION_REQUIREMENTS = Object.freeze([
   Object.freeze({ operation: "preflight.opt-in", outcomes: Object.freeze(["verified"]) }),
@@ -61,7 +57,7 @@ const COMMON_KEYS = new Set([
 ]);
 const PACKED_KEYS = new Set([...COMMON_KEYS, "package"]);
 const DOGFOOD_KEYS = new Set([...COMMON_KEYS, "repository", "rootIssue", "change", "operations", "finalState"]);
-const CONTRACT_VERSION_KEYS = new Set(["goldenPath", "statusRecovery", "skill"]);
+const CONTRACT_VERSION_KEYS = new Set(CERTIFICATION_CONTRACT_VERSION_KEYS);
 const PACKAGE_KEYS = new Set(["name", "version", "tarballSha256"]);
 const REPOSITORY_KEYS = new Set(["owner", "name"]);
 const CHANGE_KEYS = new Set(["issue", "branch", "pullRequest"]);
@@ -134,7 +130,7 @@ function validateDiagnostics(value, errors) {
   return normalized;
 }
 
-function validateContractVersions(value, errors, { strict = true } = {}) {
+function validateContractVersions(value, errors, { expected } = {}) {
   if (!isRecord(value)) {
     errors.push("$.contractVersions: must be an object");
     return false;
@@ -147,7 +143,7 @@ function validateContractVersions(value, errors, { strict = true } = {}) {
       errors.push(`$.contractVersions.${key}: must not have surrounding whitespace`);
       valid = false;
     }
-    if (strict && value[key] !== CERTIFICATION_CONTRACT_VERSIONS[key]) {
+    if (expected !== undefined && value[key] !== expected[key]) {
       errors.push(`$.contractVersions.${key}: unknown or stale contract version`);
       valid = false;
     }
@@ -310,7 +306,7 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
   return repositoryValid && rootIssueValid && changeValid && operationsValid && finalStateValid;
 }
 
-function validateSharedEnvelope(value, { certificationKind, strictVersions = true } = {}) {
+function validateSharedEnvelope(value, { certificationKind, expectedContractVersions } = {}) {
   const errors = [];
   if (!isRecord(value)) return { valid: false, errors: ["$: must be an object"] };
   const kind = value.certificationKind;
@@ -328,7 +324,7 @@ function validateSharedEnvelope(value, { certificationKind, strictVersions = tru
     errors.push("$.certificationKind: does not match the expected certification kind");
   if (!CERTIFICATION_RESULT_SET.has(value.result)) errors.push("$.result: unsupported value");
   requireString(value.sourceCommitSha, "$.sourceCommitSha", errors, { pattern: SOURCE_SHA_PATTERN, maxLength: 40 });
-  validateContractVersions(value.contractVersions, errors, { strict: strictVersions });
+  validateContractVersions(value.contractVersions, errors, { expected: expectedContractVersions });
   validateDiagnostics(value.diagnostics, errors);
   if (value.result === "passed" && Array.isArray(value.diagnostics) && value.diagnostics.length !== 0) {
     errors.push("$.diagnostics: must be empty when result is passed");
@@ -337,16 +333,18 @@ function validateSharedEnvelope(value, { certificationKind, strictVersions = tru
 }
 
 /**
- * Validate the shared envelope. Passed evidence is strict and release-ready;
- * failed/blocked evidence retains the same bounded shape but may have a
- * partial dogfood operation/final-state projection for recovery diagnostics.
+ * Validate the shared envelope. Contract versions are observed values from
+ * the producer's exact artifact; callers may optionally provide expected
+ * values when comparing two independently obtained envelopes. This avoids
+ * baking a product Skill version into the evidence authority.
  */
-export function validateCertificationEvidence(value, { certificationKind } = {}) {
+export function validateCertificationEvidence(value, { certificationKind, contractVersions } = {}) {
   const strict = value?.result === "passed";
-  const envelope = validateSharedEnvelope(value, { certificationKind, strictVersions: true });
+  const envelope = validateSharedEnvelope(value, { certificationKind, expectedContractVersions: contractVersions });
   const errors = envelope.errors;
   if (!envelope.valid) return { valid: false, errors };
   if (value.certificationKind === "packed-artifact-golden-path") {
+    if (value.result === "blocked") errors.push("$.result: packed certification cannot be blocked");
     validatePackedExtension(value.package, errors);
   } else if (value.certificationKind === "self-dogfood-golden-path") {
     validateDogfoodExtension(value, errors, { strict });

@@ -6,7 +6,6 @@ import path from "node:path";
 import test from "node:test";
 import {
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
-  CERTIFICATION_CONTRACT_VERSIONS,
   CertificationEvidenceError,
   assertCertificationEvidence,
   readCertificationEvidence,
@@ -18,6 +17,7 @@ import {
 
 const sourceCommitSha = "a".repeat(40);
 const tarballSha256 = `sha256:${"b".repeat(64)}`;
+const contractVersions = { goldenPath: "1", statusRecovery: "1", skill: "1.3.0" };
 
 function packedEvidence(overrides = {}) {
   return {
@@ -25,7 +25,7 @@ function packedEvidence(overrides = {}) {
     certificationKind: "packed-artifact-golden-path",
     result: "passed",
     sourceCommitSha,
-    contractVersions: { ...CERTIFICATION_CONTRACT_VERSIONS },
+    contractVersions: { ...contractVersions },
     package: { name: "gh-inari", version: "0.11.0", tarballSha256 },
     diagnostics: [],
     ...overrides,
@@ -45,23 +45,13 @@ test("validates the frozen packed-artifact evidence envelope", () => {
   );
 });
 
-test("accepts blocked packed evidence with bounded authority diagnostics", () => {
+test("rejects blocked packed evidence instead of treating an incomplete lane as certification", () => {
   const evidence = packedEvidence({
     result: "blocked",
-    diagnostics: [
-      {
-        code: "GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE",
-        message: "The integrated Golden Path contract is not present in the installed artifact.",
-      },
-    ],
+    diagnostics: [{ code: "PACKED_CERTIFICATION_FAILED", message: "The installed artifact failed." }],
   });
-  assert.deepEqual(validateCertificationEvidence(evidence), {
-    valid: true,
-    errors: [],
-    evidence,
-    diagnostics: evidence.diagnostics,
-  });
-  assert.doesNotThrow(() => assertCertificationEvidence(evidence));
+  assert.equal(validateCertificationEvidence(evidence).valid, false);
+  assert.throws(() => assertCertificationEvidence(evidence), CertificationEvidenceError);
 });
 
 test("serializes evidence with deterministic key order", () => {
@@ -73,7 +63,7 @@ test("serializes evidence with deterministic key order", () => {
       certificationKind: "packed-artifact-golden-path",
       result: "passed",
       sourceCommitSha,
-      contractVersions: { ...CERTIFICATION_CONTRACT_VERSIONS },
+      contractVersions: { ...contractVersions },
       package: { name: "gh-inari", version: "0.11.0", tarballSha256 },
       diagnostics: [],
     }) + "\n",
@@ -82,10 +72,6 @@ test("serializes evidence with deterministic key order", () => {
 
 for (const [label, mutate] of [
   ["schema version", (value) => ({ ...value, schemaVersion: "2" })],
-  [
-    "stale contract version",
-    (value) => ({ ...value, contractVersions: { ...value.contractVersions, goldenPath: "402.1.0" } }),
-  ],
   ["source SHA case", (value) => ({ ...value, sourceCommitSha: "A".repeat(40) })],
   ["source SHA length", (value) => ({ ...value, sourceCommitSha: "a".repeat(39) })],
   ["tarball digest prefix", (value) => ({ ...value, package: { ...value.package, tarballSha256: "b".repeat(64) } })],
@@ -116,6 +102,14 @@ for (const [label, mutate] of [
     assert.throws(() => assertCertificationEvidence(mutate(packedEvidence())), CertificationEvidenceError);
   });
 }
+
+test("compares observed contract versions only when an expected version set is supplied", () => {
+  const evidence = packedEvidence({
+    contractVersions: { ...contractVersions, skill: "1.2.0" },
+  });
+  assert.equal(validateCertificationEvidence(evidence).valid, true);
+  assert.equal(validateCertificationEvidence(evidence, { contractVersions }).valid, false);
+});
 
 test("computes and round-trips an exact tarball digest", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "inari-evidence-test-"));

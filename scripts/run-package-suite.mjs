@@ -441,7 +441,7 @@ async function main() {
   await validateCodexPlugin(packageJson, packedFiles);
 
   console.log(
-    `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable; complete Golden Path certification remains a separate authority-bound lane.`,
+    `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable; delegating complete Golden Path certification to the installed-artifact harness.`,
   );
 
   run(process.execPath, ["scripts/smoke-test.mjs"], { stdio: "inherit" });
