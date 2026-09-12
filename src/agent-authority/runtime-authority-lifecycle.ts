@@ -21,6 +21,7 @@ import {
   type Dirent,
   type Stats,
 } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   MAX_RUNTIME_AUTHORITY_ID_LENGTH,
@@ -575,6 +576,21 @@ function assertDestinationAbsent(
   }
 }
 
+function assertNonTemporaryRepositoryRoot(root: string, operation: RuntimeAuthorityLifecycleOperation): void {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTemp = path.resolve(os.tmpdir());
+  const relativeToTemp = path.relative(resolvedTemp, resolvedRoot);
+  const isTempRoot =
+    relativeToTemp === "" || (!relativeToTemp.startsWith("..") && !path.isAbsolute(relativeToTemp));
+  if (!isTempRoot) return;
+  throw lifecycleError(
+    "RUNTIME_AUTHORITY_LIFECYCLE_STORAGE_FAILED",
+    "Runtime Authority artifacts must not be written under the operating system temporary directory.",
+    operation,
+    { path: resolvedRoot, reason: "temporary repository root is not allowed for authority lifecycle writes" },
+  );
+}
+
 function writeExclusive(
   absolutePath: string,
   relativePath: string,
@@ -672,6 +688,7 @@ export function registerRuntimeAuthority(root: string, input: unknown): RuntimeA
   assertActive(authority, operation, "Registered");
   const relativePath = authorityRelativePath(authority.id, operation);
   const resolvedRoot = path.resolve(root);
+  assertNonTemporaryRepositoryRoot(resolvedRoot, operation);
   const absolutePath = path.join(resolvedRoot, ...relativePath.split("/"));
   assertDestinationAbsent(absolutePath, relativePath, operation);
   const repository = loadLocalRuntimeAuthorityRepository(resolvedRoot, operation);
@@ -686,7 +703,9 @@ export function rotateRuntimeAuthority(root: string, input: unknown): RuntimeAut
   const operation = "rotate" as const;
   const rotation = parseRuntimeAuthorityRotation(input);
   assertActive(rotation.nextAuthority, operation, "Next");
-  const repository = loadLocalRuntimeAuthorityRepository(path.resolve(root), operation);
+  const resolvedRoot = path.resolve(root);
+  assertNonTemporaryRepositoryRoot(resolvedRoot, operation);
+  const repository = loadLocalRuntimeAuthorityRepository(resolvedRoot, operation);
   const current = repository.artifacts.find((artifact) => artifact.authority.id === rotation.currentAuthorityId);
   if (current === undefined) {
     throw lifecycleError(
@@ -706,9 +725,9 @@ export function rotateRuntimeAuthority(root: string, input: unknown): RuntimeAut
   }
   assertUniqueAuthority(rotation.nextAuthority, repository.artifacts, operation);
   const relativePath = authorityRelativePath(rotation.nextAuthority.id, operation);
-  const absolutePath = path.join(path.resolve(root), ...relativePath.split("/"));
+  const absolutePath = path.join(resolvedRoot, ...relativePath.split("/"));
   assertDestinationAbsent(absolutePath, relativePath, operation);
-  ensureAuthorityDirectory(path.resolve(root), operation);
+  ensureAuthorityDirectory(resolvedRoot, operation);
   writeExclusive(absolutePath, relativePath, canonicalRuntimeAuthorityJson(rotation.nextAuthority), operation);
   return Object.freeze({
     ok: true,
