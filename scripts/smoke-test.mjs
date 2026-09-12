@@ -378,6 +378,18 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
         fail(`installed ${name} does not expose session ${sessionCommand}`);
     }
 
+    const publishHelp = invoke(launcher, ["change", "publish", "--help"], {
+      cwd: consumerDirectory,
+      env: environment,
+    });
+    if (
+      publishHelp.status !== 0 ||
+      !(publishHelp.stdout ?? "").includes("Usage: inari change publish") ||
+      !(publishHelp.stdout ?? "").includes("--session-credential") ||
+      !(publishHelp.stdout ?? "").includes("--app-endpoint")
+    )
+      fail(`installed ${name} does not expose change publish with the Session/App transport options`);
+
     for (const authorityCommand of ["register", "rotate", "revoke"]) {
       const authorityHelp = invoke(launcher, ["authority", authorityCommand, "--help"], {
         cwd: consumerDirectory,

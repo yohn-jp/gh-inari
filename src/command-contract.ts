@@ -85,6 +85,7 @@ export type CommandId =
   | "change.handoff"
   | "change.ready"
   | "change.abort"
+  | "change.publish"
   | "authority.generate"
   | "authority.register"
   | "authority.rotate"
@@ -120,7 +121,10 @@ export type OptionId =
   | "rawBody"
   | "capability"
   | "privateKey"
-  | "replace";
+  | "replace"
+  | "sessionCredential"
+  | "appEndpoint"
+  | "commit";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -152,6 +156,8 @@ const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "pol
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
+const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
+const CHANGE_PUBLISH_OPTIONS = [...CHANGE_SESSION_OPTIONS, "commit"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
@@ -367,6 +373,33 @@ export const COMMAND_OPTIONS = {
     "boolean",
     "none",
     "Explicitly replace an existing local Runtime Authority private-key file.",
+  ),
+  sessionCredential: option(
+    "sessionCredential",
+    "session-credential",
+    ["--session-credential"],
+    "string",
+    "required",
+    "Explicit Session credential bundle file. Selects the direct App transport together with --app-endpoint; never accepted as inline material.",
+    "path",
+  ),
+  appEndpoint: option(
+    "appEndpoint",
+    "app-endpoint",
+    ["--app-endpoint"],
+    "string",
+    "required",
+    "Direct Inari App HTTPS endpoint. Must be HTTPS except an explicit localhost development fixture.",
+    "https-url",
+  ),
+  commit: option(
+    "commit",
+    "commit",
+    ["--commit"],
+    "string",
+    "required",
+    "Local Git commit/tree to publish. Defaults to HEAD.",
+    "rev",
   ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
@@ -811,7 +844,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "issue",
     ["change", "issue"],
     "Request authoritative issuance of a governed Change for an Issue.",
-    CHANGE_OPTIONS,
+    CHANGE_SESSION_OPTIONS,
     "<number>",
   ),
   command(
@@ -820,7 +853,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "show",
     ["change", "show"],
     "Read a bounded machine-readable projection of a governed Change.",
-    CHANGE_OPTIONS,
+    CHANGE_SESSION_OPTIONS,
     "<number>",
   ),
   command(
@@ -838,7 +871,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "ready",
     ["change", "ready"],
     "Request the governed transition of a Change from Draft to review.",
-    CHANGE_OPTIONS,
+    CHANGE_SESSION_OPTIONS,
     "<number>",
   ),
   command(
@@ -847,7 +880,16 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "abort",
     ["change", "abort"],
     "Request authoritative termination of a governed Change.",
-    CHANGE_OPTIONS,
+    CHANGE_SESSION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "change.publish",
+    "change",
+    "publish",
+    ["change", "publish"],
+    "Project a local Git commit into the canonical implementation branch through #466 branch.advance.",
+    CHANGE_PUBLISH_OPTIONS,
     "<number>",
   ),
   command(

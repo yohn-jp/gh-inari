@@ -144,6 +144,17 @@ import {
   persistSessionCredentialBundle,
 } from "./agent-authority/session-bundle.js";
 import {
+  createDirectAppChangeRemoteExecutor,
+  loadDirectAppSession,
+  resolveAppEndpoint,
+  sendDirectAppBranchAdvance,
+} from "./agent-authority/direct-app-client.js";
+import {
+  validateBranchAdvanceSemanticRequest,
+  type BranchAdvanceSemanticRequest,
+} from "./agent-authority/branch-advance.js";
+import { projectPublishTreeDelta, resolveLocalRepositoryNameWithOwner } from "./change-publish-projection.js";
+import {
   compareSemanticIssueProjection,
   tryObserveSemanticIssue,
   type SemanticIssueRelationEvidenceInput,
@@ -1124,12 +1135,32 @@ function invalidChangeNumberError(value: string | undefined): CliError {
   return new CliError("INVALID_CHANGE_NUMBER", message, "$argv[1]", { value });
 }
 
+function rejectPartialSessionTransportOptions(
+  sessionCredential: string | boolean | undefined,
+  appEndpoint: string | boolean | undefined,
+): void {
+  if ((sessionCredential === undefined) === (appEndpoint === undefined)) return;
+  throw new CliError(
+    "INVALID_OPTION",
+    "Use --session-credential together with --app-endpoint to select the direct App transport.",
+    sessionCredential === undefined ? "--app-endpoint" : "--session-credential",
+  );
+}
+
+/** Selects the direct App transport when both Session options are supplied; otherwise the existing Actions/gh path. */
 function createChangeExecutor(
   dependencies: CliDependencies,
   root: string,
   repository: string | boolean | undefined,
+  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean } = {},
 ): ChangeRemoteExecutor {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
+  rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
+  if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
+    const { session, agent } = loadDirectAppSession(path.resolve(root, sessionOptions.sessionCredential));
+    const endpoint = resolveAppEndpoint(sessionOptions.appEndpoint);
+    return createDirectAppChangeRemoteExecutor({ endpoint, session, ...(agent === undefined ? {} : { agent }) });
+  }
   const factory =
     dependencies.createChangeExecutor ??
     ((options: ChangeRemoteExecutorOptions) => {
@@ -1200,6 +1231,143 @@ function rejectUnsupportedChangeOptions(command: string, options: Readonly<Recor
   );
 }
 
+/**
+ * `change publish` derives the bounded tree delta from a local commit and
+ * submits the exact canonical #466 `branch.advance` request through the
+ * Session/App path (#467). It never performs a raw `git push` and never
+ * duplicates #466's branch validation, Git mutation, or provenance authority.
+ */
+async function runChangePublishCommand(
+  issue: number,
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const sessionCredential = parsed.options.sessionCredential;
+  const appEndpoint = parsed.options.appEndpoint;
+  if (typeof sessionCredential !== "string" || typeof appEndpoint !== "string") {
+    throw new CliError(
+      "INPUT_REQUIRED",
+      "change publish requires --session-credential <path> and --app-endpoint <https-url>.",
+      "--session-credential",
+    );
+  }
+  const commitRev = typeof parsed.options.commit === "string" ? parsed.options.commit : "HEAD";
+
+  const { session, agent } = loadDirectAppSession(path.resolve(root, sessionCredential));
+  const endpoint = resolveAppEndpoint(appEndpoint);
+
+  // #467 requires verifying the local repository identity before publishing:
+  // an ancestor/CAS check alone proves nothing about which repository this
+  // workspace actually is, only that some commit chain exists locally.
+  const certificateRepository = session.certificate?.payload.repository.name;
+  const localRepository = resolveLocalRepositoryNameWithOwner(root);
+  if (
+    certificateRepository === undefined ||
+    localRepository === undefined ||
+    localRepository !== certificateRepository
+  ) {
+    throw new CliError(
+      "CHANGE_PUBLISH_REPOSITORY_MISMATCH",
+      `Local repository origin ("${localRepository ?? "unknown"}") does not match the Session-authorized repository ("${certificateRepository ?? "unknown"}").`,
+    );
+  }
+
+  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
+    sessionCredential,
+    appEndpoint,
+  });
+  const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const canonicalBranch = projection.canonicalBranch;
+  if (canonicalBranch === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_BRANCH_UNAVAILABLE",
+      `Change #${issue} has no canonical implementation branch to publish to.`,
+    );
+  }
+  const branchCandidate = projection.candidates.branches.find(
+    (candidate) => candidate.candidate.name === canonicalBranch,
+  );
+  const expectedHead = branchCandidate?.candidate.sha;
+  if (expectedHead === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_HEAD_UNAVAILABLE",
+      `Could not determine the current authoritative head of "${canonicalBranch}" through the App path.`,
+    );
+  }
+
+  const treeDelta = projectPublishTreeDelta({ cwd: root, commit: commitRev, expectedHead });
+
+  const compiled: BranchAdvanceSemanticRequest = {
+    version: 1,
+    issue,
+    branch: canonicalBranch,
+    expectedHead,
+    changes: treeDelta.changes,
+    commit: treeDelta.commitMetadata,
+    ...(agent === undefined ? {} : { agent }),
+  };
+  const validated = validateBranchAdvanceSemanticRequest(compiled);
+  if (!validated.valid || validated.value === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_REQUEST_INVALID",
+      "The compiled branch.advance request does not satisfy the canonical #466 contract.",
+      "$request",
+      { diagnostics: validated.diagnostics },
+    );
+  }
+
+  const result = await sendDirectAppBranchAdvance({ endpoint, session, request: validated.value });
+  const resultBranch = result.branch ?? canonicalBranch;
+  const resultExpectedHead = result.expectedHead ?? expectedHead;
+  if (result.status !== "succeeded" || result.resultingHead === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        operation: "change.publish",
+        issue,
+        branch: resultBranch,
+        expectedHead: resultExpectedHead,
+        commit: treeDelta.commit,
+        outcome: result.outcome,
+        ...(result.resultingHead === undefined ? {} : { resultingHead: result.resultingHead }),
+      }),
+    );
+    return EXIT_REMOTE;
+  }
+
+  // #467 requires an authoritative reread/verification of the resulting
+  // remote head through the Session/App path before reporting success; the
+  // branch.advance response alone is never sufficient (#466 already proves
+  // its own postcondition, but this leaf's own success report must not rely
+  // on that response without independently rereading it).
+  const verification = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const verifiedBranch = verification.candidates.branches.find(
+    (candidate) => candidate.candidate.name === resultBranch,
+  );
+  if (verifiedBranch?.candidate.sha !== result.resultingHead) {
+    throw new CliError(
+      "CHANGE_PUBLISH_VERIFICATION_FAILED",
+      `Could not verify the published branch head through the App path (expected ${result.resultingHead}, observed ${verifiedBranch?.candidate.sha ?? "unknown"}).`,
+    );
+  }
+
+  console.log(
+    JSON.stringify({
+      ok: true,
+      operation: "change.publish",
+      issue,
+      branch: resultBranch,
+      expectedHead: resultExpectedHead,
+      commit: treeDelta.commit,
+      outcome: result.outcome,
+      resultingHead: result.resultingHead,
+      verified: true,
+    }),
+  );
+  return 0;
+}
+
 async function runChangeCommand(
   command: string | undefined,
   rest: readonly string[],
@@ -1215,9 +1383,15 @@ async function runChangeCommand(
   }
   if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidChangeNumberError(rest[0]);
   rejectUnsupportedChangeOptions(definition.operation, parsed.options);
+  if (definition.operation === "publish") {
+    return await runChangePublishCommand(Number(rest[0]), parsed, root, dependencies);
+  }
 
   const issue = Number(rest[0]);
-  const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
+  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
+    sessionCredential: parsed.options.sessionCredential,
+    appEndpoint: parsed.options.appEndpoint,
+  });
   const result =
     definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
@@ -2897,6 +3071,22 @@ function classifyExitCode(error: unknown): number {
       error.code.startsWith("MANAGED_SESSION_"))
   )
     return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "SESSION_CREDENTIAL_INVALID" ||
+      error.code === "APP_ENDPOINT_INVALID" ||
+      error.code === "APP_REQUEST_TOO_LARGE" ||
+      error.code.startsWith("PUBLISH_PROJECTION_"))
+  )
+    return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "APP_TRANSPORT_FAILED" ||
+      error.code === "APP_EXECUTION_FAILED" ||
+      error.code === "BRANCH_ADVANCE_REJECTED" ||
+      error.code === "BRANCH_ADVANCE_TRANSPORT_FAILED")
+  )
+    return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;

@@ -15,3 +15,4 @@ export * from "./capability-admission.js";
 export * from "./capability-provenance.js";
 export * from "./branch-advance.js";
 export * from "./direct-app-http.js";
+export * from "./direct-app-client.js";
