@@ -885,7 +885,6 @@ test("App installation token is confined to the broker transport and never its s
     installationId: "219",
     privateKeyPem,
     repository,
-    target,
     fetch,
   });
   const request = issuerCredentialRequest();
@@ -1304,7 +1303,6 @@ test("credential issuance and scope validation keep separate bounded stages", as
     installationId: "219",
     privateKeyPem,
     repository,
-    target,
   } as const;
   const request = issuerCredentialRequest();
 

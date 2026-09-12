@@ -369,6 +369,27 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
     if (helpResult.status !== 0 || !(helpResult.stdout ?? "").includes("Usage: inari"))
       fail(`installed ${name} --help did not reach the packaged entrypoint`);
 
+    for (const sessionCommand of ["issue", "inspect"]) {
+      const sessionHelp = invoke(launcher, ["session", sessionCommand, "--help"], {
+        cwd: consumerDirectory,
+        env: environment,
+      });
+      if (sessionHelp.status !== 0 || !(sessionHelp.stdout ?? "").includes(`Usage: inari session ${sessionCommand}`))
+        fail(`installed ${name} does not expose session ${sessionCommand}`);
+    }
+
+    for (const authorityCommand of ["register", "rotate", "revoke"]) {
+      const authorityHelp = invoke(launcher, ["authority", authorityCommand, "--help"], {
+        cwd: consumerDirectory,
+        env: environment,
+      });
+      if (
+        authorityHelp.status !== 0 ||
+        !(authorityHelp.stdout ?? "").includes(`Usage: inari authority ${authorityCommand}`)
+      )
+        fail(`installed ${name} does not expose authority ${authorityCommand}`);
+    }
+
     const versionResult = invoke(launcher, ["--version"], { cwd: consumerDirectory, env: environment });
     if (versionResult.status !== 0 || versionResult.stdout.trim() !== `${packageJson.name} ${packageJson.version}`)
       fail(`installed ${name} --version returned an unexpected result`);

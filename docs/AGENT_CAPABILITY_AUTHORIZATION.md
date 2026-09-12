@@ -342,6 +342,22 @@ read or validated.
 A cached trust decision may not outlive the mutation request in V1. Optimized caching is a
 future concern and must preserve bounded revocation latency explicitly.
 
+### 6.7 Required repository Ruleset
+
+The canonical Runtime Authority root is published through the dedicated PR validation
+check and independent human review. Repository operators must configure the required
+Ruleset rule as follows:
+
+```text
+.github/inari/authorities/**
+-> require "Runtime Authority Governance"
+-> require independent human approval
+```
+
+The local `inari authority register`, `rotate`, and `revoke` commands materialize trust-root
+changes only in the operator's dedicated worktree. They do not publish to GitHub, change
+Ruleset settings, or introduce a Runtime/App credential into the Agent execution model.
+
 ## 7. Runtime Authority
 
 ### 7.1 Runtime key semantics

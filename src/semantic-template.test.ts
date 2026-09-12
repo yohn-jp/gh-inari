@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -124,6 +124,37 @@ test("sync writes projections, --check detects drift, and unchanged generation i
     assert.deepEqual(check.drift, [".github/ISSUE_TEMPLATE/feature.yml"]);
     assert.equal(check.written.length, 0);
     assert.match(await readFile(path.join(root, ".github/ISSUE_TEMPLATE/feature.yml"), "utf8"), /# drift\n/u);
+  });
+});
+
+test("sync refuses to write through a symbolic-link projection", async () => {
+  await withRepository(async (root) => {
+    await mkdir(path.join(root, ".github/inari/issues"), { recursive: true });
+    await mkdir(path.join(root, ".github/ISSUE_TEMPLATE"), { recursive: true });
+    await writeFile(
+      path.join(root, ".github/inari/issues/bug.json"),
+      `${JSON.stringify({
+        version: 1,
+        kind: "issue",
+        id: "bug",
+        name: "Bug",
+        description: "Report",
+        sections: [{ id: "summary", type: "textarea", label: "Summary" }],
+      })}\n`,
+    );
+    const outsidePath = path.join(root, "outside.txt");
+    const generatedPath = path.join(root, ".github/ISSUE_TEMPLATE/bug.yml");
+    await writeFile(outsidePath, "must remain unchanged\n");
+    await symlink(outsidePath, generatedPath);
+
+    await assert.rejects(
+      syncSemanticTemplates(root),
+      (error: unknown) =>
+        error instanceof SemanticTemplateError &&
+        error.code === "SEMANTIC_TEMPLATE_INVALID_VALUE" &&
+        error.message.includes("symbolic link"),
+    );
+    assert.equal(await readFile(outsidePath, "utf8"), "must remain unchanged\n");
   });
 });
 
