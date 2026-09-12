@@ -46,7 +46,7 @@ import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 import { capabilityClaimWithinCeiling, type CapabilityClaim } from "./capability.js";
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
-export const SESSION_ID_BYTES = 18;
+const SESSION_ID_BYTES = 18;
 const CERTIFICATE_ID_BYTES = 18;
 const VALIDATION_RUNTIME_ID = "session-issuance-validation-runtime";
 const VALIDATION_CERTIFICATE_ID = "session-issuance-validation-certificate";
@@ -223,7 +223,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function opaqueId(bytes: number): string {
+function opaqueId(bytes: number): string {
   return randomBytes(bytes).toString("base64url");
 }
 

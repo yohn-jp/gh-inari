@@ -22,7 +22,7 @@ import {
   writeSync,
   type Stats,
 } from "node:fs";
-import { createPrivateKey, generateKeyPairSync, type KeyObject } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
 import path from "node:path";
 import {
   MAX_UNIX_TIME_SECONDS,
@@ -38,12 +38,7 @@ import {
   assertRuntimeAuthority,
   type RuntimeAuthority,
 } from "./runtime-authority.js";
-import {
-  issueSessionCertificate,
-  opaqueId,
-  SESSION_ID_BYTES,
-  type ManagedSessionIssuanceRequest,
-} from "./session-issuance.js";
+import { issueSessionCertificate, type ManagedSessionIssuanceRequest } from "./session-issuance.js";
 import { exportRuntimeAuthorityPublicKey, type RuntimeAuthorityKeyPair } from "./runtime-key.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 
@@ -66,6 +61,8 @@ const ANCESTOR_WRITE_MODE_MASK = 0o022;
 const STICKY_MODE = 0o1000;
 const SAFE_METADATA_TEXT = /^[\x20-\x7e]+$/u;
 const SESSION_SUBJECT_PREFIX = "session:";
+/** Matches the #371 managed Session ID entropy; this bundle owns its own ID generation. */
+const MANUAL_SESSION_ID_BYTES = 18;
 const VALIDATION_SESSION_KEY = Object.freeze({
   kty: "OKP",
   crv: "Ed25519",
@@ -521,6 +518,11 @@ export function canonicalSessionCredentialBundleJson(input: SessionCredentialBun
   return canonicalJsonString(parsed.bundle as unknown as CanonicalJsonValue);
 }
 
+/** Generate a locally-owned opaque Session ID for manual bundle issuance. */
+function manualSessionId(): string {
+  return randomBytes(MANUAL_SESSION_ID_BYTES).toString("base64url");
+}
+
 /** Generate a fresh Session keypair, issue the canonical #367 certificate, and package it. */
 export function createSessionCredentialBundle(options: {
   readonly request: unknown;
@@ -528,7 +530,7 @@ export function createSessionCredentialBundle(options: {
   readonly now?: Date;
 }): CreatedSessionCredentialBundle {
   const request = parseSessionIssuanceRequest(options.request);
-  const sessionId = opaqueId(SESSION_ID_BYTES);
+  const sessionId = manualSessionId();
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const sessionKey = exportRuntimeAuthorityPublicKey(publicKey);
   const issuanceRequest: ManagedSessionIssuanceRequest = Object.freeze({

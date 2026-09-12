@@ -6,6 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "../cli.js";
 import { canonicalJsonString, base64UrlEncodeText, type CanonicalJsonValue } from "./codec.js";
+import * as sessionIssuance from "./session-issuance.js";
 import {
   SESSION_CREDENTIAL_BUNDLE_KIND,
   SESSION_ISSUANCE_REQUEST_KIND,
@@ -135,6 +136,23 @@ test("manual issuance creates one canonical bundle and safe inspection metadata"
   assert.equal(serializedInspection.includes("PRIVATE KEY"), false);
   assert.equal(serializedInspection.includes('"d"'), false);
   assert.equal(serializedInspection.includes(created.bundle.certificate), false);
+});
+
+test("manual issuance generates valid, distinct Session IDs without consuming #371 ID-generation exports", () => {
+  const runtimeKey = generateRuntimeAuthorityKeyPair();
+  const first = createSessionCredentialBundle({ request: requestFor(runtimeKey), runtimeKey, now: NOW });
+  const second = createSessionCredentialBundle({ request: requestFor(runtimeKey), runtimeKey, now: NOW });
+
+  const opaqueIdPattern = /^[A-Za-z0-9._-]{1,128}$/u;
+  const firstSessionId = first.certificate.payload.sub.slice("session:".length);
+  const secondSessionId = second.certificate.payload.sub.slice("session:".length);
+
+  assert.match(firstSessionId, opaqueIdPattern);
+  assert.match(secondSessionId, opaqueIdPattern);
+  assert.notEqual(firstSessionId, secondSessionId);
+
+  assert.equal(Reflect.has(sessionIssuance, "opaqueId"), false);
+  assert.equal(Reflect.has(sessionIssuance, "SESSION_ID_BYTES"), false);
 });
 
 test("bundle import rejects tampering, expiry drift, and cross-session substitution", () => {
