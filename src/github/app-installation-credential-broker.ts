@@ -19,6 +19,12 @@ import {
   type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import {
+  GitHubGitDataCapability,
+  type GitDataCapability,
+  type GitDataCapabilityTransport,
+  type GitDataGraphqlRequest,
+} from "./git-data-capability.js";
+import {
   INARI_ISSUER_MAXIMUM_PERMISSIONS,
   ISSUER_PERMISSION_NAMES,
   IssuerAuthorityError,
@@ -58,6 +64,12 @@ export const GITHUB_APP_REPOSITORY_READ_PERMISSIONS = Object.freeze({
 export type GitHubAppRepositoryReadPermissionSet = Readonly<
   Partial<Record<"contents" | "issues" | "pull_requests", "read">>
 >;
+
+/** Minimum App permission set for the bounded Git-data capability. */
+export const GITHUB_APP_GIT_DATA_PERMISSIONS = Object.freeze({
+  contents: "write",
+  metadata: "read",
+} as const);
 
 export const GITHUB_APP_CREDENTIAL_FAILURE_STAGES = Object.freeze([
   "issuer-configuration",
@@ -200,6 +212,16 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
     return this.requestAt(this.#apiUrl, request);
   }
 
+  /** Internal App-only GraphQL seam used solely for conditional ref updates. */
+  async requestGraphql(request: GitDataGraphqlRequest): Promise<GitHubChangeEffectResponse> {
+    return this.requestAt(this.#graphqlApiUrl, {
+      hostname: "github.com",
+      method: "POST",
+      path: "",
+      body: { query: request.query, variables: request.variables },
+    });
+  }
+
   private async requestAt(baseUrl: string, request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
     try {
       const response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
@@ -320,6 +342,12 @@ type CredentialRequest =
       readonly target: IssuerRepositoryIdentity;
       readonly permissions: IssuerPermissionSet;
       readonly kind: "mutation";
+    }
+  | {
+      readonly app: IssuerInstallationScope["app"];
+      readonly target: IssuerRepositoryIdentity;
+      readonly permissions: IssuerPermissionSet;
+      readonly kind: "git-data";
     };
 
 /** Shared implementation for pre-admission reads and post-admission mutations. */
@@ -441,12 +469,51 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     }
   }
 
+  /**
+   * Execute a bounded Git-data operation while retaining the App token
+   * internally. The callback receives no generic transport or credential.
+   */
+  async withGitDataCapability<T>(
+    request: { readonly target: IssuerRepositoryIdentity },
+    operation: (capability: GitDataCapability) => Promise<T>,
+  ): Promise<T> {
+    if (!isRecord(request) || !isRecord(request.target)) throw this.safeFailure("installation-scope");
+    const credential = await this.issueInstallationToken({
+      app: this.#app,
+      target: request.target,
+      permissions: GITHUB_APP_GIT_DATA_PERMISSIONS,
+      kind: "git-data",
+    });
+    const transport = new GitHubAppApiTransport({
+      apiUrl: this.#apiUrl,
+      token: credential.token,
+      fetch: this.#fetch,
+      failureStage: "projection-execution",
+      failure: this.#failure,
+    });
+    const capabilityTransport: GitDataCapabilityTransport = Object.freeze({
+      request: (input: Parameters<GitDataCapabilityTransport["request"]>[0]) => transport.request(input),
+      requestGraphql: (input: GitDataGraphqlRequest) => transport.requestGraphql(input),
+    });
+    const capability = new GitHubGitDataCapability({
+      repository: this.#repository,
+      repositoryId: credential.scope.repository.repositoryId,
+      scope: credential.scope,
+      transport: capabilityTransport,
+    });
+    try {
+      return await operation(capability);
+    } catch (error: unknown) {
+      throw this.safeOperationError(error, credential.token, "projection-execution");
+    }
+  }
+
   private async issueInstallationToken(request: CredentialRequest): Promise<InstallationCredential> {
     if (
       request.app.appId !== this.#app.appId ||
       request.app.principal !== this.#app.principal ||
       request.app.slug !== this.#app.slug ||
-      (request.kind === "mutation" && !sameConfiguredRepository(request.target, this.#repository)) ||
+      (request.kind !== "read" && !sameConfiguredRepository(request.target, this.#repository)) ||
       !(request.kind === "read"
         ? isReadPermissionSet(request.permissions)
         : isMutationPermissionSet(request.permissions))
@@ -624,6 +691,10 @@ function boundedDecimalId(value: unknown): string {
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("record invalid");
   return value as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function boundedBody(response: Response): Promise<unknown> {
