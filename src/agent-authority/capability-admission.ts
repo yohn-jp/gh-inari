@@ -40,7 +40,7 @@ export type CapabilityAdmissionOperation =
   | "branch.advance"
   | "pullRequest.create";
 
-export const CAPABILITY_ADMISSION_OPERATIONS = Object.freeze([
+const CAPABILITY_ADMISSION_OPERATIONS = Object.freeze([
   "change.issue",
   "change.show",
   "change.ready",
@@ -103,7 +103,7 @@ export type CapabilityAdmissionFailureReason =
   | "path-policy"
   | "stale-evidence";
 
-export const CAPABILITY_ADMISSION_FAILURE_REASONS = Object.freeze([
+const CAPABILITY_ADMISSION_FAILURE_REASONS = Object.freeze([
   "operation",
   "repository",
   "task",
@@ -120,6 +120,9 @@ export class CapabilityAdmissionError extends Error {
   readonly reason: CapabilityAdmissionFailureReason;
 
   constructor(reason: CapabilityAdmissionFailureReason) {
+    if (!CAPABILITY_ADMISSION_FAILURE_REASONS.includes(reason)) {
+      throw new TypeError("Unsupported capability admission failure reason.");
+    }
     super("Capability admission denied.");
     this.name = "CapabilityAdmissionError";
     this.reason = reason;
@@ -129,6 +132,7 @@ export class CapabilityAdmissionError extends Error {
 const MAX_CONTEXT_TEXT_LENGTH = 1_024;
 const MAX_CONTEXT_SHA_LENGTH = 128;
 const SAFE_CONTEXT_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
+const CAPABILITY_ADMISSION_REQUEST_KEYS = new Set(["context", "operation", "subject", "projection", "treeDelta"]);
 
 function deny(reason: CapabilityAdmissionFailureReason): never {
   throw new CapabilityAdmissionError(reason);
@@ -662,6 +666,9 @@ function deepFreeze<T>(value: T): T {
  */
 export function admitAuthenticatedSessionCapability(input: CapabilityAdmissionRequest): AdmittedSessionCapability {
   if (!isRecord(input)) deny("session-capability");
+  if (Object.keys(input).some((key) => !CAPABILITY_ADMISSION_REQUEST_KEYS.has(key))) {
+    deny("session-capability");
+  }
   if (
     typeof input.operation !== "string" ||
     !CAPABILITY_ADMISSION_OPERATIONS.includes(input.operation as CapabilityAdmissionOperation)

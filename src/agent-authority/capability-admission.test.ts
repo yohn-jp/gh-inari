@@ -4,12 +4,16 @@ import {
   CAPABILITY_ADMISSION_CONTRACT_VERSION,
   CapabilityAdmissionError,
   admitAuthenticatedSessionCapability,
+  type AdmittedSessionCapability,
+  type CapabilityAdmissionFailureReason,
   type CapabilityAdmissionRequest,
   type CapabilityAdmissionOperation,
   type CapabilityAdmissionSubject,
 } from "./capability-admission.js";
+import * as capabilityAdmissionModule from "./capability-admission.js";
 import { authenticateSessionRequest, type AuthenticatedSessionContext } from "./session-authentication.js";
 import type { CapabilityClaim } from "./capability.js";
+import type { DelegatedTreeDelta } from "./protected-paths.js";
 import {
   canonicalRuntimeAuthorityJson,
   createManagedSession,
@@ -24,6 +28,91 @@ import type { GitHubAppRepositoryReadCapability } from "../github/app-installati
 import type { GitHubChangeEffectRepository } from "../github/change-effect-adapter.js";
 import { projectChangeFromGitHubEvidence, type ChangeGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import type { SemanticSessionRequest } from "./session-request.js";
+import type { IssuerRepositoryIdentity } from "../github/issuer-authority.js";
+import type { SessionCertificateTask } from "./session-certificate.js";
+import type { ChangeState } from "../change.js";
+
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends <Value>() => Value extends Right ? 1 : 2 ? true : false;
+type Assert<Value extends true> = Value;
+
+type ExpectedCapabilityAdmissionOperation =
+  | "change.issue"
+  | "change.show"
+  | "change.ready"
+  | "change.abort"
+  | "branch.create"
+  | "branch.advance"
+  | "pullRequest.create";
+type ExpectedCapabilityAdmissionSubject =
+  | { readonly kind: "change"; readonly issue: number }
+  | { readonly kind: "branch"; readonly issue: number; readonly branch: string }
+  | {
+      readonly kind: "pullRequest";
+      readonly issue: number;
+      readonly head: string;
+      readonly base: string;
+    };
+type ExpectedCapabilityAdmissionRequest = {
+  readonly context: AuthenticatedSessionContext;
+  readonly operation: ExpectedCapabilityAdmissionOperation;
+  readonly subject: ExpectedCapabilityAdmissionSubject;
+  readonly projection: ChangeProjectionResult;
+  readonly treeDelta?: DelegatedTreeDelta;
+};
+type ExpectedAdmittedSessionCapability = {
+  readonly version: 1;
+  readonly operation: ExpectedCapabilityAdmissionOperation;
+  readonly repository: IssuerRepositoryIdentity;
+  readonly runtimeAuthority: Readonly<{ id: string; kid: string }>;
+  readonly session: Readonly<{ id: string; certificateJti: string }>;
+  readonly authority: Readonly<{ ref: string; sha: string }>;
+  readonly request: Readonly<{
+    requestId: string;
+    operation: string;
+    issuedAt: number;
+    expiresAt: number;
+  }>;
+  readonly task?: SessionCertificateTask;
+  readonly capability: CapabilityClaim;
+  readonly subject: ExpectedCapabilityAdmissionSubject;
+  readonly canonical: Readonly<{
+    state?: ChangeState;
+    branch?: string;
+    pullRequest?: number;
+  }>;
+  readonly protectedPathClassifierVersion: 1;
+};
+type ExpectedCapabilityAdmissionFailureReason =
+  | "operation"
+  | "repository"
+  | "task"
+  | "session-capability"
+  | "canonical-state"
+  | "canonical-identity"
+  | "protected-path"
+  | "path-policy"
+  | "stale-evidence";
+
+type PublicOperationIsExact = Assert<Equal<CapabilityAdmissionOperation, ExpectedCapabilityAdmissionOperation>>;
+type PublicSubjectIsExact = Assert<Equal<CapabilityAdmissionSubject, ExpectedCapabilityAdmissionSubject>>;
+type PublicRequestIsExact = Assert<Equal<CapabilityAdmissionRequest, ExpectedCapabilityAdmissionRequest>>;
+type PublicOutputIsExact = Assert<Equal<AdmittedSessionCapability, ExpectedAdmittedSessionCapability>>;
+type PublicFailureReasonsAreExact = Assert<
+  Equal<CapabilityAdmissionFailureReason, ExpectedCapabilityAdmissionFailureReason>
+>;
+
+// These are deliberate compile-time contract guards: reintroducing any of the
+// obsolete public seams makes the expected diagnostics unused and fails the
+// typecheck.
+// @ts-expect-error Runtime trust is authenticated by #374 and is not an admission seam.
+import type { RuntimeAuthoritySourceReader } from "./capability-admission.js";
+// @ts-expect-error Runtime trust is authenticated by #374 and is not an admission seam.
+import type { CapabilityAdmissionPathPolicyResolver } from "./capability-admission.js";
+// @ts-expect-error This compatibility alias is intentionally not public.
+import type { CapabilityAdmissionDeniedError } from "./capability-admission.js";
+// @ts-expect-error The obsolete admission result shape is intentionally not public.
+import type { AuthenticatedSessionCapabilityAdmission } from "./capability-admission.js";
 
 const NOW = new Date("2026-09-12T00:00:30.000Z");
 const NOW_SECONDS = Math.floor(NOW.getTime() / 1000);
@@ -253,6 +342,20 @@ test("admits pre-issuance change.issue from change.implement and freezes the res
   assert.equal(admitted.canonical.pullRequest, undefined);
   assert.deepEqual(admitted.subject, subject("change"));
   assert.equal(admitted.capability.kind, "change.implement");
+  assert.deepEqual(Object.keys(admitted).sort(), [
+    "authority",
+    "canonical",
+    "capability",
+    "operation",
+    "protectedPathClassifierVersion",
+    "repository",
+    "request",
+    "runtimeAuthority",
+    "session",
+    "subject",
+    "task",
+    "version",
+  ]);
   assert.equal(Object.isFrozen(admitted), true);
   assert.equal(Object.isFrozen(admitted.canonical), true);
 });
@@ -463,14 +566,77 @@ test("does not expose Runtime trust readers, provider credentials, or unsupporte
   const error = new CapabilityAdmissionError("operation");
   assert.equal(error.code, "CAPABILITY_ADMISSION_DENIED");
   assert.equal(error.message, "Capability admission denied.");
+  for (const forbiddenOperation of ["change.implement", "change.handoff"] as const) {
+    assertDenied(
+      () =>
+        admitAuthenticatedSessionCapability({
+          context: {} as AuthenticatedSessionContext,
+          operation: forbiddenOperation as unknown as CapabilityAdmissionOperation,
+          subject: subject("change"),
+          projection: projection(375),
+        }),
+      "operation",
+    );
+  }
+  assert.throws(
+    () => new CapabilityAdmissionError("runtime-trust" as unknown as CapabilityAdmissionFailureReason),
+    TypeError,
+  );
+  assert.throws(
+    () => new CapabilityAdmissionError("runtime-ceiling" as unknown as CapabilityAdmissionFailureReason),
+    TypeError,
+  );
+});
+
+test("rejects obsolete authority inputs instead of consuming them", async () => {
+  const runtime = runtimeAuthority();
+  const context = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.show",
+    { version: 1, issue: 375 },
+    [{ kind: "change.implement", issue: 375 }],
+  );
+  const request = {
+    context,
+    operation: "change.show" as const,
+    subject: subject("change"),
+    projection: projection(375, "draft"),
+  };
   assertDenied(
     () =>
       admitAuthenticatedSessionCapability({
-        context: {} as AuthenticatedSessionContext,
-        operation: "change.implement" as CapabilityAdmissionOperation,
-        subject: subject("change"),
-        projection: projection(375),
-      }),
-    "operation",
+        ...request,
+        runtimeAuthorityReader: {},
+      } as unknown as CapabilityAdmissionRequest),
+    "session-capability",
   );
+  assertDenied(
+    () =>
+      admitAuthenticatedSessionCapability({
+        ...request,
+        pathPolicyResolver: {},
+      } as unknown as CapabilityAdmissionRequest),
+    "session-capability",
+  );
+});
+
+test("publishes exactly the frozen admission runtime surface", () => {
+  assert.deepEqual(Object.keys(capabilityAdmissionModule).sort(), [
+    "CAPABILITY_ADMISSION_CONTRACT_VERSION",
+    "CapabilityAdmissionError",
+    "admitAuthenticatedSessionCapability",
+  ]);
+  for (const obsoleteExport of [
+    "RuntimeAuthoritySourceReader",
+    "resolveRuntimeAuthority",
+    "CAPABILITY_ADMISSION_OPERATIONS",
+    "CAPABILITY_ADMISSION_FAILURE_REASONS",
+    "CapabilityAdmissionDeniedError",
+    "CapabilityAdmissionPathPolicyResolver",
+    "CapabilityAdmissionResolvedPathPolicy",
+    "AuthenticatedSessionCapabilityAdmission",
+  ]) {
+    assert.equal(obsoleteExport in capabilityAdmissionModule, false, obsoleteExport);
+  }
 });
