@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   INARI_MCP_TOOL_CONTRACT_VERSION,
   registerChangeTools,
+  registerGoldenPathTools,
   registerSemanticBranchTools,
   registerSemanticIssueTools,
   registerSemanticPullRequestTools,
@@ -34,9 +35,10 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
     },
     {
       instructions:
-        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action projection, and the canonical Change implementation handoff. Inari Core and the repository Canon remain authoritative; this server performs no GitHub mutation.",
+        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative; this server performs no GitHub mutation.",
     },
   );
+  registerGoldenPathTools(server);
   registerSemanticIssueTools(server, options);
   registerSemanticBranchTools(server, options);
   registerSemanticPullRequestTools(server, options);

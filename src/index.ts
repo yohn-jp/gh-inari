@@ -23,6 +23,7 @@ export * from "./change-handoff.js";
 export * from "./change-trusted-executor.js";
 export * from "./golden-path-review.js";
 export * from "./golden-path-entry.js";
+export * from "./golden-path-recovery.js";
 export * from "./semantic-pr-projection.js";
 export * from "./semantic-issue-projection.js";
 export * from "./semantic-issue-observation.js";
@@ -35,6 +36,7 @@ export * from "./semantic-issue-relation-executor.js";
 export * from "./semantic-branch-executor.js";
 export * from "./artifact-contract-governance.js";
 export * from "./legacy-artifact-convergence.js";
+export * from "./golden-path-status.js";
 export * from "./agent-authority/index.js";
 export * from "./mcp/index.js";
 export {
