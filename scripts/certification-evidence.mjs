@@ -10,6 +10,10 @@ export const CERTIFICATION_KINDS = Object.freeze(["packed-artifact-golden-path",
 export const CERTIFICATION_RESULTS = Object.freeze(["passed", "failed", "blocked"]);
 /** Contract fields recorded by a producer; values come from that artifact's authorities. */
 export const CERTIFICATION_CONTRACT_VERSION_KEYS = Object.freeze(["goldenPath", "statusRecovery", "skill"]);
+/** Terminal Change states a self-dogfood run's finalState may report regardless of result. */
+export const CERTIFICATION_FINAL_STATE_TERMINAL_STATUSES = Object.freeze(["REVIEW", "RECOVERY_REQUIRED", "ABORTED"]);
+/** finalState.status sentinel for a run that never reached a terminal Change state. */
+export const CERTIFICATION_FINAL_STATE_UNAVAILABLE_STATUS = "UNAVAILABLE";
 
 export const SELF_DOGFOOD_OUTCOMES = Object.freeze({
   VERIFIED: "verified",
@@ -422,8 +426,8 @@ function validateFinalState(value, errors, { allowUnavailable = false } = {}) {
   }
   rejectUnknownKeys(value, FINAL_STATE_KEYS, "$.finalState", errors);
   const allowedStatuses = allowUnavailable
-    ? new Set(["REVIEW", "RECOVERY_REQUIRED", "ABORTED", "UNAVAILABLE"])
-    : new Set(["REVIEW", "RECOVERY_REQUIRED", "ABORTED"]);
+    ? new Set([...CERTIFICATION_FINAL_STATE_TERMINAL_STATUSES, CERTIFICATION_FINAL_STATE_UNAVAILABLE_STATUS])
+    : new Set(CERTIFICATION_FINAL_STATE_TERMINAL_STATUSES);
   if (!allowedStatuses.has(value.status))
     addValidationError(errors, "DOGFOOD_FINAL_STATE_INVALID", "$.finalState.status: unsupported value");
   if (!isRecord(value.recovery)) {

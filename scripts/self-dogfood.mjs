@@ -17,6 +17,8 @@ import {
   appendCertificationDiagnostic,
   appendSelfDogfoodOperation,
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+  CERTIFICATION_FINAL_STATE_TERMINAL_STATUSES,
+  CERTIFICATION_FINAL_STATE_UNAVAILABLE_STATUS,
   CERTIFICATION_KINDS,
   CERTIFICATION_RESULTS,
   MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH,
@@ -444,7 +446,10 @@ function initialEvidence(options, sha) {
     rootIssue: options.issue,
     change: { issue: options.issue, branch: "unresolved", pullRequest: 0 },
     operations: [],
-    finalState: { status: "UNAVAILABLE", recovery: { state: "unavailable", action: "inspect" } },
+    finalState: {
+      status: CERTIFICATION_FINAL_STATE_UNAVAILABLE_STATUS,
+      recovery: { state: "unavailable", action: "inspect" },
+    },
     diagnostics: [],
   };
 }
@@ -455,6 +460,12 @@ function recordOperation(evidence, operation, operationOutcome) {
 
 function failEvidence(evidence, code, message, result = CERTIFICATION_RESULT_BLOCKED) {
   evidence.result = result;
+  if (!CERTIFICATION_FINAL_STATE_TERMINAL_STATUSES.includes(evidence.finalState.status)) {
+    evidence.finalState = {
+      status: CERTIFICATION_FINAL_STATE_UNAVAILABLE_STATUS,
+      recovery: { state: "unavailable", action: "inspect" },
+    };
+  }
   addDiagnostic(evidence.diagnostics, code, message);
   return evidence;
 }
