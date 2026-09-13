@@ -54,6 +54,14 @@ test("trusted executor exit 1 preserves its bounded result after a successful bu
   assert.match(execution, /execution_status=\$\?/u);
   assert.match(execution, /if \[ ! -s "\$result_path" \] \|\| \[ "\$\(wc -c < "\$result_path"\)" -gt 262144 \]; then/u);
   assert.match(execution, /message":"Trusted Change execution failed closed\."/u);
+  assert.match(execution, /if \[ "\$execution_status" -ne 0 \]; then/u);
+  assert.match(execution, /Trusted Change executor result:/u);
+  assert.match(execution, /process\.stdout\.write\(raw\)/u);
+  assert.match(execution, /result = JSON\.parse\(raw\)/u);
+  assert.match(execution, /2>\/dev\/null/u);
+  assert.ok(
+    execution.indexOf('if [ "$execution_status" -ne 0 ]; then') < execution.indexOf("process.stdout.write(raw)"),
+  );
   assert.match(execution, /exit "\$execution_status"/u);
   assert.doesNotMatch(source, /tee .*result\.json/u);
 });
