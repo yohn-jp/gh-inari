@@ -326,7 +326,6 @@ export const semanticPullRequestOutputSchema = z
     number: artifactNumberSchema.optional(),
     artifact: z.unknown().optional(),
     plan: z.unknown().optional(),
-    operation: z.enum(["pr.comment", "pr.review", "pr.merge"]).optional(),
     outcome: z.enum(["succeeded", "idempotent", "stale", "blocked", "failed", "recovery-required"]).optional(),
     code: z.string().optional(),
     evidence: z.unknown().optional(),
