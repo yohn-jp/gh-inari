@@ -12,6 +12,7 @@
 
 import {
   CHANGE_TRANSITION_CONTRACT_VERSION,
+  classifyChangeAbortRecovery,
   planChangeTransition,
   validateChangeProjectionResult,
   type Change,
@@ -560,15 +561,19 @@ function requireCanonicalState(operation: CapabilityAdmissionOperation, canonica
       }
       return;
     case "change.abort":
+      if (projection.status === "absent") return;
       if (projection.status !== "healthy" && projection.status !== "partial") deny("canonical-state");
-      if (pullRequest === undefined) deny("canonical-state");
+      if (pullRequest === undefined && !canonicalAbortRecovery(canonical)) deny("canonical-state");
       if (projection.status === "partial" && !canonicalAbortRecovery(canonical)) deny("canonical-state");
       try {
         planChangeTransition({
           version: CHANGE_TRANSITION_CONTRACT_VERSION,
           transition: "abort",
           change,
-          target: { branch: canonical.branch, pullRequest },
+          target: {
+            branch: canonical.branch,
+            ...(pullRequest === undefined ? {} : { pullRequest }),
+          },
         });
       } catch {
         deny("canonical-state");
@@ -610,21 +615,7 @@ function canonicalBranchOnly(canonical: CanonicalProjection): boolean {
 }
 
 function canonicalAbortRecovery(canonical: CanonicalProjection): boolean {
-  const branches = canonical.projection.candidates.branches.filter(
-    (candidate) => candidate.classification === "canonical" && candidate.candidate.name === canonical.branch,
-  );
-  const pullRequests = canonical.projection.candidates.pullRequests.filter(
-    (candidate) =>
-      candidate.classification === "canonical" &&
-      candidate.candidate.head === canonical.branch &&
-      candidate.candidate.base === canonical.base,
-  );
-  return (
-    branches.length === 1 &&
-    pullRequests.length === 1 &&
-    pullRequests[0]?.candidate.state === "closed" &&
-    pullRequests[0].candidate.merged === false
-  );
+  return classifyChangeAbortRecovery(canonical.projection) !== undefined;
 }
 
 function admitTreeDelta(

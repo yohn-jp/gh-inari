@@ -393,12 +393,29 @@ function equivalentProjection(left: ChangeProjectionResult, right: ChangeProject
   );
 }
 
-function validPostExecutionProjection(projection: ChangeProjectionResult, issue: number): boolean {
-  return (
+function validPostExecutionProjection(
+  projection: ChangeProjectionResult,
+  issue: number,
+  operation: CapabilityAuthorizedSessionOperation,
+): boolean {
+  if (
     projection.valid &&
     projection.status === "healthy" &&
     projection.change !== undefined &&
     projection.change.identity.rootIssue === issue
+  ) {
+    return true;
+  }
+  return (
+    operation === "change.abort" &&
+    projection.valid &&
+    projection.status === "absent" &&
+    projection.diagnostics.length === 0 &&
+    projection.change?.identity.rootIssue === issue &&
+    projection.change.state === "DEFINED" &&
+    projection.change.projection === undefined &&
+    projection.candidates.branches.length === 0 &&
+    projection.candidates.pullRequests.length === 0
   );
 }
 
@@ -612,7 +629,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "verification", appScoped, "Authoritative Change verification failed.", { evidence });
     }
     if (
-      !validPostExecutionProjection(verifiedProjection, issue) ||
+      !validPostExecutionProjection(verifiedProjection, issue, operation) ||
       !equivalentProjection(execution.projection, verifiedProjection, issue)
     ) {
       return failure(operation, "verification", appScoped, "Authoritative Change verification failed.", { evidence });
