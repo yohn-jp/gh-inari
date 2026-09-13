@@ -33,6 +33,7 @@ import {
   type ChangeTransitionPlan,
 } from "./change.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
+import { readChangeEffectFailureClassification } from "./change-failure-diagnostics.js";
 import { changeEffectFailureEvidence, type GitHubChangeEffectFailureEvidence } from "./github/change-effect-adapter.js";
 import {
   ISSUER_AUTHORITY_CONTRACT_VERSION,
@@ -200,6 +201,8 @@ function executionEvidence(
             kind: failure.effect.kind,
             code: failure.code,
             message: failure.message,
+            ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+            ...(failure.status === undefined ? {} : { status: failure.status }),
           },
         }),
   };
@@ -515,7 +518,13 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             request.requester,
             [{ kind: effect.kind, status: "failed" }],
             "not-required",
-            { effect, code: effectFailure.code, message: effectFailure.message },
+            {
+              effect,
+              code: effectFailure.code,
+              message: effectFailure.message,
+              ...(effectFailure.reason === undefined ? {} : { reason: effectFailure.reason }),
+              ...(effectFailure.status === undefined ? {} : { status: effectFailure.status }),
+            },
           ),
         }),
       },
@@ -555,9 +564,17 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
     try {
       await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
       return { ok: true };
-    } catch {
+    } catch (error: unknown) {
       const failure = failureFor(effect);
-      return { ok: false, failure: { code: failure.code, message: failure.message } };
+      const classification = readChangeEffectFailureClassification(error);
+      return {
+        ok: false,
+        failure: {
+          code: failure.code,
+          message: failure.message,
+          ...(classification === undefined ? {} : classification),
+        },
+      };
     }
   }
 
@@ -637,7 +654,13 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
           request.requester,
           effectEvidence(attempts),
           "failed",
-          { effect: failure.effect, code: failure.code, message: failure.message },
+          {
+            effect: failure.effect,
+            code: failure.code,
+            message: failure.message,
+            ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+            ...(failure.status === undefined ? {} : { status: failure.status }),
+          },
         ),
       }),
     };
@@ -659,7 +682,13 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
           abortRequest.requester,
           effectEvidence(attempts),
           "failed",
-          { effect: failure.effect, code: failure.code, message: failure.message },
+          {
+            effect: failure.effect,
+            code: failure.code,
+            message: failure.message,
+            ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+            ...(failure.status === undefined ? {} : { status: failure.status }),
+          },
         ),
       }),
       semantics: {
@@ -769,6 +798,8 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             effect: failed.effect,
             code: failed.code,
             message: failed.message,
+            ...(failed.reason === undefined ? {} : { reason: failed.reason }),
+            ...(failed.status === undefined ? {} : { status: failed.status }),
           };
           const evidence = executionEvidence(
             abortRequest.operation,
@@ -878,9 +909,17 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
     try {
       await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
       return { ok: true };
-    } catch {
+    } catch (error: unknown) {
       const failure = failureFor(effect);
-      return { ok: false, failure: { code: failure.code, message: failure.message } };
+      const classification = readChangeEffectFailureClassification(error);
+      return {
+        ok: false,
+        failure: {
+          code: failure.code,
+          message: failure.message,
+          ...(classification === undefined ? {} : classification),
+        },
+      };
     }
   }
 
@@ -1077,9 +1116,17 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
       const mutation = await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
       const evidence = mutation.effects[0]?.evidence;
       return { ok: true, ...(evidence === undefined ? {} : { evidence }) };
-    } catch {
+    } catch (error: unknown) {
       const failure = failureFor(effect);
-      return { ok: false, failure: { code: failure.code, message: failure.message } };
+      const classification = readChangeEffectFailureClassification(error);
+      return {
+        ok: false,
+        failure: {
+          code: failure.code,
+          message: failure.message,
+          ...(classification === undefined ? {} : classification),
+        },
+      };
     }
   }
 }

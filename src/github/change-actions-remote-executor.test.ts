@@ -457,6 +457,10 @@ test("unknown or malformed workflow diagnostic stages remain fail closed", async
     { stage: "projection-execution", trustedCode: "provider-specific-code" },
     {
       stage: "projection-execution",
+      effectFailure: { reason: "provider-http", status: 422, rawBody: "provider-secret" },
+    },
+    {
+      stage: "projection-execution",
       diagnostics: [
         {
           version: 1,
@@ -551,6 +555,13 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
           outcome: "recovery-required",
           effects: [],
           compensation: "failed",
+          failure: {
+            kind: "CREATE_PULL_REQUEST",
+            code: "PULL_REQUEST_CREATE_FAILED",
+            message: "The pull request creation effect failed.",
+            reason: "provider-http",
+            status: 422,
+          },
         },
       },
     },
@@ -572,6 +583,13 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
             outcome: "recovery-required",
             effects: [],
             compensation: "failed",
+            failure: {
+              kind: "CREATE_PULL_REQUEST",
+              code: "PULL_REQUEST_CREATE_FAILED",
+              message: "The pull request creation effect failed.",
+              reason: "provider-http",
+              status: 422,
+            },
           },
         }) &&
       JSON.stringify(error.diagnostics) ===

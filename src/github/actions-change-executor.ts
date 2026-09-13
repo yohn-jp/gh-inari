@@ -19,6 +19,7 @@ import {
   type CanonicalBranchNamingInput,
   type ChangeBranchEvidence,
   type ChangeDiagnostic,
+  type ChangeEffectFailureClassification,
   type ChangeProjectionInput,
   type ChangePullRequestEvidence,
   type ChangeReadyEvidence,
@@ -60,7 +61,10 @@ import {
   type ChangeTrustedExecutorErrorCode,
   type ChangeTrustedEvidenceReader,
 } from "../change-trusted-executor.js";
-import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
+import {
+  normalizeTrustedFailureDiagnostics,
+  readChangeEffectFailureClassification,
+} from "../change-failure-diagnostics.js";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   type GitHubChangeEffectRepository,
@@ -161,6 +165,7 @@ export interface TrustedActionsFailureDiagnostic {
   readonly trustedCode?: ChangeTrustedExecutorErrorCode;
   readonly diagnostics?: readonly ChangeDiagnostic[];
   readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly effectFailure?: ChangeEffectFailureClassification;
 }
 
 export function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage {
@@ -178,6 +183,7 @@ function failureDiagnostic(
     ...(fields.trustedCode === undefined ? {} : { trustedCode: fields.trustedCode }),
     ...(fields.diagnostics === undefined ? {} : { diagnostics: fields.diagnostics }),
     ...(fields.evidence === undefined ? {} : { evidence: fields.evidence }),
+    ...(fields.effectFailure === undefined ? {} : { effectFailure: fields.effectFailure }),
   });
 }
 
@@ -1292,14 +1298,21 @@ export function asTrustedActionsFailure(
   error: unknown,
   issuerStage: TrustedActionsFailureStage | undefined,
 ): GitHubActionsChangeExecutorError {
-  if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error;
+  const effectFailure = readChangeEffectFailureClassification(error);
+  if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) {
+    if (effectFailure === undefined || error.details.effectFailure !== undefined) return error;
+    return new GitHubActionsChangeExecutorError(undefined, error.details.stage, error.details.reason, {
+      trustedCode: error.details.trustedCode,
+      diagnostics: error.details.diagnostics,
+      evidence: error.details.evidence,
+      effectFailure,
+    });
+  }
   const stage = trustedFailureStage(error, issuerStage);
-  return new GitHubActionsChangeExecutorError(
-    undefined,
-    stage,
-    undefined,
-    error instanceof ChangeTrustedExecutorError ? trustedFailureFields(error) : {},
-  );
+  return new GitHubActionsChangeExecutorError(undefined, stage, undefined, {
+    ...(error instanceof ChangeTrustedExecutorError ? trustedFailureFields(error) : {}),
+    ...(effectFailure === undefined ? {} : { effectFailure }),
+  });
 }
 
 export interface GitHubActionsRuntimeOptions {

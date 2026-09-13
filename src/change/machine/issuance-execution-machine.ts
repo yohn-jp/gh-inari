@@ -2,6 +2,7 @@ import { assign, createActor, fromPromise, setup, toPromise } from "xstate";
 import type {
   ChangeDiagnostic,
   ChangeEffect,
+  ChangeEffectFailureReason,
   ChangeEffectSuccessEvidence,
   ChangeIssuanceEffectAttempt,
   ChangeIssuanceFailureEvidence,
@@ -50,7 +51,12 @@ export interface IssuanceEffectSuccess {
 
 export interface IssuanceEffectFailureResult {
   readonly ok: false;
-  readonly failure: { readonly code: string; readonly message: string };
+  readonly failure: {
+    readonly code: string;
+    readonly message: string;
+    readonly reason?: ChangeEffectFailureReason;
+    readonly status?: number;
+  };
 }
 
 export type IssuanceEffectResult = IssuanceEffectSuccess | IssuanceEffectFailureResult;
@@ -172,7 +178,12 @@ export interface IssuanceExecutionServices {
   readonly read: (request: ChangeRemoteMutationRequest) => Promise<IssuanceReadResult>;
   /** The effect actor is the only machine boundary for privileged GitHub mutation. */
   readonly apply: (effect: IssuanceEffect) => Promise<IssuanceEffectResult>;
-  readonly failureForEffect: (effect: IssuanceEffect) => { readonly code: string; readonly message: string };
+  readonly failureForEffect: (effect: IssuanceEffect) => {
+    readonly code: string;
+    readonly message: string;
+    readonly reason?: ChangeEffectFailureReason;
+    readonly status?: number;
+  };
   readonly semantics: IssuanceExecutionSemantics;
   readonly results: IssuanceExecutionResults;
 }
@@ -264,9 +275,20 @@ function appendAttempt(
 
 function failedEffectEvidence(
   effect: IssuanceEffect,
-  failure: { readonly code: string; readonly message: string },
+  failure: {
+    readonly code: string;
+    readonly message: string;
+    readonly reason?: ChangeEffectFailureReason;
+    readonly status?: number;
+  },
 ): ChangeIssuanceFailureEvidence {
-  return { effect, code: failure.code, message: failure.message };
+  return {
+    effect,
+    code: failure.code,
+    message: failure.message,
+    ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+    ...(failure.status === undefined ? {} : { status: failure.status }),
+  };
 }
 
 /** @internal Test-only access to the production graph; not re-exported publicly. */

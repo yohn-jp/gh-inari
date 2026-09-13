@@ -1,6 +1,12 @@
 import { randomUUID as generateRandomUUID } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
-import { projectChangeFromGitHubEvidence, type ChangeDiagnostic, type ChangeProjectionResult } from "../change.js";
+import {
+  normalizeChangeEffectFailureClassification,
+  projectChangeFromGitHubEvidence,
+  type ChangeDiagnostic,
+  type ChangeEffectFailureClassification,
+  type ChangeProjectionResult,
+} from "../change.js";
 import {
   CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
   canonicalGitHubRequester,
@@ -153,6 +159,7 @@ function remoteError(
             ...(diagnostic.reason === undefined ? {} : { stageReason: diagnostic.reason }),
             ...(diagnostic.trustedCode === undefined ? {} : { trustedCode: diagnostic.trustedCode }),
             ...(diagnostic.evidence === undefined ? {} : { evidence: diagnostic.evidence }),
+            ...(diagnostic.effectFailure === undefined ? {} : { effectFailure: diagnostic.effectFailure }),
           }),
     },
     diagnostic?.diagnostics,
@@ -191,7 +198,9 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
   if (value === undefined) return undefined;
   const details = record(value);
   if (
-    Object.keys(details).some((key) => !["stage", "reason", "trustedCode", "diagnostics", "evidence"].includes(key)) ||
+    Object.keys(details).some(
+      (key) => !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure"].includes(key),
+    ) ||
     !isTrustedActionsFailureStage(details.stage) ||
     (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason)) ||
     (details.trustedCode !== undefined && !isChangeTrustedExecutorErrorCode(details.trustedCode))
@@ -208,12 +217,19 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
   if (details.evidence !== undefined) {
     evidence = normalizeChangeRemoteExecutionEvidence(operation, details.evidence);
   }
+  let effectFailure: ChangeEffectFailureClassification | undefined;
+  try {
+    effectFailure = normalizeChangeEffectFailureClassification(details.effectFailure);
+  } catch {
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+  }
   return Object.freeze({
     stage: details.stage,
     ...(details.reason === undefined ? {} : { reason: details.reason }),
     ...(details.trustedCode === undefined ? {} : { trustedCode: details.trustedCode }),
     ...(diagnostics === undefined ? {} : { diagnostics }),
     ...(evidence === undefined ? {} : { evidence }),
+    ...(effectFailure === undefined ? {} : { effectFailure }),
   });
 }
 

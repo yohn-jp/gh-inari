@@ -3,6 +3,7 @@ import type {
   Change,
   ChangeDiagnostic,
   ChangeEffect,
+  ChangeEffectFailureReason,
   ChangeIssuanceEffectAttempt,
   ChangeProjectionInput,
   ChangeProjectionResult,
@@ -44,7 +45,12 @@ export interface AbortEffectSuccess {
 
 export interface AbortEffectFailureResult {
   readonly ok: false;
-  readonly failure: { readonly code: string; readonly message: string };
+  readonly failure: {
+    readonly code: string;
+    readonly message: string;
+    readonly reason?: ChangeEffectFailureReason;
+    readonly status?: number;
+  };
 }
 
 export type AbortEffectResult = AbortEffectSuccess | AbortEffectFailureResult;
@@ -53,6 +59,8 @@ export interface AbortEffectFailure {
   readonly effect: AbortEffect;
   readonly code: string;
   readonly message: string;
+  readonly reason?: ChangeEffectFailureReason;
+  readonly status?: number;
 }
 
 export interface AbortAdmissionSuccess {
@@ -135,7 +143,12 @@ export interface AbortExecutionServices {
   readonly read: (request: ChangeRemoteMutationRequest) => Promise<AbortReadResult>;
   /** Privileged effects are isolated behind the operation actor boundary. */
   readonly apply: (effect: AbortEffect) => Promise<AbortEffectResult>;
-  readonly failureForEffect: (effect: AbortEffect) => { readonly code: string; readonly message: string };
+  readonly failureForEffect: (effect: AbortEffect) => {
+    readonly code: string;
+    readonly message: string;
+    readonly reason?: ChangeEffectFailureReason;
+    readonly status?: number;
+  };
   /** Builds the bounded failure returned when recovery evidence cannot be read. */
   readonly recoveryReadFailure: (
     request: ChangeRemoteMutationRequest,
@@ -206,8 +219,23 @@ function appendAttempt(
   return [...context.attempts, { effect, status }];
 }
 
-function failedEffect(context: AbortMachineContext, effect: AbortEffect, failure: { code: string; message: string }) {
-  return { effect, code: failure.code, message: failure.message } satisfies AbortEffectFailure;
+function failedEffect(
+  context: AbortMachineContext,
+  effect: AbortEffect,
+  failure: {
+    readonly code: string;
+    readonly message: string;
+    readonly reason?: ChangeEffectFailureReason;
+    readonly status?: number;
+  },
+) {
+  return {
+    effect,
+    code: failure.code,
+    message: failure.message,
+    ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+    ...(failure.status === undefined ? {} : { status: failure.status }),
+  } satisfies AbortEffectFailure;
 }
 
 function recoveryReadFailure(context: AbortMachineContext): AbortExecutionFailure {

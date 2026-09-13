@@ -81,6 +81,16 @@ function mutationRequest(permissions: IssuerPermissionSet = { contents: "write" 
   };
 }
 
+const createPullRequestEffect = {
+  kind: "CREATE_PULL_REQUEST",
+  branch: "feat/507-provider-diagnostics",
+  baseBranch: "main",
+  rootIssue: 507,
+  title: "Change #507",
+  body: "Closes #507",
+  draft: true,
+} as const;
+
 test("pre-admission read capability requests the minimum read ceiling and exposes only GET", async () => {
   const calls: RequestInit[] = [];
   const broker = new GitHubAppInstallationCredentialBroker(
@@ -368,6 +378,84 @@ test("provider failures and operation errors never disclose App secrets", async 
       return true;
     },
   );
+});
+
+test("mutation failures retain distinct bounded provider classifications without secrets", async () => {
+  const cases: Array<{
+    readonly name: string;
+    readonly expectedReason: "credential" | "scope" | "transport" | "provider-http" | "response-validation";
+    readonly expectedStage: "installation-token" | "installation-scope" | "projection-execution";
+    readonly fetch: typeof globalThis.fetch;
+    readonly status?: number;
+  }> = [
+    {
+      name: "installation-token rejection",
+      expectedReason: "credential",
+      expectedStage: "installation-token",
+      fetch: async () => new Response("provider-token-secret", { status: 503 }),
+    },
+    {
+      name: "installation scope mismatch",
+      expectedReason: "scope",
+      expectedStage: "installation-scope",
+      fetch: async () => tokenResponse({ repositories: [] }),
+    },
+    {
+      name: "provider transport failure",
+      expectedReason: "transport",
+      expectedStage: "projection-execution",
+      fetch: (async (_input, init) => {
+        if ((init?.body as string | undefined)?.includes('"permissions"')) {
+          return tokenResponse({}, { contents: "write" });
+        }
+        throw new Error("Authorization: Bearer provider-transport-secret /private/provider/path");
+      }) as typeof globalThis.fetch,
+    },
+    {
+      name: "provider HTTP rejection",
+      expectedReason: "provider-http",
+      expectedStage: "projection-execution",
+      status: 422,
+      fetch: (async (_input, init) => {
+        if ((init?.body as string | undefined)?.includes('"permissions"')) {
+          return tokenResponse({}, { contents: "write" });
+        }
+        return new Response(JSON.stringify({ message: "Bearer provider-body-secret" }), { status: 422 });
+      }) as typeof globalThis.fetch,
+    },
+    {
+      name: "provider response validation",
+      expectedReason: "response-validation",
+      expectedStage: "projection-execution",
+      fetch: (async (_input, init) => {
+        if ((init?.body as string | undefined)?.includes('"permissions"')) {
+          return tokenResponse({}, { contents: "write" });
+        }
+        return new Response(JSON.stringify({ number: "903" }), { status: 201 });
+      }) as typeof globalThis.fetch,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const broker = new GitHubAppInstallationCredentialBroker(brokerOptions(testCase.fetch));
+    await assert.rejects(
+      broker.withScopedInstallationCredential(mutationRequest(), async (capability) => {
+        await capability.apply(createPullRequestEffect);
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubAppCredentialBrokerError, testCase.name);
+        assert.equal(error.stage, testCase.expectedStage, testCase.name);
+        assert.equal(error.reason, testCase.expectedReason, testCase.name);
+        assert.equal(error.status, testCase.status, testCase.name);
+        assert.doesNotMatch(
+          JSON.stringify(error),
+          /provider-token-secret|provider-transport-secret|provider-body-secret|private\/provider|authorization/iu,
+          testCase.name,
+        );
+        return true;
+      },
+    );
+  }
 });
 
 function neverRespondingFetch(): typeof globalThis.fetch {

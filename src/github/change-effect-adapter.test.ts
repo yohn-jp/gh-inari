@@ -4,6 +4,7 @@ import {
   GITHUB_CHANGE_EFFECT_FAILURE_CODES,
   GitHubChangeEffectAdapter,
   GitHubChangeEffectContractError,
+  GitHubChangeEffectFailureError,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
   type GitHubChangeEffectCompareAndDeleteRequest,
@@ -242,6 +243,7 @@ test("MARK_PULL_REQUEST_READY fails closed for GitHub failures and malformed res
     effect,
     code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.MARK_PULL_REQUEST_READY,
     message: "The pull request ready effect failed.",
+    reason: "response-validation",
   });
   assert.deepEqual(malformedResponse.failure, apiFailure.failure);
 });
@@ -428,18 +430,56 @@ test("API, transport, and response failures normalize to deterministic bounded e
     effect,
   );
 
-  assert.deepEqual(apiFailure, transportFailure);
   assert.equal(apiFailure.status, "failed");
   if (apiFailure.status !== "failed") throw new Error("expected failure result");
   assert.deepEqual(apiFailure.failure, {
     effect,
     code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.CREATE_PULL_REQUEST,
     message: "The pull request creation effect failed.",
+    reason: "provider-http",
+    status: 422,
+  });
+  assert.equal(transportFailure.status, "failed");
+  if (transportFailure.status !== "failed") throw new Error("expected transport failure result");
+  assert.deepEqual(transportFailure.failure, {
+    effect,
+    code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.CREATE_PULL_REQUEST,
+    message: "The pull request creation effect failed.",
+    reason: "transport",
   });
   assert.equal(malformedResponse.status, "failed");
+  if (malformedResponse.status !== "failed") throw new Error("expected malformed response failure result");
+  assert.deepEqual(malformedResponse.failure, {
+    effect,
+    code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.CREATE_PULL_REQUEST,
+    message: "The pull request creation effect failed.",
+    reason: "response-validation",
+  });
   assert.equal(JSON.stringify(apiFailure).includes("api-secret"), false);
   assert.equal(JSON.stringify(apiFailure).includes("transport-secret"), false);
   assert.equal(JSON.stringify(malformedResponse).includes("903"), false);
+});
+
+test("a typed credential classification remains bounded when supplied by a credential transport", async () => {
+  const effect = {
+    kind: "CREATE_PULL_REQUEST",
+    branch: "Feature/Exact_Name",
+    baseBranch: "main",
+    rootIssue: 216,
+    title: "Change #216",
+    body: "Closes #216",
+    draft: true,
+  } as const;
+  const result = await adapter(
+    new StubChangeEffectTransport([new GitHubChangeEffectFailureError({ reason: "credential" })]),
+  ).execute(effect);
+
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") throw new Error("expected credential failure result");
+  assert.equal(result.failure.reason, "credential");
+  assert.equal(result.failure.code, GITHUB_CHANGE_EFFECT_FAILURE_CODES.CREATE_PULL_REQUEST);
+  assert.equal(JSON.stringify(result).includes("credential"), true);
+  assert.doesNotMatch(JSON.stringify(result), /token|private.?key|authorization|provider.?body/iu);
 });
 
 test("malformed branch and unexpected delete responses fail closed", async () => {
