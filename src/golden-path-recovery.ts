@@ -255,7 +255,9 @@ function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvide
       effects: plan.failureEvidence.attemptedEffects.map((attempt) => ({
         kind: attempt.effect.kind,
         status: attempt.status,
-        ...(attempt.evidence?.kind === "CREATE_BRANCH" ? { createdCommitSha: attempt.evidence.createdCommitSha } : {}),
+        ...(attempt.evidence?.kind === "CREATE_BRANCH" || attempt.evidence?.kind === "CREATE_PROVENANCE_COMMIT"
+          ? { createdCommitSha: attempt.evidence.createdCommitSha }
+          : {}),
       })),
       ...(plan.compensation.status === "succeeded" ? { compensation: "succeeded" as const } : {}),
       failure: failureEvidenceFor(plan.failureEvidence.failure),
@@ -270,7 +272,9 @@ function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvide
     effects: plan.failureEvidence.attemptedEffects.map((attempt) => ({
       kind: attempt.effect.kind,
       status: attempt.status,
-      ...(attempt.evidence?.kind === "CREATE_BRANCH" ? { createdCommitSha: attempt.evidence.createdCommitSha } : {}),
+      ...(attempt.evidence?.kind === "CREATE_BRANCH" || attempt.evidence?.kind === "CREATE_PROVENANCE_COMMIT"
+        ? { createdCommitSha: attempt.evidence.createdCommitSha }
+        : {}),
     })),
     failure: failureEvidenceFor(plan.failureEvidence.failure),
   };

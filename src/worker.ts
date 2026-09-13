@@ -42,6 +42,10 @@ export interface Env {
   readonly INARI_MAX_BODY_BYTES?: string;
   /** Non-secret deployment configuration. Bounded GitHub provider request deadline (ms). Defaults to 10s; hard ceiling 30s. */
   readonly INARI_GITHUB_API_REQUEST_TIMEOUT_MS?: string;
+  /** Worker secret: repository-trusted Runtime Authority identifier for Change issuance. */
+  readonly INARI_RUNTIME_AUTHORITY_ID?: string;
+  /** Worker secret: existing Runtime Authority PKCS#8 PEM private key. */
+  readonly INARI_RUNTIME_AUTHORITY_PRIVATE_KEY?: string;
 }
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
@@ -96,6 +100,8 @@ function buildRuntime(env: Env): WorkerRuntime {
   const apiUrl = optionalString(env.INARI_GITHUB_API_URL, MAX_API_URL_LENGTH);
   const maxBodyBytes = optionalPositiveInteger(env.INARI_MAX_BODY_BYTES);
   const requestTimeoutMs = optionalPositiveInteger(env.INARI_GITHUB_API_REQUEST_TIMEOUT_MS);
+  const runtimeAuthorityId = optionalString(env.INARI_RUNTIME_AUTHORITY_ID, MAX_SHORT_ENV_LENGTH);
+  const runtimePrivateKeyPem = optionalString(env.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, MAX_PRIVATE_KEY_LENGTH);
 
   const executor = createDirectAppSessionExecutor({
     appId,
@@ -105,6 +111,8 @@ function buildRuntime(env: Env): WorkerRuntime {
     ...(repositoryNodeId === undefined ? {} : { repositoryNodeId }),
     ...(apiUrl === undefined ? {} : { apiUrl }),
     ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
+    ...(runtimeAuthorityId === undefined ? {} : { runtimeAuthorityId }),
+    ...(runtimePrivateKeyPem === undefined ? {} : { runtimePrivateKeyPem }),
   });
   const handler = createDirectAppHttpHandler({
     executor,

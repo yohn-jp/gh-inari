@@ -74,6 +74,12 @@ test("issuance state table plans one ordered create transaction for an absent Ch
   assert.deepEqual(plan.effects, [
     { kind: "CREATE_BRANCH", branch: canonicalBranch, baseBranch: canonicalBaseBranch },
     {
+      kind: "CREATE_PROVENANCE_COMMIT",
+      branch: canonicalBranch,
+      rootIssue: identity.rootIssue,
+      path: `.inari/provenance/${identity.rootIssue}.json`,
+    },
+    {
       kind: "CREATE_PULL_REQUEST",
       branch: canonicalBranch,
       baseBranch: canonicalBaseBranch,

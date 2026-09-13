@@ -185,6 +185,12 @@ test("Change issuance retains the consumed Branch plan while planning lifecycle 
   assert.deepEqual(plan.effects, [
     { kind: "CREATE_BRANCH", branch: branchPlan.desired.name, baseBranch: branchPlan.desired.source },
     {
+      kind: "CREATE_PROVENANCE_COMMIT",
+      branch: branchPlan.desired.name,
+      rootIssue: identity.rootIssue,
+      path: `.inari/provenance/${identity.rootIssue}.json`,
+    },
+    {
       kind: "CREATE_PULL_REQUEST",
       branch: branchPlan.desired.name,
       baseBranch: branchPlan.desired.source,

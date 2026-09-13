@@ -95,7 +95,7 @@ test("production issuance, Ready, and Abort machines consume one deterministic e
   const issued = await actors.executor.execute(mutationRequest("issue", "agent:golden-path"));
   assert.deepEqual(
     actors.issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
   );
   assert.equal(issued.evidence?.outcome, "verified");
   assert.equal(issued.projection.status, "healthy");
@@ -122,7 +122,7 @@ test("production issuance, Ready, and Abort machines consume one deterministic e
   const ready = await actors.executor.execute(mutationRequest("ready", "agent:golden-path"));
   assert.deepEqual(
     actors.issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY"],
   );
   assert.equal(ready.evidence?.outcome, "verified");
   assert.equal(ready.projection.status, "healthy");
@@ -142,7 +142,14 @@ test("production issuance, Ready, and Abort machines consume one deterministic e
   const aborted = await actors.executor.execute(mutationRequest("abort", "agent:golden-path"));
   assert.deepEqual(
     actors.issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY", "CLOSE_PULL_REQUEST", "DELETE_BRANCH"],
+    [
+      "CREATE_BRANCH",
+      "CREATE_PROVENANCE_COMMIT",
+      "CREATE_PULL_REQUEST",
+      "MARK_PULL_REQUEST_READY",
+      "CLOSE_PULL_REQUEST",
+      "DELETE_BRANCH",
+    ],
   );
   assert.equal(aborted.evidence?.outcome, "verified");
   assert.equal(aborted.projection.status, "healthy");
@@ -163,15 +170,18 @@ test("production issuance, Ready, and Abort machines consume one deterministic e
   assert.equal(abortedStatus.recovery, null);
 });
 
-test("production issuance records branch generation evidence before the pull-request effect", async () => {
+test("production issuance records branch and provenance generation evidence before the pull-request effect", async () => {
   const actors = createGoldenPathActors(absentEvidenceInput());
   const result = await actors.executor.execute(mutationRequest("issue"));
 
   assert.equal(result.evidence?.effects[0]?.kind, "CREATE_BRANCH");
   assert.equal(result.evidence?.effects[0]?.status, "succeeded");
   assert.equal(result.evidence?.effects[0]?.createdCommitSha, GOLDEN_PATH_CREATED_COMMIT_SHA);
-  assert.equal(result.evidence?.effects[1]?.kind, "CREATE_PULL_REQUEST");
+  assert.equal(result.evidence?.effects[1]?.kind, "CREATE_PROVENANCE_COMMIT");
   assert.equal(result.evidence?.effects[1]?.status, "succeeded");
+  assert.equal(result.evidence?.effects[1]?.createdCommitSha, GOLDEN_PATH_CREATED_COMMIT_SHA);
+  assert.equal(result.evidence?.effects[2]?.kind, "CREATE_PULL_REQUEST");
+  assert.equal(result.evidence?.effects[2]?.status, "succeeded");
   assert.equal(actors.issuer.requests[0]?.execution.workflowTrust, "protected");
   assert.equal(actors.issuer.requests[0]?.target.repositoryId, "411000001");
 });

@@ -304,7 +304,10 @@ export function normalizeChangeRemoteExecutionEvidence(
     }
     let createdCommitSha: string | undefined;
     if (Object.prototype.hasOwnProperty.call(entry, "createdCommitSha")) {
-      if (entry.kind !== "CREATE_BRANCH" || entry.status !== "succeeded") {
+      if (
+        (entry.kind !== "CREATE_BRANCH" && entry.kind !== "CREATE_PROVENANCE_COMMIT") ||
+        entry.status !== "succeeded"
+      ) {
         throw new ChangeRemoteExecutorError(
           "CHANGE_REMOTE_RESULT_INVALID",
           "The Change executor returned invalid bounded execution evidence.",

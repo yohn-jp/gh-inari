@@ -62,6 +62,7 @@ export const INARI_ISSUER_MAXIMUM_PERMISSIONS: IssuerPermissionSet = Object.free
 export const INITIAL_CHANGE_EFFECT_PERMISSION_REQUIREMENTS: Readonly<Record<ChangeEffectKind, IssuerPermissionSet>> =
   Object.freeze({
     CREATE_BRANCH: Object.freeze({ contents: "write" }),
+    CREATE_PROVENANCE_COMMIT: Object.freeze({ contents: "write" }),
     CREATE_PULL_REQUEST: Object.freeze({ pull_requests: "write" }),
     MARK_PULL_REQUEST_READY: Object.freeze({ pull_requests: "write" }),
     CLOSE_PULL_REQUEST: Object.freeze({ pull_requests: "write" }),
@@ -70,6 +71,7 @@ export const INITIAL_CHANGE_EFFECT_PERMISSION_REQUIREMENTS: Readonly<Record<Chan
 
 export const INITIAL_CHANGE_EFFECT_KINDS = Object.freeze([
   "CREATE_BRANCH",
+  "CREATE_PROVENANCE_COMMIT",
   "CREATE_PULL_REQUEST",
   "MARK_PULL_REQUEST_READY",
   "CLOSE_PULL_REQUEST",
@@ -1253,7 +1255,8 @@ export class InariIssuerAppAuthority {
           try {
             evidence = await candidate.apply(effect);
             if (
-              (effect.kind === "CREATE_BRANCH" && evidence === undefined) ||
+              ((effect.kind === "CREATE_BRANCH" || effect.kind === "CREATE_PROVENANCE_COMMIT") &&
+                evidence === undefined) ||
               (evidence !== undefined && !validateChangeEffectSuccessEvidence(evidence, effect).valid)
             ) {
               throw new Error("invalid effect evidence");

@@ -69,6 +69,7 @@ import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
+  type GitHubChangeProvenanceSignerOptions,
 } from "./change-effect-adapter.js";
 import {
   GitHubAppApiTransport,
@@ -78,6 +79,15 @@ import {
   type GitHubAppRepositoryReadTransport,
   type GitHubAppCredentialFailureStage,
 } from "./app-installation-credential-broker.js";
+import { createRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
+import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
+import { importRuntimeAuthorityPrivateKey } from "../agent-authority/runtime-key.js";
+import {
+  CHANGE_PROVENANCE_ACTOR_TYPES,
+  MAX_CHANGE_PROVENANCE_ACTOR_NAME_LENGTH,
+  type ChangeProvenanceActor,
+  type ChangeProvenanceActorType,
+} from "../change-provenance-record.js";
 import {
   InariIssuerAppAuthority,
   assertTrustedExecution,
@@ -333,6 +343,23 @@ function boundedSecret(value: unknown, maxLength: number): string {
     throw new GitHubActionsChangeExecutorError();
   }
   return value;
+}
+
+function optionalProvenanceActor(environment: NodeJS.ProcessEnv): ChangeProvenanceActor | undefined {
+  const type = environment.INARI_PROVENANCE_ACTOR_TYPE;
+  const name = environment.INARI_PROVENANCE_ACTOR_NAME;
+  if (type === undefined && name === undefined) return undefined;
+  if (
+    typeof type !== "string" ||
+    !CHANGE_PROVENANCE_ACTOR_TYPES.includes(type as ChangeProvenanceActorType) ||
+    typeof name !== "string"
+  ) {
+    throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
+  }
+  return {
+    type: type as ChangeProvenanceActorType,
+    name: boundedString(name, MAX_CHANGE_PROVENANCE_ACTOR_NAME_LENGTH),
+  };
 }
 
 function positiveNumber(value: unknown): number {
@@ -1433,6 +1460,20 @@ export async function createGitHubActionsChangeExecutor(
   try {
     const appId = requiredEnvironment(environment, "INARI_ISSUER_APP_ID", "issuer-configuration");
     const installationId = requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID", "issuer-configuration");
+    let provenance: GitHubChangeProvenanceSignerOptions | undefined;
+    if (options.request.operation === "issue") {
+      const runtimeAuthorityId = requiredEnvironment(environment, "INARI_RUNTIME_AUTHORITY_ID", "issuer-configuration");
+      const runtimePrivateKeyPem = boundedSecret(environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, 16_384);
+      const runtimeReader = createRepositoryEvidenceReader(readTransport, repository, target);
+      const loaded = await resolveRuntimeAuthority(runtimeReader, runtimeAuthorityId);
+      const runtimeKey = importRuntimeAuthorityPrivateKey(runtimePrivateKeyPem);
+      const actor = optionalProvenanceActor(environment);
+      provenance = {
+        runtimeAuthority: loaded.authority,
+        runtimeKey,
+        ...(actor === undefined ? {} : { actor }),
+      };
+    }
     broker = new GitHubActionsCredentialBroker({
       appId,
       installationId,
@@ -1441,6 +1482,7 @@ export async function createGitHubActionsChangeExecutor(
       repositoryNodeId,
       apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
       fetch: options.fetch,
+      ...(provenance === undefined ? {} : { provenance }),
     });
     authority = new InariIssuerAppAuthority({ appId, broker });
   } catch (error: unknown) {

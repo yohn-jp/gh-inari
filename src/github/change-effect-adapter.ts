@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   MAX_CHANGE_BRANCH_LENGTH,
   MAX_CHANGE_COMMIT_SHA_LENGTH,
@@ -20,6 +21,16 @@ import {
   type ChangeIssuanceFailureEvidence,
 } from "../change.js";
 import { readChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
+import {
+  changeProvenanceRecordPath,
+  createChangeProvenanceRecord,
+  renderChangeProvenanceRecord,
+  verifyChangeProvenanceRecord,
+  type ChangeProvenanceActor,
+  type ChangeProvenanceRuntimeKey,
+} from "../change-provenance-record.js";
+import type { RuntimeAuthority } from "../agent-authority/runtime-authority.js";
+import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
 
 /** The repository target is resolved by the trusted caller, not by this adapter. */
 export interface GitHubChangeEffectRepository {
@@ -87,10 +98,22 @@ export type GitHubChangeEffectCompareAndDeleteOutcome =
 export interface GitHubChangeEffectAdapterOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly transport: GitHubChangeEffectTransport;
+  /** Trusted runtime signing and Git-data capability for the provenance effect. */
+  readonly provenance?: GitHubChangeProvenanceExecutionOptions;
 }
+
+export interface GitHubChangeProvenanceExecutionOptions {
+  readonly runtimeAuthority: RuntimeAuthority;
+  readonly runtimeKey: ChangeProvenanceRuntimeKey;
+  readonly gitData: GitHubBranchAdvanceCapability;
+  readonly actor?: ChangeProvenanceActor;
+}
+
+export type GitHubChangeProvenanceSignerOptions = Omit<GitHubChangeProvenanceExecutionOptions, "gitData">;
 
 export const GITHUB_CHANGE_EFFECT_FAILURE_CODES = Object.freeze({
   CREATE_BRANCH: "BRANCH_CREATE_FAILED",
+  CREATE_PROVENANCE_COMMIT: "PROVENANCE_COMMIT_CREATE_FAILED",
   CREATE_PULL_REQUEST: "PULL_REQUEST_CREATE_FAILED",
   MARK_PULL_REQUEST_READY: "PULL_REQUEST_READY_FAILED",
   CLOSE_PULL_REQUEST: "PULL_REQUEST_CLOSE_FAILED",
@@ -101,6 +124,7 @@ export type GitHubChangeEffectFailureCode = (typeof GITHUB_CHANGE_EFFECT_FAILURE
 
 export const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffectKind, string>> = Object.freeze({
   CREATE_BRANCH: "The branch creation effect failed.",
+  CREATE_PROVENANCE_COMMIT: "The signed provenance commit effect failed.",
   CREATE_PULL_REQUEST: "The pull request creation effect failed.",
   MARK_PULL_REQUEST_READY: "The pull request ready effect failed.",
   CLOSE_PULL_REQUEST: "The pull request close effect failed.",
@@ -269,6 +293,11 @@ const READY_FOR_REVIEW_MUTATION =
   "markPullRequestReadyForReview(input: $input) { " +
   "pullRequest { id number state isDraft } } }";
 
+function gitBlobSha(content: string): string {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1").update(`blob ${bytes.byteLength}\0`).update(bytes).digest("hex");
+}
+
 /** Bounded success evidence; GitHub response bodies and URLs are intentionally absent. */
 export type GitHubChangeEffectSuccessEvidence = ChangeEffectSuccessEvidence;
 
@@ -329,6 +358,7 @@ export class GitHubChangeEffectFailureError extends Error {
 export class GitHubChangeEffectAdapter {
   private readonly repository: GitHubChangeEffectRepository;
   private readonly transport: GitHubChangeEffectTransport;
+  private readonly provenance: GitHubChangeProvenanceExecutionOptions | undefined;
 
   constructor(options: GitHubChangeEffectAdapterOptions) {
     assertRepository(options?.repository);
@@ -337,6 +367,7 @@ export class GitHubChangeEffectAdapter {
     }
     this.repository = { ...options.repository };
     this.transport = options.transport;
+    this.provenance = options.provenance;
   }
 
   /** Execute exactly one explicit effect and normalize every execution failure. */
@@ -368,6 +399,8 @@ export class GitHubChangeEffectAdapter {
     switch (effect.kind) {
       case "CREATE_BRANCH":
         return this.createBranch(effect);
+      case "CREATE_PROVENANCE_COMMIT":
+        return this.createProvenanceCommit(effect);
       case "CREATE_PULL_REQUEST":
         return this.createPullRequest(effect);
       case "MARK_PULL_REQUEST_READY":
@@ -400,6 +433,77 @@ export class GitHubChangeEffectAdapter {
     );
     const createdCommitSha = parseGitReference(createdReference, `refs/heads/${effect.branch}`);
     return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch, createdCommitSha };
+  }
+
+  private async createProvenanceCommit(
+    effect: Extract<ChangeEffect, { readonly kind: "CREATE_PROVENANCE_COMMIT" }>,
+  ): Promise<GitHubChangeEffectSuccessEvidence> {
+    const provenance = this.provenance;
+    if (provenance === undefined) throw new GitHubChangeEffectConfigurationError();
+    if (effect.path !== changeProvenanceRecordPath(effect.rootIssue)) throw new InvalidGitHubResponseError();
+
+    const record = createChangeProvenanceRecord({
+      rootIssue: effect.rootIssue,
+      runtimeAuthority: provenance.runtimeAuthority,
+      runtimeKey: provenance.runtimeKey,
+      ...(provenance.actor === undefined ? {} : { actor: provenance.actor }),
+    });
+    const content = renderChangeProvenanceRecord(record);
+    const capability = provenance.gitData;
+    const head = await capability.readRef(effect.branch);
+    if (head === undefined) throw new InvalidGitHubResponseError();
+    const commit = await capability.readCommit(head.sha);
+    const tree = await capability.readTree(commit.treeSha);
+    const existing = tree.entries.filter((entry) => entry.path === effect.path);
+    if (existing.length > 1) throw new InvalidGitHubResponseError();
+    const existingEntry = existing[0];
+    if (existingEntry !== undefined) {
+      if (existingEntry.type !== "blob" || capability.readBlob === undefined) throw new InvalidGitHubResponseError();
+      const existingContent = await capability.readBlob(existingEntry.sha);
+      const payload = verifyChangeProvenanceRecord(existingContent, provenance.runtimeAuthority);
+      if (payload.rootIssue !== effect.rootIssue || payload.operation !== "change.issue") {
+        throw new InvalidGitHubResponseError();
+      }
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        rootIssue: effect.rootIssue,
+        path: effect.path,
+        createdCommitSha: head.sha,
+      };
+    }
+
+    const encoded = Buffer.from(content, "utf8").toString("base64");
+    const blob = await capability.createBlob({ content: encoded });
+    if (blob.sha !== gitBlobSha(content)) throw new InvalidGitHubResponseError();
+    const nextTree = await capability.createTree({
+      baseTreeSha: commit.treeSha,
+      entries: [{ path: effect.path, mode: "100644", type: "blob", sha: blob.sha }],
+    });
+    const nextCommit = await capability.createCommit({
+      message: `Change #${effect.rootIssue}: record signed provenance`,
+      treeSha: nextTree.sha,
+      parents: [head.sha],
+    });
+    await capability.compareAndAdvanceRef({
+      branch: effect.branch,
+      beforeOid: head.sha,
+      afterOid: nextCommit.sha,
+      force: false,
+    });
+    const reread = await capability.readRef(effect.branch);
+    if (reread?.sha !== nextCommit.sha) {
+      // A rejected/ambiguous update is never silently converted into success;
+      // a later issuance can only replay the exact committed record.
+      throw new InvalidGitHubResponseError();
+    }
+    return {
+      kind: effect.kind,
+      branch: effect.branch,
+      rootIssue: effect.rootIssue,
+      path: effect.path,
+      createdCommitSha: reread.sha,
+    };
   }
 
   private async createPullRequest(

@@ -11,6 +11,7 @@ import { deriveBranchName } from "../branch-naming-authority.mjs";
 import { resolveChangeLifecycleTransition } from "./change/machine/lifecycle-machine.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { validateSemanticBranchMutationPlan, type SemanticBranchMutationPlan } from "./semantic-branch-projection.js";
+import { changeProvenanceRecordPath } from "./change-provenance-record.js";
 
 import {
   renderIssueArtifact,
@@ -172,6 +173,7 @@ export interface ChangeTransitionRequest {
 
 export const CHANGE_EFFECT_KINDS = Object.freeze([
   "CREATE_BRANCH",
+  "CREATE_PROVENANCE_COMMIT",
   "CREATE_PULL_REQUEST",
   "MARK_PULL_REQUEST_READY",
   "CLOSE_PULL_REQUEST",
@@ -362,6 +364,13 @@ export type ChangeEffect =
       readonly baseBranch: string;
     }
   | {
+      readonly kind: "CREATE_PROVENANCE_COMMIT";
+      readonly branch: string;
+      readonly rootIssue: number;
+      /** Canonical repository path; Core derives and validates this value. */
+      readonly path: string;
+    }
+  | {
       readonly kind: "CREATE_PULL_REQUEST";
       readonly branch: string;
       readonly baseBranch: string;
@@ -395,6 +404,13 @@ export type ChangeEffectSuccessEvidence =
       readonly kind: "CREATE_BRANCH";
       readonly branch: string;
       readonly baseBranch: string;
+      readonly createdCommitSha: string;
+    }
+  | {
+      readonly kind: "CREATE_PROVENANCE_COMMIT";
+      readonly branch: string;
+      readonly rootIssue: number;
+      readonly path: string;
       readonly createdCommitSha: string;
     }
   | {
@@ -829,7 +845,7 @@ export type ChangeIssuanceEffectStatus = (typeof CHANGE_ISSUANCE_EFFECT_STATUSES
 export interface ChangeIssuanceEffectAttempt {
   readonly effect: ChangeEffect;
   readonly status: ChangeIssuanceEffectStatus;
-  /** Required for a successful CREATE_BRANCH before issuance compensation. */
+  /** Required for a successful branch/provenance commit before issuance compensation. */
   readonly evidence?: ChangeEffectSuccessEvidence;
 }
 
@@ -1046,6 +1062,7 @@ const EFFECT_KEYS = new Set([
   "branch",
   "baseBranch",
   "rootIssue",
+  "path",
   "title",
   "body",
   "draft",
@@ -1058,6 +1075,7 @@ const EFFECT_SUCCESS_EVIDENCE_KEYS = new Set([
   "branch",
   "baseBranch",
   "rootIssue",
+  "path",
   "pullRequest",
   "createdCommitSha",
   "expectedCommitSha",
@@ -3324,6 +3342,12 @@ function buildChangeTransitionPlan(request: ChangeTransitionRequest): ChangeTran
         baseBranch: resolved.baseBranch,
       },
       {
+        kind: "CREATE_PROVENANCE_COMMIT",
+        branch: resolved.branch,
+        rootIssue: request.change.identity.rootIssue,
+        path: changeProvenanceRecordPath(request.change.identity.rootIssue),
+      },
+      {
         kind: "CREATE_PULL_REQUEST",
         branch: resolved.branch,
         baseBranch: resolved.baseBranch,
@@ -3440,7 +3464,7 @@ function validateEffectCommitSha(value: unknown, path: string, diagnostics: Chan
 
 function requiredEffectText(
   input: RecordValue,
-  key: "title" | "body",
+  key: "title" | "body" | "path",
   path: string,
   maxLength: number,
   allowLineBreaks: boolean,
@@ -3526,6 +3550,34 @@ export function validateChangeEffect(input: unknown, path = "$"): ChangeEffectVa
       return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
     }
     return { valid: true, effect: { kind, branch, baseBranch }, diagnostics: [] };
+  }
+
+  if (kind === "CREATE_PROVENANCE_COMMIT") {
+    const allowed = new Set(["kind", "branch", "rootIssue", "path"]);
+    rejectEffectProperties(input, allowed, path, diagnostics);
+    const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    const rootIssue = requiredEffectNumber(input, "rootIssue", path, diagnostics);
+    const recordPath = requiredEffectText(input, "path", path, MAX_CHANGE_BRANCH_LENGTH, false, diagnostics);
+    if (rootIssue !== undefined && recordPath !== undefined) {
+      let expectedPath: string;
+      try {
+        expectedPath = changeProvenanceRecordPath(rootIssue);
+      } catch {
+        expectedPath = "";
+      }
+      if (recordPath !== expectedPath) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_INVALID_EFFECT",
+          `${path}.path`,
+          "Provenance commit path must be the canonical root-Issue record path.",
+        );
+      }
+    }
+    if (diagnostics.length > 0 || branch === undefined || rootIssue === undefined || recordPath === undefined) {
+      return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    return { valid: true, effect: { kind, branch, rootIssue, path: recordPath }, diagnostics: [] };
   }
 
   if (kind === "CREATE_PULL_REQUEST") {
@@ -3673,6 +3725,41 @@ export function validateChangeEffectSuccessEvidence(
     if (branch !== undefined && baseBranch !== undefined && createdCommitSha !== undefined) {
       evidence = { kind, branch, baseBranch, createdCommitSha };
     }
+  } else if (kind === "CREATE_PROVENANCE_COMMIT") {
+    rejectEffectProperties(
+      input,
+      new Set(["kind", "branch", "rootIssue", "path", "createdCommitSha"]),
+      path,
+      diagnostics,
+    );
+    const branch = requiredEffectBranch(input, "branch", path, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
+    const rootIssue = requiredEffectNumber(input, "rootIssue", path, diagnostics);
+    const recordPath = requiredEffectText(input, "path", path, MAX_CHANGE_BRANCH_LENGTH, false, diagnostics);
+    const createdCommitSha = hasOwn(input, "createdCommitSha")
+      ? validateEffectCommitSha(input.createdCommitSha, `${path}.createdCommitSha`, diagnostics)
+      : undefined;
+    if (!hasOwn(input, "createdCommitSha")) {
+      addDiagnostic(diagnostics, "CHANGE_INVALID_PLAN", `${path}.createdCommitSha`, "Created commit SHA is required.");
+    }
+    if (rootIssue !== undefined && recordPath !== undefined) {
+      let expectedPath: string;
+      try {
+        expectedPath = changeProvenanceRecordPath(rootIssue);
+      } catch {
+        expectedPath = "";
+      }
+      if (recordPath !== expectedPath) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_INVALID_PLAN",
+          `${path}.path`,
+          "Provenance evidence path must be the canonical root-Issue record path.",
+        );
+      }
+    }
+    if (branch !== undefined && rootIssue !== undefined && recordPath !== undefined && createdCommitSha !== undefined) {
+      evidence = { kind, branch, rootIssue, path: recordPath, createdCommitSha };
+    }
   } else if (kind === "CREATE_PULL_REQUEST") {
     rejectEffectProperties(
       input,
@@ -3732,6 +3819,13 @@ function effectSuccessEvidenceMatches(effect: ChangeEffect, evidence: ChangeEffe
       // requested branch/baseBranch identity is knowable and checked here.
       return (
         evidence.kind === effect.kind && evidence.branch === effect.branch && evidence.baseBranch === effect.baseBranch
+      );
+    case "CREATE_PROVENANCE_COMMIT":
+      return (
+        evidence.kind === effect.kind &&
+        evidence.branch === effect.branch &&
+        evidence.rootIssue === effect.rootIssue &&
+        evidence.path === effect.path
       );
     case "CREATE_PULL_REQUEST":
       // pullRequest has no effect-side counterpart to bind against (the PR number
@@ -5111,22 +5205,22 @@ function validateCreateIssuanceFailureSemantics(
       "Compensation is only valid for a create issuance from an absent Change.",
     );
   }
-  if (issuance.effects.length !== 2) {
+  if (issuance.effects.length !== 3) {
     addRecoverySemanticDiagnostic(
       diagnostics,
       "$.issuance.effects",
-      "A compensable issuance must contain the ordered branch and Draft pull-request effects.",
+      "A compensable issuance must contain the ordered branch, provenance, and Draft pull-request effects.",
     );
     return undefined;
   }
-  if (attemptedEffects.length !== 2) {
+  if (attemptedEffects.length !== 3) {
     addRecoverySemanticDiagnostic(
       diagnostics,
       "$.failureEvidence.attemptedEffects",
-      "A compensable issuance must record both ordered effect attempts.",
+      "A compensable issuance must record all three ordered effect attempts.",
     );
   } else {
-    const [branchAttempt, pullRequestAttempt] = attemptedEffects;
+    const [branchAttempt, provenanceAttempt, pullRequestAttempt] = attemptedEffects;
     if (!sameEffect(branchAttempt.effect, issuance.effects[0]) || branchAttempt.status !== "succeeded") {
       addRecoverySemanticDiagnostic(
         diagnostics,
@@ -5134,28 +5228,36 @@ function validateCreateIssuanceFailureSemantics(
         "Canonical branch creation must be the first successful attempted effect.",
       );
     }
-    if (!sameEffect(pullRequestAttempt.effect, issuance.effects[1]) || pullRequestAttempt.status !== "failed") {
+    if (!sameEffect(provenanceAttempt.effect, issuance.effects[1]) || provenanceAttempt.status !== "succeeded") {
       addRecoverySemanticDiagnostic(
         diagnostics,
         "$.failureEvidence.attemptedEffects[1]",
-        "Canonical Draft pull-request creation must be the failed second effect.",
+        "The signed provenance commit must be the second successful attempted effect.",
+      );
+    }
+    if (!sameEffect(pullRequestAttempt.effect, issuance.effects[2]) || pullRequestAttempt.status !== "failed") {
+      addRecoverySemanticDiagnostic(
+        diagnostics,
+        "$.failureEvidence.attemptedEffects[2]",
+        "Canonical Draft pull-request creation must be the failed third effect.",
       );
     }
   }
-  if (!sameEffect(failure.effect, issuance.effects[1])) {
+  if (!sameEffect(failure.effect, issuance.effects[2])) {
     addRecoverySemanticDiagnostic(
       diagnostics,
       "$.failureEvidence.failure.effect",
       "Failure evidence must identify the canonical Draft pull-request effect.",
     );
   }
-  const branchEvidence = attemptedEffects[0]?.evidence;
-  const createdCommitSha = branchEvidence?.kind === "CREATE_BRANCH" ? branchEvidence.createdCommitSha : undefined;
+  const provenanceEvidence = attemptedEffects[1]?.evidence;
+  const createdCommitSha =
+    provenanceEvidence?.kind === "CREATE_PROVENANCE_COMMIT" ? provenanceEvidence.createdCommitSha : undefined;
   if (createdCommitSha === undefined) {
     addRecoverySemanticDiagnostic(
       diagnostics,
-      "$.failureEvidence.attemptedEffects[0].evidence",
-      "A successful CREATE_BRANCH must retain its created commit SHA before compensation.",
+      "$.failureEvidence.attemptedEffects[1].evidence",
+      "A successful provenance commit must retain its created commit SHA before compensation.",
     );
   }
   return createdCommitSha;

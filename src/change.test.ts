@@ -352,6 +352,12 @@ test("Core owns the lifecycle matrix and emits explicit issue effects", () => {
       baseBranch: "main",
     },
     {
+      kind: "CREATE_PROVENANCE_COMMIT",
+      branch: "feat/210-define-canonical-change-domain-contract",
+      rootIssue: 210,
+      path: ".inari/provenance/210.json",
+    },
+    {
       kind: "CREATE_PULL_REQUEST",
       branch: "feat/210-define-canonical-change-domain-contract",
       baseBranch: "main",

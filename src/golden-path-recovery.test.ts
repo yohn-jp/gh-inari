@@ -25,6 +25,7 @@ import type { ChangeRemoteExecutionEvidence } from "./change-executor.js";
 
 const branch = "feat/395-golden-path";
 const branchSha = "0123456789abcdef0123456789abcdef01234567";
+const provenanceSha = "fedcba9876543210fedcba9876543210fedcba98";
 const coreIdentity: ChangeIdentity = { repositoryHost: "github.com", repositoryId: "100", rootIssue: 395 };
 const branchGovernance = { pattern: "^feat/[0-9]+-[a-z0-9-]+$" } as const;
 const naming = { type: "feat", slug: "golden-path" } as const;
@@ -275,10 +276,21 @@ test("a validated issuance recovery plan supplies cleanup authority without recl
           createdCommitSha: branchSha,
         },
       },
-      { effect: issuance.effects[1]!, status: "failed" },
+      {
+        effect: issuance.effects[1]!,
+        status: "succeeded",
+        evidence: {
+          kind: "CREATE_PROVENANCE_COMMIT",
+          branch,
+          rootIssue: 395,
+          path: ".inari/provenance/395.json",
+          createdCommitSha: provenanceSha,
+        },
+      },
+      { effect: issuance.effects[2]!, status: "failed" },
     ],
-    failure: { effect: issuance.effects[1]!, code: "CREATE_FAILED", message: "bounded" },
-    projection: coreProjectionInput([{ name: branch, sha: branchSha }], []),
+    failure: { effect: issuance.effects[2]!, code: "CREATE_FAILED", message: "bounded" },
+    projection: coreProjectionInput([{ name: branch, sha: provenanceSha }], []),
   });
   const result = projectGoldenPathRecovery({ recoveryPlan: plan });
   assert.deepEqual(result, {
@@ -307,10 +319,21 @@ test("a Core-verified successful issuance compensation is not recovery evidence"
           createdCommitSha: branchSha,
         },
       },
-      { effect: issuance.effects[1]!, status: "failed" },
+      {
+        effect: issuance.effects[1]!,
+        status: "succeeded",
+        evidence: {
+          kind: "CREATE_PROVENANCE_COMMIT",
+          branch,
+          rootIssue: 395,
+          path: ".inari/provenance/395.json",
+          createdCommitSha: provenanceSha,
+        },
+      },
+      { effect: issuance.effects[2]!, status: "failed" },
     ],
-    failure: { effect: issuance.effects[1]!, code: "CREATE_FAILED", message: "bounded" },
-    projection: coreProjectionInput([{ name: branch, sha: branchSha }], []),
+    failure: { effect: issuance.effects[2]!, code: "CREATE_FAILED", message: "bounded" },
+    projection: coreProjectionInput([{ name: branch, sha: provenanceSha }], []),
     compensation: { status: "succeeded", projection: coreProjectionInput([], []) },
   });
   assert.equal(projectGoldenPathRecovery({ recoveryPlan: plan }), null);
