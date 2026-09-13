@@ -10,11 +10,11 @@ import {
   CERTIFICATION_KINDS,
   CERTIFICATION_RESULTS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
-} from "./certification-evidence.mjs";
+} from "../../scripts/certification-evidence.mjs";
 import {
   RELEASE_CERTIFICATION_CONTRACT_VERSIONS,
   RELEASE_CERTIFICATION_SCHEMA_VERSION,
-} from "../src/release-certification.js";
+} from "../../src/release-certification.js";
 import {
   extractSelfDogfoodEvidence,
   generatePackedEvidence,
@@ -22,7 +22,7 @@ import {
   parseWorkflowContext,
   retrieveSelfDogfoodEvidence,
   runWorkflowCertification,
-} from "./verify-release-certification.mjs";
+} from "../../scripts/verify-release-certification.mjs";
 
 const SOURCE_SHA = "a".repeat(40);
 const OTHER_SOURCE_SHA = "b".repeat(40);

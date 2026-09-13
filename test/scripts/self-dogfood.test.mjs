@@ -10,10 +10,10 @@ import {
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
   CERTIFICATION_KINDS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
-} from "./certification-evidence.mjs";
-import { parseArguments, projectWorkerHandoff, sanitizeWorkerEnvironment } from "./self-dogfood.mjs";
+} from "../../scripts/certification-evidence.mjs";
+import { parseArguments, projectWorkerHandoff, sanitizeWorkerEnvironment } from "../../scripts/self-dogfood.mjs";
 
-const scriptPath = fileURLToPath(new URL("./self-dogfood.mjs", import.meta.url));
+const scriptPath = fileURLToPath(new URL("../../scripts/self-dogfood.mjs", import.meta.url));
 
 test("self-dogfood requires an exact disposable Issue confirmation", () => {
   const parsed = parseArguments(["--repository", "yohn-jp/gh-inari", "--issue", "416", "--confirm-disposable", "415"]);

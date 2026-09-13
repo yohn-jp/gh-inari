@@ -7,7 +7,7 @@ import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const launcherSource = fs.readFileSync(path.join(repoRoot, "gh-inari"), "utf8");
 
 function writeFixtureFile(filePath, contents, mode) {

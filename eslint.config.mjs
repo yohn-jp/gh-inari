@@ -6,7 +6,7 @@ export default defineConfig(
     ignores: ["dist/**", "node_modules/**"],
   },
   {
-    files: ["src/**/*.ts", "scripts/**/*.mjs", "eslint.config.mjs"],
+    files: ["src/**/*.ts", "scripts/**/*.mjs", "test/**/*.mjs", "eslint.config.mjs"],
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: { ecmaVersion: "latest", sourceType: "module" },

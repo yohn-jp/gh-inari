@@ -10,8 +10,11 @@ import {
   serializeCertificationEvidence,
   validateCertificationEvidence,
   validateSelfDogfoodEvidence,
-} from "./certification-evidence.mjs";
-import { RELEASE_CERTIFICATION_CONTRACT_VERSIONS, verifyReleaseCertification } from "../src/release-certification.js";
+} from "../../scripts/certification-evidence.mjs";
+import {
+  RELEASE_CERTIFICATION_CONTRACT_VERSIONS,
+  verifyReleaseCertification,
+} from "../../src/release-certification.js";
 
 const SOURCE_SHA = "c".repeat(40);
 const TARBALL_SHA = `sha256:${"d".repeat(64)}`;

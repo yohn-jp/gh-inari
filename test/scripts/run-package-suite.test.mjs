@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { exportsTargetPaths, validateCodexPluginMetadata } from "./run-package-suite.mjs";
+import { exportsTargetPaths, validateCodexPluginMetadata } from "../../scripts/run-package-suite.mjs";
 import {
   CERTIFICATION_ENTRY_COMMANDS,
   REQUIRED_BIN_NAMES,
   validatePreflightOutput,
   validateSkillIndex,
   validateVersionOutput,
-} from "./smoke-test.mjs";
+} from "../../scripts/smoke-test.mjs";
 
 const packageJson = { name: "gh-inari", version: "0.7.0" };
 const manifest = { name: "inari", version: "0.7.0", skills: "skills/inari" };
@@ -163,7 +163,7 @@ test("packed certification rejects runtime, preflight, and Skill contract drift"
 });
 
 test("packed certification has no checked-out source execution path", () => {
-  const script = fs.readFileSync(path.join(import.meta.dirname, "smoke-test.mjs"), "utf8");
+  const script = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "scripts", "smoke-test.mjs"), "utf8");
   assert.match(script, /run\("npm", \["pack"/u);
   assert.match(script, /--omit=dev/u);
   assert.match(script, /--diagnose/u);
@@ -171,7 +171,7 @@ test("packed certification has no checked-out source execution path", () => {
 });
 
 test("complete certification uses the installed Golden Path and provider boundary", () => {
-  const smokeScript = fs.readFileSync(path.join(import.meta.dirname, "smoke-test.mjs"), "utf8");
+  const smokeScript = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "scripts", "smoke-test.mjs"), "utf8");
   assert.match(smokeScript, /executing the complete Golden Path through the installed package/u);
   assert.match(smokeScript, /change.*issue/u);
   assert.match(smokeScript, /inari_golden_path_status/u);

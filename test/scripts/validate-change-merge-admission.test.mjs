@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { renderPullRequestArtifact } from "../src/artifact.ts";
-import { pullRequestContractFixture } from "../src/contract/fixtures.ts";
-import { INARI_ISSUER_PRINCIPAL } from "../src/github/issuer-authority.ts";
+import { renderPullRequestArtifact } from "../../src/artifact.ts";
+import { pullRequestContractFixture } from "../../src/contract/fixtures.ts";
+import { INARI_ISSUER_PRINCIPAL } from "../../src/github/issuer-authority.ts";
 import {
   classifyChangePullRequestContract,
   failureReport,
   validateChangeMergeAdmissionEvent,
   validateGitHubPullRequestEvent,
-} from "./validate-change-merge-admission.mjs";
+} from "../../scripts/validate-change-merge-admission.mjs";
 
 const identity = {
   repositoryHost: "github.com",

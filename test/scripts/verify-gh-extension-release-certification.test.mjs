@@ -10,17 +10,17 @@ import {
   CERTIFICATION_KINDS,
   CERTIFICATION_RESULTS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
-} from "./certification-evidence.mjs";
+} from "../../scripts/certification-evidence.mjs";
 import {
   buildArtifactManifest,
   computeArtifactManifestSha256,
   parseWorkflowContext,
   runWorkflowCertification,
-} from "./verify-gh-extension-release-certification.mjs";
+} from "../../scripts/verify-gh-extension-release-certification.mjs";
 import {
   RELEASE_CERTIFICATION_CONTRACT_VERSIONS,
   verifyGhExtensionReleaseCertification,
-} from "../src/release-certification.js";
+} from "../../src/release-certification.js";
 
 const SOURCE_SHA = "a".repeat(40);
 const OTHER_SOURCE_SHA = "b".repeat(40);
