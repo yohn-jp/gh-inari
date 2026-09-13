@@ -8,6 +8,7 @@ import {
   diffArtifact,
   prepareRemediationArtifact,
   prepareSyncInput,
+  projectRemediationRouting,
   RemediationError,
   validateReconstructedInput,
   renderCanonicalBody,
@@ -598,4 +599,125 @@ Closes #
       return true;
     },
   );
+});
+
+test("remediation routing is versioned, deterministic, and follows operation admission", () => {
+  const source = normalizeSemanticTemplate({
+    version: 1,
+    kind: "issue",
+    id: "routing-fixture",
+    name: "Routing fixture",
+    description: "Remediation routing fixture",
+    sections: [
+      {
+        id: "priority",
+        kind: "input",
+        type: "enum",
+        label: "Priority",
+        required: true,
+        options: [{ id: "critical", value: "p-critical", label: "Critical" }],
+      },
+      {
+        id: "areas",
+        kind: "input",
+        type: "array",
+        label: "Areas",
+        multiple: true,
+        options: [
+          { id: "frontend", value: "area-frontend", label: "Frontend" },
+          { id: "backend", value: "area-backend", label: "Backend" },
+        ],
+      },
+    ],
+  });
+  const path = ".github/ISSUE_TEMPLATE/routing.yml";
+  const contract = trusted(compileSemanticTemplateSource(source, path), path, JSON.stringify(source));
+  const remoteFor = (body: string) => ({
+    number: 525,
+    title: "feat: routing",
+    body,
+    state: "open" as const,
+    url: "https://github.com/acme/inari/issues/525",
+    labels: [],
+    assignees: [],
+  });
+  const readFor = (body: string, explicit = false): ExistingArtifactRead => ({
+    remote: remoteFor(body),
+    contract,
+    result: validateExistingIssueArtifact(contract, body),
+    ...(explicit ? { templateSelection: "explicit" as const } : {}),
+  });
+  const canonical = prepareRemediationArtifact("issue", contract, {
+    fields: { priority: "p-critical", areas: ["area-backend", "area-frontend"] },
+    metadata: { title: "feat: routing", labels: [], assignees: [] },
+  });
+
+  assert.deepEqual(projectRemediationRouting("issue", readFor(canonical.body)), {
+    version: 1,
+    kind: "none",
+    reason: "artifact-is-current",
+  });
+
+  const driftedBody = canonical.body.replace("Backend, Frontend", "Backend,Frontend");
+  const normalizable = projectRemediationRouting("issue", readFor(driftedBody));
+  assert.equal(normalizable.kind, "normalize");
+  assert.equal(normalizable.operation, "issue.normalize");
+
+  const patchable = projectRemediationRouting("issue", readFor(canonical.body.replace("Critical", "Unknown")));
+  assert.equal(patchable.kind, "edit");
+  assert.equal(patchable.operation, "issue.edit");
+  assert.equal(patchable.inputMode, "patch");
+  assert.deepEqual(
+    patchable.requiredInput?.invalidFields.map((field) => field.field),
+    ["priority"],
+  );
+
+  const incompleteExplicit = readFor("### Other\n\nNo recoverable priority\n", true);
+  const recovery = projectRemediationRouting("issue", incompleteExplicit);
+  assert.equal(recovery.kind, "sync-required");
+  assert.equal(recovery.operation, "issue.sync");
+  assert.equal(recovery.inputMode, "complete-document");
+  assert.throws(
+    () => applySemanticPatch("issue", incompleteExplicit, { fields: {}, metadata: {} }),
+    (error: unknown) => error instanceof RemediationError && error.code === "SEMANTIC_PATCH_INVALID",
+  );
+  const completeSyncInput = prepareSyncInput("issue", incompleteExplicit, {
+    fields: { priority: "p-critical", areas: ["area-backend"] },
+    metadata: { title: "feat: repaired", labels: [], assignees: [] },
+  });
+  assert.equal(prepareRemediationArtifact("issue", contract, completeSyncInput).body.includes("Critical"), true);
+
+  const ambiguous: ExistingArtifactRead = {
+    remote: remoteFor(canonical.body),
+    result: {
+      valid: false,
+      classification: "ambiguous",
+      parse: { parsed: false, values: {}, diagnostics: [] },
+      violations: [],
+      attemptedTemplates: [".github/ISSUE_TEMPLATE/z.yml", ".github/ISSUE_TEMPLATE/a.yml"],
+    },
+  };
+  assert.deepEqual(projectRemediationRouting("issue", ambiguous), {
+    version: 1,
+    kind: "template-selection-required",
+    inputMode: "template-selection",
+    templateCandidates: [".github/ISSUE_TEMPLATE/a.yml", ".github/ISSUE_TEMPLATE/z.yml"],
+    reason: "authoritative-template-selection-required",
+  });
+
+  const unrecoverable: ExistingArtifactRead = {
+    remote: remoteFor("not a governed artifact\n"),
+    result: {
+      valid: false,
+      classification: "wrong-template",
+      parse: { parsed: false, values: {}, diagnostics: [] },
+      violations: [],
+    },
+  };
+  assert.deepEqual(projectRemediationRouting("issue", unrecoverable), {
+    version: 1,
+    kind: "manual-review",
+    inputMode: "manual",
+    reason: "artifact-is-unrecoverable",
+  });
 });

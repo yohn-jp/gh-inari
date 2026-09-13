@@ -322,6 +322,42 @@ export interface ExistingArtifactAssessment {
   readonly diagnostics: readonly ExistingArtifactDiagnostic[];
 }
 
+export const REMEDIATION_ROUTING_VERSION = 1 as const;
+
+export type RemediationRoutingKind =
+  "none" | "normalize" | "edit" | "sync-required" | "template-selection-required" | "manual-review";
+
+export type RemediationInputMode = "patch" | "complete-document" | "template-selection" | "manual";
+
+export type RemediationCommand = `${GovernedArtifactDomain}.${Exclude<RemediationOperation, "check">}`;
+
+export interface RemediationRequiredField {
+  readonly field: string;
+  readonly path: string;
+  readonly reason: string;
+}
+
+export interface RemediationRequiredInput {
+  readonly missingFields: readonly RemediationRequiredField[];
+  readonly invalidFields: readonly RemediationRequiredField[];
+}
+
+/**
+ * Operation-level recovery authority. This is deliberately separate from
+ * ArtifactDiagnosticReport: diagnostics explain the observed defect, while
+ * this projection identifies the one safe remediation class to try next.
+ */
+export interface RemediationRoutingProjection {
+  readonly version: typeof REMEDIATION_ROUTING_VERSION;
+  readonly kind: RemediationRoutingKind;
+  readonly operation?: RemediationCommand;
+  readonly inputMode?: RemediationInputMode;
+  readonly template?: string;
+  readonly templateCandidates?: readonly string[];
+  readonly requiredInput?: RemediationRequiredInput;
+  readonly reason: string;
+}
+
 export interface SemanticDiffChange {
   readonly path: string;
   readonly before?: unknown;
@@ -773,6 +809,147 @@ export function prepareSyncInput(
     }
   }
   return desired;
+}
+
+const EMPTY_SEMANTIC_PATCH: ArtifactInputDocument = { fields: {}, metadata: {} };
+
+/** Project the canonical next remediation class without probing a mutation. */
+export function projectRemediationRouting(
+  domain: GovernedArtifactDomain,
+  read: ExistingArtifactRead,
+  assessment: ExistingArtifactAssessment = assessExistingArtifact(domain, read),
+): RemediationRoutingProjection {
+  if (assessment.status === "valid-current") {
+    return {
+      version: REMEDIATION_ROUTING_VERSION,
+      kind: "none",
+      reason: "artifact-is-current",
+    };
+  }
+
+  if (assessment.status === "ambiguous") {
+    const templateCandidates = boundedTemplateCandidates(read);
+    return {
+      version: REMEDIATION_ROUTING_VERSION,
+      kind: "template-selection-required",
+      inputMode: "template-selection",
+      ...(templateCandidates.length === 0 ? {} : { templateCandidates }),
+      reason: "authoritative-template-selection-required",
+    };
+  }
+
+  if (isNormalizationAdmissible(domain, read, assessment)) {
+    return {
+      version: REMEDIATION_ROUTING_VERSION,
+      kind: "normalize",
+      operation: remediationCommand(domain, "normalize"),
+      ...(read.contract === undefined ? {} : { template: read.contract.templateIdentity.id }),
+      reason: "semantic-preservation-proven",
+    };
+  }
+
+  if (isEditAdmissible(domain, read)) {
+    const requiredInput = projectRemediationRequiredInput(domain, read);
+    return {
+      version: REMEDIATION_ROUTING_VERSION,
+      kind: "edit",
+      operation: remediationCommand(domain, "edit"),
+      inputMode: "patch",
+      ...(read.contract === undefined ? {} : { template: read.contract.templateIdentity.id }),
+      ...(requiredInput === undefined ? {} : { requiredInput }),
+      reason: "semantic-patch-admissible",
+    };
+  }
+
+  if (isSyncAdmissible(domain, read)) {
+    return {
+      version: REMEDIATION_ROUTING_VERSION,
+      kind: "sync-required",
+      operation: remediationCommand(domain, "sync"),
+      inputMode: "complete-document",
+      ...(read.contract === undefined ? {} : { template: read.contract.templateIdentity.id }),
+      reason: "current-semantics-cannot-be-safely-preserved",
+    };
+  }
+
+  return {
+    version: REMEDIATION_ROUTING_VERSION,
+    kind: "manual-review",
+    inputMode: "manual",
+    reason: "artifact-is-unrecoverable",
+  };
+}
+
+function remediationCommand(
+  domain: GovernedArtifactDomain,
+  operation: Exclude<RemediationOperation, "check">,
+): RemediationCommand {
+  return `${domain}.${operation}`;
+}
+
+function isNormalizationAdmissible(
+  domain: GovernedArtifactDomain,
+  read: ExistingArtifactRead,
+  assessment: ExistingArtifactAssessment,
+): boolean {
+  if (!assessment.normalizable || read.contract === undefined || !read.result.valid || !read.result.parse.parsed) {
+    return false;
+  }
+  try {
+    prepareRemediationArtifact(domain, read.contract, currentArtifactInput(domain, read));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isEditAdmissible(domain: GovernedArtifactDomain, read: ExistingArtifactRead): boolean {
+  if (read.contract === undefined) return false;
+  try {
+    // An empty object is a patch shape, not a semantic value. It exercises the
+    // same authority/parse/reconstruction gate as a caller's real patch.
+    applySemanticPatch(domain, read, EMPTY_SEMANTIC_PATCH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSyncAdmissible(domain: GovernedArtifactDomain, read: ExistingArtifactRead): boolean {
+  if (read.contract === undefined) return false;
+  try {
+    // Sync requires caller-supplied complete values. The empty envelope only
+    // exercises the non-semantic sync admission boundary; it fabricates none.
+    prepareSyncInput(domain, read, EMPTY_SEMANTIC_PATCH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function projectRemediationRequiredInput(
+  domain: GovernedArtifactDomain,
+  read: ExistingArtifactRead,
+): RemediationRequiredInput | undefined {
+  if (read.contract === undefined) return undefined;
+  const current = currentArtifactInput(domain, read);
+  const partial = validatePartialArtifactInput(read.contract, current.fields);
+  const missingFields = partial.missingFields.slice(0, 32).map(projectRemediationField);
+  const invalidFields = partial.invalidFields.slice(0, 32).map(projectRemediationField);
+  if (missingFields.length === 0 && invalidFields.length === 0) return undefined;
+  return { missingFields, invalidFields };
+}
+
+function projectRemediationField(field: {
+  readonly field: string;
+  readonly path: string;
+  readonly reason: string;
+}): RemediationRequiredField {
+  return { field: field.field, path: field.path, reason: field.reason };
+}
+
+function boundedTemplateCandidates(read: ExistingArtifactRead): readonly string[] {
+  return [...new Set(read.result.attemptedTemplates ?? [])].sort(compareStrings).slice(0, 32);
 }
 
 function assertSupportedSyncMetadata(domain: GovernedArtifactDomain, metadata: ArtifactInputMetadata): void {

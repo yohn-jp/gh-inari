@@ -31,7 +31,12 @@ export type SkillScenarioScope = "default-route" | "leaf-operation" | "specializ
  */
 export interface SkillContractReference {
   readonly contract:
-    "golden-path-entry" | "golden-path-governance" | "change-handoff" | "golden-path-status" | "golden-path-recovery";
+    | "golden-path-entry"
+    | "golden-path-governance"
+    | "change-handoff"
+    | "golden-path-status"
+    | "golden-path-recovery"
+    | "remediation-recovery";
   readonly output: "action" | "handoff" | "nextAction" | "recovery";
   readonly instruction: string;
 }
@@ -184,20 +189,25 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       "Use when inspection identifies a non-canonical or semantically invalid Issue or PR that needs correction.",
     scope: "specialized-alternative",
     workflow: [
-      ["Classify the artifact and confirm it needs repair.", "issue.check"],
-      [
-        "Preview, then apply canonicalization after review for a parseable, semantically valid artifact.",
-        "issue.normalize",
-      ],
-      ["Preview, then apply an explicit semantic or metadata patch after review.", "issue.edit"],
-      ["Preview, then apply a sync operation after review when desired-state convergence is required.", "issue.sync"],
+      ["Classify the artifact and consume its versioned remediation recovery decision.", "issue.check"],
+      ["Follow the returned operation and input mode, then preview and apply it after review.", "issue.normalize"],
+      ["Use the corresponding edit or sync command only when the returned recovery decision names it.", "issue.edit"],
+      ["For sync-required recovery, provide the complete desired document through the sync contract.", "issue.sync"],
     ],
     invariants: [
-      "Check is read-only; choose normalize, edit, or sync from its classification.",
+      "Check is read-only; consume its versioned recovery decision instead of deriving an operation from classification.",
       "Normalize only when preservation of current semantics is proven; use edit or sync for explicit repair.",
       "Always preview a mutation before applying it.",
       "Applies equally to PRs via the corresponding `inari pr` commands.",
       HELP_DISCLAIMER,
+    ],
+    contractReferences: [
+      {
+        contract: "remediation-recovery",
+        output: "recovery",
+        instruction:
+          "Consume the bounded `check`/`explain` recovery projection; do not probe normalize, edit, or sync to discover the next operation.",
+      },
     ],
     canonicalCommandId: "issue.normalize",
     helpDomain: "issue",

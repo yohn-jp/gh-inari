@@ -2730,6 +2730,7 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
       body: "not a canonical artifact\n",
       templates: [{ path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE }],
       expectedStatus: "unsupported",
+      expectedRecoveryKind: "manual-review",
     },
     {
       name: "ambiguous",
@@ -2741,6 +2742,7 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
         { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
       ],
       expectedStatus: "ambiguous",
+      expectedRecoveryKind: "template-selection-required",
     },
     {
       name: "semantically-invalid",
@@ -2750,6 +2752,7 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
       templates: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
       policy: { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
       expectedStatus: "semantically-invalid",
+      expectedRecoveryKind: "edit",
     },
   ];
 
@@ -2792,6 +2795,11 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
       assert.equal(output.status, testCase.expectedStatus, testCase.name);
       assert.equal(output.valid, false, testCase.name);
       assert.equal(
+        (output.recovery as { kind?: string } | undefined)?.kind,
+        testCase.expectedRecoveryKind,
+        testCase.name,
+      );
+      assert.equal(
         transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
         false,
         testCase.name,
@@ -2799,6 +2807,51 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
     } finally {
       console.log = originalLog;
     }
+  }
+});
+
+test("check projects complete sync after explicit reconstruction rejects normalize and edit", async () => {
+  const transport = new CliStubTransport(
+    remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 114,
+        title: "feat: incomplete repair",
+        body: "not a canonical artifact\n",
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/114",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "check", "114", "--template", "default", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    });
+    assert.equal(exitCode, 2, lines[0]);
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      recovery?: { version?: number; kind?: string; operation?: string; inputMode?: string; reason?: string };
+    };
+    assert.deepEqual(output.recovery, {
+      version: 1,
+      kind: "sync-required",
+      operation: "pr.sync",
+      inputMode: "complete-document",
+      template: "pull-request-default_github_pull_request_template_md",
+      reason: "current-semantics-cannot-be-safely-preserved",
+    });
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH") || args.includes("POST")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
   }
 });
 

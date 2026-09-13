@@ -58,6 +58,7 @@ import {
   prepareSyncInput,
   remediationDiagnosticReport,
   remediationFailureDetails,
+  projectRemediationRouting,
   readGovernedExistingArtifact,
   RemediationError,
   translateRemediationFailure,
@@ -2666,10 +2667,14 @@ async function runExistingValidation(
   await adapter.resolveRepositoryContext();
   const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
   const { remote, result } = read;
+  const assessment = assessExistingArtifact(domain, read);
   const projection = projectExistingArtifact(result);
   const output = {
     valid: projection.valid,
     classification: projection.classification,
+    status: assessment.status,
+    normalizable: assessment.normalizable,
+    recovery: projectRemediationRouting(domain, read, assessment),
     number,
     url: remote.url,
     diagnostics: projection.diagnostics,
@@ -2752,6 +2757,7 @@ async function runExistingRemediation(
         classification: read.result.classification,
         valid: assessment.status === "valid-current",
         normalizable: assessment.normalizable,
+        recovery: projectRemediationRouting(domain, read, assessment),
         diagnostics: assessment.diagnostics,
         ...(read.result.classification === "semantic" ? { violations: read.result.violations } : {}),
         ...(read.result.attemptedTemplates === undefined ? {} : { attemptedTemplates: read.result.attemptedTemplates }),
