@@ -224,7 +224,9 @@ test("GitHub adapter normalizes PR runtime evidence without raw API shapes", asy
   assert.equal(observed.checks.status, "available");
   assert.equal(observed.checks.items.length, 2);
   assert.deepEqual(
-    observed.checks.items.map((check) => ({ kind: check.kind, id: check.id })).sort((left, right) => left.id.localeCompare(right.id)),
+    observed.checks.items
+      .map((check) => ({ kind: check.kind, id: check.id }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
     [
       { kind: "check-run", id: "4" },
       { kind: "status", id: "ci/status" },
