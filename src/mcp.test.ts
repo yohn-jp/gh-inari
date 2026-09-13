@@ -287,14 +287,18 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
         "inari_pr_plan",
         "inari_pr_observe",
         "inari_pr_drift",
+        "inari_pr_comment",
+        "inari_pr_review",
+        "inari_pr_merge",
         "inari_golden_path_entry",
         "inari_change_handoff",
       ].sort(),
     );
     for (const tool of listed.tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
-      assert.equal(tool.annotations?.readOnlyHint, true, tool.name);
-      assert.equal(tool.annotations?.destructiveHint, false, tool.name);
+      const mutation = ["inari_pr_comment", "inari_pr_review", "inari_pr_merge"].includes(tool.name);
+      assert.equal(tool.annotations?.readOnlyHint, mutation ? false : true, tool.name);
+      assert.equal(tool.annotations?.destructiveHint, mutation ? true : false, tool.name);
       assert.ok(tool.outputSchema, tool.name);
     }
   });

@@ -142,11 +142,63 @@ export interface GitHubPullRequest {
   readonly draft: boolean;
   readonly maintainerCanModify?: boolean;
   readonly head: string;
+  /** Commit identity of the head branch when the provider supplies it. */
+  readonly headSha?: string;
   readonly base: string;
+  /** Commit identity of the base branch when the provider supplies it. */
+  readonly baseSha?: string;
   readonly labels?: readonly string[];
   readonly assignees?: readonly string[];
   readonly milestone?: GitHubMilestone;
   readonly requestedReviewers?: GitHubReviewRequests;
+  /** Fresh provider merge evidence; absent means the provider did not expose it. */
+  readonly mergeable?: boolean | null;
+  readonly mergeableState?: string;
+  readonly merged?: boolean;
+  readonly mergedAt?: string | null;
+  readonly mergeCommitSha?: string | null;
+  /** Optional provider evidence used only to prove an idempotent strategy replay. */
+  readonly mergeMethod?: "merge" | "squash" | "rebase";
+}
+
+export interface GitHubPullRequestComment {
+  readonly id: number;
+  readonly body: string;
+  readonly url?: string;
+  readonly author?: string;
+}
+
+export type GitHubPullRequestReviewState =
+  "approved" | "changes-requested" | "commented" | "dismissed" | "pending" | "unknown";
+
+export interface GitHubPullRequestReview {
+  readonly id: number;
+  readonly body: string | null;
+  readonly state: GitHubPullRequestReviewState;
+  readonly commitId: string;
+  readonly url?: string;
+  readonly author?: string;
+}
+
+export interface GitHubPullRequestMergeResponse {
+  readonly merged: boolean;
+  readonly sha?: string;
+}
+
+export interface GitHubPullRequestMergePolicyEvidence {
+  readonly allowedStrategies?: readonly ("merge" | "squash" | "rebase")[];
+  readonly checks?: Readonly<{
+    readonly authoritative: boolean;
+    readonly satisfied: boolean;
+    readonly required?: readonly string[];
+    readonly state?: string;
+  }>;
+  readonly reviews?: Readonly<{
+    readonly authoritative: boolean;
+    readonly satisfied: boolean;
+    readonly requiredApprovals?: number;
+    readonly approvals?: number;
+  }>;
 }
 
 /** Provider-normalized pagination evidence used by Operational Observation. */

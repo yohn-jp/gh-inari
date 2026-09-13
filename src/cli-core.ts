@@ -176,6 +176,15 @@ import {
   tryObserveOperationalPullRequest,
   type OperationalDiagnostic,
 } from "./operational-observation.js";
+import {
+  SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+  SemanticPullRequestMutationError,
+  SemanticPullRequestMutationExecutor,
+  type SemanticPullRequestMutationExecutionPort,
+  type SemanticPullRequestMutationOperation,
+  type SemanticPullRequestRepositoryIdentity,
+  tryPlanSemanticPullRequestMutation,
+} from "./semantic-pr-mutation.js";
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
 import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import {
@@ -261,6 +270,12 @@ export interface CliDependencies {
   readonly createSemanticPullRequestExecutor?: (
     options: SemanticPullRequestExecutorOptions,
   ) => SemanticPullRequestExecutionPort;
+  /** Injectable governed PR comment/review/merge executor. */
+  readonly semanticPullRequestMutationExecutor?: SemanticPullRequestMutationExecutionPort;
+  /** Factory seam for the governed PR mutation executor. */
+  readonly createSemanticPullRequestMutationExecutor?: (options: {
+    readonly adapter: GitHubAdapter;
+  }) => SemanticPullRequestMutationExecutionPort;
   /** Injectable Semantic Issue Relation Executor; it never carries App credentials. */
   readonly semanticIssueRelationExecutor?: SemanticIssueRelationExecutionPort;
   /** Factory seam for a repository-scoped Semantic Issue Relation Executor. */
@@ -303,6 +318,11 @@ const VALUE_OPTIONS = new Set([
   "maxSessionTtlSeconds",
   "probeIssue",
   "sessionTtlSeconds",
+  "expectedHead",
+  "expectedBase",
+  "reviewIntent",
+  "mergeStrategy",
+  "retry",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -1706,6 +1726,9 @@ async function runArtifactCommand(
     }
   }
   if (domain === "pr") {
+    if (command === "comment" || command === "review" || command === "merge") {
+      return runPullRequestMutationCommand(command, rest, parsed, root, dependencies);
+    }
     const semantic = semanticPullRequestOperation(command, rest);
     if (semantic !== undefined) {
       return runSemanticPullRequestCommand(semantic.operation, semantic.rest, parsed, root, dependencies, json);
@@ -2219,6 +2242,179 @@ async function runIssueRelationsCommand(
 }
 
 type SemanticPullRequestOperation = "contract" | "materialize" | "plan" | "execute" | "check";
+
+function pullRequestMutationRepository(
+  context: Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>,
+): SemanticPullRequestRepositoryIdentity {
+  return {
+    hostname: context.hostname,
+    nameWithOwner: context.nameWithOwner,
+    ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
+  };
+}
+
+function pullRequestMutationExitCode(code: string, outcome: string): number {
+  if (
+    outcome === "stale" ||
+    outcome === "blocked" ||
+    code === "PR_MUTATION_EXECUTION_REQUEST_INVALID" ||
+    code === "PR_MUTATION_EXECUTION_PLAN_INVALID" ||
+    code === "PR_MUTATION_REPOSITORY_MISMATCH" ||
+    code === "PR_MUTATION_DUPLICATE_REVIEW" ||
+    code === "PR_MUTATION_DRAFT" ||
+    code === "PR_MUTATION_NOT_OPEN" ||
+    code === "PR_MUTATION_MERGE_BLOCKED"
+  )
+    return EXIT_VALIDATION;
+  return EXIT_REMOTE;
+}
+
+async function runPullRequestMutationCommand(
+  command: string,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const operation = command as SemanticPullRequestMutationOperation;
+  const definition = getCommandForPositionals(["pr", command]);
+  if (definition === undefined || definition.domain !== "pr")
+    throw new CliError("UNKNOWN_COMMAND", `Unknown PR mutation command "${command}".`);
+  if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("pr", rest[0]);
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by pr ${operation}.`,
+      "$argv",
+      { command: `pr ${operation}`, option: option.id },
+    );
+  }
+  if (parsed.fields.length > 0 || parsed.capabilities.length > 0)
+    throw new CliError("INVALID_OPTION", `PR ${operation} does not accept --field or --capability.`, "$argv");
+
+  try {
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    const context = await adapter.getRepositoryContext();
+    const common = {
+      version: SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+      operation,
+      repository: pullRequestMutationRepository(context),
+      pullRequest: Number(rest[0]),
+    };
+    const request: unknown =
+      operation === "comment"
+        ? {
+            ...common,
+            ...(typeof parsed.options.rawBody === "string" ? { body: parsed.options.rawBody } : {}),
+            ...(typeof parsed.options.expectedHead === "string" ? { expectedHead: parsed.options.expectedHead } : {}),
+          }
+        : operation === "review"
+          ? {
+              ...common,
+              ...(typeof parsed.options.expectedHead === "string" ? { expectedHead: parsed.options.expectedHead } : {}),
+              ...(typeof parsed.options.reviewIntent === "string" ? { intent: parsed.options.reviewIntent } : {}),
+              ...(typeof parsed.options.rawBody === "string" ? { body: parsed.options.rawBody } : {}),
+              ...(typeof parsed.options.retry === "string" ? { retry: parsed.options.retry } : {}),
+            }
+          : {
+              ...common,
+              ...(typeof parsed.options.expectedHead === "string" ? { expectedHead: parsed.options.expectedHead } : {}),
+              ...(typeof parsed.options.expectedBase === "string" ? { expectedBase: parsed.options.expectedBase } : {}),
+              ...(typeof parsed.options.mergeStrategy === "string" ? { strategy: parsed.options.mergeStrategy } : {}),
+            };
+    const planned = tryPlanSemanticPullRequestMutation(request);
+    if (!planned.valid || planned.plan === undefined) {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          valid: false,
+          operation: `pr.${operation}`,
+          outcome: "failed",
+          diagnostics: planned.violations,
+          violations: planned.violations,
+          mutation: false,
+        }),
+      );
+      return EXIT_VALIDATION;
+    }
+    const executor =
+      dependencies.semanticPullRequestMutationExecutor ??
+      (
+        dependencies.createSemanticPullRequestMutationExecutor ??
+        ((options) => new SemanticPullRequestMutationExecutor(options))
+      )({
+        adapter,
+      });
+    const execution = await executor.execute({
+      version: SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+      plan: planned.plan,
+    });
+    console.log(
+      JSON.stringify({
+        ok: true,
+        valid: true,
+        operation: `pr.${operation}`,
+        outcome: execution.outcome,
+        plan: execution.plan,
+        evidence: execution.evidence,
+        current: execution.current,
+        ...(execution.resource === undefined ? {} : { resource: execution.resource }),
+        mutation: execution.outcome === "succeeded",
+      }),
+    );
+    return 0;
+  } catch (error: unknown) {
+    if (error instanceof SemanticPullRequestMutationError) {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          valid: false,
+          operation: `pr.${operation}`,
+          outcome: error.outcome,
+          code: error.code,
+          diagnostics: error.diagnostics,
+          violations: error.diagnostics,
+          evidence: error.evidence,
+          ...(error.plan === undefined ? {} : { plan: error.plan }),
+          mutation: false,
+        }),
+      );
+      return pullRequestMutationExitCode(error.code, error.outcome);
+    }
+    const provider = isGitHubAdapterError(error);
+    console.log(
+      JSON.stringify({
+        ok: false,
+        valid: false,
+        operation: `pr.${operation}`,
+        outcome: "failed",
+        code: provider ? error.code : "PR_MUTATION_TARGET_READ_FAILED",
+        diagnostics: [
+          {
+            code: provider ? error.code : "PR_MUTATION_TARGET_READ_FAILED",
+            path: "$.pullRequest",
+            message: provider
+              ? "The bounded GitHub provider operation failed before verified mutation completion."
+              : "The governed PR mutation could not establish verified execution evidence.",
+          },
+        ],
+        violations: [
+          {
+            code: provider ? error.code : "PR_MUTATION_TARGET_READ_FAILED",
+            path: "$.pullRequest",
+            message: provider
+              ? "The bounded GitHub provider operation failed before verified mutation completion."
+              : "The governed PR mutation could not establish verified execution evidence.",
+          },
+        ],
+        mutation: false,
+      }),
+    );
+    return EXIT_REMOTE;
+  }
+}
 
 function semanticPullRequestOperation(
   command: string | undefined,
@@ -3238,7 +3434,14 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
       }
       throw new CliError("INVALID_OPTION", `Unknown option ${occurrence.rawName}.`);
     }
-    if (option.id === "rawBody") throw new CliError("INVALID_OPTION", `Unknown option ${occurrence.rawName}.`);
+    if (
+      option.id === "rawBody" &&
+      !(
+        tokenized.positionals[0] === "pr" &&
+        (tokenized.positionals[1] === "comment" || tokenized.positionals[1] === "review")
+      )
+    )
+      throw new CliError("INVALID_OPTION", `Unknown option ${occurrence.rawName}.`);
     if (option.arity === "required" && occurrence.value === undefined) {
       throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires a value.`);
     }

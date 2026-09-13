@@ -77,6 +77,9 @@ export type CommandId =
   | "pr.edit"
   | "pr.normalize"
   | "pr.sync"
+  | "pr.comment"
+  | "pr.review"
+  | "pr.merge"
   | "branch.check"
   | "branch.semantic.check"
   | "template.list"
@@ -139,7 +142,12 @@ export type OptionId =
   | "replace"
   | "sessionCredential"
   | "appEndpoint"
-  | "commit";
+  | "commit"
+  | "expectedHead"
+  | "expectedBase"
+  | "reviewIntent"
+  | "mergeStrategy"
+  | "retry";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -220,6 +228,9 @@ const PR_CREATE_OPTIONS = [
   "draft",
   "maintainerCanModify",
 ] as const;
+const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHead"] as const;
+const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
+const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
 
 const option = (
   id: OptionId,
@@ -539,6 +550,51 @@ export const COMMAND_OPTIONS = {
     "required",
     "Local Git commit/tree to publish. Defaults to HEAD.",
     "rev",
+  ),
+  expectedHead: option(
+    "expectedHead",
+    "expected-head",
+    ["--expected-head"],
+    "string",
+    "required",
+    "Expected pull-request head commit identity used for stale-race protection.",
+    "sha",
+  ),
+  expectedBase: option(
+    "expectedBase",
+    "expected-base",
+    ["--expected-base"],
+    "string",
+    "required",
+    "Expected pull-request base branch used for merge stale-race protection.",
+    "branch",
+  ),
+  reviewIntent: option(
+    "reviewIntent",
+    "intent",
+    ["--intent"],
+    "string",
+    "required",
+    "Canonical review intent: approve, request-changes, or comment-only.",
+    "intent",
+  ),
+  mergeStrategy: option(
+    "mergeStrategy",
+    "strategy",
+    ["--strategy"],
+    "string",
+    "required",
+    "Canonical merge strategy: merge, squash, or rebase.",
+    "strategy",
+  ),
+  retry: option(
+    "retry",
+    "retry",
+    ["--retry"],
+    "string",
+    "required",
+    "Review retry semantics: reject-duplicate or allow-duplicate.",
+    "mode",
   ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
@@ -954,6 +1010,33 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["pr", "sync"],
     "Reconcile an existing PR to a desired semantic state.",
     [...REMEDIATION_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.comment",
+    "pr",
+    "comment",
+    ["pr", "comment"],
+    "Create and verify one bounded top-level pull-request conversation comment.",
+    PR_COMMENT_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "pr.review",
+    "pr",
+    "review",
+    ["pr", "review"],
+    "Submit and verify one canonical pull-request review intent bound to an expected head.",
+    PR_REVIEW_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "pr.merge",
+    "pr",
+    "merge",
+    ["pr", "merge"],
+    "Admit, merge, reread, and verify one pull request with a bounded strategy.",
+    PR_MERGE_OPTIONS,
     "<number>",
   ),
   command(
@@ -1396,6 +1479,9 @@ export function commandUsage(entry: CommandDefinition): string {
           entry.id === "pr.semantic.check" ||
           entry.id === "branch.semantic.check") &&
           id === "from") ||
+        (entry.id === "pr.comment" && id === "rawBody") ||
+        (entry.id === "pr.review" && (id === "expectedHead" || id === "reviewIntent")) ||
+        (entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||

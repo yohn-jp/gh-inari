@@ -1147,3 +1147,66 @@ test("getPullRequest fails closed on malformed requested reviewers, including a 
       error.details.path === "requested_teams",
   );
 });
+
+test("bounded PR mutation adapter maps canonical comment, review, and merge effects", async () => {
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: "100000157",
+  };
+  const transport = new StubGhTransport([
+    command(0, JSON.stringify({ id: 1, body: "hello", html_url: "https://github.com/acme/inari#issuecomment-1" })),
+    command(0, JSON.stringify([{ id: 1, body: "hello", html_url: "https://github.com/acme/inari#issuecomment-1" }])),
+    command(0, JSON.stringify([])),
+    command(
+      0,
+      JSON.stringify({
+        id: 2,
+        body: "LGTM",
+        state: "APPROVED",
+        commit_id: "head-sha",
+        html_url: "https://github.com/acme/inari#review-2",
+      }),
+    ),
+    command(0, JSON.stringify({ merged: true, sha: "merge-sha" })),
+  ]);
+  class MutationAdapter extends GitHubAdapter {
+    constructor() {
+      super({ repository: "acme/inari", transport });
+    }
+
+    override async resolveRepositoryContext() {
+      return context;
+    }
+  }
+  const adapter = new MutationAdapter();
+
+  assert.deepEqual(await adapter.createPullRequestComment(521, "hello"), {
+    id: 1,
+    body: "hello",
+    url: "https://github.com/acme/inari#issuecomment-1",
+  });
+  assert.deepEqual(await adapter.listPullRequestComments(521), [
+    { id: 1, body: "hello", url: "https://github.com/acme/inari#issuecomment-1" },
+  ]);
+  assert.deepEqual(await adapter.listPullRequestReviews(521), []);
+  assert.deepEqual(await adapter.submitPullRequestReview(521, "approve", "LGTM", "head-sha"), {
+    id: 2,
+    body: "LGTM",
+    state: "approved",
+    commitId: "head-sha",
+    url: "https://github.com/acme/inari#review-2",
+  });
+  assert.deepEqual(await adapter.mergePullRequest(521, "squash", "head-sha"), { merged: true, sha: "merge-sha" });
+  assert.ok(transport.calls[0]?.args.includes("--method") && transport.calls[0]?.args.includes("POST"));
+  assert.ok(transport.calls[0]?.args.includes("--raw-field") && transport.calls[0]?.args.includes("body=hello"));
+  assert.ok(transport.calls[3]?.args.includes("event=APPROVE"));
+  assert.ok(transport.calls[3]?.args.includes("commit_id=head-sha"));
+  assert.ok(transport.calls[4]?.args.includes("--method") && transport.calls[4]?.args.includes("PUT"));
+  assert.ok(transport.calls[4]?.args.includes("merge_method=squash"));
+  assert.ok(transport.calls[4]?.args.includes("sha=head-sha"));
+});

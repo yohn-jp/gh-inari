@@ -47,6 +47,10 @@ import {
   type GitHubBranch,
   type GitHubMilestone,
   type GitHubPullRequest,
+  type GitHubPullRequestComment,
+  type GitHubPullRequestMergePolicyEvidence,
+  type GitHubPullRequestMergeResponse,
+  type GitHubPullRequestReview,
   type GitHubReviewRequests,
   type RepositoryContext,
   type RepositoryTree,
@@ -63,6 +67,8 @@ const MAX_PULL_REQUEST_LIST_ITEMS = 100;
 const OPERATIONAL_PAGE_SIZE = 100;
 const OPERATIONAL_MAX_PAGES = 10;
 const OPERATIONAL_MAX_ITEMS = OPERATIONAL_PAGE_SIZE * OPERATIONAL_MAX_PAGES;
+const MAX_PULL_REQUEST_COMMENTS = 100;
+const MAX_PULL_REQUEST_REVIEWS = 100;
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
 
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
@@ -97,6 +103,12 @@ const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.fre
   "issue.relation.mutate": "mutation",
   "pull_request.create": "mutation",
   "pull_request.update": "mutation",
+  "pull_request.comment.read": "read",
+  "pull_request.comment.mutate": "mutation",
+  "pull_request.review.read": "read",
+  "pull_request.review.mutate": "mutation",
+  "pull_request.merge": "mutation",
+  "pull_request.policy.read": "read",
   "branch.read": "read",
   "branch.create": "mutation",
 });
@@ -107,6 +119,16 @@ function operationClass(operation: string): GhOperationClass {
     throw new Error(`No timeout class registered for gh operation "${operation}".`);
   }
   return operationClassValue;
+}
+
+function repositoryApiOperation(repositoryPath: string, method: "GET" | "POST" | "PATCH" | "DELETE"): string {
+  if (repositoryPath.startsWith("pulls/") && repositoryPath.includes("/reviews"))
+    return method === "GET" ? "pull_request.review.read" : "pull_request.review.mutate";
+  if (repositoryPath.startsWith("issues/") && repositoryPath.includes("/comments"))
+    return method === "GET" ? "pull_request.comment.read" : "pull_request.comment.mutate";
+  if (repositoryPath.startsWith("branches/") || repositoryPath.startsWith("commits/"))
+    return "pull_request.policy.read";
+  return method === "GET" ? "issue.relation.read" : "issue.relation.mutate";
 }
 
 /**
@@ -272,7 +294,7 @@ export class GitHubAdapter {
     fields: Readonly<Record<string, GitHubApiFieldValue>>,
   ): Promise<GitHubApiResponse> {
     assertRepositoryApiPath(repositoryPath);
-    const operation = method === "GET" ? "issue.relation.read" : "issue.relation.mutate";
+    const operation = repositoryApiOperation(repositoryPath, method);
     const args = [
       "api",
       `repos/${nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
@@ -442,6 +464,129 @@ export class GitHubAdapter {
 
   async readPullRequest(pullRequestNumber: number): Promise<GitHubPullRequest> {
     return this.getPullRequest(pullRequestNumber);
+  }
+
+  /** Read bounded top-level conversation comments for one pull request. */
+  async listPullRequestComments(pullRequestNumber: number): Promise<readonly GitHubPullRequestComment[]> {
+    assertIssueNumber(pullRequestNumber, "pull_request_number");
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runApi(
+      this.apiArguments(
+        context,
+        `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments?per_page=${MAX_PULL_REQUEST_COMMENTS}`,
+        "GET",
+      ),
+      "pull_request.comment.read",
+    );
+    return parsePullRequestComments(result, "pull_request.comment.read");
+  }
+
+  /** Create one bounded top-level conversation comment; Core owns admission. */
+  async createPullRequestComment(pullRequestNumber: number, body: string): Promise<GitHubPullRequestComment> {
+    assertIssueNumber(pullRequestNumber, "pull_request_number");
+    assertMutationBody(body, "body");
+    const context = await this.resolveRepositoryContext();
+    const args = this.apiArguments(
+      context,
+      `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments`,
+      "POST",
+    );
+    appendRawField(args, "body", body);
+    return parsePullRequestComment(
+      await this.runApi(args, "pull_request.comment.mutate"),
+      "pull_request.comment.mutate",
+    );
+  }
+
+  /** Read bounded reviews; provider event names are normalized by this adapter. */
+  async listPullRequestReviews(pullRequestNumber: number): Promise<readonly GitHubPullRequestReview[]> {
+    assertIssueNumber(pullRequestNumber, "pull_request_number");
+    const context = await this.resolveRepositoryContext();
+    const result = await this.runApi(
+      this.apiArguments(
+        context,
+        `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews?per_page=${MAX_PULL_REQUEST_REVIEWS}`,
+        "GET",
+      ),
+      "pull_request.review.read",
+    );
+    return parsePullRequestReviews(result, "pull_request.review.read");
+  }
+
+  /** Submit one canonical review intent through the bounded provider seam. */
+  async submitPullRequestReview(
+    pullRequestNumber: number,
+    intent: "approve" | "request-changes" | "comment-only",
+    body: string,
+    expectedHead?: string,
+  ): Promise<GitHubPullRequestReview> {
+    assertIssueNumber(pullRequestNumber, "pull_request_number");
+    assertMutationBody(body, "body", true);
+    const event = intent === "approve" ? "APPROVE" : intent === "request-changes" ? "REQUEST_CHANGES" : "COMMENT";
+    const context = await this.resolveRepositoryContext();
+    const args = this.apiArguments(
+      context,
+      `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews`,
+      "POST",
+    );
+    appendRawField(args, "event", event);
+    appendRawField(args, "body", body);
+    if (expectedHead !== undefined) appendRawField(args, "commit_id", expectedHead);
+    return parsePullRequestReview(await this.runApi(args, "pull_request.review.mutate"), "pull_request.review.mutate");
+  }
+
+  /** Execute the fixed provider merge endpoint for one Core-admitted strategy. */
+  async mergePullRequest(
+    pullRequestNumber: number,
+    strategy: "merge" | "squash" | "rebase",
+    expectedHead?: string,
+  ): Promise<GitHubPullRequestMergeResponse> {
+    assertIssueNumber(pullRequestNumber, "pull_request_number");
+    if (strategy !== "merge" && strategy !== "squash" && strategy !== "rebase")
+      throw new ContractViolationError("Merge strategy is invalid.", "strategy");
+    const context = await this.resolveRepositoryContext();
+    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/merge`, "PUT");
+    appendRawField(args, "merge_method", strategy);
+    if (expectedHead !== undefined) appendRawField(args, "sha", expectedHead);
+    const record = responseRecord(await this.runApi(args, "pull_request.merge"), "pull_request.merge");
+    const merged = responseBoolean(record.merged, "merged", "pull_request.merge");
+    const sha = record.sha === undefined ? undefined : responseString(record.sha, "sha", "pull_request.merge");
+    return { merged, ...(sha === undefined ? {} : { sha }) };
+  }
+
+  /**
+   * Read repository merge settings plus branch-protection status/review
+   * evidence. A missing protection endpoint is explicitly non-authoritative;
+   * other malformed or failed responses remain errors so merge fails closed.
+   */
+  async getPullRequestMergePolicy(pullRequest: GitHubPullRequest): Promise<GitHubPullRequestMergePolicyEvidence> {
+    assertIssueNumber(pullRequest.number, "pull_request.number");
+    const context = await this.resolveRepositoryContext();
+    const repository = responseRecord(
+      await this.runApi(
+        this.apiArguments(context, `repos/${context.nameWithOwner}`, "GET"),
+        "pull_request.policy.read",
+      ),
+      "pull_request.policy.read",
+    );
+    const allowedStrategies = mergeStrategiesFromRepository(repository);
+    const [requiredChecks, requiredReviews] = await Promise.all([
+      this.requestRepositoryApi(
+        `branches/${encodeURIComponent(pullRequest.base)}/protection/required_status_checks`,
+        "GET",
+      ),
+      this.requestRepositoryApi(
+        `branches/${encodeURIComponent(pullRequest.base)}/protection/required_pull_request_reviews`,
+        "GET",
+      ),
+    ]);
+    const checks = await mergeChecksEvidence(this, pullRequest, requiredChecks);
+    const reviews = await mergeReviewsEvidence(this, pullRequest, requiredReviews);
+    return {
+      ...(allowedStrategies === undefined ? {} : { allowedStrategies }),
+      ...(checks === undefined ? {} : { checks }),
+      ...(reviews === undefined ? {} : { reviews }),
+    };
   }
 
   /**
@@ -1098,7 +1243,7 @@ export class GitHubAdapter {
   private apiArguments(
     context: RepositoryContext,
     endpoint: string,
-    method: "GET" | "POST" | "PATCH" | "DELETE",
+    method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT",
   ): string[] {
     return ["api", endpoint, "--hostname", context.hostname, "--method", method];
   }
@@ -1107,6 +1252,18 @@ export class GitHubAdapter {
 function assertIssueNumber(value: number, path: string): asserts value is number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new ContractViolationError("GitHub artifact number must be a positive integer.", path);
+  }
+}
+
+function assertMutationBody(value: string, path: string, allowEmpty = false): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    (!allowEmpty && value.length === 0) ||
+    value.length > 65_536 ||
+    Buffer.byteLength(value, "utf8") > 65_536 ||
+    /\u0000/gu.test(value)
+  ) {
+    throw new ContractViolationError("Pull-request mutation body is outside the bounded limit.", path);
   }
 }
 
@@ -1386,7 +1543,7 @@ function assertRepositoryApiPath(value: string): void {
     value.startsWith("/") ||
     value.includes("\u0000") ||
     value.includes("..") ||
-    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|commits\/|git\/)/u.test(value))
+    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|git\/|branches\/|commits\/)/u.test(value))
   ) {
     throw new ContractViolationError("Repository API path is invalid.", "repositoryPath");
   }
@@ -1937,11 +2094,19 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
       : responseBoolean(record.maintainer_can_modify, "maintainer_can_modify", operation);
   const head = responseRef(record.head, "head", operation);
   const base = responseRef(record.base, "base", operation);
+  const headSha = responseNestedOptionalString(record.head, "sha", "head.sha", operation);
+  const baseSha = responseNestedOptionalString(record.base, "sha", "base.sha", operation);
   const milestone = responseMilestone(record.milestone, "milestone", operation);
   const labels = record.labels === undefined ? undefined : responseNames(record.labels, "labels", operation);
   const assignees =
     record.assignees === undefined ? undefined : responseNames(record.assignees, "assignees", operation);
   const requestedReviewers = responseReviewRequests(record, operation);
+  const mergeable = responseOptionalBooleanOrNull(record.mergeable, "mergeable", operation);
+  const mergeableState = responseOptionalString(record.mergeable_state, "mergeable_state", operation);
+  const merged = responseOptionalBoolean(record.merged, "merged", operation);
+  const mergedAt = responseOptionalStringOrNull(record.merged_at, "merged_at", operation);
+  const mergeCommitSha = responseOptionalStringOrNull(record.merge_commit_sha, "merge_commit_sha", operation);
+  const mergeMethod = responseOptionalMergeMethod(record.merge_method, "merge_method", operation);
   return {
     number,
     title,
@@ -1951,12 +2116,181 @@ function parsePullRequest(value: unknown, operation: string): GitHubPullRequest 
     draft,
     ...(maintainerCanModify === undefined ? {} : { maintainerCanModify }),
     head,
+    ...(headSha === undefined ? {} : { headSha }),
     base,
+    ...(baseSha === undefined ? {} : { baseSha }),
     ...(labels === undefined ? {} : { labels }),
     ...(assignees === undefined ? {} : { assignees }),
     ...(milestone === undefined ? {} : { milestone }),
     ...(requestedReviewers === undefined ? {} : { requestedReviewers }),
+    ...(mergeable === undefined ? {} : { mergeable }),
+    ...(mergeableState === undefined ? {} : { mergeableState }),
+    ...(merged === undefined ? {} : { merged }),
+    ...(mergedAt === undefined ? {} : { mergedAt }),
+    ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }),
+    ...(mergeMethod === undefined ? {} : { mergeMethod }),
   };
+}
+
+function parsePullRequestComments(value: unknown, operation: string): readonly GitHubPullRequestComment[] {
+  if (!Array.isArray(value) || value.length > MAX_PULL_REQUEST_COMMENTS) {
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid bounded pull-request comment list.", {
+      path: "body",
+    });
+  }
+  return value.map((entry, index) => parsePullRequestComment(entry, `${operation}[${index}]`));
+}
+
+function parsePullRequestComment(value: unknown, operation: string): GitHubPullRequestComment {
+  const record = responseRecord(value, operation);
+  const id = responseNumber(record.id, "id", operation);
+  if (id < 1)
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid comment identity.", { path: "id" });
+  const body = responseString(record.body, "body", operation);
+  assertResponseBody(body, "body", operation);
+  const url = responseOptionalString(record.html_url ?? record.url, "url", operation);
+  const author = responseNestedOptionalString(record.user, "login", "user.login", operation);
+  return {
+    id,
+    body,
+    ...(url === undefined ? {} : { url }),
+    ...(author === undefined ? {} : { author }),
+  };
+}
+
+function parsePullRequestReviews(value: unknown, operation: string): readonly GitHubPullRequestReview[] {
+  if (!Array.isArray(value) || value.length > MAX_PULL_REQUEST_REVIEWS) {
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid bounded pull-request review list.", {
+      path: "body",
+    });
+  }
+  return value.map((entry, index) => parsePullRequestReview(entry, `${operation}[${index}]`));
+}
+
+function parsePullRequestReview(value: unknown, operation: string): GitHubPullRequestReview {
+  const record = responseRecord(value, operation);
+  const id = responseNumber(record.id, "id", operation);
+  if (id < 1)
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid review identity.", { path: "id" });
+  const body = record.body === null ? null : responseString(record.body, "body", operation);
+  if (body !== null) assertResponseBody(body, "body", operation);
+  const state = normalizedReviewState(record.state, operation);
+  const commitId = responseString(record.commit_id, "commit_id", operation);
+  const url = responseOptionalString(record.html_url ?? record.url, "url", operation);
+  const author = responseNestedOptionalString(record.user, "login", "user.login", operation);
+  return {
+    id,
+    body,
+    state,
+    commitId,
+    ...(url === undefined ? {} : { url }),
+    ...(author === undefined ? {} : { author }),
+  };
+}
+
+function normalizedReviewState(value: unknown, operation: string): GitHubPullRequestReview["state"] {
+  if (value === "APPROVED") return "approved";
+  if (value === "CHANGES_REQUESTED") return "changes-requested";
+  if (value === "COMMENTED") return "commented";
+  if (value === "DISMISSED") return "dismissed";
+  if (value === "PENDING") return "pending";
+  if (typeof value === "string" && value.length > 0 && value.length <= 64) return "unknown";
+  throw new GitHubApiResponseError(operation, "GitHub returned an invalid review state.", { path: "state" });
+}
+
+function mergeStrategiesFromRepository(
+  record: Record<string, unknown>,
+): readonly ("merge" | "squash" | "rebase")[] | undefined {
+  const fields = [record.allow_merge_commit, record.allow_squash_merge, record.allow_rebase_merge];
+  if (!fields.every((value) => typeof value === "boolean")) return undefined;
+  return [
+    ...(record.allow_merge_commit === true ? (["merge"] as const) : []),
+    ...(record.allow_squash_merge === true ? (["squash"] as const) : []),
+    ...(record.allow_rebase_merge === true ? (["rebase"] as const) : []),
+  ];
+}
+
+async function mergeChecksEvidence(
+  adapter: GitHubAdapter,
+  pullRequest: GitHubPullRequest,
+  requiredResponse: GitHubApiResponse,
+): Promise<GitHubPullRequestMergePolicyEvidence["checks"]> {
+  if (requiredResponse.status === 404) return undefined;
+  if (requiredResponse.status < 200 || requiredResponse.status >= 300)
+    throw new GitHubApiError("pull_request.policy.read", "GitHub required-status-check policy could not be read.");
+  const required = requiredCheckNames(requiredResponse.body, "pull_request.policy.read");
+  const statusResponse = await adapter.requestRepositoryApi(
+    `commits/${encodeURIComponent(pullRequest.headSha ?? pullRequest.head)}/status`,
+    "GET",
+  );
+  if (statusResponse.status < 200 || statusResponse.status >= 300)
+    throw new GitHubApiError("pull_request.policy.read", "GitHub pull-request status evidence could not be read.");
+  const status = responseRecord(statusResponse.body, "pull_request.policy.read");
+  const state = responseString(status.state, "state", "pull_request.policy.read");
+  const statuses = Array.isArray(status.statuses) ? status.statuses : [];
+  const contexts = new Map<string, string>();
+  for (const entry of statuses) {
+    if (!isRecord(entry) || typeof entry.context !== "string" || typeof entry.state !== "string") continue;
+    contexts.set(entry.context, entry.state.toLowerCase());
+  }
+  return {
+    authoritative: true,
+    satisfied: required.every((name) => contexts.get(name) === "success"),
+    required,
+    state,
+  };
+}
+
+async function mergeReviewsEvidence(
+  adapter: GitHubAdapter,
+  pullRequest: GitHubPullRequest,
+  requiredResponse: GitHubApiResponse,
+): Promise<GitHubPullRequestMergePolicyEvidence["reviews"]> {
+  if (requiredResponse.status === 404) return undefined;
+  if (requiredResponse.status < 200 || requiredResponse.status >= 300)
+    throw new GitHubApiError("pull_request.policy.read", "GitHub required-review policy could not be read.");
+  const record = responseRecord(requiredResponse.body, "pull_request.policy.read");
+  if (
+    typeof record.required_approving_review_count !== "number" ||
+    !Number.isSafeInteger(record.required_approving_review_count)
+  )
+    throw new GitHubApiResponseError("pull_request.policy.read", "GitHub returned an invalid required-review policy.", {
+      path: "required_approving_review_count",
+    });
+  const requiredApprovals = record.required_approving_review_count;
+  if (requiredApprovals === 0) return { authoritative: true, satisfied: true, requiredApprovals, approvals: 0 };
+  const reviews = await adapter.listPullRequestReviews(pullRequest.number);
+  const approvedAuthors = new Set<string>();
+  for (const review of reviews) {
+    if (review.commitId !== (pullRequest.headSha ?? pullRequest.head) || review.state !== "approved") continue;
+    approvedAuthors.add(review.author ?? `review-${review.id}`);
+  }
+  return {
+    authoritative: true,
+    satisfied: approvedAuthors.size >= requiredApprovals,
+    requiredApprovals,
+    approvals: approvedAuthors.size,
+  };
+}
+
+function requiredCheckNames(value: unknown, operation: string): readonly string[] {
+  const record = responseRecord(value, operation);
+  const contexts = record.contexts;
+  const checks = record.checks;
+  const names: string[] = [];
+  if (contexts !== undefined) {
+    if (!Array.isArray(contexts))
+      throw new GitHubApiResponseError(operation, "Required check contexts are invalid.", { path: "contexts" });
+    for (const entry of contexts) if (typeof entry === "string" && entry.length > 0) names.push(entry);
+  }
+  if (checks !== undefined) {
+    if (!Array.isArray(checks))
+      throw new GitHubApiResponseError(operation, "Required checks are invalid.", { path: "checks" });
+    for (const entry of checks) {
+      if (isRecord(entry) && typeof entry.context === "string" && entry.context.length > 0) names.push(entry.context);
+    }
+  }
+  return [...new Set(names)].sort();
 }
 
 function parseBranch(value: unknown, expectedName: string, operation: string): GitHubBranch {
@@ -2006,6 +2340,49 @@ function responseBoolean(value: unknown, path: string, operation: string): boole
       path,
     });
   }
+  return value;
+}
+
+function responseOptionalBoolean(value: unknown, path: string, operation: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  return responseBoolean(value, path, operation);
+}
+
+function responseOptionalBooleanOrNull(value: unknown, path: string, operation: string): boolean | null | undefined {
+  if (value === undefined || value === null) return value;
+  return responseBoolean(value, path, operation);
+}
+
+function responseOptionalString(value: unknown, path: string, operation: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return responseString(value, path, operation);
+}
+
+function responseOptionalStringOrNull(value: unknown, path: string, operation: string): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return responseString(value, path, operation);
+}
+
+function responseNestedOptionalString(
+  value: unknown,
+  key: string,
+  path: string,
+  operation: string,
+): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value))
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid.`, { path });
+  return responseOptionalString(value[key], path, operation);
+}
+
+function responseOptionalMergeMethod(
+  value: unknown,
+  path: string,
+  operation: string,
+): "merge" | "squash" | "rebase" | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value !== "merge" && value !== "squash" && value !== "rebase")
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid merge method.", { path });
   return value;
 }
 
@@ -2109,6 +2486,14 @@ function responseRef(value: unknown, path: string, operation: string): string {
     });
   }
   return responseString(value.ref, `${path}.ref`, operation);
+}
+
+function assertResponseBody(value: string, path: string, operation: string): void {
+  if (value.length > 65_536 || Buffer.byteLength(value, "utf8") > 65_536 || /\u0000/gu.test(value)) {
+    throw new GitHubApiResponseError(operation, "GitHub returned a pull-request body outside the bounded limit.", {
+      path,
+    });
+  }
 }
 
 function assertRepositoryRef(value: string): asserts value is string {

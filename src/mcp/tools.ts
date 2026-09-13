@@ -47,6 +47,15 @@ import {
   type SemanticPullRequestMutationPlan,
 } from "../semantic-pr-projection.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
+import {
+  SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+  SemanticPullRequestMutationError,
+  SemanticPullRequestMutationExecutor,
+  tryPlanSemanticPullRequestMutation,
+  type SemanticPullRequestMutationExecutionPort,
+  type SemanticPullRequestMutationOperation,
+  type SemanticPullRequestRepositoryIdentity,
+} from "../semantic-pr-mutation.js";
 import { projectGoldenPathRecovery } from "../golden-path-recovery.js";
 import { tryProjectGoldenPathStatus } from "../golden-path-status.js";
 import {
@@ -97,6 +106,9 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_plan",
   "inari_pr_observe",
   "inari_pr_drift",
+  "inari_pr_comment",
+  "inari_pr_review",
+  "inari_pr_merge",
   "inari_golden_path_entry",
   "inari_change_handoff",
 ] as const);
@@ -130,6 +142,55 @@ const artifactNumberSchema = z
   .describe("GitHub Issue or pull-request number.");
 const branchNameSchema = boundedString("Git branch name to observe.");
 const branchSourceSchema = boundedString("Explicit Git branch source evidence.");
+
+const mutationBodySchema = z
+  .string()
+  .max(65_536)
+  .superRefine((value, context) => {
+    if (value.includes("\u0000") || Buffer.byteLength(value, "utf8") > 65_536)
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Body exceeds the bounded mutation limit." });
+  })
+  .describe("Bounded pull-request comment or review body.");
+const mutationCommentBodySchema = mutationBodySchema.min(1);
+const mutationExpectedHeadSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => !/[\u0000\r\n]/u.test(value), { message: "Expected head contains an unsafe control character." })
+  .describe("Expected pull-request head commit identity.");
+const mutationExpectedBaseSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => !/[\u0000\r\n]/u.test(value), { message: "Expected base contains an unsafe control character." })
+  .describe("Expected pull-request base branch.");
+
+/** Input for one bounded top-level PR conversation comment. */
+export const semanticPullRequestCommentInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  number: artifactNumberSchema,
+  body: mutationCommentBodySchema,
+  expectedHead: mutationExpectedHeadSchema.optional(),
+});
+
+/** Input for one canonical review intent bound to a fresh expected head. */
+export const semanticPullRequestReviewInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  number: artifactNumberSchema,
+  expectedHead: mutationExpectedHeadSchema,
+  intent: z.enum(["approve", "request-changes", "comment-only"]),
+  body: mutationBodySchema.optional(),
+  retry: z.enum(["reject-duplicate", "allow-duplicate"]).optional(),
+});
+
+/** Input for one policy-admitted, strategy-bound PR merge. */
+export const semanticPullRequestMergeInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  number: artifactNumberSchema,
+  expectedHead: mutationExpectedHeadSchema,
+  expectedBase: mutationExpectedBaseSchema,
+  strategy: z.enum(["merge", "squash", "rebase"]),
+});
 
 const inputValueSchema = z
   .record(z.string().min(1).max(MAX_STRING_LENGTH), z.unknown())
@@ -261,6 +322,9 @@ export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInp
 export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
 export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
+export type SemanticPullRequestCommentInput = z.infer<typeof semanticPullRequestCommentInputSchema>;
+export type SemanticPullRequestReviewInput = z.infer<typeof semanticPullRequestReviewInputSchema>;
+export type SemanticPullRequestMergeInput = z.infer<typeof semanticPullRequestMergeInputSchema>;
 export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
 export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
 export type GoldenPathStatusMcpInput = z.infer<typeof goldenPathStatusInputSchema>;
@@ -275,6 +339,12 @@ export interface NativeSemanticPullRequestDependencies {
   readonly adapter?: GitHubAdapter;
   /** Factory seam for repository-scoped adapter construction. */
   readonly createAdapter?: (options: GitHubAdapterOptions) => GitHubAdapter;
+  /** Direct governed PR comment/review/merge executor seam. */
+  readonly semanticPullRequestMutationExecutor?: SemanticPullRequestMutationExecutionPort;
+  /** Factory seam for a repository-scoped governed PR mutation executor. */
+  readonly createSemanticPullRequestMutationExecutor?: (options: {
+    readonly adapter: GitHubAdapter;
+  }) => SemanticPullRequestMutationExecutionPort;
 }
 
 /** Shared dependency seam for all read-only semantic artifact catalogs. */
@@ -323,6 +393,12 @@ export const semanticPullRequestOutputSchema = z
     number: artifactNumberSchema.optional(),
     artifact: z.unknown().optional(),
     plan: z.unknown().optional(),
+    operation: z.enum(["pr.comment", "pr.review", "pr.merge"]).optional(),
+    outcome: z.enum(["succeeded", "idempotent", "stale", "blocked", "failed", "recovery-required"]).optional(),
+    code: z.string().optional(),
+    evidence: z.unknown().optional(),
+    current: z.unknown().optional(),
+    resource: z.unknown().optional(),
     desired: z.unknown().optional(),
     observed: z.unknown().optional(),
     semantic: z.unknown().optional(),
@@ -423,6 +499,28 @@ function adapterFor(
     ...(repository === undefined ? {} : { repository }),
   };
   return (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))(options);
+}
+
+function mutationExecutorFor(
+  adapter: GitHubAdapter,
+  dependencies: NativeSemanticPullRequestDependencies,
+): SemanticPullRequestMutationExecutionPort {
+  if (dependencies.semanticPullRequestMutationExecutor !== undefined)
+    return dependencies.semanticPullRequestMutationExecutor;
+  return (
+    dependencies.createSemanticPullRequestMutationExecutor ??
+    ((options: { readonly adapter: GitHubAdapter }) => new SemanticPullRequestMutationExecutor(options))
+  )({ adapter });
+}
+
+function mutationRepository(
+  context: Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>,
+): SemanticPullRequestRepositoryIdentity {
+  return {
+    hostname: context.hostname,
+    nameWithOwner: context.nameWithOwner,
+    ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
+  };
 }
 
 function changeExecutorFor(
@@ -1244,6 +1342,133 @@ async function handleBranchDrift(
   }
 }
 
+type SemanticPullRequestMutationMcpInput =
+  SemanticPullRequestCommentInput | SemanticPullRequestReviewInput | SemanticPullRequestMergeInput;
+
+function mutationRequest(
+  operation: SemanticPullRequestMutationOperation,
+  input: SemanticPullRequestMutationMcpInput,
+  repository: SemanticPullRequestRepositoryIdentity,
+): unknown {
+  const common = {
+    version: SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+    operation,
+    repository,
+    pullRequest: input.number,
+  };
+  if (operation === "comment") {
+    const comment = input as SemanticPullRequestCommentInput;
+    return {
+      ...common,
+      body: comment.body,
+      ...(comment.expectedHead === undefined ? {} : { expectedHead: comment.expectedHead }),
+    };
+  }
+  if (operation === "review") {
+    const review = input as SemanticPullRequestReviewInput;
+    return {
+      ...common,
+      expectedHead: review.expectedHead,
+      intent: review.intent,
+      ...(review.body === undefined ? {} : { body: review.body }),
+      ...(review.retry === undefined ? {} : { retry: review.retry }),
+    };
+  }
+  const merge = input as SemanticPullRequestMergeInput;
+  return {
+    ...common,
+    expectedHead: merge.expectedHead,
+    expectedBase: merge.expectedBase,
+    strategy: merge.strategy,
+  };
+}
+
+async function handlePullRequestMutation(
+  operation: SemanticPullRequestMutationOperation,
+  input: SemanticPullRequestMutationMcpInput,
+  dependencies: NativeSemanticPullRequestDependencies,
+): Promise<CallToolResult> {
+  const operationName = `pr.${operation}` as const;
+  const adapter = adapterFor(input.repository, dependencies);
+  try {
+    const context = await adapter.getRepositoryContext();
+    const planned = tryPlanSemanticPullRequestMutation(mutationRequest(operation, input, mutationRepository(context)));
+    if (!planned.valid || planned.plan === undefined) {
+      const diagnostics = boundedDiagnostics(planned.violations);
+      return result(
+        {
+          ok: false,
+          valid: false,
+          operation: operationName,
+          outcome: "failed",
+          diagnostics,
+          violations: diagnostics,
+          mutation: false,
+        },
+        `Governed ${operationName} request failed validation; see diagnostics.`,
+      );
+    }
+    const execution = await mutationExecutorFor(adapter, dependencies).execute({
+      version: SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+      plan: planned.plan,
+    });
+    return result(
+      {
+        ok: true,
+        valid: true,
+        operation: operationName,
+        outcome: execution.outcome,
+        plan: execution.plan,
+        evidence: execution.evidence,
+        current: execution.current,
+        ...(execution.resource === undefined ? {} : { resource: execution.resource }),
+        mutation: execution.outcome === "succeeded",
+      },
+      `Governed ${operationName} completed with verified ${execution.outcome} evidence.`,
+    );
+  } catch (error: unknown) {
+    if (error instanceof SemanticPullRequestMutationError) {
+      const diagnostics = boundedDiagnostics(error.diagnostics);
+      return result(
+        {
+          ok: false,
+          valid: false,
+          operation: operationName,
+          outcome: error.outcome,
+          code: error.code,
+          diagnostics,
+          violations: diagnostics,
+          evidence: error.evidence,
+          ...(error.plan === undefined ? {} : { plan: error.plan }),
+          mutation: false,
+        },
+        `Governed ${operationName} did not complete; see typed evidence.`,
+      );
+    }
+    const diagnostics = [
+      {
+        code: isGitHubAdapterError(error) ? error.code : "PR_MUTATION_EXECUTION_FAILED",
+        path: "$.pullRequest",
+        message: isGitHubAdapterError(error)
+          ? "The bounded GitHub provider operation failed before verified mutation completion."
+          : "The governed PR mutation could not establish verified execution evidence.",
+      },
+    ];
+    return result(
+      {
+        ok: false,
+        valid: false,
+        operation: operationName,
+        outcome: "failed",
+        diagnostics,
+        violations: diagnostics,
+        mutation: false,
+      },
+      `Governed ${operationName} failed before verified completion; see diagnostics.`,
+    );
+  }
+}
+
 async function handleContract(
   input: SemanticPullRequestContractInput,
   dependencies: NativeSemanticPullRequestDependencies,
@@ -1417,7 +1642,48 @@ export function registerSemanticPullRequestTools(
     },
     async (input: SemanticPullRequestDriftInput) => handlePullRequestDrift(input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan, observe, drift]);
+  const mutationAnnotations: ToolAnnotations = Object.freeze({
+    readOnlyHint: false,
+    destructiveHint: true,
+    openWorldHint: true,
+  });
+  const comment = server.registerTool(
+    "inari_pr_comment",
+    {
+      title: "Governed PR conversation comment",
+      description:
+        "Create exactly one bounded top-level pull-request conversation comment through Inari Core, then reread and verify the recorded comment. This is a write authority with typed failure evidence.",
+      inputSchema: semanticPullRequestCommentInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: mutationAnnotations,
+    },
+    async (input: SemanticPullRequestCommentInput) => handlePullRequestMutation("comment", input, dependencies),
+  );
+  const review = server.registerTool(
+    "inari_pr_review",
+    {
+      title: "Governed PR review",
+      description:
+        "Submit one canonical approve, request-changes, or comment-only review bound to an expected pull-request head. Inari rereads and verifies the recorded review and applies explicit retry semantics.",
+      inputSchema: semanticPullRequestReviewInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: mutationAnnotations,
+    },
+    async (input: SemanticPullRequestReviewInput) => handlePullRequestMutation("review", input, dependencies),
+  );
+  const merge = server.registerTool(
+    "inari_pr_merge",
+    {
+      title: "Governed PR merge",
+      description:
+        "Admit one strategy-bound pull-request merge against fresh head/base, draft, conflict, check, and review evidence; perform one bounded provider mutation; and reread the merged postcondition. Ambiguous results remain recovery-required.",
+      inputSchema: semanticPullRequestMergeInputSchema,
+      outputSchema: semanticPullRequestOutputSchema,
+      annotations: mutationAnnotations,
+    },
+    async (input: SemanticPullRequestMergeInput) => handlePullRequestMutation("merge", input, dependencies),
+  );
+  return Object.freeze([contract, materialize, plan, observe, drift, comment, review, merge]);
 }
 
 type SemanticArtifactKind = "issue" | "branch";
