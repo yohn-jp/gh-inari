@@ -165,6 +165,18 @@ test("validates exact request and canonical base64", () => {
     false,
   );
 });
+test("accepts a well-formed branch name", () => {
+  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "feat/42-add-init-command" }).valid, true);
+});
+test("rejects the exempt main branch as a non-default branch name", () => {
+  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "main" }).valid, false);
+});
+test("rejects a branch missing an issue number", () => {
+  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "feat/add-init-command" }).valid, false);
+});
+test("rejects an unknown branch type prefix", () => {
+  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "wip/42-add-init-command" }).valid, false);
+});
 test("advances through narrow capability with decoded-content identity and CAS", async () => {
   const { calls, broker } = fake();
   const result = await executeBranchAdvance({ context, broker, admission });

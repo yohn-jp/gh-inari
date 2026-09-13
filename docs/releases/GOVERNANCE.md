@@ -18,9 +18,9 @@ The exact machine-enforced rules live here, not in this document:
   lint, typecheck, test, build, package-contents checks that run on every
   PR and must be green before merge.
 - [`.github/workflows/governance.yml`](../../.github/workflows/governance.yml) —
-  branch-name and linked-Issue contract for PRs
-  ([`scripts/validate-pr.mjs`](../../scripts/validate-pr.mjs),
-  [`scripts/validate-branch-name.mjs`](../../scripts/validate-branch-name.mjs)).
+  branch-name and linked-Issue contract for PRs, delegated to the
+  organization-owned reusable workflow in `yohn-jp/.github`, which validates
+  semantics through the published `gh-inari` package.
 - [`.github/workflows/codeql.yml`](../../.github/workflows/codeql.yml) —
   static analysis on PRs and `main`.
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — Issue-first workflow,

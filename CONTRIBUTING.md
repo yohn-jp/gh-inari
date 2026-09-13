@@ -66,9 +66,9 @@ This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
 - Keep the pull request template sections.
 - CI (typecheck, lint, test, build, package check) must pass.
 - The `Governance / validate-pr` check enforces the branch-name and
-  linked-Issue contract — see [`scripts/validate-pr.mjs`](scripts/validate-pr.mjs)
-  and [`scripts/validate-branch-name.mjs`](scripts/validate-branch-name.mjs)
-  for the exact rules.
+  linked-Issue contract via the organization-owned reusable workflow in
+  `yohn-jp/.github`, which validates semantics through the published
+  `gh-inari` package.
 
 ## Reporting bugs / requesting features
 
