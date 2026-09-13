@@ -81,6 +81,37 @@ test("omitting actor remains valid and verification uses only the repository tru
   assert.equal(isChangeProvenanceRecordValid(rendered, trusted), true);
 });
 
+test("independent active Runtime Authorities sign and verify against the same repository trust set", () => {
+  const firstKey = generateRuntimeAuthorityKeyPair();
+  const secondKey = generateRuntimeAuthorityKeyPair();
+  const first = assertRuntimeAuthority({
+    ...authority(firstKey),
+    id: "runtime-a",
+  });
+  const second = assertRuntimeAuthority({
+    ...authority(secondKey),
+    id: "runtime-b",
+  });
+  const firstRecord = createChangeProvenanceRecord({
+    rootIssue: 533,
+    runtimeAuthority: first,
+    runtimeKey: firstKey,
+    now: NOW,
+  });
+  const secondRecord = createChangeProvenanceRecord({
+    rootIssue: 533,
+    runtimeAuthority: second,
+    runtimeKey: secondKey,
+    now: NOW,
+  });
+
+  assert.equal(firstRecord.signature.kid, first.id);
+  assert.equal(secondRecord.signature.kid, second.id);
+  assert.doesNotThrow(() => verifyChangeProvenanceRecord(firstRecord, first));
+  assert.doesNotThrow(() => verifyChangeProvenanceRecord(secondRecord, second));
+  assert.throws(() => verifyChangeProvenanceRecord(firstRecord, second));
+});
+
 test("tampering, unknown requester data, and a substituted runtime key fail closed", () => {
   const pair = generateRuntimeAuthorityKeyPair();
   const trusted = authority(pair);

@@ -500,7 +500,7 @@ export const COMMAND_OPTIONS = {
     ["--environment"],
     "boolean",
     "none",
-    "Read the runtime-signing deployment binding from INARI_RUNTIME_AUTHORITY_ID and INARI_RUNTIME_AUTHORITY_PRIVATE_KEY.",
+    "Read the initiating Runtime's authority id and private key from its scoped environment.",
   ),
   rotationPhase: option(
     "rotationPhase",
@@ -1157,7 +1157,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "authority",
     "readiness",
     ["authority", "readiness"],
-    "Verify a runtime-signing deployment's key identity and bounded signer probe against canonical protected-ref trust; add --rotation-phase to also check safe overlap-rotation ordering before rotate/revoke.",
+    "Verify an initiating Runtime's key identity and bounded signer probe against canonical protected-ref trust; add --rotation-phase to also check safe overlap-rotation ordering before rotate/revoke.",
     AUTHORITY_READINESS_OPTIONS,
   ),
   command(

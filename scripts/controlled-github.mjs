@@ -14,6 +14,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
 const OWNER = "yohn-jp";
@@ -698,6 +699,31 @@ function spawnWorker(executable, args, options) {
   });
 }
 
+async function callerProducedSignedProvenance(packageRoot, consumerRoot, requestJson) {
+  const request = JSON.parse(requestJson);
+  if (!isRecord(request) || request.operation !== "issue" || request.signedProvenanceRecord !== undefined) {
+    return requestJson;
+  }
+  const authorityId = requireEnvironment("INARI_CALLER_RUNTIME_AUTHORITY_ID");
+  const privateKeyPem = requireEnvironment("INARI_CALLER_RUNTIME_AUTHORITY_PRIVATE_KEY");
+  const authorityPath = `.github/inari/authorities/${authorityId}.json`;
+  const governance = governanceEntries(consumerRoot);
+  const authorityEntry = governance.entries.find((entry) => entry.path === authorityPath);
+  if (authorityEntry === undefined) throw new Error("caller Runtime Authority record is missing");
+  const authoritySource = governance.blobs.get(authorityEntry.sha);
+  if (authoritySource === undefined) throw new Error("caller Runtime Authority blob is missing");
+  const authority = JSON.parse(authoritySource);
+  const provenanceModule = await import(
+    pathToFileURL(path.join(packageRoot, "dist", "change-provenance-record.js")).href
+  );
+  const record = provenanceModule.createChangeProvenanceRecord({
+    rootIssue: request.issue,
+    runtimeAuthority: authority,
+    runtimeKey: crypto.createPrivateKey(privateKeyPem),
+  });
+  return JSON.stringify({ ...request, signedProvenanceRecord: record });
+}
+
 function generatePrivateKey() {
   return crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" });
 }
@@ -713,6 +739,7 @@ async function dispatchWorker(state, statePath, requestJson) {
   });
   const address = server.address();
   if (!isRecord(address) || typeof address.port !== "number") throw new Error("controlled provider did not bind");
+  const signedRequestJson = await callerProducedSignedProvenance(packageRoot, consumerRoot, requestJson);
   const sharedEnvironment = {
     ...process.env,
     GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
@@ -724,31 +751,20 @@ async function dispatchWorker(state, statePath, requestJson) {
     GITHUB_WORKFLOW_REF: `${REPOSITORY}/.github/workflows/inari-change-executor.yml@refs/heads/main`,
     GITHUB_WORKFLOW_SHA: state.workflowSha,
     GITHUB_ACTOR: "packed-certification",
-    INARI_CHANGE_REQUEST: requestJson,
+    INARI_CHANGE_REQUEST: signedRequestJson,
   };
-  // Simulates the separate, narrowly-scoped `runtime-sign` Actions job: the
-  // Runtime private key is available only to this isolated invocation, and
-  // only the resulting signed record crosses into the `execute` environment
-  // below.
-  let signedProvenanceRecord;
-  const parsedRequest = JSON.parse(requestJson);
-  if (isRecord(parsedRequest) && parsedRequest.operation === "issue") {
-    const signer = path.join(packageRoot, "dist", "github", "runtime-sign-cli.js");
-    if (!fs.existsSync(signer))
-      throw new Error("installed Runtime signing entrypoint is missing from the packed package");
-    const signResult = await spawnWorker(process.execPath, [signer], { cwd: consumerRoot, env: sharedEnvironment });
-    if (signResult.status !== 0) {
-      throw new Error(`controlled Runtime signing failed: ${signResult.stderr.slice(0, 512)}`);
-    }
-    signedProvenanceRecord = signResult.stdout.trim();
-  }
-  const { INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: _omittedRuntimePrivateKey, ...executeEnvironment } = sharedEnvironment;
+  const {
+    INARI_RUNTIME_AUTHORITY_ID: _omittedRuntimeAuthorityId,
+    INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: _omittedRuntimePrivateKey,
+    INARI_CALLER_RUNTIME_AUTHORITY_ID: _omittedCallerAuthorityId,
+    INARI_CALLER_RUNTIME_AUTHORITY_PRIVATE_KEY: _omittedCallerPrivateKey,
+    ...executeEnvironment
+  } = sharedEnvironment;
   const environment = {
     ...executeEnvironment,
     INARI_ISSUER_APP_ID: "415",
     INARI_ISSUER_INSTALLATION_ID: "415",
     INARI_ISSUER_APP_PRIVATE_KEY: generatePrivateKey(),
-    ...(signedProvenanceRecord === undefined ? {} : { INARI_CHANGE_PROVENANCE_RECORD: signedProvenanceRecord }),
   };
   let workerResult;
   try {

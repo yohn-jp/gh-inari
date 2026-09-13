@@ -20,6 +20,7 @@ import {
   sendDirectAppBranchAdvance,
 } from "./direct-app-client.js";
 import { ChangeRemoteExecutorError } from "../change-executor.js";
+import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import type { BranchAdvanceSemanticRequest } from "./branch-advance.js";
 
@@ -216,6 +217,56 @@ test("maps a bounded App transport failure onto ChangeRemoteExecutorError withou
     await assert.rejects(
       executor.execute({ version: 1, issue: 467, operation: "ready" }),
       (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RUN_FAILED",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("carries caller-produced signed provenance through the direct-App request", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".direct-app-client-test-"));
+  try {
+    const { path: bundlePath } = await createBundleFile(dir);
+    const { session } = loadDirectAppSession(bundlePath);
+    const runtimeKey = generateRuntimeAuthorityKeyPair();
+    const signedProvenanceRecord = createChangeProvenanceRecord({
+      rootIssue: 467,
+      runtimeAuthority: authority(runtimeKey),
+      runtimeKey,
+      now: NOW,
+    });
+    let sentRequest: unknown;
+    const fetchImpl = fakeFetch((_url, body) => {
+      sentRequest = (body as { request: unknown }).request;
+      return {
+        status: 200,
+        body: {
+          version: 1,
+          ok: true,
+          operation: "change.issue",
+          requestId: "r1",
+          result: {
+            version: 1,
+            status: "succeeded",
+            execution: { projection: projection() },
+          },
+        },
+      };
+    });
+    const executor = createDirectAppChangeRemoteExecutor({
+      endpoint: new URL("https://app.example.com"),
+      session,
+      fetchImpl,
+    });
+    await executor.execute({
+      version: 1,
+      issue: 467,
+      operation: "issue",
+      signedProvenanceRecord,
+    });
+    assert.deepEqual(
+      (sentRequest as { signedProvenanceRecord: unknown }).signedProvenanceRecord,
+      signedProvenanceRecord,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

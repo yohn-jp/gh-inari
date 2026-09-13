@@ -428,6 +428,7 @@ function canonicalMutationRequest(request: ChangeRemoteMutationRequest): ChangeR
     request.issue,
     request.requester,
     request.semanticPullRequestPlan,
+    request.signedProvenanceRecord,
   );
 }
 
@@ -520,7 +521,13 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
         throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
       }
     }
-    return changeRemoteMutationRequest(request.operation, request.issue, requester, request.semanticPullRequestPlan);
+    return changeRemoteMutationRequest(
+      request.operation,
+      request.issue,
+      requester,
+      request.semanticPullRequestPlan,
+      request.signedProvenanceRecord,
+    );
   }
 
   private async dispatchAndCollect(request: ChangeRemoteMutationRequest): Promise<ActionResultEnvelope> {
@@ -551,6 +558,9 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
       ...(request.semanticPullRequestPlan === undefined
         ? {}
         : { semanticPullRequestPlan: request.semanticPullRequestPlan }),
+      ...(request.signedProvenanceRecord === undefined
+        ? {}
+        : { signedProvenanceRecord: request.signedProvenanceRecord }),
     };
     try {
       await this.#api.requestActionsApi(dispatchPath(), "POST", {

@@ -117,7 +117,7 @@ export interface RuntimeAuthorityReadinessResult {
 export type RuntimeAuthorityReadinessPrivateKey = string | KeyObject | RuntimeAuthorityKeyPair;
 
 export interface VerifyRuntimeAuthorityReadinessOptions {
-  /** Value of INARI_RUNTIME_AUTHORITY_ID in the signer deployment. */
+  /** Authority ID selected by the initiating Runtime. */
   readonly authorityId?: string;
   /** PEM, private KeyObject, or generated keypair held by the signer only. */
   readonly privateKey?: RuntimeAuthorityReadinessPrivateKey;

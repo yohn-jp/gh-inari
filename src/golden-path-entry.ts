@@ -50,6 +50,7 @@ import {
   type SemanticArtifactMaterializationViolation,
 } from "./contract/semantic-artifact.js";
 import { tryProjectSemanticIssue, type SemanticIssueProjectionViolation } from "./semantic-issue-projection.js";
+import type { SignedChangeProvenanceRecord } from "./change-provenance-record.js";
 
 /** Version of the transport-neutral entry projection. */
 export const GOLDEN_PATH_ENTRY_CONTRACT_VERSION = 1 as const;
@@ -1170,6 +1171,8 @@ export interface GoldenPathEntryExecutionInput extends Omit<GoldenPathEntryProje
   readonly issue?: number;
   readonly executor: ChangeRemoteExecutor;
   readonly requester?: string;
+  /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
+  readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
 }
 
 export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInput): Promise<GoldenPathEntryResult> {
@@ -1241,6 +1244,8 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
     "issue",
     preflight.action.issue,
     input.requester,
+    undefined,
+    input.signedProvenanceRecord,
   );
   try {
     const raw = await input.executor.execute(request);

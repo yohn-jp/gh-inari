@@ -263,6 +263,9 @@ export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExec
         ...(request.semanticPullRequestPlan === undefined
           ? {}
           : { semanticPullRequestPlan: asJson(request.semanticPullRequestPlan) }),
+        ...(request.signedProvenanceRecord === undefined
+          ? {}
+          : { signedProvenanceRecord: asJson(request.signedProvenanceRecord) }),
         ...(options.agent === undefined ? {} : { agent: asJson(options.agent) }),
       };
       const response = await send(operation, semanticRequest);

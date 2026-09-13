@@ -481,6 +481,8 @@ function prepareGovernedConsumer(consumerDirectory) {
     workflowSha,
     runtimeAuthorityId,
     runtimePrivateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    callerRuntimeAuthorityId: runtimeAuthorityId,
+    callerRuntimePrivateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   };
 }
 
@@ -916,6 +918,8 @@ function main() {
       INARI_PACKED_PROVIDER_STATE: statePath,
       INARI_RUNTIME_AUTHORITY_ID: governedConsumer.runtimeAuthorityId,
       INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: governedConsumer.runtimePrivateKeyPem,
+      INARI_CALLER_RUNTIME_AUTHORITY_ID: governedConsumer.callerRuntimeAuthorityId,
+      INARI_CALLER_RUNTIME_AUTHORITY_PRIVATE_KEY: governedConsumer.callerRuntimePrivateKeyPem,
       PATH: boundedPath(binDirectory, externalExecutables, [controlledGh]),
     };
     const launcherChecks = checkInstalledLaunchers(
