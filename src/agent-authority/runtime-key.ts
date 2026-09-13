@@ -25,7 +25,14 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+  type KeyObject,
+} from "node:crypto";
 import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 import { assertEd25519PublicJwk, type Ed25519PublicJwk } from "./ed25519-jwk.js";
 
@@ -160,7 +167,7 @@ export function importRuntimeAuthorityPrivateKey(pem: string): KeyObject {
 
 /** Return only the public JWK, whether the input is a public or private KeyObject or a generated pair. */
 export function exportRuntimeAuthorityPublicKey(key: KeyObject | RuntimeAuthorityKeyPair): Ed25519PublicJwk {
-  if (isKeyPair(key)) return key.publicKeyJwk;
+  if (isKeyPair(key)) return assertEd25519PublicJwk(key.publicKeyJwk, "$.publicKey");
   return publicJwkFromKey(key);
 }
 
@@ -173,6 +180,19 @@ export function canonicalRuntimeAuthorityPublicKeyJson(
       ? assertEd25519PublicJwk(key, "$.publicKey")
       : exportRuntimeAuthorityPublicKey(key as KeyObject | RuntimeAuthorityKeyPair);
   return canonicalJsonString(publicKey as unknown as CanonicalJsonValue);
+}
+
+/**
+ * Stable, public identity for a Runtime Authority key.
+ *
+ * The fingerprint is over the canonical public JWK bytes, never over private
+ * key material.  The explicit algorithm prefix makes future format changes
+ * unambiguous without changing the Runtime Authority schema or `kid` value.
+ */
+export function runtimeAuthorityPublicKeyFingerprint(
+  key: Ed25519PublicJwk | KeyObject | RuntimeAuthorityKeyPair,
+): string {
+  return `sha256:${createHash("sha256").update(canonicalRuntimeAuthorityPublicKeyJson(key), "utf8").digest("hex")}`;
 }
 
 function privateKeyPem(key: KeyObject): string {

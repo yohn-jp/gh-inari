@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.6.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.7.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -87,6 +87,8 @@ export type CommandId =
   | "change.abort"
   | "change.publish"
   | "authority.generate"
+  | "authority.bootstrap"
+  | "authority.readiness"
   | "authority.register"
   | "authority.rotate"
   | "authority.revoke"
@@ -121,6 +123,15 @@ export type OptionId =
   | "rawBody"
   | "capability"
   | "privateKey"
+  | "publicKey"
+  | "authorityId"
+  | "output"
+  | "notBefore"
+  | "notAfter"
+  | "maxSessionTtlSeconds"
+  | "probeIssue"
+  | "sessionTtlSeconds"
+  | "environment"
   | "replace"
   | "sessionCredential"
   | "appEndpoint"
@@ -159,6 +170,29 @@ const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
 const CHANGE_PUBLISH_OPTIONS = [...CHANGE_SESSION_OPTIONS, "commit"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
+const AUTHORITY_BOOTSTRAP_OPTIONS = [
+  "help",
+  "json",
+  "privateKey",
+  "publicKey",
+  "authorityId",
+  "output",
+  "notBefore",
+  "notAfter",
+  "maxSessionTtlSeconds",
+  "capability",
+] as const;
+const AUTHORITY_READINESS_OPTIONS = [
+  "help",
+  "json",
+  "repository",
+  "authorityId",
+  "privateKey",
+  "environment",
+  "probeIssue",
+  "sessionTtlSeconds",
+  "capability",
+] as const;
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
 const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
@@ -365,6 +399,86 @@ export const COMMAND_OPTIONS = {
     "required",
     "Local Runtime Authority private-key file. The file is never published or used as a GitHub credential.",
     "path",
+  ),
+  publicKey: option(
+    "publicKey",
+    "public-key",
+    ["--public-key"],
+    "string",
+    "required",
+    "Explicit Ed25519 public JWK JSON file used only to prepare a public Runtime Authority record.",
+    "path",
+  ),
+  authorityId: option(
+    "authorityId",
+    "authority-id",
+    ["--authority-id", "--id"],
+    "string",
+    "required",
+    "Stable canonical Runtime Authority identifier.",
+    "id",
+  ),
+  output: option(
+    "output",
+    "output",
+    ["--output", "-o"],
+    "string",
+    "required",
+    "Destination for the canonical public Runtime Authority JSON record.",
+    "authority.json",
+  ),
+  notBefore: option(
+    "notBefore",
+    "not-before",
+    ["--not-before"],
+    "string",
+    "required",
+    "RFC 3339 activation timestamp; defaults to the current instant.",
+    "timestamp",
+  ),
+  notAfter: option(
+    "notAfter",
+    "not-after",
+    ["--not-after"],
+    "string",
+    "required",
+    "RFC 3339 expiry timestamp; omit for no expiry.",
+    "timestamp",
+  ),
+  maxSessionTtlSeconds: option(
+    "maxSessionTtlSeconds",
+    "max-session-ttl-seconds",
+    ["--max-session-ttl-seconds"],
+    "string",
+    "required",
+    "Maximum Session Certificate TTL for this Runtime Authority.",
+    "seconds",
+  ),
+  probeIssue: option(
+    "probeIssue",
+    "probe-issue",
+    ["--probe-issue"],
+    "string",
+    "required",
+    "Positive Issue number used by the bounded signer readiness probe.",
+    "number",
+  ),
+  sessionTtlSeconds: option(
+    "sessionTtlSeconds",
+    "session-ttl-seconds",
+    ["--session-ttl-seconds"],
+    "string",
+    "required",
+    "Intended Session TTL to check against canonical Runtime Authority policy.",
+    "seconds",
+  ),
+  environment: option(
+    "environment",
+    "environment",
+    ["--environment"],
+    "boolean",
+    "none",
+    "Read the runtime-signing deployment binding from INARI_RUNTIME_AUTHORITY_ID and INARI_RUNTIME_AUTHORITY_PRIVATE_KEY.",
   ),
   replace: option(
     "replace",
@@ -901,6 +1015,22 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     AUTHORITY_OPTIONS,
   ),
   command(
+    "authority.bootstrap",
+    "authority",
+    "bootstrap",
+    ["authority", "bootstrap"],
+    "Construct a canonical public Runtime Authority record from local key material without registering trust.",
+    AUTHORITY_BOOTSTRAP_OPTIONS,
+  ),
+  command(
+    "authority.readiness",
+    "authority",
+    "readiness",
+    ["authority", "readiness"],
+    "Verify a runtime-signing deployment's key identity and bounded signer probe against canonical protected-ref trust.",
+    AUTHORITY_READINESS_OPTIONS,
+  ),
+  command(
     "authority.register",
     "authority",
     "register",
@@ -1226,7 +1356,9 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||
-        ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from");
+        ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from") ||
+        (entry.id === "authority.bootstrap" &&
+          (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability"));
       const syntax =
         entry.id === "authority.register" && id === "from"
           ? "--from <authority.json>"

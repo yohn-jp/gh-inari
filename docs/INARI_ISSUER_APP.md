@@ -1,5 +1,9 @@
 # Inari issuer GitHub App authority
 
+Runtime signer provisioning and the `runtime-signing` Environment boundary are
+documented in the subordinate
+[`Runtime Authority operations runbook`](./RUNTIME_AUTHORITY_OPERATIONS.md).
+
 This document is the implementation contract for Issues #217 and #464. The product and
 trust-boundary authority remains
 [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md); this document does

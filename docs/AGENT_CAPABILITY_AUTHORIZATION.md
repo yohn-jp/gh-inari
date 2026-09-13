@@ -13,6 +13,11 @@ prior art, but its hosted gateway, centralized requester-authentication/admissio
 Actions-as-required-execution assumptions are subordinate to this document where they
 conflict. MCP remains a supported protocol/transport, not the trust root.
 
+The subordinate operator procedure for the Runtime Authority lifecycle is
+[`RUNTIME_AUTHORITY_OPERATIONS.md`](./RUNTIME_AUTHORITY_OPERATIONS.md). This
+architecture remains normative; the runbook documents the current CLI and
+deployment procedure without redefining the trust model.
+
 ## 1. Purpose
 
 Coding agents should not need a user's GitHub credential in order to perform governed
