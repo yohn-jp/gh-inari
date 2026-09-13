@@ -153,6 +153,9 @@ export interface CommandOptionDefinition {
   readonly description: string;
 }
 
+/** Caller-supplied values bound to supported command options in a projection. */
+export type CommandArgumentBindings = Readonly<Partial<Record<OptionId, string | boolean>>>;
+
 export interface CommandDefinition {
   readonly id: CommandId;
   readonly domain: CommandDomain;
@@ -1259,11 +1262,32 @@ export function commandInvocation(id: CommandId): string {
   return [AGENT_INVOCATION_CONTRACT.canonical, ...definition.path].join(" ");
 }
 
-export function commandExample(id: CommandId): string {
+function renderBoundCommandOption(optionDefinition: CommandOptionDefinition, value: string | boolean): string {
+  const name = optionDefinition.aliases[0] ?? `--${optionDefinition.key}`;
+  if (typeof value === "boolean") {
+    if (!value || optionDefinition.arity !== "none") {
+      throw new Error(`Command option ${optionDefinition.id} cannot be bound to ${String(value)}.`);
+    }
+    return name;
+  }
+  const renderedValue = /^[A-Za-z0-9_./:@+=,-]+$/u.test(value) ? value : JSON.stringify(value);
+  return `${name} ${renderedValue}`;
+}
+
+export function commandExample(id: CommandId, bindings: CommandArgumentBindings = {}): string {
   const definition = getCommand(id);
   const argument = definition.argumentExample ?? definition.positionalSyntax;
   const suffix = argument === undefined || argument.startsWith("[") ? "" : ` ${argument}`;
-  return `${commandInvocation(id)}${suffix}`;
+  const boundOptionIds = Object.keys(bindings) as OptionId[];
+  for (const optionId of boundOptionIds) {
+    if (!definition.optionIds.includes(optionId)) {
+      throw new Error(`Command ${id} does not support bound option ${optionId}.`);
+    }
+  }
+  const boundOptions = definition.optionIds
+    .filter((optionId) => bindings[optionId] !== undefined)
+    .map((optionId) => renderBoundCommandOption(getOption(optionId), bindings[optionId]!));
+  return [commandInvocation(id), ...boundOptions, suffix.trim()].filter((part) => part !== "").join(" ");
 }
 
 export function commandUsageInvocation(id: CommandId): string {
@@ -1281,9 +1305,9 @@ export function commandRecoveryInvocation(id: "issue.create" | "pr.create"): str
   return `${commandInvocation(id)} ${parts.join(" ")}`;
 }
 
-export function commandTemplateSchemaInvocation(domain: "issue" | "pr"): string {
+export function commandTemplateSchemaInvocation(domain: "issue" | "pr", template?: string): string {
   const id = domain === "issue" ? "issue.schema" : "pr.schema";
-  return `${commandInvocation(id)} <template>`;
+  return template === undefined ? `${commandInvocation(id)} <template>` : commandExample(id, { template });
 }
 
 export function helpInvocation(

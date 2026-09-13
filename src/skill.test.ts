@@ -10,6 +10,8 @@ import {
   projectSkillScenarioToText,
   SKILL_SCENARIOS,
 } from "./skill.js";
+import type { GoldenPathGovernanceDiscoveryResult } from "./golden-path-governance.js";
+import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 
 const CROSS_PRODUCT_NAMES = ["wabachi", "nawabari", "mottainai"];
 
@@ -91,9 +93,13 @@ test("authoring scenarios make direct governed creation the conditional golden p
     assert.equal(scenario.workflow[0]?.command, `inari ${domain} create`);
     assert.match(scenario.workflow[0]?.summary ?? "", /explicit|leaf/i);
 
-    const schemaStep = scenario.workflow.find((step) => step.command === `inari ${domain} schema`);
+    const schemaStep = projectSkillScenarioToJson(scenario).workflow.find(
+      (step) => step.commandId === `${domain}.schema`,
+    );
     assert.ok(schemaStep);
     assert.match(schemaStep.summary, /If required fields are unknown/);
+    assert.equal(schemaStep.command, undefined);
+    assert.equal(schemaStep.prerequisite?.kind, "golden-path-governance");
 
     const validateStep = scenario.workflow.find((step) => step.command === `inari ${domain} validate`);
     const renderStep = scenario.workflow.find((step) => step.command === `inari ${domain} render`);
@@ -104,6 +110,105 @@ test("authoring scenarios make direct governed creation the conditional golden p
     assert.match(scenario.invariants.join(" "), /not mandatory ceremony/);
   }
 });
+
+function resolvedGovernance(
+  domain: "issue" | "pr",
+  contract: { readonly templateIdentity: { readonly path: string } },
+): GoldenPathGovernanceDiscoveryResult {
+  const provenance = {
+    authority: "repository-default-branch" as const,
+    repository: { host: "github.com", owner: "acme", name: "inari", nameWithOwner: "acme/inari" },
+    ref: "main",
+    treeSha: `${domain}-tree-sha`,
+    template: {
+      path: contract.templateIdentity.path,
+      ref: "main",
+      sha: `${domain}-template-sha`,
+      digest: `${domain}-template-digest`,
+    },
+  };
+  return {
+    version: "1",
+    status: "resolved",
+    domain,
+    source: "native-template",
+    contract,
+    provenance,
+    generation: provenance,
+    nextAction: { action: "direct-governed-create", kind: "direct-governed-create" },
+  } as unknown as GoldenPathGovernanceDiscoveryResult;
+}
+
+function unresolvedGovernance(domain: "issue" | "pr"): GoldenPathGovernanceDiscoveryResult {
+  return {
+    version: "1",
+    status: "ambiguous",
+    domain,
+    source: "native-template",
+    reason: "SELECTOR_AMBIGUOUS",
+    nextAction: { action: "provide-template-selector", kind: "provide-template-selector" },
+    diagnostic: {
+      code: "SELECTOR_AMBIGUOUS",
+      message: "More than one template matches.",
+      candidates: ["first", "second"],
+      candidateCount: 2,
+      candidatesTruncated: false,
+    },
+  };
+}
+
+for (const domain of ["issue", "pr"] as const) {
+  test(`${domain} schema step binds the resolved single-template identity`, () => {
+    const scenario = findSkillScenario(domain === "issue" ? "author-issue" : "author-pr");
+    assert.ok(scenario);
+    const contract = domain === "issue" ? issueContractFixture : pullRequestContractFixture;
+    const projected = projectSkillScenarioToJson(scenario, { governance: resolvedGovernance(domain, contract) });
+    const schemaStep = projected.workflow.find((step) => step.commandId === `${domain}.schema`);
+    assert.ok(schemaStep);
+    assert.equal(schemaStep.command, `inari ${domain} schema --template ${contract.templateIdentity.path}`);
+    assert.deepEqual(schemaStep.bindings, { template: contract.templateIdentity.path });
+    assert.equal(schemaStep.prerequisite, undefined);
+  });
+
+  test(`${domain} schema step binds the resolved multi-template identity instead of a default`, () => {
+    const scenario = findSkillScenario(domain === "issue" ? "author-issue" : "author-pr");
+    assert.ok(scenario);
+    const baseContract = domain === "issue" ? issueContractFixture : pullRequestContractFixture;
+    const contract = {
+      ...baseContract,
+      templateIdentity: {
+        ...baseContract.templateIdentity,
+        id: "release",
+        name: "Release",
+        path: domain === "issue" ? ".github/ISSUE_TEMPLATE/release.yml" : ".github/PULL_REQUEST_TEMPLATE/release.md",
+      },
+    };
+    const projected = projectSkillScenarioToJson(scenario, { governance: resolvedGovernance(domain, contract) });
+    const schemaStep = projected.workflow.find((step) => step.commandId === `${domain}.schema`);
+    assert.ok(schemaStep);
+    assert.equal(schemaStep.command, `inari ${domain} schema --template ${contract.templateIdentity.path}`);
+    assert.doesNotMatch(schemaStep.command ?? "", /default/u);
+  });
+
+  test(`${domain} schema step projects a prerequisite when governance is unresolved`, () => {
+    const scenario = findSkillScenario(domain === "issue" ? "author-issue" : "author-pr");
+    assert.ok(scenario);
+    const projected = projectSkillScenarioToJson(scenario, { governance: unresolvedGovernance(domain) });
+    const schemaStep = projected.workflow.find((step) => step.commandId === `${domain}.schema`);
+    assert.ok(schemaStep);
+    assert.equal(schemaStep.command, undefined);
+    assert.equal(schemaStep.bindings, undefined);
+    assert.deepEqual(schemaStep.prerequisite, {
+      kind: "golden-path-governance",
+      action: "provide-template-selector",
+      reason: "SELECTOR_AMBIGUOUS",
+    });
+    assert.doesNotMatch(
+      projectSkillScenarioToText(scenario, { governance: unresolvedGovernance(domain) }),
+      new RegExp(`inari ${domain} schema`, "u"),
+    );
+  });
+}
 
 test("the Golden Path is the only default route and existing flows point to it", () => {
   assert.deepEqual(
@@ -166,7 +271,6 @@ for (const scenario of SKILL_SCENARIOS) {
     assert.equal(json.whenToUse, scenario.whenToUse);
     assert.equal(json.scope, scenario.scope);
     assert.equal(json.delegatesTo, scenario.delegatesTo);
-    assert.deepEqual(json.workflow, scenario.workflow);
     assert.deepEqual(json.contractReferences, scenario.contractReferences);
     assert.deepEqual(json.invariants, scenario.invariants);
     assert.equal(json.canonicalEntrypoint, scenario.canonicalEntrypoint);
@@ -174,9 +278,11 @@ for (const scenario of SKILL_SCENARIOS) {
 
     assert.ok(text.includes(scenario.title));
     assert.ok(text.includes(scenario.whenToUse));
-    for (const step of scenario.workflow) {
+    for (const step of json.workflow) {
       assert.ok(text.includes(step.summary));
-      assert.ok(text.includes(step.command));
+      if (step.command !== undefined) assert.ok(text.includes(step.command));
+      if (step.bindings !== undefined) assert.ok(text.includes(JSON.stringify(step.bindings)));
+      if (step.prerequisite !== undefined) assert.ok(text.includes(JSON.stringify(step.prerequisite)));
     }
     for (const reference of scenario.contractReferences) {
       assert.ok(text.includes(`${reference.contract}.${reference.output}`));
