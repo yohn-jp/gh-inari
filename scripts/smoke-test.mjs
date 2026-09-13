@@ -246,13 +246,13 @@ function boundedPath(binDirectory, externalExecutables, additionalExecutables = 
   return [...new Set(directories)].join(path.delimiter);
 }
 
-function freshEnvironment(rootDirectory, binDirectory, externalExecutables) {
+export function freshEnvironment(rootDirectory, binDirectory, externalExecutables, sourceEnvironment = process.env) {
   const homeDirectory = path.join(rootDirectory, "home");
   fs.mkdirSync(homeDirectory, { recursive: true });
   const npmUserConfig = path.join(rootDirectory, "npmrc");
   fs.writeFileSync(npmUserConfig, "", { flag: "a" });
 
-  const environment = { ...process.env };
+  const environment = { ...sourceEnvironment };
   for (const variable of [
     "NODE_PATH",
     "NODE_OPTIONS",
@@ -260,6 +260,9 @@ function freshEnvironment(rootDirectory, binDirectory, externalExecutables) {
     "NPM_CONFIG_USERCONFIG",
     "npm_config_globalconfig",
     "npm_config_userconfig",
+    "GITHUB_ACTIONS",
+    "GITHUB_ACTOR",
+    "GITHUB_TRIGGERING_ACTOR",
   ]) {
     delete environment[variable];
   }
