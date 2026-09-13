@@ -300,6 +300,30 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
   });
 });
 
+test("governed PR comment/review/merge writes are never exposed through MCP, even with a Session executor", async () => {
+  const server = createInariMcpServer({
+    sessionExecutor: {
+      execute: async () => {
+        throw new Error("not used by this test");
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const listed = await client.listTools();
+    const names = listed.tools.map((tool) => tool.name);
+    for (const mutationTool of ["inari_pr_comment", "inari_pr_review", "inari_pr_merge"]) {
+      assert.ok(!names.includes(mutationTool), mutationTool);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 function changeHandoffProjection(draft = true): Record<string, unknown> {
   const branch = "feat/42-canonical-change";
   return {

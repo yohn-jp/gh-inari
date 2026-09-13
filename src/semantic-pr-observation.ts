@@ -195,11 +195,19 @@ const PULL_REQUEST_KEYS = new Set([
   "draft",
   "maintainerCanModify",
   "head",
+  "headSha",
   "base",
+  "baseSha",
   "labels",
   "assignees",
   "milestone",
   "requestedReviewers",
+  "mergeable",
+  "mergeableState",
+  "merged",
+  "mergedAt",
+  "mergeCommitSha",
+  "mergeMethod",
   // These are accepted only as a direct evidence convenience. They are
   // normalized into the explicit repository identity, never used as policy.
   "repositoryHost",
@@ -399,6 +407,28 @@ function bodyValue(
     return undefined;
   }
   return body;
+}
+
+function optionalEvidenceString(
+  value: unknown,
+  path: string,
+  violations: SemanticPullRequestObservationViolation[],
+  maxLength: number,
+  allowNull = false,
+): void {
+  if (value === undefined || (allowNull && value === null)) return;
+  requiredString(value, path, violations, maxLength);
+}
+
+function optionalEvidenceBoolean(
+  value: unknown,
+  path: string,
+  violations: SemanticPullRequestObservationViolation[],
+  allowNull = false,
+): void {
+  if (value === undefined || (allowNull && value === null)) return;
+  if (typeof value !== "boolean")
+    addViolation(violations, "OBSERVED_PULL_REQUEST_VALUE_INVALID", path, "Value must be boolean.");
 }
 
 function stringArray(
@@ -1024,6 +1054,40 @@ function validatePullRequestEvidence(input: unknown): {
     SEMANTIC_PULL_REQUEST_OBSERVATION_LIMITS.refLength,
   );
   const body = bodyValue(input.body, "$.pullRequest.body", violations);
+  optionalEvidenceString(
+    input.headSha,
+    "$.pullRequest.headSha",
+    violations,
+    SEMANTIC_PULL_REQUEST_OBSERVATION_LIMITS.refLength,
+  );
+  optionalEvidenceString(
+    input.baseSha,
+    "$.pullRequest.baseSha",
+    violations,
+    SEMANTIC_PULL_REQUEST_OBSERVATION_LIMITS.refLength,
+  );
+  optionalEvidenceBoolean(input.mergeable, "$.pullRequest.mergeable", violations, true);
+  optionalEvidenceString(
+    input.mergeableState,
+    "$.pullRequest.mergeableState",
+    violations,
+    SEMANTIC_PULL_REQUEST_OBSERVATION_LIMITS.refLength,
+  );
+  optionalEvidenceBoolean(input.merged, "$.pullRequest.merged", violations);
+  optionalEvidenceString(input.mergedAt, "$.pullRequest.mergedAt", violations, 128, true);
+  optionalEvidenceString(input.mergeCommitSha, "$.pullRequest.mergeCommitSha", violations, 128, true);
+  if (
+    input.mergeMethod !== undefined &&
+    input.mergeMethod !== "merge" &&
+    input.mergeMethod !== "squash" &&
+    input.mergeMethod !== "rebase"
+  )
+    addViolation(
+      violations,
+      "OBSERVED_PULL_REQUEST_VALUE_INVALID",
+      "$.pullRequest.mergeMethod",
+      "Merge method is invalid.",
+    );
   let number: number | undefined;
   if (input.number !== undefined) {
     if (typeof input.number !== "number" || !Number.isSafeInteger(input.number) || input.number < 1)

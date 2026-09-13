@@ -97,6 +97,9 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_plan",
   "inari_pr_observe",
   "inari_pr_drift",
+  "inari_pr_comment",
+  "inari_pr_review",
+  "inari_pr_merge",
   "inari_golden_path_entry",
   "inari_change_handoff",
 ] as const);
@@ -323,6 +326,11 @@ export const semanticPullRequestOutputSchema = z
     number: artifactNumberSchema.optional(),
     artifact: z.unknown().optional(),
     plan: z.unknown().optional(),
+    outcome: z.enum(["succeeded", "idempotent", "stale", "blocked", "failed", "recovery-required"]).optional(),
+    code: z.string().optional(),
+    evidence: z.unknown().optional(),
+    current: z.unknown().optional(),
+    resource: z.unknown().optional(),
     desired: z.unknown().optional(),
     observed: z.unknown().optional(),
     semantic: z.unknown().optional(),
@@ -1352,7 +1360,7 @@ export function registerGoldenPathTools(server: McpServer): readonly RegisteredT
   return Object.freeze([status]);
 }
 
-/** Register the canonical semantic PR tool catalog on any MCP transport. */
+/** Register the read-only semantic PR contract/materialize/plan/observe/drift catalog on any MCP transport. */
 export function registerSemanticPullRequestTools(
   server: McpServer,
   dependencies: NativeSemanticPullRequestDependencies = {},

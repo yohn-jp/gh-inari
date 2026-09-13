@@ -26,6 +26,53 @@ export * from "./golden-path-review.js";
 export * from "./golden-path-entry.js";
 export * from "./golden-path-recovery.js";
 export * from "./semantic-pr-projection.js";
+// The existing PR projection owns the historical MutationPlan names. Export
+// the governed write authority under explicit names to keep that authority
+// separate at the package barrel as well as in its implementation module.
+export {
+  SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
+  SEMANTIC_PULL_REQUEST_MUTATION_LIMITS,
+  SemanticPullRequestMutationError,
+  SemanticPullRequestMutationExecutor,
+  SemanticPullRequestMutationValidationError,
+  LocalSemanticPullRequestMutationExecutor,
+  materializeSemanticPullRequestMutationRequest as materializeGovernedSemanticPullRequestMutationRequest,
+  tryMaterializeSemanticPullRequestMutationRequest as tryMaterializeGovernedSemanticPullRequestMutationRequest,
+  planSemanticPullRequestMutation as planGovernedSemanticPullRequestMutation,
+  createSemanticPullRequestMutationPlan as createGovernedSemanticPullRequestMutationPlan,
+  tryPlanSemanticPullRequestMutation as tryPlanGovernedSemanticPullRequestMutation,
+  validateSemanticPullRequestMutationPlan as validateGovernedSemanticPullRequestMutationPlan,
+  serializeSemanticPullRequestMutationPlan as serializeGovernedSemanticPullRequestMutationPlan,
+  deserializeSemanticPullRequestMutationPlan as deserializeGovernedSemanticPullRequestMutationPlan,
+  parseSemanticPullRequestMutationPlan as parseGovernedSemanticPullRequestMutationPlan,
+} from "./semantic-pr-mutation.js";
+export type {
+  SemanticPullRequestMutationContractVersion as GovernedSemanticPullRequestMutationContractVersion,
+  SemanticPullRequestMutationPlanVersion as GovernedSemanticPullRequestMutationPlanVersion,
+  SemanticPullRequestMutationOperation,
+  SemanticPullRequestMutationOutcome,
+  SemanticPullRequestReviewIntent,
+  SemanticPullRequestRetryMode,
+  SemanticPullRequestMergeStrategy,
+  SemanticPullRequestRepositoryIdentity,
+  SemanticPullRequestCommentRequest,
+  SemanticPullRequestReviewRequest,
+  SemanticPullRequestMergeRequest,
+  SemanticPullRequestMutationRequest,
+  SemanticPullRequestMutationPrecondition,
+  SemanticPullRequestMutationEffect,
+  SemanticPullRequestMutationPlan as GovernedSemanticPullRequestMutationPlan,
+  SemanticPullRequestMutationViolation,
+  SemanticPullRequestMutationRequestResult,
+  SemanticPullRequestMutationPlanResult,
+  SemanticPullRequestMutationDiagnostic,
+  SemanticPullRequestMutationEvidence,
+  SemanticPullRequestMutationResult,
+  SemanticPullRequestMutationErrorCode,
+  SemanticPullRequestMutationProvider,
+  SemanticPullRequestMutationExecutionRequest,
+  SemanticPullRequestMutationExecutionPort,
+} from "./semantic-pr-mutation.js";
 export * from "./semantic-issue-projection.js";
 export * from "./semantic-issue-observation.js";
 export * from "./operational-observation.js";

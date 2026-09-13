@@ -37,7 +37,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
     },
     {
       instructions:
-        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. When an embedding supplies the existing Session-authorized App executor, the optional Change execution tool forwards signed Session requests to that executor without adding MCP authorization. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative.",
+        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. The default catalog performs no GitHub mutation. When an embedding supplies the existing Session-authorized App executor, the optional Change execution tool forwards signed Session requests to that executor without adding MCP authorization. Governed pull-request comment/review/merge writes are not exposed through MCP: the canonical Session-authorized App executor does not yet admit those operations, and MCP must not open a second authorization plane for them. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative.",
     },
   );
   registerGoldenPathTools(server);
