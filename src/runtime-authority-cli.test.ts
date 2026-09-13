@@ -171,6 +171,34 @@ test("authority readiness reports a bounded missing deployment binding", async (
   }
 });
 
+test("authority readiness --rotation-phase requires --current-authority-id and a valid phase", async () => {
+  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-rotation-order-cli-"));
+  try {
+    const missingCurrentId = await captureCli(
+      ["authority", "readiness", "--rotation-phase", "activate", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(missingCurrentId.exitCode, 1);
+    assert.match(missingCurrentId.stdout, /INPUT_REQUIRED/u);
+
+    const danglingCurrentId = await captureCli(
+      ["authority", "readiness", "--current-authority-id", "A", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(danglingCurrentId.exitCode, 1);
+    assert.match(danglingCurrentId.stdout, /INVALID_OPTION/u);
+
+    const invalidPhase = await captureCli(
+      ["authority", "readiness", "--rotation-phase", "bogus", "--current-authority-id", "A", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(invalidPhase.exitCode, 1);
+    assert.match(invalidPhase.stdout, /INVALID_OPTION/u);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("authority bootstrap constructs a canonical record from the generated private key and leaves registration explicit", async () => {
   const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-bootstrap-"));
   try {

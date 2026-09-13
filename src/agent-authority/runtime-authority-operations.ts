@@ -211,17 +211,14 @@ function readinessFailure(
   });
 }
 
-function readinessCanonical(
-  loaded: LoadedRuntimeAuthority,
-  publicKeyFingerprint: string,
-): RuntimeAuthorityReadinessCanonicalEvidence {
+function readinessCanonical(loaded: LoadedRuntimeAuthority): RuntimeAuthorityReadinessCanonicalEvidence {
   return Object.freeze({
     ref: loaded.provenance.ref,
     policySha: loaded.provenance.policySha,
     treeSha: loaded.provenance.treeSha,
     path: loaded.path,
     authorityId: loaded.authority.id,
-    publicKeyFingerprint,
+    publicKeyFingerprint: runtimeAuthorityPublicKeyFingerprint(loaded.authority.key),
   });
 }
 
@@ -381,7 +378,7 @@ export async function verifyRuntimeAuthorityReadiness(
   } catch (error: unknown) {
     return trustFailure(error, authorityId);
   }
-  const canonical = readinessCanonical(loaded, derived.publicKeyFingerprint);
+  const canonical = readinessCanonical(loaded);
   if (derived.publicKey.x !== loaded.authority.key.x) {
     return readinessFailure(
       "key-mismatch",

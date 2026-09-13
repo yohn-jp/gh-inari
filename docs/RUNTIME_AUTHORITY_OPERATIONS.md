@@ -130,9 +130,11 @@ branch. The first public key has no authority until its record is merged.
 5. Do not configure the signer secret before the trust-root PR is merged. After
    merge, confirm the record exists on the protected default branch, is active,
    and is within its validity window.
-6. Bind the exact private key and authority ID to the isolated
-   `runtime-signing` Environment, then run readiness from that deployment.
-   Readiness must be `state: "ready"` before fresh Change issuance or dogfood.
+6. Set the exact authority ID as the repository variable
+   `INARI_RUNTIME_AUTHORITY_ID`, bind the matching private key as a secret on
+   the isolated `runtime-signing` Environment, then run readiness from that
+   deployment. Readiness must be `state: "ready"` before fresh Change issuance
+   or dogfood.
 
 Possession of the generated key never approves its own registration. A local
 record on a feature branch is a review input, not canonical trust.
@@ -154,20 +156,22 @@ creation/overlap and revocation as separate PR phases.
 
 ## `runtime-signing` Environment binding (#518)
 
-Create or use the GitHub Environment named exactly `runtime-signing`. Store
-these values as Environment-scoped secrets owned by the Runtime deployment
-operator:
+Create or use the GitHub Environment named exactly `runtime-signing`, and
+bind these values owned by the Runtime deployment operator:
 
-| Secret                                | Value and ownership                                                                               |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `INARI_RUNTIME_AUTHORITY_ID`          | Exact canonical authority ID; public metadata but kept Environment-scoped to bind the deployment. |
-| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | The matching PKCS#8 Ed25519 PEM; Runtime/signer only.                                             |
+| Name                                  | Kind                               | Value and ownership                                                                               |
+| -------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `INARI_RUNTIME_AUTHORITY_ID`          | Repository variable (`vars`)       | Exact canonical authority ID; public metadata, so it is a plain repository variable, readable by every job.          |
+| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | Environment secret (`secrets`)     | The matching PKCS#8 Ed25519 PEM; Runtime/signer only, scoped to the `runtime-signing` Environment.                   |
 
-The existing #518 workflow configures these secrets only on the `runtime-sign`
-job. The `execute` job may receive the public authority ID needed for trust
-lookup, but never receives or inherits `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY`.
-The normal execute job, direct App path, MCP path, Agent Session, and effect
-adapter must remain private-key-free.
+`INARI_RUNTIME_AUTHORITY_ID` must be a repository variable, not an
+Environment secret: an Environment-scoped secret is only visible to jobs that
+declare that Environment, and both `runtime-sign` and `execute` need the
+authority ID for trust lookup while only `runtime-sign` may declare
+`environment: runtime-signing`. The existing #518 workflow configures
+`INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` only on the `runtime-sign` job; the
+`execute` job, direct App path, MCP path, Agent Session, and effect adapter
+must remain private-key-free.
 
 GitHub does not reveal a secret after registration. Therefore, do not use
 “secret exists” as readiness evidence. Run the readiness command inside the
@@ -227,8 +231,25 @@ B = newly generated authority
 its envelope names `currentAuthorityId` and contains the already prepared
 `nextAuthority` public record. It adds B without rewriting A. Do not activate B
 before B is trusted, and do not revoke A until the deployed signer has moved to
-B and readiness has succeeded. The pure rotation-order guard in the Runtime
-Authority operations API reports these unsafe states as blocked.
+B and readiness has succeeded.
+
+Before step 4 (activating B) and before step 6 (revoking A), run readiness with
+`--rotation-phase` from the deployment that will perform that step:
+
+```sh
+# before binding/activating B (step 4)
+inari authority readiness --environment --rotation-phase activate \
+  --current-authority-id A --probe-issue 522 --json
+
+# before revoking A (step 6), run from the deployment already bound to B
+inari authority readiness --environment --rotation-phase revoke \
+  --current-authority-id A --probe-issue 522 --json
+```
+
+This checks B's readiness against canonical trust and, for `revoke`, confirms
+the deployment's configured signer has already moved to B before A may be
+revoked. A `blocked` rotation order is a hard stop: do not revoke A while the
+signer is still bound to A.
 
 If migration fails before A is revoked, leave A active, restore the last known
 working A deployment binding, and investigate. Do not replace A's local file

@@ -125,6 +125,11 @@ test("readiness returns stable states for missing, malformed, mismatched, inacti
     now: new Date("2026-06-01T00:00:00Z"),
   });
   assert.equal(mismatch.state, "key-mismatch");
+  const trustedIdentity = deriveRuntimeAuthorityIdentity(first.authority.id, first.authority.key);
+  const configuredIdentity = deriveRuntimeAuthorityIdentity(first.authority.id, other.pair);
+  assert.equal(mismatch.canonical?.publicKeyFingerprint, trustedIdentity.publicKeyFingerprint);
+  assert.notEqual(mismatch.canonical?.publicKeyFingerprint, configuredIdentity.publicKeyFingerprint);
+  assert.equal(mismatch.publicKeyFingerprint, configuredIdentity.publicKeyFingerprint);
 
   const inactive = authorityFromPair("runtime-inactive", first.pair, { status: "disabled" });
   const inactiveResult = await verifyRuntimeAuthorityReadiness(reader([inactive.authority]), {

@@ -132,6 +132,8 @@ export type OptionId =
   | "probeIssue"
   | "sessionTtlSeconds"
   | "environment"
+  | "rotationPhase"
+  | "currentAuthorityId"
   | "replace"
   | "sessionCredential"
   | "appEndpoint"
@@ -192,6 +194,8 @@ const AUTHORITY_READINESS_OPTIONS = [
   "probeIssue",
   "sessionTtlSeconds",
   "capability",
+  "rotationPhase",
+  "currentAuthorityId",
 ] as const;
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
@@ -479,6 +483,24 @@ export const COMMAND_OPTIONS = {
     "boolean",
     "none",
     "Read the runtime-signing deployment binding from INARI_RUNTIME_AUTHORITY_ID and INARI_RUNTIME_AUTHORITY_PRIVATE_KEY.",
+  ),
+  rotationPhase: option(
+    "rotationPhase",
+    "rotation-phase",
+    ["--rotation-phase"],
+    "string",
+    "required",
+    "Check safe overlap-rotation ordering for the given phase before authority rotate (activate) or authority revoke (revoke).",
+    "activate|revoke",
+  ),
+  currentAuthorityId: option(
+    "currentAuthorityId",
+    "current-authority-id",
+    ["--current-authority-id"],
+    "string",
+    "required",
+    "Currently trusted Runtime Authority ID being rotated away from; required with --rotation-phase.",
+    "id",
   ),
   replace: option(
     "replace",
@@ -1027,7 +1049,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "authority",
     "readiness",
     ["authority", "readiness"],
-    "Verify a runtime-signing deployment's key identity and bounded signer probe against canonical protected-ref trust.",
+    "Verify a runtime-signing deployment's key identity and bounded signer probe against canonical protected-ref trust; add --rotation-phase to also check safe overlap-rotation ordering before rotate/revoke.",
     AUTHORITY_READINESS_OPTIONS,
   ),
   command(

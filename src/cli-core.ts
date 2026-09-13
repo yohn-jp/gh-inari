@@ -132,10 +132,12 @@ import {
   loadRuntimeAuthorityKeyPair,
 } from "./agent-authority/runtime-key.js";
 import {
+  checkRuntimeAuthorityRotationOrder,
   createRuntimeAuthorityRecord,
   deriveRuntimeAuthorityIdentity,
   verifyRuntimeAuthorityReadiness,
   type RuntimeAuthorityPublicKeyInput,
+  type RuntimeAuthorityRotationPhase,
 } from "./agent-authority/runtime-authority-operations.js";
 import { RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY } from "./agent-authority/runtime-authority.js";
 import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
@@ -1033,6 +1035,29 @@ async function runAuthorityCommand(
       : typeof parsed.options.privateKey === "string"
         ? path.resolve(root, parsed.options.privateKey)
         : undefined;
+    const rotationPhase = parsed.options.rotationPhase;
+    if (rotationPhase !== undefined && rotationPhase !== "activate" && rotationPhase !== "revoke") {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Option --rotation-phase must be exactly activate or revoke.",
+        "--rotation-phase",
+      );
+    }
+    const currentAuthorityId = parsed.options.currentAuthorityId;
+    if (rotationPhase === undefined && currentAuthorityId !== undefined) {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Option --current-authority-id requires --rotation-phase.",
+        "--current-authority-id",
+      );
+    }
+    if (rotationPhase !== undefined && typeof currentAuthorityId !== "string") {
+      throw new CliError(
+        "INPUT_REQUIRED",
+        "Use --current-authority-id <id> with --rotation-phase.",
+        "--current-authority-id",
+      );
+    }
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
     const result = await verifyRuntimeAuthorityReadiness(adapter, {
       authorityId,
@@ -1046,15 +1071,31 @@ async function runAuthorityCommand(
         : {}),
       ...(parsed.capabilities.length === 0 ? {} : { capabilities: parsed.capabilities }),
     });
-    if (json) console.log(JSON.stringify(result));
+    const rotationOrder =
+      rotationPhase === undefined || typeof currentAuthorityId !== "string"
+        ? undefined
+        : checkRuntimeAuthorityRotationOrder({
+            currentAuthorityId,
+            nextAuthorityId: authorityId ?? "",
+            phase: rotationPhase as RuntimeAuthorityRotationPhase,
+            signerAuthorityId: authorityId,
+            nextReadiness: result,
+          });
+    if (json) console.log(JSON.stringify(rotationOrder === undefined ? result : { ...result, rotationOrder }));
     else {
       console.log(`Runtime Authority readiness: ${result.state}.`);
       if (result.authorityId !== undefined) console.log(`Authority ID: ${result.authorityId}`);
       if (result.publicKeyFingerprint !== undefined)
         console.log(`Public key fingerprint: ${result.publicKeyFingerprint}`);
       for (const item of result.diagnostics) console.log(`Diagnostic: ${item.code}: ${item.message}`);
+      if (rotationOrder !== undefined) {
+        console.log(`Rotation order: ${rotationOrder.state}.`);
+        if (rotationOrder.diagnostic !== undefined) {
+          console.log(`Diagnostic: ${rotationOrder.diagnostic.code}: ${rotationOrder.diagnostic.message}`);
+        }
+      }
     }
-    return result.ok ? 0 : EXIT_VALIDATION;
+    return result.ok && (rotationOrder === undefined || rotationOrder.ok) ? 0 : EXIT_VALIDATION;
   }
 
   rejectUnsupportedAuthorityLifecycleOptions(command, parsed.options, parsed.capabilities);
