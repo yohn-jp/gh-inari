@@ -576,7 +576,11 @@ export class GitHubAdapter {
     const statuses = await this.readOperationalCollection(
       `commits/${encodeURIComponent(headSha)}/status`,
       "pull_request.statuses",
-      (body) => arrayResponse(body, "statuses"),
+      (body) => {
+        if (!isRecord(body))
+          throw new GitHubApiResponseError("pull_request.statuses", "GitHub returned invalid commit status data.");
+        return arrayResponse(body.statuses, "statuses");
+      },
       (entry, path) => parseOperationalCheck(entry, path, "status"),
     );
     const items = [...runs.items, ...statuses.items].sort(compareOperationalChecks);
@@ -1402,6 +1406,27 @@ function providerText(value: unknown, path: string, operation: string, maximum =
   return value;
 }
 
+/**
+ * Bounded prose/Markdown field validator for Issue/PR/comment/review
+ * bodies. Ordinary multiline Markdown uses TAB/LF/CR, so unlike
+ * providerText() this allows those while still rejecting NUL and other
+ * unsafe control characters, and bounds by UTF-8 byte length rather than
+ * JS code-unit length.
+ */
+function providerProse(value: unknown, path: string, operation: string, maximumBytes: number): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value) ||
+    Buffer.byteLength(value, "utf8") > maximumBytes
+  ) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value;
+}
+
 function optionalProviderText(value: unknown, path: string, operation: string, maximum = 2_048): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   return providerText(value, path, operation, maximum);
@@ -1531,14 +1556,16 @@ function parseOperationalIssue(
   operation: string,
 ): Omit<GitHubOperationalIssueEvidence, "comments" | "provenance"> {
   const record = responseRecord(value, operation);
+  const number = responseNumber(record.number, "number", operation);
+  if (record.pull_request !== undefined) throw new GitHubResourceKindMismatchError(operation, number);
   return {
     repository: operationalRepository(context),
-    number: responseNumber(record.number, "number", operation),
+    number,
     title: providerText(record.title, "title", operation, 255),
     body:
       record.body === undefined || record.body === null
         ? null
-        : providerText(record.body, "body", operation, 1_048_576),
+        : providerProse(record.body, "body", operation, 1_048_576),
     state: operationalState(record.state),
     ...(record.state_reason === undefined
       ? {}
@@ -1611,7 +1638,7 @@ function parseOperationalPullRequest(
     body:
       record.body === undefined || record.body === null
         ? null
-        : providerText(record.body, "body", operation, 1_048_576),
+        : providerProse(record.body, "body", operation, 1_048_576),
     state: operationalState(record.state),
     author: operationalActor(record.user, "user", operation),
     head: operationalRef(record.head, "head", operation),
@@ -1664,7 +1691,7 @@ function parseOperationalComment(
   const body =
     record.body === undefined || record.body === null
       ? null
-      : providerText(record.body, `${path}.body`, "operational.comment", 1_048_576);
+      : providerProse(record.body, `${path}.body`, "operational.comment", 1_048_576);
   const author = operationalActor(record.user, `${path}.user`, "operational.comment");
   const createdAt = optionalProviderText(record.created_at, `${path}.created_at`, "operational.comment", 128);
   const updatedAt = optionalProviderText(record.updated_at, `${path}.updated_at`, "operational.comment", 128);
@@ -1702,7 +1729,7 @@ function parseOperationalReview(value: unknown, path: string): GitHubOperational
   const body =
     record.body === undefined || record.body === null
       ? null
-      : providerText(record.body, `${path}.body`, "operational.review", 1_048_576);
+      : providerProse(record.body, `${path}.body`, "operational.review", 1_048_576);
   const author = operationalActor(record.user, `${path}.user`, "operational.review");
   const state =
     record.state === undefined || record.state === null

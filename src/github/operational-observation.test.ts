@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./index.js";
+import {
+  GitHubAdapter,
+  GitHubResourceKindMismatchError,
+  type GhCommandResult,
+  type GhTransport,
+  type GhTransportOptions,
+} from "./index.js";
 
 function command(stdout = "", exitCode = 0): GhCommandResult {
   return { stdout, exitCode, stderr: "" };
@@ -30,7 +36,7 @@ class OperationalTransport implements GhTransport {
           JSON.stringify({
             number: 7,
             title: "Wrong template",
-            body: "Provider body remains readable.",
+            body: "Provider body remains readable.\n\n- line one\r\n- line two\ttabbed",
             state: "open",
             state_reason: null,
             html_url: "https://github.com/acme/inari/issues/7",
@@ -52,12 +58,24 @@ class OperationalTransport implements GhTransport {
             user: { login: "octocat" },
           }),
         );
+      if (path === "issues/11")
+        return command(
+          JSON.stringify({
+            number: 11,
+            title: "Actually a pull request",
+            body: "body",
+            state: "open",
+            html_url: "https://github.com/acme/inari/issues/11",
+            user: { login: "octocat" },
+            pull_request: { url: "https://api.github.com/repos/acme/inari/pulls/11" },
+          }),
+        );
       if (path === "pulls/8")
         return command(
           JSON.stringify({
             number: 8,
             title: "Operational PR",
-            body: "body",
+            body: "## Summary\n\nMultiline PR body.\r\n\r\n- item",
             state: "open",
             html_url: "https://github.com/acme/inari/pull/8",
             user: { login: "octocat" },
@@ -117,7 +135,14 @@ class OperationalTransport implements GhTransport {
       );
     if (path.startsWith("pulls/8/comments"))
       return included([
-        { id: 2, body: "inline", user: { login: "reviewer" }, path: "src/a.ts", line: 4, side: "RIGHT" },
+        {
+          id: 2,
+          body: "inline\nfeedback\r\nhere",
+          user: { login: "reviewer" },
+          path: "src/a.ts",
+          line: 4,
+          side: "RIGHT",
+        },
       ]);
     if (path.startsWith("pulls/10/") || path.startsWith("issues/10/") || path.startsWith("commits/head-sha-10/"))
       return included([]);
@@ -125,7 +150,7 @@ class OperationalTransport implements GhTransport {
       return included([
         {
           id: 3,
-          body: "approved",
+          body: "Approved.\n\nLooks good\toverall.",
           user: { login: "reviewer" },
           state: "APPROVED",
           submitted_at: "2026-01-03T00:00:00Z",
@@ -142,7 +167,11 @@ class OperationalTransport implements GhTransport {
         check_runs: [{ id: 4, name: "build", status: "completed", conclusion: "success" }],
       });
     if (path.startsWith("commits/head-sha/status"))
-      return included([{ context: "ci/status", state: "success", description: "ok" }]);
+      return included({
+        state: "success",
+        total_count: 1,
+        statuses: [{ context: "ci/status", state: "success", description: "ok" }],
+      });
     throw new Error(`Unexpected paginated endpoint: ${endpoint}`);
   }
 
@@ -154,7 +183,7 @@ class OperationalTransport implements GhTransport {
 test("GitHub adapter preserves bounded Issue comments pagination and provenance", async () => {
   const transport = new OperationalTransport();
   const observed = await new GitHubAdapter({ repository: "acme/inari", transport }).observeIssue(7);
-  assert.equal(observed.body, "Provider body remains readable.");
+  assert.equal(observed.body, "Provider body remains readable.\n\n- line one\r\n- line two\ttabbed");
   assert.equal(observed.comments.status, "available");
   assert.equal(observed.comments.items.length, 101);
   assert.equal(observed.comments.pagination.pages, 2);
@@ -174,18 +203,40 @@ test("GitHub adapter makes the bounded collection truncation continuation explic
   assert.equal(transport.calls.filter((args) => args[1]?.includes("issues/9/comments") === true).length, 10);
 });
 
+test("GitHub adapter observeIssue fails closed when the resource is PR-shaped", async () => {
+  const transport = new OperationalTransport();
+  await assert.rejects(
+    new GitHubAdapter({ repository: "acme/inari", transport }).observeIssue(11),
+    (error: unknown) =>
+      error instanceof GitHubResourceKindMismatchError &&
+      error.code === "GITHUB_RESOURCE_KIND_MISMATCH" &&
+      error.category === "api",
+  );
+});
+
 test("GitHub adapter normalizes PR runtime evidence without raw API shapes", async () => {
   const transport = new OperationalTransport();
   const observed = await new GitHubAdapter({ repository: "acme/inari", transport }).observePullRequest(8);
   assert.deepEqual(observed.head, { ref: "feat/observation", sha: "head-sha" });
   assert.deepEqual(observed.base, { ref: "main", sha: "base-sha" });
   assert.equal(observed.reviewDecision, "APPROVED");
+  assert.equal(observed.body, "## Summary\n\nMultiline PR body.\r\n\r\n- item");
+  assert.equal(observed.checks.status, "available");
   assert.equal(observed.checks.items.length, 2);
+  assert.deepEqual(
+    observed.checks.items.map((check) => ({ kind: check.kind, id: check.id })).sort((left, right) => left.id.localeCompare(right.id)),
+    [
+      { kind: "check-run", id: "4" },
+      { kind: "status", id: "ci/status" },
+    ],
+  );
   assert.deepEqual(
     observed.changedFiles.items.map((file) => file.filename),
     ["a.ts", "z.ts"],
   );
   assert.equal(observed.inlineReviewComments.items[0]?.path, "src/a.ts");
+  assert.equal(observed.inlineReviewComments.items[0]?.body, "inline\nfeedback\r\nhere");
+  assert.equal(observed.reviews.items[0]?.body, "Approved.\n\nLooks good\toverall.");
   assert.ok(observed.provenance.endpoints.includes("pulls/8/reviews"));
 });
 

@@ -265,6 +265,13 @@ export class OperationalObservationError extends Error {
 type RecordValue = Record<string, unknown>;
 type Mapper<T> = (value: unknown, path: string, violations: OperationalObservationViolation[]) => T | undefined;
 
+/**
+ * Control characters unsafe even in prose (NUL and other C0/DEL controls).
+ * Excludes TAB (\u0009), LF (\u000a) and CR (\u000d), which are normal in
+ * multiline Markdown body/comment/review text.
+ */
+const PROSE_UNSAFE_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
+
 const OPERATIONAL_ISSUE_KEYS = new Set([
   "repository",
   "number",
@@ -369,6 +376,33 @@ function text(
     (required && value.length === 0) ||
     value.length > maximum ||
     /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    violation(violations, "OPERATIONAL_OBSERVATION_VALUE_INVALID", path, `Value at ${path} is invalid.`);
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Bounded prose/Markdown validator for Issue/PR/comment/review bodies.
+ * Unlike text(), this allows the whitespace control characters ordinary
+ * multiline Markdown uses (CR, LF, TAB); it still rejects NUL and other
+ * unsafe control characters, and bounds by UTF-8 byte length rather than JS
+ * code-unit length so multi-byte characters cannot bypass the limit.
+ */
+function prose(
+  value: unknown,
+  path: string,
+  maximumBytes: number,
+  violations: OperationalObservationViolation[],
+  required = true,
+): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (
+    typeof value !== "string" ||
+    (required && value.length === 0) ||
+    PROSE_UNSAFE_CONTROL_CHARACTERS.test(value) ||
+    Buffer.byteLength(value, "utf8") > maximumBytes
   ) {
     violation(violations, "OPERATIONAL_OBSERVATION_VALUE_INVALID", path, `Value at ${path} is invalid.`);
     return undefined;
@@ -844,7 +878,7 @@ function normalizeComment(
   const body =
     value.body === null
       ? null
-      : text(value.body, `${path}.body`, OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
+      : prose(value.body, `${path}.body`, OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
   const author = normalizeActor(value.author, `${path}.author`, violations);
   const createdAt = normalizeTimestamp(value.createdAt, `${path}.createdAt`, violations);
   const updatedAt = normalizeTimestamp(value.updatedAt, `${path}.updatedAt`, violations);
@@ -887,7 +921,7 @@ function normalizeReview(
   const body =
     value.body === null
       ? null
-      : text(value.body, `${path}.body`, OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
+      : prose(value.body, `${path}.body`, OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
   const author = normalizeActor(value.author, `${path}.author`, violations);
   const state = text(value.state, `${path}.state`, 64, violations);
   const submittedAt = normalizeTimestamp(value.submittedAt, `${path}.submittedAt`, violations);
@@ -1044,7 +1078,7 @@ function issueProjection(
   const body =
     evidence.body === null
       ? null
-      : text(evidence.body, "$.issue.body", OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
+      : prose(evidence.body, "$.issue.body", OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
   const state = normalizeState(evidence.state, "$.issue.state", violations);
   const stateReason =
     evidence.stateReason === undefined
@@ -1176,7 +1210,7 @@ function pullRequestProjection(
   const body =
     evidence.body === null
       ? null
-      : text(evidence.body, "$.pullRequest.body", OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
+      : prose(evidence.body, "$.pullRequest.body", OPERATIONAL_OBSERVATION_LIMITS.bodyBytes, violations, false);
   const state = normalizeState(evidence.state, "$.pullRequest.state", violations);
   const author = normalizeActor(evidence.author, "$.pullRequest.author", violations);
   const head = normalizeRef(evidence.head, "$.pullRequest.head", violations);

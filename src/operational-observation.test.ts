@@ -27,7 +27,7 @@ const issueEvidence: GitHubOperationalIssueEvidence = {
   repository,
   number: 520,
   title: "wrong-template Issue",
-  body: "The body is still observable.",
+  body: "The body is still observable.\n\n- multiline\r\n- with CRLF\tand a tab",
   state: "open",
   author: { login: "author", id: 1 },
   labels: ["zeta", "alpha"],
@@ -139,6 +139,18 @@ test("Core derives a conservative checks summary from complete normalized checks
   assert.equal(observed.checksSummary, "failure");
 });
 
+test("Core derives success from a mix of check-runs and legacy commit statuses", () => {
+  const observed = observeOperationalPullRequest({
+    pullRequest: pullRequestEvidence({
+      checks: collection([
+        { id: "4", name: "build", kind: "check-run", status: "completed", conclusion: "success" },
+        { id: "ci/status", name: "ci/status", kind: "status", status: "success" },
+      ]),
+    }),
+  });
+  assert.equal(observed.checksSummary, "success");
+});
+
 test("truncated collections require an explicit continuation page", () => {
   const result = tryObserveOperationalPullRequest({
     pullRequest: pullRequestEvidence({
@@ -160,4 +172,18 @@ test("Core observation rejects unsupported normalized evidence properties", () =
   });
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((entry) => entry.code === "OPERATIONAL_OBSERVATION_INPUT_UNKNOWN_PROPERTY"));
+});
+
+test("Core observation accepts ordinary multiline Markdown but still rejects unsafe control characters", () => {
+  const withMultilineBody = tryObserveOperationalPullRequest({
+    pullRequest: pullRequestEvidence({ body: "## Notes\n\nFirst line.\r\nSecond line.\tTabbed." }),
+  });
+  assert.equal(withMultilineBody.valid, true);
+  assert.equal(withMultilineBody.observation?.body, "## Notes\n\nFirst line.\r\nSecond line.\tTabbed.");
+
+  const withNul = tryObserveOperationalPullRequest({
+    pullRequest: pullRequestEvidence({ body: "unsafe\u0000body" }),
+  });
+  assert.equal(withNul.valid, false);
+  assert.ok(withNul.violations.some((entry) => entry.path === "$.pullRequest.body"));
 });
