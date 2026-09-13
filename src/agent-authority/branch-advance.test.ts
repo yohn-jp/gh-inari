@@ -12,6 +12,7 @@ import type { AuthenticatedSessionContext } from "./session-authentication.js";
 import type {
   GitDataCommitInput,
   GitDataRefUpdateInput,
+  GitDataTree,
   GitDataTreeInput,
   GitHubBranchAdvanceCapability,
 } from "../github/git-data-capability.js";
@@ -108,6 +109,52 @@ function fake(mode: "updated" | "rejected" | "throws-applied" | "throws-not-appl
       ) => operation(capability),
     },
   };
+}
+
+function replayFake(expectedHeadTree: GitDataTree, currentHeadTree: GitDataTree, currentHead = "8".repeat(40)) {
+  const commits = new Map([
+    [HEAD, expectedHeadTree],
+    [currentHead, currentHeadTree],
+  ]);
+  const trees = new Map([expectedHeadTree, currentHeadTree].map((tree) => [tree.sha, tree] as const));
+  const calls: { blobs: string[]; updates: GitDataRefUpdateInput[] } = { blobs: [], updates: [] };
+  const capability: GitHubBranchAdvanceCapability = {
+    scope,
+    readRef: async () => ({ name: BRANCH, ref: `refs/heads/${BRANCH}`, sha: currentHead }),
+    readCommit: async (sha) => {
+      const tree = commits.get(sha);
+      if (tree === undefined) throw new Error("unknown commit");
+      return { sha, treeSha: tree.sha };
+    },
+    readTree: async (sha) => {
+      const tree = trees.get(sha);
+      if (tree === undefined) throw new Error("unknown tree");
+      return tree;
+    },
+    createBlob: async ({ content: value }) => {
+      calls.blobs.push(value);
+      return { sha: blobSha };
+    },
+    createTree: async () => ({ sha: TREE }),
+    createCommit: async () => ({ sha: COMMIT }),
+    compareAndAdvanceRef: async (input) => {
+      calls.updates.push(input);
+      return { status: "rejected" };
+    },
+  };
+  return {
+    calls,
+    broker: {
+      withBranchAdvanceCapability: async <T>(
+        _request: unknown,
+        operation: (c: GitHubBranchAdvanceCapability) => Promise<T>,
+      ) => operation(capability),
+    },
+  };
+}
+
+function replayTree(sha: string, entries: GitDataTree["entries"]): GitDataTree {
+  return { sha, entries };
 }
 
 test("validates exact request and canonical base64", () => {
@@ -265,6 +312,65 @@ test("rejects stale expected head without overwriting concurrent work", async ()
   assert.equal(result.outcome, "stale");
   assert.equal(result.failure?.reason, "stale-head");
   assert.equal(calls.blobs.length, 0);
+});
+
+test("does not treat a replay with an unrelated concurrent path as idempotent", async () => {
+  const expectedBase = replayTree("7".repeat(40), [
+    { path: "src/file.txt", mode: "100644", type: "blob", sha: "e".repeat(40) },
+  ]);
+  const requestedTarget = replayTree("6".repeat(40), [
+    { path: "src/file.txt", mode: "100644", type: "blob", sha: blobSha },
+  ]);
+  const concurrentTarget = replayTree("5".repeat(40), [
+    ...requestedTarget.entries,
+    { path: "src/unrelated.txt", mode: "100644", type: "blob", sha: "c".repeat(40) },
+  ]);
+  const { calls, broker } = replayFake(expectedBase, concurrentTarget);
+
+  const result = await executeBranchAdvance({ context, broker, admission });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "stale");
+  assert.equal(result.failure?.reason, "stale-head");
+  assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
+});
+
+test("returns idempotent success when the stale head is the exact requested target", async () => {
+  const expectedBase = replayTree("7".repeat(40), [
+    { path: "src/file.txt", mode: "100644", type: "blob", sha: "e".repeat(40) },
+  ]);
+  const exactTarget = replayTree("6".repeat(40), [
+    { path: "src/file.txt", mode: "100644", type: "blob", sha: blobSha },
+  ]);
+  const { calls, broker } = replayFake(expectedBase, exactTarget);
+
+  const result = await executeBranchAdvance({ context, broker, admission });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.outcome, "idempotent");
+  assert.equal(result.resultingHead, "8".repeat(40));
+  assert.ok(result.provenance);
+  assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
+});
+
+test("returns stale failure when the stale head does not contain the requested target", async () => {
+  const expectedBase = replayTree("7".repeat(40), [
+    { path: "src/file.txt", mode: "100644", type: "blob", sha: "e".repeat(40) },
+  ]);
+  const nonTarget = replayTree("6".repeat(40), [
+    { path: "src/file.txt", mode: "100644", type: "blob", sha: "e".repeat(40) },
+  ]);
+  const { calls, broker } = replayFake(expectedBase, nonTarget);
+
+  const result = await executeBranchAdvance({ context, broker, admission });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.outcome, "stale");
+  assert.equal(result.failure?.reason, "stale-head");
+  assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
 });
 
 test("rejects a concurrent head update via compare-and-swap rejection", async () => {

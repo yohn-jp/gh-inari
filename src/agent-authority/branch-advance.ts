@@ -268,13 +268,62 @@ function fail(
   return result(r, outcome, { code: "BRANCH_ADVANCE_FAILED", reason, message });
 }
 
-function provesTarget(tree: GitDataTree, request: BranchAdvanceSemanticRequest): boolean {
-  const entries = new Map(tree.entries.filter((e) => e.type === "blob").map((e) => [e.path, e]));
-  return (request.changes ?? []).every((change) => {
-    if (change.operation === "delete") return !entries.has(change.path);
-    const entry = entries.get(change.path);
-    return entry !== undefined && entry.sha === blobSha(change.content) && entry.mode === change.mode;
-  });
+type ReplayTreeEntry = Pick<GitDataTree["entries"][number], "mode" | "type" | "sha">;
+
+/**
+ * Return the provider's complete file snapshot, excluding only structural
+ * directory entries.  Tree entry SHAs change when a child changes, so they
+ * cannot be compared as file state; blobs and submodule (commit) entries are
+ * part of the target state and must be compared exactly.
+ */
+function replaySnapshot(tree: GitDataTree): Map<string, ReplayTreeEntry> | undefined {
+  const entries = new Map<string, ReplayTreeEntry>();
+  for (const entry of tree.entries) {
+    if (entry.type === "tree") continue;
+    if (entries.has(entry.path)) return undefined;
+    entries.set(entry.path, { mode: entry.mode, type: entry.type, sha: entry.sha });
+  }
+  return entries;
+}
+
+/**
+ * Prove the exact requested target against the signed expected-head tree.
+ * Checking only changed paths is insufficient: a concurrent update to an
+ * unrelated path would otherwise be reported as an idempotent replay.
+ */
+function provesTarget(
+  tree: GitDataTree,
+  expectedHeadTree: GitDataTree,
+  request: BranchAdvanceSemanticRequest,
+): boolean {
+  const expected = replaySnapshot(expectedHeadTree);
+  const actual = replaySnapshot(tree);
+  if (expected === undefined || actual === undefined) return false;
+
+  for (const change of request.changes) {
+    if (change.operation === "delete") {
+      const before = expected.get(change.path);
+      // A delete of a missing/non-blob entry could not have been a successful
+      // branch.advance mutation, so it cannot establish idempotent success.
+      if (before === undefined || before.type !== "blob") return false;
+      expected.delete(change.path);
+      continue;
+    }
+    expected.set(change.path, { mode: change.mode, type: "blob", sha: blobSha(change.content) });
+  }
+
+  if (actual.size !== expected.size) return false;
+  for (const [path, expectedEntry] of expected) {
+    const actualEntry = actual.get(path);
+    if (
+      actualEntry === undefined ||
+      actualEntry.mode !== expectedEntry.mode ||
+      actualEntry.type !== expectedEntry.type ||
+      actualEntry.sha !== expectedEntry.sha
+    )
+      return false;
+  }
+  return true;
 }
 function provenance(
   context: AuthenticatedSessionContext,
@@ -378,7 +427,9 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
       if (ref.sha !== r.expectedHead) {
         const replayCommit = await capability.readCommit(ref.sha);
         const replayTree = await capability.readTree(replayCommit.treeSha);
-        if (provesTarget(replayTree, r))
+        const expectedHeadCommit = await capability.readCommit(r.expectedHead);
+        const expectedHeadTree = await capability.readTree(expectedHeadCommit.treeSha);
+        if (provesTarget(replayTree, expectedHeadTree, r))
           return result(r, "idempotent", undefined, ref.sha, provenance(context, capability, r, c));
         return fail(r, "stale-head", "Expected head is stale; no overwrite was attempted.", "stale");
       }
