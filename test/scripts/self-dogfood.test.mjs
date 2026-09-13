@@ -297,6 +297,7 @@ test("a failure after a recorded mid-lifecycle status still writes schema-valid 
   fs.mkdirSync(workerDirectory);
   const workerObservation = path.join(root, "worker-observation");
   const outputFile = path.join(root, "evidence.json");
+  const issueStateFile = path.join(root, "provider-issue-state");
   const fakeInari = path.join(root, "fake-inari.mjs");
   const worker = path.join(root, "worker.mjs");
   fs.writeFileSync(
@@ -304,16 +305,51 @@ test("a failure after a recorded mid-lifecycle status still writes schema-valid 
     `#!/usr/bin/env node
 import fs from "node:fs";
 const args = process.argv.slice(2);
+const issueStateFile = process.env.FAKE_INARI_ISSUE_STATE;
 const issue = args.includes("issue") && args.includes("change");
+const issueCount = Number(fs.existsSync(issueStateFile) ? fs.readFileSync(issueStateFile, "utf8") : "0");
+if (issue) fs.writeFileSync(issueStateFile, String(issueCount + 1));
 const ready = args.includes("ready");
 const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1, contractVersions: { goldenPath: "1", statusRecovery: "1" } };
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
 else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
-else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: "verified" } };
+else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
 else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
-else if (ready) { console.log(JSON.stringify({ ok: false, state: "DRAFT", ...common, recovery: { state: "none", action: "none" } })); process.exit(1); }
+else if (ready) {
+  console.log(JSON.stringify({
+    ok: false,
+    error: {
+      code: "CHANGE_REMOTE_RUN_FAILED",
+      message: "The trusted Change workflow did not produce a successful result.",
+      details: {
+        operation: "change.ready",
+        reason: "workflow-failed",
+        stage: "projection-execution",
+        trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        token: "issuer-secret",
+        diagnostics: [{ version: 1, code: "CHANGE_PROVENANCE_CONFLICT", path: "$.projection.change.provenance", message: "The trusted Change provenance is inconsistent." }],
+        evidence: {
+          version: 1,
+          operation: "ready",
+          outcome: "recovery-required",
+          effects: [{ kind: "MARK_PULL_REQUEST_READY", status: "failed" }],
+          compensation: "failed",
+          failure: {
+            kind: "MARK_PULL_REQUEST_READY",
+            code: "CHANGE_EFFECT_FAILED",
+            message: "The ready effect failed.",
+            reason: "provider-http",
+            status: 422,
+            provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+          },
+        },
+      },
+    },
+  }));
+  process.exit(1);
+}
 else output = { ok: false };
 console.log(JSON.stringify(output));
 `,
@@ -348,7 +384,12 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, INARI_SELF_DOGFOOD: "1", GH_TOKEN: "issuer-secret" },
+        env: {
+          ...process.env,
+          INARI_SELF_DOGFOOD: "1",
+          GH_TOKEN: "issuer-secret",
+          FAKE_INARI_ISSUE_STATE: issueStateFile,
+        },
       },
     );
     assert.equal(
@@ -363,6 +404,38 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
       status: "UNAVAILABLE",
       recovery: { state: "unavailable", action: "inspect" },
     });
+    const failedCommand = evidence.diagnostics.find(({ code }) => code === "CHANGE_REMOTE_RUN_FAILED");
+    assert.ok(failedCommand, JSON.stringify(evidence));
+    assert.deepEqual(failedCommand?.details, {
+      operation: "change.ready",
+      reason: "workflow-failed",
+      stage: "projection-execution",
+      trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+      diagnostics: [
+        {
+          version: 1,
+          code: "CHANGE_PROVENANCE_CONFLICT",
+          path: "$.projection.change.provenance",
+          message: "The trusted Change provenance is inconsistent.",
+        },
+      ],
+      evidence: {
+        version: 1,
+        operation: "ready",
+        outcome: "recovery-required",
+        effects: [{ kind: "MARK_PULL_REQUEST_READY", status: "failed" }],
+        compensation: "failed",
+        failure: {
+          kind: "MARK_PULL_REQUEST_READY",
+          code: "CHANGE_EFFECT_FAILED",
+          message: "The ready effect failed.",
+          reason: "provider-http",
+          status: 422,
+          provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+        },
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(evidence), /issuer-secret|runtime-private-key|rawBody|provider-payload/iu);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

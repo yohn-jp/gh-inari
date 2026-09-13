@@ -46,9 +46,18 @@ export const MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH: 128;
 export const MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH: 512;
 export const MAX_CERTIFICATION_STRING_LENGTH: 512;
 
+export interface CertificationDiagnosticStructuredFields {
+  readonly details?: Record<string, unknown>;
+  readonly diagnostics?: readonly Record<string, unknown>[];
+  readonly evidence?: Record<string, unknown>;
+}
+
 export interface CertificationDiagnostic {
   readonly code: string;
   readonly message: string;
+  readonly details?: Record<string, unknown>;
+  readonly diagnostics?: readonly Record<string, unknown>[];
+  readonly evidence?: Record<string, unknown>;
 }
 export type CertificationDiagnosticCode =
   | "EXPECTED_IDENTITY_INVALID"
@@ -166,6 +175,7 @@ export function appendCertificationDiagnostic<T extends CertificationDiagnostic>
   diagnostics: T[],
   code: string,
   message: string,
+  structured?: CertificationDiagnosticStructuredFields,
 ): void;
 
 export function isCertificationBoundedString(value: unknown, maximum?: number): value is string;

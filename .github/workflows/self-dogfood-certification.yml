@@ -95,8 +95,21 @@ jobs:
             pnpm add --ignore-scripts --save-exact "$tarball"
           )
           installed_package="$consumer_dir/node_modules/gh-inari"
-          installed_executable="$consumer_dir/node_modules/.bin/inari"
           test -d "$installed_package"
+          installed_executable="$(node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const packageDirectory = process.argv[1];
+            const packageMetadata = JSON.parse(fs.readFileSync(path.join(packageDirectory, "package.json"), "utf8"));
+            if (
+              packageMetadata.bin === null ||
+              typeof packageMetadata.bin !== "object" ||
+              Array.isArray(packageMetadata.bin) ||
+              typeof packageMetadata.bin.inari !== "string" ||
+              packageMetadata.bin.inari.length === 0
+            ) process.exit(1);
+            process.stdout.write(path.resolve(packageDirectory, packageMetadata.bin.inari));
+          ' "$installed_package")"
           test -x "$installed_executable"
           source_root="$(pwd -P)"
           installed_package_real="$(realpath "$installed_package")"
