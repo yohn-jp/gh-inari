@@ -277,3 +277,80 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a failure after a recorded mid-lifecycle status still writes schema-valid blocked evidence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "inari-self-dogfood-blocked-"));
+  const workerDirectory = path.join(root, "worker");
+  fs.mkdirSync(workerDirectory);
+  const workerObservation = path.join(root, "worker-observation");
+  const outputFile = path.join(root, "evidence.json");
+  const fakeInari = path.join(root, "fake-inari.mjs");
+  const worker = path.join(root, "worker.mjs");
+  fs.writeFileSync(
+    fakeInari,
+    `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+const issue = args.includes("issue") && args.includes("change");
+const ready = args.includes("ready");
+const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1, contractVersions: { goldenPath: "1", statusRecovery: "1" } };
+let output;
+if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
+else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
+else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
+else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: "verified" } };
+else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
+else if (ready) { console.log(JSON.stringify({ ok: false, state: "DRAFT", ...common, recovery: { state: "none", action: "none" } })); process.exit(1); }
+else output = { ok: false };
+console.log(JSON.stringify(output));
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  fs.writeFileSync(
+    worker,
+    `import fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: process.env.GH_TOKEN, branch: process.env.INARI_IMPLEMENTATION_BRANCH }));
+`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        "--inari",
+        fakeInari,
+        "--repository",
+        "yohn-jp/gh-inari",
+        "--issue",
+        "239",
+        "--confirm-disposable",
+        "239",
+        "--worker-cwd",
+        workerDirectory,
+        "--worker-command",
+        JSON.stringify([process.execPath, worker]),
+        "--output",
+        outputFile,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, INARI_SELF_DOGFOOD: "1", GH_TOKEN: "issuer-secret" },
+      },
+    );
+    assert.equal(
+      result.status,
+      2,
+      `stderr: ${result.stderr}\nstdout: ${result.stdout}\nevidence: ${fs.existsSync(outputFile) ? fs.readFileSync(outputFile, "utf8") : "missing"}`,
+    );
+    assert.equal(fs.existsSync(outputFile), true, "a blocked run must still write evidence instead of crashing");
+    const evidence = JSON.parse(fs.readFileSync(outputFile, "utf8"));
+    assert.equal(evidence.result, "blocked");
+    assert.deepEqual(evidence.finalState, {
+      status: "UNAVAILABLE",
+      recovery: { state: "unavailable", action: "inspect" },
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
