@@ -387,6 +387,12 @@ test("mutation failures retain distinct bounded provider classifications without
     readonly expectedStage: "installation-token" | "installation-scope" | "projection-execution";
     readonly fetch: typeof globalThis.fetch;
     readonly status?: number;
+    readonly expectedProvider?: {
+      readonly category: "validation-failed";
+      readonly resource: "PullRequest";
+      readonly field: "head";
+      readonly code: "custom";
+    };
   }> = [
     {
       name: "installation-token rejection",
@@ -416,11 +422,30 @@ test("mutation failures retain distinct bounded provider classifications without
       expectedReason: "provider-http",
       expectedStage: "projection-execution",
       status: 422,
+      expectedProvider: {
+        category: "validation-failed",
+        resource: "PullRequest",
+        field: "head",
+        code: "custom",
+      },
       fetch: (async (_input, init) => {
         if ((init?.body as string | undefined)?.includes('"permissions"')) {
           return tokenResponse({}, { contents: "write" });
         }
-        return new Response(JSON.stringify({ message: "Bearer provider-body-secret" }), { status: 422 });
+        return new Response(
+          JSON.stringify({
+            message: "Bearer provider-body-secret",
+            errors: [
+              {
+                resource: "PullRequest",
+                field: "head",
+                code: "custom",
+                message: "provider-controlled prose",
+              },
+            ],
+          }),
+          { status: 422 },
+        );
       }) as typeof globalThis.fetch,
     },
     {
@@ -447,6 +472,7 @@ test("mutation failures retain distinct bounded provider classifications without
         assert.equal(error.stage, testCase.expectedStage, testCase.name);
         assert.equal(error.reason, testCase.expectedReason, testCase.name);
         assert.equal(error.status, testCase.status, testCase.name);
+        assert.deepEqual(error.provider, testCase.expectedProvider, testCase.name);
         assert.doesNotMatch(
           JSON.stringify(error),
           /provider-token-secret|provider-transport-secret|provider-body-secret|private\/provider|authorization/iu,

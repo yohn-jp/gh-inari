@@ -4,6 +4,7 @@ import type {
   ChangeDiagnostic,
   ChangeEffect,
   ChangeEffectFailureReason,
+  ChangeEffectFailureProviderDiagnostic,
   ChangeProjectionInput,
   ChangeProjectionResult,
   ChangeReadyTransitionValidationResult,
@@ -43,6 +44,7 @@ export interface ReadyEffectFailure {
   readonly message: string;
   readonly reason?: ChangeEffectFailureReason;
   readonly status?: number;
+  readonly provider?: ChangeEffectFailureProviderDiagnostic;
 }
 
 export interface ReadyEffectSuccess {

@@ -1,11 +1,19 @@
 import {
   MAX_CHANGE_BRANCH_LENGTH,
   MAX_CHANGE_COMMIT_SHA_LENGTH,
+  CHANGE_EFFECT_FAILURE_PROVIDER_CODES,
+  CHANGE_EFFECT_FAILURE_PROVIDER_FIELDS,
+  CHANGE_EFFECT_FAILURE_PROVIDER_RESOURCES,
   MAX_CHANGE_HOST_LENGTH,
   normalizeChangeEffectFailureClassification,
   validateChangeEffect,
   type ChangeDiagnostic,
   type ChangeEffectFailureClassification,
+  type ChangeEffectFailureProviderCategory,
+  type ChangeEffectFailureProviderCode,
+  type ChangeEffectFailureProviderDiagnostic,
+  type ChangeEffectFailureProviderField,
+  type ChangeEffectFailureProviderResource,
   type ChangeEffect,
   type ChangeEffectKind,
   type ChangeEffectSuccessEvidence,
@@ -97,6 +105,106 @@ export const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffect
   CLOSE_PULL_REQUEST: "The pull request close effect failed.",
   DELETE_BRANCH: "The branch deletion effect failed.",
 });
+
+/** Maximum serialized provider rejection input inspected by the normalizer. */
+export const MAX_GITHUB_CHANGE_EFFECT_REJECTION_BODY_BYTES = 16_384 as const;
+/** Maximum number of structured GitHub error entries inspected. */
+export const MAX_GITHUB_CHANGE_EFFECT_REJECTION_ERRORS = 8 as const;
+
+const GITHUB_REJECTION_CATEGORY_BY_STATUS: Readonly<Record<number, ChangeEffectFailureProviderCategory>> =
+  Object.freeze({
+    401: "authentication-failed",
+    409: "conflict",
+    422: "validation-failed",
+    429: "rate-limit",
+  });
+
+/**
+ * Project a GitHub rejection body into the existing bounded classification.
+ * Only allowlisted scalar values are returned; the input is never retained.
+ */
+export function normalizeGitHubChangeEffectProviderDiagnostic(
+  status: number,
+  body: unknown,
+): ChangeEffectFailureProviderDiagnostic | undefined {
+  try {
+    return normalizeGitHubChangeEffectProviderDiagnosticUnsafe(status, body);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeGitHubChangeEffectProviderDiagnosticUnsafe(
+  status: number,
+  body: unknown,
+): ChangeEffectFailureProviderDiagnostic | undefined {
+  const category = GITHUB_REJECTION_CATEGORY_BY_STATUS[status];
+  if (category === undefined) return undefined;
+  if (body === undefined) return category === "validation-failed" ? undefined : { category };
+  if (!isRecord(body)) return undefined;
+
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(body);
+  } catch {
+    return undefined;
+  }
+  if (serialized === undefined) return undefined;
+  if (new TextEncoder().encode(serialized).byteLength > MAX_GITHUB_CHANGE_EFFECT_REJECTION_BODY_BYTES) {
+    return undefined;
+  }
+
+  const rawErrors = body.errors;
+  if (rawErrors === undefined) return category === "validation-failed" ? undefined : { category };
+  if (
+    !Array.isArray(rawErrors) ||
+    rawErrors.length === 0 ||
+    rawErrors.length > MAX_GITHUB_CHANGE_EFFECT_REJECTION_ERRORS
+  ) {
+    return undefined;
+  }
+
+  let detail: Omit<ChangeEffectFailureProviderDiagnostic, "category"> | undefined;
+  for (const rawError of rawErrors) {
+    if (!isRecord(rawError)) return undefined;
+    const candidate = providerErrorDetail(rawError);
+    if (candidate === undefined) continue;
+    if (detail === undefined) detail = candidate;
+  }
+  if (category === "validation-failed" && detail === undefined) return undefined;
+  return { category, ...(detail ?? {}) };
+}
+
+function providerErrorDetail(
+  value: Record<string, unknown>,
+): Omit<ChangeEffectFailureProviderDiagnostic, "category"> | undefined {
+  const detail: {
+    resource?: ChangeEffectFailureProviderResource;
+    field?: ChangeEffectFailureProviderField;
+    code?: ChangeEffectFailureProviderCode;
+  } = {};
+  for (const key of ["resource", "field", "code"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    if (typeof value[key] !== "string") return undefined;
+    if (
+      key === "resource" &&
+      CHANGE_EFFECT_FAILURE_PROVIDER_RESOURCES.includes(value[key] as ChangeEffectFailureProviderResource)
+    ) {
+      detail.resource = value[key] as ChangeEffectFailureProviderResource;
+    } else if (
+      key === "field" &&
+      CHANGE_EFFECT_FAILURE_PROVIDER_FIELDS.includes(value[key] as ChangeEffectFailureProviderField)
+    ) {
+      detail.field = value[key] as ChangeEffectFailureProviderField;
+    } else if (
+      key === "code" &&
+      CHANGE_EFFECT_FAILURE_PROVIDER_CODES.includes(value[key] as ChangeEffectFailureProviderCode)
+    ) {
+      detail.code = value[key] as ChangeEffectFailureProviderCode;
+    }
+  }
+  return Object.keys(detail).length === 0 ? undefined : detail;
+}
 
 /** Stable bounded failure evidence for a single explicit effect. */
 export function changeEffectFailureEvidence(
@@ -441,7 +549,12 @@ export class GitHubChangeEffectAdapter {
     }
     if (response.status === 404) return undefined;
     if (response.status !== 200) {
-      throw new GitHubChangeEffectFailureError({ reason: "provider-http", status: response.status });
+      const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
+      throw new GitHubChangeEffectFailureError({
+        reason: "provider-http",
+        status: response.status,
+        ...(provider === undefined ? {} : { provider }),
+      });
     }
     return parseGitReference(response.body, `refs/heads/${branch}`);
   }
@@ -456,7 +569,12 @@ export class GitHubChangeEffectAdapter {
         throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
       }
       if (response.status !== expectedStatus) {
-        throw new GitHubChangeEffectFailureError({ reason: "provider-http", status: response.status });
+        const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
+        throw new GitHubChangeEffectFailureError({
+          reason: "provider-http",
+          status: response.status,
+          ...(provider === undefined ? {} : { provider }),
+        });
       }
       return response.body;
     } catch (error: unknown) {

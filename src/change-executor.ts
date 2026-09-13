@@ -75,6 +75,7 @@ export interface ChangeRemoteExecutionFailureEvidence {
   readonly message: string;
   readonly reason?: ChangeEffectFailureClassification["reason"];
   readonly status?: number;
+  readonly provider?: ChangeEffectFailureClassification["provider"];
 }
 
 export interface ChangeRemoteExecutionEvidence {
@@ -349,7 +350,9 @@ export function normalizeChangeRemoteExecutionEvidence(
     }
     const failureValue = candidate.failure as Record<string, unknown>;
     if (
-      Object.keys(failureValue).some((key) => !["kind", "code", "message", "reason", "status"].includes(key)) ||
+      Object.keys(failureValue).some(
+        (key) => !["kind", "code", "message", "reason", "status", "provider"].includes(key),
+      ) ||
       !CHANGE_EFFECT_KINDS.includes(failureValue.kind as ChangeEffectKind) ||
       !isSecretSafeBoundedText(failureValue.code, 80) ||
       !isSecretSafeBoundedText(failureValue.message, 240)
@@ -363,11 +366,12 @@ export function normalizeChangeRemoteExecutionEvidence(
     let classification: ChangeEffectFailureClassification | undefined;
     try {
       classification =
-        failureValue.reason === undefined && failureValue.status === undefined
+        failureValue.reason === undefined && failureValue.status === undefined && failureValue.provider === undefined
           ? undefined
           : normalizeChangeEffectFailureClassification({
               ...(failureValue.reason === undefined ? {} : { reason: failureValue.reason }),
               ...(failureValue.status === undefined ? {} : { status: failureValue.status }),
+              ...(failureValue.provider === undefined ? {} : { provider: failureValue.provider }),
             });
     } catch {
       throw new ChangeRemoteExecutorError(

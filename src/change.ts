@@ -193,10 +193,82 @@ export const CHANGE_EFFECT_FAILURE_REASONS = Object.freeze([
 ] as const);
 export type ChangeEffectFailureReason = (typeof CHANGE_EFFECT_FAILURE_REASONS)[number];
 
+/** Provider rejection categories retained by the bounded effect contract. */
+export const CHANGE_EFFECT_FAILURE_PROVIDER_CATEGORIES = Object.freeze([
+  "validation-failed",
+  "authentication-failed",
+  "conflict",
+  "rate-limit",
+] as const);
+export type ChangeEffectFailureProviderCategory = (typeof CHANGE_EFFECT_FAILURE_PROVIDER_CATEGORIES)[number];
+
+/** GitHub resource names recognized by the provider rejection projection. */
+export const CHANGE_EFFECT_FAILURE_PROVIDER_RESOURCES = Object.freeze([
+  "Branch",
+  "Commit",
+  "Contents",
+  "Issue",
+  "IssueComment",
+  "PullRequest",
+  "PullRequestReview",
+  "Reference",
+  "Ref",
+  "Repository",
+  "User",
+  "Workflow",
+  "WorkflowRun",
+] as const);
+export type ChangeEffectFailureProviderResource = (typeof CHANGE_EFFECT_FAILURE_PROVIDER_RESOURCES)[number];
+
+/** GitHub fields recognized by the provider rejection projection. */
+export const CHANGE_EFFECT_FAILURE_PROVIDER_FIELDS = Object.freeze([
+  "assignees",
+  "base",
+  "body",
+  "branch",
+  "default_branch",
+  "draft",
+  "field",
+  "head",
+  "labels",
+  "name",
+  "number",
+  "pull_request",
+  "ref",
+  "repository",
+  "sha",
+  "state",
+  "title",
+] as const);
+export type ChangeEffectFailureProviderField = (typeof CHANGE_EFFECT_FAILURE_PROVIDER_FIELDS)[number];
+
+/** GitHub structured error codes recognized by the provider rejection projection. */
+export const CHANGE_EFFECT_FAILURE_PROVIDER_CODES = Object.freeze([
+  "already_exists",
+  "custom",
+  "incorrect",
+  "invalid",
+  "missing",
+  "missing_field",
+  "not_found",
+  "protected",
+  "unprocessable",
+] as const);
+export type ChangeEffectFailureProviderCode = (typeof CHANGE_EFFECT_FAILURE_PROVIDER_CODES)[number];
+
+export interface ChangeEffectFailureProviderDiagnostic {
+  readonly category: ChangeEffectFailureProviderCategory;
+  readonly resource?: ChangeEffectFailureProviderResource;
+  readonly field?: ChangeEffectFailureProviderField;
+  readonly code?: ChangeEffectFailureProviderCode;
+}
+
 export interface ChangeEffectFailureClassification {
   readonly reason: ChangeEffectFailureReason;
   /** Provider status is retained only when an HTTP rejection was observed. */
   readonly status?: number;
+  /** Recognized, structured provider rejection detail; raw bodies never enter this field. */
+  readonly provider?: ChangeEffectFailureProviderDiagnostic;
 }
 
 export function isChangeEffectFailureReason(value: unknown): value is ChangeEffectFailureReason {
@@ -211,7 +283,7 @@ export function normalizeChangeEffectFailureClassification(
     throw new TypeError("Change effect failure classification must be an object.");
   }
   const candidate = value as Record<string, unknown>;
-  if (Object.keys(candidate).some((key) => key !== "reason" && key !== "status")) {
+  if (Object.keys(candidate).some((key) => key !== "reason" && key !== "status" && key !== "provider")) {
     throw new TypeError("Change effect failure classification contains an unsupported property.");
   }
   if (!isChangeEffectFailureReason(candidate.reason)) {
@@ -227,9 +299,47 @@ export function normalizeChangeEffectFailureClassification(
   ) {
     throw new TypeError("Change effect failure status is invalid.");
   }
+  let provider: ChangeEffectFailureProviderDiagnostic | undefined;
+  if (candidate.provider !== undefined) {
+    if (candidate.reason !== "provider-http" || !isRecord(candidate.provider)) {
+      throw new TypeError("Change effect provider diagnostic is invalid.");
+    }
+    const providerCandidate = candidate.provider;
+    if (
+      Object.keys(providerCandidate).some(
+        (key) => key !== "category" && key !== "resource" && key !== "field" && key !== "code",
+      ) ||
+      !CHANGE_EFFECT_FAILURE_PROVIDER_CATEGORIES.includes(
+        providerCandidate.category as ChangeEffectFailureProviderCategory,
+      ) ||
+      (providerCandidate.resource !== undefined &&
+        !CHANGE_EFFECT_FAILURE_PROVIDER_RESOURCES.includes(
+          providerCandidate.resource as ChangeEffectFailureProviderResource,
+        )) ||
+      (providerCandidate.field !== undefined &&
+        !CHANGE_EFFECT_FAILURE_PROVIDER_FIELDS.includes(providerCandidate.field as ChangeEffectFailureProviderField)) ||
+      (providerCandidate.code !== undefined &&
+        !CHANGE_EFFECT_FAILURE_PROVIDER_CODES.includes(providerCandidate.code as ChangeEffectFailureProviderCode))
+    ) {
+      throw new TypeError("Change effect provider diagnostic contains an unsupported value.");
+    }
+    provider = {
+      category: providerCandidate.category as ChangeEffectFailureProviderCategory,
+      ...(providerCandidate.resource === undefined
+        ? {}
+        : { resource: providerCandidate.resource as ChangeEffectFailureProviderResource }),
+      ...(providerCandidate.field === undefined
+        ? {}
+        : { field: providerCandidate.field as ChangeEffectFailureProviderField }),
+      ...(providerCandidate.code === undefined
+        ? {}
+        : { code: providerCandidate.code as ChangeEffectFailureProviderCode }),
+    };
+  }
   return {
     reason: candidate.reason,
     ...(candidate.status === undefined ? {} : { status: candidate.status }),
+    ...(provider === undefined ? {} : { provider }),
   };
 }
 
@@ -732,6 +842,7 @@ export interface ChangeIssuanceFailureEvidence {
   /** Optional typed classification retained when a trusted boundary can prove it. */
   readonly reason?: ChangeEffectFailureReason;
   readonly status?: number;
+  readonly provider?: ChangeEffectFailureProviderDiagnostic;
 }
 
 export const CHANGE_ISSUANCE_COMPENSATION_STATUSES = Object.freeze(["required", "succeeded", "failed"] as const);
@@ -985,7 +1096,7 @@ const CHANGE_ISSUANCE_VERIFICATION_KEYS = new Set([
 ]);
 const CHANGE_ISSUANCE_PULL_REQUEST_KEYS = new Set(["required", "number"]);
 const CHANGE_ISSUANCE_ATTEMPT_KEYS = new Set(["effect", "status", "evidence"]);
-const CHANGE_ISSUANCE_FAILURE_KEYS = new Set(["effect", "code", "message", "reason", "status"]);
+const CHANGE_ISSUANCE_FAILURE_KEYS = new Set(["effect", "code", "message", "reason", "status", "provider"]);
 const CHANGE_ISSUANCE_FAILURE_RECORD_KEYS = new Set(["attemptedEffects", "failure", "projection"]);
 const CHANGE_ISSUANCE_COMPENSATION_PLAN_KEYS = new Set([
   "version",
@@ -4556,11 +4667,12 @@ function validateChangeIssuanceFailureEvidence(
     diagnostics,
   );
   let classification: ChangeEffectFailureClassification | undefined;
-  if (input.reason !== undefined) {
+  if (input.reason !== undefined || input.status !== undefined || input.provider !== undefined) {
     try {
       classification = normalizeChangeEffectFailureClassification({
-        reason: input.reason,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
         ...(input.status === undefined ? {} : { status: input.status }),
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
       });
     } catch {
       addDiagnostic(

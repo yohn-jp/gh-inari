@@ -4,6 +4,7 @@ import type {
   ChangeDiagnostic,
   ChangeEffect,
   ChangeEffectFailureReason,
+  ChangeEffectFailureProviderDiagnostic,
   ChangeIssuanceEffectAttempt,
   ChangeProjectionInput,
   ChangeProjectionResult,
@@ -50,6 +51,7 @@ export interface AbortEffectFailureResult {
     readonly message: string;
     readonly reason?: ChangeEffectFailureReason;
     readonly status?: number;
+    readonly provider?: ChangeEffectFailureProviderDiagnostic;
   };
 }
 
@@ -61,6 +63,7 @@ export interface AbortEffectFailure {
   readonly message: string;
   readonly reason?: ChangeEffectFailureReason;
   readonly status?: number;
+  readonly provider?: ChangeEffectFailureProviderDiagnostic;
 }
 
 export interface AbortAdmissionSuccess {
@@ -148,6 +151,7 @@ export interface AbortExecutionServices {
     readonly message: string;
     readonly reason?: ChangeEffectFailureReason;
     readonly status?: number;
+    readonly provider?: ChangeEffectFailureProviderDiagnostic;
   };
   /** Builds the bounded failure returned when recovery evidence cannot be read. */
   readonly recoveryReadFailure: (
@@ -227,6 +231,7 @@ function failedEffect(
     readonly message: string;
     readonly reason?: ChangeEffectFailureReason;
     readonly status?: number;
+    readonly provider?: ChangeEffectFailureProviderDiagnostic;
   },
 ) {
   return {
@@ -235,6 +240,7 @@ function failedEffect(
     message: failure.message,
     ...(failure.reason === undefined ? {} : { reason: failure.reason }),
     ...(failure.status === undefined ? {} : { status: failure.status }),
+    ...(failure.provider === undefined ? {} : { provider: failure.provider }),
   } satisfies AbortEffectFailure;
 }
 

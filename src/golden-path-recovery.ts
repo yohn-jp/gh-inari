@@ -10,10 +10,15 @@ import {
   validateChangeIssuanceRecoveryPlan,
   validateChangeTransitionRecoveryPlan,
   type ChangeRecoveryPlan,
+  type ChangeIssuanceFailureEvidence,
   type ChangeProjectionResult,
   type ChangeTransitionRecoveryPlan,
 } from "./change.js";
-import type { ChangeRemoteExecutionEvidence, ChangeRemoteExecutionResult } from "./change-executor.js";
+import type {
+  ChangeRemoteExecutionEvidence,
+  ChangeRemoteExecutionFailureEvidence,
+  ChangeRemoteExecutionResult,
+} from "./change-executor.js";
 import {
   GOLDEN_PATH_ACTION_OWNERS,
   GOLDEN_PATH_AUTOMATIC_CLEANUP,
@@ -199,6 +204,17 @@ function projectionFor(input: GoldenPathRecoveryInput): ChangeProjectionResult |
   return input.recoveryPlan?.failureEvidence.projection;
 }
 
+function failureEvidenceFor(failure: ChangeIssuanceFailureEvidence): ChangeRemoteExecutionFailureEvidence {
+  return {
+    kind: failure.effect.kind,
+    code: failure.code,
+    message: failure.message,
+    ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+    ...(failure.status === undefined ? {} : { status: failure.status }),
+    ...(failure.provider === undefined ? {} : { provider: failure.provider }),
+  };
+}
+
 function validateRecoveryPlan(
   input: unknown,
 ): { readonly valid: true; readonly plan: ChangeRecoveryPlan } | { readonly valid: false } {
@@ -242,11 +258,7 @@ function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvide
         ...(attempt.evidence?.kind === "CREATE_BRANCH" ? { createdCommitSha: attempt.evidence.createdCommitSha } : {}),
       })),
       ...(plan.compensation.status === "succeeded" ? { compensation: "succeeded" as const } : {}),
-      failure: {
-        kind: plan.failureEvidence.failure.effect.kind,
-        code: plan.failureEvidence.failure.code,
-        message: plan.failureEvidence.failure.message,
-      },
+      failure: failureEvidenceFor(plan.failureEvidence.failure),
     };
   }
   const transition = plan.transition.request.transition;
@@ -260,11 +272,7 @@ function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvide
       status: attempt.status,
       ...(attempt.evidence?.kind === "CREATE_BRANCH" ? { createdCommitSha: attempt.evidence.createdCommitSha } : {}),
     })),
-    failure: {
-      kind: plan.failureEvidence.failure.effect.kind,
-      code: plan.failureEvidence.failure.code,
-      message: plan.failureEvidence.failure.message,
-    },
+    failure: failureEvidenceFor(plan.failureEvidence.failure),
   };
 }
 

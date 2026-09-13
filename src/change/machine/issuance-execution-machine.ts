@@ -3,6 +3,7 @@ import type {
   ChangeDiagnostic,
   ChangeEffect,
   ChangeEffectFailureReason,
+  ChangeEffectFailureProviderDiagnostic,
   ChangeEffectSuccessEvidence,
   ChangeIssuanceEffectAttempt,
   ChangeIssuanceFailureEvidence,
@@ -56,6 +57,7 @@ export interface IssuanceEffectFailureResult {
     readonly message: string;
     readonly reason?: ChangeEffectFailureReason;
     readonly status?: number;
+    readonly provider?: ChangeEffectFailureProviderDiagnostic;
   };
 }
 
@@ -183,6 +185,7 @@ export interface IssuanceExecutionServices {
     readonly message: string;
     readonly reason?: ChangeEffectFailureReason;
     readonly status?: number;
+    readonly provider?: ChangeEffectFailureProviderDiagnostic;
   };
   readonly semantics: IssuanceExecutionSemantics;
   readonly results: IssuanceExecutionResults;
@@ -280,6 +283,7 @@ function failedEffectEvidence(
     readonly message: string;
     readonly reason?: ChangeEffectFailureReason;
     readonly status?: number;
+    readonly provider?: ChangeEffectFailureProviderDiagnostic;
   },
 ): ChangeIssuanceFailureEvidence {
   return {
@@ -288,6 +292,7 @@ function failedEffectEvidence(
     message: failure.message,
     ...(failure.reason === undefined ? {} : { reason: failure.reason }),
     ...(failure.status === undefined ? {} : { status: failure.status }),
+    ...(failure.provider === undefined ? {} : { provider: failure.provider }),
   };
 }
 

@@ -112,7 +112,7 @@ export function isChangeTrustedExecutorErrorCode(value: unknown): value is Chang
   return CHANGE_TRUSTED_EXECUTOR_ERROR_CODES.includes(value as ChangeTrustedExecutorErrorCode);
 }
 
-/** Bounded trusted-execution failure; provider/API details are discarded. */
+/** Bounded trusted-execution failure; raw provider/API details are discarded. */
 export class ChangeTrustedExecutorError extends Error {
   readonly code: ChangeTrustedExecutorErrorCode;
   readonly diagnostics: readonly ChangeDiagnostic[];
@@ -203,6 +203,7 @@ function executionEvidence(
             message: failure.message,
             ...(failure.reason === undefined ? {} : { reason: failure.reason }),
             ...(failure.status === undefined ? {} : { status: failure.status }),
+            ...(failure.provider === undefined ? {} : { provider: failure.provider }),
           },
         }),
   };
@@ -524,6 +525,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
               message: effectFailure.message,
               ...(effectFailure.reason === undefined ? {} : { reason: effectFailure.reason }),
               ...(effectFailure.status === undefined ? {} : { status: effectFailure.status }),
+              ...(effectFailure.provider === undefined ? {} : { provider: effectFailure.provider }),
             },
           ),
         }),
@@ -660,6 +662,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             message: failure.message,
             ...(failure.reason === undefined ? {} : { reason: failure.reason }),
             ...(failure.status === undefined ? {} : { status: failure.status }),
+            ...(failure.provider === undefined ? {} : { provider: failure.provider }),
           },
         ),
       }),
@@ -688,6 +691,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             message: failure.message,
             ...(failure.reason === undefined ? {} : { reason: failure.reason }),
             ...(failure.status === undefined ? {} : { status: failure.status }),
+            ...(failure.provider === undefined ? {} : { provider: failure.provider }),
           },
         ),
       }),
@@ -800,6 +804,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             message: failed.message,
             ...(failed.reason === undefined ? {} : { reason: failed.reason }),
             ...(failed.status === undefined ? {} : { status: failed.status }),
+            ...(failed.provider === undefined ? {} : { provider: failed.provider }),
           };
           const evidence = executionEvidence(
             abortRequest.operation,
