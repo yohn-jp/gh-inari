@@ -259,6 +259,136 @@ test("prepared PR artifacts preserve metadata and scalar, list, optional, and mu
   assert.equal(prepared.artifact.base, "main");
 });
 
+test("PR free-text fields preserve interior paragraph breaks through render and parse", () => {
+  const fields = {
+    summary: "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
+    linked_issue: "Closes #493",
+    acceptance: ["tests"],
+    scope: "A bounded scope.",
+  };
+  const prepared = preparePullRequestArtifact(governedFixture(pullRequestContractFixture), {
+    fields,
+    metadata: { title: "fix: preserve PR paragraphs", head: "feature", base: "main" },
+  });
+
+  assert.match(prepared.artifact.body, /First paragraph\.\n\nSecond paragraph\.\n\nThird paragraph\./u);
+  assert.deepEqual(parseExistingPullRequestArtifact(pullRequestContractFixture, prepared.artifact.body).values, fields);
+});
+
+test("PR structured list fields ignore blank lines between items and render contiguously", () => {
+  const contract = governedFixture({
+    ...pullRequestContractFixture,
+    sections: [
+      {
+        id: "items",
+        title: "Items",
+        kind: "input",
+        render: { order: 0, headingLevel: 2 },
+        nativeMetadata: { elementType: "heading", sourceId: "items", headingLevel: 2 },
+        fields: [
+          {
+            id: "items",
+            label: "Items",
+            type: "array",
+            selection: "list",
+            required: "unknown",
+            items: { type: "string" },
+            render: { order: 0 },
+            nativeMetadata: { elementType: "pr_section", sourceId: "items" },
+          },
+        ],
+      },
+    ],
+    supplementalConstraints: { fields: [] },
+  });
+  const canonicalBody = renderPullRequestArtifact(contract, { items: ["first", "second"] });
+  const spacedBody = canonicalBody.replace("- first\n- second", "- first\n\n- second");
+  const parsed = parseExistingPullRequestArtifact(contract, spacedBody);
+
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, { items: ["first", "second"] });
+  assert.equal(renderPullRequestArtifact(contract, parsed.values), canonicalBody);
+});
+
+test("PR checklists ignore blank lines between task-list items and render contiguously", () => {
+  const fields = {
+    summary: "A useful summary",
+    linked_issue: "Closes #493",
+    acceptance: ["tests", "build"],
+    scope: "",
+  };
+  const canonicalBody = renderPullRequestArtifact(pullRequestContractFixture, fields);
+  const spacedBody = canonicalBody.replace("- [x] Tests\n- [x] Build", "- [x] Tests\n\n- [x] Build");
+  const parsed = parseExistingPullRequestArtifact(pullRequestContractFixture, spacedBody);
+
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, fields);
+  assert.equal(renderPullRequestArtifact(pullRequestContractFixture, parsed.values), canonicalBody);
+});
+
+test("linked_issue preserves multiple references under its current string representation", () => {
+  const fields = {
+    summary: "A useful summary",
+    linked_issue: "Closes #475\nResolves #463",
+    acceptance: ["tests"],
+  };
+  const body = renderPullRequestArtifact(pullRequestContractFixture, fields);
+  const parsed = parseExistingPullRequestArtifact(pullRequestContractFixture, body);
+
+  assert.match(body, /Closes #475\nResolves #463/u);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, fields);
+});
+
+test("PR HTML comments and placeholders remain non-semantic during parsing", () => {
+  const contract = governedFixture(
+    parsePullRequestTemplate(
+      [
+        "<!-- Repository guidance -->",
+        "",
+        "## Summary",
+        "<!-- Explain the change. -->",
+        "",
+        "## Validation",
+        "",
+        "<!-- Choose completed items. -->",
+        "Select completed items:",
+        "",
+        "- [ ] Tests",
+        "- [ ] Build",
+        "",
+      ].join("\n"),
+      {
+        id: "pull-request-default:.github/PULL_REQUEST_TEMPLATE.md",
+        type: "pull-request-default",
+        kind: "pull-request",
+        name: "default",
+        path: ".github/PULL_REQUEST_TEMPLATE.md",
+      },
+    ),
+  );
+  const body = [
+    "<!-- Repository guidance -->",
+    "",
+    "## Summary",
+    "<!-- Explain the change. -->",
+    "A useful summary",
+    "",
+    "## Validation",
+    "",
+    "<!-- Choose completed items. -->",
+    "Select completed items:",
+    "",
+    "- [x] Tests",
+    "- [ ] Build",
+    "",
+  ].join("\n");
+  const parsed = parseExistingPullRequestArtifact(contract, body);
+
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, { summary: "A useful summary", validation: ["tests"] });
+});
+
 test("unsafe multi-select labels are rejected at the canonical boundary", () => {
   const contract = governedFixture({
     irVersion: CANONICAL_IR_VERSION,
