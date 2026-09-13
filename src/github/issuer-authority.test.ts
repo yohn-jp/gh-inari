@@ -84,6 +84,14 @@ function successEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
         baseBranch: effect.baseBranch,
         createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
       };
+    case "CREATE_PROVENANCE_COMMIT":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        rootIssue: effect.rootIssue,
+        path: effect.path,
+        createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
+      };
     case "CREATE_PULL_REQUEST":
       return {
         kind: effect.kind,

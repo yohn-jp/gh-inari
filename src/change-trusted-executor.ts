@@ -174,7 +174,9 @@ function effectEvidence(attempts: readonly ChangeIssuanceEffectAttempt[]): reado
   return attempts.map((attempt) => ({
     kind: attempt.effect.kind,
     status: attempt.status,
-    ...(attempt.evidence?.kind === "CREATE_BRANCH" ? { createdCommitSha: attempt.evidence.createdCommitSha } : {}),
+    ...(attempt.evidence?.kind === "CREATE_BRANCH" || attempt.evidence?.kind === "CREATE_PROVENANCE_COMMIT"
+      ? { createdCommitSha: attempt.evidence.createdCommitSha }
+      : {}),
   }));
 }
 

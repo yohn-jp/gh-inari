@@ -4,6 +4,7 @@
 // consumer tree; the checkout is used only to produce the tarball and read its
 // expected package metadata.
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -448,6 +449,27 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
 
 function prepareGovernedConsumer(consumerDirectory) {
   fs.cpSync(path.join(repoRoot, ".github"), path.join(consumerDirectory, ".github"), { recursive: true });
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+  const publicJwk = publicKey.export({ format: "jwk" });
+  const runtimeAuthorityId = "packed-certification";
+  const runtimeAuthority = {
+    capabilityCeiling: ["change.implement"],
+    id: runtimeAuthorityId,
+    key: { crv: "Ed25519", kty: "OKP", x: publicJwk.x },
+    kind: "runtime-authority",
+    maxSessionTtlSeconds: 3_600,
+    notAfter: null,
+    notBefore: "2020-01-01T00:00:00Z",
+    status: "active",
+    version: 1,
+  };
+  const authorityDirectory = path.join(consumerDirectory, ".github", "inari", "authorities");
+  fs.mkdirSync(authorityDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(authorityDirectory, `${runtimeAuthorityId}.json`),
+    `${JSON.stringify(runtimeAuthority)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   run("git", ["init", "--quiet"], { cwd: consumerDirectory });
   run("git", ["config", "user.name", "packed-certification"], { cwd: consumerDirectory });
   run("git", ["config", "user.email", "packed-certification@example.invalid"], { cwd: consumerDirectory });
@@ -455,7 +477,11 @@ function prepareGovernedConsumer(consumerDirectory) {
   run("git", ["commit", "--quiet", "-m", "controlled governance generation"], { cwd: consumerDirectory });
   const workflowSha = run("git", ["rev-parse", "HEAD"], { cwd: consumerDirectory }).stdout.trim();
   if (!/^[0-9a-f]{40}$/u.test(workflowSha)) fail("controlled consumer governance commit has no exact SHA");
-  return workflowSha;
+  return {
+    workflowSha,
+    runtimeAuthorityId,
+    runtimePrivateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  };
 }
 
 function installControlledGh(certificationRoot) {
@@ -867,7 +893,8 @@ function main() {
     const packageData = validateInstalledPackage(installedPackageDirectory, consumerDirectory, packageJson);
     const binDirectory = path.join(consumerDirectory, "node_modules", ".bin");
     const installedLauncher = path.join(binDirectory, "inari");
-    const workflowSha = prepareGovernedConsumer(consumerDirectory);
+    const governedConsumer = prepareGovernedConsumer(consumerDirectory);
+    const workflowSha = governedConsumer.workflowSha;
     const { issueInput } = createGoldenPathInputs(certificationRoot);
     const renderedIssue = jsonOutput(
       invoke(installedLauncher, ["issue", "render", "--template", "feature", "--from", issueInput, "--json"], {
@@ -887,6 +914,8 @@ function main() {
       INARI_PACKED_PACKAGE_ROOT: installedPackageDirectory,
       INARI_PACKED_CONSUMER_ROOT: consumerDirectory,
       INARI_PACKED_PROVIDER_STATE: statePath,
+      INARI_RUNTIME_AUTHORITY_ID: governedConsumer.runtimeAuthorityId,
+      INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: governedConsumer.runtimePrivateKeyPem,
       PATH: boundedPath(binDirectory, externalExecutables, [controlledGh]),
     };
     const launcherChecks = checkInstalledLaunchers(

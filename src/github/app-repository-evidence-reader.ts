@@ -11,7 +11,10 @@
  * that consume the reader this module produces.
  */
 
-import type { GitHubAppRepositoryReadCapability } from "./app-installation-credential-broker.js";
+import type {
+  GitHubAppRepositoryReadCapability,
+  GitHubAppRepositoryReadTransport,
+} from "./app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "./types.js";
 import type { RuntimeAuthoritySourceReader } from "../agent-authority/runtime-authority-trust.js";
@@ -45,13 +48,13 @@ function isBoundedProviderText(value: unknown, maximum: number): value is string
 }
 
 async function readProvider(
-  capability: GitHubAppRepositoryReadCapability,
+  transport: GitHubAppRepositoryReadTransport,
   repository: GitHubChangeEffectRepository,
   path: string,
 ): Promise<Record<string, unknown>> {
   let response: { readonly status: number; readonly body?: unknown };
   try {
-    response = await capability.transport.request({ hostname: repository.hostname, method: "GET", path });
+    response = await transport.request({ hostname: repository.hostname, method: "GET", path });
   } catch {
     fail();
   }
@@ -72,8 +75,8 @@ function repositoryPath(repository: GitHubChangeEffectRepository, suffix = ""): 
  * evidence) -- the same acquisition surface, reused by every consumer that
  * only needs bounded repository-default-branch reads.
  */
-export function createAppRepositoryEvidenceReader(
-  capability: GitHubAppRepositoryReadCapability,
+export function createRepositoryEvidenceReader(
+  transport: GitHubAppRepositoryReadTransport,
   repository: GitHubChangeEffectRepository,
   identity: IssuerRepositoryIdentity,
 ): RuntimeAuthoritySourceReader {
@@ -81,7 +84,7 @@ export function createAppRepositoryEvidenceReader(
   return {
     resolveRepositoryContext: async () => context,
     getRepositoryDefaultBranch: async () => {
-      const body = await readProvider(capability, repository, repositoryPath(repository));
+      const body = await readProvider(transport, repository, repositoryPath(repository));
       if (!isBoundedProviderText(body.default_branch, MAX_REPOSITORY_REF_LENGTH)) fail();
       return body.default_branch;
     },
@@ -89,7 +92,7 @@ export function createAppRepositoryEvidenceReader(
       if (!isBoundedProviderText(branch, MAX_REPOSITORY_REF_LENGTH)) fail();
       let response: { readonly status: number; readonly body?: unknown };
       try {
-        response = await capability.transport.request({
+        response = await transport.request({
           hostname: repository.hostname,
           method: "GET",
           path: repositoryPath(repository, `git/ref/heads/${encodeURIComponent(branch)}`),
@@ -113,7 +116,7 @@ export function createAppRepositoryEvidenceReader(
     getRepositoryTree: async (ref: string): Promise<RepositoryTree> => {
       if (!isBoundedProviderText(ref, MAX_REPOSITORY_SHA_LENGTH)) fail();
       const body = await readProvider(
-        capability,
+        transport,
         repository,
         repositoryPath(repository, `git/trees/${encodeURIComponent(ref)}?recursive=1`),
       );
@@ -135,7 +138,7 @@ export function createAppRepositoryEvidenceReader(
     getRepositoryBlob: async (sha: string): Promise<string> => {
       if (!isBoundedProviderText(sha, MAX_REPOSITORY_SHA_LENGTH)) fail();
       const body = await readProvider(
-        capability,
+        transport,
         repository,
         repositoryPath(repository, `git/blobs/${encodeURIComponent(sha)}`),
       );
@@ -156,6 +159,15 @@ export function createAppRepositoryEvidenceReader(
       }
     },
   };
+}
+
+/** Build the same reader over a credential-bound App read capability. */
+export function createAppRepositoryEvidenceReader(
+  capability: GitHubAppRepositoryReadCapability,
+  repository: GitHubChangeEffectRepository,
+  identity: IssuerRepositoryIdentity,
+): RuntimeAuthoritySourceReader {
+  return createRepositoryEvidenceReader(capability.transport, repository, identity);
 }
 
 function repositoryContext(identity: IssuerRepositoryIdentity): RepositoryContext {

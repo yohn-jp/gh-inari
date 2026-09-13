@@ -97,6 +97,44 @@ function sha1Blob(source) {
   return crypto.createHash("sha1").update(`blob ${bytes.byteLength}\0`).update(bytes).digest("hex");
 }
 
+const CONTROLLED_BASE_TREE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+function sha1GitObject(kind, value) {
+  return crypto.createHash("sha1").update(`${kind}\0${value}`, "utf8").digest("hex");
+}
+
+function initializeGitObjects(state, governance) {
+  if (!isRecord(state.gitBlobs)) state.gitBlobs = {};
+  if (!isRecord(state.gitTrees)) state.gitTrees = {};
+  if (!isRecord(state.gitCommits)) state.gitCommits = {};
+  const entries = governance.entries.map((entry) => ({
+    path: entry.path,
+    mode: "100644",
+    type: "blob",
+    sha: entry.sha,
+  }));
+  for (const [sha, source] of governance.blobs) state.gitBlobs[sha] = source;
+  state.gitTrees[CONTROLLED_BASE_TREE_SHA] ??= entries;
+  state.gitCommits[BASE_SHA] ??= {
+    sha: BASE_SHA,
+    treeSha: CONTROLLED_BASE_TREE_SHA,
+    parents: [],
+  };
+}
+
+function treeEntries(state, refOrSha) {
+  if (
+    refOrSha === BASE_BRANCH ||
+    refOrSha === `refs/heads/${BASE_BRANCH}` ||
+    refOrSha === state.branches?.[BASE_BRANCH] ||
+    refOrSha === state.workflowSha
+  ) {
+    return { sha: CONTROLLED_BASE_TREE_SHA, entries: state.gitTrees[CONTROLLED_BASE_TREE_SHA] };
+  }
+  const entries = state.gitTrees?.[refOrSha];
+  return entries === undefined ? undefined : { sha: refOrSha, entries };
+}
+
 function governanceEntries(consumerRoot) {
   const root = path.join(consumerRoot, ".github");
   if (!fs.existsSync(root)) throw new Error("consumer governance source is missing");
@@ -322,6 +360,7 @@ function repositoryApi(argv, state) {
 
 function createProviderServer(state, statePath, consumerRoot) {
   const governance = governanceEntries(consumerRoot);
+  initializeGitObjects(state, governance);
   const server = http.createServer(async (request, response) => {
     try {
       const { parsed, parts } = endpointParts(request.url ?? "/");
@@ -364,16 +403,27 @@ function createProviderServer(state, statePath, consumerRoot) {
           sendJson(response, 200, { errors: [{ message: "invalid controlled ref update" }] });
           return;
         }
-        if (consumeDeleteFailure(state, statePath, branch)) {
-          sendJson(response, 200, { errors: [{ message: "controlled one-shot delete failure" }] });
-          return;
-        }
         if (state.branches?.[branch] === undefined) {
           sendJson(response, 200, { errors: [{ message: "controlled branch is absent" }] });
           return;
         }
         if (state.branches[branch] !== update.beforeOid) {
           sendJson(response, 200, { errors: [{ message: "controlled branch commit mismatch" }] });
+          return;
+        }
+        const afterOid = typeof update.afterOid === "string" ? update.afterOid : "";
+        if (afterOid !== "0".repeat(40)) {
+          if (!/^[0-9a-f]{40}$/u.test(afterOid)) {
+            sendJson(response, 200, { errors: [{ message: "invalid controlled ref update" }] });
+            return;
+          }
+          state.branches[branch] = afterOid;
+          stateChanged(statePath, state);
+          sendJson(response, 200, { data: { updateRefs: { clientMutationId: null } } });
+          return;
+        }
+        if (consumeDeleteFailure(state, statePath, branch)) {
+          sendJson(response, 200, { errors: [{ message: "controlled one-shot delete failure" }] });
           return;
         }
         delete state.branches[branch];
@@ -408,16 +458,20 @@ function createProviderServer(state, statePath, consumerRoot) {
         sendJson(response, 200, refs);
         return;
       }
+      if (request.method === "GET" && resource[0] === "git" && resource[1] === "commits" && resource.length === 3) {
+        const commit = state.gitCommits?.[resource[2]];
+        if (commit === undefined) sendJson(response, 404, { message: "not found" });
+        else sendJson(response, 200, { sha: commit.sha, tree: { sha: commit.treeSha }, parents: commit.parents });
+        return;
+      }
       if (request.method === "GET" && resource[0] === "git" && resource[1] === "trees" && resource.length === 3) {
-        sendJson(response, 200, {
-          sha: state.workflowSha,
-          truncated: false,
-          tree: governance.entries,
-        });
+        const tree = treeEntries(state, resource[2]);
+        if (tree === undefined) sendJson(response, 404, { message: "not found" });
+        else sendJson(response, 200, { sha: tree.sha, truncated: false, tree: tree.entries });
         return;
       }
       if (request.method === "GET" && resource[0] === "git" && resource[1] === "blobs" && resource.length === 3) {
-        const source = governance.blobs.get(resource[2]);
+        const source = state.gitBlobs?.[resource[2]];
         if (source === undefined) sendJson(response, 404, { message: "not found" });
         else
           sendJson(response, 200, {
@@ -522,6 +576,77 @@ function createProviderServer(state, statePath, consumerRoot) {
           });
         return;
       }
+      if (request.method === "POST" && resource[0] === "git" && resource[1] === "blobs" && resource.length === 2) {
+        const input = await jsonRequest(request);
+        if (!isRecord(input) || typeof input.content !== "string" || input.encoding !== "base64") {
+          sendJson(response, 422, { message: "invalid blob" });
+          return;
+        }
+        const source = Buffer.from(input.content, "base64").toString("utf8");
+        const sha = sha1Blob(source);
+        state.gitBlobs[sha] = source;
+        stateChanged(statePath, state);
+        sendJson(response, 201, { sha });
+        return;
+      }
+      if (request.method === "POST" && resource[0] === "git" && resource[1] === "trees" && resource.length === 2) {
+        const input = await jsonRequest(request);
+        const baseTree =
+          isRecord(input) && typeof input.base_tree === "string" ? state.gitTrees[input.base_tree] : undefined;
+        const updates = isRecord(input) && Array.isArray(input.tree) ? input.tree : undefined;
+        if (baseTree === undefined || updates === undefined) {
+          sendJson(response, 422, { message: "invalid tree" });
+          return;
+        }
+        const entries = [...baseTree];
+        for (const update of updates) {
+          if (
+            !isRecord(update) ||
+            typeof update.path !== "string" ||
+            update.type !== "blob" ||
+            update.mode !== "100644" ||
+            (update.sha !== null && typeof update.sha !== "string")
+          ) {
+            sendJson(response, 422, { message: "invalid tree entry" });
+            return;
+          }
+          const existingIndex = entries.findIndex((entry) => entry.path === update.path);
+          if (update.sha === null) {
+            if (existingIndex >= 0) entries.splice(existingIndex, 1);
+          } else {
+            const entry = { path: update.path, mode: update.mode, type: update.type, sha: update.sha };
+            if (existingIndex >= 0) entries[existingIndex] = entry;
+            else entries.push(entry);
+          }
+        }
+        entries.sort((left, right) => left.path.localeCompare(right.path));
+        const sha = sha1GitObject("tree", JSON.stringify(entries));
+        state.gitTrees[sha] = entries;
+        stateChanged(statePath, state);
+        sendJson(response, 201, { sha });
+        return;
+      }
+      if (request.method === "POST" && resource[0] === "git" && resource[1] === "commits" && resource.length === 2) {
+        const input = await jsonRequest(request);
+        if (
+          !isRecord(input) ||
+          typeof input.message !== "string" ||
+          typeof input.tree !== "string" ||
+          !Array.isArray(input.parents) ||
+          input.parents.length !== 1 ||
+          typeof input.parents[0] !== "string" ||
+          state.gitTrees[input.tree] === undefined
+        ) {
+          sendJson(response, 422, { message: "invalid commit" });
+          return;
+        }
+        const commitValue = { message: input.message, tree: input.tree, parents: input.parents };
+        const sha = sha1GitObject("commit", JSON.stringify(commitValue));
+        state.gitCommits[sha] = { sha, treeSha: input.tree, parents: input.parents };
+        stateChanged(statePath, state);
+        sendJson(response, 201, { sha });
+        return;
+      }
       if (request.method === "DELETE" && resource[0] === "git" && resource[1] === "refs" && resource[2] === "heads") {
         const branch = resource.slice(3).join("/");
         if (consumeDeleteFailure(state, statePath, branch)) {
@@ -588,7 +713,7 @@ async function dispatchWorker(state, statePath, requestJson) {
   });
   const address = server.address();
   if (!isRecord(address) || typeof address.port !== "number") throw new Error("controlled provider did not bind");
-  const environment = {
+  const sharedEnvironment = {
     ...process.env,
     GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
     GITHUB_SERVER_URL: `https://${HOST}`,
@@ -599,10 +724,31 @@ async function dispatchWorker(state, statePath, requestJson) {
     GITHUB_WORKFLOW_REF: `${REPOSITORY}/.github/workflows/inari-change-executor.yml@refs/heads/main`,
     GITHUB_WORKFLOW_SHA: state.workflowSha,
     GITHUB_ACTOR: "packed-certification",
+    INARI_CHANGE_REQUEST: requestJson,
+  };
+  // Simulates the separate, narrowly-scoped `runtime-sign` Actions job: the
+  // Runtime private key is available only to this isolated invocation, and
+  // only the resulting signed record crosses into the `execute` environment
+  // below.
+  let signedProvenanceRecord;
+  const parsedRequest = JSON.parse(requestJson);
+  if (isRecord(parsedRequest) && parsedRequest.operation === "issue") {
+    const signer = path.join(packageRoot, "dist", "github", "runtime-sign-cli.js");
+    if (!fs.existsSync(signer))
+      throw new Error("installed Runtime signing entrypoint is missing from the packed package");
+    const signResult = await spawnWorker(process.execPath, [signer], { cwd: consumerRoot, env: sharedEnvironment });
+    if (signResult.status !== 0) {
+      throw new Error(`controlled Runtime signing failed: ${signResult.stderr.slice(0, 512)}`);
+    }
+    signedProvenanceRecord = signResult.stdout.trim();
+  }
+  const { INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: _omittedRuntimePrivateKey, ...executeEnvironment } = sharedEnvironment;
+  const environment = {
+    ...executeEnvironment,
     INARI_ISSUER_APP_ID: "415",
     INARI_ISSUER_INSTALLATION_ID: "415",
     INARI_ISSUER_APP_PRIVATE_KEY: generatePrivateKey(),
-    INARI_CHANGE_REQUEST: requestJson,
+    ...(signedProvenanceRecord === undefined ? {} : { INARI_CHANGE_PROVENANCE_RECORD: signedProvenanceRecord }),
   };
   let workerResult;
   try {

@@ -63,6 +63,14 @@ function effectSuccessEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidenc
         baseBranch: effect.baseBranch,
         createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
       };
+    case "CREATE_PROVENANCE_COMMIT":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        rootIssue: effect.rootIssue,
+        path: effect.path,
+        createdCommitSha: "0123456789abcdef0123456789abcdef01234567",
+      };
     case "CREATE_PULL_REQUEST":
       return {
         kind: effect.kind,
@@ -721,7 +729,7 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
   assert.equal(plan.mode, "create");
   assert.deepEqual(
     plan.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
   );
 
   const effects: string[] = [];
@@ -773,7 +781,7 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
     issue: 239,
   });
 
-  assert.deepEqual(effects, ["CREATE_BRANCH", "CREATE_PULL_REQUEST"]);
+  assert.deepEqual(effects, ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"]);
   assert.equal(result.evidence?.outcome, "verified");
   assert.equal(result.projection.change?.state, "DRAFT");
   assert.equal(result.projection.change?.projection?.pullRequest, 2180);
@@ -1511,7 +1519,7 @@ test("Trusted executor construction rejects a forked target repository", async (
 test("Trusted executor construction succeeds when the workflow ref, target ref, and repository identity are all proven", async () => {
   const executor = await createGitHubActionsChangeExecutor({
     cwd: process.cwd(),
-    request: changeRemoteMutationRequest("issue", 218),
+    request: changeRemoteMutationRequest("ready", 218),
     environment: trustedEnvironment(),
     fetch: repositoryOnlyFetch(false),
   });
@@ -1522,7 +1530,7 @@ test("workflow_dispatch and workflow_call both require a bounded authenticated a
   for (const event of ["workflow_dispatch", "workflow_call"] as const) {
     const executor = await createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeRemoteMutationRequest("ready", 218),
       environment: trustedEnvironment({ GITHUB_EVENT_NAME: event }),
       fetch: repositoryOnlyFetch(false),
     });
@@ -1531,7 +1539,7 @@ test("workflow_dispatch and workflow_call both require a bounded authenticated a
     await assert.rejects(
       createGitHubActionsChangeExecutor({
         cwd: process.cwd(),
-        request: changeRemoteMutationRequest("issue", 218),
+        request: changeRemoteMutationRequest("ready", 218),
         environment: trustedEnvironment({ GITHUB_EVENT_NAME: event, GITHUB_ACTOR: undefined }),
         fetch: repositoryOnlyFetch(false),
       }),

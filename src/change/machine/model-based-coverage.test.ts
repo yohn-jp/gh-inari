@@ -461,6 +461,12 @@ const ABORT_EFFECTS: readonly ChangeEffect[] = [
 const ISSUANCE_EFFECTS: readonly ChangeEffect[] = [
   { kind: "CREATE_BRANCH", branch: "test/351-model-graph", baseBranch: "main" },
   {
+    kind: "CREATE_PROVENANCE_COMMIT",
+    branch: "test/351-model-graph",
+    rootIssue: 351,
+    path: ".inari/provenance/351.json",
+  },
+  {
     kind: "CREATE_PULL_REQUEST",
     branch: "test/351-model-graph",
     baseBranch: "main",

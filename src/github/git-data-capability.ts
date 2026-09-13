@@ -87,6 +87,8 @@ export interface GitHubBranchAdvanceCapability {
   readRef(branch: string): Promise<GitDataRef | undefined>;
   readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }>;
   readTree(refOrSha: string): Promise<GitDataTree>;
+  /** Read a blob only when an idempotent replay must verify existing content. */
+  readonly readBlob?: (sha: string) => Promise<string>;
   createBlob(input: GitDataBlobInput): Promise<{ readonly sha: string }>;
   createTree(input: GitDataTreeInput): Promise<{ readonly sha: string }>;
   createCommit(input: GitDataCommitInput): Promise<{ readonly sha: string }>;
@@ -215,6 +217,21 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     const body = await this.#request("GET", `${this.#repositoryPath()}/git/commits/${sha}`, undefined, 200);
     if (body.sha !== sha || !isRecord(body.tree) || !validSha(body.tree.sha)) throw new GitDataCapabilityError();
     return Object.freeze({ sha, treeSha: body.tree.sha });
+  }
+
+  async readBlob(sha: string): Promise<string> {
+    if (!validSha(sha)) throw new GitDataCapabilityError();
+    const body = await this.#request("GET", `${this.#repositoryPath()}/git/blobs/${sha}`, undefined, 200);
+    if (body.sha !== sha || body.encoding !== "base64" || typeof body.content !== "string") {
+      throw new GitDataCapabilityError();
+    }
+    const content = body.content.replace(/\s/gu, "");
+    if (!validBase64(content)) throw new GitDataCapabilityError();
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(content, "base64"));
+    } catch {
+      throw new GitDataCapabilityError();
+    }
   }
 
   async createBlob(input: GitDataBlobInput): Promise<{ readonly sha: string }> {

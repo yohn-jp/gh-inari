@@ -129,6 +129,35 @@ export function generateRuntimeAuthorityKeyPair(): RuntimeAuthorityKeyPair {
   }
 }
 
+/**
+ * Import the trusted Runtime Authority's existing PKCS#8 PEM secret without
+ * changing the key format used by the file-backed runtime key mechanism.
+ */
+export function importRuntimeAuthorityPrivateKey(pem: string): KeyObject {
+  if (
+    typeof pem !== "string" ||
+    pem.length === 0 ||
+    Buffer.byteLength(pem, "utf8") > MAX_RUNTIME_PRIVATE_KEY_FILE_BYTES
+  ) {
+    throw safeKeyError(
+      "RUNTIME_AUTHORITY_KEY_INVALID_PRIVATE_KEY",
+      "Runtime Authority private key is too large or empty.",
+    );
+  }
+  try {
+    const privateKey = createPrivateKey({ key: pem, format: "pem", type: "pkcs8" });
+    assertPrivateEd25519Key(privateKey);
+    publicJwkFromKey(privateKey);
+    return privateKey;
+  } catch (error: unknown) {
+    if (error instanceof RuntimeAuthorityKeyError) throw error;
+    throw safeKeyError(
+      "RUNTIME_AUTHORITY_KEY_INVALID_PRIVATE_KEY",
+      "Runtime Authority private key is malformed or not Ed25519.",
+    );
+  }
+}
+
 /** Return only the public JWK, whether the input is a public or private KeyObject or a generated pair. */
 export function exportRuntimeAuthorityPublicKey(key: KeyObject | RuntimeAuthorityKeyPair): Ed25519PublicJwk {
   if (isKeyPair(key)) return key.publicKeyJwk;

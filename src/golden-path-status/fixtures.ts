@@ -272,6 +272,21 @@ export class DeterministicIssuer {
           },
         };
         return;
+      case "CREATE_PROVENANCE_COMMIT":
+        // The branch already exists; the provenance commit advances its
+        // generation to the same deterministic head used by the fixture.
+        this.reader.current = {
+          ...this.reader.current,
+          evidence: {
+            ...current,
+            branches: branches(
+              currentBranches.map((candidate) =>
+                candidate.name === effect.branch ? { ...candidate, sha: GOLDEN_PATH_CREATED_COMMIT_SHA } : candidate,
+              ),
+            ),
+          },
+        };
+        return;
       case "CREATE_PULL_REQUEST":
         this.reader.current = {
           ...this.reader.current,
@@ -339,6 +354,14 @@ function successEvidence(effect: ChangeEffect) {
         kind: effect.kind,
         branch: effect.branch,
         baseBranch: effect.baseBranch,
+        createdCommitSha: GOLDEN_PATH_CREATED_COMMIT_SHA,
+      } as const;
+    case "CREATE_PROVENANCE_COMMIT":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        rootIssue: effect.rootIssue,
+        path: effect.path,
         createdCommitSha: GOLDEN_PATH_CREATED_COMMIT_SHA,
       } as const;
     case "CREATE_PULL_REQUEST":

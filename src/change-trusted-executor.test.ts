@@ -75,6 +75,14 @@ function successEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
   switch (effect.kind) {
     case "CREATE_BRANCH":
       return { kind: effect.kind, branch: effect.branch, baseBranch: effect.baseBranch, createdCommitSha };
+    case "CREATE_PROVENANCE_COMMIT":
+      return {
+        kind: effect.kind,
+        branch: effect.branch,
+        rootIssue: effect.rootIssue,
+        path: effect.path,
+        createdCommitSha,
+      };
     case "CREATE_PULL_REQUEST":
       return {
         kind: effect.kind,
@@ -249,7 +257,7 @@ test("trusted issuance plans in Core, applies ordered effects, and verifies a fr
 
   assert.deepEqual(
     issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
   );
   assert.equal(result.evidence?.outcome, "verified");
   assert.equal(result.evidence?.requester, "agent:alice");
@@ -377,7 +385,7 @@ test("branch success and pull-request failure are compensated through a Core rec
 
   assert.deepEqual(
     issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "DELETE_BRANCH"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST", "DELETE_BRANCH"],
   );
   assert.equal(result.evidence?.outcome, "compensated");
   assert.equal(result.evidence?.compensation, "succeeded");
@@ -413,7 +421,7 @@ test("issuance recovery fails closed without deleting an advanced branch", async
   assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
   assert.deepEqual(
     issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
   );
 });
 
@@ -664,7 +672,7 @@ test("a pull request created despite an ambiguous creation response refuses comp
   assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
   assert.deepEqual(
     issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
   );
 });
 
@@ -706,7 +714,7 @@ test("a reread failure after a pull-request creation failure fails closed into r
   );
   assert.deepEqual(
     issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
   );
 });
 
@@ -732,7 +740,7 @@ test("a reread failure after issuance compensation fails closed into recovery", 
   );
   assert.deepEqual(
     issuer.effects.map((effect) => effect.kind),
-    ["CREATE_BRANCH", "CREATE_PULL_REQUEST", "DELETE_BRANCH"],
+    ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST", "DELETE_BRANCH"],
   );
 });
 

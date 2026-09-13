@@ -28,8 +28,11 @@ export interface IssuanceExecutionFailure {
   readonly evidence?: ChangeRemoteExecutionResult["evidence"];
 }
 
-/** The two ordered create-mode issuance effects; DELETE_BRANCH is compensation-only. */
-export type IssuanceCreateEffect = Extract<ChangeEffect, { readonly kind: "CREATE_BRANCH" | "CREATE_PULL_REQUEST" }>;
+/** The three ordered create-mode issuance effects; DELETE_BRANCH is compensation-only. */
+export type IssuanceCreateEffect = Extract<
+  ChangeEffect,
+  { readonly kind: "CREATE_BRANCH" | "CREATE_PROVENANCE_COMMIT" | "CREATE_PULL_REQUEST" }
+>;
 export type IssuanceCompensationEffect = Extract<ChangeEffect, { readonly kind: "DELETE_BRANCH" }>;
 export type IssuanceEffect = IssuanceCreateEffect | IssuanceCompensationEffect;
 
@@ -267,7 +270,11 @@ function identityMismatchFailure(
 
 function createEffectAt(context: IssuanceMachineContext): IssuanceCreateEffect | undefined {
   const effect = context.plan?.effects[context.effectIndex];
-  return effect?.kind === "CREATE_BRANCH" || effect?.kind === "CREATE_PULL_REQUEST" ? effect : undefined;
+  return effect?.kind === "CREATE_BRANCH" ||
+    effect?.kind === "CREATE_PROVENANCE_COMMIT" ||
+    effect?.kind === "CREATE_PULL_REQUEST"
+    ? effect
+    : undefined;
 }
 
 function appendAttempt(

@@ -46,6 +46,7 @@ import {
 } from "./change-executor.js";
 import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import type { ChangeDiagnostic, ChangeProjectionResult } from "./change.js";
+import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
 
 export const CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION = 1 as const;
 
@@ -77,6 +78,8 @@ export type DirectChangeSemanticRequest =
       readonly issue: number;
       readonly semanticPullRequestPlan?: unknown;
       readonly agent?: SessionAgentMetadata;
+      /** Runtime-signed provenance bootstrap record for `change.issue`; never a private key. */
+      readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
     }
   | {
       readonly version: 1;
@@ -115,6 +118,8 @@ export interface CapabilityAuthorizedChangeExecutorFactoryInput {
     readonly operation: "issue" | "ready" | "abort";
     readonly issue: number;
     readonly semanticPullRequestPlan?: unknown;
+    /** Runtime-signed provenance bootstrap record, present only for `operation: "issue"`. */
+    readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
   };
 }
 
@@ -154,7 +159,7 @@ export interface CapabilityAuthorizedSessionExecutor {
   execute(envelope: unknown): Promise<CapabilityAuthorizedSessionExecutionResult>;
 }
 
-const DIRECT_REQUEST_KEYS = new Set(["version", "issue", "semanticPullRequestPlan", "agent"]);
+const DIRECT_REQUEST_KEYS = new Set(["version", "issue", "semanticPullRequestPlan", "agent", "signedProvenanceRecord"]);
 const DIRECT_NON_ISSUE_KEYS = new Set(["version", "issue", "agent"]);
 const AGENT_KEYS = new Set(["name", "version", "runtime", "product"]);
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
@@ -219,11 +224,24 @@ function parseDirectRequest(
   }
   const agent = parseAgent(input.agent);
   if (operation === "change.issue") {
+    let signedProvenanceRecord: SignedChangeProvenanceRecord | undefined;
+    if (hasOwn(input, "signedProvenanceRecord")) {
+      // Shape/signature validity is re-verified downstream against the
+      // repository-trusted Runtime Authority; this only rejects structurally
+      // invalid input early, matching how other optional fields here defer
+      // deeper semantic validation to their owning authority.
+      const validation = validateChangeProvenanceRecord(input.signedProvenanceRecord);
+      if (!validation.valid || validation.record === undefined) {
+        throw new TypeError("Direct Change request is invalid.");
+      }
+      signedProvenanceRecord = validation.record;
+    }
     return Object.freeze({
       version: 1,
       issue: input.issue,
       ...(hasOwn(input, "semanticPullRequestPlan") ? { semanticPullRequestPlan: input.semanticPullRequestPlan } : {}),
       ...(agent === undefined ? {} : { agent }),
+      ...(signedProvenanceRecord === undefined ? {} : { signedProvenanceRecord }),
     });
   }
   if (hasOwn(input, "semanticPullRequestPlan")) throw new TypeError("Direct Change request is invalid.");
@@ -578,8 +596,19 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     let app = this.#options.app;
     if (this.#options.createChangeExecutor !== undefined) {
       try {
+        const factoryRequest = {
+          ...request,
+          ...(operation === "change.issue" && "signedProvenanceRecord" in directRequest
+            ? { signedProvenanceRecord: directRequest.signedProvenanceRecord }
+            : {}),
+        };
         const created = appFromFactory(
-          await this.#options.createChangeExecutor({ context, execution: executionContext, admission, request }),
+          await this.#options.createChangeExecutor({
+            context,
+            execution: executionContext,
+            admission,
+            request: factoryRequest,
+          }),
         );
         executor = created.executor;
         app = created.app ?? app;

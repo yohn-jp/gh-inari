@@ -19,6 +19,7 @@ import {
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
   type GitHubChangeEffectSuccessEvidence,
+  type GitHubChangeProvenanceSignerOptions,
   type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import {
@@ -390,6 +391,8 @@ export interface GitHubAppInstallationCredentialBrokerOptions {
   readonly now?: () => Date;
   readonly failure?: (stage: GitHubAppCredentialFailureStage) => Error;
   readonly mutationFailure?: (effect: ChangeEffect) => Error;
+  /** Trusted Runtime signer used only by CREATE_PROVENANCE_COMMIT. */
+  readonly provenance?: GitHubChangeProvenanceSignerOptions;
   /** Bounded deadline applied to every provider request. Defaults to 10s; hard ceiling 30s. */
   readonly requestTimeoutMs?: number;
 }
@@ -431,6 +434,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
   readonly #now: () => Date;
   readonly #failure: (stage: GitHubAppCredentialFailureStage) => Error;
   readonly #mutationFailure: (effect: ChangeEffect) => Error;
+  readonly #provenance: GitHubChangeProvenanceSignerOptions | undefined;
   readonly #requestTimeoutMs: number;
 
   constructor(options: GitHubAppInstallationCredentialBrokerOptions) {
@@ -450,6 +454,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       });
       this.#repositoryNodeId =
         options.repositoryNodeId === undefined ? undefined : boundedString(options.repositoryNodeId, 255);
+      this.#provenance = options.provenance;
       this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, MAX_API_URL_LENGTH).replace(/\/+$/u, "");
       this.#fetch = options.fetch ?? globalThis.fetch;
       this.#now = options.now ?? (() => new Date());
@@ -526,7 +531,36 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       failure: this.#failure,
       requestTimeoutMs: this.#requestTimeoutMs,
     });
-    const adapter = new GitHubChangeEffectAdapter({ repository: this.#repository, transport });
+    let provenance:
+      | {
+          readonly runtimeAuthority: GitHubChangeProvenanceSignerOptions["runtimeAuthority"];
+          readonly signedRecord: GitHubChangeProvenanceSignerOptions["signedRecord"];
+          readonly gitData: GitHubBranchAdvanceCapabilityImpl;
+        }
+      | undefined;
+    if (this.#provenance !== undefined) {
+      const repositoryNodeId = credential.repositoryNodeId ?? this.#repositoryNodeId;
+      if (repositoryNodeId === undefined) throw this.safeFailure("installation-scope", { reason: "scope" });
+      const capabilityTransport: BranchAdvanceCapabilityTransport = Object.freeze({
+        request: (input: Parameters<BranchAdvanceCapabilityTransport["request"]>[0]) => transport.request(input),
+        requestGraphql: (input: GitDataGraphqlRequest) => transport.requestGraphql(input),
+      });
+      provenance = {
+        ...this.#provenance,
+        gitData: new GitHubBranchAdvanceCapabilityImpl({
+          repository: this.#repository,
+          repositoryId: credential.scope.repository.repositoryId,
+          repositoryNodeId,
+          scope: credential.scope,
+          transport: capabilityTransport,
+        }),
+      };
+    }
+    const adapter = new GitHubChangeEffectAdapter({
+      repository: this.#repository,
+      transport,
+      ...(provenance === undefined ? {} : { provenance }),
+    });
     const capability: IssuerScopedMutationCapability = {
       scope: credential.scope,
       apply: async (effect) => {

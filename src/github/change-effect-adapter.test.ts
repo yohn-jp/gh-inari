@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_CODES,
@@ -11,8 +12,14 @@ import {
   type GitHubChangeEffectCompareAndDeleteRequest,
   type GitHubChangeEffectCompareAndDeleteOutcome,
   type GitHubChangeEffectTransport,
+  type GitHubChangeProvenanceExecutionOptions,
 } from "./index.js";
 import type { ChangeEffect } from "../change.js";
+import { changeProvenanceRecordPath, createChangeProvenanceRecord } from "../change-provenance-record.js";
+import { verifyChangeProvenanceRecord } from "../change-provenance-record.js";
+import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
+import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
+import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
 
 type StubResponse = GitHubChangeEffectResponse | Error;
 
@@ -85,6 +92,153 @@ function readyMutationResponse(number: number, nodeId = "MDExOlB1bGxSZXF1ZXN0OTA
 function adapter(transport: GitHubChangeEffectTransport): GitHubChangeEffectAdapter {
   return new GitHubChangeEffectAdapter({ repository, transport });
 }
+
+function provenanceAdapter(
+  transport: GitHubChangeEffectTransport,
+  provenance: GitHubChangeProvenanceExecutionOptions,
+): GitHubChangeEffectAdapter {
+  return new GitHubChangeEffectAdapter({ repository, transport, provenance });
+}
+
+function blobSha(content: string): string {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1").update(`blob ${bytes.byteLength}\0`).update(bytes).digest("hex");
+}
+
+function provenanceCapability(): {
+  readonly capability: GitHubBranchAdvanceCapability;
+  readonly state: {
+    head: string;
+    entries: Array<{ path: string; mode: "100644"; type: "blob"; sha: string }>;
+    blobs: Map<string, string>;
+  };
+  readonly calls: { blobs: number; trees: number; commits: number; advances: number; reads: number };
+} {
+  const state = {
+    head: "0123456789abcdef0123456789abcdef01234567",
+    entries: [] as Array<{ path: string; mode: "100644"; type: "blob"; sha: string }>,
+    blobs: new Map<string, string>(),
+  };
+  const calls = { blobs: 0, trees: 0, commits: 0, advances: 0, reads: 0 };
+  const capability: GitHubBranchAdvanceCapability = {
+    scope: {} as GitHubBranchAdvanceCapability["scope"],
+    readRef: async () => {
+      calls.reads += 1;
+      return {
+        name: "feat/513-signed-change-provenance-bootstrap",
+        ref: "refs/heads/feat/513-signed-change-provenance-bootstrap",
+        sha: state.head,
+      };
+    },
+    readCommit: async (sha) => ({ sha, treeSha: "abcdefabcdefabcdefabcdefabcdefabcdefabcd" }),
+    readTree: async () => ({ sha: "abcdefabcdefabcdefabcdefabcdefabcdefabcd", entries: state.entries }),
+    readBlob: async (sha) => {
+      const content = state.blobs.get(sha);
+      if (content === undefined) throw new Error("missing blob");
+      return content;
+    },
+    createBlob: async ({ content }) => {
+      calls.blobs += 1;
+      const decoded = Buffer.from(content, "base64").toString("utf8");
+      const sha = blobSha(decoded);
+      state.blobs.set(sha, decoded);
+      return { sha };
+    },
+    createTree: async () => {
+      calls.trees += 1;
+      state.entries = [
+        { path: changeProvenanceRecordPath(513), mode: "100644", type: "blob", sha: [...state.blobs.keys()][0]! },
+      ];
+      return { sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+    },
+    createCommit: async () => {
+      calls.commits += 1;
+      return { sha: "cccccccccccccccccccccccccccccccccccccccc" };
+    },
+    compareAndAdvanceRef: async ({ beforeOid, afterOid }) => {
+      calls.advances += 1;
+      if (beforeOid !== state.head) return { status: "rejected" };
+      state.head = afterOid;
+      return { status: "updated" };
+    },
+  };
+  return { capability, state, calls };
+}
+
+function provenanceOptions(gitData: GitHubBranchAdvanceCapability): GitHubChangeProvenanceExecutionOptions {
+  const runtimeKey = generateRuntimeAuthorityKeyPair();
+  const runtimeAuthority = assertRuntimeAuthority({
+    version: 1,
+    kind: "runtime-authority",
+    id: "runtime-change",
+    key: runtimeKey.publicKeyJwk,
+    status: "active",
+    notBefore: "2026-01-01T00:00:00Z",
+    notAfter: null,
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement"],
+  });
+  // Acting as "the Runtime" here is legitimate in a test: only production
+  // trust domains (the App/executor) must never hold the private key.
+  const signedRecord = createChangeProvenanceRecord({
+    rootIssue: 513,
+    runtimeAuthority,
+    runtimeKey,
+    actor: { type: "agent", name: "Luna" },
+  });
+  return {
+    runtimeAuthority,
+    signedRecord,
+    gitData,
+  };
+}
+
+test("CREATE_PROVENANCE_COMMIT writes, verifies, and replays one signed canonical record", async () => {
+  const git = provenanceCapability();
+  const effect = {
+    kind: "CREATE_PROVENANCE_COMMIT",
+    branch: "feat/513-signed-change-provenance-bootstrap",
+    rootIssue: 513,
+    path: changeProvenanceRecordPath(513),
+  } as const;
+  const options = provenanceOptions(git.capability);
+  const transport = new StubChangeEffectTransport([]);
+
+  const first = await provenanceAdapter(transport, options).execute(effect);
+  assert.deepEqual(first, {
+    status: "succeeded",
+    effect,
+    evidence: {
+      kind: "CREATE_PROVENANCE_COMMIT",
+      branch: effect.branch,
+      rootIssue: effect.rootIssue,
+      path: effect.path,
+      createdCommitSha: "cccccccccccccccccccccccccccccccccccccccc",
+    },
+  });
+  assert.deepEqual(git.calls, { blobs: 1, trees: 1, commits: 1, advances: 1, reads: 2 });
+  const entry = git.state.entries[0];
+  assert.notEqual(entry, undefined);
+  const rendered = git.state.blobs.get(entry!.sha);
+  assert.notEqual(rendered, undefined);
+  assert.deepEqual(verifyChangeProvenanceRecord(rendered!, options.runtimeAuthority), {
+    version: 1,
+    rootIssue: 513,
+    operation: "change.issue",
+    actor: { type: "agent", name: "Luna" },
+  });
+
+  const second = await provenanceAdapter(transport, options).execute(effect);
+  assert.deepEqual(second, first);
+  assert.deepEqual(git.calls, { blobs: 1, trees: 1, commits: 1, advances: 1, reads: 3 });
+
+  const tampered = JSON.parse(rendered!) as Record<string, unknown>;
+  tampered.rootIssue = 514;
+  git.state.blobs.set(entry!.sha, `${JSON.stringify(tampered)}\n`);
+  const rejected = await provenanceAdapter(transport, options).execute(effect);
+  assert.equal(rejected.status, "failed");
+  assert.deepEqual(git.calls, { blobs: 1, trees: 1, commits: 1, advances: 1, reads: 4 });
+});
 
 test("CREATE_BRANCH reads the explicit base ref and creates the exact explicit branch ref", async () => {
   const effect = {

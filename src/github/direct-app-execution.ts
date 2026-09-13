@@ -18,9 +18,11 @@ import {
   type GitHubAppRepositoryReadCapability,
 } from "./app-installation-credential-broker.js";
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
+import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
 import { GitHubActionsEvidenceReader } from "./actions-change-executor.js";
 import { InariIssuerAppAuthority, type IssuerRepositoryIdentity } from "./issuer-authority.js";
-import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
+import type { GitHubChangeEffectRepository, GitHubChangeProvenanceSignerOptions } from "./change-effect-adapter.js";
+import { verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
@@ -51,6 +53,8 @@ export interface DirectAppSessionExecutorConfig {
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly now?: () => Date;
+  /** Repository-trusted Runtime Authority identifier for fresh issuance. Non-secret; verification only. */
+  readonly runtimeAuthorityId?: string;
   /** Bounded deadline applied to every GitHub provider request. Defaults to 10s; hard ceiling 30s. */
   readonly requestTimeoutMs?: number;
 }
@@ -147,15 +151,45 @@ export function createDirectAppSessionExecutor(
       input: CapabilityAuthorizedChangeExecutorFactoryInput,
     ): Promise<CapabilityAuthorizedChangeExecutorFactoryResult> => {
       const target = input.context.repository;
+      let executionBroker = broker;
+      if (input.request.operation === "issue") {
+        if (
+          config.runtimeAuthorityId === undefined ||
+          config.runtimeAuthorityId !== input.context.runtimeAuthority.id ||
+          input.request.signedProvenanceRecord === undefined
+        ) {
+          throw new Error("The repository-trusted Runtime Authority signed provenance record is not configured.");
+        }
+        const signedProvenanceRecord = input.request.signedProvenanceRecord;
+        const provenance = await broker.withRepositoryReadCapability({}, async (capability) => {
+          const runtimeReader = createAppRepositoryEvidenceReader(capability, config.repository, target);
+          const loaded = await resolveRuntimeAuthority(runtimeReader, config.runtimeAuthorityId as string, {
+            ...(config.now === undefined ? {} : { now: config.now() }),
+          });
+          // The App/executor never imports or holds the Runtime private key.
+          // It only verifies the already-signed record against the
+          // repository-trusted Runtime public key.
+          verifyChangeProvenanceRecord(signedProvenanceRecord, loaded.authority);
+          const signer: GitHubChangeProvenanceSignerOptions = {
+            runtimeAuthority: loaded.authority,
+            signedRecord: signedProvenanceRecord,
+          };
+          return signer;
+        });
+        executionBroker = new GitHubAppInstallationCredentialBroker({
+          ...brokerOptions,
+          provenance,
+        });
+      }
       const issuerAuthority = new InariIssuerAppAuthority({
         appId: config.appId,
-        broker,
+        broker: executionBroker,
         ...(config.now === undefined ? {} : { now: config.now }),
       });
       const executor: ChangeRemoteExecutor = {
-        read: (request) => readChangeProjection(broker, config, target, request),
+        read: (request) => readChangeProjection(executionBroker, config, target, request),
         execute: async (request): Promise<ChangeProjectionResult | ChangeRemoteExecutionResult> =>
-          broker.withRepositoryReadCapability({}, async (capability) => {
+          executionBroker.withRepositoryReadCapability({}, async (capability) => {
             const reader = buildReader(capability, config, target, request);
             const trustedExecutor = new TrustedChangeExecutor({
               reader,

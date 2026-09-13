@@ -78,10 +78,21 @@ function branchCreatedPrFailed(plan = issuancePlan()) {
           createdCommitSha,
         } satisfies ChangeEffectSuccessEvidence,
       },
-      { effect: plan.effects[1]!, status: "failed" as const },
+      {
+        effect: plan.effects[1]!,
+        status: "succeeded" as const,
+        evidence: {
+          kind: "CREATE_PROVENANCE_COMMIT",
+          branch: canonicalBranch,
+          rootIssue: identity.rootIssue,
+          path: `.inari/provenance/${identity.rootIssue}.json`,
+          createdCommitSha,
+        } satisfies ChangeEffectSuccessEvidence,
+      },
+      { effect: plan.effects[2]!, status: "failed" as const },
     ],
     failure: {
-      effect: plan.effects[1]!,
+      effect: plan.effects[2]!,
       code: "PULL_REQUEST_CREATE_FAILED",
       message: "The Draft pull request effect failed.",
     },
@@ -102,7 +113,7 @@ test("branch creation success followed by PR creation failure yields explicit br
   assert.deepEqual(plan.transaction, plan.issuance.transaction);
   assert.deepEqual(
     plan.failureEvidence.attemptedEffects.map((attempt) => attempt.status),
-    ["succeeded", "failed"],
+    ["succeeded", "succeeded", "failed"],
   );
   assert.equal(plan.failureEvidence.failure.effect.kind, "CREATE_PULL_REQUEST");
   assert.deepEqual(plan.verification, {
@@ -306,21 +317,27 @@ test("advanced, malformed, or stale generation evidence never produces a deletio
   };
   const missingEvidence = {
     ...base,
-    attemptedEffects: [{ effect: base.issuance.effects[0]!, status: "succeeded" as const }, base.attemptedEffects[1]!],
+    attemptedEffects: [
+      base.attemptedEffects[0]!,
+      { effect: base.issuance.effects[1]!, status: "succeeded" as const },
+      base.attemptedEffects[2]!,
+    ],
   };
   const malformedEvidence = {
     ...base,
     attemptedEffects: [
+      base.attemptedEffects[0]!,
       {
-        ...base.attemptedEffects[0]!,
+        ...base.attemptedEffects[1]!,
         evidence: {
-          kind: "CREATE_BRANCH",
+          kind: "CREATE_PROVENANCE_COMMIT",
           branch: canonicalBranch,
-          baseBranch: canonicalBaseBranch,
+          rootIssue: identity.rootIssue,
+          path: `.inari/provenance/${identity.rootIssue}.json`,
           createdCommitSha: "not-a-sha",
         },
       },
-      base.attemptedEffects[1]!,
+      base.attemptedEffects[2]!,
     ],
   };
   for (const candidate of [advanced, missingEvidence, malformedEvidence]) {
