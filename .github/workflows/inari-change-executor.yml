@@ -35,6 +35,11 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - name: Initialize bounded result
+        run: |
+          mkdir -p "$RUNNER_TEMP/inari-change-result"
+          printf '%s\n' '{"ok":false,"error":{"code":"CHANGE_ACTIONS_RUNTIME_INVALID","message":"Trusted Change runtime preparation failed closed.","details":{"stage":"trusted-execution"}}}' > "$RUNNER_TEMP/inari-change-result/result.json"
+
       - name: Checkout trusted executor source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -50,7 +55,12 @@ jobs:
       - name: Install trusted dependencies
         run: corepack pnpm install --frozen-lockfile --ignore-scripts
 
+      - name: Build trusted executor
+        id: build
+        run: corepack pnpm run build
+
       - name: Execute Core plan
+        if: steps.build.outcome == 'success'
         env:
           INARI_CHANGE_REQUEST: ${{ inputs.request }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -60,15 +70,11 @@ jobs:
           INARI_ISSUER_APP_PRIVATE_KEY: ${{ secrets.INARI_ISSUER_APP_PRIVATE_KEY }}
         run: |
           set +e
-          mkdir -p "$RUNNER_TEMP/inari-change-result"
-          corepack pnpm run build
-          build_status=$?
-          if [ "$build_status" -eq 0 ]; then
-            node dist/github/actions-change-executor.js > "$RUNNER_TEMP/inari-change-result/result.json"
-            execution_status=$?
-          else
-            printf '%s\n' '{"ok":false,"error":{"code":"CHANGE_ACTIONS_RUNTIME_INVALID","message":"Trusted Change execution failed closed.","details":{"stage":"trusted-execution"}}}' > "$RUNNER_TEMP/inari-change-result/result.json"
-            execution_status=$build_status
+          result_path="$RUNNER_TEMP/inari-change-result/result.json"
+          node dist/github/actions-change-executor.js > "$result_path" 2>/dev/null
+          execution_status=$?
+          if [ ! -s "$result_path" ] || [ "$(wc -c < "$result_path")" -gt 262144 ]; then
+            printf '%s\n' '{"ok":false,"error":{"code":"CHANGE_ACTIONS_RUNTIME_INVALID","message":"Trusted Change execution failed closed.","details":{"stage":"trusted-execution"}}}' > "$result_path"
           fi
           exit "$execution_status"
 
