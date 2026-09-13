@@ -378,6 +378,8 @@ test("--help=full prints the complete command and option reference", async () =>
 test("pr sync help exposes the complete canonical --from envelope", async () => {
   const { exitCode, output } = await captureHelp(["pr", "sync", "--help"]);
   assert.equal(exitCode, 0);
+  assert.match(output, /Usage: inari pr sync <number> .*--from <path>/);
+  assert.doesNotMatch(output, /--field/);
   assert.match(output, /fields \(object\)/);
   assert.match(output, /title \(string\)/);
   assert.match(output, /head \(string\)/);
@@ -3966,6 +3968,7 @@ test("--field on a command that does not resolve an artifact input document fail
     ["issue", "get", "1", "--field", "problem=x"],
     ["issue", "check", "1", "--field", "problem=x"],
     ["issue", "normalize", "1", "--field", "problem=x"],
+    ["pr", "sync", "1", "--field", "summary=x"],
     ["template", "list", "--field", "problem=x"],
   ];
   for (const argv of cases) {
@@ -3975,6 +3978,37 @@ test("--field on a command that does not resolve an artifact input document fail
     assert.equal(error?.code, "FIELD_UNSUPPORTED_COMMAND", argv.join(" "));
     assert.equal(error?.path, "--field", argv.join(" "));
   }
+});
+
+test("pr sync rejects the former direct-field dead end before metadata validation", async () => {
+  let adapterCreated = false;
+  const result = await captureJson(
+    [
+      "pr",
+      "sync",
+      "81",
+      "--field",
+      "summary=A summary",
+      "--title",
+      "feat: complete",
+      "--head",
+      "feature",
+      "--base",
+      "main",
+      "--json",
+    ],
+    {
+      createAdapter: () => {
+        adapterCreated = true;
+        throw new Error("direct-field pr sync must be rejected before adapter creation");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  const error = result.output.error as { code?: string; path?: string } | undefined;
+  assert.equal(error?.code, "FIELD_UNSUPPORTED_COMMAND");
+  assert.equal(error?.path, "--field");
+  assert.equal(adapterCreated, false);
 });
 
 test("`issue validate <number> --field ...` does not silently fall back to the existing-artifact path and ignore the field", async () => {

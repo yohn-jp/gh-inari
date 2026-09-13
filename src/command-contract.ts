@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.7.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.8.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -179,6 +179,7 @@ const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "pol
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const OBSERVATION_OPTIONS = ["help", "json", "repository"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
+const PR_SYNC_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
 const CHANGE_PUBLISH_OPTIONS = [...CHANGE_SESSION_OPTIONS, "commit"] as const;
@@ -1009,7 +1010,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "sync",
     ["pr", "sync"],
     "Reconcile an existing PR to a desired semantic state.",
-    [...REMEDIATION_OPTIONS],
+    PR_SYNC_OPTIONS,
     "<number>",
   ),
   command(
@@ -1486,6 +1487,7 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||
         ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from") ||
+        (entry.id === "pr.sync" && id === "from") ||
         (entry.id === "authority.bootstrap" &&
           (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability"));
       const syntax =

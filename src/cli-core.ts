@@ -3393,11 +3393,12 @@ function mergeDirectFields(
 }
 
 /**
- * Resolve one artifact input document from `--from` and/or `--field`, sharing
- * the same candidate/normalization/validation path regardless of source. At
- * least one of the two is required; when both are present, `--from` supplies
- * the base document and direct fields are merged in under a conflict rule
- * that never depends on which flag appeared first in argv.
+ * Resolve one artifact input document from the input modes exposed by the
+ * selected command, sharing the same candidate/normalization/validation path
+ * regardless of source. At least one input source is required; when both are
+ * present, `--from` supplies the base document and direct fields are merged
+ * in under a conflict rule that never depends on which flag appeared first in
+ * argv.
  */
 async function resolveArtifactInputDocument(
   parsed: ParsedArgs,
@@ -3407,7 +3408,11 @@ async function resolveArtifactInputDocument(
 ): Promise<ArtifactInputDocument> {
   const hasFrom = typeof parsed.options.from === "string";
   if (!hasFrom && parsed.fields.length === 0 && !allowEmpty) {
-    throw new CliError("INPUT_REQUIRED", "Use --from <file.json> or --field <name>=<value>.", "--from");
+    throw new CliError(
+      "INPUT_REQUIRED",
+      requirePullRequestSyncInput ? "Use --from <file.json>." : "Use --from <file.json> or --field <name>=<value>.",
+      "--from",
+    );
   }
   const document = hasFrom
     ? await readInputDocument(parsed.options.from, requirePullRequestSyncInput ? parsePullRequestSyncInput : undefined)

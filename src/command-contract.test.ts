@@ -68,6 +68,12 @@ test("unknown upstream command trees stay outside the owned command contract", (
   assert.equal(getCommandForPositionals(["repo", "view"]), undefined);
 });
 
+test("pr sync exposes only its complete --from input mode", () => {
+  const command = getCommandForPositionals(["pr", "sync"]);
+  assert.ok(command);
+  assert.deepEqual(command.optionIds, ["help", "json", "template", "repository", "policy", "from", "dryRun"]);
+});
+
 test("every owned command keeps routing, usage, discovery, and Skill references on one authority", () => {
   const projection = projectCommandContract();
   for (const command of INARI_COMMANDS) {
