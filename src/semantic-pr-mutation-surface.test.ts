@@ -91,7 +91,7 @@ async function captureCli(
   }
 }
 
-test("CLI and MCP expose the same governed PR mutation plan boundary", async () => {
+test("CLI exposes the governed PR mutation plan boundary", async () => {
   const adapter = new ContextAdapter();
   const cliExecutor = new CaptureExecutor();
   const cli = await captureCli(
@@ -110,34 +110,25 @@ test("CLI and MCP expose the same governed PR mutation plan boundary", async () 
     },
     { expectedHead: "head-521", intent: "approve", body: "LGTM", retry: "reject-duplicate" },
   );
+});
 
-  const mcpExecutor = new CaptureExecutor();
-  const server = createInariMcpServer({ adapter, semanticPullRequestMutationExecutor: mcpExecutor, sessionExecutor });
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "inari-pr-mutation-surface-test", version: "1" }, { capabilities: {} });
-  try {
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    const response = await client.callTool({
-      name: "inari_pr_review",
-      arguments: { number: 521, expectedHead: "head-521", intent: "approve", body: "LGTM" },
-    });
-    assert.equal(response.isError, undefined);
-    const content = response.structuredContent as Record<string, unknown>;
-    assert.equal(content.operation, "pr.review");
-    const mcpPlan = content.plan as Record<string, unknown>;
-    const mcpRequest = mcpPlan.request as Record<string, unknown>;
-    assert.deepEqual(
-      {
-        expectedHead: mcpRequest.expectedHead,
-        intent: mcpRequest.intent,
-        body: mcpRequest.body,
-        retry: mcpRequest.retry,
-      },
-      { expectedHead: "head-521", intent: "approve", body: "LGTM", retry: "reject-duplicate" },
-    );
-  } finally {
-    await client.close();
-    await server.close();
+test("MCP does not expose governed PR comment/review/merge writes, with or without a Session executor", async () => {
+  const adapter = new ContextAdapter();
+  for (const options of [{ adapter }, { adapter, sessionExecutor }]) {
+    const server = createInariMcpServer(options);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "inari-pr-mutation-surface-test", version: "1" }, { capabilities: {} });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const listed = await client.listTools();
+      const names = listed.tools.map((tool) => tool.name);
+      for (const mutationTool of ["inari_pr_comment", "inari_pr_review", "inari_pr_merge"]) {
+        assert.ok(!names.includes(mutationTool), mutationTool);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
   }
 });

@@ -264,7 +264,7 @@ async function withClient<T>(callback: (client: Client, transports: SemanticPrTr
   }
 }
 
-test("native MCP exposes one transport-neutral typed semantic PR catalog without a Session executor", async () => {
+test("native MCP exposes one transport-neutral typed semantic PR catalog", async () => {
   await withClient(async (client) => {
     const listed = await client.listTools();
     assert.deepEqual(
@@ -300,7 +300,7 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog without
   });
 });
 
-test("governed PR comment/review/merge tools register only when an embedding supplies a Session executor", async () => {
+test("governed PR comment/review/merge writes are never exposed through MCP, even with a Session executor", async () => {
   const server = createInariMcpServer({
     sessionExecutor: {
       execute: async () => {
@@ -316,10 +316,7 @@ test("governed PR comment/review/merge tools register only when an embedding sup
     const listed = await client.listTools();
     const names = listed.tools.map((tool) => tool.name);
     for (const mutationTool of ["inari_pr_comment", "inari_pr_review", "inari_pr_merge"]) {
-      assert.ok(names.includes(mutationTool), mutationTool);
-      const tool = listed.tools.find((candidate) => candidate.name === mutationTool);
-      assert.equal(tool?.annotations?.readOnlyHint, false, mutationTool);
-      assert.equal(tool?.annotations?.destructiveHint, true, mutationTool);
+      assert.ok(!names.includes(mutationTool), mutationTool);
     }
   } finally {
     await client.close();
