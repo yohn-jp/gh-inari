@@ -17,7 +17,7 @@ Change executor are authoritative. MCP owns protocol translation only.
 
 | Legacy design/work item                                                        | Classification     | Current meaning                                                                                                                                                       |
 | ------------------------------------------------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Native typed MCP tools and transport-neutral semantic contracts                | retained           | MCP may expose Core-backed contract, materialization, preview, observation, drift, status, handoff, and governed PR comment/review/merge operations.                  |
+| Native typed MCP tools and transport-neutral semantic contracts                | retained           | MCP may expose Core-backed contract, materialization, preview, observation, drift, status, and handoff projections. Governed PR comment/review/merge writes are privileged and gated on the same App executor seam as Session-authorized Change execution.                  |
 | Hosted MCP gateway as requester authentication/admission authority             | superseded         | A hosted endpoint may be a deployment adapter, but it cannot decide Session authority or become a trust root.                                                         |
 | Central Runtime/Agent Session registry or requester database                   | obsolete           | Session Certificates and proof-of-possession are verified against repository Runtime trust and current policy; no central registry is required.                       |
 | GitHub Actions as the mandatory privileged execution plane                     | compatibility-only | The existing Actions `ChangeRemoteExecutor` remains for callers that need it or for specialized repository-local execution; it is not the authorization architecture. |
@@ -61,13 +61,13 @@ reinterpret the envelope, and it does not return `gh auth`, PATs, Runtime
 private keys, App keys/JWTs, or installation tokens. The App path returns only
 its bounded execution/provenance result.
 
-The default native MCP server registers the semantic catalog without requiring
-a Session executor. Read-only tools remain available for contract discovery and
-planning, while the governed PR comment/review/merge tools use the same
-versioned Core admission and bounded GitHub provider effects as the CLI. They
-are not raw endpoint wrappers and do not create or mutate Change lifecycle
-state. The separate `inari_change_execute` tool remains available only when an
-embedding explicitly supplies the existing App executor.
+The default native MCP server registers the semantic/read-only catalog without
+requiring a Session executor. This preserves local contract discovery and
+planning for callers that have no privileged authority. A privileged catalog is
+registered only by an embedding that explicitly supplies the existing App
+executor: the `inari_change_execute` bridge, and the governed PR
+comment/review/merge write tools, both gated on the same
+`sessionExecutor` seam.
 
 ## Transport rules
 
@@ -75,9 +75,11 @@ embedding explicitly supplies the existing App executor.
   execution authorities.
 - Read-only MCP tools remain direct Core adapters and do not require Session
   credentials.
-- Governed PR comment, review, and merge tools remain direct Core/provider
-  adapters: they reread execution-time evidence and return typed postcondition
-  results, but they do not replace Session-authorized Change execution.
+- Governed PR comment, review, and merge tools use the same versioned Core
+  admission and bounded GitHub provider effects as the CLI, but MCP does not
+  register them as part of the default/unconditional catalog; they are
+  privileged mutation authority available only through the same
+  embedding-supplied App executor seam as Session-authorized Change execution.
 - Direct App and MCP privileged calls use the same signed request bytes and the
   same production executor; transport metadata cannot enlarge authority.
 - Actions remains available as an explicit compatibility/specialized transport

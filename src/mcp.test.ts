@@ -264,7 +264,7 @@ async function withClient<T>(callback: (client: Client, transports: SemanticPrTr
   }
 }
 
-test("native MCP exposes one transport-neutral typed semantic PR catalog", async () => {
+test("native MCP exposes one transport-neutral typed semantic PR catalog without a Session executor", async () => {
   await withClient(async (client) => {
     const listed = await client.listTools();
     assert.deepEqual(
@@ -287,21 +287,44 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
         "inari_pr_plan",
         "inari_pr_observe",
         "inari_pr_drift",
-        "inari_pr_comment",
-        "inari_pr_review",
-        "inari_pr_merge",
         "inari_golden_path_entry",
         "inari_change_handoff",
       ].sort(),
     );
     for (const tool of listed.tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
-      const mutation = ["inari_pr_comment", "inari_pr_review", "inari_pr_merge"].includes(tool.name);
-      assert.equal(tool.annotations?.readOnlyHint, mutation ? false : true, tool.name);
-      assert.equal(tool.annotations?.destructiveHint, mutation ? true : false, tool.name);
+      assert.equal(tool.annotations?.readOnlyHint, true, tool.name);
+      assert.equal(tool.annotations?.destructiveHint, false, tool.name);
       assert.ok(tool.outputSchema, tool.name);
     }
   });
+});
+
+test("governed PR comment/review/merge tools register only when an embedding supplies a Session executor", async () => {
+  const server = createInariMcpServer({
+    sessionExecutor: {
+      execute: async () => {
+        throw new Error("not used by this test");
+      },
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const listed = await client.listTools();
+    const names = listed.tools.map((tool) => tool.name);
+    for (const mutationTool of ["inari_pr_comment", "inari_pr_review", "inari_pr_merge"]) {
+      assert.ok(names.includes(mutationTool), mutationTool);
+      const tool = listed.tools.find((candidate) => candidate.name === mutationTool);
+      assert.equal(tool?.annotations?.readOnlyHint, false, mutationTool);
+      assert.equal(tool?.annotations?.destructiveHint, true, mutationTool);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
 
 function changeHandoffProjection(draft = true): Record<string, unknown> {

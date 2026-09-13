@@ -9,6 +9,7 @@ import {
   registerSemanticBranchTools,
   registerSemanticIssueTools,
   registerSemanticPullRequestTools,
+  registerSemanticPullRequestMutationTools,
   type NativeChangeDependencies,
 } from "./tools.js";
 import { createMcpSessionAppBridge } from "./session-app-bridge.js";
@@ -37,7 +38,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
     },
     {
       instructions:
-        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, governed pull-request comment/review/merge writes with fresh reread verification, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. When an embedding supplies the existing Session-authorized App executor, the optional Change execution tool forwards signed Session requests to that executor without adding MCP authorization. PR mutation authority is separate from Change lifecycle authority. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative.",
+        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. The default catalog performs no GitHub mutation. When an embedding supplies the existing Session-authorized App executor, the optional Change execution tool forwards signed Session requests to that executor without adding MCP authorization, and the governed pull-request comment/review/merge write tools become available as privileged mutation authority. PR mutation authority is separate from Change lifecycle authority. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative.",
     },
   );
   registerGoldenPathTools(server);
@@ -47,6 +48,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
   registerChangeTools(server, options);
   if (options.sessionExecutor !== undefined) {
     registerSessionAuthorizedChangeTools(server, createMcpSessionAppBridge(options.sessionExecutor));
+    registerSemanticPullRequestMutationTools(server, options);
   }
   return server;
 }

@@ -62,10 +62,15 @@ class FakeMutationProvider implements SemanticPullRequestMutationProvider {
   mergeError: unknown;
   ambiguousMerge = false;
   mergePolicy: GitHubPullRequestMergePolicyEvidence | undefined;
+  actor = "octocat";
   private readCount = 0;
 
   async getRepositoryContext(): Promise<RepositoryContext> {
     return context;
+  }
+
+  async getAuthenticatedUser(): Promise<string> {
+    return this.actor;
   }
 
   async readPullRequest(): Promise<GitHubPullRequest> {
@@ -110,6 +115,7 @@ class FakeMutationProvider implements SemanticPullRequestMutationProvider {
       body,
       state,
       commitId: this.pullRequest.headSha ?? this.pullRequest.head,
+      author: this.actor,
     } as GitHubPullRequestReview;
     this.reviews.push(review);
     return review;
@@ -256,7 +262,7 @@ test("review rejects a stale head before effect and makes exact retry idempotent
   assert.equal(missingImmutableHead.reviewEffects, 0);
 
   const provider = new FakeMutationProvider();
-  provider.reviews.push({ id: 7, body: "LGTM", state: "approved", commitId: "head-521" });
+  provider.reviews.push({ id: 7, body: "LGTM", state: "approved", commitId: "head-521", author: provider.actor });
   const replay = await execute(provider, {
     operation: "review",
     expectedHead: "head-521",
@@ -267,9 +273,29 @@ test("review rejects a stale head before effect and makes exact retry idempotent
   assert.equal(provider.reviewEffects, 0);
 });
 
+test("review duplicate/idempotence classification is bound to the authenticated caller, not any reviewer", async () => {
+  const provider = new FakeMutationProvider();
+  provider.reviews.push({
+    id: 7,
+    body: "LGTM",
+    state: "approved",
+    commitId: "head-521",
+    author: "reviewer-b",
+  });
+  const result = await execute(provider, {
+    operation: "review",
+    expectedHead: "head-521",
+    intent: "approve",
+    body: "LGTM",
+  });
+  assert.equal(result.outcome, "succeeded");
+  assert.equal(provider.reviewEffects, 1);
+  assert.equal(provider.reviews.at(-1)?.author, provider.actor);
+});
+
 test("review duplicate policy is explicit and allow-duplicate verifies the new review", async () => {
   const provider = new FakeMutationProvider();
-  provider.reviews.push({ id: 7, body: "Previous", state: "approved", commitId: "head-521" });
+  provider.reviews.push({ id: 7, body: "Previous", state: "approved", commitId: "head-521", author: provider.actor });
   await rejected(
     provider,
     { operation: "review", expectedHead: "head-521", intent: "approve", body: "Current" },
@@ -393,6 +419,26 @@ test("merge enforces authoritative policy and verifies provider failure, reread 
     "PR_MUTATION_POSTCONDITION_FAILED",
     "failed",
   );
+
+  const missingStrategyEvidence = new FakeMutationProvider();
+  missingStrategyEvidence.mergePullRequest = async (_pullRequest, strategy) => {
+    missingStrategyEvidence.mergeEffects += 1;
+    missingStrategyEvidence.pullRequest = {
+      ...missingStrategyEvidence.pullRequest,
+      state: "closed",
+      merged: true,
+      mergedAt: "2026-09-13T00:00:00Z",
+      mergeMethod: undefined,
+    };
+    return { merged: true, sha: `merge-${strategy}` };
+  };
+  const succeededWithoutStrategyEvidence = await execute(missingStrategyEvidence, {
+    operation: "merge",
+    expectedHead: "head-521",
+    expectedBase: "main",
+    strategy: "merge",
+  });
+  assert.equal(succeededWithoutStrategyEvidence.outcome, "succeeded");
 });
 
 test("ambiguous merge remains recovery-required and a proven merge replay is idempotent", async () => {
@@ -423,4 +469,22 @@ test("ambiguous merge remains recovery-required and a proven merge replay is ide
   });
   assert.equal(second.outcome, "idempotent");
   assert.equal(provider.mergeEffects, 1);
+});
+
+test("a merge already closed without provider strategy evidence is not reported idempotent for an arbitrary requested strategy", async () => {
+  const provider = new FakeMutationProvider();
+  provider.pullRequest = pullRequest({
+    state: "closed",
+    merged: true,
+    mergedAt: "2026-09-13T00:00:00Z",
+    mergeMethod: undefined,
+  });
+  const error = await rejected(
+    provider,
+    { operation: "merge", expectedHead: "head-521", expectedBase: "main", strategy: "squash" },
+    "PR_MUTATION_NOT_OPEN",
+    "blocked",
+  );
+  assert.equal(error.evidence.effect, "not-attempted");
+  assert.equal(provider.mergeEffects, 0);
 });

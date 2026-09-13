@@ -11,6 +11,13 @@ import type {
   SemanticPullRequestMutationPlan,
   SemanticPullRequestMutationResult,
 } from "./semantic-pr-mutation.js";
+import type { CapabilityAuthorizedSessionExecutor } from "./session-authorized-change-executor.js";
+
+const sessionExecutor: CapabilityAuthorizedSessionExecutor = {
+  execute: async () => {
+    throw new Error("not used by this test");
+  },
+};
 
 const context: RepositoryContext = {
   hostname: "github.com",
@@ -105,7 +112,7 @@ test("CLI and MCP expose the same governed PR mutation plan boundary", async () 
   );
 
   const mcpExecutor = new CaptureExecutor();
-  const server = createInariMcpServer({ adapter, semanticPullRequestMutationExecutor: mcpExecutor });
+  const server = createInariMcpServer({ adapter, semanticPullRequestMutationExecutor: mcpExecutor, sessionExecutor });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "inari-pr-mutation-surface-test", version: "1" }, { capabilities: {} });
   try {

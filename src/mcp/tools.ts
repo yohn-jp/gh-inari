@@ -1577,7 +1577,7 @@ export function registerGoldenPathTools(server: McpServer): readonly RegisteredT
   return Object.freeze([status]);
 }
 
-/** Register the canonical semantic PR tool catalog on any MCP transport. */
+/** Register the read-only semantic PR contract/materialize/plan/observe/drift catalog on any MCP transport. */
 export function registerSemanticPullRequestTools(
   server: McpServer,
   dependencies: NativeSemanticPullRequestDependencies = {},
@@ -1642,11 +1642,28 @@ export function registerSemanticPullRequestTools(
     },
     async (input: SemanticPullRequestDriftInput) => handlePullRequestDrift(input, dependencies),
   );
-  const mutationAnnotations: ToolAnnotations = Object.freeze({
-    readOnlyHint: false,
-    destructiveHint: true,
-    openWorldHint: true,
-  });
+  return Object.freeze([contract, materialize, plan, observe, drift]);
+}
+
+const PR_MUTATION_ANNOTATIONS: ToolAnnotations = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: true,
+  openWorldHint: true,
+});
+
+/**
+ * Register the governed PR comment/review/merge write tools.
+ *
+ * These are privileged mutation authority, not the transport-neutral
+ * read-only catalog: they are registered only by an embedding that
+ * explicitly supplies the existing Session-authorized App executor, the
+ * same gate as `registerSessionAuthorizedChangeTools`. They must never be
+ * added to the default/unconditional MCP catalog.
+ */
+export function registerSemanticPullRequestMutationTools(
+  server: McpServer,
+  dependencies: NativeSemanticPullRequestDependencies = {},
+): readonly RegisteredTool[] {
   const comment = server.registerTool(
     "inari_pr_comment",
     {
@@ -1655,7 +1672,7 @@ export function registerSemanticPullRequestTools(
         "Create exactly one bounded top-level pull-request conversation comment through Inari Core, then reread and verify the recorded comment. This is a write authority with typed failure evidence.",
       inputSchema: semanticPullRequestCommentInputSchema,
       outputSchema: semanticPullRequestOutputSchema,
-      annotations: mutationAnnotations,
+      annotations: PR_MUTATION_ANNOTATIONS,
     },
     async (input: SemanticPullRequestCommentInput) => handlePullRequestMutation("comment", input, dependencies),
   );
@@ -1667,7 +1684,7 @@ export function registerSemanticPullRequestTools(
         "Submit one canonical approve, request-changes, or comment-only review bound to an expected pull-request head. Inari rereads and verifies the recorded review and applies explicit retry semantics.",
       inputSchema: semanticPullRequestReviewInputSchema,
       outputSchema: semanticPullRequestOutputSchema,
-      annotations: mutationAnnotations,
+      annotations: PR_MUTATION_ANNOTATIONS,
     },
     async (input: SemanticPullRequestReviewInput) => handlePullRequestMutation("review", input, dependencies),
   );
@@ -1679,11 +1696,11 @@ export function registerSemanticPullRequestTools(
         "Admit one strategy-bound pull-request merge against fresh head/base, draft, conflict, check, and review evidence; perform one bounded provider mutation; and reread the merged postcondition. Ambiguous results remain recovery-required.",
       inputSchema: semanticPullRequestMergeInputSchema,
       outputSchema: semanticPullRequestOutputSchema,
-      annotations: mutationAnnotations,
+      annotations: PR_MUTATION_ANNOTATIONS,
     },
     async (input: SemanticPullRequestMergeInput) => handlePullRequestMutation("merge", input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan, observe, drift, comment, review, merge]);
+  return Object.freeze([comment, review, merge]);
 }
 
 type SemanticArtifactKind = "issue" | "branch";

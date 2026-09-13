@@ -242,6 +242,8 @@ export class SemanticPullRequestMutationError extends Error {
 /** Provider-neutral bounded effect and observation seam owned by the adapter. */
 export interface SemanticPullRequestMutationProvider {
   readonly getRepositoryContext: () => Promise<RepositoryContext>;
+  /** Login of the identity whose credentials execute provider effects; binds review idempotence to this caller. */
+  readonly getAuthenticatedUser: () => Promise<string>;
   readonly readPullRequest: (pullRequest: number) => Promise<GitHubPullRequest>;
   readonly listPullRequestComments: (pullRequest: number) => Promise<readonly GitHubPullRequestComment[]>;
   readonly createPullRequestComment: (pullRequest: number, body: string) => Promise<GitHubPullRequestComment>;
@@ -751,12 +753,32 @@ function isMerged(pullRequest: GitHubPullRequest): boolean {
   );
 }
 
-function mergedAsRequested(pullRequest: GitHubPullRequest, request: SemanticPullRequestMergeRequest): boolean {
+function mergedMatchingTarget(pullRequest: GitHubPullRequest, request: SemanticPullRequestMergeRequest): boolean {
   return (
     isMerged(pullRequest) &&
     pullRequest.number === request.pullRequest &&
     pullRequest.headSha === request.expectedHead &&
-    pullRequest.base === request.expectedBase &&
+    pullRequest.base === request.expectedBase
+  );
+}
+
+/**
+ * Idempotent-replay proof requires authoritative strategy evidence: a
+ * missing `mergeMethod` must not be treated as a wildcard match for an
+ * arbitrary requested strategy (issue #521 review).
+ */
+function mergedAsRequested(pullRequest: GitHubPullRequest, request: SemanticPullRequestMergeRequest): boolean {
+  return mergedMatchingTarget(pullRequest, request) && pullRequest.mergeMethod === request.strategy;
+}
+
+/**
+ * Post-effect verification after this executor's own accepted provider
+ * response: the requested strategy is already proven by that acceptance, so
+ * missing reread `mergeMethod` evidence does not invalidate the postcondition.
+ */
+function mergedMatchingOwnEffect(pullRequest: GitHubPullRequest, request: SemanticPullRequestMergeRequest): boolean {
+  return (
+    mergedMatchingTarget(pullRequest, request) &&
     (pullRequest.mergeMethod === undefined || pullRequest.mergeMethod === request.strategy)
   );
 }
@@ -776,8 +798,14 @@ function intentForReview(review: GitHubPullRequestReview): SemanticPullRequestRe
   return undefined;
 }
 
-function sameReview(review: GitHubPullRequestReview, request: SemanticPullRequestReviewRequest): boolean {
+/**
+ * Duplicate/idempotence matching must bind the authenticated mutation
+ * principal: an absent `author` on provider evidence cannot prove this
+ * caller submitted the review, so it never matches (issue #521 review).
+ */
+function sameReview(review: GitHubPullRequestReview, request: SemanticPullRequestReviewRequest, actor: string): boolean {
   return (
+    review.author === actor &&
     review.commitId === request.expectedHead &&
     intentForReview(review) === request.intent &&
     (review.body ?? "") === request.body
@@ -1115,6 +1143,19 @@ export class SemanticPullRequestMutationExecutor implements SemanticPullRequestM
         { ...emptyEvidence("review", "blocked", "not-attempted"), current: currentEvidence(before) },
       );
     }
+    let actor: string;
+    try {
+      actor = await this.#provider.getAuthenticatedUser();
+    } catch {
+      throwMutationError(
+        plan,
+        "PR_MUTATION_TARGET_READ_FAILED",
+        "failed",
+        "The authenticated mutation principal could not be established before review execution.",
+        [diagnostic("PR_MUTATION_TARGET_READ_FAILED", "$.actor", "Caller identity evidence is unavailable.")],
+        { ...emptyEvidence("review", "failed", "not-attempted"), current: currentEvidence(before) },
+      );
+    }
     let existing: readonly GitHubPullRequestReview[];
     try {
       existing = await this.#provider.listPullRequestReviews(request.pullRequest);
@@ -1129,9 +1170,12 @@ export class SemanticPullRequestMutationExecutor implements SemanticPullRequestM
       );
     }
     const sameIntent = existing.filter(
-      (review) => review.commitId === request.expectedHead && intentForReview(review) === request.intent,
+      (review) =>
+        review.author === actor &&
+        review.commitId === request.expectedHead &&
+        intentForReview(review) === request.intent,
     );
-    const exact = sameIntent.find((review) => sameReview(review, request));
+    const exact = sameIntent.find((review) => sameReview(review, request, actor));
     if (exact !== undefined && request.retry === "reject-duplicate") {
       return result(
         plan,
@@ -1192,7 +1236,7 @@ export class SemanticPullRequestMutationExecutor implements SemanticPullRequestM
             { ...emptyEvidence("review", "recovery-required", "ambiguous"), providerResponse: "ambiguous" },
           );
         }
-        const recoveredReview = recovered.find((review) => sameReview(review, request));
+        const recoveredReview = recovered.find((review) => sameReview(review, request, actor));
         if (recoveredReview !== undefined) {
           return result(
             plan,
@@ -1258,6 +1302,7 @@ export class SemanticPullRequestMutationExecutor implements SemanticPullRequestM
     const verified = reread.some(
       (review) =>
         review.id === submitted.id &&
+        review.author === actor &&
         review.commitId === request.expectedHead &&
         intentForReview(review) === request.intent &&
         (review.body ?? "") === request.body,
@@ -1424,7 +1469,8 @@ export class SemanticPullRequestMutationExecutor implements SemanticPullRequestM
         },
       );
     }
-    const verifiedMerge = mergedAsRequested(after, request);
+    const verifiedMerge =
+      providerError === undefined ? mergedMatchingOwnEffect(after, request) : mergedAsRequested(after, request);
     if (verifiedMerge) {
       const outcome = providerError === undefined && providerResponse?.merged === true ? "succeeded" : "idempotent";
       return result(plan, after, outcome, {
