@@ -1439,7 +1439,7 @@ test("template list --repository reports authoritative remote templates", async 
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["template", "list", "--repository", "acme/inari"], {
-      repositoryRoot: "/tmp/stale-local-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     assert.equal(exitCode, 0);
@@ -1812,7 +1812,7 @@ test("issue get auto-selects the matching governed Issue Form and omits raw Mark
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
-      repositoryRoot: "/tmp/stale-local-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     assert.equal(exitCode, 0);
@@ -1869,7 +1869,7 @@ test("issue get succeeds for a valid-template issue even when an unrelated sibli
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
-      repositoryRoot: "/tmp/stale-local-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     assert.equal(exitCode, 0);
@@ -1903,7 +1903,7 @@ test("issue get fails closed with a bounded diagnostic when every candidate Issu
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
-      repositoryRoot: "/tmp/stale-local-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     assert.equal(exitCode, 2);
@@ -1944,7 +1944,7 @@ test("pr get returns canonical fields and minimal pull request metadata", async 
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "get", "43", "--repository", "acme/inari", "--json"], {
-      repositoryRoot: "/tmp/stale-local-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     assert.equal(exitCode, 0);
@@ -2046,7 +2046,7 @@ test("get returns deterministic diagnostics and never guesses fields for invalid
     console.log = (line: string) => lines.push(line);
     try {
       const exitCode = await runCli([testCase.domain, "get", testCase.number, "--repository", "acme/inari", "--json"], {
-        repositoryRoot: "/tmp/stale-local-copy",
+        repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
         createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
       });
       assert.equal(exitCode, 2, testCase.name);

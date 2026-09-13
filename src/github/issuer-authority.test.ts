@@ -142,7 +142,11 @@ test("issuer App identity is explicit and has no reviewer authority", () => {
     appId: "123456",
     principal: INARI_ISSUER_PRINCIPAL,
   });
-  assert.deepEqual(INARI_ISSUER_MAXIMUM_PERMISSIONS, { contents: "write", pull_requests: "write" });
+  assert.deepEqual(INARI_ISSUER_MAXIMUM_PERMISSIONS, {
+    contents: "write",
+    issues: "read",
+    pull_requests: "write",
+  });
   assert.equal("approve" in new InariIssuerAppAuthority({ appId: app.appId, broker: brokerFor().broker }), false);
   assert.equal(validateInariIssuerAppIdentity(app).valid, true);
 });

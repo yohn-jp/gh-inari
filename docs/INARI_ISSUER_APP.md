@@ -1,15 +1,16 @@
 # Inari issuer GitHub App authority
 
-This document is the implementation contract for Issue #217. The product and
+This document is the implementation contract for Issues #217 and #464. The product and
 trust-boundary authority remains
 [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md); this document does
 not introduce a second semantic authority.
 
 ## Role
 
-The Inari GitHub App is the issuer identity and a least-privilege mutation
-capability. It is not a semantic API, a frontend, a reviewer, or a merge
-authority.
+The Inari GitHub App has two distinct trusted capabilities: a least-privilege
+repository evidence reader used before admission, and the issuer mutation
+capability used only after admission. It is not a semantic API, a frontend, a
+reviewer, or a merge authority.
 
 Inari Core computes and validates `ChangeEffect` values. The issuer authority
 accepts only those explicit effects and checks the credential boundary around
@@ -18,8 +19,20 @@ transitions, validate PR policy, or implement idempotency and recovery.
 
 ## Permission ceiling
 
-The initial issuer ceiling is deliberately limited to the permissions needed
-by the initial effect set:
+The App ceiling is deliberately limited to repository evidence reads plus the
+initial effect set. `metadata: read` is GitHub's automatic baseline.
+
+| Trusted capability           | GitHub App permission ceiling                           |
+| ---------------------------- | ------------------------------------------------------- |
+| Pre-admission evidence reads | `contents: read`, `issues: read`, `pull_requests: read` |
+| `CREATE_BRANCH`              | `contents: write`                                       |
+| `DELETE_BRANCH`              | `contents: write`                                       |
+| `CREATE_PULL_REQUEST`        | `pull_requests: write`                                  |
+| `MARK_PULL_REQUEST_READY`    | `pull_requests: write`                                  |
+| `CLOSE_PULL_REQUEST`         | `pull_requests: write`                                  |
+
+Read authority cannot apply a Change effect, and mutation authority cannot be
+used as a general evidence reader. The mutation ceiling remains:
 
 | Initial `ChangeEffect`    | GitHub App permission  |
 | ------------------------- | ---------------------- |
@@ -29,25 +42,40 @@ by the initial effect set:
 | `MARK_PULL_REQUEST_READY` | `pull_requests: write` |
 | `CLOSE_PULL_REQUEST`      | `pull_requests: write` |
 
-`metadata: read` is GitHub's automatic baseline and is not requested as an
-additional capability. The issuer does not request Issue mutation,
-administration, Actions, workflow, review/approval, or merge permissions.
-When one effect is applied, the short-lived credential is requested with only
-that effect's required permission. A Change issuance containing branch and PR
-effects requests the union of those two requirements.
+The issuer does not request Issue write, administration, Actions, workflow,
+review/approval, or merge permissions. `issues: read` is read-only evidence
+authority and is never part of a mutation request. When one effect is applied,
+the short-lived credential is requested with only that effect's required
+permission. A Change issuance containing branch and PR effects requests the
+union of those two requirements.
 
 ## Credential boundary
 
-The only credential boundary is
+The two credential boundaries are
+`withRepositoryReadCapability` and
 `TrustedInstallationCredentialBroker.withScopedInstallationCredential`:
 
 ```text
-human / agent caller
-        │ semantic request, no App credential
+pre-admission evidence request
+        │ no App credential
         ▼
-trusted protected execution
-        │ obtains a fresh installation credential
-        │ selects one repository and requested permissions
+trusted App provider
+        │ obtains a fresh read credential
+        │ selects one repository and read-only permissions
+        ▼
+repository-read capability
+        │ GET evidence only; host + immutable repository ID bound
+        ▼
+evidence / admission
+        │
+        └── credential is discarded when the read operation ends
+
+admitted Change effect
+        │ no App credential
+        ▼
+trusted issuer authority
+        │ obtains a fresh mutation credential
+        │ selects one repository and admitted permissions
         ▼
 scoped mutation capability
         │ apply(ChangeEffect), no token return value
@@ -63,10 +91,11 @@ authority errors contain no credential value. Broker errors are sanitized at
 the authority boundary so an accidental token-bearing provider error cannot
 cross to a caller.
 
-The broker must obtain a new short-lived credential for the operation; it must
-not cache or return a reusable bearer credential. The scoped capability must
-expose only the repository-scoped mutation operation and must not expose a
-token, private key, authorization header, or general GitHub client.
+The broker must obtain a new short-lived credential for each operation; it
+must not cache or return a reusable bearer credential. The read capability
+exposes only repository-scoped GET evidence. The mutation capability exposes
+only the repository-scoped mutation operation. Neither exposes a token,
+private key, authorization header, or general GitHub client.
 
 ## Identity and scope proof
 
@@ -82,8 +111,12 @@ Every issuer operation carries all of these identities:
 The broker must return scope evidence proving that:
 
 - the App and installation identities match;
-- the installation host matches the target repository host;
-- the selected repository ID and locator match the target;
+- for pre-admission reads, the selected repository ID and locator are derived
+  from the provider response, with the host fixed to the configured canonical
+  host;
+- for post-admission mutations, the selected repository ID and locator match
+  the admitted `IssuerCredentialRequest.target`;
+- the installation host matches the scoped repository host;
 - the credential is restricted to the selected repository;
 - the granted permissions exactly match the requested effect capability,
   apart from GitHub's automatic metadata read permission; and

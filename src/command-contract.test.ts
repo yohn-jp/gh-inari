@@ -104,9 +104,15 @@ test("every owned command keeps routing, usage, discovery, and Skill references 
         command.id,
       );
     for (const optionId of command.optionIds.filter((id) => id !== "help" && id !== "json")) {
+      const expectedSyntax =
+        command.id === "authority.register" && optionId === "from"
+          ? "--from <authority.json>"
+          : command.id === "authority.rotate" && optionId === "from"
+            ? "--from <rotation.json>"
+            : optionSyntax(getOption(optionId));
       assert.match(
         commandUsage(command),
-        new RegExp(optionSyntax(getOption(optionId)).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")),
+        new RegExp(expectedSyntax.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")),
         command.id,
       );
     }

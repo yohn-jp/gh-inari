@@ -1,5 +1,23 @@
 export * from "./adapter.js";
+export * from "./app-installation-credential-broker.js";
+export * from "./app-repository-evidence-reader.js";
+export * from "./direct-app-execution.js";
 export * from "./change-effect-adapter.js";
+// The Git-data implementation and its broker-owned transport stay private.
+// Only the frozen branch-advance capability contract crosses this barrel.
+export type {
+  GitHubBranchAdvanceCapability,
+  GitDataRef,
+  GitDataTreeEntry,
+  GitDataTree,
+  GitDataBlobInput,
+  GitDataTreeWriteEntry,
+  GitDataTreeInput,
+  GitDataCommitAuthor,
+  GitDataCommitInput,
+  GitDataRefUpdateInput,
+  GitDataRefUpdateResult,
+} from "./git-data-capability.js";
 export * from "./actions-change-executor.js";
 export * from "./change-actions-remote-executor.js";
 export * from "./errors.js";

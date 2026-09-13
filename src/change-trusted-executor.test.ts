@@ -667,6 +667,36 @@ test("a pull-request close failure enters bounded abort cleanup recovery", async
   assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
 });
 
+test("an ambiguous close never compensates by deleting a still-present branch", async () => {
+  const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CLOSE_PULL_REQUEST";
+  const originalApply = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    if (request.effects[0]?.kind === "CLOSE_PULL_REQUEST") {
+      reader.current = {
+        ...reader.current,
+        evidence: evidence([branch], { status: "available", value: [closedPullRequest()] }),
+      };
+    }
+    return originalApply(request);
+  };
+
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.outcome, "recovery-required");
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["CLOSE_PULL_REQUEST"],
+  );
+  assert.equal(result.projection.change?.projection?.branch, branch);
+});
+
 test("abort cleanup reread failure fails closed with recovery evidence", async () => {
   const reader = new MutableReader(input(evidence([branch], { status: "available", value: [draftPullRequest()] })));
   const issuer = new FakeIssuer(reader);

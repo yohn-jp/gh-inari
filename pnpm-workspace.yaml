@@ -1,5 +1,8 @@
 # List native-build packages here if pnpm's default ignored-builds
 # safety net blocks them (ERR_PNPM_IGNORED_BUILDS). esbuild (a transitive
-# dependency of tsx) is a known-safe, widely used build tool.
+# dependency of tsx) is a known-safe, widely used build tool. workerd is
+# Cloudflare's official Workers runtime simulator, a direct dependency of
+# the pinned `wrangler` devDependency used for #468 Worker build/deploy.
 allowBuilds:
   esbuild: true
+  workerd: true

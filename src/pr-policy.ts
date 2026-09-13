@@ -365,7 +365,23 @@ function parseRule(value: unknown, path: string): PullRequestPolicySectionRule {
   };
 }
 
-const QUANTIFIER_PATTERN = /^(?:[*+?]|\{\d*,?\d*\})/u;
+function startsWithQuantifier(value: string): boolean {
+  const first = value[0];
+  if (first === "*" || first === "+" || first === "?") return true;
+  if (first !== "{") return false;
+
+  let index = 1;
+  while (index < value.length && isAsciiDigit(value[index])) index += 1;
+  if (value[index] === ",") {
+    index += 1;
+    while (index < value.length && isAsciiDigit(value[index])) index += 1;
+  }
+  return value[index] === "}";
+}
+
+function isAsciiDigit(value: string | undefined): boolean {
+  return value !== undefined && value >= "0" && value <= "9";
+}
 
 interface RegexGroup {
   /** True once this group's own body contains a nested group that is itself quantified. */
@@ -439,8 +455,7 @@ function hasCatastrophicBacktrackingRisk(pattern: string): boolean {
       if (closed === undefined) continue;
       closed.alternatives.push(pattern.slice(closed.currentAlternativeStart, index));
       const rest = pattern.slice(index + 1);
-      const quantifierMatch = QUANTIFIER_PATTERN.exec(rest);
-      const isQuantified = quantifierMatch !== null;
+      const isQuantified = startsWithQuantifier(rest);
       if (isQuantified) {
         if (closed.hasQuantifiedChild) return true;
         if (closed.alternatives.length > 1 && alternativesOverlap(closed.alternatives)) return true;
@@ -450,7 +465,7 @@ function hasCatastrophicBacktrackingRisk(pattern: string): boolean {
       continue;
     }
 
-    if (QUANTIFIER_PATTERN.test(char)) continue;
+    if (startsWithQuantifier(char)) continue;
 
     // An ordinary literal atom: a quantifier immediately following it (e.g. "a+")
     // still contributes unbounded repetition inside whatever group contains it.
@@ -463,14 +478,21 @@ function hasCatastrophicBacktrackingRisk(pattern: string): boolean {
 function markIfQuantifiedAtom(stack: RegexGroup[], pattern: string, fromIndex: number): void {
   const current = stack.at(-1);
   if (current === undefined) return;
-  if (QUANTIFIER_PATTERN.test(pattern.slice(fromIndex))) current.hasQuantifiedChild = true;
+  if (startsWithQuantifier(pattern.slice(fromIndex))) current.hasQuantifiedChild = true;
 }
 
-const LITERAL_ALTERNATIVE_PATTERN = /^[^\\^$.*+?()[\]{}|]*$/u;
+const LITERAL_ALTERNATIVE_METACHARACTERS = "\\^$.*+?()[]{}|";
+
+function isLiteralAlternative(value: string): boolean {
+  for (const character of value) {
+    if (LITERAL_ALTERNATIVE_METACHARACTERS.includes(character)) return false;
+  }
+  return true;
+}
 
 /** True if any two alternatives are literal text where one is a prefix of (or equal to) the other. */
 function alternativesOverlap(alternatives: readonly string[]): boolean {
-  const literals = alternatives.filter((alternative) => LITERAL_ALTERNATIVE_PATTERN.test(alternative));
+  const literals = alternatives.filter(isLiteralAlternative);
   for (let i = 0; i < literals.length; i += 1) {
     for (let j = i + 1; j < literals.length; j += 1) {
       const [shorter, longer] =

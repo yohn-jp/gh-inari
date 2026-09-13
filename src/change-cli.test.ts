@@ -93,7 +93,14 @@ async function capture(
 }
 
 test("Change commands are additions to the existing canonical command authority", () => {
-  const ids = ["change.issue", "change.show", "change.handoff", "change.ready", "change.abort"] as const;
+  const ids = [
+    "change.issue",
+    "change.show",
+    "change.handoff",
+    "change.ready",
+    "change.abort",
+    "change.publish",
+  ] as const;
   const contract = projectCommandContract();
   assert.equal(contract.id, COMMAND_CONTRACT_ID);
   assert.equal(contract.invocation, AGENT_INVOCATION_CONTRACT);
@@ -104,7 +111,7 @@ test("Change commands are additions to the existing canonical command authority"
     assert.equal(getCommandForPositionals(definition.path)?.id, id);
     assert.equal(projected.invocation, commandInvocation(id));
     assert.equal(projected.example, commandExample(id));
-    assert.match(commandUsage(definition), /^change (issue|show|handoff|ready|abort) <number>/u);
+    assert.match(commandUsage(definition), /^change (issue|show|handoff|ready|abort|publish) <number>/u);
   }
   assert.deepEqual(
     projectCommandHelp(["change"]).commands.map((entry) => entry.id),

@@ -129,7 +129,31 @@ import {
   canonicalRuntimeAuthorityPublicKeyJson,
   defaultRuntimeAuthorityPrivateKeyPath,
   generateAndPersistRuntimeAuthorityKeyPair,
+  loadRuntimeAuthorityKeyPair,
 } from "./agent-authority/runtime-key.js";
+import {
+  registerRuntimeAuthority,
+  revokeRuntimeAuthority,
+  rotateRuntimeAuthority,
+} from "./agent-authority/runtime-authority-lifecycle.js";
+import {
+  createSessionCredentialBundle,
+  inspectSessionCredentialBundle,
+  loadSessionCredentialBundle,
+  parseSessionCredentialBundle,
+  persistSessionCredentialBundle,
+} from "./agent-authority/session-bundle.js";
+import {
+  createDirectAppChangeRemoteExecutor,
+  loadDirectAppSession,
+  resolveAppEndpoint,
+  sendDirectAppBranchAdvance,
+} from "./agent-authority/direct-app-client.js";
+import {
+  validateBranchAdvanceSemanticRequest,
+  type BranchAdvanceSemanticRequest,
+} from "./agent-authority/branch-advance.js";
+import { projectPublishTreeDelta, resolveLocalRepositoryNameWithOwner } from "./change-publish-projection.js";
 import {
   compareSemanticIssueProjection,
   tryObserveSemanticIssue,
@@ -333,7 +357,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "authority") {
-      return runAuthorityCommand(command, rest, parsed, root, json);
+      return await runAuthorityCommand(command, rest, parsed, root, json);
+    }
+    if (domain === "session") {
+      return await runSessionCommand(command, rest, parsed, root, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -842,37 +869,194 @@ function rejectUnsupportedAuthorityOptions(
   );
 }
 
-function runAuthorityCommand(
+async function runAuthorityCommand(
   command: string | undefined,
   rest: readonly string[],
   parsed: ParsedArgs,
   root: string,
   json: boolean,
-): number {
-  if (command !== "generate" || rest.length > 0) {
+): Promise<number> {
+  if (
+    (command !== "generate" && command !== "register" && command !== "rotate" && command !== "revoke") ||
+    (command !== "revoke" && rest.length > 0) ||
+    (command === "revoke" && rest.length !== 1)
+  ) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
   }
-  rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
-  const requestedPath = parsed.options.privateKey;
-  const privateKeyPath =
-    typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
-  const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
-    replace: parsed.options.replace === true,
-  });
-  const output = {
-    ok: true,
-    operation: "authority.generate",
-    privateKeyPath,
-    publicKey: pair.publicKeyJwk,
-    publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
-    repositoryTrustChanged: false,
-  } as const;
+
+  if (command === "generate") {
+    rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
+    const requestedPath = parsed.options.privateKey;
+    const privateKeyPath =
+      typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
+    const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
+      replace: parsed.options.replace === true,
+    });
+    const output = {
+      ok: true,
+      operation: "authority.generate",
+      privateKeyPath,
+      publicKey: pair.publicKeyJwk,
+      publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
+      repositoryTrustChanged: false,
+    } as const;
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Generated local Runtime Authority keypair.");
+      console.log(`Private key: ${privateKeyPath}`);
+      console.log(`Public key: ${output.publicKeyJson}`);
+      console.log("Repository trust was not modified.");
+    }
+    return 0;
+  }
+
+  rejectUnsupportedAuthorityLifecycleOptions(command, parsed.options, parsed.capabilities);
+  const result =
+    command === "revoke"
+      ? revokeRuntimeAuthority(root, rest[0] as string)
+      : command === "register"
+        ? registerRuntimeAuthority(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))))
+        : rotateRuntimeAuthority(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))));
+  const output = { ...result } as const;
   if (json) console.log(JSON.stringify(output));
   else {
-    console.log("Generated local Runtime Authority keypair.");
-    console.log(`Private key: ${privateKeyPath}`);
-    console.log(`Public key: ${output.publicKeyJson}`);
-    console.log("Repository trust was not modified.");
+    if (command === "register") console.log("Registered a Runtime Authority trust record.");
+    else if (command === "rotate") console.log("Added a Runtime Authority trust record for overlap rotation.");
+    else if (result.changed) console.log("Disabled the Runtime Authority trust record.");
+    else console.log("Runtime Authority trust record is already disabled.");
+    console.log(`Artifact: ${path.join(root, result.path)}`);
+  }
+  return 0;
+}
+
+function requiredAuthorityFrom(parsed: ParsedArgs): string {
+  const value = parsed.options.from;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new CliError("INPUT_REQUIRED", "Use --from <authority.json>.", "--from");
+  }
+  return value;
+}
+
+function authorityInputPath(root: string, value: string): string {
+  return value === "-" ? value : path.resolve(root, value);
+}
+
+function rejectUnsupportedAuthorityLifecycleOptions(
+  command: "register" | "rotate" | "revoke",
+  options: Readonly<Record<string, string | boolean>>,
+  capabilities: readonly string[],
+): void {
+  if (capabilities.length > 0) {
+    throw new CliError("INVALID_OPTION", "Option --capability is not supported by authority commands.", "--capability");
+  }
+  const definition = getCommand(
+    `authority.${command}` as "authority.register" | "authority.rotate" | "authority.revoke",
+  );
+  const unsupported = Object.keys(options).find((id) => !definition.optionIds.includes(id as OptionId));
+  if (unsupported === undefined) return;
+  const option = getOption(unsupported as OptionId);
+  throw new CliError(
+    "INVALID_OPTION",
+    `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority ${command}.`,
+    "$argv",
+    { command: `authority ${command}`, option: option.id },
+  );
+}
+
+function requiredSessionOption(
+  options: Readonly<Record<string, string | boolean>>,
+  key: "from" | "privateKey" | "to",
+): string {
+  const value = options[key];
+  if (typeof value !== "string" || value.length === 0) {
+    const option = getOption(key);
+    throw new CliError(
+      "INPUT_REQUIRED",
+      `Use ${option.aliases[0]} <${option.placeholder ?? "path"}>.`,
+      option.aliases[0],
+    );
+  }
+  return value;
+}
+
+function rejectUnsupportedSessionOptions(command: "issue" | "inspect", parsed: ParsedArgs): void {
+  const definition = getCommand(command === "issue" ? "session.issue" : "session.inspect");
+  if (parsed.capabilities.length > 0) {
+    throw new CliError("INVALID_OPTION", "Option --capability is not supported by Session commands.", "--capability");
+  }
+  const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
+  if (unsupported === undefined) return;
+  const option = getOption(unsupported as OptionId);
+  throw new CliError(
+    "INVALID_OPTION",
+    `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by session ${command}.`,
+    "$argv",
+    { command: `session ${command}`, option: option.id },
+  );
+}
+
+async function runSessionCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  json: boolean,
+): Promise<number> {
+  if ((command !== "issue" && command !== "inspect") || rest.length > 0) {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown session command "${command ?? ""}".`);
+  }
+  rejectUnsupportedSessionOptions(command, parsed);
+
+  if (command === "issue") {
+    const from = requiredSessionOption(parsed.options, "from");
+    const privateKey = requiredSessionOption(parsed.options, "privateKey");
+    const to = requiredSessionOption(parsed.options, "to");
+    const request = await readJsonValue(from === "-" ? from : path.resolve(root, from));
+    const runtimeKey = loadRuntimeAuthorityKeyPair(path.resolve(root, privateKey));
+    const created = createSessionCredentialBundle({ request, runtimeKey });
+    const bundlePath = persistSessionCredentialBundle(path.resolve(root, to), created.bundle);
+    const safe = inspectSessionCredentialBundle(created);
+    const output = {
+      ok: true,
+      operation: "session.issue" as const,
+      bundlePath,
+      bundle: safe.bundle,
+      repository: safe.repository,
+      ...(safe.task === undefined ? {} : { task: safe.task }),
+      capabilities: safe.capabilities,
+      expiry: safe.expiry,
+      runtime: safe.runtime,
+      session: safe.session,
+      certificate: safe.certificate,
+      ...(safe.agent === undefined ? {} : { agent: safe.agent }),
+    };
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Issued a short-lived Session credential bundle.");
+      console.log(`Bundle: ${bundlePath}`);
+      console.log(`Session: ${safe.session.id}`);
+      console.log(`Runtime Authority: ${safe.runtime.authorityId}`);
+      console.log(`Expires: ${safe.expiry.exp}`);
+    }
+    return 0;
+  }
+
+  const from = requiredSessionOption(parsed.options, "from");
+  const bundle =
+    from === "-"
+      ? parseSessionCredentialBundle(await readJsonValue(from))
+      : loadSessionCredentialBundle(path.resolve(root, from));
+  const output = inspectSessionCredentialBundle(bundle);
+  if (json) console.log(JSON.stringify(output));
+  else {
+    console.log("Session credential bundle is valid.");
+    console.log(`Session: ${output.session.id}`);
+    console.log(`Certificate: ${output.session.certificateId}`);
+    console.log(`Runtime Authority: ${output.runtime.authorityId}`);
+    console.log(`Repository: ${output.repository.name} (${output.repository.id})`);
+    if (output.task !== undefined) console.log(`Task: ${output.task.kind} #${output.task.number}`);
+    console.log(`Capabilities: ${output.capabilities.map((claim) => claim.kind).join(", ")}`);
+    console.log(`Expires: ${output.expiry.exp}`);
   }
   return 0;
 }
@@ -951,12 +1135,32 @@ function invalidChangeNumberError(value: string | undefined): CliError {
   return new CliError("INVALID_CHANGE_NUMBER", message, "$argv[1]", { value });
 }
 
+function rejectPartialSessionTransportOptions(
+  sessionCredential: string | boolean | undefined,
+  appEndpoint: string | boolean | undefined,
+): void {
+  if ((sessionCredential === undefined) === (appEndpoint === undefined)) return;
+  throw new CliError(
+    "INVALID_OPTION",
+    "Use --session-credential together with --app-endpoint to select the direct App transport.",
+    sessionCredential === undefined ? "--app-endpoint" : "--session-credential",
+  );
+}
+
+/** Selects the direct App transport when both Session options are supplied; otherwise the existing Actions/gh path. */
 function createChangeExecutor(
   dependencies: CliDependencies,
   root: string,
   repository: string | boolean | undefined,
+  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean } = {},
 ): ChangeRemoteExecutor {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
+  rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
+  if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
+    const { session, agent } = loadDirectAppSession(path.resolve(root, sessionOptions.sessionCredential));
+    const endpoint = resolveAppEndpoint(sessionOptions.appEndpoint);
+    return createDirectAppChangeRemoteExecutor({ endpoint, session, ...(agent === undefined ? {} : { agent }) });
+  }
   const factory =
     dependencies.createChangeExecutor ??
     ((options: ChangeRemoteExecutorOptions) => {
@@ -1027,6 +1231,143 @@ function rejectUnsupportedChangeOptions(command: string, options: Readonly<Recor
   );
 }
 
+/**
+ * `change publish` derives the bounded tree delta from a local commit and
+ * submits the exact canonical #466 `branch.advance` request through the
+ * Session/App path (#467). It never performs a raw `git push` and never
+ * duplicates #466's branch validation, Git mutation, or provenance authority.
+ */
+async function runChangePublishCommand(
+  issue: number,
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const sessionCredential = parsed.options.sessionCredential;
+  const appEndpoint = parsed.options.appEndpoint;
+  if (typeof sessionCredential !== "string" || typeof appEndpoint !== "string") {
+    throw new CliError(
+      "INPUT_REQUIRED",
+      "change publish requires --session-credential <path> and --app-endpoint <https-url>.",
+      "--session-credential",
+    );
+  }
+  const commitRev = typeof parsed.options.commit === "string" ? parsed.options.commit : "HEAD";
+
+  const { session, agent } = loadDirectAppSession(path.resolve(root, sessionCredential));
+  const endpoint = resolveAppEndpoint(appEndpoint);
+
+  // #467 requires verifying the local repository identity before publishing:
+  // an ancestor/CAS check alone proves nothing about which repository this
+  // workspace actually is, only that some commit chain exists locally.
+  const certificateRepository = session.certificate?.payload.repository.name;
+  const localRepository = resolveLocalRepositoryNameWithOwner(root);
+  if (
+    certificateRepository === undefined ||
+    localRepository === undefined ||
+    localRepository !== certificateRepository
+  ) {
+    throw new CliError(
+      "CHANGE_PUBLISH_REPOSITORY_MISMATCH",
+      `Local repository origin ("${localRepository ?? "unknown"}") does not match the Session-authorized repository ("${certificateRepository ?? "unknown"}").`,
+    );
+  }
+
+  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
+    sessionCredential,
+    appEndpoint,
+  });
+  const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const canonicalBranch = projection.canonicalBranch;
+  if (canonicalBranch === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_BRANCH_UNAVAILABLE",
+      `Change #${issue} has no canonical implementation branch to publish to.`,
+    );
+  }
+  const branchCandidate = projection.candidates.branches.find(
+    (candidate) => candidate.candidate.name === canonicalBranch,
+  );
+  const expectedHead = branchCandidate?.candidate.sha;
+  if (expectedHead === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_HEAD_UNAVAILABLE",
+      `Could not determine the current authoritative head of "${canonicalBranch}" through the App path.`,
+    );
+  }
+
+  const treeDelta = projectPublishTreeDelta({ cwd: root, commit: commitRev, expectedHead });
+
+  const compiled: BranchAdvanceSemanticRequest = {
+    version: 1,
+    issue,
+    branch: canonicalBranch,
+    expectedHead,
+    changes: treeDelta.changes,
+    commit: treeDelta.commitMetadata,
+    ...(agent === undefined ? {} : { agent }),
+  };
+  const validated = validateBranchAdvanceSemanticRequest(compiled);
+  if (!validated.valid || validated.value === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_REQUEST_INVALID",
+      "The compiled branch.advance request does not satisfy the canonical #466 contract.",
+      "$request",
+      { diagnostics: validated.diagnostics },
+    );
+  }
+
+  const result = await sendDirectAppBranchAdvance({ endpoint, session, request: validated.value });
+  const resultBranch = result.branch ?? canonicalBranch;
+  const resultExpectedHead = result.expectedHead ?? expectedHead;
+  if (result.status !== "succeeded" || result.resultingHead === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        operation: "change.publish",
+        issue,
+        branch: resultBranch,
+        expectedHead: resultExpectedHead,
+        commit: treeDelta.commit,
+        outcome: result.outcome,
+        ...(result.resultingHead === undefined ? {} : { resultingHead: result.resultingHead }),
+      }),
+    );
+    return EXIT_REMOTE;
+  }
+
+  // #467 requires an authoritative reread/verification of the resulting
+  // remote head through the Session/App path before reporting success; the
+  // branch.advance response alone is never sufficient (#466 already proves
+  // its own postcondition, but this leaf's own success report must not rely
+  // on that response without independently rereading it).
+  const verification = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const verifiedBranch = verification.candidates.branches.find(
+    (candidate) => candidate.candidate.name === resultBranch,
+  );
+  if (verifiedBranch?.candidate.sha !== result.resultingHead) {
+    throw new CliError(
+      "CHANGE_PUBLISH_VERIFICATION_FAILED",
+      `Could not verify the published branch head through the App path (expected ${result.resultingHead}, observed ${verifiedBranch?.candidate.sha ?? "unknown"}).`,
+    );
+  }
+
+  console.log(
+    JSON.stringify({
+      ok: true,
+      operation: "change.publish",
+      issue,
+      branch: resultBranch,
+      expectedHead: resultExpectedHead,
+      commit: treeDelta.commit,
+      outcome: result.outcome,
+      resultingHead: result.resultingHead,
+      verified: true,
+    }),
+  );
+  return 0;
+}
+
 async function runChangeCommand(
   command: string | undefined,
   rest: readonly string[],
@@ -1042,9 +1383,15 @@ async function runChangeCommand(
   }
   if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidChangeNumberError(rest[0]);
   rejectUnsupportedChangeOptions(definition.operation, parsed.options);
+  if (definition.operation === "publish") {
+    return await runChangePublishCommand(Number(rest[0]), parsed, root, dependencies);
+  }
 
   const issue = Number(rest[0]);
-  const executor = createChangeExecutor(dependencies, root, parsed.options.repository);
+  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
+    sessionCredential: parsed.options.sessionCredential,
+    appEndpoint: parsed.options.appEndpoint,
+  });
   const result =
     definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
@@ -2716,7 +3063,32 @@ function classifyExitCode(error: unknown): number {
     return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("SEMANTIC_PR_EXECUTION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_")) return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code.startsWith("SESSION_BUNDLE_") ||
+      error.code.startsWith("SESSION_CERTIFICATE_") ||
+      error.code.startsWith("SESSION_BOOTSTRAP_") ||
+      error.code.startsWith("MANAGED_SESSION_"))
+  )
+    return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "SESSION_CREDENTIAL_INVALID" ||
+      error.code === "APP_ENDPOINT_INVALID" ||
+      error.code === "APP_REQUEST_TOO_LARGE" ||
+      error.code.startsWith("PUBLISH_PROJECTION_"))
+  )
+    return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "APP_TRANSPORT_FAILED" ||
+      error.code === "APP_EXECUTION_FAILED" ||
+      error.code === "BRANCH_ADVANCE_REJECTED" ||
+      error.code === "BRANCH_ADVANCE_TRANSPORT_FAILED")
+  )
+    return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
@@ -2743,6 +3115,7 @@ function isOwnedInvocation(argv: readonly string[]): boolean {
       first === "template" ||
       first === "change" ||
       first === "authority" ||
+      first === "session" ||
       first === "mcp") &&
     positionals.length === 1
   )
@@ -2822,7 +3195,7 @@ async function readStdin(): Promise<string> {
 }
 
 const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<
-  Record<"issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp", string>
+  Record<"issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp", string>
 > = {
   issue: "issue list",
   pr: "pr checks",
@@ -2830,6 +3203,7 @@ const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<
   template: "template view",
   change: "change list",
   authority: "authority generate",
+  session: "session issue",
   mcp: "mcp serve",
 };
 
@@ -2844,6 +3218,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     domain === "branch" ||
     domain === "change" ||
     domain === "authority" ||
+    domain === "session" ||
     domain === "mcp"
   ) {
     const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
@@ -2873,6 +3248,7 @@ Domains:
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
   authority  Local Runtime Authority key generation and secure loading
+  session    Manual short-lived Session credential issuance and inspection
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
@@ -2883,7 +3259,9 @@ Run \`inari --help=full\` for the complete command and option reference.
 Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime checks.`);
 }
 
-function printDomainHelp(domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "mcp"): void {
+function printDomainHelp(
+  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp",
+): void {
   const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
 

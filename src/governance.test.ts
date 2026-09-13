@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import path from "node:path";
 import {
   compileRepositoryGovernedContract,
   createRemoteArtifactContractIdentities,
@@ -9,6 +10,7 @@ import {
   discoverRepositoryTemplates,
   GovernanceError,
   rejectGovernedPolicyOverride,
+  resolveGovernedIssueEvidence,
   updateGovernedIssue,
   updateGovernedPullRequest,
   resolveRemoteArtifactContractIdentity,
@@ -307,7 +309,7 @@ test("remote schema output exposes repository and trusted source provenance", as
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "schema", "remote", "--repository", "acme/repository-b", "--json"], {
-      repositoryRoot: "/tmp/stale-copy",
+      repositoryRoot: path.resolve("test-fixtures/stale-copy"),
       createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
     });
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -981,7 +983,7 @@ test("existing-artifact validation acquires the contract from the artifact targe
     const exitCode = await runCli(
       ["issue", "validate", "42", "--template", "remote", "--repository", "acme/repository-b", "--json"],
       {
-        repositoryRoot: "/tmp/stale-local-copy/.github/false",
+        repositoryRoot: path.resolve("test-fixtures/stale-local-copy/.github/false"),
         createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
       },
     );
@@ -1084,4 +1086,42 @@ test("successful pull-request update keeps identity when post-effect governance 
   assert.equal(result.artifact.url, updatedPullRequest.html_url);
   assert.equal(result.governance.reconciled, false);
   assert.equal(result.governance.currentGeneration, "tree-sha-d");
+});
+
+test("resolveGovernedIssueEvidence fails closed when the Issue body is missing", async () => {
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport([]) });
+  await assert.rejects(
+    resolveGovernedIssueEvidence(adapter, undefined, "main"),
+    (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_INVALID",
+  );
+});
+
+test("resolveGovernedIssueEvidence fails closed on a malformed template identity marker", async () => {
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport([]) });
+  const body = "Some body\n\n<!-- inari:template not-json -->";
+  await assert.rejects(
+    resolveGovernedIssueEvidence(adapter, body, "main"),
+    (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_INVALID",
+  );
+});
+
+test("resolveGovernedIssueEvidence resolves marker-identified remote governance without a local checkout", async () => {
+  const source = issueTemplate("remote_field");
+  const transport = new StubGovernanceTransport(
+    governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source),
+  );
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
+  const prepared = prepareIssueArtifact(contract, {
+    fields: { remote_field: "value" },
+    metadata: { title: "Remote issue" },
+  }).artifact;
+
+  const secondTransport = new StubGovernanceTransport(
+    governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source),
+  );
+  const secondAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: secondTransport });
+  const evidence = await resolveGovernedIssueEvidence(secondAdapter, prepared.body, "main");
+  assert.equal(evidence.body, prepared.body);
+  assert.equal(evidence.contract.provenance?.template.path, ".github/ISSUE_TEMPLATE/remote.yml");
 });

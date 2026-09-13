@@ -283,6 +283,9 @@ function openAndValidateAncestorDirectory(directoryPath: string, noFollow: numbe
 function openRootDirectory(root: string, noFollow: number): number {
   let fd: number;
   try {
+    // This opens the existing filesystem root read-only as a directory
+    // descriptor; it never creates or writes a temporary file.
+    // lgtm [js/insecure-temporary-file]
     fd = openSync(root, directoryOpenFlags(noFollow));
   } catch {
     throw safeKeyError(
