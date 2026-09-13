@@ -2,7 +2,7 @@
 
 Status: proposed architecture for Epic #278 and Issue #279. This document becomes the normative implementation boundary for #278 when merged.
 
-This document refines the artifact-semantics layer of [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md) and composes with [`NATIVE_MCP_ISSUER_GATEWAY.md`](./NATIVE_MCP_ISSUER_GATEWAY.md). It does not replace the Change lifecycle, authorization model, issuer identity, or hosted MCP trust model defined there.
+This document refines the artifact-semantics layer of [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md) and composes with [`NATIVE_MCP_ISSUER_GATEWAY.md`](./NATIVE_MCP_ISSUER_GATEWAY.md). It does not replace the Change lifecycle, Session/App authorization model, issuer identity, or MCP transport boundary defined there.
 
 The current v1 semantic-template behavior described in [`SEMANTIC_TEMPLATES.md`](./SEMANTIC_TEMPLATES.md) remains the executable compatibility authority until the migration in this document is implemented.
 
