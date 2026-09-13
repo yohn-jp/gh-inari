@@ -150,6 +150,109 @@ test("authority generate has an explicit human-readable trust boundary", async (
   }
 });
 
+test("authority readiness reports a bounded missing deployment binding", async () => {
+  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-readiness-cli-"));
+  try {
+    const result = await captureCli(["authority", "readiness", "--json"], repositoryRoot);
+    assert.equal(result.exitCode, 2);
+    const output = jsonOutput(result);
+    assert.equal(output.ok, false);
+    assert.equal(output.state, "missing-deployment-binding");
+    assert.deepEqual(output.diagnostics, [
+      {
+        code: "RUNTIME_AUTHORITY_READINESS_MISSING_DEPLOYMENT_BINDING",
+        message: "Signer deployment must provide an authority ID and a Runtime private key.",
+      },
+    ]);
+    assert.equal(result.stdout.includes("BEGIN PRIVATE KEY"), false);
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("authority readiness --rotation-phase requires --current-authority-id and a valid phase", async () => {
+  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "inari-authority-rotation-order-cli-"));
+  try {
+    const missingCurrentId = await captureCli(
+      ["authority", "readiness", "--rotation-phase", "activate", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(missingCurrentId.exitCode, 1);
+    assert.match(missingCurrentId.stdout, /INPUT_REQUIRED/u);
+
+    const danglingCurrentId = await captureCli(
+      ["authority", "readiness", "--current-authority-id", "A", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(danglingCurrentId.exitCode, 1);
+    assert.match(danglingCurrentId.stdout, /INVALID_OPTION/u);
+
+    const invalidPhase = await captureCli(
+      ["authority", "readiness", "--rotation-phase", "bogus", "--current-authority-id", "A", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(invalidPhase.exitCode, 1);
+    assert.match(invalidPhase.stdout, /INVALID_OPTION/u);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("authority bootstrap constructs a canonical record from the generated private key and leaves registration explicit", async () => {
+  const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-bootstrap-"));
+  try {
+    const generated = await captureCli(
+      ["authority", "generate", "--private-key", "runtime.pem", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(generated.exitCode, 0);
+    const prepared = await captureCli(
+      [
+        "authority",
+        "bootstrap",
+        "--private-key",
+        "runtime.pem",
+        "--authority-id",
+        "runtime-cli",
+        "--output",
+        "prepared-authority.json",
+        "--not-before",
+        "2026-01-01T00:00:00Z",
+        "--max-session-ttl-seconds",
+        "7200",
+        "--capability",
+        "change.implement",
+        "--json",
+      ],
+      repositoryRoot,
+    );
+    assert.equal(prepared.exitCode, 0, prepared.stderr);
+    const preparedOutput = jsonOutput(prepared);
+    assert.equal(preparedOutput.operation, "authority.bootstrap");
+    assert.equal(preparedOutput.repositoryTrustChanged, false);
+    assert.equal(preparedOutput.deploymentBindingChanged, false);
+    assert.equal(JSON.stringify(preparedOutput).includes("BEGIN PRIVATE KEY"), false);
+    const record = JSON.parse(
+      await readFile(path.join(repositoryRoot, "prepared-authority.json"), "utf8"),
+    ) as RuntimeAuthority;
+    assert.equal(record.id, "runtime-cli");
+    assert.equal(await readFile(artifactPath(repositoryRoot, "runtime-cli")).catch(() => undefined), undefined);
+
+    const registered = await captureCli(
+      ["authority", "register", "--from", "prepared-authority.json", "--json"],
+      repositoryRoot,
+    );
+    assert.equal(registered.exitCode, 0, registered.stderr);
+    assert.equal(
+      await readFile(artifactPath(repositoryRoot, "runtime-cli"), "utf8"),
+      canonicalRuntimeAuthorityJson(record),
+    );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("authority register creates one canonical active trust artifact exclusively", async () => {
   const repositoryRoot = await mkdtemp(path.join(process.cwd(), ".inari-authority-register-"));
   try {

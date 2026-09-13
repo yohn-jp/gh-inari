@@ -64,7 +64,7 @@ jobs:
         env:
           INARI_CHANGE_REQUEST: ${{ inputs.request }}
           GITHUB_TOKEN: ${{ github.token }}
-          INARI_RUNTIME_AUTHORITY_ID: ${{ secrets.INARI_RUNTIME_AUTHORITY_ID }}
+          INARI_RUNTIME_AUTHORITY_ID: ${{ vars.INARI_RUNTIME_AUTHORITY_ID }}
           INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: ${{ secrets.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY }}
         run: |
           set -e
@@ -132,7 +132,7 @@ jobs:
           INARI_ISSUER_APP_ID: ${{ secrets.INARI_ISSUER_APP_ID }}
           INARI_ISSUER_INSTALLATION_ID: ${{ secrets.INARI_ISSUER_INSTALLATION_ID }}
           INARI_ISSUER_APP_PRIVATE_KEY: ${{ secrets.INARI_ISSUER_APP_PRIVATE_KEY }}
-          INARI_RUNTIME_AUTHORITY_ID: ${{ secrets.INARI_RUNTIME_AUTHORITY_ID }}
+          INARI_RUNTIME_AUTHORITY_ID: ${{ vars.INARI_RUNTIME_AUTHORITY_ID }}
         run: |
           set +e
           result_path="$RUNNER_TEMP/inari-change-result/result.json"

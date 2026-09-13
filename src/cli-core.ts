@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { open } from "node:fs/promises";
+import { open, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,6 +132,17 @@ import {
   loadRuntimeAuthorityKeyPair,
 } from "./agent-authority/runtime-key.js";
 import {
+  checkRuntimeAuthorityRotationOrder,
+  createRuntimeAuthorityRecord,
+  deriveRuntimeAuthorityIdentity,
+  verifyRuntimeAuthorityReadiness,
+  type RuntimeAuthorityPublicKeyInput,
+  type RuntimeAuthorityRotationPhase,
+} from "./agent-authority/runtime-authority-operations.js";
+import { RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY } from "./agent-authority/runtime-authority.js";
+import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
+import type { CapabilityKind } from "./agent-authority/capability.js";
+import {
   registerRuntimeAuthority,
   revokeRuntimeAuthority,
   rotateRuntimeAuthority,
@@ -228,6 +239,8 @@ interface RuntimeDiagnostic {
 
 export interface CliDependencies {
   readonly repositoryRoot?: string;
+  /** Environment seam for explicit runtime-signing readiness checks. */
+  readonly environment?: NodeJS.ProcessEnv;
   readonly createAdapter?: (options: ConstructorParameters<typeof GitHubAdapter>[0]) => GitHubAdapter;
   readonly packageMetadata?: PackageMetadata;
   readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
@@ -263,6 +276,7 @@ const BOOLEAN_OPTIONS = new Set([
   "check",
   "dryRun",
   "replace",
+  "environment",
 ]);
 const VALUE_OPTIONS = new Set([
   "from",
@@ -276,6 +290,14 @@ const VALUE_OPTIONS = new Set([
   "requireCapability",
   "minimumVersion",
   "privateKey",
+  "publicKey",
+  "authorityId",
+  "output",
+  "notBefore",
+  "notAfter",
+  "maxSessionTtlSeconds",
+  "probeIssue",
+  "sessionTtlSeconds",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -357,7 +379,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "authority") {
-      return await runAuthorityCommand(command, rest, parsed, root, json);
+      return await runAuthorityCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "session") {
       return await runSessionCommand(command, rest, parsed, root, json);
@@ -851,21 +873,24 @@ function runSkillCommand(scenarioId: string | undefined, json: boolean): number 
 }
 
 function rejectUnsupportedAuthorityOptions(
+  command: "generate" | "bootstrap" | "readiness",
   options: Readonly<Record<string, string | boolean>>,
   capabilities: readonly string[],
 ): void {
-  if (capabilities.length > 0) {
+  const definition = getCommand(
+    `authority.${command}` as "authority.generate" | "authority.bootstrap" | "authority.readiness",
+  );
+  if (capabilities.length > 0 && !definition.optionIds.includes("capability")) {
     throw new CliError("INVALID_OPTION", "Option --capability is not supported by authority commands.", "--capability");
   }
-  const definition = getCommand("authority.generate");
   const unsupported = Object.keys(options).find((id) => !definition.optionIds.includes(id as OptionId));
   if (unsupported === undefined) return;
   const option = getOption(unsupported as OptionId);
   throw new CliError(
     "INVALID_OPTION",
-    `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority generate.`,
+    `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority ${command}.`,
     "$argv",
-    { command: "authority generate", option: option.id },
+    { command: `authority ${command}`, option: option.id },
   );
 }
 
@@ -874,18 +899,25 @@ async function runAuthorityCommand(
   rest: readonly string[],
   parsed: ParsedArgs,
   root: string,
+  dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
   if (
-    (command !== "generate" && command !== "register" && command !== "rotate" && command !== "revoke") ||
-    (command !== "revoke" && rest.length > 0) ||
+    (command !== "generate" &&
+      command !== "bootstrap" &&
+      command !== "readiness" &&
+      command !== "register" &&
+      command !== "rotate" &&
+      command !== "revoke") ||
+    (command !== "revoke" && command !== "readiness" && rest.length > 0) ||
+    (command === "readiness" && rest.length > 0) ||
     (command === "revoke" && rest.length !== 1)
   ) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
   }
 
   if (command === "generate") {
-    rejectUnsupportedAuthorityOptions(parsed.options, parsed.capabilities);
+    rejectUnsupportedAuthorityOptions(command, parsed.options, parsed.capabilities);
     const requestedPath = parsed.options.privateKey;
     const privateKeyPath =
       typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
@@ -910,6 +942,162 @@ async function runAuthorityCommand(
     return 0;
   }
 
+  if (command === "bootstrap") {
+    rejectUnsupportedAuthorityOptions(command, parsed.options, parsed.capabilities);
+    const authorityId = requiredAuthorityOption(parsed, "authorityId", "--authority-id <id>");
+    const outputValue = requiredAuthorityOption(parsed, "output", "--output <authority.json>");
+    const ttlValue = requiredAuthorityOption(parsed, "maxSessionTtlSeconds", "--max-session-ttl-seconds <seconds>");
+    if (parsed.capabilities.length === 0) {
+      throw new CliError("INPUT_REQUIRED", "Use at least one --capability <id>.", "--capability");
+    }
+    const privateKeyValue = parsed.options.privateKey;
+    const publicKeyValue = parsed.options.publicKey;
+    if ((typeof privateKeyValue === "string") === (typeof publicKeyValue === "string")) {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Use exactly one of --private-key <path> or --public-key <path>.",
+        "--private-key",
+      );
+    }
+    const outputPath = path.resolve(root, outputValue);
+    const privateKeyPath = typeof privateKeyValue === "string" ? path.resolve(root, privateKeyValue) : undefined;
+    if (privateKeyPath !== undefined && privateKeyPath === outputPath) {
+      throw new CliError(
+        "INVALID_OPTION",
+        "The public authority output cannot overwrite the private key file.",
+        "--output",
+      );
+    }
+    const outputRelative = path.relative(root, outputPath).split(path.sep).join("/");
+    const trustRootPrefix = `${RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY}/`;
+    if (outputRelative === RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY || outputRelative.startsWith(trustRootPrefix)) {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Bootstrap output must stay outside the canonical trust-root directory; use authority register for materialization.",
+        "--output",
+      );
+    }
+    const maxSessionTtlSeconds = parseAuthorityInteger(ttlValue, "--max-session-ttl-seconds");
+    const key =
+      privateKeyPath === undefined
+        ? await readJsonValue(authorityInputPath(root, publicKeyValue as string))
+        : loadRuntimeAuthorityKeyPair(privateKeyPath);
+    const authority = createRuntimeAuthorityRecord({
+      id: authorityId,
+      key: key as RuntimeAuthorityPublicKeyInput,
+      ...(typeof parsed.options.notBefore === "string" ? { notBefore: parsed.options.notBefore } : {}),
+      ...(typeof parsed.options.notAfter === "string" ? { notAfter: parsed.options.notAfter } : {}),
+      maxSessionTtlSeconds,
+      capabilityCeiling: parsed.capabilities as CapabilityKind[],
+    });
+    const rendered = renderRuntimeAuthorityArtifact(authority);
+    await writeBootstrapAuthorityOutput(outputPath, rendered.content);
+    const output = {
+      ok: true,
+      operation: "authority.bootstrap",
+      outputPath,
+      artifactPath: rendered.path,
+      authority,
+      publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(authority.key),
+      publicKeyFingerprint: deriveRuntimeAuthorityIdentity(authority.id, authority.key).publicKeyFingerprint,
+      repositoryTrustChanged: false,
+      deploymentBindingChanged: false,
+    } as const;
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Constructed canonical Runtime Authority public record.");
+      console.log(`Record: ${outputPath}`);
+      console.log(`Trust artifact to register: ${rendered.path}`);
+      console.log("Repository trust and deployment binding were not modified.");
+    }
+    return 0;
+  }
+
+  if (command === "readiness") {
+    rejectUnsupportedAuthorityOptions(command, parsed.options, parsed.capabilities);
+    const environment = dependencies.environment ?? process.env;
+    const fromEnvironment = parsed.options.environment === true;
+    if (fromEnvironment && (parsed.options.authorityId !== undefined || parsed.options.privateKey !== undefined)) {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Use --environment alone, or provide --authority-id and --private-key explicitly.",
+        "--environment",
+      );
+    }
+    const authorityId = fromEnvironment
+      ? environment.INARI_RUNTIME_AUTHORITY_ID
+      : typeof parsed.options.authorityId === "string"
+        ? parsed.options.authorityId
+        : undefined;
+    const privateKeyPem = fromEnvironment ? environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY : undefined;
+    const privateKeyPath = fromEnvironment
+      ? undefined
+      : typeof parsed.options.privateKey === "string"
+        ? path.resolve(root, parsed.options.privateKey)
+        : undefined;
+    const rotationPhase = parsed.options.rotationPhase;
+    if (rotationPhase !== undefined && rotationPhase !== "activate" && rotationPhase !== "revoke") {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Option --rotation-phase must be exactly activate or revoke.",
+        "--rotation-phase",
+      );
+    }
+    const currentAuthorityId = parsed.options.currentAuthorityId;
+    if (rotationPhase === undefined && currentAuthorityId !== undefined) {
+      throw new CliError(
+        "INVALID_OPTION",
+        "Option --current-authority-id requires --rotation-phase.",
+        "--current-authority-id",
+      );
+    }
+    if (rotationPhase !== undefined && typeof currentAuthorityId !== "string") {
+      throw new CliError(
+        "INPUT_REQUIRED",
+        "Use --current-authority-id <id> with --rotation-phase.",
+        "--current-authority-id",
+      );
+    }
+    const adapter = createAdapter(dependencies, root, parsed.options.repository);
+    const result = await verifyRuntimeAuthorityReadiness(adapter, {
+      authorityId,
+      ...(privateKeyPem === undefined ? {} : { privateKey: privateKeyPem }),
+      ...(privateKeyPath === undefined ? {} : { privateKeyPath }),
+      ...(typeof parsed.options.probeIssue === "string"
+        ? { probeIssue: parseAuthorityInteger(parsed.options.probeIssue, "--probe-issue") }
+        : {}),
+      ...(typeof parsed.options.sessionTtlSeconds === "string"
+        ? { sessionTtlSeconds: parseAuthorityInteger(parsed.options.sessionTtlSeconds, "--session-ttl-seconds") }
+        : {}),
+      ...(parsed.capabilities.length === 0 ? {} : { capabilities: parsed.capabilities }),
+    });
+    const rotationOrder =
+      rotationPhase === undefined || typeof currentAuthorityId !== "string"
+        ? undefined
+        : checkRuntimeAuthorityRotationOrder({
+            currentAuthorityId,
+            nextAuthorityId: authorityId ?? "",
+            phase: rotationPhase as RuntimeAuthorityRotationPhase,
+            signerAuthorityId: authorityId,
+            nextReadiness: result,
+          });
+    if (json) console.log(JSON.stringify(rotationOrder === undefined ? result : { ...result, rotationOrder }));
+    else {
+      console.log(`Runtime Authority readiness: ${result.state}.`);
+      if (result.authorityId !== undefined) console.log(`Authority ID: ${result.authorityId}`);
+      if (result.publicKeyFingerprint !== undefined)
+        console.log(`Public key fingerprint: ${result.publicKeyFingerprint}`);
+      for (const item of result.diagnostics) console.log(`Diagnostic: ${item.code}: ${item.message}`);
+      if (rotationOrder !== undefined) {
+        console.log(`Rotation order: ${rotationOrder.state}.`);
+        if (rotationOrder.diagnostic !== undefined) {
+          console.log(`Diagnostic: ${rotationOrder.diagnostic.code}: ${rotationOrder.diagnostic.message}`);
+        }
+      }
+    }
+    return result.ok && (rotationOrder === undefined || rotationOrder.ok) ? 0 : EXIT_VALIDATION;
+  }
+
   rejectUnsupportedAuthorityLifecycleOptions(command, parsed.options, parsed.capabilities);
   const result =
     command === "revoke"
@@ -927,6 +1115,38 @@ async function runAuthorityCommand(
     console.log(`Artifact: ${path.join(root, result.path)}`);
   }
   return 0;
+}
+
+function requiredAuthorityOption(
+  parsed: ParsedArgs,
+  key: "authorityId" | "output" | "maxSessionTtlSeconds",
+  usage: string,
+): string {
+  const value = parsed.options[key];
+  if (typeof value !== "string" || value.length === 0) throw new CliError("INPUT_REQUIRED", `Use ${usage}.`, usage);
+  return value;
+}
+
+function parseAuthorityInteger(value: string, option: string): number {
+  if (!/^[1-9]\d*$/u.test(value)) throw new CliError("INVALID_OPTION", `${option} must be a positive integer.`, option);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new CliError("INVALID_OPTION", `${option} is too large.`, option);
+  return parsed;
+}
+
+async function writeBootstrapAuthorityOutput(outputPath: string, content: string): Promise<void> {
+  try {
+    await writeFile(outputPath, content, { encoding: "utf8", mode: 0o644, flag: "wx" });
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+      throw new CliError(
+        "OUTPUT_EXISTS",
+        "Bootstrap output already exists; choose a new public record path.",
+        "--output",
+      );
+    }
+    throw new CliError("OUTPUT_WRITE_FAILED", "Unable to write the canonical public authority record.", "--output");
+  }
 }
 
 function requiredAuthorityFrom(parsed: ParsedArgs): string {
@@ -3247,7 +3467,7 @@ Domains:
   branch     Semantic Branch observation and drift checks
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
-  authority  Local Runtime Authority key generation and secure loading
+  authority  Local Runtime Authority key, bootstrap, readiness, and lifecycle operations
   session    Manual short-lived Session credential issuance and inspection
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
