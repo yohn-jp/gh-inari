@@ -49,6 +49,8 @@ test("worker handoff allowlists environment and carries only bounded identities"
       HOME: "/tmp/home",
       GH_TOKEN: "issuer-secret",
       INARI_ISSUER_PRIVATE_KEY: "private-key",
+      INARI_RUNTIME_AUTHORITY_ID: "yohn-self-dogfood-ci-2026-09",
+      INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "runtime-private-key",
       AWS_SECRET_ACCESS_KEY: "cloud-secret",
     },
     {
@@ -70,6 +72,8 @@ test("worker handoff allowlists environment and carries only bounded identities"
   assert.deepEqual(environment.HOME, "/tmp/home");
   assert.equal(environment.GH_TOKEN, undefined);
   assert.equal(environment.INARI_ISSUER_PRIVATE_KEY, undefined);
+  assert.equal(environment.INARI_RUNTIME_AUTHORITY_ID, undefined);
+  assert.equal(environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, undefined);
   assert.equal(environment.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(environment.INARI_CHANGE_ISSUE, "239");
   assert.equal(environment.INARI_IMPLEMENTATION_BRANCH, "feat/239-disposable-dogfood");
@@ -222,7 +226,12 @@ console.log(JSON.stringify(output));
   fs.writeFileSync(
     worker,
     `import fs from "node:fs";
-fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: process.env.GH_TOKEN, branch: process.env.INARI_IMPLEMENTATION_BRANCH }));
+fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({
+  token: process.env.GH_TOKEN,
+  runtimeAuthorityId: process.env.INARI_RUNTIME_AUTHORITY_ID,
+  runtimeAuthorityPrivateKey: process.env.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
+  branch: process.env.INARI_IMPLEMENTATION_BRANCH,
+}));
 `,
     { encoding: "utf8", mode: 0o600 },
   );
@@ -252,6 +261,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
           ...process.env,
           INARI_SELF_DOGFOOD: "1",
           GH_TOKEN: "issuer-secret",
+          INARI_RUNTIME_AUTHORITY_ID: "yohn-self-dogfood-ci-2026-09",
+          INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "runtime-private-key",
           FAKE_INARI_STATE: stateFile,
           FAKE_INARI_READY_STATE: path.join(root, "provider-ready-state"),
         },
@@ -272,6 +283,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
     );
     const observation = JSON.parse(fs.readFileSync(workerObservation, "utf8"));
     assert.equal(observation.token, undefined);
+    assert.equal(observation.runtimeAuthorityId, undefined);
+    assert.equal(observation.runtimeAuthorityPrivateKey, undefined);
     assert.equal(observation.branch, "feat/239-self-dogfood");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

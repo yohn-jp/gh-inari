@@ -27,6 +27,25 @@ test("self-dogfood certification is an explicit, source-addressable privileged o
   assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/u);
 });
 
+test("self-dogfood signer is dedicated and scoped to the coordinator", () => {
+  assert.match(workflow, /environment:\n\s+name: self-dogfood-certification/u);
+  assert.match(workflow, /INARI_RUNTIME_AUTHORITY_ID: \$\{\{ vars\.INARI_RUNTIME_AUTHORITY_ID \}\}/u);
+  assert.match(
+    workflow,
+    /INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: \$\{\{ secrets\.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY \}\}/u,
+  );
+  assert.match(workflow, /test "\$INARI_RUNTIME_AUTHORITY_ID" = "yohn-self-dogfood-ci-2026-09"/u);
+  assert.match(workflow, /test -n "\$INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"/u);
+  assert.doesNotMatch(workflow, /yohn-runtime-2026-09/u);
+
+  const coordinatorStart = workflow.indexOf(
+    "- name: Run the real self-dogfood coordinator with the installed artifact",
+  );
+  assert.notEqual(coordinatorStart, -1);
+  assert.doesNotMatch(workflow.slice(0, coordinatorStart), /INARI_RUNTIME_AUTHORITY_PRIVATE_KEY/u);
+  assert.equal((workflow.match(/INARI_RUNTIME_AUTHORITY_PRIVATE_KEY:/gu) ?? []).length, 1);
+});
+
 test("self-dogfood workflow contains no manual branch or pull-request mutation path", () => {
   assert.doesNotMatch(workflow, /gh\s+(?:api|pr\s+create|issue\s+create)/u);
   assert.doesNotMatch(workflow, /git\s+(?:push|update-ref|branch\s+-f)/u);
