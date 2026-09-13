@@ -803,7 +803,11 @@ function intentForReview(review: GitHubPullRequestReview): SemanticPullRequestRe
  * principal: an absent `author` on provider evidence cannot prove this
  * caller submitted the review, so it never matches (issue #521 review).
  */
-function sameReview(review: GitHubPullRequestReview, request: SemanticPullRequestReviewRequest, actor: string): boolean {
+function sameReview(
+  review: GitHubPullRequestReview,
+  request: SemanticPullRequestReviewRequest,
+  actor: string,
+): boolean {
   return (
     review.author === actor &&
     review.commitId === request.expectedHead &&
