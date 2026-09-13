@@ -1111,6 +1111,26 @@ Epic #267 correctly identified several durable boundaries:
 
 Those remain valid.
 
+Issue #381 records the final classification needed to reconcile the native MCP
+tracker with the completed Session/App execution leaves:
+
+| #267/#268 assumption                                                 | Classification under the current architecture |
+| -------------------------------------------------------------------- | --------------------------------------------- |
+| Native typed MCP protocol and transport-neutral Core projections     | retained                                      |
+| Hosted gateway as authentication/admission authority                 | superseded                                    |
+| Central Runtime/Agent Session registry or requester state            | obsolete                                      |
+| Actions as the mandatory privileged execution plane                  | compatibility-only                            |
+| Actions OIDC as the normative caller-to-App authorization route      | obsolete                                      |
+| Consumer-workflow-centered App credential dispatch                   | superseded                                    |
+| OAuth/MCP identity replacing Session Certificate proof-of-possession | obsolete                                      |
+
+The native MCP privileged bridge may forward the canonical signed Session
+request directly to the existing Session-authorized App executor. It adds no
+certificate, capability vocabulary, Session registry, or authorization
+authority. Read-only MCP tools remain available without Session coupling, and
+the existing Actions remote executor remains an explicit compatibility or
+specialized transport until parity justifies any retirement.
+
 The following assumptions are superseded by #364 as normative architecture:
 
 - a hosted MCP gateway is the required authentication/authorization control plane;

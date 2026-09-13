@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   canonicalRuntimeAuthorityJson,
   createManagedSession,
@@ -14,6 +16,7 @@ import {
 } from "./agent-authority/index.js";
 import { assertRuntimeAuthority } from "./agent-authority/runtime-authority.js";
 import { createDirectAppSessionExecutor } from "./github/direct-app-execution.js";
+import { createInariMcpServer } from "./mcp/server.js";
 import type { GitHubChangeEffectRepository } from "./github/change-effect-adapter.js";
 
 const NOW = new Date("2026-09-13T00:00:30.000Z");
@@ -103,11 +106,15 @@ function signedSession(
   options: {
     readonly taskIssue?: number;
     readonly certificateRepository?: { readonly id: string; readonly name: string };
+    readonly certificateNow?: Date;
+    readonly requestExpiresAt?: number;
   } = {},
 ): SessionFixture {
   const runtime = createRuntimeAuthority();
   const session = createManagedSession();
   const certificateRepository = options.certificateRepository ?? { id: REPOSITORY_ID, name: "acme/inari" };
+  const certificateNow = options.certificateNow ?? NOW;
+  const issuedAt = Math.floor(certificateNow.getTime() / 1000);
   const issuance = session.createIssuanceRequest({
     repository: certificateRepository,
     task: { kind: "issue", number: options.taskIssue ?? ISSUE },
@@ -119,7 +126,7 @@ function signedSession(
     runtimeAuthority: runtime.authority,
     runtimeKey: runtime.key,
     request: issuance,
-    now: NOW,
+    now: certificateNow,
   });
   session.acceptCertificate(certificate.compact);
   return {
@@ -129,8 +136,8 @@ function signedSession(
       request: request as unknown as SemanticSessionRequest,
       operation,
       requestId: `integration-${operation.replaceAll(".", "-")}`,
-      issuedAt: NOW_SECONDS,
-      expiresAt: NOW_SECONDS + 60,
+      issuedAt,
+      expiresAt: options.requestExpiresAt ?? issuedAt + 60,
     }),
     runtimePrivateKeyPem: runtime.key.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   };
@@ -346,6 +353,107 @@ function directExecutor(session: SessionFixture, provider: ProviderFixture) {
     now: () => NOW,
   });
 }
+
+async function mcpExecutor(session: SessionFixture, provider: ProviderFixture): Promise<unknown> {
+  const server = createInariMcpServer({ sessionExecutor: directExecutor(session, provider) });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-session-mcp-integration-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({
+      name: "inari_change_execute",
+      arguments: { envelope: session.envelope },
+    });
+    return response.structuredContent;
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+test("MCP privileged execution has direct-App authorization parity and preserves Session PoP", async () => {
+  const session = signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }]);
+  const directProvider = providerFixture("abort", session.authority);
+  const direct = await directExecutor(session, directProvider).execute(session.envelope);
+  const mcpProvider = providerFixture("abort", session.authority);
+  const throughMcp = await mcpExecutor(session, mcpProvider);
+
+  assert.deepEqual(throughMcp, direct);
+  assert.equal(direct.status, "succeeded");
+  assert.equal(mcpProvider.state.pullRequestState, "closed");
+  assert.equal(mcpProvider.state.branchPresent, false);
+  assert.equal(
+    JSON.stringify(throughMcp).includes(PRIVATE_KEY_PEM),
+    false,
+    "MCP result must not contain the App private key",
+  );
+  assert.equal(JSON.stringify(throughMcp).includes("integration-installation-token"), false);
+
+  const tampered = {
+    ...(session.envelope as Record<string, unknown>),
+    request: { version: 1, issue: ISSUE + 1 },
+  };
+  const tamperedSession = { ...session, envelope: tampered };
+  const directTamperedProvider = providerFixture("abort", session.authority);
+  const directTampered = await directExecutor(tamperedSession, directTamperedProvider).execute(tampered);
+  const mcpTamperedProvider = providerFixture("abort", session.authority);
+  const throughMcpTampered = await mcpExecutor(tamperedSession, mcpTamperedProvider);
+
+  assert.deepEqual(throughMcpTampered, directTampered);
+  assert.equal(directTampered.status, "failed");
+  assert.equal(directTampered.failure?.phase, "authentication");
+  assert.equal(mcpTamperedProvider.state.pullRequestState, "open");
+  assert.equal(mcpTamperedProvider.state.branchPresent, true);
+});
+
+test("MCP and direct-App reject expired, wrong-repository, wrong-task, and overbroad authority identically", async () => {
+  const cases = [
+    {
+      name: "expired request",
+      session: signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }], {
+        certificateNow: new Date((NOW_SECONDS - 120) * 1_000),
+        requestExpiresAt: NOW_SECONDS - 1,
+      }),
+      phase: "authentication",
+    },
+    {
+      name: "wrong repository",
+      session: signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }], {
+        certificateRepository: { id: "987654321", name: "acme/inari" },
+      }),
+      phase: "authentication",
+    },
+    {
+      name: "wrong task",
+      session: signedSession(
+        "change.abort",
+        { version: 1, issue: ISSUE },
+        [{ kind: "change.abort", issue: ISSUE + 1 }],
+        { taskIssue: ISSUE + 1 },
+      ),
+      phase: "authorization",
+    },
+    {
+      name: "operation outside Session authority",
+      session: signedSession("change.issue", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }]),
+      phase: "authorization",
+    },
+  ] as const;
+
+  for (const candidate of cases) {
+    const directProvider = providerFixture("abort", candidate.session.authority);
+    const direct = await directExecutor(candidate.session, directProvider).execute(candidate.session.envelope);
+    const mcpProvider = providerFixture("abort", candidate.session.authority);
+    const throughMcp = await mcpExecutor(candidate.session, mcpProvider);
+
+    assert.deepEqual(throughMcp, direct, candidate.name);
+    assert.equal(direct.status, "failed", candidate.name);
+    assert.equal(direct.failure?.phase, candidate.phase, candidate.name);
+    assert.equal(mcpProvider.state.pullRequestState, "open", candidate.name);
+    assert.equal(mcpProvider.state.branchPresent, true, candidate.name);
+  }
+});
 
 test("authenticated direct-App Change mutation returns verified App provenance after provider effects", async () => {
   const session = signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }]);

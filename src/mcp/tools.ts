@@ -64,9 +64,14 @@ import {
   type ChangeRemoteExecutor,
   type ChangeRemoteExecutorOptions,
 } from "../change-executor.js";
+import type {
+  CapabilityAuthorizedSessionExecutionResult,
+  CapabilityAuthorizedSessionExecutor,
+} from "../session-authorized-change-executor.js";
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
+import type { McpSessionAppBridge } from "./session-app-bridge.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
@@ -92,6 +97,9 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_golden_path_entry",
   "inari_change_handoff",
 ] as const);
+
+/** Optional privileged catalog, enabled only by an embedding with App execution. */
+export const INARI_MCP_PRIVILEGED_TOOL_NAMES = Object.freeze(["inari_change_execute"] as const);
 
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
 
@@ -197,7 +205,8 @@ export const semanticPullRequestDriftInputSchema = z.strictObject({
  * Input schema for previewing existing-Issue native relationship
  * reconciliation. Read-only: this composes live observation with Core
  * planning but never mutates GitHub, matching the read-only MCP boundary
- * every other semantic artifact tool uses (mutation stays CLI/Actions-only).
+ * this tool and every other semantic artifact tool uses. Privileged Change
+ * execution is a separate, explicitly configured Session/App bridge.
  */
 export const issueRelationsPlanInputSchema = z.strictObject({
   repository: repositorySchema.optional(),
@@ -213,6 +222,16 @@ export const implementationHandoffInputSchema = z.strictObject({
   repository: repositorySchema.optional(),
   issue: artifactNumberSchema,
 });
+
+/**
+ * The value is intentionally opaque here. The canonical Session request
+ * validator and executor own its structure, signature, freshness, and
+ * repository/task bindings; MCP must not create a second envelope contract.
+ */
+export const sessionAuthorizedChangeInputSchema = z.strictObject({
+  envelope: z.unknown().describe("Canonical signed Session request envelope; never include private credentials."),
+});
+export type SessionAuthorizedChangeInput = z.infer<typeof sessionAuthorizedChangeInputSchema>;
 
 /** Compatibility name for callers that prefix the handoff with Change. */
 export const changeImplementationHandoffInputSchema = implementationHandoffInputSchema;
@@ -264,6 +283,8 @@ export interface NativeChangeDependencies extends NativeSemanticPullRequestDepen
   readonly changeExecutor?: ChangeRemoteExecutor;
   /** Factory seam for repository-scoped Change executor construction. */
   readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+  /** Existing Session-authorized App executor; absent for the read-only catalog. */
+  readonly sessionExecutor?: CapabilityAuthorizedSessionExecutor;
 }
 
 const READ_ONLY: ToolAnnotations = Object.freeze({
@@ -338,6 +359,20 @@ export const implementationHandoffOutputSchema = z
   .strict();
 
 export const changeImplementationHandoffOutputSchema = implementationHandoffOutputSchema;
+
+/** Structured projection of the canonical Session-authorized execution result. */
+export const sessionAuthorizedChangeOutputSchema = z
+  .object({
+    version: z.literal(1),
+    operation: z.enum(["change.issue", "change.show", "change.ready", "change.abort", "branch.advance"]).optional(),
+    status: z.enum(["succeeded", "failed"]),
+    projection: z.unknown().optional(),
+    execution: z.unknown().optional(),
+    branchAdvance: z.unknown().optional(),
+    provenance: z.unknown().optional(),
+    failure: z.unknown().optional(),
+  })
+  .strict();
 
 /** Structured output schema for a read-only Golden Path entry projection. */
 export const goldenPathEntryOutputSchema = z
@@ -699,6 +734,65 @@ async function handleGoldenPathStatus(input: GoldenPathStatusMcpInput): Promise<
       "Golden Path status projection failed; see diagnostics.",
     );
   }
+}
+
+function unavailableSessionExecution(): CapabilityAuthorizedSessionExecutionResult {
+  return {
+    version: 1,
+    status: "failed",
+    failure: {
+      code: "SESSION_EXECUTION_FAILED",
+      phase: "execution",
+      message: "Session-authorized App execution failed closed.",
+    },
+  };
+}
+
+async function handleSessionAuthorizedChange(
+  input: SessionAuthorizedChangeInput,
+  bridge: McpSessionAppBridge,
+): Promise<CallToolResult> {
+  let execution: CapabilityAuthorizedSessionExecutionResult;
+  try {
+    execution = await bridge.execute(input.envelope);
+  } catch {
+    // The transport boundary must not expose executor/provider errors or
+    // credential-bearing details. The canonical executor normally returns a
+    // bounded result; this is only the unexpected adapter-failure fallback.
+    execution = unavailableSessionExecution();
+  }
+  return result(
+    execution as unknown as Record<string, unknown>,
+    execution.status === "succeeded"
+      ? "Completed through the canonical Session-authorized App execution path."
+      : "Session-authorized App execution failed closed; see the bounded result.",
+  );
+}
+
+const PRIVILEGED_CHANGE: ToolAnnotations = Object.freeze({
+  readOnlyHint: false,
+  destructiveHint: true,
+  openWorldHint: true,
+});
+
+/** Register the optional privileged bridge without adding an MCP authority. */
+export function registerSessionAuthorizedChangeTools(
+  server: McpServer,
+  bridge: McpSessionAppBridge,
+): readonly RegisteredTool[] {
+  const execute = server.registerTool(
+    "inari_change_execute",
+    {
+      title: "Execute Session-authorized Change",
+      description:
+        "Forward the canonical signed Session request envelope to the existing Session-authorized App executor. Session proof-of-possession, capability admission, trusted Change/Core/XState execution, and App effects remain outside MCP; never provide gh auth, PATs, Runtime private keys, App keys/JWTs, or installation tokens.",
+      inputSchema: sessionAuthorizedChangeInputSchema,
+      outputSchema: sessionAuthorizedChangeOutputSchema,
+      annotations: PRIVILEGED_CHANGE,
+    },
+    async (input: SessionAuthorizedChangeInput) => handleSessionAuthorizedChange(input, bridge),
+  );
+  return Object.freeze([execute]);
 }
 
 function observationRepository(
