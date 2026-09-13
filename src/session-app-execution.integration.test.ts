@@ -43,19 +43,22 @@ const PRIVATE_KEY_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
   .toString();
 
-type ProviderMode = "abort" | "branch-success" | "branch-stale";
+type ProviderMode = "abort" | "abort-timeout-after-close" | "branch-success" | "branch-stale";
 
 interface SessionFixture {
   readonly authority: RuntimeAuthority;
   readonly envelope: unknown;
+  readonly runtimePrivateKeyPem: string;
 }
 
 interface ProviderState {
+  runtimeAuthority: RuntimeAuthority;
   branchPresent: boolean;
   branchSha: string;
   pullRequestState: "open" | "closed";
   pullRequestDraft: boolean;
   readonly calls: readonly { readonly method: string; readonly path: string }[];
+  readonly authorizationHeaders: readonly string[];
 }
 
 interface ProviderFixture {
@@ -97,17 +100,22 @@ function signedSession(
   operation: string,
   request: Record<string, unknown>,
   capabilities: readonly CapabilityClaim[],
+  options: {
+    readonly taskIssue?: number;
+    readonly certificateRepository?: { readonly id: string; readonly name: string };
+  } = {},
 ): SessionFixture {
   const runtime = createRuntimeAuthority();
   const session = createManagedSession();
+  const certificateRepository = options.certificateRepository ?? { id: REPOSITORY_ID, name: "acme/inari" };
   const issuance = session.createIssuanceRequest({
-    repository: { id: REPOSITORY_ID, name: "acme/inari" },
-    task: { kind: "issue", number: ISSUE },
+    repository: certificateRepository,
+    task: { kind: "issue", number: options.taskIssue ?? ISSUE },
     capabilities,
     ttlSeconds: 600,
   });
   const certificate = issueSessionCertificate({
-    repository: { id: REPOSITORY_ID, name: "acme/inari" },
+    repository: certificateRepository,
     runtimeAuthority: runtime.authority,
     runtimeKey: runtime.key,
     request: issuance,
@@ -124,6 +132,7 @@ function signedSession(
       issuedAt: NOW_SECONDS,
       expiresAt: NOW_SECONDS + 60,
     }),
+    runtimePrivateKeyPem: runtime.key.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   };
 }
 
@@ -141,18 +150,21 @@ function pullRequestEvidence(state: ProviderState): Record<string, unknown> {
 
 function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): ProviderFixture {
   const artifact = renderRuntimeAuthorityArtifact(authority);
-  const artifactContent = Buffer.from(canonicalRuntimeAuthorityJson(authority), "utf8").toString("base64");
   const changeContent = Buffer.from("integration", "utf8").toString("base64");
   const targetBlobSha = blobSha(changeContent);
   const state: ProviderState = {
+    runtimeAuthority: authority,
     branchPresent: true,
     branchSha: mode === "branch-stale" ? STALE_HEAD : mode === "branch-success" ? EXPECTED_HEAD : EXPECTED_HEAD,
     pullRequestState: "open",
     pullRequestDraft: true,
     calls: [],
+    authorizationHeaders: [],
   };
   const calls: Array<{ readonly method: string; readonly path: string }> = [];
+  const authorizationHeaders: string[] = [];
   Object.defineProperty(state, "calls", { get: () => calls });
+  Object.defineProperty(state, "authorizationHeaders", { get: () => authorizationHeaders });
 
   const repository = {
     id: Number(REPOSITORY_ID),
@@ -168,6 +180,8 @@ function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): Provi
     const path = `${decodeURIComponent(parsed.pathname.replace(/^\/+/, ""))}${parsed.search}`;
     const method = String(init?.method ?? "GET").toUpperCase();
     calls.push({ method, path });
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (authorization !== null) authorizationHeaders.push(authorization);
 
     if (path === `app/installations/${INSTALLATION_ID}/access_tokens` && method === "POST") {
       const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
@@ -200,7 +214,7 @@ function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): Provi
       return jsonResponse(200, {
         sha: POLICY_BLOB_SHA,
         encoding: "base64",
-        content: artifactContent,
+        content: Buffer.from(canonicalRuntimeAuthorityJson(state.runtimeAuthority), "utf8").toString("base64"),
       });
     }
 
@@ -233,6 +247,7 @@ function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): Provi
     if (path === `repos/acme/inari/pulls/${PULL_REQUEST}` && method === "PATCH") {
       state.pullRequestState = "closed";
       state.pullRequestDraft = false;
+      if (mode === "abort-timeout-after-close") throw new Error("simulated transport timeout after provider effect");
       return jsonResponse(200, { number: PULL_REQUEST, state: "closed" });
     }
     if (path === `repos/acme/inari/pulls/${PULL_REQUEST}`) {
@@ -273,6 +288,16 @@ function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): Provi
           sha: EXPECTED_TREE_SHA,
           truncated: false,
           tree: [{ path: "README.md", mode: "100644", type: "blob", sha: BASE_BLOB_SHA }],
+        });
+      }
+      if (sha === RESULTING_TREE_SHA) {
+        return jsonResponse(200, {
+          sha: RESULTING_TREE_SHA,
+          truncated: false,
+          tree: [
+            { path: "README.md", mode: "100644", type: "blob", sha: BASE_BLOB_SHA },
+            { path: "src/integration.txt", mode: "100644", type: "blob", sha: targetBlobSha },
+          ],
         });
       }
     }
@@ -341,6 +366,33 @@ test("authenticated direct-App Change mutation returns verified App provenance a
   );
 });
 
+test("replaying the same signed Change request does not duplicate canonical effects", async () => {
+  const session = signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }]);
+  const provider = providerFixture("abort", session.authority);
+  const executor = directExecutor(session, provider);
+
+  const first = await executor.execute(session.envelope);
+  assert.equal(first.status, "succeeded", JSON.stringify(first));
+  assert.equal(first.execution?.evidence?.outcome, "verified");
+  const effectCallsAfterFirst = provider.state.calls.filter(
+    (call) =>
+      (call.method === "PATCH" && call.path.endsWith(`/pulls/${PULL_REQUEST}`)) ||
+      (call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`)),
+  ).length;
+
+  const replay = await executor.execute(session.envelope);
+  assert.equal(replay.status, "succeeded", JSON.stringify(replay));
+  assert.equal(replay.execution?.evidence?.outcome, "returned-existing");
+  assert.equal(
+    provider.state.calls.filter(
+      (call) =>
+        (call.method === "PATCH" && call.path.endsWith(`/pulls/${PULL_REQUEST}`)) ||
+        (call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`)),
+    ).length,
+    effectCallsAfterFirst,
+  );
+});
+
 test("production branch.advance composition consumes the exact signed request and preserves #466 provenance", async () => {
   const request = branchAdvanceRequest();
   const session = signedSession("branch.advance", request, [{ kind: "branch.advance", branch: BRANCH }]);
@@ -370,6 +422,124 @@ test("production branch.advance replay with an unrelated concurrent tree change 
   assert.equal(provider.state.branchSha, STALE_HEAD);
   assert.equal(
     provider.state.calls.some((call) => call.method === "POST" && call.path === "repos/acme/inari/git/refs"),
+    false,
+  );
+});
+
+test("replaying the same signed branch.advance request resolves only from the exact authoritative target", async () => {
+  const session = signedSession("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
+  const provider = providerFixture("branch-success", session.authority);
+  const executor = directExecutor(session, provider);
+
+  const first = await executor.execute(session.envelope);
+  assert.equal(first.status, "succeeded", JSON.stringify(first));
+  assert.equal(first.branchAdvance?.outcome, "advanced");
+  const mutationCallsAfterFirst = provider.state.calls.filter(
+    (call) =>
+      call.method === "POST" &&
+      (call.path === "graphql" ||
+        call.path === "repos/acme/inari/git/blobs" ||
+        call.path === "repos/acme/inari/git/trees" ||
+        call.path === "repos/acme/inari/git/commits"),
+  ).length;
+
+  const replay = await executor.execute(session.envelope);
+  assert.equal(replay.status, "succeeded", JSON.stringify(replay));
+  assert.equal(replay.branchAdvance?.outcome, "idempotent");
+  assert.equal(replay.branchAdvance?.resultingHead, RESULTING_HEAD);
+  assert.equal(
+    provider.state.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        (call.path === "graphql" ||
+          call.path === "repos/acme/inari/git/blobs" ||
+          call.path === "repos/acme/inari/git/trees" ||
+          call.path === "repos/acme/inari/git/commits"),
+    ).length,
+    mutationCallsAfterFirst,
+  );
+});
+
+test("Runtime revocation rejects the next otherwise-unexpired privileged request at authentication", async () => {
+  const session = signedSession("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
+  const provider = providerFixture("branch-success", session.authority);
+  const executor = directExecutor(session, provider);
+
+  const first = await executor.execute(session.envelope);
+  assert.equal(first.status, "succeeded", JSON.stringify(first));
+
+  provider.state.runtimeAuthority = assertRuntimeAuthority({ ...session.authority, status: "disabled" });
+  const replay = await executor.execute(session.envelope);
+
+  assert.equal(replay.status, "failed");
+  assert.equal(replay.failure?.phase, "authentication");
+  assert.equal(replay.branchAdvance, undefined);
+  assert.equal(provider.state.calls.filter((call) => call.method === "POST" && call.path === "graphql").length, 1);
+});
+
+test("a Change timeout after provider close effect is reread and becomes bounded recovery-required", async () => {
+  const session = signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }]);
+  const provider = providerFixture("abort-timeout-after-close", session.authority);
+  const closeCallIndexBefore = provider.state.calls.length;
+  const result = await directExecutor(session, provider).execute(session.envelope);
+
+  assert.equal(result.status, "failed", JSON.stringify(result));
+  assert.equal(result.failure?.phase, "recovery-required");
+  assert.equal(result.failure?.evidence?.outcome, "recovery-required");
+  assert.equal(provider.state.pullRequestState, "closed");
+  const closeCallIndex = provider.state.calls.findIndex(
+    (call, index) =>
+      index >= closeCallIndexBefore && call.method === "PATCH" && call.path.endsWith(`/pulls/${PULL_REQUEST}`),
+  );
+  assert.notEqual(closeCallIndex, -1);
+  assert.ok(
+    provider.state.calls
+      .slice(closeCallIndex + 1)
+      .some((call) => call.method === "GET" && call.path.startsWith("repos/acme/inari/pulls?")),
+  );
+  assert.equal(
+    provider.state.calls.some((call) => call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`)),
+    false,
+  );
+
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(PRIVATE_KEY_PEM), false);
+  assert.equal(serialized.includes(session.runtimePrivateKeyPem), false);
+  assert.equal(serialized.includes("integration-installation-token"), false);
+  assert.equal(serialized.includes("BEGIN PRIVATE KEY"), false);
+  for (const header of provider.state.authorizationHeaders) assert.equal(serialized.includes(header), false);
+});
+
+test("wrong Issue task and certificate repository substitution fail closed before branch mutation", async () => {
+  const taskSession = signedSession(
+    "branch.advance",
+    branchAdvanceRequest(),
+    [{ kind: "branch.advance", branch: BRANCH }],
+    { taskIssue: ISSUE + 1 },
+  );
+  const taskProvider = providerFixture("branch-success", taskSession.authority);
+  const taskResult = await directExecutor(taskSession, taskProvider).execute(taskSession.envelope);
+  assert.equal(taskResult.status, "failed");
+  assert.equal(taskResult.failure?.phase, "authorization");
+  assert.equal(
+    taskProvider.state.calls.some((call) => call.method === "POST" && call.path === "graphql"),
+    false,
+  );
+
+  const repositorySession = signedSession(
+    "branch.advance",
+    branchAdvanceRequest(),
+    [{ kind: "branch.advance", branch: BRANCH }],
+    { certificateRepository: { id: "987654321", name: "acme/inari" } },
+  );
+  const repositoryProvider = providerFixture("branch-success", repositorySession.authority);
+  const repositoryResult = await directExecutor(repositorySession, repositoryProvider).execute(
+    repositorySession.envelope,
+  );
+  assert.equal(repositoryResult.status, "failed");
+  assert.equal(repositoryResult.failure?.phase, "authentication");
+  assert.equal(
+    repositoryProvider.state.calls.some((call) => call.method === "POST" && call.path === "graphql"),
     false,
   );
 });

@@ -147,7 +147,11 @@ export function createDirectAppSessionExecutor(
       input: CapabilityAuthorizedChangeExecutorFactoryInput,
     ): Promise<CapabilityAuthorizedChangeExecutorFactoryResult> => {
       const target = input.context.repository;
-      const issuerAuthority = new InariIssuerAppAuthority({ appId: config.appId, broker });
+      const issuerAuthority = new InariIssuerAppAuthority({
+        appId: config.appId,
+        broker,
+        ...(config.now === undefined ? {} : { now: config.now }),
+      });
       const executor: ChangeRemoteExecutor = {
         read: (request) => readChangeProjection(broker, config, target, request),
         execute: async (request): Promise<ChangeProjectionResult | ChangeRemoteExecutionResult> =>
