@@ -32,6 +32,10 @@ permissions:
 jobs:
   certify:
     name: Certify exact installed artifact
+    # This Environment is dedicated to the self-dogfood Runtime Authority.
+    # The private key is scoped to the coordinator step below, never the job.
+    environment:
+      name: self-dogfood-certification
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -155,10 +159,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           INARI_SELF_DOGFOOD: "1"
+          INARI_RUNTIME_AUTHORITY_ID: ${{ vars.INARI_RUNTIME_AUTHORITY_ID }}
+          INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: ${{ secrets.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY }}
           DOGFOOD_ISSUE: ${{ inputs.disposable_issue }}
           DOGFOOD_CONFIRMATION: ${{ inputs.confirm_disposable }}
         run: |
           set -euo pipefail
+          test "$INARI_RUNTIME_AUTHORITY_ID" = "yohn-self-dogfood-ci-2026-09"
+          test -n "$INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"
           [[ "$DOGFOOD_ISSUE" == "$DOGFOOD_CONFIRMATION" ]]
           worker_command="$(node -e 'process.stdout.write(JSON.stringify([process.execPath, process.argv[1], process.argv[2]]))' "$DOGFOOD_WORKER_SCRIPT" "$DOGFOOD_WORKER_OBSERVATION")"
           args=(
