@@ -15,7 +15,7 @@ import {
   type GitHubChangeProvenanceExecutionOptions,
 } from "./index.js";
 import type { ChangeEffect } from "../change.js";
-import { changeProvenanceRecordPath } from "../change-provenance-record.js";
+import { changeProvenanceRecordPath, createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
 import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
@@ -167,20 +167,28 @@ function provenanceCapability(): {
 
 function provenanceOptions(gitData: GitHubBranchAdvanceCapability): GitHubChangeProvenanceExecutionOptions {
   const runtimeKey = generateRuntimeAuthorityKeyPair();
-  return {
+  const runtimeAuthority = assertRuntimeAuthority({
+    version: 1,
+    kind: "runtime-authority",
+    id: "runtime-change",
+    key: runtimeKey.publicKeyJwk,
+    status: "active",
+    notBefore: "2026-01-01T00:00:00Z",
+    notAfter: null,
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement"],
+  });
+  // Acting as "the Runtime" here is legitimate in a test: only production
+  // trust domains (the App/executor) must never hold the private key.
+  const signedRecord = createChangeProvenanceRecord({
+    rootIssue: 513,
+    runtimeAuthority,
     runtimeKey,
-    runtimeAuthority: assertRuntimeAuthority({
-      version: 1,
-      kind: "runtime-authority",
-      id: "runtime-change",
-      key: runtimeKey.publicKeyJwk,
-      status: "active",
-      notBefore: "2026-01-01T00:00:00Z",
-      notAfter: null,
-      maxSessionTtlSeconds: 3_600,
-      capabilityCeiling: ["change.implement"],
-    }),
     actor: { type: "agent", name: "Luna" },
+  });
+  return {
+    runtimeAuthority,
+    signedRecord,
     gitData,
   };
 }

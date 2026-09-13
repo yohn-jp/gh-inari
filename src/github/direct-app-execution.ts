@@ -19,11 +19,10 @@ import {
 } from "./app-installation-credential-broker.js";
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
-import { importRuntimeAuthorityPrivateKey } from "../agent-authority/runtime-key.js";
 import { GitHubActionsEvidenceReader } from "./actions-change-executor.js";
 import { InariIssuerAppAuthority, type IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { GitHubChangeEffectRepository, GitHubChangeProvenanceSignerOptions } from "./change-effect-adapter.js";
-import type { ChangeProvenanceActor } from "../change-provenance-record.js";
+import { verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
@@ -54,12 +53,8 @@ export interface DirectAppSessionExecutorConfig {
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly now?: () => Date;
-  /** Repository-trusted Runtime Authority identifier for fresh issuance. */
+  /** Repository-trusted Runtime Authority identifier for fresh issuance. Non-secret; verification only. */
   readonly runtimeAuthorityId?: string;
-  /** Existing Runtime Authority PKCS#8 PEM secret used only for signing. */
-  readonly runtimePrivateKeyPem?: string;
-  /** Optional attribution metadata; never used for authorization. */
-  readonly provenanceActor?: ChangeProvenanceActor;
   /** Bounded deadline applied to every GitHub provider request. Defaults to 10s; hard ceiling 30s. */
   readonly requestTimeoutMs?: number;
 }
@@ -160,21 +155,24 @@ export function createDirectAppSessionExecutor(
       if (input.request.operation === "issue") {
         if (
           config.runtimeAuthorityId === undefined ||
-          config.runtimePrivateKeyPem === undefined ||
-          config.runtimeAuthorityId !== input.context.runtimeAuthority.id
+          config.runtimeAuthorityId !== input.context.runtimeAuthority.id ||
+          input.request.signedProvenanceRecord === undefined
         ) {
-          throw new Error("The repository-trusted Runtime Authority signer is not configured.");
+          throw new Error("The repository-trusted Runtime Authority signed provenance record is not configured.");
         }
+        const signedProvenanceRecord = input.request.signedProvenanceRecord;
         const provenance = await broker.withRepositoryReadCapability({}, async (capability) => {
           const runtimeReader = createAppRepositoryEvidenceReader(capability, config.repository, target);
           const loaded = await resolveRuntimeAuthority(runtimeReader, config.runtimeAuthorityId as string, {
             ...(config.now === undefined ? {} : { now: config.now() }),
           });
-          const runtimeKey = importRuntimeAuthorityPrivateKey(config.runtimePrivateKeyPem as string);
+          // The App/executor never imports or holds the Runtime private key.
+          // It only verifies the already-signed record against the
+          // repository-trusted Runtime public key.
+          verifyChangeProvenanceRecord(signedProvenanceRecord, loaded.authority);
           const signer: GitHubChangeProvenanceSignerOptions = {
             runtimeAuthority: loaded.authority,
-            runtimeKey,
-            ...(config.provenanceActor === undefined ? {} : { actor: config.provenanceActor }),
+            signedRecord: signedProvenanceRecord,
           };
           return signer;
         });

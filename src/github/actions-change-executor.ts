@@ -81,12 +81,10 @@ import {
 } from "./app-installation-credential-broker.js";
 import { createRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
-import { importRuntimeAuthorityPrivateKey } from "../agent-authority/runtime-key.js";
 import {
-  CHANGE_PROVENANCE_ACTOR_TYPES,
-  MAX_CHANGE_PROVENANCE_ACTOR_NAME_LENGTH,
-  type ChangeProvenanceActor,
-  type ChangeProvenanceActorType,
+  validateChangeProvenanceRecord,
+  verifyChangeProvenanceRecord,
+  type SignedChangeProvenanceRecord,
 } from "../change-provenance-record.js";
 import {
   InariIssuerAppAuthority,
@@ -345,21 +343,19 @@ function boundedSecret(value: unknown, maxLength: number): string {
   return value;
 }
 
-function optionalProvenanceActor(environment: NodeJS.ProcessEnv): ChangeProvenanceActor | undefined {
-  const type = environment.INARI_PROVENANCE_ACTOR_TYPE;
-  const name = environment.INARI_PROVENANCE_ACTOR_NAME;
-  if (type === undefined && name === undefined) return undefined;
-  if (
-    typeof type !== "string" ||
-    !CHANGE_PROVENANCE_ACTOR_TYPES.includes(type as ChangeProvenanceActorType) ||
-    typeof name !== "string"
-  ) {
+function requiredSignedProvenanceRecord(environment: NodeJS.ProcessEnv): SignedChangeProvenanceRecord {
+  const serialized = boundedSecret(environment.INARI_CHANGE_PROVENANCE_RECORD, 16_384);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
     throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
   }
-  return {
-    type: type as ChangeProvenanceActorType,
-    name: boundedString(name, MAX_CHANGE_PROVENANCE_ACTOR_NAME_LENGTH),
-  };
+  const validation = validateChangeProvenanceRecord(parsed);
+  if (!validation.valid || validation.record === undefined) {
+    throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
+  }
+  return validation.record;
 }
 
 function positiveNumber(value: unknown): number {
@@ -1463,15 +1459,16 @@ export async function createGitHubActionsChangeExecutor(
     let provenance: GitHubChangeProvenanceSignerOptions | undefined;
     if (options.request.operation === "issue") {
       const runtimeAuthorityId = requiredEnvironment(environment, "INARI_RUNTIME_AUTHORITY_ID", "issuer-configuration");
-      const runtimePrivateKeyPem = boundedSecret(environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, 16_384);
       const runtimeReader = createRepositoryEvidenceReader(readTransport, repository, target);
       const loaded = await resolveRuntimeAuthority(runtimeReader, runtimeAuthorityId);
-      const runtimeKey = importRuntimeAuthorityPrivateKey(runtimePrivateKeyPem);
-      const actor = optionalProvenanceActor(environment);
+      // The signed record is produced by a separate, narrowly-scoped Runtime
+      // signing job; this trusted executor never imports or holds the
+      // Runtime private key. It only verifies the record it was handed.
+      const signedRecord = requiredSignedProvenanceRecord(environment);
+      verifyChangeProvenanceRecord(signedRecord, loaded.authority);
       provenance = {
         runtimeAuthority: loaded.authority,
-        runtimeKey,
-        ...(actor === undefined ? {} : { actor }),
+        signedRecord,
       };
     }
     broker = new GitHubActionsCredentialBroker({

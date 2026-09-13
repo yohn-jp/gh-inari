@@ -23,11 +23,9 @@ import {
 import { readChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
 import {
   changeProvenanceRecordPath,
-  createChangeProvenanceRecord,
   renderChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
-  type ChangeProvenanceActor,
-  type ChangeProvenanceRuntimeKey,
+  type SignedChangeProvenanceRecord,
 } from "../change-provenance-record.js";
 import type { RuntimeAuthority } from "../agent-authority/runtime-authority.js";
 import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
@@ -104,9 +102,9 @@ export interface GitHubChangeEffectAdapterOptions {
 
 export interface GitHubChangeProvenanceExecutionOptions {
   readonly runtimeAuthority: RuntimeAuthority;
-  readonly runtimeKey: ChangeProvenanceRuntimeKey;
+  /** Already Runtime-signed elsewhere; this boundary only verifies it. */
+  readonly signedRecord: SignedChangeProvenanceRecord;
   readonly gitData: GitHubBranchAdvanceCapability;
-  readonly actor?: ChangeProvenanceActor;
 }
 
 export type GitHubChangeProvenanceSignerOptions = Omit<GitHubChangeProvenanceExecutionOptions, "gitData">;
@@ -442,12 +440,15 @@ export class GitHubChangeEffectAdapter {
     if (provenance === undefined) throw new GitHubChangeEffectConfigurationError();
     if (effect.path !== changeProvenanceRecordPath(effect.rootIssue)) throw new InvalidGitHubResponseError();
 
-    const record = createChangeProvenanceRecord({
-      rootIssue: effect.rootIssue,
-      runtimeAuthority: provenance.runtimeAuthority,
-      runtimeKey: provenance.runtimeKey,
-      ...(provenance.actor === undefined ? {} : { actor: provenance.actor }),
-    });
+    // The Runtime signs the provenance payload before this request ever
+    // crosses into the App/executor boundary; this adapter only verifies the
+    // already-signed record against the repository-trusted Runtime public
+    // key. It never imports or holds a Runtime private key.
+    const record = provenance.signedRecord;
+    const signedPayload = verifyChangeProvenanceRecord(record, provenance.runtimeAuthority);
+    if (signedPayload.rootIssue !== effect.rootIssue || signedPayload.operation !== "change.issue") {
+      throw new InvalidGitHubResponseError();
+    }
     const content = renderChangeProvenanceRecord(record);
     const capability = provenance.gitData;
     const head = await capability.readRef(effect.branch);

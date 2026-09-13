@@ -534,8 +534,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     let provenance:
       | {
           readonly runtimeAuthority: GitHubChangeProvenanceSignerOptions["runtimeAuthority"];
-          readonly runtimeKey: GitHubChangeProvenanceSignerOptions["runtimeKey"];
-          readonly actor?: GitHubChangeProvenanceSignerOptions["actor"];
+          readonly signedRecord: GitHubChangeProvenanceSignerOptions["signedRecord"];
           readonly gitData: GitHubBranchAdvanceCapabilityImpl;
         }
       | undefined;

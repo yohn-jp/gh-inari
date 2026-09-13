@@ -30,9 +30,63 @@ permissions:
   pull-requests: read
 
 jobs:
+  # Signs the Change provenance bootstrap record when, and only when, the
+  # request is a fresh issuance. This job is the ONLY place
+  # INARI_RUNTIME_AUTHORITY_PRIVATE_KEY is configured; it runs in its own
+  # GitHub Environment so the secret is never available to `execute` (which
+  # applies the Core plan through the trusted App/Actions executor boundary).
+  # See PR #518 / issue #513: the Runtime signing authority must stay
+  # separate from the App/executor trust domain that #364/#380 established.
+  runtime-sign:
+    if: github.ref == 'refs/heads/main' && fromJSON(inputs.request).operation == 'issue'
+    runs-on: ubuntu-latest
+    environment: runtime-signing
+    steps:
+      - name: Checkout trusted signer source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+
+      - name: Install trusted dependencies
+        run: corepack pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build trusted signer
+        run: corepack pnpm run build
+
+      - name: Sign provenance record
+        env:
+          INARI_CHANGE_REQUEST: ${{ inputs.request }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INARI_RUNTIME_AUTHORITY_ID: ${{ secrets.INARI_RUNTIME_AUTHORITY_ID }}
+          INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: ${{ secrets.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY }}
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/inari-change-provenance"
+          node dist/github/runtime-sign-cli.js > "$RUNNER_TEMP/inari-change-provenance/record.json"
+
+      - name: Publish signed provenance record
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: inari-change-provenance-${{ inputs.correlation }}
+          path: ${{ runner.temp }}/inari-change-provenance/record.json
+          if-no-files-found: error
+          retention-days: 1
+
   execute:
     # Only the protected default branch may supply the workflow and Core code.
-    if: github.ref == 'refs/heads/main'
+    # `always()` plus the explicit success/skip check keeps `execute` running
+    # for non-issue operations, where `runtime-sign` is skipped entirely.
+    if: |
+      always() && github.ref == 'refs/heads/main' &&
+      (needs.runtime-sign.result == 'success' || needs.runtime-sign.result == 'skipped')
+    needs: runtime-sign
     runs-on: ubuntu-latest
     steps:
       - name: Initialize bounded result
@@ -59,6 +113,16 @@ jobs:
         id: build
         run: corepack pnpm run build
 
+      # Only present when `runtime-sign` actually ran (fresh issuance). The
+      # download step tolerates the skipped-upstream case: `execute` never
+      # blocks on an artifact that a skipped `runtime-sign` never produced.
+      - name: Download signed provenance record
+        if: steps.build.outcome == 'success' && needs.runtime-sign.result == 'success'
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: inari-change-provenance-${{ inputs.correlation }}
+          path: ${{ runner.temp }}/inari-change-provenance
+
       - name: Execute Core plan
         if: steps.build.outcome == 'success'
         env:
@@ -69,10 +133,13 @@ jobs:
           INARI_ISSUER_INSTALLATION_ID: ${{ secrets.INARI_ISSUER_INSTALLATION_ID }}
           INARI_ISSUER_APP_PRIVATE_KEY: ${{ secrets.INARI_ISSUER_APP_PRIVATE_KEY }}
           INARI_RUNTIME_AUTHORITY_ID: ${{ secrets.INARI_RUNTIME_AUTHORITY_ID }}
-          INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: ${{ secrets.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY }}
         run: |
           set +e
           result_path="$RUNNER_TEMP/inari-change-result/result.json"
+          provenance_path="$RUNNER_TEMP/inari-change-provenance/record.json"
+          if [ -s "$provenance_path" ]; then
+            export INARI_CHANGE_PROVENANCE_RECORD="$(cat "$provenance_path")"
+          fi
           node dist/github/actions-change-executor.js > "$result_path" 2>/dev/null
           execution_status=$?
           if [ ! -s "$result_path" ] || [ "$(wc -c < "$result_path")" -gt 262144 ]; then
