@@ -13,7 +13,7 @@ import {
   sha256Tarball,
   validateCertificationEvidence,
   writeCertificationEvidence,
-} from "./certification-evidence.mjs";
+} from "../../scripts/certification-evidence.mjs";
 
 const sourceCommitSha = "a".repeat(40);
 const tarballSha256 = `sha256:${"b".repeat(64)}`;

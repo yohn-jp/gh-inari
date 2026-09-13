@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const workflowPath = path.join(repositoryRoot, ".github", "workflows", "change-provenance.yml");
 
 test("Change provenance suspension preserves the required check as an explicit no-op", () => {

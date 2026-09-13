@@ -7,13 +7,13 @@ import test from "node:test";
 import {
   canonicalRuntimeAuthorityJson,
   RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX,
-} from "../src/agent-authority/runtime-authority.ts";
+} from "../../src/agent-authority/runtime-authority.ts";
 import {
   RUNTIME_AUTHORITY_GOVERNANCE_CHECK_NAME,
   snapshotEntry,
   validateRuntimeAuthorityGitTransition,
   validateRuntimeAuthorityTransition,
-} from "./validate-runtime-authority-governance.mjs";
+} from "../../scripts/validate-runtime-authority-governance.mjs";
 
 const KEY_A = { kty: "OKP", crv: "Ed25519", x: "A".repeat(43) };
 const KEY_B = { kty: "OKP", crv: "Ed25519", x: "B".repeat(43) };

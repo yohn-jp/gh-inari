@@ -9,8 +9,8 @@ import {
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
   SELF_DOGFOOD_RECOVERY_OPERATION,
   appendSelfDogfoodOperation,
-} from "./certification-evidence.mjs";
-import { verifySelfDogfoodRun } from "./self-dogfood-workflow.mjs";
+} from "../../scripts/certification-evidence.mjs";
+import { verifySelfDogfoodRun } from "../../scripts/self-dogfood-workflow.mjs";
 
 const sourceCommitSha = "a".repeat(40);
 

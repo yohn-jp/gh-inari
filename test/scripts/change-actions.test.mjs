@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const workflowPath = path.join(repositoryRoot, ".github", "workflows", "inari-change-executor.yml");
 
 test("trusted Change workflow delegates semantic decisions to the versioned executor", () => {
