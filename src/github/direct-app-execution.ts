@@ -82,6 +82,16 @@ function buildReader(
   });
 }
 
+async function projectChangeFromCapability(
+  capability: GitHubAppRepositoryReadCapability,
+  config: DirectAppSessionExecutorConfig,
+  identity: IssuerRepositoryIdentity,
+  request: ChangeRemoteReadRequest | ChangeRemoteMutationRequest,
+): Promise<ChangeProjectionResult> {
+  const reader = buildReader(capability, config, identity, request);
+  return projectChangeFromGitHubEvidence(await reader.read(request));
+}
+
 async function readChangeProjection(
   broker: GitHubAppInstallationCredentialBroker,
   config: DirectAppSessionExecutorConfig,
@@ -89,8 +99,7 @@ async function readChangeProjection(
   request: ChangeRemoteReadRequest | ChangeRemoteMutationRequest,
 ): Promise<ChangeProjectionResult> {
   return broker.withRepositoryReadCapability({}, async (capability) => {
-    const reader = buildReader(capability, config, identity, request);
-    return projectChangeFromGitHubEvidence(await reader.read(request));
+    return projectChangeFromCapability(capability, config, identity, request);
   });
 }
 
@@ -116,6 +125,7 @@ export function createDirectAppSessionExecutor(
     ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
   };
   const broker = new GitHubAppInstallationCredentialBroker(brokerOptions);
+  let establishedApp: CapabilityAuthorizedChangeExecutorFactoryResult["app"];
 
   return createCapabilityAuthorizedSessionExecutor({
     authentication: {
@@ -126,8 +136,11 @@ export function createDirectAppSessionExecutor(
     readExecutor: {
       read: async (request) =>
         broker.withRepositoryReadCapability({}, async (capability) => {
-          const scope = capability.scope.repository;
-          return readChangeProjection(broker, config, scope, request);
+          establishedApp = Object.freeze({
+            ...capability.scope.app,
+            installationId: capability.scope.installation.installationId,
+          });
+          return projectChangeFromCapability(capability, config, capability.scope.repository, request);
         }),
     },
     createChangeExecutor: async (
@@ -149,14 +162,17 @@ export function createDirectAppSessionExecutor(
             return trustedExecutor.execute(request);
           }),
       };
-      return { executor };
+      if (establishedApp === undefined) {
+        throw new Error("The App installation identity was not established by the broker.");
+      }
+      return { executor, app: establishedApp };
     },
     branchAdvance: (input) =>
       executeBranchAdvance({
         context: input.context,
         broker,
         admission: input.admission,
-        request: input.envelope,
+        request: input.request,
         ...(config.now === undefined ? {} : { now: config.now }),
       }),
   });
