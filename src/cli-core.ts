@@ -135,6 +135,7 @@ import {
 import {
   checkRuntimeAuthorityRotationOrder,
   createRuntimeAuthorityRecord,
+  createRuntimeSignedChangeProvenanceRecord,
   deriveRuntimeAuthorityIdentity,
   verifyRuntimeAuthorityReadiness,
   type RuntimeAuthorityPublicKeyInput,
@@ -1399,6 +1400,7 @@ function createChangeExecutor(
   root: string,
   repository: string | boolean | undefined,
   sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean } = {},
+  adapter?: GitHubAdapter,
 ): ChangeRemoteExecutor {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
   rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
@@ -1410,11 +1412,13 @@ function createChangeExecutor(
   const factory =
     dependencies.createChangeExecutor ??
     ((options: ChangeRemoteExecutorOptions) => {
-      const adapter = (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
-        cwd: options.cwd,
-        ...(options.repository === undefined ? {} : { repository: options.repository }),
-      });
-      return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
+      const transportAdapter =
+        adapter ??
+        (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
+          cwd: options.cwd,
+          ...(options.repository === undefined ? {} : { repository: options.repository }),
+        });
+      return createGitHubActionsChangeRemoteExecutor({ ...options, api: transportAdapter });
     });
   return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
@@ -1634,16 +1638,37 @@ async function runChangeCommand(
   }
 
   const issue = Number(rest[0]);
-  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
-    sessionCredential: parsed.options.sessionCredential,
-    appEndpoint: parsed.options.appEndpoint,
-  });
+  const runtimeTrustAdapter =
+    definition.operation === "issue" ? createAdapter(dependencies, root, parsed.options.repository) : undefined;
+  const signedProvenanceRecord =
+    runtimeTrustAdapter === undefined
+      ? undefined
+      : await createRuntimeSignedChangeProvenanceRecord(runtimeTrustAdapter, issue, {
+          authorityId: (dependencies.environment ?? process.env).INARI_RUNTIME_AUTHORITY_ID,
+          privateKey: (dependencies.environment ?? process.env).INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
+        });
+  const executor = createChangeExecutor(
+    dependencies,
+    root,
+    parsed.options.repository,
+    {
+      sessionCredential: parsed.options.sessionCredential,
+      appEndpoint: parsed.options.appEndpoint,
+    },
+    runtimeTrustAdapter,
+  );
   const result =
     definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
       : await executeChangeRemoteMutationResult(
           executor,
-          changeRemoteMutationRequest(definition.operation as ChangeRemoteMutation, issue),
+          changeRemoteMutationRequest(
+            definition.operation as ChangeRemoteMutation,
+            issue,
+            undefined,
+            undefined,
+            signedProvenanceRecord,
+          ),
         );
   const projection = result.projection;
   if (definition.operation === "handoff") {

@@ -25,6 +25,10 @@ import { runCli } from "./cli.js";
 import { GhUnauthenticatedError, GitHubAdapter } from "./github/index.js";
 import { findSkillScenario, SKILL_MODEL_VERSION } from "./skill.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
+import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
+import { createRuntimeAuthorityRecord } from "./agent-authority/runtime-authority-operations.js";
+import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
+import { generateRuntimeAuthorityKeyPair } from "./agent-authority/runtime-key.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -32,6 +36,66 @@ const identity = {
   rootIssue: 42,
 } as const;
 const branch = "feat/42-semantic-change";
+
+const runtimeSignerPair = generateRuntimeAuthorityKeyPair();
+const runtimeSignerAuthority = createRuntimeAuthorityRecord({
+  id: "runtime-cli-test",
+  key: runtimeSignerPair,
+  notBefore: "2026-01-01T00:00:00Z",
+  maxSessionTtlSeconds: 7200,
+  capabilityCeiling: ["change.implement", "change.ready"],
+});
+const runtimeSignerArtifact = renderRuntimeAuthorityArtifact(runtimeSignerAuthority);
+const runtimeSignerPrivateKeyPem = runtimeSignerPair.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+const runtimeSignerEnvironment = {
+  INARI_RUNTIME_AUTHORITY_ID: runtimeSignerAuthority.id,
+  INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: runtimeSignerPrivateKeyPem,
+};
+
+function runtimeTrustAdapter(overrides: Record<string, unknown> = {}): GitHubAdapter {
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: identity.repositoryId,
+  };
+  return {
+    async resolveRepositoryContext() {
+      return context;
+    },
+    async getRepositoryContext() {
+      return context;
+    },
+    async getRepositoryDefaultBranch() {
+      return "main";
+    },
+    async findBranch(branchName: string) {
+      return { name: branchName, ref: `refs/heads/${branchName}`, sha: "runtime-policy-commit" };
+    },
+    async getRepositoryTree() {
+      return {
+        sha: "runtime-policy-tree",
+        entries: [{ path: runtimeSignerArtifact.path, type: "blob" as const, sha: "runtime-policy-blob" }],
+      };
+    },
+    async getRepositoryBlob(sha: string) {
+      if (sha !== "runtime-policy-blob") throw new Error("unexpected Runtime Authority blob");
+      return runtimeSignerArtifact.content;
+    },
+    ...overrides,
+  } as unknown as GitHubAdapter;
+}
+
+function runtimeSignerDependencies(overrides: Parameters<typeof runCli>[1] = {}): Parameters<typeof runCli>[1] {
+  return {
+    environment: runtimeSignerEnvironment,
+    createAdapter: () => runtimeTrustAdapter(),
+    ...overrides,
+  };
+}
 
 function projection(draft = true): ChangeProjectionResult {
   const result = projectChangeFromGitHubEvidence({
@@ -297,18 +361,7 @@ test("CLI preserves the normalized provider rejection projection in execution ev
 
 test("default Change wiring constructs an Actions-backed executor and normalizes dispatch failure", async () => {
   const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
-  const adapter = {
-    async getRepositoryContext() {
-      return {
-        hostname: "github.com",
-        host: "github.com",
-        owner: "acme",
-        name: "inari",
-        nameWithOwner: "acme/inari",
-        url: "https://github.com/acme/inari",
-        repositoryId: "100000237",
-      };
-    },
+  const adapter = runtimeTrustAdapter({
     async getAuthenticatedUser() {
       return "octocat";
     },
@@ -317,10 +370,11 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
       if (method === "POST") throw new Error("Bearer secret-token");
       return { workflow_runs: [] };
     },
-  } as unknown as GitHubAdapter;
+  });
   const adapterOptions: ConstructorParameters<typeof GitHubAdapter>[0][] = [];
   const result = await capture(["change", "issue", "42", "--json"], {
     repositoryRoot: "/workspace/inari",
+    environment: runtimeSignerEnvironment,
     createAdapter: (options) => {
       adapterOptions.push(options);
       return adapter;
@@ -333,30 +387,72 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
   assert.equal(calls[0]?.method, "GET");
   assert.equal(calls[1]?.method, "POST");
   assert.equal(calls[1]?.path, "actions/workflows/inari-change-executor.yml/dispatches");
-  assert.deepEqual(JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}"), {
+  const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
+  const signedProvenanceRecord = dispatched.signedProvenanceRecord;
+  delete dispatched.signedProvenanceRecord;
+  assert.deepEqual(dispatched, {
     version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
     operation: "issue",
     issue: 42,
     requester: "github:octocat",
   });
+  assert.equal(typeof signedProvenanceRecord, "object");
+  assert.deepEqual(verifyChangeProvenanceRecord(signedProvenanceRecord, runtimeSignerAuthority), {
+    version: 1,
+    rootIssue: 42,
+    operation: "change.issue",
+  });
   assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
 });
 
-test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {
+test("fresh change issue fails before dispatch when the Runtime signer is not configured", async () => {
+  let constructed = false;
+  let executed = false;
   const result = await capture(["change", "issue", "42", "--json"], {
-    changeExecutor: {
-      async execute() {
-        throw new ChangeRemoteExecutorError(
-          "CHANGE_REMOTE_RUN_FAILED",
-          "The trusted Change workflow did not produce a successful result.",
-          { operation: "change.issue", reason: "workflow-failed", stage: "installation-token" },
-        );
-      },
-      async read() {
-        throw new Error("unreachable");
-      },
+    environment: {},
+    createAdapter: () => runtimeTrustAdapter(),
+    createChangeExecutor: () => {
+      constructed = true;
+      return {
+        async execute() {
+          executed = true;
+          throw new Error("unreachable");
+        },
+        async read() {
+          throw new Error("unreachable");
+        },
+      };
     },
   });
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(constructed, false);
+  assert.equal(executed, false);
+  assert.deepEqual(result.output?.error, {
+    code: "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+    message: "Runtime signer configuration must provide an authority ID and private key.",
+    diagnostics: [],
+  });
+});
+
+test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {
+  const result = await capture(
+    ["change", "issue", "42", "--json"],
+    runtimeSignerDependencies({
+      changeExecutor: {
+        async execute() {
+          throw new ChangeRemoteExecutorError(
+            "CHANGE_REMOTE_RUN_FAILED",
+            "The trusted Change workflow did not produce a successful result.",
+            { operation: "change.issue", reason: "workflow-failed", stage: "installation-token" },
+          );
+        },
+        async read() {
+          throw new Error("unreachable");
+        },
+      },
+    }),
+  );
 
   assert.equal(result.exitCode, 3);
   assert.deepEqual(result.output?.error, {
@@ -367,33 +463,36 @@ test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {
 });
 
 test("CLI --json preserves the bounded trusted code and Core diagnostic envelope", async () => {
-  const result = await capture(["change", "issue", "42", "--json"], {
-    changeExecutor: {
-      async execute() {
-        throw new ChangeRemoteExecutorError(
-          "CHANGE_REMOTE_RUN_FAILED",
-          "The trusted Change workflow did not produce a successful result.",
-          {
-            operation: "change.issue",
-            reason: "workflow-failed",
-            stage: "projection-execution",
-            trustedCode: "CHANGE_EXECUTION_PRECONDITION_FAILED",
-          },
-          [
+  const result = await capture(
+    ["change", "issue", "42", "--json"],
+    runtimeSignerDependencies({
+      changeExecutor: {
+        async execute() {
+          throw new ChangeRemoteExecutorError(
+            "CHANGE_REMOTE_RUN_FAILED",
+            "The trusted Change workflow did not produce a successful result.",
             {
-              version: 1,
-              code: "CHANGE_PROVENANCE_CONFLICT",
-              path: "$.projection.change.provenance",
-              message: "The trusted Change provenance is inconsistent.",
+              operation: "change.issue",
+              reason: "workflow-failed",
+              stage: "projection-execution",
+              trustedCode: "CHANGE_EXECUTION_PRECONDITION_FAILED",
             },
-          ],
-        );
+            [
+              {
+                version: 1,
+                code: "CHANGE_PROVENANCE_CONFLICT",
+                path: "$.projection.change.provenance",
+                message: "The trusted Change provenance is inconsistent.",
+              },
+            ],
+          );
+        },
+        async read() {
+          throw new Error("unreachable");
+        },
       },
-      async read() {
-        throw new Error("unreachable");
-      },
-    },
-  });
+    }),
+  );
 
   assert.equal(result.exitCode, 3);
   assert.deepEqual(result.output?.error, {
@@ -417,12 +516,13 @@ test("CLI --json preserves the bounded trusted code and Core diagnostic envelope
 });
 
 test("caller authentication failure is distinct from an unconfigured executor", async () => {
-  const adapter = {
+  const adapter = runtimeTrustAdapter({
     async getAuthenticatedUser() {
       throw new GhUnauthenticatedError("github.com", "token=secret");
     },
-  } as unknown as GitHubAdapter;
+  });
   const authResult = await capture(["change", "issue", "42", "--json"], {
+    environment: runtimeSignerEnvironment,
     createAdapter: () => adapter,
   });
   assert.equal(authResult.exitCode, 3);
@@ -432,9 +532,10 @@ test("caller authentication failure is distinct from an unconfigured executor", 
     details: { operation: "change.issue", reason: "authentication" },
   });
 
-  const unavailableResult = await capture(["change", "issue", "42", "--json"], {
-    changeExecutor: createUnavailableChangeRemoteExecutor(),
-  });
+  const unavailableResult = await capture(
+    ["change", "issue", "42", "--json"],
+    runtimeSignerDependencies({ changeExecutor: createUnavailableChangeRemoteExecutor() }),
+  );
   assert.equal(unavailableResult.exitCode, 3);
   assert.deepEqual(unavailableResult.output?.error, {
     code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",

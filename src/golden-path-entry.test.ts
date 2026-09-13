@@ -18,6 +18,10 @@ import {
   type ChangeRemoteMutationRequest,
 } from "./change-executor.js";
 import { runCli } from "./cli.js";
+import { createRuntimeAuthorityRecord } from "./agent-authority/runtime-authority-operations.js";
+import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
+import { generateRuntimeAuthorityKeyPair } from "./agent-authority/runtime-key.js";
+import { GitHubAdapter } from "./github/index.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -28,6 +32,52 @@ const branch = "feat/406-golden-path-entry";
 const baseBranch = "main";
 const naming = { type: "feat", slug: "golden-path-entry" } as const;
 const branchGovernance = { pattern: "^feat/[0-9]+-[a-z0-9-]+$" } as const;
+const cliRuntimePair = generateRuntimeAuthorityKeyPair();
+const cliRuntimeAuthority = createRuntimeAuthorityRecord({
+  id: "runtime-golden-path-test",
+  key: cliRuntimePair,
+  notBefore: "2026-01-01T00:00:00Z",
+  maxSessionTtlSeconds: 7200,
+  capabilityCeiling: ["change.implement", "change.ready"],
+});
+const cliRuntimeArtifact = renderRuntimeAuthorityArtifact(cliRuntimeAuthority);
+const cliRuntimeEnvironment = {
+  INARI_RUNTIME_AUTHORITY_ID: cliRuntimeAuthority.id,
+  INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: cliRuntimePair.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+};
+
+function cliRuntimeTrustAdapter(): GitHubAdapter {
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: identity.repositoryId,
+  };
+  return {
+    async resolveRepositoryContext() {
+      return context;
+    },
+    async getRepositoryDefaultBranch() {
+      return "main";
+    },
+    async findBranch(branchName: string) {
+      return { name: branchName, ref: `refs/heads/${branchName}`, sha: "runtime-policy-commit" };
+    },
+    async getRepositoryTree() {
+      return {
+        sha: "runtime-policy-tree",
+        entries: [{ path: cliRuntimeArtifact.path, type: "blob" as const, sha: "runtime-policy-blob" }],
+      };
+    },
+    async getRepositoryBlob(sha: string) {
+      if (sha !== "runtime-policy-blob") throw new Error("unexpected Runtime Authority blob");
+      return cliRuntimeArtifact.content;
+    },
+  } as unknown as GitHubAdapter;
+}
 
 const governedIssueContract = {
   ...issueContractFixture,
@@ -341,6 +391,8 @@ test("the canonical change issue CLI exposes the shared entry projection", async
   console.log = (line: string) => output.push(line);
   try {
     const exitCode = await runCli(["change", "issue", "406", "--json"], {
+      environment: cliRuntimeEnvironment,
+      createAdapter: () => cliRuntimeTrustAdapter(),
       changeExecutor: {
         async execute() {
           return {
