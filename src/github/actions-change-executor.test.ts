@@ -25,6 +25,7 @@ import type {
   GitHubChangeEffectResponse,
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
+import { GitHubChangeEffectAdapter } from "./change-effect-adapter.js";
 import {
   CHANGE_TRANSITION_CONTRACT_VERSION,
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
@@ -960,6 +961,87 @@ test("API transport uses GitHub GraphQL updateRefs as an atomic conditional bran
       },
     ],
   });
+});
+
+async function executeConditionalDeleteWithGraphqlResponse(graphqlResponse: Response | Error): Promise<{
+  readonly result: Awaited<ReturnType<GitHubChangeEffectAdapter["execute"]>>;
+  readonly calls: readonly { readonly url: string; readonly method: string }[];
+}> {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const effect = { kind: "DELETE_BRANCH", branch: "feat/218-conditional-delete", expectedCommitSha: sha } as const;
+  const calls: { url: string; method: string }[] = [];
+  let requestCount = 0;
+  const transport = new GitHubActionsApiTransport({
+    token: "issuer-token",
+    repositoryNodeId: "R_kgDO218000001",
+    fetch: async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET" });
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response(
+          JSON.stringify({
+            ref: `refs/heads/${effect.branch}`,
+            object: { type: "commit", sha },
+          }),
+          { status: 200 },
+        );
+      }
+      if (graphqlResponse instanceof Error) throw graphqlResponse;
+      return graphqlResponse;
+    },
+  });
+  return {
+    result: await new GitHubChangeEffectAdapter({ repository, transport }).execute(effect),
+    calls,
+  };
+}
+
+test("conditional GraphQL rejection remains provider-typed and never falls through to REST DELETE", async () => {
+  const { result, calls } = await executeConditionalDeleteWithGraphqlResponse(
+    new Response(JSON.stringify({ errors: [{ type: "FORBIDDEN", message: "Bearer graphql-provider-secret" }] }), {
+      status: 200,
+    }),
+  );
+
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") throw new Error("expected provider rejection");
+  assert.equal(result.failure.reason, "provider-http");
+  assert.equal(result.failure.status, 200);
+  assert.deepEqual(result.failure.provider, { category: "authentication-failed" });
+  assert.equal(
+    calls.some((call) => call.method === "DELETE"),
+    false,
+  );
+  assert.doesNotMatch(JSON.stringify(result), /graphql-provider-secret/iu);
+});
+
+test("conditional delete preserves a bounded transport failure", async () => {
+  const { result, calls } = await executeConditionalDeleteWithGraphqlResponse(
+    new Error("Authorization: Bearer graphql-transport-secret /private/provider/path"),
+  );
+
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") throw new Error("expected transport failure");
+  assert.equal(result.failure.reason, "transport");
+  assert.equal(
+    calls.some((call) => call.method === "DELETE"),
+    false,
+  );
+  assert.doesNotMatch(JSON.stringify(result), /graphql-transport-secret|private\/provider/iu);
+});
+
+test("conditional delete classifies a malformed GraphQL response as response-validation", async () => {
+  const { result, calls } = await executeConditionalDeleteWithGraphqlResponse(
+    new Response(JSON.stringify({ data: { updateRefs: {} } }), { status: 200 }),
+  );
+
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") throw new Error("expected response-validation failure");
+  assert.equal(result.failure.reason, "response-validation");
+  assert.equal(
+    calls.some((call) => call.method === "DELETE"),
+    false,
+  );
 });
 
 test("API transport failures expose only the bounded projection boundary", async () => {

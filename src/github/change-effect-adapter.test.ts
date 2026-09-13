@@ -323,6 +323,34 @@ test("SHA-conditional compensation uses an atomic provider primitive and never s
   });
 });
 
+test("SHA-conditional compensation classifies an observed generation mismatch and never invokes deletion", async () => {
+  const expectedSha = "0123456789abcdef0123456789abcdef01234567";
+  const observedSha = "fedcba9876543210fedcba9876543210fedcba98";
+  const effect = { kind: "DELETE_BRANCH", branch: "Feature/Exact_Name", expectedCommitSha: expectedSha } as const;
+  let primitiveCalls = 0;
+  const result = await adapter(
+    new StubChangeEffectTransport(
+      [response(200, gitReference("refs/heads/Feature/Exact_Name", observedSha))],
+      async () => {
+        primitiveCalls += 1;
+        return "deleted";
+      },
+    ),
+  ).execute(effect);
+
+  assert.deepEqual(result, {
+    status: "failed",
+    effect,
+    failure: {
+      effect,
+      code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.DELETE_BRANCH,
+      message: "The branch deletion effect failed.",
+      reason: "generation-mismatch",
+    },
+  });
+  assert.equal(primitiveCalls, 0);
+});
+
 test("SHA-conditional compensation treats absence as idempotent and refuses REST-only deletion", async () => {
   const sha = "0123456789abcdef0123456789abcdef01234567";
   const effect = { kind: "DELETE_BRANCH", branch: "Feature/Exact_Name", expectedCommitSha: sha } as const;
@@ -352,6 +380,8 @@ test("a concurrent update is reported by compare-and-delete and cannot fall thro
   );
   const result = await adapter(transport).execute(effect);
   assert.equal(result.status, "failed");
+  if (result.status !== "failed") throw new Error("expected conditional delete failure");
+  assert.equal(result.failure.reason, "generation-mismatch");
   assert.equal(primitiveCalls, 1);
   assert.equal(
     transport.calls.some((call) => call.method === "DELETE"),

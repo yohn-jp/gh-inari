@@ -153,6 +153,7 @@ export interface IssuanceExecutionResults {
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: ChangeIssuanceFailureEvidence,
     compensationStatus: "succeeded" | "failed",
+    compensationFailure?: ChangeIssuanceFailureEvidence,
   ) => ChangeRemoteExecutionResult;
   /**
    * Recovery-required outcome for evidence Core could not validate as a safe
@@ -165,12 +166,14 @@ export interface IssuanceExecutionResults {
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: ChangeIssuanceFailureEvidence,
     compensationStatus: "succeeded" | "failed",
+    compensationFailure?: ChangeIssuanceFailureEvidence,
   ) => ChangeRemoteExecutionResult;
   /** Bounded thrown failure when repository evidence cannot be reread after an effect failure. */
   readonly recoveryReadFailure: (
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: ChangeIssuanceFailureEvidence,
     compensationStatus?: "succeeded" | "failed",
+    compensationFailure?: ChangeIssuanceFailureEvidence,
   ) => IssuanceExecutionFailure;
 }
 
@@ -661,6 +664,7 @@ export const issuanceExecutionMachine = setup({
                       context.attempts,
                       context.effectFailure,
                       context.compensationStatus,
+                      context.compensationFailure,
                     ),
                   },
             ),
@@ -676,6 +680,7 @@ export const issuanceExecutionMachine = setup({
                     context.attempts,
                     context.effectFailure,
                     context.compensationStatus,
+                    context.compensationFailure,
                   ),
                 },
           ),
@@ -749,8 +754,21 @@ export const issuanceExecutionMachine = setup({
         const compensationStatus = context.compensationStatus ?? "failed";
         const result =
           context.recoveryPlanOk === true
-            ? context.services.results.recoveryRequired(projection, context.attempts, failure, compensationStatus)
-            : context.services.results.recoveryUnsafe(plan, projection, context.attempts, failure, compensationStatus);
+            ? context.services.results.recoveryRequired(
+                projection,
+                context.attempts,
+                failure,
+                compensationStatus,
+                context.compensationFailure,
+              )
+            : context.services.results.recoveryUnsafe(
+                plan,
+                projection,
+                context.attempts,
+                failure,
+                compensationStatus,
+                context.compensationFailure,
+              );
         return { outcome: { kind: "result", result } };
       }),
     },

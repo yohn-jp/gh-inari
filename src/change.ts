@@ -190,6 +190,7 @@ export const CHANGE_EFFECT_FAILURE_REASONS = Object.freeze([
   "transport",
   "provider-http",
   "response-validation",
+  "generation-mismatch",
 ] as const);
 export type ChangeEffectFailureReason = (typeof CHANGE_EFFECT_FAILURE_REASONS)[number];
 

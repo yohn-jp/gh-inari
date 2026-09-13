@@ -11,6 +11,7 @@
 import { createSign } from "node:crypto";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
+  MAX_GITHUB_CHANGE_EFFECT_REJECTION_ERRORS,
   GitHubChangeEffectAdapter,
   GitHubChangeEffectFailureError,
   normalizeGitHubChangeEffectProviderDiagnostic,
@@ -302,7 +303,7 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
       typeof request.expectedCommitSha !== "string" ||
       !COMMIT_SHA_PATTERN.test(request.expectedCommitSha)
     ) {
-      return "mismatch";
+      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
     }
     const response = await this.requestAt(this.#graphqlApiUrl, {
       hostname: "github.com",
@@ -333,21 +334,27 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
         ...(provider === undefined ? {} : { provider }),
       });
     }
-    if (typeof response.body !== "object" || response.body === null || Array.isArray(response.body)) {
-      return "mismatch";
+    if (!isRecord(response.body)) throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+    const body = response.body;
+    if (body.errors !== undefined) {
+      if (!isValidGraphqlErrorList(body.errors)) {
+        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      }
+      const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, body);
+      throw new GitHubChangeEffectFailureError({
+        reason: "provider-http",
+        status: response.status,
+        ...(provider === undefined ? {} : { provider }),
+      });
     }
-    const body = response.body as Record<string, unknown>;
-    if (body.errors !== undefined) return "mismatch";
-    const data = body.data;
+    if (!isRecord(body.data) || !isRecord(body.data.updateRefs)) {
+      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+    }
     if (
-      typeof data !== "object" ||
-      data === null ||
-      Array.isArray(data) ||
-      typeof (data as Record<string, unknown>).updateRefs !== "object" ||
-      (data as Record<string, unknown>).updateRefs === null ||
-      Array.isArray((data as Record<string, unknown>).updateRefs)
+      !Object.prototype.hasOwnProperty.call(body.data.updateRefs, "clientMutationId") ||
+      body.data.updateRefs.clientMutationId !== null
     ) {
-      return "mismatch";
+      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
     }
     return "deleted";
   }
@@ -824,6 +831,15 @@ function record(value: unknown): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isValidGraphqlErrorList(value: unknown): value is readonly Record<string, unknown>[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= MAX_GITHUB_CHANGE_EFFECT_REJECTION_ERRORS &&
+    value.every((entry) => isRecord(entry))
+  );
 }
 
 async function boundedBody(response: Response): Promise<unknown> {
