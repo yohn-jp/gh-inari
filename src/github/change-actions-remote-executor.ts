@@ -599,7 +599,10 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
           throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
         }
         const result = resultFromArchive(archive, semanticOperation);
-        if (run.conclusion !== "success") {
+        // A bounded trusted result is the authority for the Change outcome.
+        // Only a runtime failure envelope remains a remote-run failure when
+        // the workflow itself concluded unsuccessfully.
+        if (run.conclusion !== "success" && result.failed) {
           throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "workflow-conclusion", result.diagnostic);
         }
         return result;

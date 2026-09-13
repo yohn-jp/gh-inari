@@ -59,6 +59,37 @@ function projection(): ChangeProjectionResult {
   return result;
 }
 
+function recoveryProjection(): ChangeProjectionResult {
+  const result = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: "github.com", repositoryId: "100000157", rootIssue: 42 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "remote-change" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: 42, state: "open" } },
+      branches: { status: "available", value: [{ name: "feat/42-remote-change" }] },
+      pullRequests: {
+        status: "available",
+        value: [
+          {
+            number: 100,
+            head: "feat/42-remote-change",
+            base: "main",
+            state: "closed",
+            draft: false,
+            merged: false,
+            provenance: { issuer: "app:inari-issuer" },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.status, "partial");
+  assert.equal(result.change?.state, "RECOVERY_REQUIRED");
+  return result;
+}
+
 function archive(value: unknown): Uint8Array {
   const name = Buffer.from("result.json", "utf8");
   const content = Buffer.from(JSON.stringify(value), "utf8");
@@ -394,7 +425,7 @@ test("auth and repository resolution failures are normalized without raw credent
   );
 });
 
-test("dispatch, run, ambiguous, stale, and malformed result failures fail closed", async () => {
+test("dispatch, run, missing, ambiguous, stale, and malformed result failures fail closed", async () => {
   const dispatchApi = new FakeActionsApi();
   dispatchApi.requestActionsApi = async (path, method, fields = {}) => {
     dispatchApi.calls.push({ path, method, fields });
@@ -408,6 +439,7 @@ test("dispatch, run, ambiguous, stale, and malformed result failures fail closed
 
   const failedRunApi = new FakeActionsApi();
   failedRunApi.runState = "failure";
+  failedRunApi.artifactMode = "missing";
   await assert.rejects(
     executor(failedRunApi).execute(changeRemoteMutationRequest("issue", 42)),
     (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RUN_FAILED",
@@ -425,6 +457,34 @@ test("dispatch, run, ambiguous, stale, and malformed result failures fail closed
           : error.code === "CHANGE_REMOTE_CORRELATION_FAILED"),
     );
   }
+});
+
+test("a valid semantic recovery result remains authoritative over a failed workflow conclusion", async () => {
+  const api = new FakeActionsApi();
+  api.runState = "failure";
+  const expectedProjection = recoveryProjection();
+  const expectedEvidence = {
+    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    operation: "issue",
+    outcome: "recovery-required",
+    effects: [
+      { kind: "CREATE_BRANCH", status: "succeeded", createdCommitSha: "a".repeat(40) },
+      { kind: "CREATE_PULL_REQUEST", status: "failed" },
+    ],
+    compensation: "failed",
+    failure: {
+      kind: "CREATE_PULL_REQUEST",
+      code: "CHANGE_EFFECT_FAILED",
+      message: "The pull request effect failed.",
+    },
+  } as const;
+  api.archiveValue = { projection: expectedProjection, evidence: expectedEvidence };
+
+  const result = await executor(api).execute(changeRemoteMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: expectedProjection, evidence: expectedEvidence });
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.equal(result.evidence?.outcome, "recovery-required");
 });
 
 test("workflow failure artifacts preserve only an enumerated diagnostic stage", async () => {
