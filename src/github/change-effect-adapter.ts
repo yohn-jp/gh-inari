@@ -19,6 +19,7 @@ import {
   type ChangeEffectSuccessEvidence,
   type ChangeIssuanceFailureEvidence,
 } from "../change.js";
+import { readChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
 
 /** The repository target is resolved by the trusted caller, not by this adapter. */
 export interface GitHubChangeEffectRepository {
@@ -119,6 +120,24 @@ const GITHUB_REJECTION_CATEGORY_BY_STATUS: Readonly<Record<number, ChangeEffectF
     429: "rate-limit",
   });
 
+/** Structured GraphQL error codes that can be projected onto the existing taxonomy. */
+const GITHUB_GRAPHQL_REJECTION_CATEGORY_BY_CODE: Readonly<Record<string, ChangeEffectFailureProviderCategory>> =
+  Object.freeze({
+    BAD_USER_INPUT: "validation-failed",
+    CONFLICT: "conflict",
+    FORBIDDEN: "authentication-failed",
+    INVALID: "validation-failed",
+    MISMATCH: "conflict",
+    RATE_LIMIT: "rate-limit",
+    RATE_LIMITED: "rate-limit",
+    STALE: "conflict",
+    THROTTLED: "rate-limit",
+    UNAUTHENTICATED: "authentication-failed",
+    UNAUTHORIZED: "authentication-failed",
+    UNPROCESSABLE: "validation-failed",
+    VALIDATION_FAILED: "validation-failed",
+  });
+
 /**
  * Project a GitHub rejection body into the existing bounded classification.
  * Only allowlisted scalar values are returned; the input is never retained.
@@ -138,9 +157,12 @@ function normalizeGitHubChangeEffectProviderDiagnosticUnsafe(
   status: number,
   body: unknown,
 ): ChangeEffectFailureProviderDiagnostic | undefined {
-  const category = GITHUB_REJECTION_CATEGORY_BY_STATUS[status];
-  if (category === undefined) return undefined;
-  if (body === undefined) return category === "validation-failed" ? undefined : { category };
+  const statusCategory = GITHUB_REJECTION_CATEGORY_BY_STATUS[status];
+  if (body === undefined) {
+    return statusCategory === undefined || statusCategory === "validation-failed"
+      ? undefined
+      : { category: statusCategory };
+  }
   if (!isRecord(body)) return undefined;
 
   let serialized: string | undefined;
@@ -153,6 +175,9 @@ function normalizeGitHubChangeEffectProviderDiagnosticUnsafe(
   if (new TextEncoder().encode(serialized).byteLength > MAX_GITHUB_CHANGE_EFFECT_REJECTION_BODY_BYTES) {
     return undefined;
   }
+
+  const category = statusCategory ?? graphqlRejectionCategory(status, body);
+  if (category === undefined) return undefined;
 
   const rawErrors = body.errors;
   if (rawErrors === undefined) return category === "validation-failed" ? undefined : { category };
@@ -171,8 +196,28 @@ function normalizeGitHubChangeEffectProviderDiagnosticUnsafe(
     if (candidate === undefined) continue;
     if (detail === undefined) detail = candidate;
   }
-  if (category === "validation-failed" && detail === undefined) return undefined;
+  if (category === "validation-failed" && detail === undefined && !isGraphqlRejection(status, body)) return undefined;
   return { category, ...(detail ?? {}) };
+}
+
+function isGraphqlRejection(status: number, body: unknown): boolean {
+  return status === 200 && isRecord(body) && Array.isArray(body.errors) && body.errors.length > 0;
+}
+
+function graphqlRejectionCategory(status: number, body: unknown): ChangeEffectFailureProviderCategory | undefined {
+  if (!isGraphqlRejection(status, body)) return undefined;
+  const errors = (body as Record<string, unknown>).errors;
+  if (!Array.isArray(errors) || errors.length > MAX_GITHUB_CHANGE_EFFECT_REJECTION_ERRORS) return undefined;
+  for (const error of errors) {
+    if (!isRecord(error)) continue;
+    const extensions = isRecord(error.extensions) ? error.extensions : undefined;
+    for (const candidate of [error.type, error.code, extensions?.code]) {
+      if (typeof candidate !== "string") continue;
+      const category = GITHUB_GRAPHQL_REJECTION_CATEGORY_BY_CODE[candidate.toUpperCase()];
+      if (category !== undefined) return category;
+    }
+  }
+  return undefined;
 }
 
 function providerErrorDetail(
@@ -307,9 +352,10 @@ export class GitHubChangeEffectAdapter {
       const classification =
         error instanceof GitHubChangeEffectFailureError
           ? error.classification
-          : error instanceof InvalidGitHubResponseError
-            ? { reason: "response-validation" as const }
-            : { reason: "transport" as const };
+          : (readChangeEffectFailureClassification(error) ??
+            (error instanceof InvalidGitHubResponseError
+              ? { reason: "response-validation" as const }
+              : { reason: "transport" as const }));
       return {
         status: "failed",
         effect: explicitEffect,
@@ -516,13 +562,18 @@ export class GitHubChangeEffectAdapter {
         outcome: "absent",
       };
     }
-    if (currentCommitSha !== effect.expectedCommitSha) throw new InvalidGitHubResponseError();
+    if (currentCommitSha !== effect.expectedCommitSha) {
+      throw new GitHubChangeEffectFailureError({ reason: "generation-mismatch" });
+    }
 
     if (typeof this.transport.compareAndDeleteBranch !== "function") throw new InvalidGitHubResponseError();
     const outcome = await this.transport.compareAndDeleteBranch({
       branch: effect.branch,
       expectedCommitSha: effect.expectedCommitSha,
     });
+    if (outcome === "mismatch") {
+      throw new GitHubChangeEffectFailureError({ reason: "generation-mismatch" });
+    }
     if (outcome !== "deleted" && outcome !== "absent") throw new InvalidGitHubResponseError();
     return {
       kind: effect.kind,

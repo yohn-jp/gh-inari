@@ -185,6 +185,7 @@ function executionEvidence(
   effects: readonly ChangeRemoteEffectEvidence[],
   compensation: ChangeRemoteExecutionEvidence["compensation"] = "not-required",
   failure?: ChangeIssuanceFailureEvidence,
+  compensationFailure?: ChangeIssuanceFailureEvidence,
 ): ChangeRemoteExecutionEvidence {
   return {
     version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
@@ -204,6 +205,18 @@ function executionEvidence(
             ...(failure.reason === undefined ? {} : { reason: failure.reason }),
             ...(failure.status === undefined ? {} : { status: failure.status }),
             ...(failure.provider === undefined ? {} : { provider: failure.provider }),
+          },
+        }),
+    ...(compensationFailure === undefined
+      ? {}
+      : {
+          compensationFailure: {
+            kind: compensationFailure.effect.kind,
+            code: compensationFailure.code,
+            message: compensationFailure.message,
+            ...(compensationFailure.reason === undefined ? {} : { reason: compensationFailure.reason }),
+            ...(compensationFailure.status === undefined ? {} : { status: compensationFailure.status }),
+            ...(compensationFailure.provider === undefined ? {} : { provider: compensationFailure.provider }),
           },
         }),
   };
@@ -1039,7 +1052,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             failure,
           ),
         }),
-        recoveryRequired: (projection, attempts, failure, compensationStatus) => ({
+        recoveryRequired: (projection, attempts, failure, compensationStatus, compensationFailure) => ({
           projection,
           evidence: executionEvidence(
             request.operation,
@@ -1048,9 +1061,10 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             effectEvidence(attempts),
             compensationStatus,
             failure,
+            compensationFailure,
           ),
         }),
-        recoveryUnsafe: (plan, projection, attempts, failure, compensationStatus) => ({
+        recoveryUnsafe: (plan, projection, attempts, failure, compensationStatus, compensationFailure) => ({
           projection: recoveryProjection(projection, recoveryChangeForProjection(plan, projection)),
           evidence: executionEvidence(
             request.operation,
@@ -1059,9 +1073,10 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             effectEvidence(attempts),
             compensationStatus,
             failure,
+            compensationFailure,
           ),
         }),
-        recoveryReadFailure: (attempts, failure, compensationStatus) => ({
+        recoveryReadFailure: (attempts, failure, compensationStatus, compensationFailure) => ({
           code: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
           message:
             compensationStatus === undefined
@@ -1075,6 +1090,7 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
             effectEvidence(attempts),
             compensationStatus ?? "failed",
             failure,
+            compensationFailure,
           ),
         }),
       },

@@ -440,6 +440,37 @@ test("failed compensation returns bounded RECOVERY_REQUIRED evidence", async () 
   assert.doesNotMatch(JSON.stringify(result), /credential-bearing|token|privateKey/iu);
 });
 
+test("trusted issuance evidence preserves the typed compensation generation mismatch", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_PULL_REQUEST";
+  const originalApply = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    if (request.effects[0]?.kind === "DELETE_BRANCH") {
+      throw new GitHubChangeEffectFailureError({ reason: "generation-mismatch" });
+    }
+    return originalApply(request);
+  };
+
+  const result = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.outcome, "recovery-required");
+  assert.equal(result.evidence?.compensation, "failed");
+  assert.equal(result.evidence?.failure?.kind, "CREATE_PULL_REQUEST");
+  assert.deepEqual(result.evidence?.compensationFailure, {
+    kind: "DELETE_BRANCH",
+    code: "BRANCH_DELETE_FAILED",
+    message: "The branch deletion effect failed.",
+    reason: "generation-mismatch",
+  });
+  assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.doesNotMatch(JSON.stringify(result), /token|privateKey|authorization|provider-body/iu);
+});
+
 test("effect failure has deterministic bounded mapping", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);

@@ -86,6 +86,8 @@ export interface ChangeRemoteExecutionEvidence {
   readonly issuer?: string;
   readonly effects: readonly ChangeRemoteEffectEvidence[];
   readonly compensation?: "not-required" | "succeeded" | "failed";
+  /** The bounded failure of the compensation effect, when cleanup failed. */
+  readonly compensationFailure?: ChangeRemoteExecutionFailureEvidence;
   readonly failure?: ChangeRemoteExecutionFailureEvidence;
 }
 
@@ -247,6 +249,7 @@ export function normalizeChangeRemoteExecutionEvidence(
     "issuer",
     "effects",
     "compensation",
+    "compensationFailure",
     "failure",
   ]);
   if (Object.keys(candidate).some((key) => !allowed.has(key))) {
@@ -339,16 +342,15 @@ export function normalizeChangeRemoteExecutionEvidence(
       { operation },
     );
   }
-  let failure: ChangeRemoteExecutionFailureEvidence | undefined;
-  if (candidate.failure !== undefined) {
-    if (typeof candidate.failure !== "object" || candidate.failure === null || Array.isArray(candidate.failure)) {
+  function normalizeFailure(value: unknown): ChangeRemoteExecutionFailureEvidence {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new ChangeRemoteExecutorError(
         "CHANGE_REMOTE_RESULT_INVALID",
         "The Change executor returned invalid bounded execution evidence.",
         { operation },
       );
     }
-    const failureValue = candidate.failure as Record<string, unknown>;
+    const failureValue = value as Record<string, unknown>;
     if (
       Object.keys(failureValue).some(
         (key) => !["kind", "code", "message", "reason", "status", "provider"].includes(key),
@@ -380,13 +382,16 @@ export function normalizeChangeRemoteExecutionEvidence(
         { operation },
       );
     }
-    failure = {
+    return {
       kind: failureValue.kind as ChangeEffectKind,
       code: failureValue.code,
       message: failureValue.message,
       ...(classification === undefined ? {} : classification),
     };
   }
+  const failure = candidate.failure === undefined ? undefined : normalizeFailure(candidate.failure);
+  const compensationFailure =
+    candidate.compensationFailure === undefined ? undefined : normalizeFailure(candidate.compensationFailure);
   if (
     candidate.compensation !== undefined &&
     !["not-required", "succeeded", "failed"].includes(candidate.compensation as string)
@@ -407,6 +412,7 @@ export function normalizeChangeRemoteExecutionEvidence(
     ...(candidate.compensation === undefined
       ? {}
       : { compensation: candidate.compensation as "not-required" | "succeeded" | "failed" }),
+    ...(compensationFailure === undefined ? {} : { compensationFailure }),
     ...(failure === undefined ? {} : { failure }),
   };
   if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > MAX_CHANGE_REMOTE_EXECUTION_EVIDENCE_BYTES) {
