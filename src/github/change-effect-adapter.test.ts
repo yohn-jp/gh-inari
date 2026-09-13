@@ -5,6 +5,7 @@ import {
   GitHubChangeEffectAdapter,
   GitHubChangeEffectContractError,
   GitHubChangeEffectFailureError,
+  MAX_GITHUB_CHANGE_EFFECT_REJECTION_BODY_BYTES,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
   type GitHubChangeEffectCompareAndDeleteRequest,
@@ -458,6 +459,87 @@ test("API, transport, and response failures normalize to deterministic bounded e
   assert.equal(JSON.stringify(apiFailure).includes("api-secret"), false);
   assert.equal(JSON.stringify(apiFailure).includes("transport-secret"), false);
   assert.equal(JSON.stringify(malformedResponse).includes("903"), false);
+});
+
+test("provider HTTP failures retain only recognized bounded GitHub validation detail", async () => {
+  const effect = {
+    kind: "CREATE_PULL_REQUEST",
+    branch: "Feature/Exact_Name",
+    baseBranch: "main",
+    rootIssue: 216,
+    title: "Change #216",
+    body: "Closes #216",
+    draft: true,
+  } as const;
+  const recognized = await adapter(
+    new StubChangeEffectTransport([
+      response(422, {
+        message: "Validation Failed; Bearer provider-secret",
+        documentation_url: "https://provider.invalid/secret",
+        errors: [
+          {
+            resource: "PullRequest",
+            field: "head",
+            code: "custom",
+            message: "provider-controlled prose and secret",
+          },
+        ],
+      }),
+    ]),
+  ).execute(effect);
+  assert.equal(recognized.status, "failed");
+  if (recognized.status !== "failed") throw new Error("expected failure result");
+  assert.deepEqual(recognized.failure, {
+    effect,
+    code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.CREATE_PULL_REQUEST,
+    message: "The pull request creation effect failed.",
+    reason: "provider-http",
+    status: 422,
+    provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+  });
+  assert.doesNotMatch(JSON.stringify(recognized), /provider-secret|provider\.invalid|provider-controlled/iu);
+
+  const baseline = async (status: number, body: unknown) => {
+    const result = await adapter(new StubChangeEffectTransport([response(status, body)])).execute(effect);
+    assert.equal(result.status, "failed");
+    if (result.status !== "failed") throw new Error("expected failure result");
+    assert.deepEqual(result.failure, {
+      effect,
+      code: GITHUB_CHANGE_EFFECT_FAILURE_CODES.CREATE_PULL_REQUEST,
+      message: "The pull request creation effect failed.",
+      reason: "provider-http",
+      status,
+    });
+    return result;
+  };
+
+  await baseline(422, { message: "free-form provider message" });
+  await baseline(422, { errors: { resource: "PullRequest", field: "head", code: "custom" } });
+  await baseline(422, {
+    errors: [{ resource: "PullRequest", field: "head", code: "custom" }],
+    message: "x".repeat(MAX_GITHUB_CHANGE_EFFECT_REJECTION_BODY_BYTES),
+  });
+  await baseline(404, { message: "Not Found" });
+  await baseline(500, { message: "Internal Server Error", errors: [{ resource: "PullRequest", code: "custom" }] });
+  await baseline(422, {
+    errors: [{ resource: "PullRequest", field: 42, code: "custom", message: "unsafe shape" }],
+  });
+});
+
+test("recognized status-only provider categories remain bounded", async () => {
+  const effect = { kind: "DELETE_BRANCH", branch: "feature" } as const;
+  for (const [status, category] of [
+    [401, "authentication-failed"],
+    [409, "conflict"],
+    [429, "rate-limit"],
+  ] as const) {
+    const result = await adapter(new StubChangeEffectTransport([response(status)])).execute(effect);
+    assert.equal(result.status, "failed");
+    if (result.status !== "failed") throw new Error("expected failure result");
+    assert.equal(result.failure.reason, "provider-http");
+    assert.equal(result.failure.status, status);
+    assert.deepEqual(result.failure.provider, { category });
+  }
 });
 
 test("a typed credential classification remains bounded when supplied by a credential transport", async () => {

@@ -621,6 +621,7 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
             message: "The pull request creation effect failed.",
             reason: "provider-http",
             status: 422,
+            provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
           },
         },
       },
@@ -649,6 +650,7 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
               message: "The pull request creation effect failed.",
               reason: "provider-http",
               status: 422,
+              provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
             },
           },
         }) &&

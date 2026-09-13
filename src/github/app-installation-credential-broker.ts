@@ -13,6 +13,7 @@ import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   GitHubChangeEffectAdapter,
   GitHubChangeEffectFailureError,
+  normalizeGitHubChangeEffectProviderDiagnostic,
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
@@ -93,6 +94,7 @@ export class GitHubAppCredentialBrokerError extends Error {
   readonly stage: GitHubAppCredentialFailureStage;
   readonly reason?: ChangeEffectFailureClassification["reason"];
   readonly status?: number;
+  readonly provider?: ChangeEffectFailureClassification["provider"];
 
   constructor(stage: GitHubAppCredentialFailureStage, classification?: ChangeEffectFailureClassification) {
     super("Trusted GitHub App credential operation failed closed.");
@@ -102,6 +104,7 @@ export class GitHubAppCredentialBrokerError extends Error {
       attachChangeEffectFailureClassification(this, classification);
       this.reason = classification.reason;
       this.status = classification.status;
+      this.provider = classification.provider;
     }
   }
 }
@@ -323,7 +326,12 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
       },
     });
     if (response.status !== 200) {
-      throw new GitHubChangeEffectFailureError({ reason: "provider-http", status: response.status });
+      const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
+      throw new GitHubChangeEffectFailureError({
+        reason: "provider-http",
+        status: response.status,
+        ...(provider === undefined ? {} : { provider }),
+      });
     }
     if (typeof response.body !== "object" || response.body === null || Array.isArray(response.body)) {
       return "mismatch";
@@ -720,7 +728,11 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     const classification =
       failure.reason === undefined
         ? undefined
-        : { reason: failure.reason, ...(failure.status === undefined ? {} : { status: failure.status }) };
+        : {
+            reason: failure.reason,
+            ...(failure.status === undefined ? {} : { status: failure.status }),
+            ...(failure.provider === undefined ? {} : { provider: failure.provider }),
+          };
     try {
       const error = this.#mutationFailure(effect);
       if (error instanceof Error && !errorText(error).includes(this.#privateKeyPem)) {

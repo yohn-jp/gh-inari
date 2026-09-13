@@ -16,6 +16,7 @@ import {
   ChangeRemoteExecutorError,
   createUnavailableChangeRemoteExecutor,
   type ChangeRemoteExecutor,
+  type ChangeRemoteExecutionEvidence,
   type ChangeRemoteMutationRequest,
   type ChangeRemoteReadRequest,
 } from "./change-executor.js";
@@ -262,6 +263,36 @@ test("abort is routed through the same executor boundary", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(calls[0]?.operation, "abort");
   assert.equal(result.output?.operation, "change.abort");
+});
+
+test("CLI preserves the normalized provider rejection projection in execution evidence", async () => {
+  const evidence: ChangeRemoteExecutionEvidence = {
+    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    operation: "ready",
+    outcome: "failed",
+    effects: [{ kind: "MARK_PULL_REQUEST_READY", status: "failed" }],
+    failure: {
+      kind: "MARK_PULL_REQUEST_READY",
+      code: "PULL_REQUEST_READY_FAILED",
+      message: "The pull request ready effect failed.",
+      reason: "provider-http",
+      status: 422,
+      provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+    },
+  };
+  const result = await capture(["change", "ready", "42", "--json"], {
+    changeExecutor: {
+      async execute() {
+        return { projection: projection(), evidence };
+      },
+      async read() {
+        throw new Error("unreachable");
+      },
+    },
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual((result.output?.evidence as Record<string, unknown> | undefined)?.failure, evidence.failure);
 });
 
 test("default Change wiring constructs an Actions-backed executor and normalizes dispatch failure", async () => {

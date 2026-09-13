@@ -14,6 +14,7 @@ import {
   type IssuerRepositoryIdentity,
   type TrustedExecutionContext,
 } from "./github/issuer-authority.js";
+import { GitHubChangeEffectFailureError } from "./github/change-effect-adapter.js";
 import {
   TrustedChangeExecutor,
   ChangeTrustedExecutorError,
@@ -135,6 +136,7 @@ class MutableReader implements ChangeTrustedEvidenceReader {
 class FakeIssuer {
   readonly effects: ChangeEffect[] = [];
   fail: ChangeEffect["kind"] | undefined;
+  failureClassification: ConstructorParameters<typeof GitHubChangeEffectFailureError>[0] | undefined;
   failReadAfterEffectFailure = false;
   leaveBranchAfterDelete = false;
   readonly reader: MutableReader;
@@ -149,6 +151,8 @@ class FakeIssuer {
     this.effects.push(effect);
     if (effect.kind === this.fail) {
       if (this.failReadAfterEffectFailure) this.reader.failNextRead = true;
+      if (this.failureClassification !== undefined)
+        throw new GitHubChangeEffectFailureError(this.failureClassification);
       throw new Error("provider detail must not cross the boundary");
     }
     if (effect.kind === "CREATE_BRANCH") {
@@ -452,6 +456,37 @@ test("effect failure has deterministic bounded mapping", async () => {
       assert.equal(error.code, "CHANGE_EXECUTION_EFFECT_FAILED");
       assert.equal(error.evidence?.failure?.code, "BRANCH_CREATE_FAILED");
       assert.doesNotMatch(error.message, /provider|credential|token/iu);
+      return true;
+    },
+  );
+});
+
+test("trusted executor preserves the normalized provider rejection projection", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "CREATE_BRANCH";
+  issuer.failureClassification = {
+    reason: "provider-http",
+    status: 422,
+    provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+  };
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "issue",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ChangeTrustedExecutorError);
+      assert.deepEqual(error.evidence?.failure, {
+        kind: "CREATE_BRANCH",
+        code: "BRANCH_CREATE_FAILED",
+        message: "The branch creation effect failed.",
+        reason: "provider-http",
+        status: 422,
+        provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+      });
       return true;
     },
   );
