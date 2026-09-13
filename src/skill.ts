@@ -1,14 +1,17 @@
 import {
   commandExample,
   commandInvocation,
+  getCommand,
   helpInvocation,
+  type CommandArgumentBindings,
   type CommandDomain,
   type CommandId,
 } from "./command-contract.js";
+import type { GoldenPathGovernanceDiscoveryResult } from "./golden-path-governance.js";
 
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 
-export const SKILL_MODEL_VERSION = "1.3.0";
+export const SKILL_MODEL_VERSION = "1.4.0";
 export const SKILL_DEFAULT_SCENARIO_ID = "golden-path" as const;
 
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
@@ -18,8 +21,23 @@ export interface SkillWorkflowStep {
   readonly summary: string;
   /** Stable reference into the versioned command contract. */
   readonly commandId: CommandId;
-  /** Backward-compatible rendered command projection. */
-  readonly command: string;
+  /** Backward-compatible rendered command projection when all required inputs are bound. */
+  readonly command?: string;
+  /** Authoritative command-option values used to render an executable command. */
+  readonly bindings?: CommandArgumentBindings;
+  /** Canonical prerequisite when this step cannot yet be rendered safely. */
+  readonly prerequisite?: SkillWorkflowPrerequisite;
+}
+
+export interface SkillWorkflowPrerequisite {
+  readonly kind: "golden-path-governance";
+  readonly action: string;
+  readonly reason?: string;
+}
+
+export interface SkillProjectionContext {
+  /** Result returned by Golden Path governance; selection remains outside the skill projection. */
+  readonly governance?: GoldenPathGovernanceDiscoveryResult;
 }
 
 export type SkillScenarioScope = "default-route" | "leaf-operation" | "specialized-alternative";
@@ -347,6 +365,59 @@ export function findSkillScenario(id: string): SkillScenario | undefined {
   return SKILL_SCENARIOS.find((scenario) => scenario.id === id);
 }
 
+function templateSchemaDomain(commandId: CommandId): "issue" | "pr" | undefined {
+  const command = getCommand(commandId);
+  return command.operation === "schema" && (command.domain === "issue" || command.domain === "pr")
+    ? command.domain
+    : undefined;
+}
+
+function governanceMatchesSchemaDomain(
+  governance: GoldenPathGovernanceDiscoveryResult,
+  domain: "issue" | "pr",
+): boolean {
+  return governance.domain === domain || (domain === "pr" && governance.domain === "pull_request");
+}
+
+function prerequisiteForSchema(governance: GoldenPathGovernanceDiscoveryResult | undefined): SkillWorkflowPrerequisite {
+  return {
+    kind: "golden-path-governance",
+    action: governance?.nextAction.action ?? "resolve-governance",
+    ...(governance === undefined || governance.status === "resolved" ? {} : { reason: governance.reason }),
+  };
+}
+
+function projectWorkflowStep(step: SkillWorkflowStep, context: SkillProjectionContext): SkillWorkflowStep {
+  const domain = templateSchemaDomain(step.commandId);
+  if (domain === undefined) return step;
+
+  const governance = context.governance;
+  if (
+    governance?.status === "resolved" &&
+    governance.source === "native-template" &&
+    governanceMatchesSchemaDomain(governance, domain) &&
+    "templateIdentity" in governance.contract
+  ) {
+    const bindings = { template: governance.contract.templateIdentity.path } as const;
+    return {
+      summary: step.summary,
+      commandId: step.commandId,
+      bindings,
+      command: commandExample(step.commandId, bindings),
+    };
+  }
+
+  return {
+    summary: step.summary,
+    commandId: step.commandId,
+    prerequisite: prerequisiteForSchema(governance),
+  };
+}
+
+function projectWorkflow(scenario: SkillScenario, context: SkillProjectionContext): readonly SkillWorkflowStep[] {
+  return scenario.workflow.map((step) => projectWorkflowStep(step, context));
+}
+
 export interface SkillIndexEntry {
   readonly id: string;
   readonly title: string;
@@ -406,7 +477,10 @@ export function projectSkillIndexToText(): string {
   return lines.join("\n");
 }
 
-export function projectSkillScenarioToJson(scenario: SkillScenario): SkillScenarioProjection {
+export function projectSkillScenarioToJson(
+  scenario: SkillScenario,
+  context: SkillProjectionContext = {},
+): SkillScenarioProjection {
   return {
     version: SKILL_MODEL_VERSION,
     id: scenario.id,
@@ -414,7 +488,7 @@ export function projectSkillScenarioToJson(scenario: SkillScenario): SkillScenar
     whenToUse: scenario.whenToUse,
     scope: scenario.scope,
     ...(scenario.delegatesTo === undefined ? {} : { delegatesTo: scenario.delegatesTo }),
-    workflow: scenario.workflow,
+    workflow: projectWorkflow(scenario, context),
     contractReferences: scenario.contractReferences,
     invariants: scenario.invariants,
     canonicalCommandId: scenario.canonicalCommandId,
@@ -424,7 +498,7 @@ export function projectSkillScenarioToJson(scenario: SkillScenario): SkillScenar
   };
 }
 
-export function projectSkillScenarioToText(scenario: SkillScenario): string {
+export function projectSkillScenarioToText(scenario: SkillScenario, context: SkillProjectionContext = {}): string {
   const lines: string[] = [
     `${scenario.title} (${scenario.id})`,
     "",
@@ -440,9 +514,11 @@ export function projectSkillScenarioToText(scenario: SkillScenario): string {
     "",
     "Workflow:",
   ];
-  scenario.workflow.forEach((step, index) => {
+  projectWorkflow(scenario, context).forEach((step, index) => {
     lines.push(`  ${index + 1}. ${step.summary}`);
-    lines.push(`     ${step.command}`);
+    if (step.command !== undefined) lines.push(`     ${step.command}`);
+    if (step.bindings !== undefined) lines.push(`     Bound arguments: ${JSON.stringify(step.bindings)}`);
+    if (step.prerequisite !== undefined) lines.push(`     Prerequisite: ${JSON.stringify(step.prerequisite)}`);
   });
   if (scenario.contractReferences.length > 0) {
     lines.push("");

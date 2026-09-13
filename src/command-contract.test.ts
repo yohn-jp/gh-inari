@@ -7,6 +7,7 @@ import {
   INARI_COMMANDS,
   commandExample,
   commandInvocation,
+  commandTemplateSchemaInvocation,
   commandUsage,
   getCommandForPositionals,
   getOption,
@@ -61,6 +62,13 @@ test("the shared tokenizer consumes every value-taking option before command ide
   assert.equal(getOption("field").arity, "required");
   assert.equal(getOption("field").repeatable, true);
   assert.equal(getOption("repository").aliases.includes("-R"), true);
+});
+
+test("command projections bind authoritative option values without changing generic examples", () => {
+  const template = ".github/ISSUE_TEMPLATE/release.yml";
+  assert.equal(commandExample("issue.schema", { template }), `inari issue schema --template ${template}`);
+  assert.equal(commandTemplateSchemaInvocation("issue", template), `inari issue schema --template ${template}`);
+  assert.equal(commandExample("issue.schema"), "inari issue schema");
 });
 
 test("unknown upstream command trees stay outside the owned command contract", () => {
