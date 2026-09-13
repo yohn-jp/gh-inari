@@ -845,8 +845,8 @@ export function recoverExistingArtifactValues(
 
   const dependencyMarker = contract.artifactKind === "issue" ? extractIssueDependencyMarker(body ?? "") : undefined;
   const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker?.body ?? body ?? "").body;
-  const stripComments = contract.artifactKind === "pull_request";
-  const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
+  const stripArtifactComments = contract.artifactKind === "pull_request";
+  const source = normalizeSource(stripArtifactComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
   const blocks = headingBlocks(source);
   const values: Record<string, unknown> = {};
   const expectedTitles = new Map<string, number>();
@@ -874,8 +874,8 @@ export function recoverExistingArtifactValues(
       field,
       block.body,
       `$.${field.id}`,
-      stripComments,
       contract.artifactKind === "issue",
+      pullRequestFieldPlaceholder(field, stripArtifactComments),
     );
     // parseFieldLines may retain known checklist selections alongside a
     // bounded structural diagnostic. The canonical loader below decides
@@ -1542,12 +1542,12 @@ function parseRenderedBody(
   contract: CanonicalContract,
   body: string,
   issueHeadingLevel: number | undefined,
-  stripComments: boolean,
+  stripArtifactComments: boolean,
 ): ExistingArtifactParseResult {
   const dependencyMarker =
     contract.artifactKind === "issue" ? extractIssueDependencyMarker(body) : { status: "absent" as const, body };
   const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker.body).body;
-  const source = normalizeSource(stripComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
+  const source = normalizeSource(stripArtifactComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
   const lines = source.split("\n");
   const values: Record<string, unknown> = {};
   const diagnostics: ExistingArtifactDiagnostic[] = [];
@@ -1571,7 +1571,7 @@ function parseRenderedBody(
     if (section.kind === "documentation") {
       if (issueHeadingLevel !== undefined) continue;
       const expected = trimBlankLines(
-        stripComments ? removeHtmlComments(section.content ?? "") : (section.content ?? ""),
+        stripArtifactComments ? removeHtmlComments(section.content ?? "") : (section.content ?? ""),
       );
       if (expected !== undefined) {
         const expectedLines = expected.split("\n");
@@ -1626,7 +1626,9 @@ function parseRenderedBody(
     const nextSection = contract.sections[sectionIndex + 1];
     const nextDocumentation =
       issueHeadingLevel === undefined && nextSection?.kind === "documentation"
-        ? trimBlankLines(stripComments ? removeHtmlComments(nextSection.content ?? "") : (nextSection.content ?? ""))
+        ? trimBlankLines(
+            stripArtifactComments ? removeHtmlComments(nextSection.content ?? "") : (nextSection.content ?? ""),
+          )
         : undefined;
     if (nextDocumentation !== undefined) {
       const documentationLines = nextDocumentation.split("\n");
@@ -1643,7 +1645,13 @@ function parseRenderedBody(
       }
     }
     const fieldLines = trimLineRange(lines.slice(contentStart, fieldEnd));
-    const parsed = parseFieldLines(field, fieldLines, `$.${field.id}`, stripComments, issueHeadingLevel !== undefined);
+    const parsed = parseFieldLines(
+      field,
+      fieldLines,
+      `$.${field.id}`,
+      issueHeadingLevel !== undefined,
+      pullRequestFieldPlaceholder(field, stripArtifactComments),
+    );
     diagnostics.push(...parsed.diagnostics);
     if (parsed.value !== undefined) values[field.id] = parsed.value;
     if (parsed.diagnostics.length > 0) return { parsed: false, values: {}, diagnostics };
@@ -1698,12 +1706,12 @@ function parseFieldLines(
   field: CanonicalField,
   lines: readonly string[],
   path: string,
-  stripComments: boolean,
   issueBody: boolean,
+  pullRequestPlaceholder: string | undefined,
 ): { value: unknown; diagnostics: readonly ExistingArtifactDiagnostic[] } {
   const diagnostics: ExistingArtifactDiagnostic[] = [];
-  const filtered = stripComments ? lines.filter((line) => line.trim().length > 0) : lines;
-  if (filtered.length === 1 && filtered[0]?.trim() === GITHUB_NO_RESPONSE) {
+  const canonicalLines = canonicalizeFieldLines(field, lines);
+  if (canonicalLines.length === 1 && canonicalLines[0]?.trim() === GITHUB_NO_RESPONSE) {
     // GitHub uses the same marker for an empty optional selection. Preserve
     // the materialized empty array so prepared artifacts remain reversible.
     return { value: field.type === "array" ? [] : undefined, diagnostics };
@@ -1711,19 +1719,20 @@ function parseFieldLines(
   if (field.type === "string" || field.type === "enum") {
     const parsedValue =
       field.nativeMetadata.render === undefined
-        ? trimBlankLines(unescapeMarkdownValue(filtered.join("\n")))
-        : parseRenderedCodeBlock(filtered, field.nativeMetadata.render, path, diagnostics);
+        ? trimBlankLines(unescapeMarkdownValue(canonicalLines.join("\n")))
+        : parseRenderedCodeBlock(canonicalLines, field.nativeMetadata.render, path, diagnostics);
     if (parsedValue === EXPLICIT_EMPTY_STRING_MARKER) return { value: "", diagnostics };
-    const placeholder = stripComments
-      ? removeHtmlComments(field.nativeMetadata.placeholder ?? "")
-      : (field.nativeMetadata.placeholder ?? "");
-    if (stripComments && parsedValue !== undefined && parsedValue === trimBlankLines(placeholder))
+    if (
+      pullRequestPlaceholder !== undefined &&
+      parsedValue !== undefined &&
+      parsedValue === trimBlankLines(pullRequestPlaceholder)
+    )
       return { value: undefined, diagnostics };
     return { value: issueBody ? issueSemanticValue(field, parsedValue) : parsedValue, diagnostics };
   }
   if (field.type === "array") {
     if (field.nativeMetadata.multiple === true) {
-      const value = trimBlankLines(unescapeMarkdownValue(filtered.join("\n")));
+      const value = trimBlankLines(unescapeMarkdownValue(canonicalLines.join("\n")));
       if (value === undefined) return { value: undefined, diagnostics };
       const values = value
         .split(",")
@@ -1732,13 +1741,13 @@ function parseFieldLines(
       if (values.length === 0) return { value: undefined, diagnostics };
       return { value: issueBody ? values.map((value) => issueSemanticValue(field, value)) : values, diagnostics };
     }
-    const values = filtered
+    const values = canonicalLines
       .map((line) => {
         const value = /^[-+*][ \t]+(.+)$/u.exec(line)?.[1]?.trim();
         return value === undefined ? undefined : unescapeMarkdownValue(value);
       })
       .filter((value): value is string => value !== undefined);
-    if (values.length !== filtered.length) {
+    if (values.length !== canonicalLines.length) {
       diagnostics.push({
         code: "EXISTING_UNPARSEABLE",
         path,
@@ -1749,9 +1758,10 @@ function parseFieldLines(
     return { value: values, diagnostics };
   }
   const values: string[] = [];
-  const checklistLines = stripComments
-    ? removeRenderedPlaceholder(filtered, field.nativeMetadata.placeholder)
-    : filtered;
+  const checklistLines =
+    pullRequestPlaceholder === undefined
+      ? canonicalLines
+      : removeRenderedPlaceholder(canonicalLines, pullRequestPlaceholder);
   for (const line of checklistLines) {
     const match = /^[-+*][ \t]+\[([ xX])\][ \t]+(.+)$/u.exec(line);
     if (match === null) {
@@ -1777,9 +1787,22 @@ function parseFieldLines(
   return { value: values, diagnostics };
 }
 
+/**
+ * Preserve line structure for scalar values; blank lines are presentation
+ * noise only for structured collection fields.
+ */
+function canonicalizeFieldLines(field: CanonicalField, lines: readonly string[]): readonly string[] {
+  return field.type === "array" || field.type === "checklist" ? lines.filter((line) => line.trim().length > 0) : lines;
+}
+
+function pullRequestFieldPlaceholder(field: CanonicalField, stripArtifactComments: boolean): string | undefined {
+  if (!stripArtifactComments || field.nativeMetadata.placeholder === undefined) return undefined;
+  return normalizeSource(removeHtmlComments(field.nativeMetadata.placeholder));
+}
+
 function removeRenderedPlaceholder(lines: readonly string[], placeholder: string | undefined): readonly string[] {
   if (placeholder === undefined) return lines;
-  const placeholderLines = nonEmptyLines(removeHtmlComments(placeholder));
+  const placeholderLines = nonEmptyLines(placeholder);
   return placeholderLines.length > 0 && sameLines(lines.slice(0, placeholderLines.length), placeholderLines)
     ? lines.slice(placeholderLines.length)
     : lines;
