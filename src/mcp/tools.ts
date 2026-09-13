@@ -1,5 +1,5 @@
 /**
- * Native MCP tools for the semantic pull-request Core boundary.
+ * Native MCP tools for the semantic artifact and Operational Observation Core boundaries.
  *
  * This module owns only protocol translation. Repository policy, effective
  * contract compilation, materialization, projection, and planning remain in
@@ -40,6 +40,7 @@ import {
   type SemanticIssueMutationPlan,
 } from "../semantic-issue-projection.js";
 import { compareSemanticIssueProjection, tryObserveSemanticIssue } from "../semantic-issue-observation.js";
+import { tryObserveOperationalIssue, tryObserveOperationalPullRequest } from "../operational-observation.js";
 import {
   SemanticPullRequestProjectionError,
   tryPlanSemanticPullRequest,
@@ -71,6 +72,8 @@ import type {
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
+import { readGovernedExistingArtifact } from "../reconciliation.js";
+import { projectExistingArtifact } from "../artifact.js";
 import type { McpSessionAppBridge } from "./session-app-bridge.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
@@ -302,8 +305,9 @@ export const semanticPullRequestOutputSchema = z
   .object({
     ok: z.boolean(),
     valid: z.boolean(),
+    operation: z.string().optional(),
     phase: z.enum(["contract", "materialization", "projection", "observation", "comparison"]).optional(),
-    version: z.string().optional(),
+    version: z.union([z.string(), z.number()]).optional(),
     artifactContractVersion: z.string().optional(),
     kind: z.string().optional(),
     id: z.string().optional(),
@@ -316,10 +320,12 @@ export const semanticPullRequestOutputSchema = z
     dependencyGraph: z.unknown().optional(),
     evaluationOrder: z.unknown().optional(),
     capabilities: z.unknown().optional(),
+    number: artifactNumberSchema.optional(),
     artifact: z.unknown().optional(),
     plan: z.unknown().optional(),
     desired: z.unknown().optional(),
     observed: z.unknown().optional(),
+    semantic: z.unknown().optional(),
     comparison: z.unknown().optional(),
     drift: z.array(z.unknown()).optional(),
     observationDiagnostics: z.array(z.unknown()).optional(),
@@ -870,6 +876,55 @@ async function observePullRequestFromGitHub(
   };
 }
 
+interface OperationalObserveEnvelope {
+  readonly observation:
+    ReturnType<typeof tryObserveOperationalIssue> | ReturnType<typeof tryObserveOperationalPullRequest>;
+}
+
+async function observeOperationalIssueFromGitHub(
+  adapter: GitHubAdapter,
+  number: number,
+): Promise<OperationalObserveEnvelope> {
+  return { observation: tryObserveOperationalIssue({ issue: await adapter.observeIssue(number) }) };
+}
+
+async function observeOperationalPullRequestFromGitHub(
+  adapter: GitHubAdapter,
+  number: number,
+): Promise<OperationalObserveEnvelope> {
+  return {
+    observation: tryObserveOperationalPullRequest({ pullRequest: await adapter.observePullRequest(number) }),
+  };
+}
+
+async function operationalSemanticOverlay(
+  adapter: GitHubAdapter,
+  domain: "issue" | "pr",
+  number: number,
+): Promise<Readonly<Record<string, unknown>>> {
+  try {
+    const read = await readGovernedExistingArtifact(adapter, domain, number);
+    const projection = projectExistingArtifact(read.result);
+    const unavailable = new Set(["wrong-template", "unparseable", "ambiguous", "unsupported"]);
+    return {
+      status: projection.valid ? "valid" : unavailable.has(read.result.classification) ? "unavailable" : "invalid",
+      diagnostics: boundedDiagnostics(projection.diagnostics),
+      classification: read.result.classification,
+    };
+  } catch {
+    return {
+      status: "unavailable",
+      diagnostics: [
+        {
+          code: "SEMANTIC_PROJECTION_UNAVAILABLE",
+          path: "$.semantic",
+          message: "Semantic Artifact projection read failed closed; observed provider state remains available.",
+        },
+      ],
+    };
+  }
+}
+
 async function handleIssueObserve(
   input: SemanticIssueObserveInput,
   dependencies: NativeSemanticArtifactDependencies,
@@ -877,36 +932,42 @@ async function handleIssueObserve(
   const adapter = adapterFor(input.repository, dependencies);
   let effectiveContract: EffectiveArtifactContract | undefined;
   try {
-    effectiveContract = await compileSemanticArtifactContract("issue", input, adapter);
-    const envelope = await observeIssueFromGitHub(adapter, effectiveContract, input.number);
-    if (!envelope.result.valid || envelope.result.projection === undefined) {
+    // Contract resolution is attempted only as a semantic overlay. A missing,
+    // legacy, or wrong template must not prevent provider observation.
+    try {
+      effectiveContract = await compileSemanticArtifactContract("issue", input, adapter);
+    } catch {
+      effectiveContract = undefined;
+    }
+    const envelope = await observeOperationalIssueFromGitHub(adapter, input.number);
+    if (!envelope.observation.valid || envelope.observation.observation === undefined) {
       return result(
         {
-          ...failure("observation", envelope.result.violations),
-          effectiveContract,
-          ...(envelope.observationDiagnostics.length === 0
-            ? {}
-            : { observationDiagnostics: [...envelope.observationDiagnostics] }),
+          ...failure("observation", envelope.observation.violations),
+          ...(effectiveContract === undefined ? {} : { effectiveContract }),
         },
-        "Semantic Issue observation failed; see diagnostics.",
+        "Operational Issue observation failed; see diagnostics.",
       );
     }
+    const semantic = await operationalSemanticOverlay(adapter, "issue", input.number);
     return result(
       {
         ok: true,
         valid: true,
-        effectiveContract,
-        observed: envelope.result.projection,
-        ...(envelope.observationDiagnostics.length === 0
-          ? {}
-          : { observationDiagnostics: [...envelope.observationDiagnostics] }),
+        operation: "issue.observe",
+        number: input.number,
+        version: envelope.observation.observation.version,
+        ...(effectiveContract === undefined ? {} : { effectiveContract }),
+        observed: envelope.observation.observation,
+        semantic,
+        mutation: false,
       },
-      "Observed the semantic Issue through the bounded GitHub adapter.",
+      "Observed the Issue runtime state through the bounded GitHub adapter.",
     );
   } catch (error: unknown) {
     return result(
       { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
-      "Semantic Issue observation failed; see diagnostics.",
+      "Operational Issue observation failed; see diagnostics.",
     );
   }
 }
@@ -981,21 +1042,39 @@ async function handlePullRequestObserve(
   const adapter = adapterFor(input.repository, dependencies);
   let effectiveContract: EffectiveArtifactContract | undefined;
   try {
-    effectiveContract = await compileSemanticArtifactContract("pull_request", input, adapter);
-    const envelope = await observePullRequestFromGitHub(adapter, input.number);
-    if (!envelope.result.valid || envelope.result.projection === undefined)
+    try {
+      effectiveContract = await compileSemanticArtifactContract("pull_request", input, adapter);
+    } catch {
+      effectiveContract = undefined;
+    }
+    const envelope = await observeOperationalPullRequestFromGitHub(adapter, input.number);
+    if (!envelope.observation.valid || envelope.observation.observation === undefined)
       return result(
-        { ...failure("observation", envelope.result.violations), effectiveContract },
-        "Semantic PR observation failed; see diagnostics.",
+        {
+          ...failure("observation", envelope.observation.violations),
+          ...(effectiveContract === undefined ? {} : { effectiveContract }),
+        },
+        "Operational PR observation failed; see diagnostics.",
       );
+    const semantic = await operationalSemanticOverlay(adapter, "pr", input.number);
     return result(
-      { ok: true, valid: true, effectiveContract, observed: envelope.result.projection },
-      "Observed the semantic PR through the bounded GitHub adapter.",
+      {
+        ok: true,
+        valid: true,
+        operation: "pr.observe",
+        number: input.number,
+        version: envelope.observation.observation.version,
+        ...(effectiveContract === undefined ? {} : { effectiveContract }),
+        observed: envelope.observation.observation,
+        semantic,
+        mutation: false,
+      },
+      "Observed the pull-request runtime state through the bounded GitHub adapter.",
     );
   } catch (error: unknown) {
     return result(
       { ...failure("observation", error), ...(effectiveContract === undefined ? {} : { effectiveContract }) },
-      "Semantic PR observation failed; see diagnostics.",
+      "Operational PR observation failed; see diagnostics.",
     );
   }
 }
@@ -1317,9 +1396,9 @@ export function registerSemanticPullRequestTools(
   const observe = server.registerTool(
     "inari_pr_observe",
     {
-      title: "Observe semantic PR",
+      title: "Observe PR runtime state",
       description:
-        "Observe one GitHub pull request through the bounded adapter and normalize it with the Core semantic observer.",
+        "Observe one GitHub pull request through the bounded adapter and normalize provider runtime state with the versioned Operational Observation Core.",
       inputSchema: semanticPullRequestObserveInputSchema,
       outputSchema: semanticPullRequestOutputSchema,
       annotations: READ_ONLY,
@@ -1515,9 +1594,9 @@ export function registerSemanticIssueTools(
   const observe = server.registerTool(
     "inari_issue_observe",
     {
-      title: "Observe semantic Issue",
+      title: "Observe Issue runtime state",
       description:
-        "Observe one GitHub Issue through the bounded adapter and normalize it with the Core semantic observer.",
+        "Observe one GitHub Issue through the bounded adapter and normalize provider runtime state with the versioned Operational Observation Core.",
       inputSchema: semanticIssueObserveInputSchema,
       outputSchema: semanticPullRequestOutputSchema,
       annotations: READ_ONLY,

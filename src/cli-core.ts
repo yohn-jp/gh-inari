@@ -160,6 +160,11 @@ import {
   type SemanticIssueRelationEvidenceInput,
 } from "./semantic-issue-observation.js";
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "./semantic-pr-observation.js";
+import {
+  tryObserveOperationalIssue,
+  tryObserveOperationalPullRequest,
+  type OperationalDiagnostic,
+} from "./operational-observation.js";
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
 import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import {
@@ -1486,6 +1491,10 @@ async function runArtifactCommand(
       return runSemanticPullRequestCommand(semantic.operation, semantic.rest, parsed, root, dependencies, json);
     }
   }
+  if (command === "observe") {
+    if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError(domain, rest[0]);
+    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies);
+  }
   if (
     command === "check" &&
     typeof parsed.options.from === "string" &&
@@ -1643,6 +1652,98 @@ async function runArtifactCommand(
     throw invalidArtifactNumberError(domain, rest[0]);
   }
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
+}
+
+interface OperationalSemanticOverlay {
+  readonly status: "valid" | "invalid" | "unavailable";
+  readonly diagnostics: readonly unknown[];
+  readonly classification?: string;
+}
+
+async function projectOperationalSemanticOverlay(
+  domain: "issue" | "pr",
+  number: number,
+  adapter: GitHubAdapter,
+): Promise<OperationalSemanticOverlay> {
+  try {
+    const read = await readGovernedExistingArtifact(adapter, domain, number);
+    const projection = projectExistingArtifact(read.result);
+    const unavailable = new Set(["wrong-template", "unparseable", "ambiguous", "unsupported"]);
+    return {
+      status: projection.valid ? "valid" : unavailable.has(read.result.classification) ? "unavailable" : "invalid",
+      diagnostics: projection.diagnostics,
+      classification: read.result.classification,
+    };
+  } catch {
+    const diagnostic: OperationalDiagnostic = {
+      code: "SEMANTIC_PROJECTION_UNAVAILABLE",
+      path: "$.semantic",
+      message: "Semantic Artifact projection read failed closed; observed provider state remains available.",
+    };
+    return { status: "unavailable", diagnostics: [diagnostic] };
+  }
+}
+
+/** Project the canonical Operational Observation surface for CLI callers. */
+async function runOperationalObservationCommand(
+  domain: "issue" | "pr",
+  number: number,
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const unsupported = Object.keys(parsed.options).find((key) => !["json", "repository"].includes(key));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by Operational Observation.`,
+      "$argv",
+    );
+  }
+  if (parsed.fields.length > 0 || parsed.capabilities.length > 0) {
+    throw new CliError(
+      "INVALID_OPTION",
+      "Operational Observation is provider evidence and does not accept semantic field or capability input.",
+      "$argv",
+    );
+  }
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const evidence = domain === "issue" ? await adapter.observeIssue(number) : await adapter.observePullRequest(number);
+  const observedResult =
+    domain === "issue"
+      ? tryObserveOperationalIssue({ issue: evidence })
+      : tryObserveOperationalPullRequest({ pullRequest: evidence });
+  if (!observedResult.valid || observedResult.observation === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        valid: false,
+        operation: `${domain}.observe`,
+        kind: domain === "issue" ? "issue" : "pull_request",
+        number,
+        phase: "observation",
+        diagnostics: observedResult.violations,
+        violations: observedResult.violations,
+      }),
+    );
+    return EXIT_VALIDATION;
+  }
+  const semantic = await projectOperationalSemanticOverlay(domain, number, adapter);
+  console.log(
+    JSON.stringify({
+      ok: true,
+      valid: true,
+      operation: `${domain}.observe`,
+      kind: domain === "issue" ? "issue" : "pull_request",
+      version: observedResult.observation.version,
+      number,
+      observed: observedResult.observation,
+      semantic,
+      mutation: false,
+    }),
+  );
+  return 0;
 }
 
 type SemanticIssueOperation = "contract" | "materialize" | "plan" | "check";
