@@ -405,3 +405,23 @@ test("shared transition recovery plans retain abort provenance and only the pend
     implementer: "agent:codex",
   });
 });
+
+test("branch-only abort recovery is an explicit branch cleanup plan without a PR target", () => {
+  const change = {
+    version: 1 as const,
+    identity,
+    state: "RECOVERY_REQUIRED" as const,
+    provenance: { issuer: "app:inari-issuer" },
+    projection: { branch: canonicalBranch },
+  };
+  const plan = planChangeTransition({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    transition: "abort",
+    change,
+    target: { branch: canonicalBranch },
+  });
+
+  assert.deepEqual(plan.effects, [{ kind: "DELETE_BRANCH", branch: canonicalBranch }]);
+  assert.equal(plan.result.state, "ABORTED");
+  assert.deepEqual(plan.result.projection, { branch: canonicalBranch });
+});

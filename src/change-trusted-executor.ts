@@ -11,6 +11,7 @@ import {
   CHANGE_TRANSITION_CONTRACT_VERSION,
   ChangeIssuanceRecoveryValidationError,
   ChangeIssuanceValidationError,
+  classifyChangeAbortRecovery,
   createChangeDiagnostic,
   planChangeIssuance,
   planChangeIssuanceRecovery,
@@ -252,18 +253,39 @@ function expectedProjection(plan: PlannedChange): {
 }
 
 function isAbortCleanupRecoveryProjection(projection: ChangeProjectionResult): boolean {
-  if (!projection.valid && projection.status !== "partial") return false;
-  if (projection.change?.state !== "RECOVERY_REQUIRED" || projection.canonicalBranch === undefined) return false;
-  const canonicalBranches = projection.candidates.branches.filter(
-    (candidate) => candidate.classification === "canonical" && candidate.candidate.name === projection.canonicalBranch,
+  return classifyChangeAbortRecovery(projection) !== undefined;
+}
+
+function isCleanAbortProjection(projection: ChangeProjectionResult): boolean {
+  return (
+    projection.valid &&
+    projection.status === "absent" &&
+    projection.diagnostics.length === 0 &&
+    projection.change?.state === "DEFINED" &&
+    projection.change.projection === undefined &&
+    projection.candidates.branches.length === 0 &&
+    projection.candidates.pullRequests.length === 0
   );
-  const canonicalPullRequests = projection.candidates.pullRequests.filter(
-    (candidate) =>
-      candidate.classification === "canonical" &&
-      candidate.candidate.state === "closed" &&
-      candidate.candidate.merged === false,
+}
+
+function isBranchOnlyAbortRecoveryPlan(plan: PlannedChange): boolean {
+  return (
+    "request" in plan &&
+    plan.request.transition === "abort" &&
+    plan.from === "RECOVERY_REQUIRED" &&
+    plan.request.change.projection?.branch !== undefined &&
+    plan.request.change.projection?.pullRequest === undefined
   );
-  return canonicalBranches.length === 1 && canonicalPullRequests.length === 1;
+}
+
+function isCleanAbortPlan(plan: PlannedChange): boolean {
+  return (
+    "request" in plan &&
+    plan.request.transition === "abort" &&
+    plan.from === "DEFINED" &&
+    plan.to === "DEFINED" &&
+    plan.effects.length === 0
+  );
 }
 
 function recoveryProjection(projection: ChangeProjectionResult, change: Change): ChangeProjectionResult {
@@ -300,7 +322,9 @@ function verifyProjection(plan: PlannedChange, projection: ChangeProjectionResul
   const expected = expectedProjection(plan);
   const actual = projection.change;
   const diagnostics: ChangeDiagnostic[] = [];
-  if (!projection.valid || projection.status !== "healthy") {
+  const cleanBranchOnlyAbort = isBranchOnlyAbortRecoveryPlan(plan) && isCleanAbortProjection(projection);
+  const cleanAbortNoop = isCleanAbortPlan(plan) && isCleanAbortProjection(projection);
+  if ((!projection.valid || projection.status !== "healthy") && !cleanBranchOnlyAbort && !cleanAbortNoop) {
     diagnostics.push(
       diagnostic("CHANGE_INVALID_PLAN", "$.projection", "Post-effect projection is not a healthy canonical Change."),
     );
@@ -310,12 +334,12 @@ function verifyProjection(plan: PlannedChange, projection: ChangeProjectionResul
       diagnostic("CHANGE_INVALID_PLAN", "$.projection.change.identity", "Projection identity differs from the plan."),
     );
   }
-  if (actual?.state !== expected.state) {
+  if (actual?.state !== expected.state && !cleanBranchOnlyAbort) {
     diagnostics.push(
       diagnostic("CHANGE_INVALID_PLAN", "$.projection.change.state", "Projection state differs from the plan."),
     );
   }
-  if (actual?.projection?.branch !== expected.branch) {
+  if (actual?.projection?.branch !== expected.branch && !cleanBranchOnlyAbort) {
     diagnostics.push(
       diagnostic(
         "CHANGE_INVALID_PLAN",
@@ -691,17 +715,34 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
               },
             };
           }
+          const change = {
+            ...projection.change,
+            provenance: {
+              ...projection.change.provenance,
+              ...(abortRequest.requester === undefined ? {} : { requester: abortRequest.requester }),
+            },
+          } satisfies Change;
+          if (isCleanAbortProjection(projection)) {
+            // A branch-only cleanup leaves no remote Change artifact. Once
+            // absence is freshly proven, a later abort is a safe no-op retry;
+            // it does not invent a lifecycle mutation or a delete target.
+            return {
+              ok: true,
+              plan: {
+                version: CHANGE_TRANSITION_CONTRACT_VERSION,
+                request: { version: CHANGE_TRANSITION_CONTRACT_VERSION, transition: "abort", change },
+                from: "DEFINED",
+                to: "DEFINED",
+                result: change,
+                effects: [],
+              },
+            };
+          }
           try {
             const plan = planChangeTransition({
               version: CHANGE_TRANSITION_CONTRACT_VERSION,
               transition: abortRequest.operation,
-              change: {
-                ...projection.change,
-                provenance: {
-                  ...projection.change.provenance,
-                  ...(abortRequest.requester === undefined ? {} : { requester: abortRequest.requester }),
-                },
-              },
+              change,
               target: {
                 ...(projection.change.projection?.branch === undefined
                   ? {}
@@ -806,7 +847,17 @@ export class TrustedChangeExecutor implements ChangeRemoteExecutor {
 
   private async readAbortInput(request: ChangeRemoteMutationRequest): Promise<AbortReadResult> {
     try {
-      return { ok: true, input: await this.readRawInput(request) };
+      const input = await this.readRawInput(request);
+      // A branch-only recovery has no PR from which to recover issuer
+      // provenance. Bind the trusted issuer only when the reader supplied no
+      // issuer claim; an explicit untrusted claim remains rejectable below.
+      return {
+        ok: true,
+        input:
+          input.provenance?.issuer === undefined
+            ? requestWithProvenance(input, request.requester, INARI_ISSUER_PRINCIPAL)
+            : input,
+      };
     } catch (error: unknown) {
       if (error instanceof ChangeTrustedExecutorError) {
         return {

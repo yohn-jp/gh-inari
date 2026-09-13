@@ -43,7 +43,7 @@ const PRIVATE_KEY_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
   .toString();
 
-type ProviderMode = "abort" | "abort-timeout-after-close" | "branch-success" | "branch-stale";
+type ProviderMode = "abort" | "abort-branch-only" | "abort-timeout-after-close" | "branch-success" | "branch-stale";
 
 interface SessionFixture {
   readonly authority: RuntimeAuthority;
@@ -241,7 +241,7 @@ function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): Provi
       );
     }
     if (path.startsWith("repos/acme/inari/pulls?") && method === "GET") {
-      return jsonResponse(200, [pullRequestEvidence(state)]);
+      return jsonResponse(200, mode === "abort-branch-only" ? [] : [pullRequestEvidence(state)]);
     }
 
     if (path === `repos/acme/inari/pulls/${PULL_REQUEST}` && method === "PATCH") {
@@ -390,6 +390,33 @@ test("replaying the same signed Change request does not duplicate canonical effe
         (call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`)),
     ).length,
     effectCallsAfterFirst,
+  );
+});
+
+test("branch-only Change recovery cleans up the branch and replays without another mutation", async () => {
+  const session = signedSession("change.abort", { version: 1, issue: ISSUE }, [{ kind: "change.abort", issue: ISSUE }]);
+  const provider = providerFixture("abort-branch-only", session.authority);
+  const executor = directExecutor(session, provider);
+
+  const first = await executor.execute(session.envelope);
+  assert.equal(first.status, "succeeded", JSON.stringify(first));
+  assert.equal(first.execution?.evidence?.outcome, "verified");
+  assert.equal(provider.state.branchPresent, false);
+  assert.equal(
+    provider.state.calls.some((call) => call.method === "PATCH" && call.path.endsWith(`/pulls/${PULL_REQUEST}`)),
+    false,
+  );
+
+  const deleteCallsAfterFirst = provider.state.calls.filter(
+    (call) => call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`),
+  ).length;
+  const replay = await executor.execute(session.envelope);
+  assert.equal(replay.status, "succeeded", JSON.stringify(replay));
+  assert.equal(replay.execution?.evidence?.outcome, "returned-existing");
+  assert.equal(
+    provider.state.calls.filter((call) => call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`))
+      .length,
+    deleteCallsAfterFirst,
   );
 });
 

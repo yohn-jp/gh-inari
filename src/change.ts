@@ -523,6 +523,10 @@ export interface ChangeProjectionResult {
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
+/** Explicit recovery shapes that may authorize a governed abort cleanup. */
+export const CHANGE_ABORT_RECOVERY_KINDS = Object.freeze(["branch-only", "closed-pull-request"] as const);
+export type ChangeAbortRecoveryKind = (typeof CHANGE_ABORT_RECOVERY_KINDS)[number];
+
 /** The governed PR body/contract pair checked at merge admission. */
 export interface ChangeMergeAdmissionPullRequest {
   /** A repository-governed canonical PR contract, not a caller-authored schema. */
@@ -2074,6 +2078,54 @@ function projectionStatusDiagnostic(status: ChangeProjectionStatus, diagnostics:
 }
 
 /**
+ * Classify only the bounded recovery projections that may enter abort cleanup.
+ * Branch-only recovery is intentionally stricter than the historical
+ * branch-plus-closed-PR shape: the evidence set must contain exactly one
+ * canonical branch and no pull-request candidates at all.
+ */
+export function classifyChangeAbortRecovery(projection: ChangeProjectionResult): ChangeAbortRecoveryKind | undefined {
+  if (
+    projection.valid ||
+    projection.status !== "partial" ||
+    projection.change?.state !== "RECOVERY_REQUIRED" ||
+    projection.canonicalBranch === undefined
+  ) {
+    return undefined;
+  }
+
+  const canonicalBranches = projection.candidates.branches.filter(
+    (candidate) => candidate.classification === "canonical" && candidate.candidate.name === projection.canonicalBranch,
+  );
+  if (canonicalBranches.length !== 1 || projection.change.projection?.branch !== projection.canonicalBranch) {
+    return undefined;
+  }
+
+  const canonicalPullRequests = projection.candidates.pullRequests.filter(
+    (candidate) =>
+      candidate.classification === "canonical" &&
+      candidate.candidate.head === projection.canonicalBranch &&
+      candidate.candidate.base === projection.canonicalBaseBranch &&
+      candidate.candidate.state === "closed" &&
+      candidate.candidate.merged === false,
+  );
+  if (
+    canonicalPullRequests.length === 1 &&
+    projection.change.projection?.pullRequest === canonicalPullRequests[0]?.candidate.number
+  ) {
+    return "closed-pull-request";
+  }
+
+  if (
+    projection.change.projection?.pullRequest === undefined &&
+    projection.candidates.branches.length === 1 &&
+    projection.candidates.pullRequests.length === 0
+  ) {
+    return "branch-only";
+  }
+  return undefined;
+}
+
+/**
  * Purely project one Change from bounded Issue, branch, and pull-request
  * evidence. Existing Change state is never used as authority, and no GitHub
  * client, persistence, mutation, or candidate heuristic is involved.
@@ -2923,6 +2975,7 @@ function validateTransitionSemantics(
   }
   const sourceBranch = change.projection?.branch;
   const sourcePullRequest = change.projection?.pullRequest;
+  const branchOnlyAbortRecovery = transition === "abort" && change.state === "RECOVERY_REQUIRED";
   if (!sameDefinedValue(sourceBranch, target?.branch)) {
     reportTargetProblem(diagnostics, "$.target.branch", "Target branch does not match the current Change projection.");
   }
@@ -2938,7 +2991,7 @@ function validateTransitionSemantics(
   if (branch === undefined) {
     reportTargetProblem(diagnostics, "$.change.projection.branch", "The transition requires a canonical branch.");
   }
-  if (pullRequest === undefined) {
+  if (pullRequest === undefined && !branchOnlyAbortRecovery) {
     reportTargetProblem(
       diagnostics,
       "$.change.projection.pullRequest",
@@ -2948,7 +3001,10 @@ function validateTransitionSemantics(
   if (diagnostics.length > 0) {
     return { diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
   }
-  return { diagnostics: [], resolved: { branch, pullRequest } };
+  return {
+    diagnostics: [],
+    resolved: { branch, ...(pullRequest === undefined ? {} : { pullRequest }) },
+  };
 }
 
 /** Validate a transport-independent lifecycle request and its transition policy. */
@@ -3114,17 +3170,17 @@ function buildChangeTransitionPlan(request: ChangeTransitionRequest): ChangeTran
       effects.push({ kind: "MARK_PULL_REQUEST_READY", pullRequest: resolved.pullRequest });
     }
   } else if (request.transition === "abort") {
-    if (resolved.pullRequest === undefined) throw new Error("A valid abort request must resolve a pull request.");
     if (request.change.state === "ABORTED") {
       // A historical aborted Change is already fully terminated. In
       // particular, do not issue duplicate close/delete mutations.
     } else if (request.change.state === "RECOVERY_REQUIRED") {
       // Recovery retries only the remaining canonical cleanup effect. The
-      // trusted executor admits this edge only for closed canonical PR
-      // evidence; Core remains the sole effect planner.
+      // trusted executor admits this edge only for explicitly classified
+      // recovery evidence; Core remains the sole effect planner.
       if (resolved.branch === undefined) throw new Error("A recovery retry must resolve a canonical branch.");
       effects.push({ kind: "DELETE_BRANCH", branch: resolved.branch });
     } else {
+      if (resolved.pullRequest === undefined) throw new Error("A valid abort request must resolve a pull request.");
       effects.push(
         { kind: "CLOSE_PULL_REQUEST", pullRequest: resolved.pullRequest },
         { kind: "DELETE_BRANCH", branch: resolved.branch! },

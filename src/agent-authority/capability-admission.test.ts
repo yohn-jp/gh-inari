@@ -410,6 +410,10 @@ test("requires separate ready and abort claims and delegates lifecycle legality 
   const aborted = admission(abortContext, "change.abort", subject("change"), projection(375, "aborted"));
   assert.equal(aborted.canonical.state, "ABORTED");
 
+  const branchOnly = admission(abortContext, "change.abort", subject("change"), projection(375, "branch-only"));
+  assert.equal(branchOnly.canonical.state, "RECOVERY_REQUIRED");
+  assert.equal(branchOnly.canonical.pullRequest, undefined);
+
   const implementContext = await authenticatedContext(
     runtime.authority,
     runtime.key,

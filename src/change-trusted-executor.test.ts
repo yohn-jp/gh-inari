@@ -314,6 +314,53 @@ test("healthy issuance retry returns the existing Change without effects", async
   assert.equal(result.projection.change?.projection?.pullRequest, 2180);
 });
 
+test("branch-only abort recovery deletes only the canonical branch and is idempotent after cleanup", async () => {
+  const reader = new MutableReader(input(evidence([branch])));
+  const issuer = new FakeIssuer(reader);
+  issuer.fail = "DELETE_BRANCH";
+
+  const failed = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(failed.evidence?.outcome, "recovery-required");
+  assert.equal(failed.projection.change?.state, "RECOVERY_REQUIRED");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["DELETE_BRANCH"],
+  );
+
+  issuer.fail = undefined;
+  const recovered = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(recovered.evidence?.outcome, "verified");
+  assert.equal(recovered.projection.status, "absent");
+  assert.equal(recovered.projection.change?.state, "DEFINED");
+  assert.equal(recovered.projection.change?.projection, undefined);
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["DELETE_BRANCH", "DELETE_BRANCH"],
+  );
+
+  const replay = await executor(reader, issuer).execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "abort",
+    issue: identity.rootIssue,
+  });
+  assert.equal(replay.evidence?.outcome, "returned-existing");
+  assert.equal(replay.projection.status, "absent");
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["DELETE_BRANCH", "DELETE_BRANCH"],
+  );
+});
+
 test("branch success and pull-request failure are compensated through a Core recovery plan", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);
@@ -833,6 +880,53 @@ test("MERGED, noncanonical, and ambiguous projections reject before mutation", a
     }),
   );
   assert.deepEqual(driftedIssuer.effects, []);
+});
+
+test("branch-only abort recovery rejects unrelated, ambiguous, and untrusted evidence", async () => {
+  const cases: readonly ChangeProjectionInput[] = [
+    input(evidence([branch, "feat/218-unrelated"])),
+    input({
+      issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+      branches: { status: "available", value: [{ name: "feat/218-arbitrary" }] },
+      pullRequests: { status: "available", value: [] },
+    }),
+    input({
+      issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+      branches: {
+        status: "available",
+        value: [
+          { name: branch, rootIssue: identity.rootIssue },
+          { name: "feat/218-second", rootIssue: identity.rootIssue },
+        ],
+      },
+      pullRequests: { status: "available", value: [] },
+    }),
+    input({
+      issue: { status: "available", value: { number: identity.rootIssue, state: "open" } },
+      branches: { status: "available", value: [{ name: branch }] },
+      pullRequests: {
+        status: "available",
+        value: [{ ...draftPullRequest(), head: "feat/218-unrelated" }],
+      },
+    }),
+    {
+      ...input(evidence([branch])),
+      provenance: { issuer: "github:untrusted" },
+    },
+  ];
+
+  for (const current of cases) {
+    const reader = new MutableReader(current);
+    const issuer = new FakeIssuer(reader);
+    await assert.rejects(
+      executor(reader, issuer).execute({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        operation: "abort",
+        issue: identity.rootIssue,
+      }),
+    );
+    assert.deepEqual(issuer.effects, []);
+  }
 });
 
 test("partial abort cleanup returns RECOVERY_REQUIRED and a later retry applies only branch deletion", async () => {
