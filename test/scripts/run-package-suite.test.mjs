@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { exportsTargetPaths, validateCodexPluginMetadata } from "../../scripts/run-package-suite.mjs";
 import {
   CERTIFICATION_ENTRY_COMMANDS,
   REQUIRED_BIN_NAMES,
+  freshEnvironment,
   validatePreflightOutput,
   validateSkillIndex,
   validateVersionOutput,
@@ -179,4 +181,21 @@ test("complete certification uses the installed Golden Path and provider boundar
   assert.match(smokeScript, /INARI_PACKED_PROVIDER_STATE/u);
   assert.doesNotMatch(smokeScript, /GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE|certification.*blocked/u);
   assert.doesNotMatch(smokeScript, /packed-golden-path-runner/u);
+});
+
+test("packed certification isolates ambient GitHub Actions requester context", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "inari-packed-environment-test-"));
+  try {
+    const environment = freshEnvironment(root, path.join(root, "bin"), [], {
+      ...process.env,
+      GITHUB_ACTIONS: "true",
+      GITHUB_ACTOR: "ambient-host-actor",
+      GITHUB_TRIGGERING_ACTOR: "ambient-triggering-actor",
+    });
+    assert.equal(environment.GITHUB_ACTIONS, undefined);
+    assert.equal(environment.GITHUB_ACTOR, undefined);
+    assert.equal(environment.GITHUB_TRIGGERING_ACTOR, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

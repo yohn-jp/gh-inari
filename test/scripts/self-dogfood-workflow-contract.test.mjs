@@ -20,6 +20,8 @@ test("self-dogfood certification is an explicit, source-addressable privileged o
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$\{GITHUB_SHA\}"/u);
   assert.match(workflow, /pnpm pack --pack-destination/u);
   assert.match(workflow, /pnpm add --ignore-scripts --save-exact/u);
+  assert.match(workflow, /packageMetadata\.bin\.inari/u);
+  assert.doesNotMatch(workflow, /node_modules\/\.bin\/inari/u);
   assert.match(workflow, /--inari "\$DOGFOOD_INSTALLED_EXECUTABLE"/u);
   assert.match(workflow, /scripts\/self-dogfood\.mjs/u);
   assert.match(workflow, /scripts\/self-dogfood-workflow\.mjs/u);

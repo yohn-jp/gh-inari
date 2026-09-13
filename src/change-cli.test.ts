@@ -361,8 +361,10 @@ test("CLI preserves the normalized provider rejection projection in execution ev
 
 test("default Change wiring constructs an Actions-backed executor and normalizes dispatch failure", async () => {
   const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
+  let authenticatedUserReads = 0;
   const adapter = runtimeTrustAdapter({
     async getAuthenticatedUser() {
+      authenticatedUserReads += 1;
       return "octocat";
     },
     async requestActionsApi(path: string, method: "GET" | "POST", fields: Readonly<Record<string, string>> = {}) {
@@ -386,6 +388,7 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
   assert.deepEqual(adapterOptions, [{ cwd: "/workspace/inari" }]);
   assert.equal(calls[0]?.method, "GET");
   assert.equal(calls[1]?.method, "POST");
+  assert.equal(authenticatedUserReads, 1);
   assert.equal(calls[1]?.path, "actions/workflows/inari-change-executor.yml/dispatches");
   const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
   const signedProvenanceRecord = dispatched.signedProvenanceRecord;
@@ -403,6 +406,38 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
     operation: "change.issue",
   });
   assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
+});
+
+test("GitHub Actions Change wiring uses GITHUB_ACTOR without resolving /user", async () => {
+  const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
+  let authenticatedUserReads = 0;
+  const adapter = runtimeTrustAdapter({
+    async getAuthenticatedUser() {
+      authenticatedUserReads += 1;
+      throw new Error("/user must not be read in GitHub Actions");
+    },
+    async requestActionsApi(path: string, method: "GET" | "POST", fields: Readonly<Record<string, string>> = {}) {
+      calls.push({ path, method, fields });
+      if (method === "POST") throw new Error("Bearer secret-token");
+      return { workflow_runs: [] };
+    },
+  });
+  const result = await capture(["change", "issue", "42", "--json"], {
+    repositoryRoot: "/workspace/inari",
+    environment: {
+      ...runtimeSignerEnvironment,
+      GITHUB_ACTIONS: "true",
+      GITHUB_ACTOR: "actions-actor",
+      GITHUB_TRIGGERING_ACTOR: "triggering-actor",
+    },
+    createAdapter: () => adapter,
+  });
+
+  assert.equal(result.exitCode, 3);
+  assert.equal(authenticatedUserReads, 0);
+  const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
+  assert.equal(dispatched.requester, "github:actions-actor");
+  assert.notEqual(dispatched.requester, "github:triggering-actor");
 });
 
 test("fresh change issue fails before dispatch when the Runtime signer is not configured", async () => {

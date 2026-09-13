@@ -28,6 +28,21 @@ function isWithin(parent, candidate) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+export function resolveInstalledPackageExecutablePath(installedPackagePath, packageMetadata) {
+  if (
+    packageMetadata === null ||
+    typeof packageMetadata !== "object" ||
+    Array.isArray(packageMetadata) ||
+    packageMetadata.bin === null ||
+    typeof packageMetadata.bin !== "object" ||
+    Array.isArray(packageMetadata.bin) ||
+    typeof packageMetadata.bin.inari !== "string" ||
+    packageMetadata.bin.inari.length === 0
+  )
+    throw new Error("installed package metadata must declare bin.inari");
+  return path.resolve(installedPackagePath, packageMetadata.bin.inari);
+}
+
 function boundedText(value) {
   return String(value)
     .replace(/[\u0000-\u001f\u007f]/gu, " ")
@@ -113,16 +128,21 @@ export function verifySelfDogfoodRun(input) {
   const sourceRoot = fs.realpathSync(input.sourceRoot);
   const tarballPath = fs.realpathSync(input.tarballPath);
   const installedPackagePath = fs.realpathSync(input.installedPackagePath);
-  const installedExecutablePath = fs.realpathSync(input.installedExecutablePath);
   if (!fs.statSync(tarballPath).isFile() || !fs.statSync(installedPackagePath).isDirectory())
     throw new Error("workflow artifact or installed package path is not usable");
+  const packageMetadata = readJson(path.join(installedPackagePath, "package.json"), "installed package metadata");
+  if (packageMetadata.name !== "gh-inari" || typeof packageMetadata.version !== "string")
+    throw new Error("installed package identity is not gh-inari");
+  const declaredExecutablePath = resolveInstalledPackageExecutablePath(installedPackagePath, packageMetadata);
+  const suppliedExecutablePath = path.resolve(input.installedExecutablePath);
+  if (suppliedExecutablePath !== declaredExecutablePath)
+    throw new Error("installed executable does not exactly match package.json bin.inari");
+  const installedExecutablePath = fs.realpathSync(suppliedExecutablePath);
+  if (!fs.statSync(installedExecutablePath).isFile()) throw new Error("installed bin.inari target is not a file");
   if (isWithin(sourceRoot, installedPackagePath) || isWithin(sourceRoot, installedExecutablePath))
     throw new Error("installed executable must be outside the source checkout");
   if (!isWithin(installedPackagePath, installedExecutablePath))
     throw new Error("installed executable is not resolved from the installed package");
-  const packageMetadata = readJson(path.join(installedPackagePath, "package.json"), "installed package metadata");
-  if (packageMetadata.name !== "gh-inari" || typeof packageMetadata.version !== "string")
-    throw new Error("installed package identity is not gh-inari");
   if (sha256Tarball(tarballPath) !== input.tarballSha256)
     throw new Error("workflow tarball digest does not match the recorded digest");
 

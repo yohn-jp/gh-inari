@@ -72,6 +72,8 @@ const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const TARBALL_SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
 const DIAGNOSTIC_CODE_PATTERN = /^[A-Z][A-Z0-9_.-]{0,127}$/u;
+const STRUCTURED_UNSAFE_TEXT_PATTERN =
+  /(?:-----BEGIN|bearer\s+|(?:access|refresh|installation|github|oauth)?[-_ ]?token\b|private\s*key|password|secret|credential|authorization|cookie|raw\s+(?:github|provider|api)?\s*(?:body|response|payload|exception|error)|(?:github|provider|api)\s+(?:api\s+)?(?:body|response|payload)|(?:^|[\\/])(?:etc|home|mnt|opt|private|root|run|srv|tmp|users|var|workspace)(?:[\\/]|$)|[A-Za-z]:[\\/]|(?:ghp|github_pat|gho|ghs|ghr)_[A-Za-z0-9_]+|https?:\/\/)/iu;
 const REPOSITORY_PART_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/u;
 const BRANCH_PATTERN = /^[^\u0000-\u001F\u007F]{1,512}$/u;
 export const MAX_CERTIFICATION_DIAGNOSTICS = 20;
@@ -79,6 +81,8 @@ export const MAX_CERTIFICATION_OPERATIONS = 32;
 export const MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH = 128;
 export const MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH = 512;
 export const MAX_CERTIFICATION_STRING_LENGTH = 512;
+const MAX_STRUCTURED_DIAGNOSTIC_BYTES = 16_384;
+const MAX_STRUCTURED_DIAGNOSTICS = 32;
 const MAX_PACKAGE_NAME_LENGTH = 214;
 const MAX_PACKAGE_VERSION_LENGTH = 256;
 
@@ -97,6 +101,115 @@ const COMMON_KEYS = new Set([
 ]);
 const PACKED_KEYS = new Set([...COMMON_KEYS, "package"]);
 const DOGFOOD_KEYS = new Set([...COMMON_KEYS, "repository", "rootIssue", "change", "operations", "finalState"]);
+const CERTIFICATION_DIAGNOSTIC_KEYS = new Set(["code", "message", "details", "diagnostics", "evidence"]);
+const STRUCTURED_DETAIL_KEYS = new Set([
+  "operation",
+  "reason",
+  "stage",
+  "stageReason",
+  "trustedCode",
+  "path",
+  "field",
+  "category",
+  "issue",
+  "status",
+  "version",
+  "recovery",
+  "provider",
+  "effectFailure",
+  "diagnostics",
+  "evidence",
+]);
+const STRUCTURED_RECOVERY_KEYS = new Set(["state", "action"]);
+const STRUCTURED_PROVIDER_KEYS = new Set(["category", "resource", "field", "code"]);
+const STRUCTURED_FAILURE_KEYS = new Set(["kind", "code", "message", "reason", "status", "provider"]);
+const STRUCTURED_EFFECT_KEYS = new Set(["kind", "status", "createdCommitSha"]);
+const STRUCTURED_EXECUTION_EVIDENCE_KEYS = new Set([
+  "version",
+  "operation",
+  "outcome",
+  "requester",
+  "issuer",
+  "effects",
+  "compensation",
+  "compensationFailure",
+  "failure",
+]);
+const STRUCTURED_EFFECT_KINDS = new Set([
+  "CREATE_BRANCH",
+  "CREATE_PROVENANCE_COMMIT",
+  "CREATE_PULL_REQUEST",
+  "MARK_PULL_REQUEST_READY",
+  "CLOSE_PULL_REQUEST",
+  "DELETE_BRANCH",
+]);
+const STRUCTURED_EXECUTION_OPERATIONS = new Set(["issue", "ready", "abort"]);
+const STRUCTURED_EXECUTION_OUTCOMES = new Set([
+  "verified",
+  "returned-existing",
+  "compensated",
+  "recovery-required",
+  "failed",
+]);
+const STRUCTURED_FAILURE_REASONS = new Set([
+  "credential",
+  "scope",
+  "transport",
+  "provider-http",
+  "response-validation",
+  "generation-mismatch",
+]);
+const STRUCTURED_PROVIDER_CATEGORIES = new Set([
+  "validation-failed",
+  "authentication-failed",
+  "conflict",
+  "rate-limit",
+]);
+const STRUCTURED_PROVIDER_RESOURCES = new Set([
+  "Branch",
+  "Commit",
+  "Contents",
+  "Issue",
+  "IssueComment",
+  "PullRequest",
+  "PullRequestReview",
+  "Reference",
+  "Ref",
+  "Repository",
+  "User",
+  "Workflow",
+  "WorkflowRun",
+]);
+const STRUCTURED_PROVIDER_FIELDS = new Set([
+  "assignees",
+  "base",
+  "body",
+  "branch",
+  "default_branch",
+  "draft",
+  "field",
+  "head",
+  "labels",
+  "name",
+  "number",
+  "pull_request",
+  "ref",
+  "repository",
+  "sha",
+  "state",
+  "title",
+]);
+const STRUCTURED_PROVIDER_CODES = new Set([
+  "already_exists",
+  "custom",
+  "incorrect",
+  "invalid",
+  "missing",
+  "missing_field",
+  "not_found",
+  "protected",
+  "unprocessable",
+]);
 const CONTRACT_VERSION_KEYS = new Set(CERTIFICATION_CONTRACT_VERSION_KEYS);
 const PACKAGE_KEYS = new Set(["name", "version", "tarballSha256"]);
 const REPOSITORY_KEYS = new Set(["owner", "name"]);
@@ -143,10 +256,16 @@ function validationDiagnostics(errors) {
 }
 
 /** Add a safe, bounded diagnostic to a producer or verifier result. */
-export function appendCertificationDiagnostic(diagnostics, code, message) {
+export function appendCertificationDiagnostic(diagnostics, code, message, structured = undefined) {
   if (!Array.isArray(diagnostics) || diagnostics.length >= MAX_CERTIFICATION_DIAGNOSTICS) return;
   const boundedCode = typeof code === "string" && DIAGNOSTIC_CODE_PATTERN.test(code) ? code : "EVIDENCE_MALFORMED";
-  diagnostics.push({ code: boundedCode, message: boundedDiagnosticMessage(message) });
+  const diagnostic = { code: boundedCode, message: boundedDiagnosticMessage(message) };
+  if (isRecord(structured)) {
+    if (structured.details !== undefined) diagnostic.details = structured.details;
+    if (structured.diagnostics !== undefined) diagnostic.diagnostics = structured.diagnostics;
+    if (structured.evidence !== undefined) diagnostic.evidence = structured.evidence;
+  }
+  diagnostics.push(diagnostic);
 }
 
 export function isCertificationBoundedString(value, maximum = MAX_CERTIFICATION_STRING_LENGTH) {
@@ -193,6 +312,16 @@ export function isCertificationCompletedRecoveryState(value) {
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSafeStructuredText(value, maximum = MAX_STRING_LENGTH) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximum &&
+    !/[\u0000-\u001F\u007F]/u.test(value) &&
+    !STRUCTURED_UNSAFE_TEXT_PATTERN.test(value)
+  );
 }
 
 function rejectUnknownKeys(value, allowed, path, errors) {
@@ -248,7 +377,7 @@ function validateDiagnostics(value, errors) {
       addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
       continue;
     }
-    rejectUnknownKeys(diagnostic, new Set(["code", "message"]), path, errors);
+    rejectUnknownKeys(diagnostic, CERTIFICATION_DIAGNOSTIC_KEYS, path, errors);
     const codeValid = requireString(diagnostic.code, `${path}.code`, errors, {
       pattern: DIAGNOSTIC_CODE_PATTERN,
       maxLength: MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH,
@@ -256,9 +385,286 @@ function validateDiagnostics(value, errors) {
     const messageValid = requireString(diagnostic.message, `${path}.message`, errors, {
       maxLength: MAX_DIAGNOSTIC_MESSAGE_LENGTH,
     });
-    if (codeValid && messageValid) normalized.push({ code: diagnostic.code, message: diagnostic.message });
+    validateStructuredDiagnosticFields(diagnostic, path, errors);
+    if (codeValid && messageValid) {
+      normalized.push({
+        code: diagnostic.code,
+        message: diagnostic.message,
+        ...(diagnostic.details === undefined ? {} : { details: diagnostic.details }),
+        ...(diagnostic.diagnostics === undefined ? {} : { diagnostics: diagnostic.diagnostics }),
+        ...(diagnostic.evidence === undefined ? {} : { evidence: diagnostic.evidence }),
+      });
+    }
   }
   return normalized;
+}
+
+function validateSafeStructuredString(value, path, errors, maximum = MAX_STRING_LENGTH) {
+  if (!isSafeStructuredText(value, maximum)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be bounded and secret-safe`);
+    return false;
+  }
+  return true;
+}
+
+function validateStructuredProvider(value, path, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
+    return false;
+  }
+  rejectUnknownKeys(value, STRUCTURED_PROVIDER_KEYS, path, errors);
+  let valid = STRUCTURED_PROVIDER_CATEGORIES.has(value.category);
+  if (!valid) addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.category: unsupported value`);
+  if (
+    value.category !== undefined &&
+    (!STRUCTURED_PROVIDER_CATEGORIES.has(value.category) ||
+      !validateSafeStructuredString(value.category, `${path}.category`, errors))
+  )
+    valid = false;
+  if (
+    value.resource !== undefined &&
+    (!STRUCTURED_PROVIDER_RESOURCES.has(value.resource) ||
+      !validateSafeStructuredString(value.resource, `${path}.resource`, errors))
+  )
+    valid = false;
+  if (
+    value.field !== undefined &&
+    (!STRUCTURED_PROVIDER_FIELDS.has(value.field) ||
+      !validateSafeStructuredString(value.field, `${path}.field`, errors))
+  )
+    valid = false;
+  if (
+    value.code !== undefined &&
+    (!STRUCTURED_PROVIDER_CODES.has(value.code) || !validateSafeStructuredString(value.code, `${path}.code`, errors))
+  )
+    valid = false;
+  return valid;
+}
+
+function validateStructuredFailure(value, path, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
+    return false;
+  }
+  rejectUnknownKeys(value, STRUCTURED_FAILURE_KEYS, path, errors);
+  let valid = true;
+  valid =
+    STRUCTURED_EFFECT_KINDS.has(value.kind) &&
+    validateSafeStructuredString(value.kind, `${path}.kind`, errors, 64) &&
+    valid;
+  valid =
+    validateSafeStructuredString(value.code, `${path}.code`, errors, MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH) && valid;
+  valid = validateSafeStructuredString(value.message, `${path}.message`, errors, 240) && valid;
+  if (
+    value.reason !== undefined &&
+    (!STRUCTURED_FAILURE_REASONS.has(value.reason) ||
+      !validateSafeStructuredString(value.reason, `${path}.reason`, errors, 64))
+  )
+    valid = false;
+  if (value.status !== undefined) {
+    if (
+      value.reason !== "provider-http" ||
+      !Number.isSafeInteger(value.status) ||
+      value.status < 100 ||
+      value.status > 599
+    ) {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.status: must be an HTTP status for provider-http`);
+      valid = false;
+    }
+  }
+  if (value.provider !== undefined) {
+    if (value.reason !== "provider-http" || !validateStructuredProvider(value.provider, `${path}.provider`, errors))
+      valid = false;
+  }
+  if (value.reason === undefined && (value.status !== undefined || value.provider !== undefined)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: status/provider requires reason`);
+    valid = false;
+  }
+  return valid;
+}
+
+function validateStructuredEffectFailure(value, path, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
+    return false;
+  }
+  const keys = new Set(["reason", "status", "provider"]);
+  rejectUnknownKeys(value, keys, path, errors);
+  let valid = STRUCTURED_FAILURE_REASONS.has(value.reason);
+  if (!valid) addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.reason: unsupported value`);
+  if (value.status !== undefined) {
+    if (
+      value.reason !== "provider-http" ||
+      !Number.isSafeInteger(value.status) ||
+      value.status < 100 ||
+      value.status > 599
+    ) {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.status: must be an HTTP status for provider-http`);
+      valid = false;
+    }
+  }
+  if (value.provider !== undefined) {
+    if (value.reason !== "provider-http" || !validateStructuredProvider(value.provider, `${path}.provider`, errors))
+      valid = false;
+  }
+  return valid;
+}
+
+function validateStructuredEffects(value, path, errors) {
+  if (!Array.isArray(value) || value.length > 8) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must contain at most 8 entries`);
+    return false;
+  }
+  let valid = true;
+  for (let index = 0; index < value.length; index += 1) {
+    const effect = value[index];
+    const effectPath = `${path}[${String(index)}]`;
+    if (!isRecord(effect)) {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${effectPath}: must be an object`);
+      valid = false;
+      continue;
+    }
+    rejectUnknownKeys(effect, STRUCTURED_EFFECT_KEYS, effectPath, errors);
+    if (
+      !STRUCTURED_EFFECT_KINDS.has(effect.kind) ||
+      !validateSafeStructuredString(effect.kind, `${effectPath}.kind`, errors, 64)
+    )
+      valid = false;
+    if (effect.status !== "succeeded" && effect.status !== "failed") {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${effectPath}.status: unsupported value`);
+      valid = false;
+    }
+    if (effect.createdCommitSha !== undefined) {
+      if (
+        (effect.kind !== "CREATE_BRANCH" && effect.kind !== "CREATE_PROVENANCE_COMMIT") ||
+        effect.status !== "succeeded" ||
+        typeof effect.createdCommitSha !== "string" ||
+        !/^[0-9a-f]{40}$/iu.test(effect.createdCommitSha)
+      ) {
+        addValidationError(errors, "EVIDENCE_MALFORMED", `${effectPath}.createdCommitSha: invalid commit SHA`);
+        valid = false;
+      }
+    }
+  }
+  return valid;
+}
+
+function validateStructuredExecutionEvidence(value, path, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
+    return false;
+  }
+  rejectUnknownKeys(value, STRUCTURED_EXECUTION_EVIDENCE_KEYS, path, errors);
+  let valid = value.version === 1;
+  if (!valid) addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.version: must be 1`);
+  valid =
+    STRUCTURED_EXECUTION_OPERATIONS.has(value.operation) &&
+    validateSafeStructuredString(value.operation, `${path}.operation`, errors, 64) &&
+    valid;
+  valid =
+    STRUCTURED_EXECUTION_OUTCOMES.has(value.outcome) &&
+    validateSafeStructuredString(value.outcome, `${path}.outcome`, errors, 64) &&
+    valid;
+  if (value.requester !== undefined)
+    valid = validateSafeStructuredString(value.requester, `${path}.requester`, errors, 160) && valid;
+  if (value.issuer !== undefined)
+    valid = validateSafeStructuredString(value.issuer, `${path}.issuer`, errors, 160) && valid;
+  valid = validateStructuredEffects(value.effects, `${path}.effects`, errors) && valid;
+  if (value.compensation !== undefined && !["not-required", "succeeded", "failed"].includes(value.compensation)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.compensation: unsupported value`);
+    valid = false;
+  }
+  if (value.failure !== undefined) valid = validateStructuredFailure(value.failure, `${path}.failure`, errors) && valid;
+  if (value.compensationFailure !== undefined)
+    valid = validateStructuredFailure(value.compensationFailure, `${path}.compensationFailure`, errors) && valid;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_STRUCTURED_DIAGNOSTIC_BYTES) {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: exceeds the bounded evidence size`);
+      valid = false;
+    }
+  } catch {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be JSON-serializable`);
+    valid = false;
+  }
+  return valid;
+}
+
+function validateStructuredChangeDiagnostics(value, path, errors) {
+  if (!Array.isArray(value) || value.length > MAX_STRUCTURED_DIAGNOSTICS) {
+    addValidationError(
+      errors,
+      "EVIDENCE_MALFORMED",
+      `${path}: must contain at most ${String(MAX_STRUCTURED_DIAGNOSTICS)} entries`,
+    );
+    return false;
+  }
+  let valid = true;
+  for (let index = 0; index < value.length; index += 1) {
+    const diagnostic = value[index];
+    const diagnosticPath = `${path}[${String(index)}]`;
+    if (!isRecord(diagnostic)) {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${diagnosticPath}: must be an object`);
+      valid = false;
+      continue;
+    }
+    rejectUnknownKeys(diagnostic, new Set(["version", "code", "path", "message"]), diagnosticPath, errors);
+    if (diagnostic.version !== 1) {
+      addValidationError(errors, "EVIDENCE_MALFORMED", `${diagnosticPath}.version: must be 1`);
+      valid = false;
+    }
+    valid = validateSafeStructuredString(diagnostic.code, `${diagnosticPath}.code`, errors, 128) && valid;
+    valid = validateSafeStructuredString(diagnostic.path, `${diagnosticPath}.path`, errors, 160) && valid;
+    valid = validateSafeStructuredString(diagnostic.message, `${diagnosticPath}.message`, errors, 240) && valid;
+  }
+  return valid;
+}
+
+function validateStructuredRecovery(value, path, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
+    return false;
+  }
+  rejectUnknownKeys(value, STRUCTURED_RECOVERY_KEYS, path, errors);
+  let valid = validateSafeStructuredString(value.state, `${path}.state`, errors, 64);
+  if (value.action !== null && value.action !== undefined)
+    valid = validateSafeStructuredString(value.action, `${path}.action`, errors, 128) && valid;
+  return valid;
+}
+
+function validateStructuredDetails(value, path, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}: must be an object`);
+    return false;
+  }
+  rejectUnknownKeys(value, STRUCTURED_DETAIL_KEYS, path, errors);
+  let valid = true;
+  for (const key of ["operation", "reason", "stage", "stageReason", "trustedCode", "path", "field", "category"]) {
+    if (value[key] !== undefined) valid = validateSafeStructuredString(value[key], `${path}.${key}`, errors) && valid;
+  }
+  for (const key of ["issue", "status", "version"]) {
+    if (value[key] !== undefined) valid = requirePositiveInteger(value[key], `${path}.${key}`, errors) && valid;
+  }
+  if (value.recovery !== undefined)
+    valid = validateStructuredRecovery(value.recovery, `${path}.recovery`, errors) && valid;
+  if (value.provider !== undefined)
+    valid = validateStructuredProvider(value.provider, `${path}.provider`, errors) && valid;
+  if (value.effectFailure !== undefined)
+    valid = validateStructuredEffectFailure(value.effectFailure, `${path}.effectFailure`, errors) && valid;
+  if (value.diagnostics !== undefined)
+    valid = validateStructuredChangeDiagnostics(value.diagnostics, `${path}.diagnostics`, errors) && valid;
+  if (value.evidence !== undefined)
+    valid = validateStructuredExecutionEvidence(value.evidence, `${path}.evidence`, errors) && valid;
+  return valid;
+}
+
+function validateStructuredDiagnosticFields(value, path, errors) {
+  let valid = true;
+  if (value.details !== undefined) valid = validateStructuredDetails(value.details, `${path}.details`, errors) && valid;
+  if (value.diagnostics !== undefined)
+    valid = validateStructuredChangeDiagnostics(value.diagnostics, `${path}.diagnostics`, errors) && valid;
+  if (value.evidence !== undefined)
+    valid = validateStructuredExecutionEvidence(value.evidence, `${path}.evidence`, errors) && valid;
+  return valid;
 }
 
 function validateContractVersions(value, errors, { expected } = {}) {
@@ -703,7 +1109,13 @@ export function canonicalizeCertificationEvidence(value, options) {
       },
     };
   }
-  common.diagnostics = value.diagnostics.map(({ code, message }) => ({ code, message }));
+  common.diagnostics = value.diagnostics.map(({ code, message, details, diagnostics, evidence }) => ({
+    code,
+    message,
+    ...(details === undefined ? {} : { details }),
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+    ...(evidence === undefined ? {} : { evidence }),
+  }));
   return common;
 }
 
