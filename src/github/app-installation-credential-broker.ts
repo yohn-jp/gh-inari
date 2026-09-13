@@ -12,12 +12,17 @@ import { createSign } from "node:crypto";
 import {
   GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES,
   GitHubChangeEffectAdapter,
+  GitHubChangeEffectFailureError,
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
   type GitHubChangeEffectSuccessEvidence,
   type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
+import {
+  attachChangeEffectFailureClassification,
+  readChangeEffectFailureClassification,
+} from "../change-failure-diagnostics.js";
 import {
   GitHubBranchAdvanceCapabilityImpl,
   type BranchAdvanceCapabilityTransport,
@@ -38,7 +43,7 @@ import {
   type IssuerScopedMutationCapability,
   type TrustedInstallationCredentialBroker,
 } from "./issuer-authority.js";
-import type { ChangeEffect } from "../change.js";
+import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
 
 const DEFAULT_API_URL = "https://api.github.com";
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -86,11 +91,18 @@ export type GitHubAppCredentialFailureStage = (typeof GITHUB_APP_CREDENTIAL_FAIL
 export class GitHubAppCredentialBrokerError extends Error {
   readonly code = "GITHUB_APP_CREDENTIAL_BROKER_FAILED" as const;
   readonly stage: GitHubAppCredentialFailureStage;
+  readonly reason?: ChangeEffectFailureClassification["reason"];
+  readonly status?: number;
 
-  constructor(stage: GitHubAppCredentialFailureStage) {
+  constructor(stage: GitHubAppCredentialFailureStage, classification?: ChangeEffectFailureClassification) {
     super("Trusted GitHub App credential operation failed closed.");
     this.name = "GitHubAppCredentialBrokerError";
     this.stage = stage;
+    if (classification !== undefined) {
+      attachChangeEffectFailureClassification(this, classification);
+      this.reason = classification.reason;
+      this.status = classification.status;
+    }
   }
 }
 
@@ -243,21 +255,31 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
 
   private async requestAt(baseUrl: string, request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
     const bounded = boundedRequestSignal(this.#requestTimeoutMs);
+    let response: Response;
     try {
-      const response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
-        method: request.method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${this.#token}`,
-          "X-GitHub-Api-Version": "2022-11-28",
-          ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        signal: bounded.signal,
-      });
-      return { status: response.status, body: await boundedBody(response) };
-    } catch {
-      throw this.safeFailure(this.#failureStage);
+      try {
+        response = await this.#fetch(request.path === "" ? baseUrl : `${baseUrl}/${request.path}`, {
+          method: request.method,
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${this.#token}`,
+            "X-GitHub-Api-Version": "2022-11-28",
+            ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+          signal: bounded.signal,
+        });
+      } catch {
+        throw this.safeFailure(this.#failureStage, { reason: "transport" });
+      }
+      try {
+        return { status: response.status, body: await boundedBody(response) };
+      } catch (error: unknown) {
+        throw this.safeFailure(
+          this.#failureStage,
+          error instanceof InvalidGitHubAppResponseError ? { reason: "response-validation" } : { reason: "transport" },
+        );
+      }
     } finally {
       bounded.clear();
     }
@@ -300,12 +322,10 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
         },
       },
     });
-    if (
-      response.status !== 200 ||
-      typeof response.body !== "object" ||
-      response.body === null ||
-      Array.isArray(response.body)
-    ) {
+    if (response.status !== 200) {
+      throw new GitHubChangeEffectFailureError({ reason: "provider-http", status: response.status });
+    }
+    if (typeof response.body !== "object" || response.body === null || Array.isArray(response.body)) {
       return "mismatch";
     }
     const body = response.body as Record<string, unknown>;
@@ -324,14 +344,22 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
     return "deleted";
   }
 
-  private safeFailure(stage: GitHubAppCredentialFailureStage): Error {
+  private safeFailure(
+    stage: GitHubAppCredentialFailureStage,
+    classification?: ChangeEffectFailureClassification,
+  ): Error {
     try {
       const error = this.#failure(stage);
-      if (error instanceof Error && !errorText(error).includes(this.#token)) return error;
+      if (error instanceof Error && !errorText(error).includes(this.#token)) {
+        if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
+          return new GitHubAppCredentialBrokerError(stage, classification);
+        }
+        return attachChangeEffectFailureClassification(error, classification);
+      }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError(stage);
+    return new GitHubAppCredentialBrokerError(stage, classification);
   }
 }
 
@@ -419,9 +447,9 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     request: { readonly permissions?: GitHubAppRepositoryReadPermissionSet },
     operation: (capability: GitHubAppRepositoryReadCapability) => Promise<T>,
   ): Promise<T> {
-    if (!isRepositoryReadRequest(request)) throw this.safeFailure("installation-scope");
+    if (!isRepositoryReadRequest(request)) throw this.safeFailure("installation-scope", { reason: "scope" });
     const permissions = request.permissions ?? GITHUB_APP_REPOSITORY_READ_PERMISSIONS;
-    if (!isReadPermissionSet(permissions)) throw this.safeFailure("installation-scope");
+    if (!isReadPermissionSet(permissions)) throw this.safeFailure("installation-scope", { reason: "scope" });
     const credential = await this.issueInstallationToken({
       app: this.#app,
       permissions,
@@ -440,7 +468,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       transport: Object.freeze({
         request: async (readRequest: { readonly hostname: string; readonly method: "GET"; readonly path: string }) => {
           if (!isRepositoryReadPath(readRequest, this.#repository)) {
-            throw this.safeFailure("repository-read");
+            throw this.safeFailure("repository-read", { reason: "scope" });
           }
           const response = await transport.request({
             hostname: readRequest.hostname,
@@ -451,7 +479,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
             isRepositoryRootPath(readRequest.path, this.#repository) &&
             !isAuthoritativeRepositoryRead(response, credential.scope.repository, this.#repository)
           ) {
-            throw this.safeFailure("repository-read");
+            throw this.safeFailure("repository-read", { reason: "scope" });
           }
           return response;
         },
@@ -488,7 +516,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       scope: credential.scope,
       apply: async (effect) => {
         const result = await adapter.execute(effect);
-        if (result.status === "failed") throw this.safeMutationFailure(effect);
+        if (result.status === "failed") throw this.safeMutationFailure(effect, result.failure);
         return result.evidence as GitHubChangeEffectSuccessEvidence;
       },
     };
@@ -508,10 +536,12 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     operation: (capability: import("./git-data-capability.js").GitHubBranchAdvanceCapability) => Promise<T>,
   ): Promise<T> {
     if (!isRecord(request) || !isRecord(request.target) || typeof operation !== "function") {
-      throw this.safeFailure("installation-scope");
+      throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     const targetResult = validateIssuerRepositoryIdentity(request.target);
-    if (!targetResult.valid || targetResult.value === undefined) throw this.safeFailure("installation-scope");
+    if (!targetResult.valid || targetResult.value === undefined) {
+      throw this.safeFailure("installation-scope", { reason: "scope" });
+    }
     const credential = await this.issueInstallationToken({
       app: this.#app,
       target: targetResult.value,
@@ -519,7 +549,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       kind: "git-data",
     });
     const repositoryNodeId = credential.repositoryNodeId ?? this.#repositoryNodeId;
-    if (repositoryNodeId === undefined) throw this.safeFailure("installation-scope");
+    if (repositoryNodeId === undefined) throw this.safeFailure("installation-scope", { reason: "scope" });
     const transport = new GitHubAppApiTransport({
       apiUrl: this.#apiUrl,
       token: credential.token,
@@ -557,7 +587,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         ? isReadPermissionSet(request.permissions)
         : isMutationPermissionSet(request.permissions))
     ) {
-      throw this.safeFailure("installation-scope");
+      throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     const apiUrl = this.#apiUrl;
     let response: Response;
@@ -578,17 +608,19 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         signal: bounded.signal,
       });
     } catch {
-      throw this.safeFailure("installation-token");
+      throw this.safeFailure("installation-token", { reason: "credential" });
     } finally {
       bounded.clear();
     }
-    if (response.status !== 201) throw this.safeFailure("installation-token");
+    if (response.status !== 201) {
+      throw this.safeFailure("installation-token", { reason: "credential" });
+    }
 
     let body: Record<string, unknown>;
     try {
       body = record(await boundedBody(response));
     } catch {
-      throw this.safeFailure("installation-token");
+      throw this.safeFailure("installation-token", { reason: "credential" });
     }
     let token: string;
     let expiresAt: string;
@@ -598,31 +630,33 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       expiresAt = boundedString(body.expires_at, 64);
       permissions = record(body.permissions);
     } catch {
-      throw this.safeFailure("installation-token");
+      throw this.safeFailure("installation-token", { reason: "credential" });
     }
-    if (!isFutureGitHubTimestamp(expiresAt, this.#now())) throw this.safeFailure("installation-scope");
+    if (!isFutureGitHubTimestamp(expiresAt, this.#now())) {
+      throw this.safeFailure("installation-scope", { reason: "scope" });
+    }
     if (
       (body.app_id !== undefined && String(body.app_id) !== this.#app.appId) ||
       (body.installation_id !== undefined && String(body.installation_id) !== this.#installationId)
     ) {
-      throw this.safeFailure("installation-scope");
+      throw this.safeFailure("installation-scope", { reason: "scope" });
     }
 
     const repositories = body.repositories;
     if (!Array.isArray(repositories) || repositories.length !== 1) {
-      throw this.safeFailure("installation-scope");
+      throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     const selected = repositories[0];
     const selectedRepository = selectedRepositoryIdentity(selected, this.#repository);
-    if (selectedRepository === undefined) throw this.safeFailure("installation-scope");
+    if (selectedRepository === undefined) throw this.safeFailure("installation-scope", { reason: "scope" });
     if (
       request.kind !== "read" &&
       (request.target === undefined || !sameRepository(selectedRepository, request.target))
     ) {
-      throw this.safeFailure("installation-scope");
+      throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     const scopeRepository = request.kind === "read" ? selectedRepository : request.target;
-    if (scopeRepository === undefined) throw this.safeFailure("installation-scope");
+    if (scopeRepository === undefined) throw this.safeFailure("installation-scope", { reason: "scope" });
 
     const candidateScope: IssuerInstallationScope = {
       app: request.app,
@@ -642,14 +676,16 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       requiredPermissions: request.permissions,
       now: this.#now(),
     });
-    if (!scopeResult.valid || scopeResult.value === undefined) throw this.safeFailure("installation-scope");
+    if (!scopeResult.valid || scopeResult.value === undefined) {
+      throw this.safeFailure("installation-scope", { reason: "scope" });
+    }
     const selectedNodeId = repositoryNodeIdFrom(selected);
     if (
       selectedNodeId !== undefined &&
       this.#repositoryNodeId !== undefined &&
       selectedNodeId !== this.#repositoryNodeId
     ) {
-      throw this.safeFailure("installation-scope");
+      throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     return {
       token,
@@ -658,7 +694,10 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     };
   }
 
-  private safeFailure(stage: GitHubAppCredentialFailureStage): Error {
+  private safeFailure(
+    stage: GitHubAppCredentialFailureStage,
+    classification?: ChangeEffectFailureClassification,
+  ): Error {
     try {
       const error = this.#failure(stage);
       if (
@@ -666,25 +705,39 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         (this.#privateKeyPem === undefined || !errorText(error).includes(this.#privateKeyPem)) &&
         (this.#installationId === undefined || !errorText(error).includes(this.#installationId))
       ) {
-        return error;
+        if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
+          return new GitHubAppCredentialBrokerError(stage, classification);
+        }
+        return attachChangeEffectFailureClassification(error, classification);
       }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError(stage);
+    return new GitHubAppCredentialBrokerError(stage, classification);
   }
 
-  private safeMutationFailure(effect: ChangeEffect): Error {
+  private safeMutationFailure(effect: ChangeEffect, failure: ChangeIssuanceFailureEvidence): Error {
+    const classification =
+      failure.reason === undefined
+        ? undefined
+        : { reason: failure.reason, ...(failure.status === undefined ? {} : { status: failure.status }) };
     try {
       const error = this.#mutationFailure(effect);
-      if (error instanceof Error && !errorText(error).includes(this.#privateKeyPem)) return error;
+      if (error instanceof Error && !errorText(error).includes(this.#privateKeyPem)) {
+        if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
+          return new GitHubAppCredentialBrokerError("projection-execution", classification);
+        }
+        return attachChangeEffectFailureClassification(error, classification);
+      }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError("projection-execution");
+    return new GitHubAppCredentialBrokerError("projection-execution", classification);
   }
 
   private safeOperationError(error: unknown, token: string, stage: GitHubAppCredentialFailureStage): Error {
+    const classification = readChangeEffectFailureClassification(error);
+    if (classification !== undefined) return this.safeFailure(stage, classification);
     if (error instanceof IssuerAuthorityError) {
       const serialized = errorText(error);
       if (!serialized.includes(token) && !serialized.includes(this.#privateKeyPem)) return error;
@@ -771,7 +824,7 @@ async function boundedBody(response: Response): Promise<unknown> {
       const next = await reader.read();
       if (next.done) break;
       size += next.value.byteLength;
-      if (size > MAX_RESPONSE_BYTES) throw new Error("response too large");
+      if (size > MAX_RESPONSE_BYTES) throw new InvalidGitHubAppResponseError();
       chunks.push(next.value);
     }
   } finally {
@@ -784,12 +837,24 @@ async function boundedBody(response: Response): Promise<unknown> {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new InvalidGitHubAppResponseError();
+  }
   if (text.trim().length === 0) return undefined;
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    throw new Error("response JSON invalid");
+    throw new InvalidGitHubAppResponseError();
+  }
+}
+
+class InvalidGitHubAppResponseError extends Error {
+  constructor() {
+    super("GitHub response validation failed.");
+    this.name = "InvalidGitHubAppResponseError";
   }
 }
 

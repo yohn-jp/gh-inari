@@ -179,6 +179,60 @@ export const CHANGE_EFFECT_KINDS = Object.freeze([
 ] as const);
 export type ChangeEffectKind = (typeof CHANGE_EFFECT_KINDS)[number];
 
+/**
+ * Bounded provider failure reasons retained alongside the stable effect code.
+ * These values describe only the trusted boundary at which failure was
+ * observed; they never contain provider text or credential material.
+ */
+export const CHANGE_EFFECT_FAILURE_REASONS = Object.freeze([
+  "credential",
+  "scope",
+  "transport",
+  "provider-http",
+  "response-validation",
+] as const);
+export type ChangeEffectFailureReason = (typeof CHANGE_EFFECT_FAILURE_REASONS)[number];
+
+export interface ChangeEffectFailureClassification {
+  readonly reason: ChangeEffectFailureReason;
+  /** Provider status is retained only when an HTTP rejection was observed. */
+  readonly status?: number;
+}
+
+export function isChangeEffectFailureReason(value: unknown): value is ChangeEffectFailureReason {
+  return CHANGE_EFFECT_FAILURE_REASONS.includes(value as ChangeEffectFailureReason);
+}
+
+export function normalizeChangeEffectFailureClassification(
+  value: unknown,
+): ChangeEffectFailureClassification | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Change effect failure classification must be an object.");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).some((key) => key !== "reason" && key !== "status")) {
+    throw new TypeError("Change effect failure classification contains an unsupported property.");
+  }
+  if (!isChangeEffectFailureReason(candidate.reason)) {
+    throw new TypeError("Change effect failure reason is unsupported.");
+  }
+  if (
+    candidate.status !== undefined &&
+    (candidate.reason !== "provider-http" ||
+      typeof candidate.status !== "number" ||
+      !Number.isSafeInteger(candidate.status) ||
+      candidate.status < 100 ||
+      candidate.status > 599)
+  ) {
+    throw new TypeError("Change effect failure status is invalid.");
+  }
+  return {
+    reason: candidate.reason,
+    ...(candidate.status === undefined ? {} : { status: candidate.status }),
+  };
+}
+
 /** GitHub currently exposes SHA-1 commit identities for repository refs. */
 export const MAX_CHANGE_COMMIT_SHA_LENGTH = 40 as const;
 
@@ -675,6 +729,9 @@ export interface ChangeIssuanceFailureEvidence {
   readonly effect: ChangeEffect;
   readonly code: string;
   readonly message: string;
+  /** Optional typed classification retained when a trusted boundary can prove it. */
+  readonly reason?: ChangeEffectFailureReason;
+  readonly status?: number;
 }
 
 export const CHANGE_ISSUANCE_COMPENSATION_STATUSES = Object.freeze(["required", "succeeded", "failed"] as const);
@@ -928,7 +985,7 @@ const CHANGE_ISSUANCE_VERIFICATION_KEYS = new Set([
 ]);
 const CHANGE_ISSUANCE_PULL_REQUEST_KEYS = new Set(["required", "number"]);
 const CHANGE_ISSUANCE_ATTEMPT_KEYS = new Set(["effect", "status", "evidence"]);
-const CHANGE_ISSUANCE_FAILURE_KEYS = new Set(["effect", "code", "message"]);
+const CHANGE_ISSUANCE_FAILURE_KEYS = new Set(["effect", "code", "message", "reason", "status"]);
 const CHANGE_ISSUANCE_FAILURE_RECORD_KEYS = new Set(["attemptedEffects", "failure", "projection"]);
 const CHANGE_ISSUANCE_COMPENSATION_PLAN_KEYS = new Set([
   "version",
@@ -4498,10 +4555,38 @@ function validateChangeIssuanceFailureEvidence(
     MAX_CHANGE_DIAGNOSTIC_MESSAGE_LENGTH,
     diagnostics,
   );
+  let classification: ChangeEffectFailureClassification | undefined;
+  if (input.reason !== undefined) {
+    try {
+      classification = normalizeChangeEffectFailureClassification({
+        reason: input.reason,
+        ...(input.status === undefined ? {} : { status: input.status }),
+      });
+    } catch {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_PLAN",
+        `${path}.reason`,
+        "Failure reason or provider status is invalid.",
+      );
+    }
+  } else if (input.status !== undefined) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_INVALID_PLAN",
+      `${path}.status`,
+      "Provider status requires a provider HTTP failure reason.",
+    );
+  }
   if (diagnostics.length > 0 || effectResult.effect === undefined || code === undefined || message === undefined) {
     return undefined;
   }
-  return { effect: effectResult.effect, code, message };
+  return {
+    effect: effectResult.effect,
+    code,
+    message,
+    ...(classification === undefined ? {} : classification),
+  };
 }
 
 function validateChangeProjectionCandidateBranch(

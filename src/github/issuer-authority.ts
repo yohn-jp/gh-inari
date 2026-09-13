@@ -19,7 +19,9 @@ import {
   type ChangeEffect,
   type ChangeEffectKind,
   type ChangeEffectSuccessEvidence,
+  type ChangeEffectFailureClassification,
 } from "../change.js";
+import { readChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
 import { INARI_ISSUER_APP_KIND, INARI_ISSUER_APP_SLUG, INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 
 export {
@@ -1180,8 +1182,13 @@ function capabilityError(message: string): IssuerAuthorityError {
   return error;
 }
 
-function internalBoundaryError(code: IssuerDiagnosticCode, path: string, message: string): IssuerAuthorityError {
-  const error = new IssuerAuthorityError([createDiagnostic(code, path, message)]);
+function internalBoundaryError(
+  code: IssuerDiagnosticCode,
+  path: string,
+  message: string,
+  changeEffectFailure?: ChangeEffectFailureClassification,
+): IssuerAuthorityError {
+  const error = new IssuerAuthorityError([createDiagnostic(code, path, message)], { changeEffectFailure });
   internalBoundaryErrors.add(error);
   return error;
 }
@@ -1251,11 +1258,12 @@ export class InariIssuerAppAuthority {
             ) {
               throw new Error("invalid effect evidence");
             }
-          } catch {
+          } catch (error: unknown) {
             throw internalBoundaryError(
               "ISSUER_MUTATION_FAILED",
               "$.effects",
               "Trusted issuer mutation failed closed.",
+              readChangeEffectFailureClassification(error),
             );
           }
           applied.push({
@@ -1267,6 +1275,15 @@ export class InariIssuerAppAuthority {
       });
     } catch (error: unknown) {
       if (error instanceof IssuerAuthorityError && internalBoundaryErrors.has(error)) throw error;
+      const changeEffectFailure = readChangeEffectFailureClassification(error);
+      if (changeEffectFailure !== undefined) {
+        throw internalBoundaryError(
+          "ISSUER_CREDENTIAL_BOUNDARY",
+          "$.credential",
+          "Trusted credential operation failed closed.",
+          changeEffectFailure,
+        );
+      }
       // Never forward broker errors: provider implementations may accidentally
       // include a token, private key, or authorization header in their error.
       throw new IssuerAuthorityError([
@@ -1297,8 +1314,12 @@ export class IssuerAuthorityError extends Error {
   readonly code: IssuerDiagnosticCode;
   readonly path: string;
   readonly diagnostics: readonly IssuerDiagnostic[];
+  readonly changeEffectFailure?: ChangeEffectFailureClassification;
 
-  constructor(diagnostics: readonly IssuerDiagnostic[]) {
+  constructor(
+    diagnostics: readonly IssuerDiagnostic[],
+    options: { readonly changeEffectFailure?: ChangeEffectFailureClassification } = {},
+  ) {
     const normalized = normalizeDiagnostics(diagnostics);
     const first =
       normalized[0] ?? createDiagnostic("ISSUER_CREDENTIAL_BOUNDARY", "$", "Issuer authority rejected the request.");
@@ -1307,6 +1328,7 @@ export class IssuerAuthorityError extends Error {
     this.code = first.code;
     this.path = first.path;
     this.diagnostics = normalized;
+    if (options.changeEffectFailure !== undefined) this.changeEffectFailure = options.changeEffectFailure;
   }
 }
 

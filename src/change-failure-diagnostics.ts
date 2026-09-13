@@ -4,6 +4,8 @@ import {
   MAX_CHANGE_DIAGNOSTIC_PATH_LENGTH,
   MAX_CHANGE_DIAGNOSTICS,
   createChangeDiagnosticReport,
+  normalizeChangeEffectFailureClassification,
+  type ChangeEffectFailureClassification,
   type ChangeDiagnostic,
 } from "./change.js";
 
@@ -72,5 +74,35 @@ export function isSafeTrustedFailureDiagnostics(value: unknown): value is readon
     return true;
   } catch {
     return false;
+  }
+}
+
+const EFFECT_FAILURE_CLASSIFICATION_KEY = "changeEffectFailureClassification";
+
+/** Attach only the fixed, validated classification to an internal error. */
+export function attachChangeEffectFailureClassification<T extends Error>(
+  error: T,
+  classification: ChangeEffectFailureClassification | undefined,
+): T {
+  if (classification === undefined) return error;
+  const normalized = normalizeChangeEffectFailureClassification(classification);
+  Object.defineProperty(error, EFFECT_FAILURE_CLASSIFICATION_KEY, {
+    configurable: false,
+    enumerable: false,
+    value: normalized,
+    writable: false,
+  });
+  return error;
+}
+
+/** Read an internal classification only after validating its bounded shape. */
+export function readChangeEffectFailureClassification(value: unknown): ChangeEffectFailureClassification | undefined {
+  if (!isRecord(value)) return undefined;
+  try {
+    return normalizeChangeEffectFailureClassification(
+      value[EFFECT_FAILURE_CLASSIFICATION_KEY] ?? value.changeEffectFailure ?? value.classification,
+    );
+  } catch {
+    return undefined;
   }
 }

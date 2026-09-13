@@ -2,8 +2,10 @@ import {
   MAX_CHANGE_BRANCH_LENGTH,
   MAX_CHANGE_COMMIT_SHA_LENGTH,
   MAX_CHANGE_HOST_LENGTH,
+  normalizeChangeEffectFailureClassification,
   validateChangeEffect,
   type ChangeDiagnostic,
+  type ChangeEffectFailureClassification,
   type ChangeEffect,
   type ChangeEffectKind,
   type ChangeEffectSuccessEvidence,
@@ -97,11 +99,15 @@ export const GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES: Readonly<Record<ChangeEffect
 });
 
 /** Stable bounded failure evidence for a single explicit effect. */
-export function changeEffectFailureEvidence(effect: ChangeEffect): ChangeIssuanceFailureEvidence {
+export function changeEffectFailureEvidence(
+  effect: ChangeEffect,
+  classification?: ChangeEffectFailureClassification,
+): ChangeIssuanceFailureEvidence {
   return {
     effect,
     code: GITHUB_CHANGE_EFFECT_FAILURE_CODES[effect.kind],
     message: GITHUB_CHANGE_EFFECT_FAILURE_MESSAGES[effect.kind],
+    ...(classification === undefined ? {} : normalizeChangeEffectFailureClassification(classification)),
   };
 }
 
@@ -151,6 +157,17 @@ export class GitHubChangeEffectConfigurationError extends Error {
   }
 }
 
+/** Fixed, secret-safe classification for a provider-backed effect failure. */
+export class GitHubChangeEffectFailureError extends Error {
+  readonly classification: ChangeEffectFailureClassification;
+
+  constructor(classification: ChangeEffectFailureClassification) {
+    super("The GitHub Change effect failed at a bounded provider boundary.");
+    this.name = "GitHubChangeEffectFailureError";
+    this.classification = normalizeChangeEffectFailureClassification(classification)!;
+  }
+}
+
 /**
  * Thin projection of one explicit Core effect onto GitHub's API resources.
  * It deliberately executes no plan, retry, idempotency, lifecycle, naming, or
@@ -178,11 +195,17 @@ export class GitHubChangeEffectAdapter {
         effect: explicitEffect,
         evidence: await this.executeExplicitEffect(explicitEffect),
       };
-    } catch {
+    } catch (error: unknown) {
+      const classification =
+        error instanceof GitHubChangeEffectFailureError
+          ? error.classification
+          : error instanceof InvalidGitHubResponseError
+            ? { reason: "response-validation" as const }
+            : { reason: "transport" as const };
       return {
         status: "failed",
         effect: explicitEffect,
-        failure: createFailureEvidence(explicitEffect),
+        failure: createFailureEvidence(explicitEffect, classification),
       };
     }
   }
@@ -409,12 +432,17 @@ export class GitHubChangeEffectAdapter {
         method: "GET",
         path: `${this.repositoryPath()}/git/ref/heads/${encodeURIComponent(branch)}`,
       });
-    } catch {
-      throw new InvalidGitHubResponseError();
+    } catch (error: unknown) {
+      if (error instanceof GitHubChangeEffectFailureError) throw error;
+      throw new GitHubChangeEffectFailureError({ reason: "transport" });
     }
-    if (!isRecord(response) || !isHttpStatus(response.status)) throw new InvalidGitHubResponseError();
+    if (!isRecord(response) || !isHttpStatus(response.status)) {
+      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+    }
     if (response.status === 404) return undefined;
-    if (response.status !== 200) throw new InvalidGitHubResponseError();
+    if (response.status !== 200) {
+      throw new GitHubChangeEffectFailureError({ reason: "provider-http", status: response.status });
+    }
     return parseGitReference(response.body, `refs/heads/${branch}`);
   }
 
@@ -424,13 +452,19 @@ export class GitHubChangeEffectAdapter {
   ): Promise<unknown> {
     try {
       const response = await this.transport.request({ ...request, hostname: this.repository.hostname });
-      if (!isRecord(response) || !isHttpStatus(response.status) || response.status !== expectedStatus) {
-        throw new InvalidGitHubResponseError();
+      if (!isRecord(response) || !isHttpStatus(response.status)) {
+        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      }
+      if (response.status !== expectedStatus) {
+        throw new GitHubChangeEffectFailureError({ reason: "provider-http", status: response.status });
       }
       return response.body;
-    } catch (error) {
-      if (error instanceof InvalidGitHubResponseError) throw error;
-      throw new InvalidGitHubResponseError();
+    } catch (error: unknown) {
+      if (error instanceof GitHubChangeEffectFailureError) throw error;
+      if (error instanceof InvalidGitHubResponseError) {
+        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      }
+      throw new GitHubChangeEffectFailureError({ reason: "transport" });
     }
   }
 
@@ -452,8 +486,11 @@ function assertExplicitChangeEffect(input: unknown): ChangeEffect {
   return input as ChangeEffect;
 }
 
-function createFailureEvidence(effect: ChangeEffect): GitHubChangeEffectFailureEvidence {
-  return changeEffectFailureEvidence(effect);
+function createFailureEvidence(
+  effect: ChangeEffect,
+  classification?: ChangeEffectFailureClassification,
+): GitHubChangeEffectFailureEvidence {
+  return changeEffectFailureEvidence(effect, classification);
 }
 
 function parseGitReference(value: unknown, expectedRef: string): string {

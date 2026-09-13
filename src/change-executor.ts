@@ -3,8 +3,10 @@ import {
   CHANGE_IMPLEMENTED_TRANSITIONS,
   CHANGE_TRANSITION_CONTRACT_VERSION,
   MAX_CHANGE_COMMIT_SHA_LENGTH,
+  normalizeChangeEffectFailureClassification,
   validateChangeProjectionResult,
   type ChangeDiagnostic,
+  type ChangeEffectFailureClassification,
   type ChangeEffectKind,
   type ChangeProjectionResult,
 } from "./change.js";
@@ -71,6 +73,8 @@ export interface ChangeRemoteExecutionFailureEvidence {
   readonly kind: ChangeEffectKind;
   readonly code: string;
   readonly message: string;
+  readonly reason?: ChangeEffectFailureClassification["reason"];
+  readonly status?: number;
 }
 
 export interface ChangeRemoteExecutionEvidence {
@@ -345,7 +349,7 @@ export function normalizeChangeRemoteExecutionEvidence(
     }
     const failureValue = candidate.failure as Record<string, unknown>;
     if (
-      Object.keys(failureValue).some((key) => !["kind", "code", "message"].includes(key)) ||
+      Object.keys(failureValue).some((key) => !["kind", "code", "message", "reason", "status"].includes(key)) ||
       !CHANGE_EFFECT_KINDS.includes(failureValue.kind as ChangeEffectKind) ||
       !isSecretSafeBoundedText(failureValue.code, 80) ||
       !isSecretSafeBoundedText(failureValue.message, 240)
@@ -356,10 +360,27 @@ export function normalizeChangeRemoteExecutionEvidence(
         { operation },
       );
     }
+    let classification: ChangeEffectFailureClassification | undefined;
+    try {
+      classification =
+        failureValue.reason === undefined && failureValue.status === undefined
+          ? undefined
+          : normalizeChangeEffectFailureClassification({
+              ...(failureValue.reason === undefined ? {} : { reason: failureValue.reason }),
+              ...(failureValue.status === undefined ? {} : { status: failureValue.status }),
+            });
+    } catch {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "The Change executor returned invalid bounded execution evidence.",
+        { operation },
+      );
+    }
     failure = {
       kind: failureValue.kind as ChangeEffectKind,
       code: failureValue.code,
       message: failureValue.message,
+      ...(classification === undefined ? {} : classification),
     };
   }
   if (

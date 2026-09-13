@@ -3,6 +3,7 @@ import type {
   Change,
   ChangeDiagnostic,
   ChangeEffect,
+  ChangeEffectFailureReason,
   ChangeProjectionInput,
   ChangeProjectionResult,
   ChangeReadyTransitionValidationResult,
@@ -40,6 +41,8 @@ export type ReadyReadResult = ReadyReadSuccess | ReadyReadFailure;
 export interface ReadyEffectFailure {
   readonly code: string;
   readonly message: string;
+  readonly reason?: ChangeEffectFailureReason;
+  readonly status?: number;
 }
 
 export interface ReadyEffectSuccess {
