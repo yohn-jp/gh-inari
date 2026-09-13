@@ -11,6 +11,7 @@ import {
   type ChangeProjectionResult,
 } from "./change.js";
 import { isSecretSafeBoundedText } from "./change-failure-diagnostics.js";
+import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
 
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
@@ -47,6 +48,8 @@ export interface ChangeRemoteMutationRequest extends ChangeRemoteRequestBase {
   readonly operation: ChangeRemoteMutation;
   /** Core-produced PR plan; validated again inside trusted execution. */
   readonly semanticPullRequestPlan?: unknown;
+  /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
+  readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
 }
 
 export interface ChangeRemoteReadRequest extends ChangeRemoteRequestBase {
@@ -202,6 +205,38 @@ function validateRequest(
       throw new ChangeRemoteExecutorError(
         "CHANGE_REMOTE_REQUEST_INVALID",
         "A Semantic PR plan exceeds the bounded request size.",
+        { issue: request.issue },
+      );
+    }
+  }
+  if (request.operation !== "show" && request.signedProvenanceRecord !== undefined) {
+    if (request.operation !== "issue") {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Signed provenance is accepted only for Change issuance.",
+        { issue: request.issue },
+      );
+    }
+    const validation = validateChangeProvenanceRecord(request.signedProvenanceRecord);
+    if (!validation.valid || validation.record === undefined) {
+      throw new ChangeRemoteExecutorError("CHANGE_REMOTE_REQUEST_INVALID", "Signed Change provenance is invalid.", {
+        issue: request.issue,
+      });
+    }
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(validation.record);
+    } catch {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Signed Change provenance must be JSON-serializable.",
+        { issue: request.issue },
+      );
+    }
+    if (serialized === undefined || serialized.length > 16_384) {
+      throw new ChangeRemoteExecutorError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Signed Change provenance exceeds the bounded request size.",
         { issue: request.issue },
       );
     }
@@ -461,6 +496,7 @@ export function changeRemoteMutationRequest(
   issue: number,
   requester?: string,
   semanticPullRequestPlan?: unknown,
+  signedProvenanceRecord?: SignedChangeProvenanceRecord,
 ): ChangeRemoteMutationRequest {
   const request: ChangeRemoteMutationRequest = {
     version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
@@ -468,6 +504,7 @@ export function changeRemoteMutationRequest(
     issue,
     ...(requester === undefined ? {} : { requester }),
     ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
+    ...(signedProvenanceRecord === undefined ? {} : { signedProvenanceRecord }),
   };
   validateRequest(request);
   return request;

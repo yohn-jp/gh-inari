@@ -343,15 +343,11 @@ function boundedSecret(value: unknown, maxLength: number): string {
   return value;
 }
 
-function requiredSignedProvenanceRecord(environment: NodeJS.ProcessEnv): SignedChangeProvenanceRecord {
-  const serialized = boundedSecret(environment.INARI_CHANGE_PROVENANCE_RECORD, 16_384);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(serialized) as unknown;
-  } catch {
+function requiredSignedProvenanceRecord(request: ChangeRemoteMutationRequest): SignedChangeProvenanceRecord {
+  if (request.operation !== "issue" || request.signedProvenanceRecord === undefined) {
     throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
   }
-  const validation = validateChangeProvenanceRecord(parsed);
+  const validation = validateChangeProvenanceRecord(request.signedProvenanceRecord);
   if (!validation.valid || validation.record === undefined) {
     throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
   }
@@ -1458,14 +1454,17 @@ export async function createGitHubActionsChangeExecutor(
     const installationId = requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID", "issuer-configuration");
     let provenance: GitHubChangeProvenanceSignerOptions | undefined;
     if (options.request.operation === "issue") {
-      const runtimeAuthorityId = requiredEnvironment(environment, "INARI_RUNTIME_AUTHORITY_ID", "issuer-configuration");
+      // Parse and validate the caller-produced record before selecting any
+      // repository trust anchor. The signed kid is the sole selector.
+      const signedRecord = requiredSignedProvenanceRecord(options.request);
       const runtimeReader = createRepositoryEvidenceReader(readTransport, repository, target);
-      const loaded = await resolveRuntimeAuthority(runtimeReader, runtimeAuthorityId);
-      // The signed record is produced by a separate, narrowly-scoped Runtime
-      // signing job; this trusted executor never imports or holds the
-      // Runtime private key. It only verifies the record it was handed.
-      const signedRecord = requiredSignedProvenanceRecord(environment);
-      verifyChangeProvenanceRecord(signedRecord, loaded.authority);
+      const loaded = await resolveRuntimeAuthority(runtimeReader, signedRecord.signature.kid);
+      // The Runtime signs before this trusted executor boundary; this process
+      // never imports or holds the Runtime private key.
+      const payload = verifyChangeProvenanceRecord(signedRecord, loaded.authority);
+      if (payload.rootIssue !== options.request.issue || payload.operation !== "change.issue") {
+        throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
+      }
       provenance = {
         runtimeAuthority: loaded.authority,
         signedRecord,
@@ -1549,7 +1548,14 @@ export async function runGitHubActionsChangeExecutor(
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     const requestRecord = requestValue as Record<string, unknown>;
-    const allowedRequestKeys = new Set(["version", "operation", "issue", "requester", "semanticPullRequestPlan"]);
+    const allowedRequestKeys = new Set([
+      "version",
+      "operation",
+      "issue",
+      "requester",
+      "semanticPullRequestPlan",
+      "signedProvenanceRecord",
+    ]);
     if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
@@ -1569,6 +1575,9 @@ export async function runGitHubActionsChangeExecutor(
     if (requestRecord.semanticPullRequestPlan !== undefined && requestRecord.operation !== "issue") {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
+    if (requestRecord.signedProvenanceRecord !== undefined && requestRecord.operation !== "issue") {
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
     const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
     const request =
       requestRecord.operation === "show"
@@ -1578,6 +1587,7 @@ export async function runGitHubActionsChangeExecutor(
             requestRecord.issue,
             requester,
             requestRecord.semanticPullRequestPlan,
+            requestRecord.signedProvenanceRecord as SignedChangeProvenanceRecord | undefined,
           );
     const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
     const result =

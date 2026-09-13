@@ -31,9 +31,11 @@ import {
   type LoadedRuntimeAuthority,
 } from "./runtime-authority-trust.js";
 import {
+  ChangeProvenanceRecordError,
   createChangeProvenanceRecord,
   renderChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
+  type SignedChangeProvenanceRecord,
 } from "../change-provenance-record.js";
 
 export type RuntimeAuthorityPublicKeyInput = Ed25519PublicJwk | KeyObject | RuntimeAuthorityKeyPair;
@@ -116,8 +118,19 @@ export interface RuntimeAuthorityReadinessResult {
 
 export type RuntimeAuthorityReadinessPrivateKey = string | KeyObject | RuntimeAuthorityKeyPair;
 
+/** Runtime-local signer configuration used only before a fresh Change issue. */
+export interface RuntimeChangeProvenanceSignerOptions {
+  /** The exact Runtime Authority ID selected by this initiating Runtime. */
+  readonly authorityId?: string;
+  /** PEM, private KeyObject, or local keypair held by the signer only. */
+  readonly privateKey?: RuntimeAuthorityReadinessPrivateKey;
+  /** Secure local key path, useful for file-backed Runtime configuration. */
+  readonly privateKeyPath?: string;
+  readonly now?: Date;
+}
+
 export interface VerifyRuntimeAuthorityReadinessOptions {
-  /** Value of INARI_RUNTIME_AUTHORITY_ID in the signer deployment. */
+  /** Authority ID selected by the initiating Runtime. */
   readonly authorityId?: string;
   /** PEM, private KeyObject, or generated keypair held by the signer only. */
   readonly privateKey?: RuntimeAuthorityReadinessPrivateKey;
@@ -222,7 +235,10 @@ function readinessCanonical(loaded: LoadedRuntimeAuthority): RuntimeAuthorityRea
   });
 }
 
-function privateKeyFromOptions(options: VerifyRuntimeAuthorityReadinessOptions): KeyObject | undefined {
+function privateKeyFromOptions(options: {
+  readonly privateKey?: RuntimeAuthorityReadinessPrivateKey;
+  readonly privateKeyPath?: string;
+}): KeyObject | undefined {
   if (options.privateKey !== undefined && options.privateKeyPath !== undefined) return undefined;
   if (options.privateKeyPath !== undefined) {
     try {
@@ -470,6 +486,57 @@ export async function verifyRuntimeAuthorityReadiness(
     probe: Object.freeze({ operation: "change.issue", issue: probeIssue, verified: true as const }),
     diagnostics: Object.freeze([]),
   });
+}
+
+/**
+ * Create the caller-owned provenance record for one fresh `change.issue`.
+ *
+ * This is the Runtime-side signing seam: local signer configuration is read
+ * here, canonical protected-ref trust is resolved here, and only the signed
+ * public record is returned to the Change transport boundary.
+ */
+export async function createRuntimeSignedChangeProvenanceRecord(
+  reader: RuntimeAuthoritySourceReader,
+  rootIssue: number,
+  options: RuntimeChangeProvenanceSignerOptions,
+): Promise<SignedChangeProvenanceRecord> {
+  if (!Number.isSafeInteger(rootIssue) || rootIssue < 1) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_INVALID",
+      "Root Issue must be a positive safe integer.",
+    );
+  }
+  if (
+    !isAuthorityId(options.authorityId) ||
+    (options.privateKey === undefined && options.privateKeyPath === undefined)
+  ) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer configuration must provide an authority ID and private key.",
+    );
+  }
+  const runtimeKey = privateKeyFromOptions(options);
+  if (runtimeKey === undefined) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer private key is missing, malformed, or not Ed25519 PKCS#8.",
+    );
+  }
+  const loaded = await resolveRuntimeAuthority(reader, options.authorityId, { now: options.now });
+  const record = createChangeProvenanceRecord({
+    rootIssue,
+    runtimeAuthority: loaded.authority,
+    runtimeKey,
+    now: options.now,
+  });
+  const payload = verifyChangeProvenanceRecord(renderChangeProvenanceRecord(record), loaded.authority);
+  if (payload.rootIssue !== rootIssue || payload.operation !== "change.issue") {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime provenance record is not bound to the requested Change issue.",
+    );
+  }
+  return record;
 }
 
 /**

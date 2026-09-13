@@ -3,10 +3,12 @@ import { test } from "node:test";
 import {
   createRuntimeAuthorityRecord,
   checkRuntimeAuthorityRotationOrder,
+  createRuntimeSignedChangeProvenanceRecord,
   deriveRuntimeAuthorityIdentity,
   projectRuntimeSigningEnvironment,
   verifyRuntimeAuthorityReadiness,
 } from "./runtime-authority-operations.js";
+import { verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { renderRuntimeAuthorityArtifact, type RuntimeAuthoritySourceReader } from "./runtime-authority-trust.js";
 import { generateRuntimeAuthorityKeyPair } from "./runtime-key.js";
 import type { RuntimeAuthority } from "./runtime-authority.js";
@@ -163,6 +165,23 @@ test("readiness enforces Runtime TTL and capability ceilings", async () => {
     capabilities: ["branch.advance"],
   });
   assert.equal(capability.state, "capability-exceeds-ceiling");
+});
+
+test("the Runtime signing seam resolves canonical trust before returning a Change provenance record", async () => {
+  const { pair, authority } = authorityFromPair("runtime-change-signer");
+  const record = await createRuntimeSignedChangeProvenanceRecord(reader([authority]), 522, {
+    authorityId: authority.id,
+    privateKey: pair.privateKey,
+    now: new Date("2026-06-01T00:00:00Z"),
+  });
+
+  assert.deepEqual(verifyChangeProvenanceRecord(record, authority), {
+    version: 1,
+    rootIssue: 522,
+    operation: "change.issue",
+  });
+  assert.equal(record.signature.kid, authority.id);
+  assert.equal(JSON.stringify(record).includes("BEGIN PRIVATE KEY"), false);
 });
 
 test("rotation order requires trusted replacement readiness before activation and migration before revocation", () => {

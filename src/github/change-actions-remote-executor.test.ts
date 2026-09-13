@@ -18,6 +18,9 @@ import {
 } from "./change-actions-remote-executor.js";
 import { GhUnauthenticatedError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
+import { createChangeProvenanceRecord } from "../change-provenance-record.js";
+import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
+import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
 
 const correlation = "123e4567-e89b-42d3-a456-426614174000";
 const repository: RepositoryContext = {
@@ -318,6 +321,34 @@ test("issue, ready, and abort dispatch the same semantic request through the tru
     assert.equal(dispatch.fields["inputs[correlation]"], correlation);
     assert.doesNotMatch(JSON.stringify(dispatch.fields["inputs[request]"]), /workflow|token|privateKey|effect/iu);
   }
+});
+
+test("caller-produced signed provenance crosses the bounded Actions request unchanged", async () => {
+  const key = generateRuntimeAuthorityKeyPair();
+  const authority = assertRuntimeAuthority({
+    version: 1,
+    kind: "runtime-authority",
+    id: "runtime-actions-transport",
+    key: key.publicKeyJwk,
+    status: "active",
+    notBefore: "2026-01-01T00:00:00Z",
+    notAfter: null,
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement"],
+  });
+  const signedRecord = createChangeProvenanceRecord({
+    rootIssue: 42,
+    runtimeAuthority: authority,
+    runtimeKey: key,
+    now: new Date("2026-09-13T00:00:00Z"),
+  });
+  const api = new FakeActionsApi();
+  await executor(api).execute(changeRemoteMutationRequest("issue", 42, "agent:tester", undefined, signedRecord));
+  const dispatch = api.calls.find((call) => call.method === "POST");
+  assert.ok(dispatch);
+  const dispatched = JSON.parse(dispatch.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(dispatched.signedProvenanceRecord, signedRecord);
+  assert.equal((dispatched.signedProvenanceRecord as { signature: { kid: string } }).signature.kid, authority.id);
 });
 
 test("show uses the same remote boundary and does not request requester or issuer credentials", async () => {

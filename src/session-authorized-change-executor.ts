@@ -580,6 +580,9 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       operation === "change.issue" && "semanticPullRequestPlan" in directRequest
         ? directRequest.semanticPullRequestPlan
         : undefined,
+      operation === "change.issue" && "signedProvenanceRecord" in directRequest
+        ? directRequest.signedProvenanceRecord
+        : undefined,
     );
     const executionContext = (() => {
       try {

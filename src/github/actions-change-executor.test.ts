@@ -45,6 +45,9 @@ import {
   type TrustedExecutionContext,
 } from "./issuer-authority.js";
 import { changeRemoteMutationRequest, changeRemoteReadRequest } from "../change-executor.js";
+import { createChangeProvenanceRecord } from "../change-provenance-record.js";
+import { assertRuntimeAuthority, canonicalRuntimeAuthorityJson } from "../agent-authority/runtime-authority.js";
+import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
 
 const repository = { hostname: "github.com", owner: "acme", name: "inari" } as const;
 const target: IssuerRepositoryIdentity = {
@@ -1093,6 +1096,142 @@ function repositoryOnlyFetch(fork: boolean): typeof globalThis.fetch {
       status: 200,
     })) as unknown as typeof globalThis.fetch;
 }
+
+function runtimeAuthorityFixture(
+  id: string,
+  key: ReturnType<typeof generateRuntimeAuthorityKeyPair>,
+  overrides: Record<string, unknown> = {},
+) {
+  return assertRuntimeAuthority({
+    version: 1,
+    kind: "runtime-authority",
+    id,
+    key: key.publicKeyJwk,
+    status: "active",
+    notBefore: "2026-01-01T00:00:00Z",
+    notAfter: null,
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement"],
+    ...overrides,
+  });
+}
+
+function runtimeTrustFetch(authorities: readonly ReturnType<typeof runtimeAuthorityFixture>[], calls: string[]) {
+  const blobs = new Map<string, string>();
+  const entries = authorities.map((authority, index) => {
+    const path = `.github/inari/authorities/${authority.id}.json`;
+    blobs.set(`authority-${index}`, canonicalRuntimeAuthorityJson(authority));
+    return { path, type: "blob", sha: `authority-${index}` } as const;
+  });
+  return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    const method = String(init?.method ?? "GET").toUpperCase();
+    const requestPath = decodeURIComponent(url.pathname.replace(/^\//u, ""));
+    calls.push(`${method} ${requestPath}`);
+    if (requestPath === "repos/acme/inari" && method === "GET") {
+      return new Response(
+        JSON.stringify({ id: 218000001, full_name: "acme/inari", fork: false, default_branch: "main" }),
+        {
+          status: 200,
+        },
+      );
+    }
+    if (requestPath === "repos/acme/inari/git/ref/heads/main" && method === "GET") {
+      return new Response(JSON.stringify({ ref: "refs/heads/main", object: { type: "commit", sha: "policy" } }), {
+        status: 200,
+      });
+    }
+    if (requestPath === "repos/acme/inari/git/trees/policy" && url.search === "?recursive=1" && method === "GET") {
+      return new Response(JSON.stringify({ sha: "tree", truncated: false, tree: entries }), { status: 200 });
+    }
+    if (requestPath.startsWith("repos/acme/inari/git/blobs/") && method === "GET") {
+      const source = blobs.get(requestPath.slice("repos/acme/inari/git/blobs/".length));
+      if (source !== undefined) {
+        return new Response(
+          JSON.stringify({
+            sha: requestPath.slice("repos/acme/inari/git/blobs/".length),
+            encoding: "base64",
+            content: Buffer.from(source, "utf8").toString("base64"),
+          }),
+          { status: 200 },
+        );
+      }
+    }
+    return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
+  }) as typeof globalThis.fetch;
+}
+
+test("Actions selects the verifier exclusively from signed kid and rejects inactive or unknown authorities pre-mutation", async () => {
+  const firstKey = generateRuntimeAuthorityKeyPair();
+  const secondKey = generateRuntimeAuthorityKeyPair();
+  const first = runtimeAuthorityFixture("runtime-a", firstKey);
+  const second = runtimeAuthorityFixture("runtime-b", secondKey);
+  const revokedFirst = { ...first, status: "disabled" as const };
+  const firstRecord = createChangeProvenanceRecord({
+    rootIssue: 218,
+    runtimeAuthority: first,
+    runtimeKey: firstKey,
+    now: new Date("2026-09-13T00:00:00Z"),
+  });
+  const secondRecord = createChangeProvenanceRecord({
+    rootIssue: 218,
+    runtimeAuthority: second,
+    runtimeKey: secondKey,
+    now: new Date("2026-09-13T00:00:00Z"),
+  });
+  const validCalls: string[] = [];
+  const validExecutor = await createGitHubActionsChangeExecutor({
+    cwd: process.cwd(),
+    request: changeRemoteMutationRequest("issue", 218, undefined, undefined, secondRecord),
+    environment: trustedEnvironment({ INARI_RUNTIME_AUTHORITY_ID: first.id }),
+    fetch: runtimeTrustFetch([revokedFirst, second], validCalls),
+  });
+  assert.equal(typeof validExecutor.execute, "function");
+  assert.equal(
+    validCalls.some((call) => !call.startsWith("GET ")),
+    false,
+  );
+
+  const inactiveCases = [
+    {
+      name: "unknown kid",
+      authorities: [first],
+      record: { ...secondRecord, signature: { ...secondRecord.signature, kid: "runtime-unknown" } },
+    },
+    {
+      name: "signature kid mismatch",
+      authorities: [first, second],
+      record: { ...firstRecord, signature: { ...firstRecord.signature, kid: second.id } },
+    },
+    {
+      name: "disabled authority",
+      authorities: [first, { ...second, status: "disabled" }],
+      record: secondRecord,
+    },
+    {
+      name: "expired authority",
+      authorities: [first, { ...second, notAfter: "2026-09-12T23:59:59Z" }],
+      record: secondRecord,
+    },
+  ] as const;
+  for (const testCase of inactiveCases) {
+    const calls: string[] = [];
+    await assert.rejects(
+      createGitHubActionsChangeExecutor({
+        cwd: process.cwd(),
+        request: changeRemoteMutationRequest("issue", 218, undefined, undefined, testCase.record),
+        environment: trustedEnvironment({ INARI_RUNTIME_AUTHORITY_ID: first.id }),
+        fetch: runtimeTrustFetch(testCase.authorities, calls),
+      }),
+      testCase.name,
+    );
+    assert.equal(
+      calls.some((call) => !call.startsWith("GET ")),
+      false,
+      testCase.name,
+    );
+  }
+});
 
 const branchPolicySource = ["version: 1", "sections: []", "branch:", '  pattern: "^feat/[0-9]+-[a-z0-9-]+$"', ""].join(
   "\n",

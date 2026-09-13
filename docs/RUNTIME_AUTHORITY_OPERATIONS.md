@@ -15,9 +15,9 @@ local key generation
   -> canonical public record construction
   -> local materialization for a governed trust-root change
   -> Runtime Authority Governance PR and protected-ref merge
-  -> runtime-signing Environment binding
+  -> per-runtime (authority id, private key) provisioning
   -> canonical protected-ref readiness probe
-  -> signing operation
+  -> initiating Runtime signing and bounded Change request
   -> overlap rotation or governed revocation
 ```
 
@@ -25,13 +25,14 @@ local key generation
 protected main: .github/inari/authorities/*.json (public trust)
                          |
                          v
-runtime-signing Environment: matching private key (secret)
+Runtime A: (authority id A, private key A)
+Runtime B: (authority id B, private key B)
                          |
                          v
-             signed bounded provenance record
+       initiating Runtime signed bounded provenance record
                          |
                          v
-execute / App / Agent / MCP / effect adapter: public verification only
+trusted executor: read signature.kid and resolve matching public record
 ```
 
 The repository's protected default branch is the trust root. A working branch,
@@ -59,6 +60,12 @@ never an App credential, GitHub credential, Session credential, or Agent
 credential. The signer may hold it transiently to produce a signature. The
 executor receives only the signed record and resolves the public key from the
 canonical protected ref.
+
+For fresh Change issuance, the initiating Runtime creates this record with its
+own `(authority id, private key)` pair and includes the resulting
+`signedProvenanceRecord` in the bounded Change request. The executor never
+creates a replacement record or derives an authority ID from deployment
+configuration.
 
 ## CLI surface
 
@@ -130,11 +137,11 @@ branch. The first public key has no authority until its record is merged.
 5. Do not configure the signer secret before the trust-root PR is merged. After
    merge, confirm the record exists on the protected default branch, is active,
    and is within its validity window.
-6. Set the exact authority ID as the repository variable
-   `INARI_RUNTIME_AUTHORITY_ID`, bind the matching private key as a secret on
-   the isolated `runtime-signing` Environment, then run readiness from that
-   deployment. Readiness must be `state: "ready"` before fresh Change issuance
-   or dogfood.
+6. Provision the initiating Runtime with this authority's exact `(authority
+id, private key)` pair and run readiness from that Runtime's secure
+   environment. Readiness must be `state: "ready"` before fresh Change
+   issuance or dogfood. Do not configure the pair as repository-wide Change
+   executor settings.
 
 Possession of the generated key never approves its own registration. A local
 record on a feature branch is a review input, not canonical trust.
@@ -154,24 +161,22 @@ rejects reactivation, permits revocation only as `active -> disabled`, and
 rejects mixing creation and revocation in one trust-root transition. Keep
 creation/overlap and revocation as separate PR phases.
 
-## `runtime-signing` Environment binding (#518)
+## Per-runtime signer provisioning (#518)
 
-Create or use the GitHub Environment named exactly `runtime-signing`, and
-bind these values owned by the Runtime deployment operator:
+Each independently operated Runtime is provisioned with its own pair, owned by
+that Runtime deployment operator. If the readiness command reads environment
+variables, the names below are scoped to that Runtime process or deployment;
+they are not repository-global Change executor configuration:
 
-| Name                                  | Kind                           | Value and ownership                                                                                         |
-| ------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `INARI_RUNTIME_AUTHORITY_ID`          | Repository variable (`vars`)   | Exact canonical authority ID; public metadata, so it is a plain repository variable, readable by every job. |
-| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | Environment secret (`secrets`) | The matching PKCS#8 Ed25519 PEM; Runtime/signer only, scoped to the `runtime-signing` Environment.          |
+| Name                                  | Kind                  | Value and ownership                                                    |
+| ------------------------------------- | --------------------- | ---------------------------------------------------------------------- |
+| `INARI_RUNTIME_AUTHORITY_ID`          | Runtime configuration | Exact canonical authority ID selected by this initiating Runtime.      |
+| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | Runtime secret        | The matching PKCS#8 Ed25519 PEM; held only by this initiating Runtime. |
 
-`INARI_RUNTIME_AUTHORITY_ID` must be a repository variable, not an
-Environment secret: an Environment-scoped secret is only visible to jobs that
-declare that Environment, and both `runtime-sign` and `execute` need the
-authority ID for trust lookup while only `runtime-sign` may declare
-`environment: runtime-signing`. The existing #518 workflow configures
-`INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` only on the `runtime-sign` job; the
-`execute` job, direct App path, MCP path, Agent Session, and effect adapter
-must remain private-key-free.
+The trusted executor receives only the resulting signed provenance record. It
+does not receive either private key or a repository-global authority ID. The
+direct App path, Actions path, MCP path, Agent Session, and effect adapter
+remain private-key-free.
 
 GitHub does not reveal a secret after registration. Therefore, do not use
 “secret exists” as readiness evidence. Run the readiness command inside the
@@ -185,22 +190,23 @@ inari authority readiness --environment \
   --json
 ```
 
-`--environment` reads `INARI_RUNTIME_AUTHORITY_ID` and
-`INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` without printing either value. The
-command resolves the repository's protected default branch, confirms the
-record is active/current, derives the public key from the private key, compares
-the public identity exactly, checks optional TTL/capability intent, and runs a
-bounded `change.issue` sign-and-verify probe. It returns only public identity,
-protected-ref provenance, the probe result, and stable failure diagnostics.
+`--environment` reads the initiating Runtime's
+`INARI_RUNTIME_AUTHORITY_ID` and `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` without
+printing either value. The command resolves the repository's protected
+default branch, confirms the record is active/current, derives the public key
+from the private key, compares the public identity exactly, checks optional
+TTL/capability intent, and runs a bounded `change.issue` sign-and-verify probe.
+It returns only public identity, protected-ref provenance, the probe result,
+and stable failure diagnostics.
 
 ## Readiness and release prerequisites
 
 Fresh `change issue` / self-dogfood / release certification requires all of:
 
 - an active, currently valid Runtime record on the canonical protected ref;
-- a configured `runtime-signing` authority ID;
-- a parseable PKCS#8 Ed25519 private key whose derived public JWK exactly
-  matches that canonical record;
+- the initiating Runtime's configured authority ID;
+- that Runtime's parseable PKCS#8 Ed25519 private key whose derived public JWK
+  exactly matches the canonical record;
 - a TTL and semantic capability ceiling that admit the intended operation; and
 - a successful bounded signer probe.
 
@@ -220,8 +226,9 @@ B = newly generated authority
 1. generate B private key
 2. bootstrap B's public record and register/PR it as a new active record
 3. merge the B trust PR; confirm A+B are both canonical and active
-4. bind the matching B key and ID in runtime-signing
-5. run readiness and observe a bounded successful signing probe for B
+4. provision the matching B key and ID to Runtime B
+5. run readiness from Runtime B and observe a bounded successful signing probe
+   for B
 6. create a separate revoke PR for A and merge it
 7. run readiness again and verify A is inactive under current trust
 8. securely retire A's private-key copies under operator policy
@@ -241,7 +248,7 @@ Before step 4 (activating B) and before step 6 (revoking A), run readiness with
 inari authority readiness --environment --rotation-phase activate \
   --current-authority-id A --probe-issue 522 --json
 
-# before revoking A (step 6), run from the deployment already bound to B
+# before revoking A (step 6), run from Runtime B
 inari authority readiness --environment --rotation-phase revoke \
   --current-authority-id A --probe-issue 522 --json
 ```
@@ -303,7 +310,7 @@ new public identity and a separately governed record.
 
 | Readiness state / code                                           | Meaning                                                            | Recovery                                                                                    |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| `missing-deployment-binding` / `...MISSING_DEPLOYMENT_BINDING`   | ID or private key is absent.                                       | Configure both exact signer bindings; do not put the key in `execute`.                      |
+| `missing-deployment-binding` / `...MISSING_DEPLOYMENT_BINDING`   | The initiating Runtime's ID or private key is absent.              | Configure that Runtime's exact pair; do not put the key in the executor.                    |
 | `unknown-authority` / `...UNKNOWN_AUTHORITY`                     | ID is not on the protected canonical ref.                          | Merge the public trust PR, or correct the deployment ID.                                    |
 | `inactive-authority` / `...INACTIVE_AUTHORITY`                   | Record is disabled or outside its validity window.                 | Use an active approved authority or complete rotation; do not edit the deployment alone.    |
 | `invalid-private-key` / `...PRIVATE_KEY_INVALID`                 | PEM is missing, malformed, too large, or not Ed25519 PKCS#8.       | Restore/generate a valid private key in secure storage.                                     |
@@ -321,9 +328,9 @@ tokens, headers, or raw provider errors.
 
 - Never commit, paste, print, or upload a Runtime private key.
 - Never put the Runtime private key in App/executor, direct-App, MCP, Agent
-  Session, effect-adapter, repository-level, or general-purpose environment
-  configuration. The #518 `runtime-signing` Environment is the isolated signer
-  exception.
+  Session, effect-adapter, repository-level, or general-purpose executor
+  configuration. Keep it only in the initiating Runtime that signs the
+  request.
 - Never let possession of a Runtime private key self-authorize trust
   registration, rotation, review, or merge.
 - Never rotate by merely replacing a local file or GitHub secret. Add and merge
