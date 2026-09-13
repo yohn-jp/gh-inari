@@ -159,10 +159,10 @@ creation/overlap and revocation as separate PR phases.
 Create or use the GitHub Environment named exactly `runtime-signing`, and
 bind these values owned by the Runtime deployment operator:
 
-| Name                                  | Kind                               | Value and ownership                                                                               |
-| -------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `INARI_RUNTIME_AUTHORITY_ID`          | Repository variable (`vars`)       | Exact canonical authority ID; public metadata, so it is a plain repository variable, readable by every job.          |
-| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | Environment secret (`secrets`)     | The matching PKCS#8 Ed25519 PEM; Runtime/signer only, scoped to the `runtime-signing` Environment.                   |
+| Name                                  | Kind                           | Value and ownership                                                                                         |
+| ------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `INARI_RUNTIME_AUTHORITY_ID`          | Repository variable (`vars`)   | Exact canonical authority ID; public metadata, so it is a plain repository variable, readable by every job. |
+| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | Environment secret (`secrets`) | The matching PKCS#8 Ed25519 PEM; Runtime/signer only, scoped to the `runtime-signing` Environment.          |
 
 `INARI_RUNTIME_AUTHORITY_ID` must be a repository variable, not an
 Environment secret: an Environment-scoped secret is only visible to jobs that
