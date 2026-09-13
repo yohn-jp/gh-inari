@@ -138,7 +138,8 @@ jobs:
           result_path="$RUNNER_TEMP/inari-change-result/result.json"
           provenance_path="$RUNNER_TEMP/inari-change-provenance/record.json"
           if [ -s "$provenance_path" ]; then
-            export INARI_CHANGE_PROVENANCE_RECORD="$(cat "$provenance_path")"
+            INARI_CHANGE_PROVENANCE_RECORD="$(cat "$provenance_path")"
+            export INARI_CHANGE_PROVENANCE_RECORD
           fi
           node dist/github/actions-change-executor.js > "$result_path" 2>/dev/null
           execution_status=$?
