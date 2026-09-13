@@ -56,9 +56,7 @@ const SAFE_PROVENANCE_LABEL = /^[\x20-\x7e]+$/u;
 const SENSITIVE_PROVENANCE_LABEL = /(?:private\s*key|secret|token|credential|jwt|installation|begin\s+[-a-z]+\s+key)/iu;
 
 export type ManagedRuntimeSessionErrorCode =
-  | "MANAGED_RUNTIME_INVALID_OPTIONS"
-  | "MANAGED_RUNTIME_INVALID_PROVENANCE"
-  | "MANAGED_RUNTIME_INVALID_CERTIFICATE";
+  "MANAGED_RUNTIME_INVALID_OPTIONS" | "MANAGED_RUNTIME_INVALID_PROVENANCE" | "MANAGED_RUNTIME_INVALID_CERTIFICATE";
 
 export interface ManagedRuntimeSessionDiagnostic {
   readonly code: ManagedRuntimeSessionErrorCode;

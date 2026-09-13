@@ -31,9 +31,7 @@ function authority(runtimeKey: RuntimeAuthorityKeyPair, overrides: Record<string
   });
 }
 
-function beginOptions(
-  overrides: Partial<ManagedRuntimeSessionBeginOptions> = {},
-): ManagedRuntimeSessionBeginOptions {
+function beginOptions(overrides: Partial<ManagedRuntimeSessionBeginOptions> = {}): ManagedRuntimeSessionBeginOptions {
   return {
     repository: REPOSITORY,
     task: { kind: "issue", number: 380 },
@@ -226,7 +224,14 @@ test("the Runtime-facing issuance primitive cannot receive a ManagedSession or i
   const begin = beginManagedRuntimeSession(beginOptions());
 
   const issuanceRequestKeys = Object.keys(begin.issuanceRequest).sort();
-  assert.deepEqual(issuanceRequestKeys, ["capabilities", "repository", "sessionId", "sessionKey", "task", "ttlSeconds"]);
+  assert.deepEqual(issuanceRequestKeys, [
+    "capabilities",
+    "repository",
+    "sessionId",
+    "sessionKey",
+    "task",
+    "ttlSeconds",
+  ]);
   assert.equal("sign" in begin.issuanceRequest, false);
   assert.equal("acceptCertificate" in begin.issuanceRequest, false);
   assert.equal(JSON.stringify(begin.issuanceRequest).includes('"d"'), false);
