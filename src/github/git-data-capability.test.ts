@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  GIT_DATA_CAPABILITY_VERSION,
   GitDataCapabilityError,
   GitHubBranchAdvanceCapabilityImpl,
   type BranchAdvanceCapabilityTransport,
@@ -80,6 +79,7 @@ function capability(transport: BranchAdvanceCapabilityTransport) {
 test("exposes only bounded Git object operations and uses conditional updateRefs", async () => {
   const fake = transportFor();
   const data = capability(fake.transport);
+  assert.equal("updateRefs" in data, false);
   assert.deepEqual(await data.readRef(branch), { name: branch, ref: `refs/heads/${branch}`, sha: head });
   assert.deepEqual(await data.readTree(tree), {
     sha: tree,
@@ -131,7 +131,7 @@ test("rejects unsupported modes, force updates, malformed provider trees, and sc
     GitDataCapabilityError,
   );
   await assert.rejects(
-    data.updateRefs({ branch, beforeOid: head, afterOid: commit, force: true } as never),
+    data.compareAndAdvanceRef({ branch, beforeOid: head, afterOid: commit, force: true } as never),
     GitDataCapabilityError,
   );
   const malformedTransport: BranchAdvanceCapabilityTransport = {

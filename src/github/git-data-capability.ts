@@ -17,9 +17,7 @@ import type { IssuerInstallationScope } from "./issuer-authority.js";
 import { validateBranchName } from "../../branch-naming-authority.mjs";
 import { classifyRepositoryPath } from "../agent-authority/protected-paths.js";
 
-export const GIT_DATA_CAPABILITY_VERSION = 1 as const;
-
-export const GIT_DATA_WRITE_MODES = Object.freeze(["100644", "100755"] as const);
+const GIT_DATA_WRITE_MODES = Object.freeze(["100644", "100755"] as const);
 export type GitDataWriteMode = (typeof GIT_DATA_WRITE_MODES)[number];
 
 export type GitDataObjectType = "blob" | "tree" | "commit";
@@ -178,7 +176,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
       response = await this.#transport.request({
         hostname: this.#repository.hostname,
         method: "GET",
-        path: `${this.repositoryPath()}/git/ref/heads/${encodeURIComponent(branch)}`,
+        path: `${this.#repositoryPath()}/git/ref/heads/${encodeURIComponent(branch)}`,
       });
     } catch {
       throw new GitDataCapabilityError();
@@ -201,7 +199,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     assertRefOrSha(refOrSha);
     const body = await this.#request(
       "GET",
-      `${this.repositoryPath()}/git/trees/${encodeURIComponent(refOrSha)}?recursive=1`,
+      `${this.#repositoryPath()}/git/trees/${encodeURIComponent(refOrSha)}?recursive=1`,
       undefined,
       200,
     );
@@ -214,7 +212,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
 
   async readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }> {
     if (!validSha(sha)) throw new GitDataCapabilityError();
-    const body = await this.#request("GET", `${this.repositoryPath()}/git/commits/${sha}`, undefined, 200);
+    const body = await this.#request("GET", `${this.#repositoryPath()}/git/commits/${sha}`, undefined, 200);
     if (body.sha !== sha || !isRecord(body.tree) || !validSha(body.tree.sha)) throw new GitDataCapabilityError();
     return Object.freeze({ sha, treeSha: body.tree.sha });
   }
@@ -225,7 +223,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     }
     const body = await this.#request(
       "POST",
-      `${this.repositoryPath()}/git/blobs`,
+      `${this.#repositoryPath()}/git/blobs`,
       { content: input.content, encoding: "base64" },
       201,
     );
@@ -252,7 +250,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     });
     const body = await this.#request(
       "POST",
-      `${this.repositoryPath()}/git/trees`,
+      `${this.#repositoryPath()}/git/trees`,
       { base_tree: input.baseTreeSha, tree: entries },
       201,
     );
@@ -276,7 +274,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     }
     const body = await this.#request(
       "POST",
-      `${this.repositoryPath()}/git/commits`,
+      `${this.#repositoryPath()}/git/commits`,
       {
         message: input.message,
         tree: input.treeSha,
@@ -295,7 +293,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     return Object.freeze({ sha: bodyRecordSha(body) });
   }
 
-  async updateRefs(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult> {
+  async compareAndAdvanceRef(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult> {
     if (
       !isRecord(input) ||
       !validBranch(input.branch) ||
@@ -335,10 +333,6 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     return Object.freeze({ status: "updated" });
   }
 
-  async compareAndAdvanceRef(input: GitDataRefUpdateInput): Promise<GitDataRefUpdateResult> {
-    return this.updateRefs(input);
-  }
-
   async #request(
     method: "GET" | "POST",
     path: string,
@@ -360,7 +354,7 @@ export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCap
     return responseRecord(response.body);
   }
 
-  private repositoryPath(): string {
+  #repositoryPath(): string {
     return `repos/${this.#repository.owner}/${this.#repository.name}`;
   }
 }
