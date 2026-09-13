@@ -76,6 +76,10 @@
       "types": "./dist/semantic-issue-observation.d.ts",
       "import": "./dist/semantic-issue-observation.js"
     },
+    "./operational-observation": {
+      "types": "./dist/operational-observation.d.ts",
+      "import": "./dist/operational-observation.js"
+    },
     "./semantic-issue-relations": {
       "types": "./dist/semantic-issue-relations.d.ts",
       "import": "./dist/semantic-issue-relations.js"

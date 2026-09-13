@@ -51,6 +51,7 @@ export type CommandId =
   | "issue.create"
   | "issue.explain"
   | "issue.get"
+  | "issue.observe"
   | "issue.check"
   | "issue.edit"
   | "issue.normalize"
@@ -71,6 +72,7 @@ export type CommandId =
   | "pr.create"
   | "pr.explain"
   | "pr.get"
+  | "pr.observe"
   | "pr.check"
   | "pr.edit"
   | "pr.normalize"
@@ -167,6 +169,7 @@ const ROOT_OPTIONS = ["help", "json"] as const;
 const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
+const OBSERVATION_OPTIONS = ["help", "json", "repository"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
@@ -727,6 +730,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "issue.observe",
+    "issue",
+    "observe",
+    ["issue", "observe"],
+    "Observe normalized provider runtime state for an existing Issue without semantic projection coupling.",
+    OBSERVATION_OPTIONS,
+    "<number>",
+  ),
+  command(
     "issue.check",
     "issue",
     "check",
@@ -897,6 +909,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["pr", "get"],
     "Project an existing PR as canonical semantic JSON.",
     [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.observe",
+    "pr",
+    "observe",
+    ["pr", "observe"],
+    "Observe normalized provider runtime state for an existing pull request without semantic projection coupling.",
+    OBSERVATION_OPTIONS,
     "<number>",
   ),
   command(

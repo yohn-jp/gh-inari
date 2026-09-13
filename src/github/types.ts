@@ -148,3 +148,151 @@ export interface GitHubPullRequest {
   readonly milestone?: GitHubMilestone;
   readonly requestedReviewers?: GitHubReviewRequests;
 }
+
+/** Provider-normalized pagination evidence used by Operational Observation. */
+export interface GitHubOperationalPagination {
+  readonly perPage: number;
+  readonly pages: number;
+  readonly returned: number;
+  readonly truncated: boolean;
+  readonly nextPage?: number;
+}
+
+/** Provider-normalized, secret-safe diagnostic for one optional read. */
+export interface GitHubOperationalDiagnostic {
+  readonly code: string;
+  readonly path: string;
+  readonly message: string;
+}
+
+/** A bounded collection read. Unavailable collections retain their evidence. */
+export interface GitHubOperationalCollection<T> {
+  readonly status: "available" | "unavailable";
+  readonly items: readonly T[];
+  readonly pagination: GitHubOperationalPagination;
+  readonly diagnostics: readonly GitHubOperationalDiagnostic[];
+}
+
+/** Minimal provider identity normalized from a GitHub actor object. */
+export interface GitHubOperationalActor {
+  readonly login?: string;
+  readonly id?: number;
+  readonly name?: string;
+  readonly url?: string;
+}
+
+export interface GitHubOperationalComment {
+  readonly id: number;
+  readonly body: string | null;
+  readonly author: GitHubOperationalActor | null;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly url?: string;
+  readonly path?: string;
+  readonly line?: number | null;
+  readonly side?: string | null;
+  readonly inReplyTo?: number;
+}
+
+export interface GitHubOperationalReview {
+  readonly id: number;
+  readonly body: string | null;
+  readonly author: GitHubOperationalActor | null;
+  readonly state: string;
+  readonly submittedAt?: string;
+  readonly commitId?: string;
+  readonly url?: string;
+}
+
+export interface GitHubOperationalCheck {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: "check-run" | "status";
+  readonly status: string;
+  readonly conclusion?: string | null;
+  readonly description?: string | null;
+  readonly url?: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+}
+
+export interface GitHubOperationalChangedFile {
+  readonly filename: string;
+  readonly status?: string;
+  readonly additions?: number;
+  readonly deletions?: number;
+  readonly changes?: number;
+  readonly sha?: string;
+  readonly blobUrl?: string;
+  readonly rawUrl?: string;
+  readonly contentsUrl?: string;
+}
+
+export interface GitHubOperationalReviewRequests {
+  readonly users: readonly GitHubOperationalActor[];
+  readonly teams: readonly string[];
+}
+
+export interface GitHubOperationalRepository {
+  readonly host: string;
+  readonly nameWithOwner: string;
+  readonly repositoryId?: string;
+}
+
+export interface GitHubOperationalProvenance {
+  readonly provider: "github";
+  readonly endpoints: readonly string[];
+}
+
+/** Normalized provider evidence for one Issue; no Canon/template semantics. */
+export interface GitHubOperationalIssueEvidence {
+  readonly repository: GitHubOperationalRepository;
+  readonly number: number;
+  readonly title: string;
+  readonly body: string | null;
+  readonly state: "open" | "closed" | "unknown";
+  readonly stateReason?: string | null;
+  readonly author: GitHubOperationalActor | null;
+  readonly labels: readonly string[];
+  readonly assignees: readonly GitHubOperationalActor[];
+  readonly milestone?: GitHubMilestone;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly closedAt?: string;
+  readonly url: string;
+  readonly comments: GitHubOperationalCollection<GitHubOperationalComment>;
+  readonly provenance: GitHubOperationalProvenance;
+}
+
+/** Normalized provider evidence for one PR; no Canon/template semantics. */
+export interface GitHubOperationalPullRequestEvidence {
+  readonly repository: GitHubOperationalRepository;
+  readonly number: number;
+  readonly title: string;
+  readonly body: string | null;
+  readonly state: "open" | "closed" | "unknown";
+  readonly author: GitHubOperationalActor | null;
+  readonly head: { readonly ref?: string; readonly sha?: string };
+  readonly base: { readonly ref?: string; readonly sha?: string };
+  readonly draft?: boolean;
+  readonly mergeable?: boolean | null;
+  readonly mergeState?: string | null;
+  readonly reviewDecision?: string | null;
+  readonly merged?: boolean | null;
+  readonly mergeCommitSha?: string | null;
+  readonly labels: readonly string[];
+  readonly assignees: readonly GitHubOperationalActor[];
+  readonly requestedReviewers?: GitHubOperationalReviewRequests;
+  readonly milestone?: GitHubMilestone;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly closedAt?: string;
+  readonly mergedAt?: string;
+  readonly url: string;
+  readonly checks: GitHubOperationalCollection<GitHubOperationalCheck>;
+  readonly reviews: GitHubOperationalCollection<GitHubOperationalReview>;
+  readonly comments: GitHubOperationalCollection<GitHubOperationalComment>;
+  readonly inlineReviewComments: GitHubOperationalCollection<GitHubOperationalComment>;
+  readonly changedFiles: GitHubOperationalCollection<GitHubOperationalChangedFile>;
+  readonly provenance: GitHubOperationalProvenance;
+}

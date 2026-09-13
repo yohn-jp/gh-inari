@@ -171,6 +171,8 @@ inari issue explain <number> --template <template> --json
 inari pr explain <number> --template <template> --json
 inari issue get <number> [--template <template>] --json
 inari pr get <number> [--template <template>] --json
+inari issue observe <number> --json
+inari pr observe <number> --json
 inari issue check <number> [--template <template>]
 inari pr check <number> [--template <template>]
 inari issue edit <number> [--from patch.json] [--field name=value] [--title title] [--dry-run]
@@ -227,6 +229,20 @@ closed with a diagnostic instead of guessing another template. Artifacts
 without a marker fall back to evaluating all supported candidates
 deterministically; multiple structural matches fail closed. Native template
 boilerplate and raw Markdown are intentionally absent from successful output.
+
+`issue observe` and `pr observe` are the read-only Operational Observation
+surface. They return the versioned (`version: 1`) normalized GitHub runtime
+state, including Issue/PR body and metadata; PR observations also include
+head/base identity, merge and review state, bounded checks, reviews, comments,
+inline review comments, and deterministic changed-file metadata. Each
+collection reports availability and pagination/truncation explicitly. The
+optional `semantic` overlay reports `valid`, `invalid`, or `unavailable`, but
+never promotes observed body text into semantic fields. Thus a wrong,
+legacy, ambiguous, or invalid template remains observable while `get`,
+materialization, and Change lifecycle authority remain fail-closed and
+unchanged. MCP tools `inari_issue_observe` and `inari_pr_observe` project this
+same Core observation model; observation is read-only and is not a GitHub API
+pass-through.
 
 Existing artifact remediation uses one semantic pipeline for both Issues and
 pull requests. `check` is read-only and classifies an artifact as

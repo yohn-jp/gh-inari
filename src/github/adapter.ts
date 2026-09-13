@@ -33,6 +33,17 @@ import {
 import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
+  type GitHubOperationalActor,
+  type GitHubOperationalChangedFile,
+  type GitHubOperationalCheck,
+  type GitHubOperationalCollection,
+  type GitHubOperationalComment,
+  type GitHubOperationalIssueEvidence,
+  type GitHubOperationalPagination,
+  type GitHubOperationalProvenance,
+  type GitHubOperationalPullRequestEvidence,
+  type GitHubOperationalRepository,
+  type GitHubOperationalReview,
   type GitHubBranch,
   type GitHubMilestone,
   type GitHubPullRequest,
@@ -49,6 +60,9 @@ import {
 const DEFAULT_HOSTNAME = "github.com";
 const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
 const MAX_PULL_REQUEST_LIST_ITEMS = 100;
+const OPERATIONAL_PAGE_SIZE = 100;
+const OPERATIONAL_MAX_PAGES = 10;
+const OPERATIONAL_MAX_ITEMS = OPERATIONAL_PAGE_SIZE * OPERATIONAL_MAX_PAGES;
 const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
 
 /** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
@@ -72,7 +86,11 @@ const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.fre
   "actions.request": "mutation",
   "actions.artifact.download": "read",
   "issue.read": "read",
+  "issue.observe": "read",
   "pull_request.read": "read",
+  "pull_request.observe": "read",
+  "pull_request.review_decision": "read",
+  "operational.collection.read": "read",
   "issue.create": "mutation",
   "issue.update": "mutation",
   "issue.relation.read": "read",
@@ -151,6 +169,8 @@ export interface GitHubAdapterOptions {
 export interface GitHubApiResponse {
   readonly status: number;
   readonly body: unknown;
+  /** Lower-cased response headers retained only for bounded pagination. */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /** Bounded values accepted by the repository API seam for JSON request fields. */
@@ -422,6 +442,320 @@ export class GitHubAdapter {
 
   async readPullRequest(pullRequestNumber: number): Promise<GitHubPullRequest> {
     return this.getPullRequest(pullRequestNumber);
+  }
+
+  /**
+   * Read and normalize the fixed Issue Operational Observation surface.
+   * Semantic template parsing is intentionally not part of this adapter.
+   */
+  async observeIssue(issueNumber: number): Promise<GitHubOperationalIssueEvidence> {
+    assertIssueNumber(issueNumber, "issue_number");
+    const context = await this.resolveRepositoryContext();
+    const baseEndpoint = `issues/${issueNumber}`;
+    const result = await this.runApi(
+      this.apiArguments(context, `repos/${context.nameWithOwner}/${baseEndpoint}`, "GET"),
+      "issue.observe",
+    );
+    const base = parseOperationalIssue(result, context, "issue.observe");
+    const commentsEndpoint = `issues/${issueNumber}/comments`;
+    const comments = await this.readOperationalCollection(
+      commentsEndpoint,
+      "issue.comments",
+      (body) => arrayResponse(body, "comments"),
+      (entry, path) => parseOperationalComment(entry, path, "conversation"),
+    );
+    return {
+      ...base,
+      comments,
+      provenance: operationalProvenance([baseEndpoint, commentsEndpoint]),
+    };
+  }
+
+  /** Compatibility spelling for callers that describe this as a read. */
+  async readOperationalIssue(issueNumber: number): Promise<GitHubOperationalIssueEvidence> {
+    return this.observeIssue(issueNumber);
+  }
+
+  /**
+   * Read and normalize the fixed PR Operational Observation surface. Every
+   * expensive collection is bounded and reports its own availability and
+   * continuation state.
+   */
+  async observePullRequest(pullRequestNumber: number): Promise<GitHubOperationalPullRequestEvidence> {
+    assertIssueNumber(pullRequestNumber, "pull_request_number");
+    const context = await this.resolveRepositoryContext();
+    const baseEndpoint = `pulls/${pullRequestNumber}`;
+    const result = await this.runApi(
+      this.apiArguments(context, `repos/${context.nameWithOwner}/${baseEndpoint}`, "GET"),
+      "pull_request.observe",
+    );
+    const base = parseOperationalPullRequest(result, context, "pull_request.observe");
+    const commentsEndpoint = `issues/${pullRequestNumber}/comments`;
+    const inlineCommentsEndpoint = `pulls/${pullRequestNumber}/comments`;
+    const reviewsEndpoint = `pulls/${pullRequestNumber}/reviews`;
+    const filesEndpoint = `pulls/${pullRequestNumber}/files`;
+    const comments = await this.readOperationalCollection(
+      commentsEndpoint,
+      "pull_request.comments",
+      (body) => arrayResponse(body, "comments"),
+      (entry, path) => parseOperationalComment(entry, path, "conversation"),
+    );
+    const inlineReviewComments = await this.readOperationalCollection(
+      inlineCommentsEndpoint,
+      "pull_request.inline_comments",
+      (body) => arrayResponse(body, "inline comments"),
+      (entry, path) => parseOperationalComment(entry, path, "inline"),
+    );
+    const reviews = await this.readOperationalCollection(
+      reviewsEndpoint,
+      "pull_request.reviews",
+      (body) => arrayResponse(body, "reviews"),
+      (entry, path) => parseOperationalReview(entry, path),
+    );
+    const changedFiles = await this.readOperationalCollection(
+      filesEndpoint,
+      "pull_request.files",
+      (body) => arrayResponse(body, "changed files"),
+      (entry, path) => parseOperationalChangedFile(entry, path),
+    );
+    const deterministicChangedFiles: GitHubOperationalCollection<GitHubOperationalChangedFile> = {
+      ...changedFiles,
+      items: [...changedFiles.items].sort(compareOperationalChangedFiles),
+    };
+    const checks =
+      base.head.sha === undefined
+        ? unavailableOperationalCollection<GitHubOperationalCheck>(
+            "pull_request.checks",
+            "PR head SHA was not supplied by GitHub.",
+          )
+        : await this.readOperationalChecks(base.head.sha);
+    const reviewDecisionResult =
+      base.reviewDecision === undefined
+        ? await this.readOperationalReviewDecision(context, pullRequestNumber)
+        : { value: undefined, attempted: false };
+    const checksEndpoints =
+      base.head.sha === undefined ? [] : [`commits/${base.head.sha}/check-runs`, `commits/${base.head.sha}/status`];
+    return {
+      ...base,
+      ...(base.reviewDecision === undefined && reviewDecisionResult.value !== undefined
+        ? { reviewDecision: reviewDecisionResult.value }
+        : {}),
+      checks,
+      reviews,
+      comments,
+      inlineReviewComments,
+      changedFiles: deterministicChangedFiles,
+      provenance: operationalProvenance([
+        baseEndpoint,
+        commentsEndpoint,
+        inlineCommentsEndpoint,
+        reviewsEndpoint,
+        filesEndpoint,
+        ...checksEndpoints,
+        ...(reviewDecisionResult.attempted ? ["graphql:pullRequest.reviewDecision"] : []),
+      ]),
+    };
+  }
+
+  /** Compatibility spelling for callers that describe this as a read. */
+  async readOperationalPullRequest(pullRequestNumber: number): Promise<GitHubOperationalPullRequestEvidence> {
+    return this.observePullRequest(pullRequestNumber);
+  }
+
+  private async readOperationalChecks(headSha: string): Promise<GitHubOperationalCollection<GitHubOperationalCheck>> {
+    const runs = await this.readOperationalCollection(
+      `commits/${encodeURIComponent(headSha)}/check-runs`,
+      "pull_request.check_runs",
+      (body) => {
+        if (!isRecord(body))
+          throw new GitHubApiResponseError("pull_request.check_runs", "GitHub returned invalid check-run data.");
+        return arrayResponse(body.check_runs, "check runs");
+      },
+      (entry, path) => parseOperationalCheck(entry, path, "check-run"),
+    );
+    const statuses = await this.readOperationalCollection(
+      `commits/${encodeURIComponent(headSha)}/status`,
+      "pull_request.statuses",
+      (body) => {
+        if (!isRecord(body))
+          throw new GitHubApiResponseError("pull_request.statuses", "GitHub returned invalid commit status data.");
+        return arrayResponse(body.statuses, "statuses");
+      },
+      (entry, path) => parseOperationalCheck(entry, path, "status"),
+    );
+    const items = [...runs.items, ...statuses.items].sort(compareOperationalChecks);
+    const checks: GitHubOperationalCollection<GitHubOperationalCheck> = {
+      status: runs.status === "available" && statuses.status === "available" ? "available" : "unavailable",
+      items,
+      pagination: combineOperationalPagination(runs.pagination, statuses.pagination, items.length),
+      diagnostics: [...runs.diagnostics, ...statuses.diagnostics].slice(0, 100),
+    };
+    return checks;
+  }
+
+  /** Read GitHub's aggregate review decision through one fixed GraphQL query. */
+  private async readOperationalReviewDecision(
+    context: RepositoryContext,
+    pullRequestNumber: number,
+  ): Promise<{ readonly value?: string; readonly attempted: boolean }> {
+    const query =
+      "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}";
+    let result: GhCommandResult;
+    try {
+      result = await this.runCommand(
+        [
+          "api",
+          "graphql",
+          "--hostname",
+          context.hostname,
+          "-f",
+          `query=${query}`,
+          "-f",
+          `owner=${context.owner}`,
+          "-f",
+          `name=${context.name}`,
+          "-F",
+          `number=${pullRequestNumber}`,
+        ],
+        "pull_request.review_decision",
+      );
+    } catch {
+      return { attempted: true };
+    }
+    if (result.exitCode !== 0) return { attempted: true };
+    try {
+      const payload = parseJson(result.stdout, "pull_request.review_decision");
+      if (!isRecord(payload) || !isRecord(payload.data) || !isRecord(payload.data.repository))
+        return { attempted: true };
+      const pullRequest = payload.data.repository.pullRequest;
+      if (!isRecord(pullRequest)) return { attempted: true };
+      const value = pullRequest.reviewDecision;
+      return {
+        attempted: true,
+        ...(value === null || value === undefined
+          ? {}
+          : { value: providerText(value, "reviewDecision", "pull_request.review_decision", 64) }),
+      };
+    } catch {
+      return { attempted: true };
+    }
+  }
+
+  private async readOperationalCollection<T>(
+    endpoint: string,
+    operation: string,
+    pageBody: (body: unknown) => readonly unknown[],
+    parseItem: (value: unknown, path: string) => T,
+  ): Promise<GitHubOperationalCollection<T>> {
+    const items: T[] = [];
+    let nextPage: number | undefined = 1;
+    let pages = 0;
+    while (nextPage !== undefined && pages < OPERATIONAL_MAX_PAGES) {
+      const requestedPage: number = nextPage;
+      const pageEndpoint = `${endpoint}${endpoint.includes("?") ? "&" : "?"}per_page=${OPERATIONAL_PAGE_SIZE}&page=${requestedPage}`;
+      let response: GitHubApiResponse;
+      try {
+        response = await this.requestRepositoryApi(pageEndpoint, "GET");
+      } catch {
+        return operationalCollectionFailure(operation, items, pages, requestedPage, `${operation} read failed.`);
+      }
+      if (response.status === 404) {
+        return operationalCollectionUnavailable(
+          operation,
+          items,
+          pages,
+          `${operation} endpoint was not available from GitHub.`,
+        );
+      }
+      if (response.status < 200 || response.status >= 300) {
+        return operationalCollectionFailure(
+          operation,
+          items,
+          pages,
+          requestedPage,
+          `${operation} returned an unavailable response.`,
+        );
+      }
+      let entries: readonly unknown[];
+      try {
+        entries = pageBody(response.body);
+      } catch {
+        return operationalCollectionFailure(
+          operation,
+          items,
+          pages,
+          requestedPage,
+          `${operation} returned malformed collection data.`,
+        );
+      }
+      if (entries.length > OPERATIONAL_PAGE_SIZE || items.length + entries.length > OPERATIONAL_MAX_ITEMS) {
+        return operationalCollectionFailure(
+          operation,
+          items,
+          pages,
+          requestedPage,
+          `${operation} exceeded the bounded collection limit.`,
+        );
+      }
+      const itemOffset = items.length;
+      try {
+        entries.forEach((entry, index) => items.push(parseItem(entry, `${operation}.items[${itemOffset + index}]`)));
+      } catch {
+        return operationalCollectionFailure(
+          operation,
+          items,
+          pages,
+          requestedPage,
+          `${operation} contained malformed provider evidence.`,
+        );
+      }
+      pages += 1;
+      const linkedNext = nextPageFromLink(response.headers?.link);
+      if (linkedNext !== undefined && linkedNext <= requestedPage) {
+        return operationalCollectionFailure(
+          operation,
+          items,
+          pages,
+          linkedNext,
+          `${operation} returned a non-advancing pagination link.`,
+        );
+      }
+      if (linkedNext !== undefined) nextPage = linkedNext;
+      else if (entries.length === OPERATIONAL_PAGE_SIZE) nextPage = requestedPage + 1;
+      else nextPage = undefined;
+      if (nextPage !== undefined && pages >= OPERATIONAL_MAX_PAGES) {
+        return {
+          status: "available",
+          items,
+          pagination: {
+            perPage: OPERATIONAL_PAGE_SIZE,
+            pages,
+            returned: items.length,
+            truncated: true,
+            nextPage,
+          },
+          diagnostics: [
+            {
+              code: "OPERATIONAL_COLLECTION_TRUNCATED",
+              path: operation,
+              message: `${operation} reached the bounded page limit; request nextPage explicitly to continue.`,
+            },
+          ],
+        };
+      }
+    }
+    return {
+      status: "available",
+      items,
+      pagination: {
+        perPage: OPERATIONAL_PAGE_SIZE,
+        pages,
+        returned: items.length,
+        truncated: nextPage !== undefined,
+        ...(nextPage === undefined ? {} : { nextPage }),
+      },
+      diagnostics: [],
+    };
   }
 
   /**
@@ -1015,7 +1349,22 @@ function parseIncludedApiResponse(value: string, operation: string): GitHubApiRe
   if (separator >= lines.length) {
     throw new GitHubApiResponseError(operation, "GitHub returned an incomplete API response.");
   }
-  return { status, body: parseJson(lines.slice(separator + 1).join("\n"), operation) };
+  const headers: Record<string, string> = {};
+  for (const line of lines.slice(statusIndex + 1, separator)) {
+    const delimiter = line.indexOf(":");
+    if (delimiter <= 0) continue;
+    const name = line.slice(0, delimiter).trim().toLowerCase();
+    const headerValue = line.slice(delimiter + 1).trim();
+    // Pagination is the only provider header currently admitted to the
+    // normalized read contract. Keeping the surface narrow avoids turning
+    // request metadata into an accidental public API.
+    if (name === "link") headers[name] = headerValue;
+  }
+  return {
+    status,
+    body: parseJson(lines.slice(separator + 1).join("\n"), operation),
+    ...(Object.keys(headers).length === 0 ? {} : { headers }),
+  };
 }
 
 function assertActionsApiPath(value: string): void {
@@ -1037,10 +1386,518 @@ function assertRepositoryApiPath(value: string): void {
     value.startsWith("/") ||
     value.includes("\u0000") ||
     value.includes("..") ||
-    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|git\/)/u.test(value))
+    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|commits\/|git\/)/u.test(value))
   ) {
     throw new ContractViolationError("Repository API path is invalid.", "repositoryPath");
   }
+}
+
+function providerText(value: unknown, path: string, operation: string, maximum = 2_048): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maximum ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value;
+}
+
+/**
+ * Bounded prose/Markdown field validator for Issue/PR/comment/review
+ * bodies. Ordinary multiline Markdown uses TAB/LF/CR, so unlike
+ * providerText() this allows those while still rejecting NUL and other
+ * unsafe control characters, and bounds by UTF-8 byte length rather than
+ * JS code-unit length.
+ */
+function providerProse(value: unknown, path: string, operation: string, maximumBytes: number): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value) ||
+    Buffer.byteLength(value, "utf8") > maximumBytes
+  ) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value;
+}
+
+function optionalProviderText(value: unknown, path: string, operation: string, maximum = 2_048): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return providerText(value, path, operation, maximum);
+}
+
+function nullableProviderText(
+  value: unknown,
+  path: string,
+  operation: string,
+  maximum = 2_048,
+): string | null | undefined {
+  if (value === null) return null;
+  return optionalProviderText(value, path, operation, maximum);
+}
+
+function optionalProviderNumber(value: unknown, path: string, operation: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value;
+}
+
+function operationalActor(value: unknown, path: string, operation: string): GitHubOperationalActor | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) {
+    throw new GitHubApiResponseError(operation, `GitHub response actor ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  const login = optionalProviderText(value.login, `${path}.login`, operation, 512);
+  const name = optionalProviderText(value.name, `${path}.name`, operation, 512);
+  const url = optionalProviderText(value.html_url ?? value.url, `${path}.url`, operation, 2_048);
+  const id = optionalProviderNumber(value.id, `${path}.id`, operation);
+  if (login === undefined && name === undefined && url === undefined && id === undefined) return null;
+  return {
+    ...(login === undefined ? {} : { login }),
+    ...(id === undefined ? {} : { id }),
+    ...(name === undefined ? {} : { name }),
+    ...(url === undefined ? {} : { url }),
+  };
+}
+
+function operationalRepository(context: RepositoryContext): GitHubOperationalRepository {
+  return {
+    host: context.hostname,
+    nameWithOwner: context.nameWithOwner,
+    ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
+  };
+}
+
+function operationalProvenance(endpoints: readonly string[]): GitHubOperationalProvenance {
+  return {
+    provider: "github",
+    endpoints: [...new Set(endpoints)].sort((left, right) => left.localeCompare(right, "en-US")),
+  };
+}
+
+function operationalState(value: unknown): "open" | "closed" | "unknown" {
+  if (value === "open" || value === "closed") return value;
+  return "unknown";
+}
+
+function operationalLabels(value: unknown, path: string, operation: string): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return [
+    ...new Set(
+      value.map((entry, index) => {
+        if (!isRecord(entry))
+          throw new GitHubApiResponseError(operation, `GitHub response field ${path}[${index}] is invalid.`, { path });
+        return providerText(entry.name, `${path}[${index}].name`, operation, 512);
+      }),
+    ),
+  ].sort((left, right) => left.localeCompare(right, "en-US"));
+}
+
+function operationalActors(value: unknown, path: string, operation: string): readonly GitHubOperationalActor[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid during ${operation}.`, {
+      path,
+    });
+  }
+  return value
+    .map((entry, index) => {
+      const actor = operationalActor(entry, `${path}[${index}]`, operation);
+      if (actor === null)
+        throw new GitHubApiResponseError(operation, `GitHub response actor ${path}[${index}] is empty.`);
+      return actor;
+    })
+    .sort(compareOperationalActors);
+}
+
+function operationalMilestone(value: unknown, path: string, operation: string): GitHubMilestone | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value))
+    throw new GitHubApiResponseError(operation, `GitHub response milestone ${path} is invalid.`, { path });
+  return {
+    number: responseNumber(value.number, `${path}.number`, operation),
+    title: providerText(value.title, `${path}.title`, operation, 512),
+  };
+}
+
+function operationalRef(
+  value: unknown,
+  path: string,
+  operation: string,
+): { readonly ref?: string; readonly sha?: string } {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value))
+    throw new GitHubApiResponseError(operation, `GitHub response ref ${path} is invalid.`, { path });
+  const ref = optionalProviderText(value.ref, `${path}.ref`, operation, 512);
+  const sha = optionalProviderText(value.sha, `${path}.sha`, operation, 128);
+  return { ...(ref === undefined ? {} : { ref }), ...(sha === undefined ? {} : { sha }) };
+}
+
+function parseOperationalIssue(
+  value: unknown,
+  context: RepositoryContext,
+  operation: string,
+): Omit<GitHubOperationalIssueEvidence, "comments" | "provenance"> {
+  const record = responseRecord(value, operation);
+  const number = responseNumber(record.number, "number", operation);
+  if (record.pull_request !== undefined) throw new GitHubResourceKindMismatchError(operation, number);
+  return {
+    repository: operationalRepository(context),
+    number,
+    title: providerText(record.title, "title", operation, 255),
+    body:
+      record.body === undefined || record.body === null
+        ? null
+        : providerProse(record.body, "body", operation, 1_048_576),
+    state: operationalState(record.state),
+    ...(record.state_reason === undefined
+      ? {}
+      : { stateReason: nullableProviderText(record.state_reason, "state_reason", operation, 128) }),
+    author: operationalActor(record.user, "user", operation),
+    labels: operationalLabels(record.labels, "labels", operation),
+    assignees: operationalActors(record.assignees, "assignees", operation),
+    ...(operationalMilestone(record.milestone, "milestone", operation) === undefined
+      ? {}
+      : { milestone: operationalMilestone(record.milestone, "milestone", operation) }),
+    ...(optionalProviderText(record.created_at, "created_at", operation, 128) === undefined
+      ? {}
+      : { createdAt: optionalProviderText(record.created_at, "created_at", operation, 128) }),
+    ...(optionalProviderText(record.updated_at, "updated_at", operation, 128) === undefined
+      ? {}
+      : { updatedAt: optionalProviderText(record.updated_at, "updated_at", operation, 128) }),
+    ...(optionalProviderText(record.closed_at, "closed_at", operation, 128) === undefined
+      ? {}
+      : { closedAt: optionalProviderText(record.closed_at, "closed_at", operation, 128) }),
+    url: responseUrl(record, operation),
+  };
+}
+
+function parseOperationalPullRequest(
+  value: unknown,
+  context: RepositoryContext,
+  operation: string,
+): Omit<
+  GitHubOperationalPullRequestEvidence,
+  "checks" | "reviews" | "comments" | "inlineReviewComments" | "changedFiles" | "provenance"
+> {
+  const record = responseRecord(value, operation);
+  const requestedReviewers =
+    record.requested_reviewers === undefined && record.requested_teams === undefined
+      ? undefined
+      : {
+          users: operationalActors(record.requested_reviewers, "requested_reviewers", operation),
+          teams: operationalTeamSlugs(record.requested_teams, "requested_teams", operation),
+        };
+  const draft =
+    record.draft === undefined || record.draft === null ? undefined : responseBoolean(record.draft, "draft", operation);
+  const mergeable =
+    record.mergeable === undefined || record.mergeable === null
+      ? record.mergeable
+      : typeof record.mergeable === "boolean"
+        ? record.mergeable
+        : null;
+  const mergeState =
+    record.mergeable_state === undefined || record.mergeable_state === null
+      ? record.mergeable_state
+      : providerText(record.mergeable_state, "mergeable_state", operation, 64);
+  const reviewDecision =
+    record.review_decision === undefined || record.review_decision === null
+      ? record.review_decision
+      : providerText(record.review_decision, "review_decision", operation, 64);
+  const merged =
+    record.merged === undefined || record.merged === null
+      ? record.merged
+      : responseBoolean(record.merged, "merged", operation);
+  const mergeCommitSha = nullableProviderText(record.merge_commit_sha, "merge_commit_sha", operation, 128);
+  const milestone = operationalMilestone(record.milestone, "milestone", operation);
+  const createdAt = optionalProviderText(record.created_at, "created_at", operation, 128);
+  const updatedAt = optionalProviderText(record.updated_at, "updated_at", operation, 128);
+  const closedAt = optionalProviderText(record.closed_at, "closed_at", operation, 128);
+  const mergedAt = optionalProviderText(record.merged_at, "merged_at", operation, 128);
+  return {
+    repository: operationalRepository(context),
+    number: responseNumber(record.number, "number", operation),
+    title: providerText(record.title, "title", operation, 255),
+    body:
+      record.body === undefined || record.body === null
+        ? null
+        : providerProse(record.body, "body", operation, 1_048_576),
+    state: operationalState(record.state),
+    author: operationalActor(record.user, "user", operation),
+    head: operationalRef(record.head, "head", operation),
+    base: operationalRef(record.base, "base", operation),
+    ...(draft === undefined ? {} : { draft }),
+    ...(mergeable === undefined ? {} : { mergeable }),
+    ...(mergeState === undefined ? {} : { mergeState }),
+    ...(reviewDecision === undefined ? {} : { reviewDecision }),
+    ...(merged === undefined ? {} : { merged }),
+    ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }),
+    labels: operationalLabels(record.labels, "labels", operation),
+    assignees: operationalActors(record.assignees, "assignees", operation),
+    ...(requestedReviewers === undefined ? {} : { requestedReviewers }),
+    ...(milestone === undefined ? {} : { milestone }),
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+    ...(closedAt === undefined ? {} : { closedAt }),
+    ...(mergedAt === undefined ? {} : { mergedAt }),
+    url: responseUrl(record, operation),
+  };
+}
+
+function operationalTeamSlugs(value: unknown, path: string, operation: string): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value))
+    throw new GitHubApiResponseError(operation, `GitHub response field ${path} is invalid.`, { path });
+  return [
+    ...new Set(
+      value.map((entry, index) => {
+        if (!isRecord(entry))
+          throw new GitHubApiResponseError(operation, `GitHub response field ${path}[${index}] is invalid.`, { path });
+        return providerText(entry.slug, `${path}[${index}].slug`, operation, 512);
+      }),
+    ),
+  ].sort((left, right) => left.localeCompare(right, "en-US"));
+}
+
+function arrayResponse(value: unknown, label: string): readonly unknown[] {
+  if (!Array.isArray(value)) throw new Error(`GitHub returned invalid ${label} collection.`);
+  return value;
+}
+
+function parseOperationalComment(
+  value: unknown,
+  path: string,
+  kind: "conversation" | "inline",
+): GitHubOperationalComment {
+  const record = responseRecord(value, "operational.comment");
+  const id = responseNumber(record.id, `${path}.id`, "operational.comment");
+  const body =
+    record.body === undefined || record.body === null
+      ? null
+      : providerProse(record.body, `${path}.body`, "operational.comment", 1_048_576);
+  const author = operationalActor(record.user, `${path}.user`, "operational.comment");
+  const createdAt = optionalProviderText(record.created_at, `${path}.created_at`, "operational.comment", 128);
+  const updatedAt = optionalProviderText(record.updated_at, `${path}.updated_at`, "operational.comment", 128);
+  const url = optionalProviderText(record.html_url ?? record.url, `${path}.url`, "operational.comment", 2_048);
+  const commentPath = optionalProviderText(record.path, `${path}.path`, "operational.comment", 512);
+  const line =
+    record.line === undefined || record.line === null
+      ? record.line
+      : optionalProviderNumber(record.line, `${path}.line`, "operational.comment");
+  const side =
+    record.side === undefined || record.side === null
+      ? record.side
+      : providerText(record.side, `${path}.side`, "operational.comment", 32);
+  const inReplyTo =
+    record.in_reply_to_id === undefined || record.in_reply_to_id === null
+      ? undefined
+      : responseNumber(record.in_reply_to_id, `${path}.in_reply_to_id`, "operational.comment");
+  return {
+    id,
+    body,
+    author,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+    ...(url === undefined ? {} : { url }),
+    ...(commentPath === undefined ? {} : { path: commentPath }),
+    ...(line === undefined ? {} : { line }),
+    ...(side === undefined ? {} : { side }),
+    ...(inReplyTo === undefined ? {} : { inReplyTo }),
+  };
+}
+
+function parseOperationalReview(value: unknown, path: string): GitHubOperationalReview {
+  const record = responseRecord(value, "operational.review");
+  const id = responseNumber(record.id, `${path}.id`, "operational.review");
+  const body =
+    record.body === undefined || record.body === null
+      ? null
+      : providerProse(record.body, `${path}.body`, "operational.review", 1_048_576);
+  const author = operationalActor(record.user, `${path}.user`, "operational.review");
+  const state =
+    record.state === undefined || record.state === null
+      ? "unknown"
+      : providerText(record.state, `${path}.state`, "operational.review", 64);
+  const submittedAt = optionalProviderText(record.submitted_at, `${path}.submitted_at`, "operational.review", 128);
+  const commitId = optionalProviderText(record.commit_id, `${path}.commit_id`, "operational.review", 128);
+  const url = optionalProviderText(record.html_url ?? record.url, `${path}.url`, "operational.review", 2_048);
+  return {
+    id,
+    body,
+    author,
+    state,
+    ...(submittedAt === undefined ? {} : { submittedAt }),
+    ...(commitId === undefined ? {} : { commitId }),
+    ...(url === undefined ? {} : { url }),
+  };
+}
+
+function parseOperationalCheck(value: unknown, path: string, kind: "check-run" | "status"): GitHubOperationalCheck {
+  const record = responseRecord(value, `operational.${kind}`);
+  const rawId = record.id ?? record.context;
+  const id =
+    typeof rawId === "number"
+      ? String(responseNumber(rawId, `${path}.id`, `operational.${kind}`))
+      : providerText(rawId, `${path}.id`, `operational.${kind}`, 128);
+  const name = providerText(record.name ?? record.context, `${path}.name`, `operational.${kind}`, 512);
+  const status = providerText(record.status ?? record.state, `${path}.status`, `operational.${kind}`, 64);
+  const conclusion =
+    record.conclusion === undefined
+      ? undefined
+      : nullableProviderText(record.conclusion, `${path}.conclusion`, `operational.${kind}`, 64);
+  const description =
+    record.description === undefined
+      ? undefined
+      : nullableProviderText(record.description, `${path}.description`, `operational.${kind}`, 2_048);
+  const url = optionalProviderText(
+    record.details_url ?? record.target_url,
+    `${path}.url`,
+    `operational.${kind}`,
+    2_048,
+  );
+  const startedAt = optionalProviderText(record.started_at, `${path}.started_at`, `operational.${kind}`, 128);
+  const completedAt = optionalProviderText(record.completed_at, `${path}.completed_at`, `operational.${kind}`, 128);
+  return {
+    id,
+    name,
+    kind,
+    status,
+    ...(conclusion === undefined ? {} : { conclusion }),
+    ...(description === undefined ? {} : { description }),
+    ...(url === undefined ? {} : { url }),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+function parseOperationalChangedFile(value: unknown, path: string): GitHubOperationalChangedFile {
+  const record = responseRecord(value, "operational.file");
+  const additions = optionalProviderNumber(record.additions, `${path}.additions`, "operational.file");
+  const deletions = optionalProviderNumber(record.deletions, `${path}.deletions`, "operational.file");
+  const changes = optionalProviderNumber(record.changes, `${path}.changes`, "operational.file");
+  const status = optionalProviderText(record.status, `${path}.status`, "operational.file", 64);
+  const sha = optionalProviderText(record.sha, `${path}.sha`, "operational.file", 128);
+  const blobUrl = optionalProviderText(record.blob_url, `${path}.blob_url`, "operational.file", 2_048);
+  const rawUrl = optionalProviderText(record.raw_url, `${path}.raw_url`, "operational.file", 2_048);
+  const contentsUrl = optionalProviderText(record.contents_url, `${path}.contents_url`, "operational.file", 2_048);
+  return {
+    filename: providerText(record.filename, `${path}.filename`, "operational.file", 512),
+    ...(status === undefined ? {} : { status }),
+    ...(additions === undefined ? {} : { additions }),
+    ...(deletions === undefined ? {} : { deletions }),
+    ...(changes === undefined ? {} : { changes }),
+    ...(sha === undefined ? {} : { sha }),
+    ...(blobUrl === undefined ? {} : { blobUrl }),
+    ...(rawUrl === undefined ? {} : { rawUrl }),
+    ...(contentsUrl === undefined ? {} : { contentsUrl }),
+  };
+}
+
+function nextPageFromLink(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const next = value.split(",").find((part) => /;\s*rel="next"/iu.test(part));
+  if (next === undefined) return undefined;
+  const match = /[?&]page=(\d+)/u.exec(next);
+  if (match === null) return undefined;
+  const page = Number(match[1]);
+  return Number.isSafeInteger(page) && page > 0 ? page : undefined;
+}
+
+function operationalCollectionFailure<T>(
+  path: string,
+  items: readonly T[],
+  pages: number,
+  nextPage: number,
+  message: string,
+): GitHubOperationalCollection<T> {
+  return {
+    status: "unavailable",
+    items,
+    pagination: {
+      perPage: OPERATIONAL_PAGE_SIZE,
+      pages,
+      returned: items.length,
+      truncated: true,
+      nextPage,
+    },
+    diagnostics: [{ code: "OPERATIONAL_COLLECTION_READ_FAILED", path, message }],
+  };
+}
+
+function operationalCollectionUnavailable<T>(
+  path: string,
+  items: readonly T[],
+  pages: number,
+  message: string,
+): GitHubOperationalCollection<T> {
+  return {
+    status: "unavailable",
+    items,
+    pagination: { perPage: OPERATIONAL_PAGE_SIZE, pages, returned: items.length, truncated: false },
+    diagnostics: [{ code: "OPERATIONAL_COLLECTION_UNAVAILABLE", path, message }],
+  };
+}
+
+function unavailableOperationalCollection<T>(path: string, message: string): GitHubOperationalCollection<T> {
+  return operationalCollectionUnavailable(path, [], 0, message);
+}
+
+function combineOperationalPagination(
+  left: GitHubOperationalPagination,
+  right: GitHubOperationalPagination,
+  returned: number,
+): GitHubOperationalPagination {
+  const truncated = left.truncated || right.truncated;
+  const nextPage = left.nextPage ?? right.nextPage;
+  return {
+    perPage: OPERATIONAL_PAGE_SIZE,
+    pages: Math.max(left.pages, right.pages),
+    returned,
+    truncated,
+    ...(truncated && nextPage !== undefined ? { nextPage } : {}),
+  };
+}
+
+function compareOperationalChecks(left: GitHubOperationalCheck, right: GitHubOperationalCheck): number {
+  return (
+    left.name.localeCompare(right.name, "en-US") ||
+    left.kind.localeCompare(right.kind, "en-US") ||
+    left.id.localeCompare(right.id, "en-US")
+  );
+}
+
+function compareOperationalChangedFiles(
+  left: GitHubOperationalChangedFile,
+  right: GitHubOperationalChangedFile,
+): number {
+  return (
+    left.filename.localeCompare(right.filename, "en-US") || (left.sha ?? "").localeCompare(right.sha ?? "", "en-US")
+  );
+}
+
+function compareOperationalActors(left: GitHubOperationalActor, right: GitHubOperationalActor): number {
+  return operationalActorKey(left).localeCompare(operationalActorKey(right), "en-US");
+}
+
+function operationalActorKey(actor: GitHubOperationalActor): string {
+  return `${actor.login ?? ""}\u0000${actor.name ?? ""}\u0000${actor.id ?? 0}\u0000${actor.url ?? ""}`;
 }
 
 function parseIssue(value: unknown, operation: string, repositoryId?: string, repositoryHost?: string): GitHubIssue {
