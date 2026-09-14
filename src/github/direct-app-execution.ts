@@ -19,7 +19,7 @@ import {
 } from "./app-installation-credential-broker.js";
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
-import { GitHubActionsEvidenceReader } from "./actions-change-executor.js";
+import { GitHubChangeStateProjector } from "./change-state-projector.js";
 import { InariIssuerAppAuthority, type IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { GitHubChangeEffectRepository, GitHubChangeProvenanceSignerOptions } from "./change-effect-adapter.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
@@ -66,8 +66,8 @@ function buildReader(
   config: DirectAppSessionExecutorConfig,
   identity: IssuerRepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
-): GitHubActionsEvidenceReader {
-  return new GitHubActionsEvidenceReader({
+): GitHubChangeStateProjector {
+  return new GitHubChangeStateProjector({
     repository: config.repository,
     identity: {
       repositoryHost: identity.repositoryHost,
