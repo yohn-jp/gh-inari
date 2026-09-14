@@ -162,6 +162,102 @@ test("workflow verifier rejects an arbitrary executable or .bin shim", () => {
   }
 });
 
+test("workflow verifier accepts a pnpm-style symlinked installed package resolving into .pnpm", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "inari-self-dogfood-workflow-pnpm-"));
+  const sourceRoot = path.join(root, "source");
+  const physicalPackageRoot = path.join(
+    root,
+    "consumer",
+    "node_modules",
+    ".pnpm",
+    "gh-inari@0.11.0",
+    "node_modules",
+    "gh-inari",
+  );
+  const symlinkedPackageRoot = path.join(root, "consumer", "node_modules", "gh-inari");
+  const tarball = path.join(root, "gh-inari.tgz");
+  fs.mkdirSync(sourceRoot, { recursive: true });
+  fs.mkdirSync(path.join(physicalPackageRoot, "dist"), { recursive: true });
+  fs.writeFileSync(
+    path.join(physicalPackageRoot, "package.json"),
+    JSON.stringify({
+      name: "gh-inari",
+      version: "0.11.0",
+      bin: { "gh-inari": "dist/index.js", inari: "dist/index.js" },
+    }),
+  );
+  fs.writeFileSync(path.join(physicalPackageRoot, "dist", "index.js"), "installed", { mode: 0o755 });
+  fs.symlinkSync(physicalPackageRoot, symlinkedPackageRoot, "dir");
+  fs.writeFileSync(tarball, crypto.randomBytes(64));
+  try {
+    const tarballSha256 = `sha256:${crypto.createHash("sha256").update(fs.readFileSync(tarball)).digest("hex")}`;
+    const result = verifySelfDogfoodRun({
+      evidence: evidence(),
+      sourceCommitSha,
+      repository: "yohn-jp/gh-inari",
+      issue: 239,
+      tarballPath: tarball,
+      tarballSha256,
+      // Both the installed package path and the installed executable path are the
+      // caller's logical, symlinked node_modules/gh-inari paths -- not the physical
+      // .pnpm/... location -- matching how the workflow observes the pnpm layout.
+      installedPackagePath: symlinkedPackageRoot,
+      installedExecutablePath: path.join(symlinkedPackageRoot, "dist", "index.js"),
+      workerObservation: workerObservation(),
+      sourceRoot,
+      exerciseAbort: true,
+      environment: {},
+    });
+    assert.equal(result.passed, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workflow verifier rejects a supplied executable resolving to a different physical file", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "inari-self-dogfood-workflow-mismatch-"));
+  const sourceRoot = path.join(root, "source");
+  const packageRoot = path.join(root, "consumer", "node_modules", "gh-inari");
+  const otherFile = path.join(root, "not-installed.js");
+  const tarball = path.join(root, "gh-inari.tgz");
+  fs.mkdirSync(sourceRoot, { recursive: true });
+  fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({
+      name: "gh-inari",
+      version: "0.11.0",
+      bin: { "gh-inari": "dist/index.js", inari: "dist/index.js" },
+    }),
+  );
+  fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "installed", { mode: 0o755 });
+  fs.writeFileSync(otherFile, "not the installed executable", { mode: 0o755 });
+  fs.writeFileSync(tarball, crypto.randomBytes(64));
+  try {
+    const tarballSha256 = `sha256:${crypto.createHash("sha256").update(fs.readFileSync(tarball)).digest("hex")}`;
+    assert.throws(
+      () =>
+        verifySelfDogfoodRun({
+          evidence: evidence(),
+          sourceCommitSha,
+          repository: "yohn-jp/gh-inari",
+          issue: 239,
+          tarballPath: tarball,
+          tarballSha256,
+          installedPackagePath: packageRoot,
+          installedExecutablePath: otherFile,
+          workerObservation: workerObservation(),
+          sourceRoot,
+          exerciseAbort: true,
+          environment: {},
+        }),
+      /exactly match package\.json bin\.inari/u,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workflow verifier rejects installed products resolved inside the source checkout", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "inari-self-dogfood-workflow-boundary-"));
   const tarball = path.join(root, "gh-inari.tgz");
