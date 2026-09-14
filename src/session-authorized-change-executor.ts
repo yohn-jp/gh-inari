@@ -257,6 +257,7 @@ function directExecutionContext(context: AuthenticatedSessionContext): DirectApp
     requestId: context.request.requestId,
     sessionId: context.session.id,
     certificateJti: context.session.certificateJti,
+    requester: `session:${context.session.id}`,
   }) as DirectAppTrustedExecutionContext;
 }
 
@@ -576,7 +577,6 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     const request = changeMutationRequest(
       operation === "change.issue" ? "issue" : operation === "change.ready" ? "ready" : "abort",
       issue,
-      undefined,
       operation === "change.issue" && "semanticPullRequestPlan" in directRequest
         ? directRequest.semanticPullRequestPlan
         : undefined,

@@ -356,7 +356,7 @@ test("CLI preserves the normalized provider rejection projection in execution ev
   assert.deepEqual((result.output?.evidence as Record<string, unknown> | undefined)?.failure, evidence.failure);
 });
 
-test("default Change wiring constructs an Actions-backed executor and normalizes dispatch failure", async () => {
+test("default Change wiring omits caller requester and normalizes dispatch failure", async () => {
   const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
   let authenticatedUserReads = 0;
   const adapter = runtimeTrustAdapter({
@@ -385,7 +385,7 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
   assert.deepEqual(adapterOptions, [{ cwd: "/workspace/inari" }]);
   assert.equal(calls[0]?.method, "GET");
   assert.equal(calls[1]?.method, "POST");
-  assert.equal(authenticatedUserReads, 1);
+  assert.equal(authenticatedUserReads, 0);
   assert.equal(calls[1]?.path, "actions/workflows/inari-change-executor.yml/dispatches");
   const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
   const signedProvenanceRecord = dispatched.signedProvenanceRecord;
@@ -394,7 +394,6 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "issue",
     issue: 42,
-    requester: "github:octocat",
   });
   assert.equal(typeof signedProvenanceRecord, "object");
   assert.deepEqual(verifyChangeProvenanceRecord(signedProvenanceRecord, runtimeSignerAuthority), {
@@ -408,7 +407,7 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
 test("GitHub Actions Change wiring never supplies caller-side requester or resolves /user", async () => {
   // The trusted executor (the workflow_dispatch-authenticated actor) is the sole authority
   // for requester provenance in the Actions execution lane -- see
-  // TrustedChangeExecutor.bindRequester(). The caller must not inject GITHUB_ACTOR (or
+  // TrustedChangeExecutor.assertRequest(). The caller must not inject GITHUB_ACTOR (or
   // GITHUB_TRIGGERING_ACTOR) as requester, and must not resolve /user either.
   const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
   let authenticatedUserReads = 0;
@@ -550,9 +549,9 @@ test("CLI --json preserves the bounded trusted code and Core diagnostic envelope
   });
 });
 
-test("caller authentication failure is distinct from an unconfigured executor", async () => {
+test("caller transport authentication failure is distinct from an unconfigured executor", async () => {
   const adapter = runtimeTrustAdapter({
-    async getAuthenticatedUser() {
+    async requestActionsApi() {
       throw new GhUnauthenticatedError("github.com", "token=secret");
     },
   });
@@ -562,8 +561,8 @@ test("caller authentication failure is distinct from an unconfigured executor", 
   });
   assert.equal(authResult.exitCode, 3);
   assert.deepEqual(authResult.output?.error, {
-    code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
-    message: "The GitHub Actions Change executor is unavailable.",
+    code: "CHANGE_REMOTE_TRANSPORT_FAILED",
+    message: "The GitHub Actions Change transport failed.",
     details: { operation: "change.issue", reason: "authentication" },
   });
 

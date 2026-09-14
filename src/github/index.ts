@@ -1,6 +1,8 @@
 export * from "./adapter.js";
 export * from "./app-installation-credential-broker.js";
 export * from "./app-repository-evidence-reader.js";
+export * from "./repository-evidence-reader.js";
+export * from "./change-state-projector.js";
 export * from "./direct-app-execution.js";
 export * from "./change-effect-adapter.js";
 // The Git-data implementation and its broker-owned transport stay private.

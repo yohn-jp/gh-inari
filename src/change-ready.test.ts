@@ -411,10 +411,12 @@ test("Ready fails closed when the required reread is unavailable or malformed", 
 test("requester and issuer provenance remain separate through Ready", async () => {
   const reader = new MutableReader(projectionInput());
   const issuerAuthority = new FakeIssuer(reader);
-  const result = await executor(reader, issuerAuthority).execute({
-    ...remoteReadyRequest(),
-    requester: "agent:implementation",
-  });
+  const result = await new TrustedChangeExecutor({
+    reader,
+    issuerAuthority,
+    execution: { ...execution, requester: "agent:implementation" },
+    target,
+  }).execute(remoteReadyRequest());
   assert.equal(result.evidence?.requester, "agent:implementation");
   assert.equal(result.evidence?.issuer, issuer);
   assert.equal(result.projection.change?.provenance.requester, "agent:implementation");

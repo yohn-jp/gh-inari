@@ -16,7 +16,6 @@ import {
   INARI_CHANGE_EXECUTOR_WORKFLOW,
   type GitHubActionsRemoteApi,
 } from "./actions-change-execution-adapter.js";
-import { GhUnauthenticatedError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
@@ -149,8 +148,6 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   readonly resultRunId = 11;
   readonly resultArtifactId = 21;
   readonly result = projection();
-  authenticatedUser = "octocat";
-  authenticatedUserReads = 0;
   runState: "pending" | "success" | "failure" = "success";
   artifactMode: "valid" | "malformed" | "stale" | "ambiguous" | "missing" = "valid";
   archiveValue: unknown = { projection: this.result };
@@ -162,11 +159,6 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
 
   async getRepositoryContext(): Promise<RepositoryContext> {
     return repository;
-  }
-
-  async getAuthenticatedUser(): Promise<string> {
-    this.authenticatedUserReads += 1;
-    return this.authenticatedUser;
   }
 
   async getRepositoryDefaultBranch(): Promise<string> {
@@ -316,7 +308,6 @@ test("issue, ready, and abort dispatch the same semantic request through the tru
       version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation,
       issue: 42,
-      requester: "github:octocat",
     });
     assert.equal(dispatch.fields["inputs[correlation]"], correlation);
     assert.doesNotMatch(JSON.stringify(dispatch.fields["inputs[request]"]), /workflow|token|privateKey|effect/iu);
@@ -343,7 +334,7 @@ test("caller-produced signed provenance crosses the bounded Actions request unch
     now: new Date("2026-09-13T00:00:00Z"),
   });
   const api = new FakeActionsApi();
-  await executor(api).execute(changeMutationRequest("issue", 42, "agent:tester", undefined, signedRecord));
+  await executor(api).execute(changeMutationRequest("issue", 42, undefined, signedRecord));
   const dispatch = api.calls.find((call) => call.method === "POST");
   assert.ok(dispatch);
   const dispatched = JSON.parse(dispatch.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
@@ -357,7 +348,6 @@ test("show uses the same remote boundary and does not request requester or issue
 
   assert.deepEqual(result, api.result);
   assert.equal(api.calls.filter((call) => call.method === "POST").length, 0);
-  assert.equal(api.authenticatedUserReads, 0);
 });
 
 test("show derives branch governance from the target default-branch generation, ignoring foreign local policy", async () => {
@@ -430,20 +420,9 @@ test("show distinguishes a target repository with no branch policy from unavaila
   }
 });
 
-test("auth and repository resolution failures are normalized without raw credentials", async () => {
+test("requester authentication is not consulted and repository resolution failures are normalized", async () => {
   const authApi = new FakeActionsApi();
-  authApi.getAuthenticatedUser = async () => {
-    throw new GhUnauthenticatedError("github.com", "Bearer secret-token");
-  };
-  await assert.rejects(
-    executor(authApi).execute(changeMutationRequest("issue", 42)),
-    (error: unknown) =>
-      error instanceof ChangeExecutionPortError &&
-      error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" &&
-      (error.details as { reason?: string } | undefined)?.reason === "authentication" &&
-      !error.message.includes("secret-token") &&
-      !JSON.stringify(error).includes("secret-token"),
-  );
+  assert.deepEqual(await executor(authApi).execute(changeMutationRequest("issue", 42)), { projection: authApi.result });
 
   const resolutionApi = new FakeActionsApi();
   resolutionApi.getRepositoryContext = async () => {
@@ -702,7 +681,7 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
 test("effect and workflow injection cannot enter the semantic dispatch request", async () => {
   const api = new FakeActionsApi();
   const request = {
-    ...changeMutationRequest("issue", 42, "agent:tester"),
+    ...changeMutationRequest("issue", 42),
     workflow: "evil.yml",
     ref: "refs/heads/evil",
     effect: { kind: "create-branch" },
@@ -715,8 +694,23 @@ test("effect and workflow injection cannot enter the semantic dispatch request",
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "issue",
     issue: 42,
-    requester: "agent:tester",
   });
+});
+
+test("requester injection is rejected before crossing the Actions boundary", async () => {
+  const api = new FakeActionsApi();
+  const request = {
+    ...changeMutationRequest("issue", 42),
+    requester: "agent:tester",
+  } as never;
+  await assert.rejects(
+    executor(api).execute(request),
+    (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_REQUEST_INVALID",
+  );
+  assert.equal(
+    api.calls.some((call) => call.method === "POST"),
+    false,
+  );
 });
 
 test("untrusted execution envelope fields are rejected before crossing the remote boundary", async () => {

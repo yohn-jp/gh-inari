@@ -182,6 +182,8 @@ export interface IssuanceExecutionResults {
 
 export interface IssuanceExecutionServices {
   readonly request: ChangeMutationRequest;
+  /** Requester provenance derived by the trusted execution boundary. */
+  readonly trustedRequester?: string;
   /** The read actor is the only machine boundary for repository evidence I/O. */
   readonly read: (request: ChangeMutationRequest) => Promise<IssuanceReadResult>;
   /** The effect actor is the only machine boundary for privileged GitHub mutation. */
@@ -426,7 +428,7 @@ export const issuanceExecutionMachine = setup({
       entry: assign(({ context }) => {
         const fresh = context.freshInput;
         if (fresh === undefined) return { plan: undefined, failure: DEFAULT_READ_FAILURE };
-        const planned = context.services.semantics.plan(fresh, context.services.request.requester);
+        const planned = context.services.semantics.plan(fresh, context.services.trustedRequester);
         return planned.ok ? { plan: planned.plan, failure: undefined } : { plan: undefined, failure: planned.failure };
       }),
       always: [

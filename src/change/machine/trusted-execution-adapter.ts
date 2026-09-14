@@ -50,12 +50,14 @@ import {
 } from "../../github/effect-authorizer.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  ChangeExecutionPortError,
   type ChangeEffectEvidence,
   type ChangeExecutionEvidence,
   type ChangeExecutionResult,
   type ChangeExecutionPort,
   type ChangeMutationRequest,
   type ChangeReadRequest,
+  validateChangeRequest,
 } from "../../change-execution-port.js";
 import {
   executeReadyWithXState,
@@ -426,6 +428,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #effectAuthorizer: Pick<InariEffectAuthorizer, "applyEffects">;
   readonly #execution: TrustedExecutionContext;
   readonly #target: RepositoryIdentity;
+  readonly #trustedRequester: string | undefined;
 
   constructor(options: ChangeTrustedExecutorOptions) {
     this.#reader = options.reader;
@@ -434,12 +437,13 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
     this.#effectAuthorizer = effectAuthorizer;
     this.#execution = options.execution;
     this.#target = options.target;
+    this.#trustedRequester = options.execution.requester;
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
-    const boundRequest = this.bindRequester(request);
+    this.assertRequest(request);
     try {
-      return projectionFor(await this.readInput(boundRequest));
+      return projectionFor(await this.readInput(request));
     } catch (error: unknown) {
       if (error instanceof ChangeTrustedExecutorError) throw error;
       throw new ChangeTrustedExecutorError(
@@ -450,38 +454,48 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   }
 
   async execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
-    const boundRequest = this.bindRequester(request);
-    if (boundRequest.operation === "issue") return this.executeIssue(boundRequest);
-    if (boundRequest.operation === "ready") return this.executeReady(boundRequest);
-    return this.executeAbort(boundRequest);
+    this.assertRequest(request);
+    if (request.operation === "issue") return this.executeIssue(request);
+    if (request.operation === "ready") return this.executeReady(request);
+    return this.executeAbort(request);
   }
 
   /**
-   * Bind semantic provenance to the authenticated trusted runtime actor.
-   * Caller input may corroborate that identity, but can never replace it.
+   * Validate the caller-controlled request before trusted execution. Requester
+   * provenance is deliberately not a request field; legacy or forged payloads
+   * fail closed at this boundary instead of being silently ignored.
    */
-  private bindRequester<T extends ChangeMutationRequest | ChangeReadRequest>(request: T): T {
-    const trustedRequester = this.#execution.runtime === "github-actions" ? this.#execution.requester : undefined;
-    if (trustedRequester !== undefined && request.requester !== undefined && request.requester !== trustedRequester) {
+  private assertRequest(request: ChangeMutationRequest | ChangeReadRequest): void {
+    if (typeof request === "object" && request !== null && Object.prototype.hasOwnProperty.call(request, "requester")) {
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_PRECONDITION_FAILED",
-        "The Change requester does not match the trusted execution actor.",
+        "Caller-supplied requester identity is not accepted by trusted Change execution.",
         [
           diagnostic(
             "CHANGE_PROVENANCE_CONFLICT",
             "$.requester",
-            "Caller requester provenance does not match the authenticated trusted actor.",
+            "Requester provenance must be derived from the authenticated trusted execution context.",
           ),
         ],
       );
     }
-    if (trustedRequester === undefined || request.requester === trustedRequester) return request;
-    return { ...request, requester: trustedRequester } as T;
+    try {
+      validateChangeRequest(request);
+    } catch (error: unknown) {
+      if (error instanceof ChangeExecutionPortError) {
+        throw new ChangeTrustedExecutorError(
+          "CHANGE_EXECUTION_PRECONDITION_FAILED",
+          "Trusted Change request validation failed closed.",
+        );
+      }
+      throw error;
+    }
   }
 
   private async executeReady(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     const outcome: ReadyExecutionOutcome = await executeReadyWithXState({
       request,
+      trustedRequester: this.#trustedRequester,
       read: (readyRequest) => this.readReadyInput(readyRequest),
       apply: (effect) => this.applyReadyEffect(effect),
       failureForEffect: (effect) => {
@@ -512,11 +526,11 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
       results: {
         returnedExisting: (projection) => ({
           projection,
-          evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+          evidence: executionEvidence(request.operation, "returned-existing", this.#trustedRequester, []),
         }),
         verified: (projection, effect) => ({
           projection,
-          evidence: executionEvidence(request.operation, "verified", request.requester, [
+          evidence: executionEvidence(request.operation, "verified", this.#trustedRequester, [
             { kind: effect.kind, status: "succeeded" },
           ]),
         }),
@@ -525,7 +539,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           evidence: executionEvidence(
             request.operation,
             "failed",
-            request.requester,
+            this.#trustedRequester,
             [{ kind: effect.kind, status: "failed" }],
             "not-required",
             {
@@ -601,7 +615,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
         "Post-effect Change projection verification failed.",
       );
     }
-    const validation = validateChangeReadyTransition(readyInput(input, projection.change, request.requester));
+    const validation = validateChangeReadyTransition(readyInput(input, projection.change, this.#trustedRequester));
     if (!validation.valid || projection.change.state !== "REVIEW") {
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
@@ -614,7 +628,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
 
   private async readInput(request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput> {
     try {
-      const input = requestWithProvenance(await this.#reader.read(request), request.requester, undefined);
+      const input = requestWithProvenance(await this.#reader.read(request), this.#trustedRequester, undefined);
       const projection = projectionFor(input);
       if (projection.change?.identity.rootIssue !== request.issue) {
         throw new ChangeTrustedExecutorError(
@@ -635,7 +649,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   /** Read normalized evidence without projecting it; the Ready actor owns the next projection state. */
   private async readRawInput(request: ChangeMutationRequest): Promise<ChangeProjectionInput> {
     try {
-      return requestWithProvenance(await this.#reader.read(request), request.requester, undefined);
+      return requestWithProvenance(await this.#reader.read(request), this.#trustedRequester, undefined);
     } catch (error: unknown) {
       if (error instanceof ChangeTrustedExecutorError) throw error;
       throw new ChangeTrustedExecutorError(
@@ -649,18 +663,18 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
     const results: AbortExecutionServices["results"] = {
       returnedExisting: (projection) => ({
         projection,
-        evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+        evidence: executionEvidence(request.operation, "returned-existing", this.#trustedRequester, []),
       }),
       verified: (projection, attempts) => ({
         projection,
-        evidence: executionEvidence(request.operation, "verified", request.requester, effectEvidence(attempts)),
+        evidence: executionEvidence(request.operation, "verified", this.#trustedRequester, effectEvidence(attempts)),
       }),
       recoveryRequired: (projection, attempts, failure) => ({
         projection,
         evidence: executionEvidence(
           request.operation,
           "recovery-required",
-          request.requester,
+          this.#trustedRequester,
           effectEvidence(attempts),
           "failed",
           {
@@ -689,7 +703,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
         evidence: executionEvidence(
           abortRequest.operation,
           "recovery-required",
-          abortRequest.requester,
+          this.#trustedRequester,
           effectEvidence(attempts),
           "failed",
           {
@@ -762,7 +776,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
             ...projection.change,
             provenance: {
               ...projection.change.provenance,
-              ...(abortRequest.requester === undefined ? {} : { requester: abortRequest.requester }),
+              ...(this.#trustedRequester === undefined ? {} : { requester: this.#trustedRequester }),
             },
           } satisfies Change;
           try {
@@ -803,7 +817,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           const evidence = executionEvidence(
             abortRequest.operation,
             "recovery-required",
-            abortRequest.requester,
+            this.#trustedRequester,
             effectEvidence(attempts),
             "failed",
             failureEvidence,
@@ -885,7 +899,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
         ok: true,
         input:
           input.provenance?.issuer === undefined
-            ? requestWithProvenance(input, request.requester, INARI_ISSUER_PRINCIPAL)
+            ? requestWithProvenance(input, this.#trustedRequester, INARI_ISSUER_PRINCIPAL)
             : input,
       };
     } catch (error: unknown) {
@@ -925,6 +939,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   private async executeIssue(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     const services: IssuanceExecutionServices = {
       request,
+      trustedRequester: this.#trustedRequester,
       read: (issuanceRequest) => this.readIssuanceInput(issuanceRequest),
       apply: (effect) => this.applyIssuanceEffect(effect),
       failureForEffect: (effect) => {
@@ -1003,11 +1018,11 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
       results: {
         returnedExisting: (projection) => ({
           projection,
-          evidence: executionEvidence(request.operation, "returned-existing", request.requester, []),
+          evidence: executionEvidence(request.operation, "returned-existing", this.#trustedRequester, []),
         }),
         verified: (projection, attempts) => ({
           projection,
-          evidence: executionEvidence(request.operation, "verified", request.requester, effectEvidence(attempts)),
+          evidence: executionEvidence(request.operation, "verified", this.#trustedRequester, effectEvidence(attempts)),
         }),
         effectFailed: (attempts, failure) => ({
           code: "CHANGE_EXECUTION_EFFECT_FAILED",
@@ -1016,7 +1031,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           evidence: executionEvidence(
             request.operation,
             "failed",
-            request.requester,
+            this.#trustedRequester,
             effectEvidence(attempts),
             "not-required",
             failure,
@@ -1027,7 +1042,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           evidence: executionEvidence(
             request.operation,
             "compensated",
-            request.requester,
+            this.#trustedRequester,
             effectEvidence(attempts),
             "succeeded",
             failure,
@@ -1038,7 +1053,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           evidence: executionEvidence(
             request.operation,
             compensationStatus === "succeeded" ? "compensated" : "recovery-required",
-            request.requester,
+            this.#trustedRequester,
             effectEvidence(attempts),
             compensationStatus,
             failure,
@@ -1050,7 +1065,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           evidence: executionEvidence(
             request.operation,
             "recovery-required",
-            request.requester,
+            this.#trustedRequester,
             effectEvidence(attempts),
             compensationStatus,
             failure,
@@ -1067,7 +1082,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           evidence: executionEvidence(
             request.operation,
             "recovery-required",
-            request.requester,
+            this.#trustedRequester,
             effectEvidence(attempts),
             compensationStatus ?? "failed",
             failure,

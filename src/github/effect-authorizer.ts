@@ -222,6 +222,8 @@ export interface DirectAppTrustedExecutionContext {
   readonly requestId: string;
   readonly sessionId: string;
   readonly certificateJti: string;
+  /** Session Principal identity derived at the trusted ingress boundary. */
+  readonly requester: string;
 }
 
 /**
@@ -234,7 +236,6 @@ export type TrustedExecutionContext =
   | GitHubActionsTrustedExecutionContext
   | (DirectAppTrustedExecutionContext & {
       readonly workflowTrust?: "protected";
-      readonly requester?: string;
     });
 
 export interface IssuerMutationRequest {
@@ -362,6 +363,7 @@ const DIRECT_APP_TRUSTED_EXECUTION_KEYS = new Set([
   "requestId",
   "sessionId",
   "certificateJti",
+  "requester",
 ]);
 const MUTATION_REQUEST_KEYS = new Set(["version", "authority", "execution", "target", "effects"]);
 const CREDENTIAL_REQUEST_KEYS = new Set(["version", "authority", "app", "execution", "target", "permissions"]);
@@ -735,13 +737,18 @@ function validateDirectAppTrustedExecutionContext(
   const requestId = validateBinding("requestId");
   const sessionId = validateBinding("sessionId");
   const certificateJti = validateBinding("certificateJti");
+  const requesterPresent = requireProperty(input, "requester", path, diagnostics);
+  const requester = requesterPresent
+    ? normalizeRequester(input.requester, `${path}.requester`, diagnostics)
+    : undefined;
 
   if (
     diagnostics.length > 0 ||
     repositoryResult.value === undefined ||
     requestId === undefined ||
     sessionId === undefined ||
-    certificateJti === undefined
+    certificateJti === undefined ||
+    requester === undefined
   ) {
     return report(diagnostics);
   }
@@ -754,6 +761,7 @@ function validateDirectAppTrustedExecutionContext(
       requestId,
       sessionId,
       certificateJti,
+      requester,
     }),
   );
 }

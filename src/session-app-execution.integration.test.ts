@@ -407,6 +407,24 @@ test("MCP privileged execution has direct-App authorization parity and preserves
   assert.equal(mcpTamperedProvider.state.branchPresent, true);
 });
 
+test("MCP forwards a signed requester assertion to the same rejecting direct-App boundary", async () => {
+  const session = signedSession("change.abort", { version: 1, issue: ISSUE, requester: "github:spoofed" }, [
+    { kind: "change.abort", issue: ISSUE },
+  ]);
+  const directProvider = providerFixture("abort", session.authority);
+  const direct = await directExecutor(session, directProvider).execute(session.envelope);
+  const mcpProvider = providerFixture("abort", session.authority);
+  const throughMcp = await mcpExecutor(session, mcpProvider);
+
+  assert.deepEqual(throughMcp, direct);
+  assert.equal(direct.status, "failed");
+  assert.equal(direct.failure?.phase, "request");
+  assert.equal(directProvider.state.pullRequestState, "open");
+  assert.equal(directProvider.state.branchPresent, true);
+  assert.equal(mcpProvider.state.pullRequestState, "open");
+  assert.equal(mcpProvider.state.branchPresent, true);
+});
+
 test("MCP and direct-App reject expired, wrong-repository, wrong-task, and overbroad authority identically", async () => {
   const cases = [
     {
@@ -464,6 +482,7 @@ test("authenticated direct-App Change mutation returns verified App provenance a
   assert.equal(result.operation, "change.abort");
   assert.equal(result.provenance?.stage, "verified");
   assert.equal(result.provenance?.app?.installationId, INSTALLATION_ID);
+  assert.match(result.execution?.evidence?.requester ?? "", /^session:/u);
   assert.equal(provider.state.pullRequestState, "closed");
   assert.equal(provider.state.branchPresent, false);
   assert.ok(
