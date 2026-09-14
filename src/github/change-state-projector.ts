@@ -58,7 +58,7 @@ import {
   type GitHubRepositoryGovernanceTree,
   type GitHubRepositoryPullRequestEvidence,
 } from "./repository-evidence-reader.js";
-import type { IssuerRepositoryIdentity } from "./issuer-authority.js";
+import type { InariIssuerAppIdentity, IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { ContractProvenance, CanonicalContract, PullRequestBranchGovernance } from "../contract/ir.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 
@@ -69,6 +69,8 @@ export interface GitHubChangeStateProjectorOptions {
   readonly pullRequestNumber?: number;
   readonly branchGovernance?: PullRequestBranchGovernance;
   readonly transport: GitHubRepositoryEvidenceReaderOptions["transport"];
+  /** Provider Principal established by the enclosing credential boundary. */
+  readonly providerPrincipal?: InariIssuerAppIdentity;
   readonly cwd?: string;
   readonly remoteGovernance?: RepositoryGovernanceSourceReader;
   readonly semanticPullRequestPlan?: unknown;
@@ -109,6 +111,8 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
   readonly requiresGovernedIssueValidation: boolean;
   readonly #options: GitHubChangeStateProjectorOptions;
   readonly #reader: GitHubRepositoryEvidenceReader;
+  readonly providerPrincipal: InariIssuerAppIdentity | undefined;
+  readonly evidenceProvenance: GitHubRepositoryEvidenceReader["provenance"];
 
   constructor(options: GitHubChangeStateProjectorOptions) {
     this.#options = options;
@@ -118,8 +122,11 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
         repository: options.repository,
         repositoryId: options.identity.repositoryId,
         transport: options.transport,
+        ...(options.providerPrincipal === undefined ? {} : { providerPrincipal: options.providerPrincipal }),
         ...(options.pullRequestNumber === undefined ? {} : { pullRequestNumber: options.pullRequestNumber }),
       });
+    this.providerPrincipal = this.#reader.providerPrincipal;
+    this.evidenceProvenance = this.#reader.provenance;
     this.requiresGovernedIssueValidation = options.cwd !== undefined || options.remoteGovernance !== undefined;
   }
 

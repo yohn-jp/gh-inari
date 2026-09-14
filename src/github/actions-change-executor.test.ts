@@ -56,6 +56,9 @@ const target: RepositoryIdentity = {
   nameWithOwner: "acme/inari",
 };
 const checkedOutSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const ACTIONS_APP_PRIVATE_KEY_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
+  .privateKey.export({ type: "pkcs8", format: "pem" })
+  .toString();
 
 function effectSuccessEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
   switch (effect.kind) {
@@ -1085,7 +1088,7 @@ function trustedEnvironment(overrides: Record<string, string | undefined> = {}):
     GITHUB_WORKFLOW_SHA: checkedOutSha,
     INARI_ISSUER_APP_ID: "218",
     INARI_ISSUER_INSTALLATION_ID: "219",
-    INARI_ISSUER_APP_PRIVATE_KEY: "unused-in-these-tests",
+    INARI_ISSUER_APP_PRIVATE_KEY: ACTIONS_APP_PRIVATE_KEY_PEM,
     ...overrides,
   };
 }
@@ -1128,6 +1131,18 @@ function runtimeTrustFetch(authorities: readonly ReturnType<typeof runtimeAuthor
     const method = String(init?.method ?? "GET").toUpperCase();
     const requestPath = decodeURIComponent(url.pathname.replace(/^\//u, ""));
     calls.push(`${method} ${requestPath}`);
+    if (requestPath.startsWith("app/installations/") && method === "POST") {
+      const requestBody = JSON.parse(String(init?.body)) as { readonly permissions?: unknown };
+      return new Response(
+        JSON.stringify({
+          token: "actions-app-installation-token",
+          expires_at: "2099-01-01T00:00:00.000Z",
+          permissions: requestBody.permissions ?? { contents: "read", issues: "read", pull_requests: "read" },
+          repositories: [{ id: 218000001, full_name: "acme/inari" }],
+        }),
+        { status: 201 },
+      );
+    }
     if (requestPath === "repos/acme/inari" && method === "GET") {
       return new Response(
         JSON.stringify({ id: 218000001, full_name: "acme/inari", fork: false, default_branch: "main" }),
@@ -1188,7 +1203,7 @@ test("Actions selects the verifier exclusively from signed kid and rejects inact
   });
   assert.equal(typeof validExecutor.execute, "function");
   assert.equal(
-    validCalls.some((call) => !call.startsWith("GET ")),
+    validCalls.some((call) => !call.startsWith("GET ") && !call.startsWith("POST app/installations/")),
     false,
   );
 
@@ -1226,7 +1241,7 @@ test("Actions selects the verifier exclusively from signed kid and rejects inact
       testCase.name,
     );
     assert.equal(
-      calls.some((call) => !call.startsWith("GET ")),
+      calls.some((call) => !call.startsWith("GET ") && !call.startsWith("POST app/installations/")),
       false,
       testCase.name,
     );
@@ -1720,16 +1735,90 @@ test("workflow_dispatch and workflow_call both require a bounded authenticated a
   }
 });
 
-test("read-only Change executor construction does not require Issuer App secrets", async () => {
+test("read-only Change executor construction requires the App-backed evidence boundary", async () => {
   const environment = trustedEnvironment();
   delete environment.INARI_ISSUER_APP_ID;
   delete environment.INARI_ISSUER_INSTALLATION_ID;
   delete environment.INARI_ISSUER_APP_PRIVATE_KEY;
+  await assert.rejects(
+    createGitHubActionsChangeExecutor({
+      cwd: process.cwd(),
+      request: changeReadRequest(218),
+      environment,
+      fetch: repositoryOnlyFetch(false),
+    }),
+    (error: unknown) =>
+      error instanceof GitHubActionsChangeExecutorError && error.details?.stage === "issuer-configuration",
+  );
+});
+
+test("Actions semantic evidence reads use the brokered App capability after bootstrap", async () => {
+  const calls: Array<{ readonly method: string; readonly path: string; readonly authorization: string }> = [];
+  const fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    const method = String(init?.method ?? "GET").toUpperCase();
+    const path = decodeURIComponent(url.pathname.replace(/^\//u, ""));
+    const headers = new Headers(init?.headers);
+    calls.push({ method, path: `${path}${url.search}`, authorization: headers.get("authorization") ?? "" });
+
+    if (path.startsWith("app/installations/") && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { readonly permissions?: unknown };
+      return new Response(
+        JSON.stringify({
+          token: "brokered-app-token",
+          expires_at: "2099-01-01T00:00:00.000Z",
+          permissions: body.permissions,
+          repositories: [{ id: 218000001, full_name: "acme/inari" }],
+        }),
+        { status: 201 },
+      );
+    }
+    if (path === "repos/acme/inari" && method === "GET") {
+      return new Response(
+        JSON.stringify({ id: 218000001, full_name: "acme/inari", fork: false, default_branch: "main" }),
+        { status: 200 },
+      );
+    }
+    if (path === "repos/acme/inari/issues/218" && method === "GET") {
+      return new Response(
+        JSON.stringify({ number: 218, title: "feat: Execute Change plans safely", state: "open", body: null }),
+        { status: 200 },
+      );
+    }
+    if (path === "repos/acme/inari/git/ref/heads/feat/218-execute-change-plans-safely" && method === "GET") {
+      return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+    }
+    if (path === "repos/acme/inari/git/matching-refs/heads/" && method === "GET") {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+    if (path === "repos/acme/inari/pulls" && method === "GET") {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+    throw new Error(`unexpected provider request: ${method} ${path}${url.search}`);
+  }) as typeof globalThis.fetch;
+
   const executor = await createGitHubActionsChangeExecutor({
     cwd: process.cwd(),
     request: changeReadRequest(218),
-    environment,
-    fetch: repositoryOnlyFetch(false),
+    environment: trustedEnvironment(),
+    fetch,
   });
-  assert.equal(typeof executor.read, "function");
+  await executor.read(changeReadRequest(218));
+
+  const semanticReads = calls.filter(
+    (call) =>
+      call.path.includes("/issues/218") ||
+      call.path.includes("/git/ref/") ||
+      call.path.includes("/git/matching-refs/") ||
+      call.path.includes("/pulls"),
+  );
+  assert.ok(semanticReads.length > 0);
+  assert.equal(
+    semanticReads.every((call) => call.authorization === "Bearer brokered-app-token"),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.authorization === "Bearer read-token" && call.path !== "repos/acme/inari"),
+    false,
+  );
 });

@@ -18,7 +18,7 @@ Cloudflare Worker (src/worker.ts)
   -> createDirectAppSessionExecutor (src/github/direct-app-execution.ts)
        -> GitHubAppInstallationCredentialBroker (#464)
        -> createAppRepositoryEvidenceReader (#464-backed evidence adapter)
-       -> GitHubActionsEvidenceReader / TrustedChangeExecutor (existing Change Core)
+       -> GitHubRepositoryEvidenceReader / GitHubChangeStateProjector / TrustedChangeExecutor (existing Change Core)
        -> executeBranchAdvance (#466)
   -> createDirectAppHttpHandler (#377, src/agent-authority/direct-app-http.ts)
 ```

@@ -18,7 +18,7 @@ import type {
 import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "./types.js";
 import type { DelegatorSourceReader } from "../agent-authority/delegator-trust.js";
-import type { RepositoryIdentity } from "./effect-authorizer.js";
+import type { AppPrincipalIdentity, RepositoryIdentity } from "./effect-authorizer.js";
 
 const MAX_REPOSITORY_REF_LENGTH = 255;
 const MAX_REPOSITORY_SHA_LENGTH = 128;
@@ -33,6 +33,11 @@ export class AppRepositoryEvidenceReaderError extends Error {
     super("Trusted App repository evidence read failed closed.");
     this.name = "AppRepositoryEvidenceReaderError";
   }
+}
+
+export interface AppRepositoryEvidenceReader extends DelegatorSourceReader {
+  /** App Provider Principal that owns the capability supplying these reads. */
+  readonly providerPrincipal: AppPrincipalIdentity;
 }
 
 function fail(): never {
@@ -166,8 +171,11 @@ export function createAppRepositoryEvidenceReader(
   capability: GitHubAppRepositoryReadCapability,
   repository: GitHubChangeEffectRepository,
   identity: RepositoryIdentity,
-): DelegatorSourceReader {
-  return createRepositoryEvidenceReader(capability.transport, repository, identity);
+): AppRepositoryEvidenceReader {
+  return Object.freeze({
+    ...createRepositoryEvidenceReader(capability.transport, repository, identity),
+    providerPrincipal: capability.providerPrincipal,
+  });
 }
 
 function repositoryContext(identity: RepositoryIdentity): RepositoryContext {

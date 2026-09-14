@@ -11,6 +11,7 @@ import type { GitHubAppRepositoryReadTransport } from "./app-installation-creden
 import type { GitHubChangeEffectRepository, GitHubChangeEffectResponse } from "./change-effect-adapter.js";
 import type { ChangePullRequestEvidence } from "../change.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
+import type { InariIssuerAppIdentity } from "./issuer-authority.js";
 
 export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
   "repository-configuration",
@@ -50,7 +51,17 @@ export interface GitHubRepositoryEvidenceReaderOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly repositoryId: string;
   readonly transport: GitHubAppRepositoryReadTransport;
+  /** Explicit provider identity for the transport that supplies this evidence. */
+  readonly providerPrincipal?: InariIssuerAppIdentity;
   readonly pullRequestNumber?: number;
+}
+
+export interface GitHubRepositoryEvidenceReaderProvenance {
+  readonly providerPrincipal: InariIssuerAppIdentity;
+  readonly repository: Readonly<{
+    readonly host: string;
+    readonly repositoryId: string;
+  }>;
 }
 
 export interface GitHubRepositoryEvidence {
@@ -173,9 +184,22 @@ function apiPath(repository: GitHubChangeEffectRepository, suffix: string): stri
 
 export class GitHubRepositoryEvidenceReader {
   readonly #options: GitHubRepositoryEvidenceReaderOptions;
+  readonly providerPrincipal: InariIssuerAppIdentity | undefined;
+  readonly provenance: GitHubRepositoryEvidenceReaderProvenance | undefined;
 
   constructor(options: GitHubRepositoryEvidenceReaderOptions) {
     this.#options = options;
+    this.providerPrincipal = options.providerPrincipal;
+    this.provenance =
+      options.providerPrincipal === undefined
+        ? undefined
+        : Object.freeze({
+            providerPrincipal: options.providerPrincipal,
+            repository: Object.freeze({
+              host: options.repository.hostname,
+              repositoryId: options.repositoryId,
+            }),
+          });
   }
 
   async readRepository(): Promise<{ readonly defaultBranch: string }> {

@@ -190,6 +190,12 @@ function appReadCapability(authority: RuntimeAuthority): GitHubAppRepositoryRead
   const content = Buffer.from(canonicalRuntimeAuthorityJson(authority), "utf8").toString("base64");
   const artifact = renderRuntimeAuthorityArtifact(authority);
   return {
+    providerPrincipal: {
+      kind: "github-app",
+      slug: "inari-issuer",
+      appId: "1",
+      principal: "app:inari-issuer",
+    },
     scope: {
       app: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
       installation: { appId: "1", installationId: "2", repositoryHost: "github.com" },
