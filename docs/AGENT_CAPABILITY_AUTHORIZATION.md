@@ -1,6 +1,7 @@
 # Inari Repository-Native Agent Capability Authorization
 
-Status: proposed normative architecture for Epic #364 and Issue #365. Implementation begins only after this document is merged.
+Status: normative Session/App authorization architecture for Epic #364 and
+Issue #365, reconciled with the canonical responsibility vocabulary by #552.
 
 This document extends [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md),
 [`SEMANTIC_ARTIFACT_CONTRACTS.md`](./SEMANTIC_ARTIFACT_CONTRACTS.md), and
@@ -66,26 +67,34 @@ For this architecture, Inari is:
 > A repository-native semantic authorization plane for AI coding agents.
 
 Inari is not a general identity provider and is not defined by a hosted control-plane
-service. It uses GitHub's existing repository and GitHub App authorities while adding a
-cryptographic delegation layer whose semantics are repository-native.
+service. It uses GitHub as repository Authority and the GitHub App as a bounded
+Provider Principal while adding a cryptographic delegation layer whose
+semantics are repository-native.
 
-The product separates six roles:
+The product separates these roles:
 
-- **Repository governance** — declares trusted Runtime Authorities and the maximum
-  semantic authority each Runtime may delegate.
+- **Governance Canon** — declares trusted Delegators and the maximum bounded
+  Session capability each Delegator may issue.
 - **Delegator** — holds a long-lived delegation key and certifies bounded Agent
   Sessions. It is a delegation principal, not a GitHub mutation principal.
-- **Agent Session** — holds one ephemeral Session private key and a Runtime-signed
-  Session Certificate. It requests only the authority delegated to that session.
-- **Inari Core / trusted executor** — resolves canonical repository semantics, projects
-  current state, admits transitions, plans effects, and verifies postconditions.
-- **Inari GitHub App / issuer executor** — holds GitHub mutation credentials, verifies
-  delegated authority, and applies only Inari-admitted effects.
-- **GitHub** — remains the authoritative observable repository state and the provider
-  enforcing the App's installation permission ceiling, Rulesets, reviews, and merges.
+- **Session Principal** — holds one ephemeral Session private key and a
+  Delegator-signed Session Certificate. It requests only the bounded
+  capability delegated to that session.
+- **Semantic Core Roles** — resolve contracts, project current state, plan
+  effects, and verify postconditions without becoming repository Authority.
+- **Session Authenticator / Capability Authorizer** — authenticate the Session
+  proof and admit its bounded semantic capability as separate Roles.
+- **Executor / Lifecycle Controller** — coordinate an admitted operation and
+  control its lifecycle sequencing; XState is the current controller
+  implementation.
+- **App Principal / Credential Broker / Effect Authorizer** — contain provider
+  credentials and admit only already-planned GitHub effects.
+- **GitHub** — remains the repository Authority and provider enforcing the
+  App installation permission ceiling, Rulesets, reviews, and merges.
 
-The architecture intentionally separates **delegation authority** from **execution
-authority**.
+The architecture intentionally separates delegation, semantic execution, and
+provider identity. No Runtime Host, transport, XState actor, or App replaces
+GitHub as repository Authority.
 
 ```text
 Repository                         GitHub
@@ -129,11 +138,12 @@ Repository policy, canonical artifact derivation, branch identity, PR rendering,
 artifact validation remain Core/Semantic Artifact responsibilities. Certificates do not
 carry duplicate copies of those semantics.
 
-### 3.3 XState remains execution-control authority
+### 3.3 XState implements the Lifecycle Controller
 
-The XState machines remain responsible for lifecycle legality and trusted execution
-sequencing. Capability authorization is an admission gate before privileged effects, not
-a replacement state machine.
+The XState machines implement lifecycle legality and trusted execution
+sequencing as the Lifecycle Controller. They are not a repository Authority or
+state store. Capability authorization is an admission gate before privileged
+effects, not a replacement state machine.
 
 Ambiguous GitHub outcomes continue to use the existing pattern:
 
@@ -151,22 +161,25 @@ request
 
 A network error after an effect never proves the effect did not happen.
 
-### 3.4 GitHub App remains mutation authority
+### 3.4 App Principal remains the provider identity
 
-`INARI_ISSUER_APP.md` remains correct that App private keys and installation tokens are
-not caller credentials. This architecture strengthens that boundary by also prohibiting
-Runtime delegation keys from becoming caller-to-App execution credentials.
+`INARI_ISSUER_APP.md` remains correct that App private keys and installation
+tokens are not caller credentials. The App Principal is not GitHub Authority or
+a semantic Executor. This architecture strengthens that boundary by also
+prohibiting Delegator keys from becoming caller-to-App execution credentials.
 
-### 3.5 MCP and Actions become transports/executors, not trust roots
+### 3.5 MCP, Direct App, Actions, and CLI are adapters and profiles
 
 The native MCP work under #267 remains useful where it defines a typed agent protocol,
-transport-neutral boundaries, and App credential containment. It is no longer normative
-that Inari must have a central hosted requester-authentication/session service or that
-GitHub Actions must mediate every repository operation.
+transport-neutral boundaries, and App credential containment. Neither a central hosted
+requester-authentication/session service nor Actions mediation of every repository
+operation is required.
 
-A hosted MCP endpoint, local stdio server, direct HTTPS App endpoint, Actions bridge, or
-other adapter may carry the same signed Session request. None may change the
-authorization model.
+A hosted MCP endpoint, local stdio server, direct HTTPS App endpoint, Actions
+bridge, CLI, or other adapter may carry the same signed Session request. MCP is
+a Protocol Adapter; Direct App is an ingress/deployment composition; Actions is
+a compatibility Deployment Profile; and CLI is a Client Adapter. None may
+change the authorization model or become a trust root.
 
 ## 4. Normative trust topology
 
@@ -1111,7 +1124,7 @@ Agent from obtaining Runtime/App/user credentials with larger authority.
 Epic #267 correctly identified several durable boundaries:
 
 - MCP can be a typed native Inari protocol;
-- transport mechanics must not become semantic authority;
+- transport mechanics must not define semantic policy;
 - App credentials must remain outside agents;
 - Core owns repository semantics;
 - hosted and self-hosted transports should share one contract.
@@ -1274,6 +1287,6 @@ these questions:
 
 The implementation must preserve the central invariant:
 
-> GitHub authority remains inside the App. Delegator authority can only delegate. Agent
-> Sessions can only exercise the bounded semantic authority certified for that session
+> GitHub provider credentials remain inside the App boundary. The Delegator can only
+> delegate. Agent Sessions can only exercise the bounded semantic capability certified for that session
 > and still admitted by the repository's current canonical policy and state.

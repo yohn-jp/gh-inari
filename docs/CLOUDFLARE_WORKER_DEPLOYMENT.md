@@ -11,6 +11,14 @@ branch semantics, and no persistent state. It is pure deployment/composition:
 environment/secret validation, the frozen HTTP transport, and a bounded
 non-secret `/healthz`.
 
+In the canonical architecture this is the **Direct App / Worker Deployment
+Profile**. Cloudflare Worker is the Runtime Host, `POST /v1/execute` is the
+Ingress/HTTP Transport Adapter, the App Principal and Credential Broker contain
+provider credentials, and the shared Session-authorized Executor/Lifecycle
+Controller supplies semantics. The profile is therefore equivalent in meaning
+to MCP/App and Actions compatibility paths; it is not a new Authority or
+execution policy.
+
 ## Architecture
 
 ```
