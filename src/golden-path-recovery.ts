@@ -15,10 +15,10 @@ import {
   type ChangeTransitionRecoveryPlan,
 } from "./change.js";
 import type {
-  ChangeRemoteExecutionEvidence,
-  ChangeRemoteExecutionFailureEvidence,
-  ChangeRemoteExecutionResult,
-} from "./change-executor.js";
+  ChangeExecutionEvidence,
+  ChangeExecutionFailureEvidence,
+  ChangeExecutionResult,
+} from "./change-execution-port.js";
 import {
   GOLDEN_PATH_ACTION_OWNERS,
   GOLDEN_PATH_AUTOMATIC_CLEANUP,
@@ -67,17 +67,17 @@ export interface GoldenPathAuthoritativeReread {
  */
 export interface GoldenPathRecoveryInput {
   readonly projection?: ChangeProjectionResult;
-  readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly evidence?: ChangeExecutionEvidence;
   readonly recoveryPlan?: ChangeRecoveryPlan;
   /** Optional operation discriminator when only a Change projection is available. */
-  readonly operation?: ChangeRemoteExecutionEvidence["operation"];
+  readonly operation?: ChangeExecutionEvidence["operation"];
   readonly authoritativeReread?: GoldenPathAuthoritativeReread;
 }
 
 export type GoldenPathRecoverySource =
   | GoldenPathRecoveryInput
-  | ChangeRemoteExecutionResult
-  | ChangeRemoteExecutionEvidence
+  | ChangeExecutionResult
+  | ChangeExecutionEvidence
   | ChangeRecoveryPlan
   | ChangeProjectionResult;
 
@@ -188,7 +188,7 @@ function sourceInput(source: GoldenPathRecoverySource): GoldenPathRecoveryInput 
     return source as GoldenPathRecoveryInput;
   }
   if (hasOwn(source, "outcome") && hasOwn(source, "effects")) {
-    return { evidence: source as unknown as ChangeRemoteExecutionEvidence };
+    return { evidence: source as unknown as ChangeExecutionEvidence };
   }
   if (source.operation === "recover-issue" || source.operation === "recover-transition") {
     return { recoveryPlan: source as unknown as ChangeRecoveryPlan };
@@ -204,7 +204,7 @@ function projectionFor(input: GoldenPathRecoveryInput): ChangeProjectionResult |
   return input.recoveryPlan?.failureEvidence.projection;
 }
 
-function failureEvidenceFor(failure: ChangeIssuanceFailureEvidence): ChangeRemoteExecutionFailureEvidence {
+function failureEvidenceFor(failure: ChangeIssuanceFailureEvidence): ChangeExecutionFailureEvidence {
   return {
     kind: failure.effect.kind,
     code: failure.code,
@@ -243,7 +243,7 @@ function invalidPlanRecovery(input: GoldenPathRecoveryInput): GoldenPathRecovery
     : recovery("ISSUANCE_COMPENSATION_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
 }
 
-function evidenceFor(input: GoldenPathRecoveryInput): ChangeRemoteExecutionEvidence | undefined {
+function evidenceFor(input: GoldenPathRecoveryInput): ChangeExecutionEvidence | undefined {
   if (input.evidence !== undefined) return input.evidence;
   const plan = input.recoveryPlan;
   if (plan === undefined) return undefined;
@@ -291,7 +291,7 @@ function rereadProven(input: GoldenPathRecoveryInput): boolean {
   );
 }
 
-function idempotencyProven(evidence: ChangeRemoteExecutionEvidence | undefined): boolean {
+function idempotencyProven(evidence: ChangeExecutionEvidence | undefined): boolean {
   // Only the existing executor outcome is accepted as idempotency evidence;
   // an issuance transaction key is an identity, not a retry authorization.
   return evidence?.outcome === "returned-existing";
@@ -329,7 +329,7 @@ function recovery(
 function issuanceRecovery(
   input: GoldenPathRecoveryInput,
   projection: ChangeProjectionResult | undefined,
-  evidence: ChangeRemoteExecutionEvidence,
+  evidence: ChangeExecutionEvidence,
 ): GoldenPathRecovery | null {
   const plan = input.recoveryPlan;
   // A validated Core plan (or the explicit `compensated` executor outcome)
@@ -409,10 +409,7 @@ function abortRecovery(
   return recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED");
 }
 
-function postEffectRecovery(
-  input: GoldenPathRecoveryInput,
-  evidence: ChangeRemoteExecutionEvidence,
-): GoldenPathRecovery {
+function postEffectRecovery(input: GoldenPathRecoveryInput, evidence: ChangeExecutionEvidence): GoldenPathRecovery {
   const projection = projectionFor(input);
   const unavailable =
     projection === undefined || projection.status === "unavailable" || projection.status === "ambiguous";
@@ -592,4 +589,4 @@ export function deserializeGoldenPathRecovery(serialized: string): GoldenPathRec
   return result.recovery;
 }
 
-export type { ChangeRemoteExecutionEvidence, ChangeRemoteExecutionResult, ChangeTransitionRecoveryPlan };
+export type { ChangeExecutionEvidence, ChangeExecutionResult, ChangeTransitionRecoveryPlan };

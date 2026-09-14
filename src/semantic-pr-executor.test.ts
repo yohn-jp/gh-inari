@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { runCli } from "./cli.js";
 import type { GhCommandResult, GhTransport, GhTransportOptions } from "./github/index.js";
 import { GitHubAdapter } from "./github/index.js";
-import { SemanticPullRequestExecutor, type SemanticPullRequestExecutionRequest } from "./semantic-pr-executor.js";
+import { LocalSemanticPullRequestExecutor, type SemanticPullRequestExecutionRequest } from "./semantic-pr-executor.js";
 import { compileEffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
 import { parseArtifactContract } from "./contract/artifact-contract.js";
 import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
@@ -297,7 +297,7 @@ test("plan-only executor admission remains versioned and rejects tampered plans"
     capabilities: ["github.pull_request.implements.closing-reference"],
   });
   const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: new ExecutorTransport() });
-  const executor = new SemanticPullRequestExecutor({ adapter });
+  const executor = new LocalSemanticPullRequestExecutor({ adapter });
   const request: SemanticPullRequestExecutionRequest = {
     version: "1",
     plan: { ...plan, desired: { ...plan.desired, title: "tampered" } },

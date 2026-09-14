@@ -48,6 +48,14 @@
       "types": "./dist/change-executor.d.ts",
       "import": "./dist/change-executor.js"
     },
+    "./change-execution-port": {
+      "types": "./dist/change-execution-port.d.ts",
+      "import": "./dist/change-execution-port.js"
+    },
+    "./actions-change-execution-adapter": {
+      "types": "./dist/github/actions-change-execution-adapter.d.ts",
+      "import": "./dist/github/actions-change-execution-adapter.js"
+    },
     "./change-handoff": {
       "types": "./dist/change-handoff.d.ts",
       "import": "./dist/change-handoff.js"

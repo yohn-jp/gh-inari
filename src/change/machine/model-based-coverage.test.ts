@@ -15,7 +15,7 @@ import {
   type ChangeTransition,
   type ChangeTransitionPlan,
 } from "../../change.js";
-import type { ChangeRemoteExecutionResult } from "../../change-executor.js";
+import type { ChangeExecutionResult } from "../../change-execution-port.js";
 import { ChangeTrustedExecutorError } from "../../change-trusted-executor.js";
 import {
   createGoldenPathActors,
@@ -169,7 +169,7 @@ function graphDiagnostic(): ChangeDiagnostic {
   return { version: 1, code: "CHANGE_INVALID_PLAN", path: "$.model", message: "deterministic model precondition" };
 }
 
-function graphResult(projection: ChangeProjectionResult): ChangeRemoteExecutionResult {
+function graphResult(projection: ChangeProjectionResult): ChangeExecutionResult {
   return { projection };
 }
 

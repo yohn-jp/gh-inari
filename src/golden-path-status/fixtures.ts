@@ -18,7 +18,7 @@ import {
   type TrustedExecutionContext,
 } from "../github/issuer-authority.js";
 import { TrustedChangeExecutor, type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
-import type { ChangeRemoteMutationRequest, ChangeRemoteReadRequest } from "../change-executor.js";
+import type { ChangeMutationRequest, ChangeReadRequest } from "../change-execution-port.js";
 
 /** Stable identities used by production-path certification tests. */
 export const GOLDEN_PATH_IDENTITY: ChangeIdentity = Object.freeze({
@@ -206,7 +206,7 @@ export class DeterministicEvidenceReader implements ChangeTrustedEvidenceReader 
 
   constructor(public current: ChangeProjectionInput) {}
 
-  async read(_request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput> {
+  async read(_request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput> {
     this.readCount += 1;
     if (this.failNextRead) {
       this.failNextRead = false;
@@ -408,10 +408,7 @@ export function createGoldenPathActors(
   return { reader, issuer, executor };
 }
 
-export function mutationRequest(
-  operation: "issue" | "ready" | "abort",
-  requester?: string,
-): ChangeRemoteMutationRequest {
+export function mutationRequest(operation: "issue" | "ready" | "abort", requester?: string): ChangeMutationRequest {
   return {
     version: 1,
     operation,

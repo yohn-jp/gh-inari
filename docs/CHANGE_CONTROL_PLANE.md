@@ -142,7 +142,8 @@ The following invariants are architectural requirements.
 - Human and agent callers never receive GitHub App private keys or installation tokens.
 - Requester, issuer, implementer, reviewer, and merger identities remain distinguishable.
 - Pure deterministic operations remain local-capable.
-- Authoritative repository transitions use a trusted remote executor.
+- Authoritative repository transitions use a trusted Change Executor reached
+  through the transport-neutral Change execution port.
 - Actions workflow YAML is not a second semantic authority.
 - GitHub is the initial state store for Change projection.
 - A separate persistent Change database is not introduced without a demonstrated requirement.
@@ -507,7 +508,7 @@ Authoritative repository transitions use the trusted remote path because they ap
 ```text
 pure deterministic computation     authoritative repository mutation
 ------------------------------     ---------------------------------
-local Inari Core                   trusted remote executor
+local Inari Core                   trusted Change Executor
 ```
 
 The architecture does not turn Inari into an "everything is a GitHub Action" product.

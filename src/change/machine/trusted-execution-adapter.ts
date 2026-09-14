@@ -49,14 +49,14 @@ import {
   type TrustedExecutionContext,
 } from "../../github/issuer-authority.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  type ChangeRemoteEffectEvidence,
-  type ChangeRemoteExecutionEvidence,
-  type ChangeRemoteExecutionResult,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteMutationRequest,
-  type ChangeRemoteReadRequest,
-} from "../../change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  type ChangeEffectEvidence,
+  type ChangeExecutionEvidence,
+  type ChangeExecutionResult,
+  type ChangeExecutionPort,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
+} from "../../change-execution-port.js";
 import {
   executeReadyWithXState,
   type ReadyEffectResult,
@@ -86,7 +86,7 @@ import {
 
 export interface ChangeTrustedEvidenceReader {
   /** Returns bounded Core projection input; it never returns a GitHub response. */
-  read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput>;
+  read(request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput>;
   /** Production readers may require the governed root-Issue proof for issuance. */
   readonly requiresGovernedIssueValidation?: boolean;
 }
@@ -121,13 +121,13 @@ export function isChangeTrustedExecutorErrorCode(value: unknown): value is Chang
 export class ChangeTrustedExecutorError extends Error {
   readonly code: ChangeTrustedExecutorErrorCode;
   readonly diagnostics: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly evidence?: ChangeExecutionEvidence;
 
   constructor(
     code: ChangeTrustedExecutorErrorCode,
     message: string,
     diagnostics: readonly ChangeDiagnostic[] = [],
-    evidence?: ChangeRemoteExecutionEvidence,
+    evidence?: ChangeExecutionEvidence,
   ) {
     super(message);
     this.name = "ChangeTrustedExecutorError";
@@ -175,7 +175,7 @@ function projectionIdentity(input: ChangeProjectionInput): ChangeIdentity | unde
     : undefined;
 }
 
-function effectEvidence(attempts: readonly ChangeIssuanceEffectAttempt[]): readonly ChangeRemoteEffectEvidence[] {
+function effectEvidence(attempts: readonly ChangeIssuanceEffectAttempt[]): readonly ChangeEffectEvidence[] {
   return attempts.map((attempt) => ({
     kind: attempt.effect.kind,
     status: attempt.status,
@@ -186,16 +186,16 @@ function effectEvidence(attempts: readonly ChangeIssuanceEffectAttempt[]): reado
 }
 
 function executionEvidence(
-  operation: ChangeRemoteMutationRequest["operation"],
-  outcome: ChangeRemoteExecutionEvidence["outcome"],
+  operation: ChangeMutationRequest["operation"],
+  outcome: ChangeExecutionEvidence["outcome"],
   requester: string | undefined,
-  effects: readonly ChangeRemoteEffectEvidence[],
-  compensation: ChangeRemoteExecutionEvidence["compensation"] = "not-required",
+  effects: readonly ChangeEffectEvidence[],
+  compensation: ChangeExecutionEvidence["compensation"] = "not-required",
   failure?: ChangeIssuanceFailureEvidence,
   compensationFailure?: ChangeIssuanceFailureEvidence,
-): ChangeRemoteExecutionEvidence {
+): ChangeExecutionEvidence {
   return {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation,
     outcome,
     ...(requester === undefined ? {} : { requester }),
@@ -407,7 +407,7 @@ const DEFAULT_ABORT_READ_FAILURE = {
   diagnostics: [],
 } as const;
 
-export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
+export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #reader: ChangeTrustedEvidenceReader;
   readonly #issuerAuthority: Pick<InariIssuerAppAuthority, "applyEffects">;
   readonly #execution: TrustedExecutionContext;
@@ -420,7 +420,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     this.#target = options.target;
   }
 
-  async read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult> {
+  async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
     const boundRequest = this.bindRequester(request);
     try {
       return projectionFor(await this.readInput(boundRequest));
@@ -433,7 +433,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     }
   }
 
-  async execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+  async execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     const boundRequest = this.bindRequester(request);
     if (boundRequest.operation === "issue") return this.executeIssue(boundRequest);
     if (boundRequest.operation === "ready") return this.executeReady(boundRequest);
@@ -444,7 +444,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
    * Bind semantic provenance to the authenticated trusted runtime actor.
    * Caller input may corroborate that identity, but can never replace it.
    */
-  private bindRequester<T extends ChangeRemoteMutationRequest | ChangeRemoteReadRequest>(request: T): T {
+  private bindRequester<T extends ChangeMutationRequest | ChangeReadRequest>(request: T): T {
     const trustedRequester = this.#execution.runtime === "github-actions" ? this.#execution.requester : undefined;
     if (trustedRequester !== undefined && request.requester !== undefined && request.requester !== trustedRequester) {
       throw new ChangeTrustedExecutorError(
@@ -463,7 +463,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     return { ...request, requester: trustedRequester } as T;
   }
 
-  private async executeReady(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+  private async executeReady(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     const outcome: ReadyExecutionOutcome = await executeReadyWithXState({
       request,
       read: (readyRequest) => this.readReadyInput(readyRequest),
@@ -528,7 +528,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     throw new ChangeTrustedExecutorError(outcome.failure.code, outcome.failure.message, outcome.failure.diagnostics);
   }
 
-  private async readReadyInput(request: ChangeRemoteMutationRequest): Promise<ReadyReadResult> {
+  private async readReadyInput(request: ChangeMutationRequest): Promise<ReadyReadResult> {
     try {
       return { ok: true, input: await this.readRawInput(request) };
     } catch (error: unknown) {
@@ -574,7 +574,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
   }
 
   private verifyReadyProjection(
-    request: ChangeRemoteMutationRequest,
+    request: ChangeMutationRequest,
     input: ChangeProjectionInput,
     projection: ChangeProjectionResult,
     plan: ChangeTransitionPlan,
@@ -596,9 +596,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     verifyProjection(plan, projection);
   }
 
-  private async readInput(
-    request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest,
-  ): Promise<ChangeProjectionInput> {
+  private async readInput(request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput> {
     try {
       const input = requestWithProvenance(await this.#reader.read(request), request.requester, undefined);
       const projection = projectionFor(input);
@@ -619,7 +617,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
   }
 
   /** Read normalized evidence without projecting it; the Ready actor owns the next projection state. */
-  private async readRawInput(request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+  private async readRawInput(request: ChangeMutationRequest): Promise<ChangeProjectionInput> {
     try {
       return requestWithProvenance(await this.#reader.read(request), request.requester, undefined);
     } catch (error: unknown) {
@@ -631,7 +629,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     }
   }
 
-  private async executeAbort(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+  private async executeAbort(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     const results: AbortExecutionServices["results"] = {
       returnedExisting: (projection) => ({
         projection,
@@ -861,7 +859,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     );
   }
 
-  private async readAbortInput(request: ChangeRemoteMutationRequest): Promise<AbortReadResult> {
+  private async readAbortInput(request: ChangeMutationRequest): Promise<AbortReadResult> {
     try {
       const input = await this.readRawInput(request);
       // A branch-only recovery has no PR from which to recover issuer
@@ -908,7 +906,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
     }
   }
 
-  private async executeIssue(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+  private async executeIssue(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     const services: IssuanceExecutionServices = {
       request,
       read: (issuanceRequest) => this.readIssuanceInput(issuanceRequest),
@@ -1078,7 +1076,7 @@ export class TrustedChangeExecutionAdapter implements ChangeRemoteExecutor {
       : [];
   }
 
-  private async readIssuanceInput(request: ChangeRemoteMutationRequest): Promise<IssuanceReadResult> {
+  private async readIssuanceInput(request: ChangeMutationRequest): Promise<IssuanceReadResult> {
     try {
       return { ok: true, input: await this.readRawInput(request) };
     } catch (error: unknown) {

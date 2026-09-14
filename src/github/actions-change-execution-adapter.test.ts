@@ -4,18 +4,18 @@ import { test } from "node:test";
 import os from "node:os";
 import path from "node:path";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  ChangeRemoteExecutorError,
-  changeRemoteMutationRequest,
-  changeRemoteReadRequest,
-} from "../change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  ChangeExecutionPortError,
+  changeMutationRequest,
+  changeReadRequest,
+} from "../change-execution-port.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
-  createGitHubActionsChangeRemoteExecutor,
+  createActionsChangeExecutionAdapter,
   INARI_CHANGE_EXECUTOR_REF,
   INARI_CHANGE_EXECUTOR_WORKFLOW,
   type GitHubActionsRemoteApi,
-} from "./change-actions-remote-executor.js";
+} from "./actions-change-execution-adapter.js";
 import { GhUnauthenticatedError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
@@ -293,7 +293,7 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
 }
 
 function executor(api: FakeActionsApi, cwd = process.cwd()) {
-  return createGitHubActionsChangeRemoteExecutor({
+  return createActionsChangeExecutionAdapter({
     cwd,
     api,
     randomUUID: () => correlation,
@@ -306,14 +306,14 @@ function executor(api: FakeActionsApi, cwd = process.cwd()) {
 test("issue, ready, and abort dispatch the same semantic request through the trusted workflow", async () => {
   for (const operation of ["issue", "ready", "abort"] as const) {
     const api = new FakeActionsApi();
-    const result = await executor(api).execute(changeRemoteMutationRequest(operation, 42));
+    const result = await executor(api).execute(changeMutationRequest(operation, 42));
     assert.deepEqual(result, { projection: api.result });
     const dispatch = api.calls.find((call) => call.method === "POST");
     assert.ok(dispatch);
     assert.equal(dispatch.path, `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/dispatches`);
     assert.equal(dispatch.fields.ref, INARI_CHANGE_EXECUTOR_REF);
     assert.deepEqual(JSON.parse(dispatch.fields["inputs[request]"] ?? "{}"), {
-      version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+      version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation,
       issue: 42,
       requester: "github:octocat",
@@ -343,7 +343,7 @@ test("caller-produced signed provenance crosses the bounded Actions request unch
     now: new Date("2026-09-13T00:00:00Z"),
   });
   const api = new FakeActionsApi();
-  await executor(api).execute(changeRemoteMutationRequest("issue", 42, "agent:tester", undefined, signedRecord));
+  await executor(api).execute(changeMutationRequest("issue", 42, "agent:tester", undefined, signedRecord));
   const dispatch = api.calls.find((call) => call.method === "POST");
   assert.ok(dispatch);
   const dispatched = JSON.parse(dispatch.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
@@ -353,7 +353,7 @@ test("caller-produced signed provenance crosses the bounded Actions request unch
 
 test("show uses the same remote boundary and does not request requester or issuer credentials", async () => {
   const api = new FakeActionsApi();
-  const result = await executor(api).read(changeRemoteReadRequest(42));
+  const result = await executor(api).read(changeReadRequest(42));
 
   assert.deepEqual(result, api.result);
   assert.equal(api.calls.filter((call) => call.method === "POST").length, 0);
@@ -374,7 +374,7 @@ test("show derives branch governance from the target default-branch generation, 
     };
     api.governanceBlobs.set("target-policy-sha", branchPolicySource("^feat/[0-9]+-[a-z0-9-]+$"));
 
-    const result = await executor(api, cwd).read(changeRemoteReadRequest(42));
+    const result = await executor(api, cwd).read(changeReadRequest(42));
     assert.deepEqual(result, api.result);
     assert.equal(api.governanceReads, 3);
   } finally {
@@ -397,7 +397,7 @@ test("show remains remote-authoritative when the local checkout matches the targ
     };
     api.governanceBlobs.set("matching-policy-sha", policy);
 
-    assert.deepEqual(await executor(api, cwd).read(changeRemoteReadRequest(42)), api.result);
+    assert.deepEqual(await executor(api, cwd).read(changeReadRequest(42)), api.result);
     // Matching local content is not reused; the authoritative target generation
     // is still read through the repository governance primitives.
     assert.equal(api.governanceReads, 3);
@@ -413,14 +413,14 @@ test("show distinguishes a target repository with no branch policy from unavaila
     const localPolicy = path.join(noPolicyCwd, ".github/inari/pr-policy.yml");
     await mkdir(path.dirname(localPolicy), { recursive: true });
     await writeFile(localPolicy, branchPolicySource("^fix/[0-9]+-[a-z0-9-]+$"), "utf8");
-    assert.deepEqual(await executor(noPolicyApi, noPolicyCwd).read(changeRemoteReadRequest(42)), noPolicyApi.result);
+    assert.deepEqual(await executor(noPolicyApi, noPolicyCwd).read(changeReadRequest(42)), noPolicyApi.result);
 
     const unavailableApi = new FakeActionsApi();
     unavailableApi.governanceUnavailable = true;
     await assert.rejects(
-      executor(unavailableApi).read(changeRemoteReadRequest(42)),
+      executor(unavailableApi).read(changeReadRequest(42)),
       (error: unknown) =>
-        error instanceof ChangeRemoteExecutorError &&
+        error instanceof ChangeExecutionPortError &&
         error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" &&
         JSON.stringify(error.details) ===
           JSON.stringify({ operation: "change.show", reason: "remote-governance-unavailable" }),
@@ -436,9 +436,9 @@ test("auth and repository resolution failures are normalized without raw credent
     throw new GhUnauthenticatedError("github.com", "Bearer secret-token");
   };
   await assert.rejects(
-    executor(authApi).execute(changeRemoteMutationRequest("issue", 42)),
+    executor(authApi).execute(changeMutationRequest("issue", 42)),
     (error: unknown) =>
-      error instanceof ChangeRemoteExecutorError &&
+      error instanceof ChangeExecutionPortError &&
       error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" &&
       (error.details as { reason?: string } | undefined)?.reason === "authentication" &&
       !error.message.includes("secret-token") &&
@@ -450,9 +450,9 @@ test("auth and repository resolution failures are normalized without raw credent
     throw new Error("privateKey=secret");
   };
   await assert.rejects(
-    executor(resolutionApi).read(changeRemoteReadRequest(42)),
+    executor(resolutionApi).read(changeReadRequest(42)),
     (error: unknown) =>
-      error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
+      error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
   );
 });
 
@@ -464,25 +464,25 @@ test("dispatch, run, missing, ambiguous, stale, and malformed result failures fa
     return { workflow_runs: [] };
   };
   await assert.rejects(
-    executor(dispatchApi).execute(changeRemoteMutationRequest("issue", 42)),
-    (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_DISPATCH_FAILED",
+    executor(dispatchApi).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_DISPATCH_FAILED",
   );
 
   const failedRunApi = new FakeActionsApi();
   failedRunApi.runState = "failure";
   failedRunApi.artifactMode = "missing";
   await assert.rejects(
-    executor(failedRunApi).execute(changeRemoteMutationRequest("issue", 42)),
-    (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RUN_FAILED",
+    executor(failedRunApi).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_RUN_FAILED",
   );
 
   for (const artifactMode of ["ambiguous", "stale", "malformed"] as const) {
     const api = new FakeActionsApi();
     api.artifactMode = artifactMode;
     await assert.rejects(
-      executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+      executor(api).execute(changeMutationRequest("issue", 42)),
       (error: unknown) =>
-        error instanceof ChangeRemoteExecutorError &&
+        error instanceof ChangeExecutionPortError &&
         (artifactMode === "malformed"
           ? error.code === "CHANGE_REMOTE_RESULT_INVALID"
           : error.code === "CHANGE_REMOTE_CORRELATION_FAILED"),
@@ -495,7 +495,7 @@ test("a valid semantic recovery result remains authoritative over a failed workf
   api.runState = "failure";
   const expectedProjection = recoveryProjection();
   const expectedEvidence = {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "issue",
     outcome: "recovery-required",
     effects: [
@@ -511,7 +511,7 @@ test("a valid semantic recovery result remains authoritative over a failed workf
   } as const;
   api.archiveValue = { projection: expectedProjection, evidence: expectedEvidence };
 
-  const result = await executor(api).execute(changeRemoteMutationRequest("issue", 42));
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
 
   assert.deepEqual(result, { projection: expectedProjection, evidence: expectedEvidence });
   assert.equal(result.projection.change?.state, "RECOVERY_REQUIRED");
@@ -529,9 +529,9 @@ test("workflow failure artifacts preserve only an enumerated diagnostic stage", 
     },
   };
   await assert.rejects(
-    executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+    executor(api).execute(changeMutationRequest("issue", 42)),
     (error: unknown) =>
-      error instanceof ChangeRemoteExecutorError &&
+      error instanceof ChangeExecutionPortError &&
       error.code === "CHANGE_REMOTE_RUN_FAILED" &&
       JSON.stringify(error.details) ===
         JSON.stringify({ operation: "change.issue", reason: "workflow-failed", stage: "installation-token" }) &&
@@ -589,8 +589,8 @@ test("unknown or malformed workflow diagnostic stages remain fail closed", async
       error: { code: "CHANGE_ACTIONS_RUNTIME_INVALID", message: "failure", details },
     };
     await assert.rejects(
-      executor(api).execute(changeRemoteMutationRequest("issue", 42)),
-      (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RESULT_INVALID",
+      executor(api).execute(changeMutationRequest("issue", 42)),
+      (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_RESULT_INVALID",
     );
   }
 });
@@ -606,9 +606,9 @@ test("workflow failure artifacts preserve the bounded repository-evidence reason
     },
   };
   await assert.rejects(
-    executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+    executor(api).execute(changeMutationRequest("issue", 42)),
     (error: unknown) =>
-      error instanceof ChangeRemoteExecutorError &&
+      error instanceof ChangeExecutionPortError &&
       error.code === "CHANGE_REMOTE_RUN_FAILED" &&
       JSON.stringify(error.details) ===
         JSON.stringify({
@@ -659,9 +659,9 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
     },
   };
   await assert.rejects(
-    executor(api).execute(changeRemoteMutationRequest("issue", 42)),
+    executor(api).execute(changeMutationRequest("issue", 42)),
     (error: unknown) =>
-      error instanceof ChangeRemoteExecutorError &&
+      error instanceof ChangeExecutionPortError &&
       error.code === "CHANGE_REMOTE_RUN_FAILED" &&
       JSON.stringify(error.details) ===
         JSON.stringify({
@@ -702,7 +702,7 @@ test("workflow failure artifacts preserve trusted code, Core diagnostics, and bo
 test("effect and workflow injection cannot enter the semantic dispatch request", async () => {
   const api = new FakeActionsApi();
   const request = {
-    ...changeRemoteMutationRequest("issue", 42, "agent:tester"),
+    ...changeMutationRequest("issue", 42, "agent:tester"),
     workflow: "evil.yml",
     ref: "refs/heads/evil",
     effect: { kind: "create-branch" },
@@ -712,7 +712,7 @@ test("effect and workflow injection cannot enter the semantic dispatch request",
   const dispatch = api.calls.find((call) => call.method === "POST");
   assert.ok(dispatch);
   assert.deepEqual(JSON.parse(dispatch.fields["inputs[request]"] ?? "{}"), {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "issue",
     issue: 42,
     requester: "agent:tester",
@@ -723,7 +723,7 @@ test("untrusted execution envelope fields are rejected before crossing the remot
   const api = new FakeActionsApi();
   api.archiveValue = { projection: api.result, token: "secret", effect: { kind: "CREATE_BRANCH" } };
   await assert.rejects(
-    executor(api).execute(changeRemoteMutationRequest("issue", 42)),
-    (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RESULT_INVALID",
+    executor(api).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_RESULT_INVALID",
   );
 });

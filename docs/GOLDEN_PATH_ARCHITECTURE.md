@@ -242,7 +242,7 @@ caller intent.
 
 The Golden Path result is a transport-neutral projection. A later implementation
 may carry it alongside `ChangeProjectionResult` and
-`ChangeRemoteExecutionResult`, or expose it through a thin composition facade.
+`ChangeExecutionResult`, or expose it through a thin composition facade.
 It must not replace those underlying contracts or expose XState types.
 
 The minimum envelope is:

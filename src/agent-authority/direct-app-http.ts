@@ -19,7 +19,7 @@ import type {
   SessionExecutionPhase,
 } from "../session-authorized-change-executor.js";
 import type { ChangeDiagnostic } from "../change.js";
-import type { ChangeRemoteExecutionEvidence } from "../change-executor.js";
+import type { ChangeExecutionEvidence } from "../change-execution-port.js";
 
 export const DIRECT_APP_HTTP_CONTRACT_VERSION = 1 as const;
 export const DIRECT_APP_EXECUTE_PATH = "/v1/execute" as const;
@@ -41,7 +41,7 @@ export interface DirectAppHttpErrorBody {
   readonly code: string;
   readonly message: string;
   readonly diagnostics?: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly evidence?: ChangeExecutionEvidence;
 }
 
 export interface DirectAppHttpSuccessEnvelope {
@@ -123,7 +123,7 @@ function failureResponse(
     readonly operation?: CapabilityAuthorizedSessionOperation;
     readonly requestId?: string;
     readonly diagnostics?: readonly ChangeDiagnostic[];
-    readonly evidence?: ChangeRemoteExecutionEvidence;
+    readonly evidence?: ChangeExecutionEvidence;
   } = {},
 ): Response {
   const body: DirectAppHttpFailureEnvelope = {

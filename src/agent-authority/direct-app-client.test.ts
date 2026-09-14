@@ -14,12 +14,12 @@ import { MAX_SESSION_REQUEST_BYTES } from "./session-request.js";
 import {
   BranchAdvanceClientError,
   DirectAppClientError,
-  createDirectAppChangeRemoteExecutor,
+  createDirectAppChangeExecutionAdapter,
   loadDirectAppSession,
   resolveAppEndpoint,
   sendDirectAppBranchAdvance,
 } from "./direct-app-client.js";
-import { ChangeRemoteExecutorError } from "../change-executor.js";
+import { ChangeExecutionPortError } from "../change-execution-port.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import type { BranchAdvanceSemanticRequest } from "./branch-advance.js";
@@ -112,7 +112,7 @@ test("loads a valid Session credential bundle and signs a request with it", asyn
         },
       };
     });
-    const executor = createDirectAppChangeRemoteExecutor({
+    const executor = createDirectAppChangeExecutionAdapter({
       endpoint: new URL("https://app.example.com"),
       session,
       fetchImpl,
@@ -176,7 +176,7 @@ test("rejects a signed semantic request exceeding the 64 KiB bound before networ
       called = true;
       return { status: 200, body: { ok: false, error: { code: "X", message: "unreachable" } } };
     });
-    const executor = createDirectAppChangeRemoteExecutor({
+    const executor = createDirectAppChangeExecutionAdapter({
       endpoint: new URL("https://app.example.com"),
       session,
       fetchImpl,
@@ -196,7 +196,7 @@ test("rejects a signed semantic request exceeding the 64 KiB bound before networ
   }
 });
 
-test("maps a bounded App transport failure onto ChangeRemoteExecutorError without leaking transport detail", async () => {
+test("maps a bounded App transport failure onto ChangeExecutionPortError without leaking transport detail", async () => {
   const dir = await mkdtemp(path.join(process.cwd(), ".direct-app-client-test-"));
   try {
     const { path: bundlePath } = await createBundleFile(dir);
@@ -209,14 +209,14 @@ test("maps a bounded App transport failure onto ChangeRemoteExecutorError withou
         error: { code: "SESSION_AUTHORIZATION_DENIED", message: "Session is not authorized for change.ready." },
       },
     }));
-    const executor = createDirectAppChangeRemoteExecutor({
+    const executor = createDirectAppChangeExecutionAdapter({
       endpoint: new URL("https://app.example.com"),
       session,
       fetchImpl,
     });
     await assert.rejects(
       executor.execute({ version: 1, issue: 467, operation: "ready" }),
-      (error: unknown) => error instanceof ChangeRemoteExecutorError && error.code === "CHANGE_REMOTE_RUN_FAILED",
+      (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_RUN_FAILED",
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -253,7 +253,7 @@ test("carries caller-produced signed provenance through the direct-App request",
         },
       };
     });
-    const executor = createDirectAppChangeRemoteExecutor({
+    const executor = createDirectAppChangeExecutionAdapter({
       endpoint: new URL("https://app.example.com"),
       session,
       fetchImpl,

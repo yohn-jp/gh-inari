@@ -10,7 +10,7 @@ import type {
 } from "./github/types.js";
 import {
   SemanticPullRequestMutationError,
-  SemanticPullRequestMutationExecutor,
+  LocalSemanticPullRequestMutationExecutor,
   materializeSemanticPullRequestMutationRequest,
   planSemanticPullRequestMutation,
   tryMaterializeSemanticPullRequestMutationRequest,
@@ -154,7 +154,10 @@ function plan(input: Record<string, unknown>) {
 }
 
 async function execute(provider: FakeMutationProvider, request: Record<string, unknown>) {
-  return new SemanticPullRequestMutationExecutor({ adapter: provider }).execute({ version: "1", plan: plan(request) });
+  return new LocalSemanticPullRequestMutationExecutor({ adapter: provider }).execute({
+    version: "1",
+    plan: plan(request),
+  });
 }
 
 async function rejected(

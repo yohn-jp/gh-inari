@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { GhCommandResult, GhTransport, GhTransportOptions } from "./github/index.js";
 import { GitHubAdapter } from "./github/index.js";
 import {
-  SemanticIssueRelationExecutor,
+  LocalSemanticIssueRelationExecutor,
   SemanticIssueRelationExecutorError,
 } from "./semantic-issue-relation-executor.js";
 import { planSemanticIssueRelations } from "./semantic-issue-relations.js";
@@ -149,7 +149,7 @@ test("relation executor reports partial application when a later effect fails", 
     "tree-sha",
     true,
   );
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });
@@ -173,7 +173,7 @@ test("relation executor observes, applies, rereads, and verifies a native parent
     "HTTP/2 404 Not Found\n\n", // graph walk: the new parent target's own current parent
     `HTTP/2 200 OK\n\n${relationIssue(20)}`, // after: subject's parent now present
   ]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });
@@ -186,7 +186,7 @@ test("relation executor observes, applies, rereads, and verifies a native parent
 
 test("relation executor rejects a capabilities mismatch before touching the plan's effects", async () => {
   const transport = new RelationTransport([]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities: ["github.issue.parent.native"],
   });
@@ -207,7 +207,7 @@ test("relation executor rejects a plan bound to stale repository governance", as
   const staleGeneration = { ...canonProvenance, treeSha: "old-tree-sha" };
   const staleGenerationPlan = { ...plan(), generation: staleGeneration };
   const transport = new RelationTransport(["HTTP/2 404 Not Found\n\n", `HTTP/2 200 OK\n\n${relationIssue(20)}`]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });
@@ -231,7 +231,7 @@ test("relation executor accepts a plan bound to the current repository governanc
     "HTTP/2 404 Not Found\n\n",
     `HTTP/2 200 OK\n\n${relationIssue(20)}`,
   ]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });
@@ -245,7 +245,7 @@ test("relation executor fails closed when the post-effect reread does not match 
     "HTTP/2 404 Not Found\n\n", // graph walk: the new parent target's own current parent
     "HTTP/2 404 Not Found\n\n", // after: still empty, disagreeing with the desired parent
   ]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });
@@ -261,7 +261,7 @@ test("relation executor fails closed when the post-effect reread does not match 
 
 test("relation executor rejects execution with no capabilities asserted at all", async () => {
   const transport = new RelationTransport([]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
   });
   await assert.rejects(
@@ -295,7 +295,7 @@ test("relation executor rejects a same-owner cross-repository parent plan before
     },
   };
   const transport = new RelationTransport([]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities: localPlan.capabilities,
   });
@@ -321,7 +321,7 @@ test("relation executor re-establishes the live graph and rejects a cycle formed
     "HTTP/2 404 Not Found\n\n", // before: subject's own current parent (still empty, not stale)
     `HTTP/2 200 OK\n\n${relationIssue(10, 1010)}`, // graph walk: issue 20's current parent is now subject(10)
   ]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });
@@ -340,7 +340,7 @@ test("relation executor re-establishes the live graph and rejects a cycle formed
 
 test("relation executor fails stale plans before applying an effect", async () => {
   const transport = new RelationTransport([`HTTP/2 200 OK\n\n${relationIssue(21)}`, "HTTP/2 200 OK\n\n[]"]);
-  const executor = new SemanticIssueRelationExecutor({
+  const executor = new LocalSemanticIssueRelationExecutor({
     adapter: new GitHubAdapter({ repository: "acme/inari", transport }),
     capabilities,
   });

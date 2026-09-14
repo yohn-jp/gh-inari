@@ -11,17 +11,17 @@
 
 import { CHANGE_CONTRACT_VERSION, type Change, type ChangeDiagnostic, type ChangeProjectionResult } from "./change.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  ChangeRemoteExecutorError,
-  executeChangeRemoteMutationResult,
-  normalizeChangeRemoteExecutionEvidence,
-  normalizeChangeRemoteExecutionResult,
-  changeRemoteMutationRequest,
-  type ChangeRemoteExecutionEvidence,
-  type ChangeRemoteExecutionOutcome,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteExecutorErrorCode,
-} from "./change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  ChangeExecutionPortError,
+  executeChangeMutationResult,
+  normalizeChangeExecutionEvidence,
+  normalizeChangeExecutionResult,
+  changeMutationRequest,
+  type ChangeExecutionEvidence,
+  type ChangeExecutionOutcome,
+  type ChangeExecutionPort,
+  type ChangeExecutionPortErrorCode,
+} from "./change-execution-port.js";
 import { ChangeTrustedExecutorError, type ChangeTrustedExecutorErrorCode } from "./change-trusted-executor.js";
 import { isSafeTrustedFailureDiagnostics, isSecretSafeBoundedText } from "./change-failure-diagnostics.js";
 
@@ -34,7 +34,7 @@ export const GOLDEN_PATH_REVIEW_ADMISSION_OPERATION = "change.ready" as const;
 
 export type GoldenPathReviewAdmissionFailureCode =
   | ChangeTrustedExecutorErrorCode
-  | ChangeRemoteExecutorErrorCode
+  | ChangeExecutionPortErrorCode
   | "GOLDEN_PATH_REVIEW_RESULT_INVALID"
   | "GOLDEN_PATH_REVIEW_EXECUTION_FAILED";
 
@@ -52,9 +52,9 @@ interface GoldenPathReviewAdmissionBase {
   /** Fresh bounded Change projection, when the executor returned one. */
   readonly projection?: ChangeProjectionResult;
   /** Existing bounded execution evidence, when the executor returned one. */
-  readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly evidence?: ChangeExecutionEvidence;
   /** Underlying executor outcome; absent when execution failed before a result. */
-  readonly executionOutcome?: ChangeRemoteExecutionOutcome;
+  readonly executionOutcome?: ChangeExecutionOutcome;
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
@@ -80,7 +80,7 @@ export type GoldenPathReviewAdmissionResult = GoldenPathReviewAdmissionSuccess |
 /** Input to the transport-neutral composition facade. */
 export interface GoldenPathReviewAdmissionRequest {
   readonly issue: number;
-  readonly executor: ChangeRemoteExecutor;
+  readonly executor: ChangeExecutionPort;
   /** Opaque requester provenance; credentials remain outside this contract. */
   readonly requester?: string;
 }
@@ -101,28 +101,28 @@ function safeMessage(message: unknown, fallback: string): string {
 
 function failureCode(error: unknown): GoldenPathReviewAdmissionFailureCode {
   if (error instanceof ChangeTrustedExecutorError) return error.code;
-  if (error instanceof ChangeRemoteExecutorError) return error.code;
+  if (error instanceof ChangeExecutionPortError) return error.code;
   return "GOLDEN_PATH_REVIEW_EXECUTION_FAILED";
 }
 
 function failureMessage(error: unknown): string {
-  if (error instanceof ChangeTrustedExecutorError || error instanceof ChangeRemoteExecutorError) {
+  if (error instanceof ChangeTrustedExecutorError || error instanceof ChangeExecutionPortError) {
     return safeMessage(error.message, DEFAULT_FAILURE_MESSAGE);
   }
   return DEFAULT_FAILURE_MESSAGE;
 }
 
 function failureDiagnostics(error: unknown): readonly ChangeDiagnostic[] {
-  if (error instanceof ChangeTrustedExecutorError || error instanceof ChangeRemoteExecutorError) {
+  if (error instanceof ChangeTrustedExecutorError || error instanceof ChangeExecutionPortError) {
     return freezeDiagnostics(error.diagnostics);
   }
   return Object.freeze([]);
 }
 
-function failureEvidence(error: unknown): ChangeRemoteExecutionEvidence | undefined {
+function failureEvidence(error: unknown): ChangeExecutionEvidence | undefined {
   if (!(error instanceof ChangeTrustedExecutorError) || error.evidence === undefined) return undefined;
   try {
-    return normalizeChangeRemoteExecutionEvidence("ready", error.evidence);
+    return normalizeChangeExecutionEvidence("ready", error.evidence);
   } catch {
     return undefined;
   }
@@ -132,7 +132,7 @@ function failure(
   issue: number,
   error: unknown,
   projection?: ChangeProjectionResult,
-  evidence?: ChangeRemoteExecutionEvidence,
+  evidence?: ChangeExecutionEvidence,
 ): GoldenPathReviewAdmissionFailure {
   const normalizedEvidence = evidence ?? failureEvidence(error);
   return Object.freeze({
@@ -157,7 +157,7 @@ function resultFailure(
   code: GoldenPathReviewAdmissionFailureCode,
   message: string,
   projection: ChangeProjectionResult,
-  evidence: ChangeRemoteExecutionEvidence | undefined,
+  evidence: ChangeExecutionEvidence | undefined,
 ): GoldenPathReviewAdmissionFailure {
   // Keep the authoritative projection diagnostics on every fail-closed
   // result.  A caller must be able to distinguish stale/unavailable/wrong
@@ -182,7 +182,7 @@ function positivePullRequest(value: unknown): value is number {
 function isReviewSuccess(
   issue: number,
   projection: ChangeProjectionResult,
-  evidence: ChangeRemoteExecutionEvidence | undefined,
+  evidence: ChangeExecutionEvidence | undefined,
 ): projection is ChangeProjectionResult & {
   readonly valid: true;
   readonly status: "healthy";
@@ -223,7 +223,7 @@ function isReviewSuccess(
 export function projectGoldenPathReviewAdmission(issue: number, result: unknown): GoldenPathReviewAdmissionResult {
   let normalized;
   try {
-    normalized = normalizeChangeRemoteExecutionResult("ready", result);
+    normalized = normalizeChangeExecutionResult("ready", result);
   } catch (error: unknown) {
     return failure(issue, error);
   }
@@ -269,8 +269,8 @@ export async function executeGoldenPathReviewAdmission(
   request: GoldenPathReviewAdmissionRequest,
 ): Promise<GoldenPathReviewAdmissionResult> {
   try {
-    const remoteRequest = changeRemoteMutationRequest("ready", request.issue, request.requester);
-    const result = await executeChangeRemoteMutationResult(request.executor, remoteRequest);
+    const remoteRequest = changeMutationRequest("ready", request.issue, request.requester);
+    const result = await executeChangeMutationResult(request.executor, remoteRequest);
     return projectGoldenPathReviewAdmission(request.issue, result);
   } catch (error: unknown) {
     return failure(request.issue, error);
@@ -281,5 +281,5 @@ export async function executeGoldenPathReviewAdmission(
 export const composeGoldenPathReviewAdmission = executeGoldenPathReviewAdmission;
 
 /** Compile-time assertion that this facade remains tied to the Change remote contract. */
-export const GOLDEN_PATH_REVIEW_CHANGE_CONTRACT_VERSION = CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION;
+export const GOLDEN_PATH_REVIEW_CHANGE_CONTRACT_VERSION = CHANGE_EXECUTION_PORT_CONTRACT_VERSION;
 export const GOLDEN_PATH_REVIEW_CORE_VERSION = CHANGE_CONTRACT_VERSION;

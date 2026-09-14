@@ -30,7 +30,7 @@ import {
   ChangeTrustedExecutorError,
   type ChangeTrustedEvidenceReader,
 } from "./change-trusted-executor.js";
-import type { ChangeRemoteMutationRequest } from "./change-executor.js";
+import type { ChangeMutationRequest } from "./change-execution-port.js";
 import { executeReadyWithXState } from "./change/machine/ready-execution-machine.js";
 
 const identity = {
@@ -205,7 +205,7 @@ const execution: TrustedExecutionContext = {
 class MutableReader implements ChangeTrustedEvidenceReader {
   readCount = 0;
   constructor(public current: ChangeProjectionInput) {}
-  async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+  async read(_request: ChangeMutationRequest): Promise<ChangeProjectionInput> {
     this.readCount += 1;
     return this.current;
   }
@@ -219,7 +219,7 @@ class RereadReader extends MutableReader {
     super(current);
   }
 
-  override async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+  override async read(_request: ChangeMutationRequest): Promise<ChangeProjectionInput> {
     this.readCount += 1;
     return this.readCount === 1 ? this.current : this.reread;
   }
@@ -267,7 +267,7 @@ function executor(reader: MutableReader, issuerAuthority: FakeIssuer): TrustedCh
   return new TrustedChangeExecutor({ reader, issuerAuthority, execution, target });
 }
 
-function remoteReadyRequest(): ChangeRemoteMutationRequest {
+function remoteReadyRequest(): ChangeMutationRequest {
   return { version: CHANGE_TRANSITION_CONTRACT_VERSION, operation: "ready", issue: identity.rootIssue };
 }
 

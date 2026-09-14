@@ -433,6 +433,12 @@ CLI/MCP may produce a preview plan when they have enough observed evidence. A pr
 ## 12. Executor boundary
 
 `Executor` is a logical architecture role, not a synonym for GitHub Actions Runner.
+The unqualified term is reserved for operation coordination from admitted request
+through verified terminal result. A `ChangeExecutionPort` defines only the
+transport-neutral request/read contract. `ActionsChangeExecutionAdapter` and the
+Direct-App adapter implement that port; they do not own semantic admission or
+Change lifecycle policy. Semantic Issue, Branch, and PR execution remains in the
+explicit `LocalSemantic...Executor` profiles.
 
 An Executor admits a plan by performing the following sequence:
 

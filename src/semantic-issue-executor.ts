@@ -470,7 +470,7 @@ function semanticMutationArtifact(plan: SemanticIssueMutationPlan) {
  * The class is plan-centered and never accepts CLI-owned Issue projection or
  * repository-policy rules.
  */
-export class SemanticIssueExecutor implements SemanticIssueExecutionPort {
+export class LocalSemanticIssueExecutor implements SemanticIssueExecutionPort {
   readonly #adapter: GitHubAdapter;
   readonly #selector: string | undefined;
   readonly #capabilities: readonly string[] | undefined;
@@ -865,5 +865,7 @@ export class SemanticIssueExecutor implements SemanticIssueExecutionPort {
   }
 }
 
-/** Explicit alias for callers naming the local deployment. */
-export const LocalSemanticIssueExecutor = SemanticIssueExecutor;
+/** @deprecated Use `LocalSemanticIssueExecutor` for the local execution profile. */
+export const SemanticIssueExecutor = LocalSemanticIssueExecutor;
+/** @deprecated Use `LocalSemanticIssueExecutor` for the local execution profile. */
+export type SemanticIssueExecutor = LocalSemanticIssueExecutor;

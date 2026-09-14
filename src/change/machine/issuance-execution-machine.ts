@@ -12,7 +12,7 @@ import type {
   ChangeProjectionInput,
   ChangeProjectionResult,
 } from "../../change.js";
-import type { ChangeRemoteExecutionResult, ChangeRemoteMutationRequest } from "../../change-executor.js";
+import type { ChangeExecutionResult, ChangeMutationRequest } from "../../change-execution-port.js";
 
 export type IssuanceExecutionFailureCode =
   | "CHANGE_EXECUTION_READ_FAILED"
@@ -25,7 +25,7 @@ export interface IssuanceExecutionFailure {
   readonly code: IssuanceExecutionFailureCode;
   readonly message: string;
   readonly diagnostics: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeRemoteExecutionResult["evidence"];
+  readonly evidence?: ChangeExecutionResult["evidence"];
 }
 
 /** The three ordered create-mode issuance effects; DELETE_BRANCH is compensation-only. */
@@ -122,7 +122,7 @@ export interface IssuanceExecutionSemantics {
   ) => readonly ChangeDiagnostic[];
   readonly plan: (input: ChangeProjectionInput, requester: string | undefined) => IssuancePlanResult;
   readonly verify: (
-    request: ChangeRemoteMutationRequest,
+    request: ChangeMutationRequest,
     input: ChangeProjectionInput,
     projection: ChangeProjectionResult,
     plan: ChangeIssuancePlan,
@@ -135,11 +135,11 @@ export interface IssuanceExecutionSemantics {
 }
 
 export interface IssuanceExecutionResults {
-  readonly returnedExisting: (projection: ChangeProjectionResult) => ChangeRemoteExecutionResult;
+  readonly returnedExisting: (projection: ChangeProjectionResult) => ChangeExecutionResult;
   readonly verified: (
     projection: ChangeProjectionResult,
     attempts: readonly ChangeIssuanceEffectAttempt[],
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
   /** Bounded thrown failure for a CREATE_BRANCH failure confirmed to have applied no effect. */
   readonly effectFailed: (
     attempts: readonly ChangeIssuanceEffectAttempt[],
@@ -149,7 +149,7 @@ export interface IssuanceExecutionResults {
     projection: ChangeProjectionResult,
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: ChangeIssuanceFailureEvidence,
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
   /** Core-validated recovery-required outcome; the reread projection is used as-is. */
   readonly recoveryRequired: (
     projection: ChangeProjectionResult,
@@ -157,7 +157,7 @@ export interface IssuanceExecutionResults {
     failure: ChangeIssuanceFailureEvidence,
     compensationStatus: "succeeded" | "failed",
     compensationFailure?: ChangeIssuanceFailureEvidence,
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
   /**
    * Recovery-required outcome for evidence Core could not validate as a safe
    * compensation/recovery result; a bounded synthetic RECOVERY_REQUIRED
@@ -170,7 +170,7 @@ export interface IssuanceExecutionResults {
     failure: ChangeIssuanceFailureEvidence,
     compensationStatus: "succeeded" | "failed",
     compensationFailure?: ChangeIssuanceFailureEvidence,
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
   /** Bounded thrown failure when repository evidence cannot be reread after an effect failure. */
   readonly recoveryReadFailure: (
     attempts: readonly ChangeIssuanceEffectAttempt[],
@@ -181,9 +181,9 @@ export interface IssuanceExecutionResults {
 }
 
 export interface IssuanceExecutionServices {
-  readonly request: ChangeRemoteMutationRequest;
+  readonly request: ChangeMutationRequest;
   /** The read actor is the only machine boundary for repository evidence I/O. */
-  readonly read: (request: ChangeRemoteMutationRequest) => Promise<IssuanceReadResult>;
+  readonly read: (request: ChangeMutationRequest) => Promise<IssuanceReadResult>;
   /** The effect actor is the only machine boundary for privileged GitHub mutation. */
   readonly apply: (effect: IssuanceEffect) => Promise<IssuanceEffectResult>;
   readonly failureForEffect: (effect: IssuanceEffect) => {
@@ -198,7 +198,7 @@ export interface IssuanceExecutionServices {
 }
 
 export type IssuanceExecutionOutcome =
-  | { readonly kind: "result"; readonly result: ChangeRemoteExecutionResult }
+  | { readonly kind: "result"; readonly result: ChangeExecutionResult }
   | { readonly kind: "failure"; readonly failure: IssuanceExecutionFailure };
 
 interface IssuanceMachineContext {
@@ -218,7 +218,7 @@ interface IssuanceMachineContext {
   readonly readInput?: ChangeProjectionInput;
   readonly recoveryPlanOk?: boolean;
   readonly failure?: IssuanceExecutionFailure;
-  readonly result?: ChangeRemoteExecutionResult;
+  readonly result?: ChangeExecutionResult;
   readonly outcome?: IssuanceExecutionOutcome;
 }
 

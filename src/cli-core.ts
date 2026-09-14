@@ -27,7 +27,7 @@ import {
   SemanticValidationError,
 } from "./contract/index.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
-import { createGitHubActionsChangeRemoteExecutor, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
+import { createActionsChangeExecutionAdapter, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
   assertPullRequestSyncInputComplete,
   parsePullRequestSyncInput,
@@ -106,14 +106,14 @@ import {
   type OptionId,
 } from "./command-contract.js";
 import {
-  changeRemoteMutationRequest,
-  changeRemoteReadRequest,
-  executeChangeRemoteMutationResult,
-  readChangeRemoteProjection,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteExecutorOptions,
-  type ChangeRemoteMutation,
-} from "./change-executor.js";
+  changeMutationRequest,
+  changeReadRequest,
+  executeChangeMutationResult,
+  readChangeProjection,
+  type ChangeExecutionPort,
+  type ChangeExecutionPortOptions,
+  type ChangeMutation,
+} from "./change-execution-port.js";
 import { tryProjectImplementationHandoff } from "./change-handoff.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
@@ -157,7 +157,7 @@ import {
   persistSessionCredentialBundle,
 } from "./agent-authority/session-bundle.js";
 import {
-  createDirectAppChangeRemoteExecutor,
+  createDirectAppChangeExecutionAdapter,
   loadDirectAppSession,
   resolveAppEndpoint,
   sendDirectAppBranchAdvance,
@@ -181,7 +181,7 @@ import {
 import {
   SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
   SemanticPullRequestMutationError,
-  SemanticPullRequestMutationExecutor,
+  LocalSemanticPullRequestMutationExecutor,
   type SemanticPullRequestMutationExecutionPort,
   type SemanticPullRequestMutationOperation,
   type SemanticPullRequestRepositoryIdentity,
@@ -190,13 +190,13 @@ import {
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
 import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import {
-  SemanticPullRequestExecutor,
+  LocalSemanticPullRequestExecutor,
   type SemanticPullRequestExecutionPort,
   type SemanticPullRequestExecutorOptions,
   SEMANTIC_PULL_REQUEST_EXECUTOR_CONTRACT_VERSION,
 } from "./semantic-pr-executor.js";
 import {
-  SemanticIssueRelationExecutor,
+  LocalSemanticIssueRelationExecutor,
   SemanticIssueRelationExecutorError,
   planExistingIssueRelationReconciliation,
   SEMANTIC_ISSUE_RELATION_EXECUTOR_CONTRACT_VERSION,
@@ -263,9 +263,9 @@ export interface CliDependencies {
   readonly runGhFallback?: (argv: readonly string[]) => number;
   readonly templateResolver?: TemplateResolverDependencies;
   /** Injectable semantic executor; it never carries App credentials. */
-  readonly changeExecutor?: ChangeRemoteExecutor;
+  readonly changeExecutor?: ChangeExecutionPort;
   /** Factory seam for a repository-scoped transport implementation. */
-  readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+  readonly createChangeExecutor?: (options: ChangeExecutionPortOptions) => ChangeExecutionPort;
   /** Injectable local Semantic PR Executor; it never carries App credentials. */
   readonly semanticPullRequestExecutor?: SemanticPullRequestExecutionPort;
   /** Factory seam for a repository-scoped Semantic PR Executor. */
@@ -1401,17 +1401,17 @@ function createChangeExecutor(
   repository: string | boolean | undefined,
   sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean } = {},
   adapter?: GitHubAdapter,
-): ChangeRemoteExecutor {
+): ChangeExecutionPort {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
   rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
   if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
     const { session, agent } = loadDirectAppSession(path.resolve(root, sessionOptions.sessionCredential));
     const endpoint = resolveAppEndpoint(sessionOptions.appEndpoint);
-    return createDirectAppChangeRemoteExecutor({ endpoint, session, ...(agent === undefined ? {} : { agent }) });
+    return createDirectAppChangeExecutionAdapter({ endpoint, session, ...(agent === undefined ? {} : { agent }) });
   }
   const factory =
     dependencies.createChangeExecutor ??
-    ((options: ChangeRemoteExecutorOptions) => {
+    ((options: ChangeExecutionPortOptions) => {
       // The GitHub Actions caller never supplies or resolves requester provenance: the
       // trusted executor (workflow_dispatch's authenticated actor) is the sole authority
       // for requester identity. See TrustedChangeExecutor.bindRequester().
@@ -1422,7 +1422,7 @@ function createChangeExecutor(
           cwd: options.cwd,
           ...(options.repository === undefined ? {} : { repository: options.repository }),
         });
-      return createGitHubActionsChangeRemoteExecutor({
+      return createActionsChangeExecutionAdapter({
         ...options,
         api: transportAdapter,
         actionsCallerEnvironment: environment.GITHUB_ACTIONS === "true",
@@ -1434,8 +1434,8 @@ function createChangeExecutor(
 function projectChangeCommandResult(
   operation: string,
   issue: number,
-  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
-  evidence: Awaited<ReturnType<typeof executeChangeRemoteMutationResult>>["evidence"] = undefined,
+  projection: Awaited<ReturnType<typeof readChangeProjection>>,
+  evidence: Awaited<ReturnType<typeof executeChangeMutationResult>>["evidence"] = undefined,
 ): Readonly<Record<string, unknown>> {
   const change = projection.change;
   const changeProjection = change?.projection;
@@ -1462,7 +1462,7 @@ function projectChangeCommandResult(
 
 function projectChangeHandoffCommandResult(
   issue: number,
-  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+  projection: Awaited<ReturnType<typeof readChangeProjection>>,
   options: { readonly repositoryNameWithOwner?: string } = {},
 ): Readonly<Record<string, unknown>> {
   const handoff = tryProjectImplementationHandoff(projection, options);
@@ -1535,7 +1535,7 @@ async function runChangePublishCommand(
     sessionCredential,
     appEndpoint,
   });
-  const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const projection = await readChangeProjection(executor, changeReadRequest(issue));
   const canonicalBranch = projection.canonicalBranch;
   if (canonicalBranch === undefined) {
     throw new CliError(
@@ -1599,7 +1599,7 @@ async function runChangePublishCommand(
   // branch.advance response alone is never sufficient (#466 already proves
   // its own postcondition, but this leaf's own success report must not rely
   // on that response without independently rereading it).
-  const verification = await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue));
+  const verification = await readChangeProjection(executor, changeReadRequest(issue));
   const verifiedBranch = verification.candidates.branches.find(
     (candidate) => candidate.candidate.name === resultBranch,
   );
@@ -1667,11 +1667,11 @@ async function runChangeCommand(
   );
   const result =
     definition.operation === "show" || definition.operation === "handoff"
-      ? { projection: await readChangeRemoteProjection(executor, changeRemoteReadRequest(issue)) }
-      : await executeChangeRemoteMutationResult(
+      ? { projection: await readChangeProjection(executor, changeReadRequest(issue)) }
+      : await executeChangeMutationResult(
           executor,
-          changeRemoteMutationRequest(
-            definition.operation as ChangeRemoteMutation,
+          changeMutationRequest(
+            definition.operation as ChangeMutation,
             issue,
             undefined,
             undefined,
@@ -2232,7 +2232,9 @@ async function runIssueRelationsCommand(
 
   const executor =
     dependencies.semanticIssueRelationExecutor ??
-    (dependencies.createSemanticIssueRelationExecutor ?? ((options) => new SemanticIssueRelationExecutor(options)))({
+    (
+      dependencies.createSemanticIssueRelationExecutor ?? ((options) => new LocalSemanticIssueRelationExecutor(options))
+    )({
       adapter: createAdapter(dependencies, root, parsed.options.repository),
       capabilities: parsed.capabilities,
     });
@@ -2377,7 +2379,7 @@ async function runPullRequestMutationCommand(
       dependencies.semanticPullRequestMutationExecutor ??
       (
         dependencies.createSemanticPullRequestMutationExecutor ??
-        ((options) => new SemanticPullRequestMutationExecutor(options))
+        ((options) => new LocalSemanticPullRequestMutationExecutor(options))
       )({
         adapter,
       });
@@ -2584,7 +2586,7 @@ async function runSemanticPullRequestCommand(
   if (operation === "execute") {
     const executor =
       dependencies.semanticPullRequestExecutor ??
-      (dependencies.createSemanticPullRequestExecutor ?? ((options) => new SemanticPullRequestExecutor(options)))({
+      (dependencies.createSemanticPullRequestExecutor ?? ((options) => new LocalSemanticPullRequestExecutor(options)))({
         adapter: createAdapter(dependencies, root, parsed.options.repository),
         ...(selector === undefined ? {} : { selector }),
         capabilities: effectiveContract.capabilities,

@@ -12,14 +12,14 @@ import {
   projectCommandHelp,
 } from "./command-contract.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  ChangeRemoteExecutorError,
-  createUnavailableChangeRemoteExecutor,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteExecutionEvidence,
-  type ChangeRemoteMutationRequest,
-  type ChangeRemoteReadRequest,
-} from "./change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  ChangeExecutionPortError,
+  createUnavailableChangeExecutionPort,
+  type ChangeExecutionPort,
+  type ChangeExecutionEvidence,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
+} from "./change-execution-port.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { runCli } from "./cli.js";
 import { GhUnauthenticatedError, GitHubAdapter } from "./github/index.js";
@@ -125,10 +125,7 @@ function projection(draft = true): ChangeProjectionResult {
   return result;
 }
 
-function executor(
-  calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest>,
-  result = projection(),
-): ChangeRemoteExecutor {
+function executor(calls: Array<ChangeMutationRequest | ChangeReadRequest>, result = projection()): ChangeExecutionPort {
   return {
     async execute(request) {
       calls.push(request);
@@ -185,7 +182,7 @@ test("Change commands are additions to the existing canonical command authority"
 });
 
 test("change show reads a bounded projection without invoking mutation", async () => {
-  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
   const result = await capture(["change", "show", "42", "--json"], {
     changeExecutor: executor(calls),
   });
@@ -193,7 +190,7 @@ test("change show reads a bounded projection without invoking mutation", async (
   assert.equal(result.exitCode, 0);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "show",
     issue: 42,
   });
@@ -225,7 +222,7 @@ test("change show forwards an explicit repository target to its executor factory
 });
 
 test("change handoff reads the same Change projection and exposes only canonical identity", async () => {
-  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
   const result = await capture(["change", "handoff", "42", "--json"], {
     changeExecutor: executor(calls),
   });
@@ -233,7 +230,7 @@ test("change handoff reads the same Change projection and exposes only canonical
   assert.equal(result.exitCode, 0);
   assert.deepEqual(calls, [
     {
-      version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+      version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation: "show",
       issue: 42,
     },
@@ -256,7 +253,7 @@ test("change handoff reads the same Change projection and exposes only canonical
 });
 
 test("change handoff rejects an already-review Change without mutation", async () => {
-  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
   const result = await capture(["change", "handoff", "42", "--json"], {
     changeExecutor: executor(calls, projection(false)),
   });
@@ -270,7 +267,7 @@ test("change handoff rejects an already-review Change without mutation", async (
 });
 
 test("change handoff includes the repository locator when an adapter is available", async () => {
-  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
   const result = await capture(["change", "handoff", "42", "--json"], {
     changeExecutor: executor(calls),
     createAdapter: () =>
@@ -295,7 +292,7 @@ test("change handoff includes the repository locator when an adapter is availabl
 });
 
 test("authoritative Change commands use semantic executor requests only", async () => {
-  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
   const factoryCalls: Record<string, unknown>[] = [];
   const result = await capture(["change", "ready", "42", "--repository", "acme/inari", "--json"], {
     createChangeExecutor: (options) => {
@@ -308,7 +305,7 @@ test("authoritative Change commands use semantic executor requests only", async 
   assert.deepEqual(factoryCalls, [{ cwd: process.cwd(), repository: "acme/inari" }]);
   assert.deepEqual(calls, [
     {
-      version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+      version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation: "ready",
       issue: 42,
     },
@@ -319,7 +316,7 @@ test("authoritative Change commands use semantic executor requests only", async 
 });
 
 test("abort is routed through the same executor boundary", async () => {
-  const calls: Array<ChangeRemoteMutationRequest | ChangeRemoteReadRequest> = [];
+  const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
   const result = await capture(["change", "abort", "42", "--json"], {
     changeExecutor: executor(calls),
   });
@@ -330,8 +327,8 @@ test("abort is routed through the same executor boundary", async () => {
 });
 
 test("CLI preserves the normalized provider rejection projection in execution evidence", async () => {
-  const evidence: ChangeRemoteExecutionEvidence = {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+  const evidence: ChangeExecutionEvidence = {
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "ready",
     outcome: "failed",
     effects: [{ kind: "MARK_PULL_REQUEST_READY", status: "failed" }],
@@ -394,7 +391,7 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
   const signedProvenanceRecord = dispatched.signedProvenanceRecord;
   delete dispatched.signedProvenanceRecord;
   assert.deepEqual(dispatched, {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "issue",
     issue: 42,
     requester: "github:octocat",
@@ -479,7 +476,7 @@ test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {
     runtimeSignerDependencies({
       changeExecutor: {
         async execute() {
-          throw new ChangeRemoteExecutorError(
+          throw new ChangeExecutionPortError(
             "CHANGE_REMOTE_RUN_FAILED",
             "The trusted Change workflow did not produce a successful result.",
             { operation: "change.issue", reason: "workflow-failed", stage: "installation-token" },
@@ -506,7 +503,7 @@ test("CLI --json preserves the bounded trusted code and Core diagnostic envelope
     runtimeSignerDependencies({
       changeExecutor: {
         async execute() {
-          throw new ChangeRemoteExecutorError(
+          throw new ChangeExecutionPortError(
             "CHANGE_REMOTE_RUN_FAILED",
             "The trusted Change workflow did not produce a successful result.",
             {
@@ -572,7 +569,7 @@ test("caller authentication failure is distinct from an unconfigured executor", 
 
   const unavailableResult = await capture(
     ["change", "issue", "42", "--json"],
-    runtimeSignerDependencies({ changeExecutor: createUnavailableChangeRemoteExecutor() }),
+    runtimeSignerDependencies({ changeExecutor: createUnavailableChangeExecutionPort() }),
   );
   assert.equal(unavailableResult.exitCode, 3);
   assert.deepEqual(unavailableResult.output?.error, {

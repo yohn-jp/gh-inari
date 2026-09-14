@@ -48,18 +48,18 @@ import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import { artifactContractProvenanceFromTemplate } from "../contract/ir.js";
 import { effectiveFieldConstraints } from "../contract/constraints.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   canonicalGitHubRequester,
-  changeRemoteMutationRequest,
-  changeRemoteReadRequest,
-  normalizeChangeRemoteExecutionEvidence,
-  normalizeChangeRemoteExecutionResult,
-  normalizeChangeRemoteProjection,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteExecutionEvidence,
-  type ChangeRemoteMutationRequest,
-  type ChangeRemoteReadRequest,
-} from "../change-executor.js";
+  changeMutationRequest,
+  changeReadRequest,
+  normalizeChangeExecutionEvidence,
+  normalizeChangeExecutionResult,
+  normalizeChangeProjection,
+  type ChangeExecutionPort,
+  type ChangeExecutionEvidence,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
+} from "../change-execution-port.js";
 import {
   ChangeTrustedExecutorError,
   isChangeTrustedExecutorErrorCode,
@@ -175,7 +175,7 @@ export interface TrustedActionsFailureDiagnostic {
   readonly reason?: RepositoryEvidenceFailureReason;
   readonly trustedCode?: ChangeTrustedExecutorErrorCode;
   readonly diagnostics?: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly evidence?: ChangeExecutionEvidence;
   readonly effectFailure?: ChangeEffectFailureClassification;
 }
 
@@ -204,7 +204,7 @@ function trustedFailureFields(
   const fields: {
     trustedCode?: ChangeTrustedExecutorErrorCode;
     diagnostics?: readonly ChangeDiagnostic[];
-    evidence?: ChangeRemoteExecutionEvidence;
+    evidence?: ChangeExecutionEvidence;
   } = {};
   if (isChangeTrustedExecutorErrorCode(error.code)) fields.trustedCode = error.code;
   try {
@@ -215,7 +215,7 @@ function trustedFailureFields(
   }
   if (error.evidence !== undefined) {
     try {
-      fields.evidence = normalizeChangeRemoteExecutionEvidence(error.evidence.operation, error.evidence);
+      fields.evidence = normalizeChangeExecutionEvidence(error.evidence.operation, error.evidence);
     } catch {
       // Invalid internal evidence is omitted rather than serialized.
     }
@@ -346,7 +346,7 @@ function boundedSecret(value: unknown, maxLength: number): string {
   return value;
 }
 
-function requiredSignedProvenanceRecord(request: ChangeRemoteMutationRequest): SignedChangeProvenanceRecord {
+function requiredSignedProvenanceRecord(request: ChangeMutationRequest): SignedChangeProvenanceRecord {
   if (request.operation !== "issue" || request.signedProvenanceRecord === undefined) {
     throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
   }
@@ -488,7 +488,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     this.requiresGovernedIssueValidation = options.cwd !== undefined || options.remoteGovernance !== undefined;
   }
 
-  async read(request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest): Promise<ChangeProjectionInput> {
+  async read(request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput> {
     try {
       return await this.readInternal(request);
     } catch (error: unknown) {
@@ -496,9 +496,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     }
   }
 
-  private async readInternal(
-    request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest,
-  ): Promise<ChangeProjectionInput> {
+  private async readInternal(request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput> {
     if (request.issue !== this.#options.identity.rootIssue) {
       throw new GitHubActionsChangeExecutorError();
     }
@@ -1307,7 +1305,7 @@ export function asTrustedActionsFailure(
 
 export interface GitHubActionsRuntimeOptions {
   readonly cwd: string;
-  readonly request: ChangeRemoteMutationRequest | ChangeRemoteReadRequest;
+  readonly request: ChangeMutationRequest | ChangeReadRequest;
   readonly environment?: NodeJS.ProcessEnv;
   readonly fetch?: typeof globalThis.fetch;
 }
@@ -1315,7 +1313,7 @@ export interface GitHubActionsRuntimeOptions {
 /** Build the trusted executor from GitHub Actions runtime claims and secrets. */
 export async function createGitHubActionsChangeExecutor(
   options: GitHubActionsRuntimeOptions,
-): Promise<ChangeRemoteExecutor> {
+): Promise<ChangeExecutionPort> {
   const environment = options.environment ?? process.env;
   let repositoryNameWithOwner: string;
   let hostname = "github.com";
@@ -1534,7 +1532,7 @@ export async function runGitHubActionsChangeExecutor(
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     if (
-      requestRecord.version !== CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION ||
+      requestRecord.version !== CHANGE_EXECUTION_PORT_CONTRACT_VERSION ||
       typeof requestRecord.operation !== "string" ||
       typeof requestRecord.issue !== "number"
     ) {
@@ -1552,8 +1550,8 @@ export async function runGitHubActionsChangeExecutor(
     const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
     const request =
       requestRecord.operation === "show"
-        ? changeRemoteReadRequest(requestRecord.issue, requester)
-        : changeRemoteMutationRequest(
+        ? changeReadRequest(requestRecord.issue, requester)
+        : changeMutationRequest(
             requestRecord.operation as "issue" | "ready" | "abort",
             requestRecord.issue,
             requester,
@@ -1563,8 +1561,8 @@ export async function runGitHubActionsChangeExecutor(
     const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
     const result =
       request.operation === "show"
-        ? normalizeChangeRemoteProjection(request.operation, await executor.read(request))
-        : normalizeChangeRemoteExecutionResult(request.operation, await executor.execute(request));
+        ? normalizeChangeProjection(request.operation, await executor.read(request))
+        : normalizeChangeExecutionResult(request.operation, await executor.execute(request));
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error: unknown) {

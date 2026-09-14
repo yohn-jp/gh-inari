@@ -994,7 +994,7 @@ function result(
 }
 
 /** Executes one canonical PR mutation only after fresh admission and proof. */
-export class SemanticPullRequestMutationExecutor implements SemanticPullRequestMutationExecutionPort {
+export class LocalSemanticPullRequestMutationExecutor implements SemanticPullRequestMutationExecutionPort {
   readonly #provider: SemanticPullRequestMutationProvider;
 
   constructor(options: { readonly adapter: SemanticPullRequestMutationProvider }) {
@@ -1521,4 +1521,7 @@ export class SemanticPullRequestMutationExecutor implements SemanticPullRequestM
   }
 }
 
-export const LocalSemanticPullRequestMutationExecutor = SemanticPullRequestMutationExecutor;
+/** @deprecated Use `LocalSemanticPullRequestMutationExecutor` for the local execution profile. */
+export const SemanticPullRequestMutationExecutor = LocalSemanticPullRequestMutationExecutor;
+/** @deprecated Use `LocalSemanticPullRequestMutationExecutor` for the local execution profile. */
+export type SemanticPullRequestMutationExecutor = LocalSemanticPullRequestMutationExecutor;

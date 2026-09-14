@@ -397,7 +397,7 @@ function semanticMutationArtifact(plan: SemanticPullRequestMutationPlan) {
  * The class is intentionally plan-centered and never accepts CLI-owned PR
  * title, branch, body, or relation rules.
  */
-export class SemanticPullRequestExecutor implements SemanticPullRequestExecutionPort {
+export class LocalSemanticPullRequestExecutor implements SemanticPullRequestExecutionPort {
   readonly #adapter: GitHubAdapter;
   readonly #selector: string | undefined;
   readonly #capabilities: readonly string[] | undefined;
@@ -612,5 +612,7 @@ export class SemanticPullRequestExecutor implements SemanticPullRequestExecution
   }
 }
 
-/** Explicit alias for callers naming the local deployment. */
-export const LocalSemanticPullRequestExecutor = SemanticPullRequestExecutor;
+/** @deprecated Use `LocalSemanticPullRequestExecutor` for the local execution profile. */
+export const SemanticPullRequestExecutor = LocalSemanticPullRequestExecutor;
+/** @deprecated Use `LocalSemanticPullRequestExecutor` for the local execution profile. */
+export type SemanticPullRequestExecutor = LocalSemanticPullRequestExecutor;

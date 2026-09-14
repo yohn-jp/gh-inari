@@ -11,12 +11,12 @@ import {
   type ChangeProjectionResult,
 } from "./change.js";
 import {
-  ChangeRemoteExecutorError,
-  type ChangeRemoteExecutionResult,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteMutationRequest,
-  type ChangeRemoteReadRequest,
-} from "./change-executor.js";
+  ChangeExecutionPortError,
+  type ChangeExecutionResult,
+  type ChangeExecutionPort,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
+} from "./change-execution-port.js";
 import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 import type { CanonicalContract } from "./contract/ir.js";
@@ -121,7 +121,7 @@ function projection(draft: boolean): ChangeProjectionResult {
 
 function evidence(
   outcome: "verified" | "returned-existing" | "failed",
-): NonNullable<ChangeRemoteExecutionResult["evidence"]> {
+): NonNullable<ChangeExecutionResult["evidence"]> {
   return {
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     operation: "ready",
@@ -143,29 +143,26 @@ function evidence(
   };
 }
 
-function result(draft: boolean, outcome: "verified" | "returned-existing" | "failed"): ChangeRemoteExecutionResult {
+function result(draft: boolean, outcome: "verified" | "returned-existing" | "failed"): ChangeExecutionResult {
   return { projection: projection(draft), evidence: evidence(outcome) };
 }
 
-class FakeExecutor implements ChangeRemoteExecutor {
-  readonly executeRequests: ChangeRemoteMutationRequest[] = [];
-  readonly readRequests: ChangeRemoteReadRequest[] = [];
+class FakeExecutor implements ChangeExecutionPort {
+  readonly executeRequests: ChangeMutationRequest[] = [];
+  readonly readRequests: ChangeReadRequest[] = [];
 
   constructor(
     private readonly response:
-      | ChangeRemoteExecutionResult
-      | ChangeProjectionResult
-      | Error
-      | (() => ChangeRemoteExecutionResult | ChangeProjectionResult),
+      ChangeExecutionResult | ChangeProjectionResult | Error | (() => ChangeExecutionResult | ChangeProjectionResult),
   ) {}
 
-  async execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult | ChangeProjectionResult> {
+  async execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult | ChangeProjectionResult> {
     this.executeRequests.push(request);
     if (this.response instanceof Error) throw this.response;
     return typeof this.response === "function" ? this.response() : this.response;
   }
 
-  async read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult> {
+  async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
     this.readRequests.push(request);
     throw new Error("the review composition must not use the read port");
   }
@@ -301,7 +298,7 @@ test("precondition, stale-read, and verification failures preserve bounded execu
 test("invalid remote output and mismatched identity never become a REVIEW success", async () => {
   const invalidRemote = await executeGoldenPathReviewAdmission({
     issue: identity.rootIssue,
-    executor: new FakeExecutor(new ChangeRemoteExecutorError("CHANGE_REMOTE_RESULT_INVALID", "bounded result")),
+    executor: new FakeExecutor(new ChangeExecutionPortError("CHANGE_REMOTE_RESULT_INVALID", "bounded result")),
   });
   assert.equal(invalidRemote.ok, false);
   if (invalidRemote.ok) throw new Error("expected invalid remote result");

@@ -250,7 +250,7 @@ test("issue relations execute reconciles a native parent effect through the gove
       // planExistingIssueRelationReconciliation's own fresh parent
       // observation (blocked-by is handled generically above):
       command("HTTP/2 404 Not Found\n\n"),
-      // SemanticIssueRelationExecutor's independent re-observation before
+      // LocalSemanticIssueRelationExecutor's independent re-observation before
       // effects: only parent, since dependsOn stays "none"-represented here.
       command("HTTP/2 404 Not Found\n\n"),
       // Live graph re-establishment: the new parent target's own current parent.

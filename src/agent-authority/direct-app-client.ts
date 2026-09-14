@@ -5,7 +5,7 @@
  * a signing seam, enforcing the HTTPS/localhost and #373 64 KiB bounded
  * request constraints before any network send, compiling and signing the
  * exact canonical #373 request envelope, and mapping the #377 bounded
- * response envelope back onto the existing `ChangeRemoteExecutor` boundary
+ * response envelope back onto the existing `ChangeExecutionPort` boundary
  * or the #466 `branch.advance` result. It does not reimplement Session
  * authentication, capability admission, Change lifecycle, or branch/Git
  * mutation authority -- all of that remains owned by the App path.
@@ -13,13 +13,13 @@
 
 import { sign as ed25519Sign, type KeyObject } from "node:crypto";
 import {
-  ChangeRemoteExecutorError,
-  normalizeChangeRemoteExecutionResult,
-  normalizeChangeRemoteProjection,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteMutationRequest,
-  type ChangeRemoteReadRequest,
-} from "../change-executor.js";
+  ChangeExecutionPortError,
+  normalizeChangeExecutionResult,
+  normalizeChangeProjection,
+  type ChangeExecutionPort,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
+} from "../change-execution-port.js";
 import {
   canonicalizeSemanticRequest,
   MAX_SESSION_REQUEST_BYTES,
@@ -223,8 +223,8 @@ function isResponseEnvelope(value: unknown): value is DirectAppHttpResponseEnvel
   );
 }
 
-function executorError(envelope: DirectAppHttpFailureEnvelope, operation: string): ChangeRemoteExecutorError {
-  return new ChangeRemoteExecutorError(
+function executorError(envelope: DirectAppHttpFailureEnvelope, operation: string): ChangeExecutionPortError {
+  return new ChangeExecutionPortError(
     "CHANGE_REMOTE_RUN_FAILED",
     envelope.error.message,
     { operation, code: envelope.error.code },
@@ -232,7 +232,7 @@ function executorError(envelope: DirectAppHttpFailureEnvelope, operation: string
   );
 }
 
-export interface DirectAppChangeExecutorOptions {
+export interface DirectAppChangeExecutionAdapterOptions {
   readonly endpoint: URL;
   readonly session: ManagedSession;
   readonly agent?: SessionAgentMetadata;
@@ -241,8 +241,10 @@ export interface DirectAppChangeExecutorOptions {
   readonly requestId?: () => string;
 }
 
-/** Direct-App `ChangeRemoteExecutor`, adjacent to the existing Actions remote executor (#467). */
-export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExecutorOptions): ChangeRemoteExecutor {
+/** Direct-App transport adapter for the canonical `ChangeExecutionPort` (#467). */
+export function createDirectAppChangeExecutionAdapter(
+  options: DirectAppChangeExecutionAdapterOptions,
+): ChangeExecutionPort {
   const send = (operation: string, request: SemanticSessionRequest) =>
     sendDirectAppRequest({
       endpoint: options.endpoint,
@@ -255,7 +257,7 @@ export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExec
     });
 
   return {
-    async execute(request: ChangeRemoteMutationRequest) {
+    async execute(request: ChangeMutationRequest) {
       const operation = `change.${request.operation}`;
       const semanticRequest: SemanticSessionRequest = {
         version: 1,
@@ -272,7 +274,7 @@ export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExec
       if (!response.ok) throw executorError(response, operation);
       const result = response.result;
       if (result.execution === undefined) {
-        throw new ChangeRemoteExecutorError(
+        throw new ChangeExecutionPortError(
           "CHANGE_REMOTE_RESULT_INVALID",
           "The direct App returned no execution result.",
           {
@@ -280,9 +282,9 @@ export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExec
           },
         );
       }
-      return normalizeChangeRemoteExecutionResult(request.operation, result.execution);
+      return normalizeChangeExecutionResult(request.operation, result.execution);
     },
-    async read(request: ChangeRemoteReadRequest) {
+    async read(request: ChangeReadRequest) {
       const operation = "change.show";
       const semanticRequest: SemanticSessionRequest = {
         version: 1,
@@ -293,7 +295,7 @@ export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExec
       if (!response.ok) throw executorError(response, operation);
       const result = response.result;
       if (result.projection === undefined) {
-        throw new ChangeRemoteExecutorError(
+        throw new ChangeExecutionPortError(
           "CHANGE_REMOTE_RESULT_INVALID",
           "The direct App returned no Change projection.",
           {
@@ -301,10 +303,15 @@ export function createDirectAppChangeRemoteExecutor(options: DirectAppChangeExec
           },
         );
       }
-      return normalizeChangeRemoteProjection("show", result.projection);
+      return normalizeChangeProjection("show", result.projection);
     },
   };
 }
+
+/** @deprecated Use `DirectAppChangeExecutionAdapterOptions`. */
+export type DirectAppChangeExecutorOptions = DirectAppChangeExecutionAdapterOptions;
+/** @deprecated Use `createDirectAppChangeExecutionAdapter`. */
+export const createDirectAppChangeRemoteExecutor = createDirectAppChangeExecutionAdapter;
 
 export type BranchAdvanceClientErrorCode = "BRANCH_ADVANCE_TRANSPORT_FAILED" | "BRANCH_ADVANCE_REJECTED";
 
