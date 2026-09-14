@@ -1,9 +1,9 @@
 /**
  * Session Certificate schema, canonical JWS signing input, and offline
- * admission evaluation against a trusted Runtime Authority record.
+ * admission evaluation against a trusted Delegator record.
  *
  * Shape and semantics follow `docs/AGENT_CAPABILITY_AUTHORIZATION.md`
- * section 9: a Runtime-signed JWS (`alg: EdDSA`) binding one ephemeral
+ * section 9: a Delegator-signed JWS (`alg: EdDSA`) binding one ephemeral
  * Session public key to an immutable repository identity, a bounded
  * task/capability claim set, and an expiry no later than the delegating
  * Runtime's `maxSessionTtlSeconds`.
@@ -35,7 +35,7 @@ import {
   validateCapabilityClaim,
   type CapabilityClaim,
 } from "./capability.js";
-import { RUNTIME_AUTHORITY_ID_PATTERN, isRuntimeAuthorityActive, type RuntimeAuthority } from "./runtime-authority.js";
+import { DELEGATOR_ID_PATTERN, isDelegatorActive, type Delegator } from "./delegator.js";
 
 export const SESSION_CERTIFICATE_CONTRACT_VERSION = 1 as const;
 export type SessionCertificateContractVersion = typeof SESSION_CERTIFICATE_CONTRACT_VERSION;
@@ -59,7 +59,7 @@ export const MAX_UNIX_TIME_SECONDS = 4_102_444_800 as const;
 export interface SessionCertificateHeader {
   readonly alg: typeof SESSION_CERTIFICATE_ALG;
   readonly typ: typeof SESSION_CERTIFICATE_TYP;
-  /** Must resolve to an active trusted Runtime Authority `id`. */
+  /** Must resolve to an active trusted Delegator `id`. */
   readonly kid: string;
 }
 
@@ -77,7 +77,7 @@ export interface SessionCertificateTask {
 
 export interface SessionCertificatePayload {
   readonly ver: SessionCertificateContractVersion;
-  /** `runtime:<Runtime Authority id>`. */
+  /** `runtime:<Delegator id>`. */
   readonly iss: string;
   /** `session:<opaque session id>`. */
   readonly sub: string;
@@ -192,9 +192,9 @@ export function validateSessionCertificateHeader(
   }
   let kid: string | undefined;
   if (requireProperty(input, "kid", path, diagnostics)) {
-    if (typeof input.kid !== "string" || !RUNTIME_AUTHORITY_ID_PATTERN.test(input.kid)) {
+    if (typeof input.kid !== "string" || !DELEGATOR_ID_PATTERN.test(input.kid)) {
       diagnostics.push(
-        createDiagnostic("SESSION_CERTIFICATE_INVALID_KID", `${path}.kid`, "kid must be a valid Runtime Authority id."),
+        createDiagnostic("SESSION_CERTIFICATE_INVALID_KID", `${path}.kid`, "kid must be a valid Delegator id."),
       );
     } else {
       kid = input.kid;
@@ -342,13 +342,9 @@ export function validateSessionCertificatePayload(
   let issuerId: string | undefined;
   if (requireProperty(input, "iss", path, diagnostics)) {
     const match = typeof input.iss === "string" ? /^runtime:(.+)$/u.exec(input.iss) : null;
-    if (match === null || !RUNTIME_AUTHORITY_ID_PATTERN.test(match[1] as string)) {
+    if (match === null || !DELEGATOR_ID_PATTERN.test(match[1] as string)) {
       diagnostics.push(
-        createDiagnostic(
-          "SESSION_CERTIFICATE_INVALID_ISSUER",
-          `${path}.iss`,
-          'iss must be "runtime:<Runtime Authority id>".',
-        ),
+        createDiagnostic("SESSION_CERTIFICATE_INVALID_ISSUER", `${path}.iss`, 'iss must be "runtime:<Delegator id>".'),
       );
     } else {
       issuerId = match[1];
@@ -550,7 +546,7 @@ function headerIssuerConsistency(
     return createDiagnostic(
       "SESSION_CERTIFICATE_HEADER_ISSUER_MISMATCH",
       "$.payload.iss",
-      "payload.iss must reference the same Runtime Authority id as header.kid.",
+      "payload.iss must reference the same Delegator id as header.kid.",
     );
   }
   return undefined;
@@ -737,7 +733,7 @@ export class SessionCertificateValidationError extends Error {
   }
 }
 
-export type SessionCertificateRuntimeAuthorityDiagnosticCode =
+export type SessionCertificateDelegatorDiagnosticCode =
   | "SESSION_CERTIFICATE_UNTRUSTED_RUNTIME"
   | "SESSION_CERTIFICATE_RUNTIME_NOT_ACTIVE"
   | "SESSION_CERTIFICATE_REPOSITORY_MISMATCH"
@@ -746,50 +742,62 @@ export type SessionCertificateRuntimeAuthorityDiagnosticCode =
   | "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING"
   | "SESSION_CERTIFICATE_CAPABILITY_EXCEEDS_RUNTIME_CEILING";
 
-export interface SessionCertificateRuntimeAuthorityDiagnostic {
-  readonly code: SessionCertificateRuntimeAuthorityDiagnosticCode;
+export interface SessionCertificateDelegatorDiagnostic {
+  readonly code: SessionCertificateDelegatorDiagnosticCode;
   readonly path: string;
   readonly message: string;
 }
 
-export interface SessionCertificateRuntimeAuthorityContext {
-  readonly runtimeAuthority: RuntimeAuthority;
+export interface SessionCertificateDelegatorContext {
+  /** Canonical Delegator input for new callers. */
+  readonly delegator: Delegator;
+  /** Legacy wire/input spelling; accepted only by the compatibility overload. */
+  readonly runtimeAuthority?: never;
   /** The immutable repository ID the caller is evaluating this certificate for (architecture doc 18.6). */
   readonly expectedRepositoryId: string;
   readonly now: Date;
 }
 
-export interface SessionCertificateRuntimeAuthorityEvaluation {
+/** Legacy verification-input shape retained byte-for-byte for existing callers. */
+export interface SessionCertificateRuntimeAuthorityContext {
+  readonly runtimeAuthority: Delegator;
+  /** The immutable repository ID the caller is evaluating this certificate for (architecture doc 18.6). */
+  readonly expectedRepositoryId: string;
+  readonly now: Date;
+}
+
+export interface SessionCertificateDelegatorEvaluation {
   readonly admitted: boolean;
-  readonly diagnostics: readonly SessionCertificateRuntimeAuthorityDiagnostic[];
+  readonly diagnostics: readonly SessionCertificateDelegatorDiagnostic[];
 }
 
 /**
  * Offline half of architecture doc section 7.3/11.1's `EffectiveAuthority`
- * intersection: repository binding, Runtime trust/activity, TTL ceiling, and
+ * intersection: repository binding, Delegator trust/activity, TTL ceiling, and
  * capability ceiling containment. `RepositoryPolicy(current canonical ref)`
  * and `CurrentStateAdmission(GitHub evidence)` require live repository/App
  * state and are explicitly out of scope for this schema-only Issue.
  */
-export function evaluateSessionCertificateAgainstRuntimeAuthority(
+export function evaluateSessionCertificateAgainstDelegator(
   certificate: { readonly header: SessionCertificateHeader; readonly payload: SessionCertificatePayload },
-  context: SessionCertificateRuntimeAuthorityContext,
-): SessionCertificateRuntimeAuthorityEvaluation {
-  const diagnostics: SessionCertificateRuntimeAuthorityDiagnostic[] = [];
+  context: SessionCertificateDelegatorContext | SessionCertificateRuntimeAuthorityContext,
+): SessionCertificateDelegatorEvaluation {
+  const diagnostics: SessionCertificateDelegatorDiagnostic[] = [];
   const { header, payload } = certificate;
-  const { runtimeAuthority, expectedRepositoryId, now } = context;
+  const delegator = "delegator" in context ? context.delegator : context.runtimeAuthority;
+  const { expectedRepositoryId, now } = context;
 
-  if (header.kid !== runtimeAuthority.id || payload.iss !== `runtime:${runtimeAuthority.id}`) {
+  if (header.kid !== delegator.id || payload.iss !== `runtime:${delegator.id}`) {
     diagnostics.push({
       code: "SESSION_CERTIFICATE_UNTRUSTED_RUNTIME",
       path: "$.header.kid",
-      message: "Certificate issuer does not match the supplied Runtime Authority.",
+      message: "Certificate issuer does not match the supplied Delegator.",
     });
-  } else if (!isRuntimeAuthorityActive(runtimeAuthority, now)) {
+  } else if (!isDelegatorActive(delegator, now)) {
     diagnostics.push({
       code: "SESSION_CERTIFICATE_RUNTIME_NOT_ACTIVE",
       path: "$.runtimeAuthority.status",
-      message: "The delegating Runtime Authority is not currently active.",
+      message: "The delegating Delegator is not currently active.",
     });
   }
 
@@ -818,23 +826,33 @@ export function evaluateSessionCertificateAgainstRuntimeAuthority(
     });
   }
 
-  if (payload.exp - payload.nbf > runtimeAuthority.maxSessionTtlSeconds) {
+  if (payload.exp - payload.nbf > delegator.maxSessionTtlSeconds) {
     diagnostics.push({
       code: "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING",
       path: "$.payload.exp",
-      message: "Certificate validity window exceeds the delegating Runtime's maxSessionTtlSeconds.",
+      message: "Certificate validity window exceeds the delegating Delegator's maxSessionTtlSeconds.",
     });
   }
 
   payload.capabilities.forEach((claim, index) => {
-    if (!capabilityClaimWithinCeiling(claim, runtimeAuthority.capabilityCeiling)) {
+    if (!capabilityClaimWithinCeiling(claim, delegator.capabilityCeiling)) {
       diagnostics.push({
         code: "SESSION_CERTIFICATE_CAPABILITY_EXCEEDS_RUNTIME_CEILING",
         path: `$.payload.capabilities[${index}].kind`,
-        message: "Capability claim is outside the delegating Runtime's capabilityCeiling.",
+        message: "Capability claim is outside the delegating Delegator's capabilityCeiling.",
       });
     }
   });
 
   return { admitted: diagnostics.length === 0, diagnostics };
 }
+
+/**
+ * Compatibility aliases for the former Delegator evaluation API.
+ * The legacy function accepts the stable `runtimeAuthority` input field via
+ * the union above and executes the same Delegator evaluator.
+ */
+export type SessionCertificateRuntimeAuthorityDiagnosticCode = SessionCertificateDelegatorDiagnosticCode;
+export type SessionCertificateRuntimeAuthorityDiagnostic = SessionCertificateDelegatorDiagnostic;
+export type SessionCertificateRuntimeAuthorityEvaluation = SessionCertificateDelegatorEvaluation;
+export const evaluateSessionCertificateAgainstRuntimeAuthority = evaluateSessionCertificateAgainstDelegator;

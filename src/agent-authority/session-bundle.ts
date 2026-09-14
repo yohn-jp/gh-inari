@@ -33,14 +33,9 @@ import {
   type SessionCertificateRepository,
   type SessionCertificateTask,
 } from "./session-certificate.js";
-import {
-  MIN_SESSION_TTL_SECONDS,
-  MAX_SESSION_TTL_SECONDS,
-  assertRuntimeAuthority,
-  type RuntimeAuthority,
-} from "./runtime-authority.js";
+import { MIN_SESSION_TTL_SECONDS, MAX_SESSION_TTL_SECONDS, assertDelegator, type Delegator } from "./delegator.js";
 import { issueSessionCertificate, type ManagedSessionIssuanceRequest } from "./session-issuance.js";
-import { exportRuntimeAuthorityPublicKey, type RuntimeAuthorityKeyPair } from "./runtime-key.js";
+import { exportDelegatorPublicKey, type DelegatorKeyPair } from "./delegator-key.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 
 export const SESSION_ISSUANCE_REQUEST_VERSION = 1 as const;
@@ -84,7 +79,7 @@ export interface SessionAgentMetadata {
 export interface SessionIssuanceRequestDocument {
   readonly version: typeof SESSION_ISSUANCE_REQUEST_VERSION;
   readonly kind: typeof SESSION_ISSUANCE_REQUEST_KIND;
-  readonly runtimeAuthority: RuntimeAuthority;
+  readonly runtimeAuthority: Delegator;
   readonly repository: SessionCertificateRepository;
   readonly task?: SessionCertificateTask;
   readonly capabilities: ManagedSessionIssuanceRequest["capabilities"];
@@ -316,15 +311,15 @@ export function parseSessionIssuanceRequest(input: unknown): SessionIssuanceRequ
     ]);
   }
 
-  let runtimeAuthority: RuntimeAuthority;
+  let runtimeAuthority: Delegator;
   try {
-    runtimeAuthority = assertRuntimeAuthority(required(input, "runtimeAuthority", "$") as unknown);
+    runtimeAuthority = assertDelegator(required(input, "runtimeAuthority", "$") as unknown);
   } catch {
     throw bundleError(
       "SESSION_BUNDLE_INVALID_REQUEST",
-      "Session issuance request must contain a valid Runtime Authority record.",
+      "Session issuance request must contain a valid Delegator record.",
       "$.runtimeAuthority",
-      [diagnostic("SESSION_BUNDLE_INVALID_REQUEST", "$.runtimeAuthority", "Runtime Authority record is invalid.")],
+      [diagnostic("SESSION_BUNDLE_INVALID_REQUEST", "$.runtimeAuthority", "Delegator record is invalid.")],
     );
   }
 
@@ -486,7 +481,7 @@ export function parseSessionCredentialBundle(input: unknown): ParsedSessionCrede
       decoded.diagnostics.map((item) => diagnostic("SESSION_BUNDLE_CERTIFICATE_INVALID", item.path, item.message)),
     );
   }
-  const publicKey = exportRuntimeAuthorityPublicKey(privateKey);
+  const publicKey = exportDelegatorPublicKey(privateKey);
   if (publicKey.x !== decoded.value.payload.sessionKey.x) {
     throw bundleError(
       "SESSION_BUNDLE_CERTIFICATE_KEY_MISMATCH",
@@ -527,13 +522,13 @@ function manualSessionId(): string {
 /** Generate a fresh Session keypair, issue the canonical #367 certificate, and package it. */
 export function createSessionCredentialBundle(options: {
   readonly request: unknown;
-  readonly runtimeKey: KeyObject | RuntimeAuthorityKeyPair;
+  readonly runtimeKey: KeyObject | DelegatorKeyPair;
   readonly now?: Date;
 }): CreatedSessionCredentialBundle {
   const request = parseSessionIssuanceRequest(options.request);
   const sessionId = manualSessionId();
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  const sessionKey = exportRuntimeAuthorityPublicKey(publicKey);
+  const sessionKey = exportDelegatorPublicKey(publicKey);
   const issuanceRequest: ManagedSessionIssuanceRequest = Object.freeze({
     sessionId,
     sessionKey,

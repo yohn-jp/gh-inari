@@ -1,5 +1,5 @@
 /**
- * The semantic capability vocabulary usable inside a Runtime Authority
+ * The semantic capability vocabulary usable inside a Delegator
  * `capabilityCeiling` and a Session Certificate `capabilities` claim list.
  *
  * Per `docs/AGENT_CAPABILITY_AUTHORIZATION.md` section 11.2, agent-facing

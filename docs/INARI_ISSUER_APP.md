@@ -6,7 +6,7 @@ canonical implementation surfaces are `src/github/app-principal.ts` and
 compatibility module only.
 
 Runtime signer provisioning and per-runtime key ownership are documented in the subordinate
-[`Runtime Authority operations runbook`](./RUNTIME_AUTHORITY_OPERATIONS.md).
+[`Delegator operations runbook`](./DELEGATOR_OPERATIONS.md).
 
 This document is the implementation contract for Issues #217 and #464. The product and
 trust-boundary authority remains
