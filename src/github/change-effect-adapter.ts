@@ -27,7 +27,7 @@ import {
   verifyChangeProvenanceRecord,
   type SignedChangeProvenanceRecord,
 } from "../change-provenance-record.js";
-import type { RuntimeAuthority } from "../agent-authority/runtime-authority.js";
+import type { Delegator } from "../agent-authority/delegator.js";
 import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
 
 /** The repository target is resolved by the trusted caller, not by this adapter. */
@@ -101,7 +101,7 @@ export interface GitHubChangeEffectAdapterOptions {
 }
 
 export interface GitHubChangeProvenanceExecutionOptions {
-  readonly runtimeAuthority: RuntimeAuthority;
+  readonly runtimeAuthority: Delegator;
   /** Already Runtime-signed elsewhere; this boundary only verifies it. */
   readonly signedRecord: SignedChangeProvenanceRecord;
   readonly gitData: GitHubBranchAdvanceCapability;

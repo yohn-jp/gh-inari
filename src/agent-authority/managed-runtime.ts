@@ -7,18 +7,18 @@
  *
  * - `beginManagedRuntimeSession` only calls `createManagedSession` and builds
  *   the public-only `ManagedSessionIssuanceRequest`.  It never receives a
- *   Runtime Authority or Runtime key, so it structurally cannot call
+ *   Delegator private key, so it structurally cannot call
  *   `issueSessionCertificate`.
  * - The caller passes the resulting `issuanceRequest` to the existing
  *   `issueSessionCertificate` primitive (Runtime-side, in
- *   `./session-issuance.js`) on whatever boundary holds the Runtime key. This
+ *   `./session-issuance.js`) on whatever boundary holds the Delegator key. This
  *   module does not wrap that call, so it never holds a `ManagedSession` and
- *   a Runtime key at once either.
+ *   a Delegator key at once either.
  * - `completeManagedRuntimeSession` takes the Session created by
  *   `beginManagedRuntimeSession` and the certificate produced by
  *   `issueSessionCertificate`, has the Session accept it, and returns the
- *   Session-signing seam. It never accepts a Runtime Authority or Runtime
- *   key, so it cannot reach the Runtime private-key domain either.
+ *   Session-signing seam. It never accepts a Delegator private key, so it
+ *   cannot reach the Delegator private-key domain either.
  *
  * A caller that wants one call can compose these two functions and
  * `issueSessionCertificate` itself, but this module never introduces a
@@ -37,7 +37,7 @@ import type { SessionCertificateRepository, SessionCertificateTask } from "./ses
 
 /** Provenance is diagnostic metadata only; it is not a Session principal. */
 export interface ManagedRuntimeProvenance {
-  /** Runtime implementation label, not a Runtime Authority identity. */
+  /** Runtime implementation label, not a Delegator identity. */
   readonly runtime?: string;
   /** Optional worktree label, not a repository or authorization identity. */
   readonly worktree?: string;
@@ -84,8 +84,8 @@ export class ManagedRuntimeSessionError extends Error {
 /**
  * Options for the Session-side half of the managed-runtime seam.
  *
- * There is deliberately no Runtime Authority or Runtime key field here: this
- * type, and the function it configures, cannot reach the Runtime private-key
+ * There is deliberately no Delegator private-key field here: this
+ * type, and the function it configures, cannot reach the Delegator private-key
  * domain.
  */
 export interface ManagedRuntimeSessionBeginOptions {
@@ -121,7 +121,7 @@ export interface ManagedRuntimeSessionRequestOptions {
 /**
  * Options for the Session-side completion half of the managed-runtime seam.
  *
- * There is deliberately no Runtime Authority or Runtime key field here
+ * There is deliberately no Delegator private-key field here
  * either: this function only ever consumes the certificate already issued by
  * the Runtime-side `issueSessionCertificate` primitive.
  */
@@ -136,9 +136,9 @@ export interface ManagedRuntimeSessionCompleteOptions {
 /**
  * Agent-facing result of the managed-runtime seam.
  *
- * It contains the public-only issuance request, the canonical Runtime-signed
+ * It contains the public-only issuance request, the canonical Delegator-signed
  * certificate, and the Session signing seam.  It intentionally has no
- * Runtime key, App credential, or serialized Session private key.
+ * Delegator key, App credential, or serialized Session private key.
  */
 export interface ManagedRuntimeSession {
   readonly session: ManagedSession;
@@ -270,7 +270,7 @@ function assertIssuedCertificate(value: unknown): asserts value is IssuedSession
  * Session-side half of the managed-runtime seam.
  *
  * Creates one managed Session and its public-only issuance request. This
- * function has no Runtime Authority or Runtime key parameter, so it cannot
+ * function has no Delegator private-key parameter, so it cannot
  * call the Runtime-side `issueSessionCertificate` itself — the caller must
  * pass `issuanceRequest` to that primitive on the Runtime-key boundary, then
  * pass the resulting certificate to `completeManagedRuntimeSession`.
@@ -298,8 +298,8 @@ export function beginManagedRuntimeSession(options: ManagedRuntimeSessionBeginOp
  * Takes the Session from `beginManagedRuntimeSession` and the certificate
  * already issued by the Runtime-side `issueSessionCertificate`, has the
  * Session accept it, and returns the transport-neutral signing seam. This
- * function has no Runtime Authority or Runtime key parameter, so it cannot
- * reach the Runtime private-key domain.
+ * function has no Delegator private-key parameter, so it cannot
+ * reach the Delegator private-key domain.
  */
 export function completeManagedRuntimeSession(options: ManagedRuntimeSessionCompleteOptions): ManagedRuntimeSession {
   if (!isRecord(options)) {

@@ -1,5 +1,5 @@
 /**
- * Managed Agent Session bootstrap and Runtime-signed Session Certificate
+ * Managed Agent Session bootstrap and Delegator-signed Session Certificate
  * issuance.
  *
  * The managed boundary is deliberately split into two values:
@@ -8,7 +8,7 @@
  *   its public JWK through an issuance request;
  * - `issueSessionCertificate` runs on the Runtime side and accepts a request
  *   containing no private Session material, then signs the existing #367
- *   canonical JWS input with the #368 Runtime key.
+ *   canonical JWS input with the #368 Delegator key.
  *
  * This module does not package credentials, transport requests, verify App
  * authentication, or integrate a managed Runtime. It only implements the
@@ -36,11 +36,11 @@ import {
 import {
   MIN_SESSION_TTL_SECONDS,
   MAX_SESSION_TTL_SECONDS,
-  assertRuntimeAuthority,
-  isRuntimeAuthorityActive,
-  type RuntimeAuthority,
-} from "./runtime-authority.js";
-import { exportRuntimeAuthorityPublicKey, type RuntimeAuthorityKeyPair } from "./runtime-key.js";
+  assertDelegator,
+  isDelegatorActive,
+  type Delegator,
+} from "./delegator.js";
+import { exportDelegatorPublicKey, type DelegatorKeyPair } from "./delegator-key.js";
 import { assertEd25519PublicJwk, type Ed25519PublicJwk } from "./ed25519-jwk.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 import { capabilityClaimWithinCeiling, type CapabilityClaim } from "./capability.js";
@@ -138,9 +138,9 @@ export class SessionBootstrapError extends Error {
 export interface RuntimeSessionCertificateIssuanceOptions {
   /** Repository identity resolved by the Runtime, not supplied by the Session. */
   readonly repository: SessionCertificateRepository;
-  readonly runtimeAuthority: RuntimeAuthority;
-  /** #368 Runtime private key or the keypair returned by its machinery. */
-  readonly runtimeKey: KeyObject | RuntimeAuthorityKeyPair;
+  readonly runtimeAuthority: Delegator;
+  /** #368 Delegator private key or the keypair returned by its machinery. */
+  readonly runtimeKey: KeyObject | DelegatorKeyPair;
   readonly request: ManagedSessionIssuanceRequest;
   readonly now?: Date;
 }
@@ -368,12 +368,12 @@ function validationPayload(
   };
 }
 
-function runtimeSigningKey(input: KeyObject | RuntimeAuthorityKeyPair): KeyObject {
+function runtimeSigningKey(input: KeyObject | DelegatorKeyPair): KeyObject {
   if (isRecord(input) && "privateKey" in input) return input.privateKey as KeyObject;
   return input as KeyObject;
 }
 
-function ensureRuntimeSigningKey(input: KeyObject | RuntimeAuthorityKeyPair, authority: RuntimeAuthority): KeyObject {
+function ensureRuntimeSigningKey(input: KeyObject | DelegatorKeyPair, authority: Delegator): KeyObject {
   const privateKey = runtimeSigningKey(input);
   if (
     typeof privateKey !== "object" ||
@@ -388,7 +388,7 @@ function ensureRuntimeSigningKey(input: KeyObject | RuntimeAuthorityKeyPair, aut
   }
   let publicKey: Ed25519PublicJwk;
   try {
-    publicKey = exportRuntimeAuthorityPublicKey(privateKey);
+    publicKey = exportDelegatorPublicKey(privateKey);
   } catch {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_RUNTIME_KEY_INVALID",
@@ -398,7 +398,7 @@ function ensureRuntimeSigningKey(input: KeyObject | RuntimeAuthorityKeyPair, aut
   if (publicKey.x !== authority.key.x) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_RUNTIME_KEY_MISMATCH",
-      "Runtime signing key does not match the trusted Runtime Authority public key.",
+      "Runtime signing key does not match the trusted Delegator public key.",
     );
   }
   return privateKey;
@@ -493,7 +493,7 @@ export function createManagedSession(): ManagedSession {
   }
 
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  const publicKeyJwk = exportRuntimeAuthorityPublicKey(publicKey);
+  const publicKeyJwk = exportDelegatorPublicKey(publicKey);
   let acceptedCertificate: DecodedSessionCertificate | undefined;
 
   const createRequest = (input: ManagedSessionIssuanceRequestInput): ManagedSessionIssuanceRequest => {
@@ -598,27 +598,27 @@ export function createManagedSession(): ManagedSession {
 }
 
 /**
- * Issue a Runtime-signed certificate from a public-only Session request.
+ * Issue a Delegator-signed certificate from a public-only Session request.
  * The request's repository name is diagnostic input; the certificate uses the
  * Runtime-resolved repository identity and compares its immutable ID.
  */
 export function issueSessionCertificate(options: RuntimeSessionCertificateIssuanceOptions): IssuedSessionCertificate {
-  let authority: RuntimeAuthority;
+  let authority: Delegator;
   try {
-    authority = assertRuntimeAuthority(options.runtimeAuthority);
+    authority = assertDelegator(options.runtimeAuthority);
   } catch (error: unknown) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_INVALID_RUNTIME_AUTHORITY",
-      error instanceof Error ? error.message : "Runtime Authority record is invalid.",
+      error instanceof Error ? error.message : "Delegator record is invalid.",
     );
   }
 
   const now = options.now ?? new Date();
   const issuedAt = nowSeconds(now);
-  if (!isRuntimeAuthorityActive(authority, now)) {
+  if (!isDelegatorActive(authority, now)) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_RUNTIME_NOT_ACTIVE",
-      "The Runtime Authority is not active at issuance time.",
+      "The Delegator is not active at issuance time.",
     );
   }
 
@@ -626,7 +626,7 @@ export function issueSessionCertificate(options: RuntimeSessionCertificateIssuan
   if (options.request.ttlSeconds > authority.maxSessionTtlSeconds) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING",
-      "Requested Session Certificate TTL exceeds the Runtime Authority ceiling.",
+      "Requested Session Certificate TTL exceeds the Delegator ceiling.",
       [
         issuanceDiagnostic(
           "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING",
@@ -639,7 +639,7 @@ export function issueSessionCertificate(options: RuntimeSessionCertificateIssuan
   if (authority.notAfter !== null && (issuedAt + options.request.ttlSeconds) * 1000 > Date.parse(authority.notAfter)) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_RUNTIME_EXPIRY",
-      "Requested Session Certificate would outlive the Runtime Authority trust window.",
+      "Requested Session Certificate would outlive the Delegator trust window.",
     );
   }
   const privateKey = ensureRuntimeSigningKey(options.runtimeKey, authority);
@@ -660,7 +660,7 @@ export function issueSessionCertificate(options: RuntimeSessionCertificateIssuan
     if (!capabilityClaimWithinCeiling(claim, authority.capabilityCeiling)) {
       throw new SessionCertificateIssuanceError(
         "SESSION_CERTIFICATE_CAPABILITY_EXCEEDS_RUNTIME_CEILING",
-        "Requested capability is outside the Runtime Authority ceiling.",
+        "Requested capability is outside the Delegator ceiling.",
         [
           issuanceDiagnostic(
             "SESSION_CERTIFICATE_CAPABILITY_EXCEEDS_RUNTIME_CEILING",

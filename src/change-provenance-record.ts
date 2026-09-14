@@ -9,13 +9,13 @@
 
 import { createPublicKey, sign as ed25519Sign, verify as ed25519Verify, type KeyObject } from "node:crypto";
 import {
-  assertRuntimeAuthority,
-  isRuntimeAuthorityActive,
-  MAX_RUNTIME_AUTHORITY_ID_LENGTH,
-  RUNTIME_AUTHORITY_ID_PATTERN,
-  type RuntimeAuthority,
-} from "./agent-authority/runtime-authority.js";
-import { exportRuntimeAuthorityPublicKey, type RuntimeAuthorityKeyPair } from "./agent-authority/runtime-key.js";
+  assertDelegator,
+  isDelegatorActive,
+  MAX_DELEGATOR_ID_LENGTH,
+  DELEGATOR_ID_PATTERN,
+  type Delegator,
+} from "./agent-authority/delegator.js";
+import { exportDelegatorPublicKey, type DelegatorKeyPair } from "./agent-authority/delegator-key.js";
 import { assertEd25519PublicJwk, type Ed25519PublicJwk } from "./agent-authority/ed25519-jwk.js";
 import {
   base64UrlDecodeToBytes,
@@ -53,7 +53,7 @@ export interface ChangeProvenancePayload {
 export interface ChangeProvenanceSignatureEnvelope {
   readonly alg: typeof CHANGE_PROVENANCE_RECORD_SIGNATURE_ALGORITHM;
   readonly typ: typeof CHANGE_PROVENANCE_RECORD_SIGNATURE_TYPE;
-  /** Runtime Authority key identifier, not an actor identifier. */
+  /** Delegator key identifier, not an actor identifier. */
   readonly kid: string;
   readonly value: string;
 }
@@ -73,12 +73,12 @@ export interface ChangeProvenanceRecordDiagnostic {
   readonly message: string;
 }
 
-export type ChangeProvenanceRuntimeKey = KeyObject | RuntimeAuthorityKeyPair;
+export type ChangeProvenanceRuntimeKey = KeyObject | DelegatorKeyPair;
 
 export interface CreateChangeProvenanceRecordOptions {
   readonly rootIssue: number;
   readonly actor?: ChangeProvenanceActor;
-  readonly runtimeAuthority: RuntimeAuthority;
+  readonly runtimeAuthority: Delegator;
   readonly runtimeKey: ChangeProvenanceRuntimeKey;
   readonly now?: Date;
 }
@@ -225,8 +225,8 @@ function validSignature(
   if (
     typeof value.kid !== "string" ||
     value.kid.length === 0 ||
-    value.kid.length > MAX_RUNTIME_AUTHORITY_ID_LENGTH ||
-    !RUNTIME_AUTHORITY_ID_PATTERN.test(value.kid) ||
+    value.kid.length > MAX_DELEGATOR_ID_LENGTH ||
+    !DELEGATOR_ID_PATTERN.test(value.kid) ||
     !SAFE_TEXT.test(value.kid)
   ) {
     diagnostics.push({ path: `${path}.kid`, message: "Signature key identifier is invalid." });
@@ -299,10 +299,10 @@ function signingInput(payload: ChangeProvenancePayload, authorityId: string): st
   return `${CHANGE_PROVENANCE_RECORD_SIGNATURE_DOMAIN}.${base64UrlEncodeText(header)}.${base64UrlEncodeText(canonicalChangeProvenancePayload(payload))}`;
 }
 
-function assertRuntimeKeyMatchesAuthority(runtimeKey: ChangeProvenanceRuntimeKey, authority: RuntimeAuthority): void {
+function assertRuntimeKeyMatchesAuthority(runtimeKey: ChangeProvenanceRuntimeKey, authority: Delegator): void {
   let publicKey: Ed25519PublicJwk;
   try {
-    publicKey = exportRuntimeAuthorityPublicKey(runtimeKey);
+    publicKey = exportDelegatorPublicKey(runtimeKey);
   } catch {
     throw new ChangeProvenanceRecordError("CHANGE_PROVENANCE_RECORD_SIGNING_FAILED", "Runtime signing key is invalid.");
   }
@@ -317,9 +317,9 @@ function assertRuntimeKeyMatchesAuthority(runtimeKey: ChangeProvenanceRuntimeKey
 export function createChangeProvenanceRecord(
   options: CreateChangeProvenanceRecordOptions,
 ): SignedChangeProvenanceRecord {
-  const authority = assertRuntimeAuthority(options.runtimeAuthority);
+  const authority = assertDelegator(options.runtimeAuthority);
   const now = options.now ?? new Date();
-  if (!isRuntimeAuthorityActive(authority, now)) {
+  if (!isDelegatorActive(authority, now)) {
     throw new ChangeProvenanceRecordError(
       "CHANGE_PROVENANCE_RECORD_UNTRUSTED_KEY",
       "Runtime signing authority is inactive.",
@@ -438,10 +438,10 @@ function parseCanonicalRecord(input: unknown): SignedChangeProvenanceRecord {
 
 export function verifyChangeProvenanceRecord(
   input: unknown,
-  runtimeAuthorityInput: RuntimeAuthority,
+  runtimeAuthorityInput: Delegator,
 ): ChangeProvenancePayload {
   const record = parseCanonicalRecord(input);
-  const authority = assertRuntimeAuthority(runtimeAuthorityInput);
+  const authority = assertDelegator(runtimeAuthorityInput);
   if (record.signature.kid !== authority.id) {
     throw new ChangeProvenanceRecordError(
       "CHANGE_PROVENANCE_RECORD_UNTRUSTED_KEY",
@@ -477,7 +477,7 @@ export function verifyChangeProvenanceRecord(
   return payloadForRecord(record);
 }
 
-export function isChangeProvenanceRecordValid(input: unknown, runtimeAuthority: RuntimeAuthority): boolean {
+export function isChangeProvenanceRecordValid(input: unknown, runtimeAuthority: Delegator): boolean {
   try {
     verifyChangeProvenanceRecord(input, runtimeAuthority);
     return true;

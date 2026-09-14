@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * The dedicated PR authority for the Runtime Authority trust root.
+ * The dedicated PR check for the Delegator trust root.
  *
  * This validator compares complete base and head snapshots. It intentionally
- * imports the existing Runtime Authority schema, canonical serializer, path
+ * imports the existing Delegator schema, canonical serializer, path
  * helper, and #370 repository-path classifier instead of defining parallel
  * trust-root rules here.
  */
@@ -13,16 +13,20 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY,
-  RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX,
-  canonicalRuntimeAuthorityJson,
-  validateRuntimeAuthority,
-} from "../src/agent-authority/runtime-authority.ts";
+  DELEGATOR_ARTIFACT_DIRECTORY,
+  DELEGATOR_ARTIFACT_PATH_PREFIX,
+  canonicalDelegatorJson,
+  validateDelegator,
+} from "../src/agent-authority/delegator.ts";
 import { classifyRepositoryPath } from "../src/agent-authority/protected-paths.ts";
-import { runtimeAuthorityArtifactPath } from "../src/agent-authority/runtime-authority-trust.ts";
+import { delegatorArtifactPath } from "../src/agent-authority/delegator-trust.ts";
 
-export const RUNTIME_AUTHORITY_GOVERNANCE_CHECK_NAME = "Runtime Authority Governance";
-export const RUNTIME_AUTHORITY_GOVERNANCE_VERSION = 1;
+/** Stable check value; the legacy check name remains the repository contract. */
+export const DELEGATOR_GOVERNANCE_CHECK_NAME = "Runtime Authority Governance";
+export const DELEGATOR_GOVERNANCE_VERSION = 1;
+/** @deprecated Compatibility names for the existing required check. */
+export const RUNTIME_AUTHORITY_GOVERNANCE_CHECK_NAME = DELEGATOR_GOVERNANCE_CHECK_NAME;
+export const RUNTIME_AUTHORITY_GOVERNANCE_VERSION = DELEGATOR_GOVERNANCE_VERSION;
 
 const NORMAL_FILE_MODE = "100644";
 
@@ -67,13 +71,12 @@ function addViolation(violations, code, pathValue, message, side) {
 function canonicalAuthorityPath(filePath) {
   const classification = classifyRepositoryPath(filePath);
   if (classification.kind !== "protected") return { error: "path is not classified as protected" };
-  if (!filePath.startsWith(RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX))
-    return { error: "path is outside the canonical directory" };
-  const relative = filePath.slice(RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX.length);
+  if (!filePath.startsWith(DELEGATOR_ARTIFACT_PATH_PREFIX)) return { error: "path is outside the canonical directory" };
+  const relative = filePath.slice(DELEGATOR_ARTIFACT_PATH_PREFIX.length);
   if (relative.includes("/") || !relative.endsWith(".json")) return { error: "artifact must be a direct .json file" };
   const id = relative.slice(0, -".json".length);
   try {
-    const expected = runtimeAuthorityArtifactPath(id);
+    const expected = delegatorArtifactPath(id);
     return expected === filePath ? { id, path: expected } : { error: "filename is not canonical" };
   } catch {
     return { error: "filename does not contain a valid authority identifier" };
@@ -104,11 +107,7 @@ function validateSnapshot(snapshot, side) {
       addViolation(violations, "RUNTIME_AUTHORITY_PATH_INVALID", "$", "Runtime Authority paths must be strings.", side);
       continue;
     }
-    if (
-      filePath !== RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY &&
-      !filePath.startsWith(RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX)
-    )
-      continue;
+    if (filePath !== DELEGATOR_ARTIFACT_DIRECTORY && !filePath.startsWith(DELEGATOR_ARTIFACT_PATH_PREFIX)) continue;
     const classification = classifyRepositoryPath(filePath);
     if (classification.kind !== "protected") {
       addViolation(
@@ -156,7 +155,7 @@ function validateSnapshot(snapshot, side) {
       );
       continue;
     }
-    const validation = validateRuntimeAuthority(raw, "$runtimeAuthority");
+    const validation = validateDelegator(raw, "$runtimeAuthority");
     if (!validation.valid || validation.value === undefined) {
       addViolation(
         violations,
@@ -201,7 +200,7 @@ function validateSnapshot(snapshot, side) {
       );
       continue;
     }
-    if (entry.content !== canonicalRuntimeAuthorityJson(authority)) {
+    if (entry.content !== canonicalDelegatorJson(authority)) {
       addViolation(
         violations,
         "RUNTIME_AUTHORITY_NONCANONICAL_JSON",
@@ -217,7 +216,7 @@ function validateSnapshot(snapshot, side) {
 }
 
 function authorityWithoutStatus(authority) {
-  return canonicalRuntimeAuthorityJson({ ...authority, status: "active" });
+  return canonicalDelegatorJson({ ...authority, status: "active" });
 }
 
 function transitionReport(violations, baseRecords, headRecords) {
@@ -294,22 +293,22 @@ function transitionReport(violations, baseRecords, headRecords) {
     addViolation(
       violations,
       "RUNTIME_AUTHORITY_MIXED_TRANSITION_UNSUPPORTED",
-      RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY,
+      DELEGATOR_ARTIFACT_DIRECTORY,
       "A Runtime Authority PR must create active records or revoke existing records, not mix both phases.",
     );
   }
   return { creates, revocations };
 }
 
-/** Validate the complete base-to-head Runtime Authority trust-root transition. */
-export function validateRuntimeAuthorityTransition({ base, head }) {
+/** Validate the complete base-to-head Delegator trust-root transition. */
+export function validateDelegatorTransition({ base, head }) {
   const baseResult = validateSnapshot(base, "base");
   const headResult = validateSnapshot(head, "head");
   const violations = [...baseResult.violations, ...headResult.violations];
   const transition = transitionReport(violations, baseResult.records, headResult.records);
   return Object.freeze({
-    version: RUNTIME_AUTHORITY_GOVERNANCE_VERSION,
-    check: RUNTIME_AUTHORITY_GOVERNANCE_CHECK_NAME,
+    version: DELEGATOR_GOVERNANCE_VERSION,
+    check: DELEGATOR_GOVERNANCE_CHECK_NAME,
     valid: violations.length === 0,
     ok: violations.length === 0,
     changed: transition.creates.length > 0 || transition.revocations.length > 0,
@@ -319,7 +318,10 @@ export function validateRuntimeAuthorityTransition({ base, head }) {
   });
 }
 
-export const validateRuntimeAuthorityGovernance = validateRuntimeAuthorityTransition;
+export const validateDelegatorGovernance = validateDelegatorTransition;
+/** @deprecated Compatibility aliases for the existing validator API. */
+export const validateRuntimeAuthorityTransition = validateDelegatorTransition;
+export const validateRuntimeAuthorityGovernance = validateDelegatorTransition;
 
 function gitSnapshot(root, revision) {
   if (typeof revision !== "string" || revision.length === 0) throw new Error("revision is required");
@@ -330,7 +332,7 @@ function gitSnapshot(root, revision) {
   if (!/^[0-9a-f]{40}$/u.test(resolvedRevision)) throw new Error("git revision is not an exact commit SHA");
   const output = execFileSync(
     "git",
-    ["ls-tree", "-r", "-z", "--full-name", resolvedRevision, "--", RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY],
+    ["ls-tree", "-r", "-z", "--full-name", resolvedRevision, "--", DELEGATOR_ARTIFACT_DIRECTORY],
     { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
   );
   const snapshot = new Map();
@@ -362,12 +364,15 @@ function gitSnapshot(root, revision) {
 const MAX_BLOB_BYTES = 1_048_576;
 
 /** Read complete base/head snapshots from a Git worktree for the PR check. */
-export function validateRuntimeAuthorityGitTransition(root, baseRevision, headRevision) {
-  return validateRuntimeAuthorityTransition({
+export function validateDelegatorGitTransition(root, baseRevision, headRevision) {
+  return validateDelegatorTransition({
     base: gitSnapshot(path.resolve(root), baseRevision),
     head: gitSnapshot(path.resolve(root), headRevision),
   });
 }
+
+/** @deprecated Compatibility alias for the existing validator API. */
+export const validateRuntimeAuthorityGitTransition = validateDelegatorGitTransition;
 
 function parseCliArguments(argv) {
   const values = {};
@@ -389,7 +394,7 @@ function runAsCommand() {
   try {
     const args = parseCliArguments(process.argv.slice(2));
     const root = args.root === undefined ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..") : args.root;
-    const result = validateRuntimeAuthorityGitTransition(root, args.base, args.head);
+    const result = validateDelegatorGitTransition(root, args.base, args.head);
     if (!result.valid) {
       console.error(`${RUNTIME_AUTHORITY_GOVERNANCE_CHECK_NAME} failed`);
       for (const entry of result.violations) {

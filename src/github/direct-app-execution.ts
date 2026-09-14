@@ -18,7 +18,7 @@ import {
   type GitHubAppRepositoryReadCapability,
 } from "./app-installation-credential-broker.js";
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
-import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
+import { resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { GitHubChangeStateProjector } from "./change-state-projector.js";
 import { InariIssuerAppAuthority, type IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { GitHubChangeEffectRepository, GitHubChangeProvenanceSignerOptions } from "./change-effect-adapter.js";
@@ -150,16 +150,16 @@ export function createDirectAppSessionExecutor(
       let executionBroker = broker;
       if (input.request.operation === "issue") {
         if (input.request.signedProvenanceRecord === undefined) {
-          throw new Error("A caller-produced Runtime Authority signed provenance record is required.");
+          throw new Error("A caller-produced Delegator signed provenance record is required.");
         }
         const validation = validateChangeProvenanceRecord(input.request.signedProvenanceRecord);
         if (!validation.valid || validation.record === undefined) {
-          throw new Error("The Runtime Authority signed provenance record is invalid.");
+          throw new Error("The Delegator signed provenance record is invalid.");
         }
         const signedProvenanceRecord = validation.record;
         const provenance = await broker.withRepositoryReadCapability({}, async (capability) => {
           const runtimeReader = createAppRepositoryEvidenceReader(capability, config.repository, target);
-          const loaded = await resolveRuntimeAuthority(runtimeReader, signedProvenanceRecord.signature.kid, {
+          const loaded = await resolveDelegator(runtimeReader, signedProvenanceRecord.signature.kid, {
             ...(config.now === undefined ? {} : { now: config.now() }),
           });
           // The App/executor never imports or holds the Runtime private key.
@@ -167,7 +167,7 @@ export function createDirectAppSessionExecutor(
           // repository-trusted Runtime public key.
           const payload = verifyChangeProvenanceRecord(signedProvenanceRecord, loaded.authority);
           if (payload.rootIssue !== input.request.issue || payload.operation !== "change.issue") {
-            throw new Error("The Runtime Authority signed provenance record does not match the Change request.");
+            throw new Error("The Delegator signed provenance record does not match the Change request.");
           }
           const signer: GitHubChangeProvenanceSignerOptions = {
             runtimeAuthority: loaded.authority,

@@ -1,5 +1,5 @@
 /**
- * Deterministic canonical JSON serialization for Runtime Authority / Session
+ * Deterministic canonical JSON serialization for Delegator / Session
  * Certificate signing input, plus the base64url codec used by JWS compact
  * encoding.
  *

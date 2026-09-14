@@ -13,10 +13,12 @@ prior art, but its hosted gateway, centralized requester-authentication/admissio
 Actions-as-required-execution assumptions are subordinate to this document where they
 conflict. MCP remains a supported protocol/transport, not the trust root.
 
-The subordinate operator procedure for the Runtime Authority lifecycle is
-[`RUNTIME_AUTHORITY_OPERATIONS.md`](./RUNTIME_AUTHORITY_OPERATIONS.md). This
-architecture remains normative; the runbook documents the current CLI and
-deployment procedure without redefining the trust model.
+The subordinate operator procedure for the Delegator lifecycle is
+[`DELEGATOR_OPERATIONS.md`](./DELEGATOR_OPERATIONS.md). This architecture
+remains normative; the runbook documents the current CLI and deployment
+procedure without redefining the trust model. The former
+[`RUNTIME_AUTHORITY_OPERATIONS.md`](./RUNTIME_AUTHORITY_OPERATIONS.md) filename
+is retained as a compatibility pointer.
 
 ## 1. Purpose
 
@@ -71,7 +73,7 @@ The product separates six roles:
 
 - **Repository governance** — declares trusted Runtime Authorities and the maximum
   semantic authority each Runtime may delegate.
-- **Runtime Authority** — holds a long-lived delegation key and certifies bounded Agent
+- **Delegator** — holds a long-lived delegation key and certifies bounded Agent
   Sessions. It is a delegation principal, not a GitHub mutation principal.
 - **Agent Session** — holds one ephemeral Session private key and a Runtime-signed
   Session Certificate. It requests only the authority delegated to that session.
@@ -90,7 +92,7 @@ Repository                         GitHub
     |                                 ^
     | trusts Runtime signer           | App installation authority
     v                                 |
-Runtime Authority                    |
+Delegator                            |
     |                                 |
     | certifies bounded Session       |
     v                                 |
@@ -184,7 +186,7 @@ The target topology is:
                            │ trusts / limits
                            v
                   ┌──────────────────┐
-                  │ Runtime Authority│
+                  │ Delegator        │
                   │                  │
                   │ Runtime private  │
                   │ key              │
@@ -253,7 +255,7 @@ V1 uses repository-native structured trust records under:
 .github/inari/authorities/<authority-id>.json
 ```
 
-The file contains the Runtime public key plus policy metadata. A raw `.pub` file is
+The file contains the Delegator public key plus policy metadata. A raw `.pub` file is
 insufficient because rotation state, lifetime ceilings, and delegable capability ceilings
 must be governed alongside the key.
 
@@ -349,7 +351,7 @@ future concern and must preserve bounded revocation latency explicitly.
 
 ### 6.7 Required repository Ruleset
 
-The canonical Runtime Authority root is published through the dedicated PR validation
+The canonical Delegator root is published through the dedicated PR validation
 check and independent human review. Repository operators must configure the required
 Ruleset rule as follows:
 
@@ -363,7 +365,7 @@ The local `inari authority register`, `rotate`, and `revoke` commands materializ
 changes only in the operator's dedicated worktree. They do not publish to GitHub, change
 Ruleset settings, or introduce a Runtime/App credential into the Agent execution model.
 
-## 7. Runtime Authority
+## 7. Delegator
 
 ### 7.1 Runtime key semantics
 
@@ -391,7 +393,7 @@ or making an environment variable the default storage form is prohibited.
 Managed runtimes may obtain the private key from their own secret manager. Inari defines
 the key interface/format; it does not become a general secrets manager.
 
-### 7.3 Runtime authority ceiling
+### 7.3 Delegator authority ceiling
 
 A trusted Runtime is privileged because it can mint Session Certificates without asking
 an Inari management server. Its power is therefore bounded by the repository trust
@@ -797,7 +799,7 @@ Success is reported only after authoritative reread and semantic postcondition
 verification. Provenance includes at minimum:
 
 ```text
-runtime authority ID / key ID
+Delegator ID / key ID
 Session ID / certificate jti
 semantic operation / task
 repository ID
@@ -965,7 +967,7 @@ executed_by                   = inari-issuer[bot]
 The following identities must remain distinguishable:
 
 - repository trust owner;
-- Runtime Authority;
+- Delegator;
 - Agent Session;
 - agent implementation metadata;
 - issuer GitHub App;
@@ -1180,9 +1182,9 @@ same PR.
 
 Expected follow-up slices:
 
-1. define Runtime Authority / Session Certificate schemas and conformance vectors;
-2. add local Runtime Ed25519 key generation and secure key loading;
-3. add canonical repository Runtime trust artifacts and validation;
+1. define Delegator / Session Certificate schemas and conformance vectors;
+2. add local Delegator Ed25519 key generation and secure key loading;
+3. add canonical repository Delegator trust artifacts and validation;
 4. protect trust-root paths in semantic branch-write policy.
 
 ### Gate 2 — Session delegation
@@ -1259,7 +1261,7 @@ these questions:
 
 - who holds every key and credential;
 - where Runtime trust is rooted;
-- how Runtime authority is limited;
+- how Delegator authority is limited;
 - how Session identity and manual/managed bootstrap work;
 - what a Session Certificate proves;
 - how Session proof-of-possession is verified;
@@ -1272,6 +1274,6 @@ these questions:
 
 The implementation must preserve the central invariant:
 
-> GitHub authority remains inside the App. Runtime authority can only delegate. Agent
+> GitHub authority remains inside the App. Delegator authority can only delegate. Agent
 > Sessions can only exercise the bounded semantic authority certified for that session
 > and still admitted by the repository's current canonical policy and state.

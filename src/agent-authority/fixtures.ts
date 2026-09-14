@@ -1,11 +1,11 @@
 /**
- * Conformance vectors for the Runtime Authority and Session Certificate
+ * Conformance vectors for the Delegator and Session Certificate
  * schemas (#367). These are plain data so `conformance.test.ts` -- and any
  * future non-TypeScript implementation -- can execute the same fixed inputs
  * against its own validator and expect the same accept/reject outcome.
  *
  * `GOLDEN_SESSION_CERTIFICATE` is a real, deterministically reproducible
- * Ed25519/JWS/JCS artifact: a fixed test-only Runtime keypair (never a real
+ * Ed25519/JWS/JCS artifact: a fixed test-only Delegator keypair (never a real
  * trust anchor -- do not register it in any repository trust record) signs
  * a fixed claim set, and EdDSA signing is itself deterministic, so the
  * `compact` string below is the exact byte-for-byte output any conformant
@@ -74,6 +74,10 @@ export const RUNTIME_AUTHORITY_VECTORS: readonly ConformanceVector[] = Object.fr
   { name: "unknown-top-level-property", valid: false, input: { ...VALID_RUNTIME_AUTHORITY, trustedAdmin: true } },
   { name: "non-object-root", valid: false, input: "not-a-record" },
 ]);
+
+/** Canonical Delegator names; the Runtime Authority aliases above are retained for compatibility. */
+export const VALID_DELEGATOR = VALID_RUNTIME_AUTHORITY;
+export const DELEGATOR_VECTORS = RUNTIME_AUTHORITY_VECTORS;
 
 export const VALID_SESSION_CERTIFICATE_HEADER = Object.freeze({
   alg: "EdDSA",

@@ -196,13 +196,13 @@ function stageInvariant(path: string, diagnostics: CapabilityExecutionProvenance
   if (diagnostics.length < MAX_DIAGNOSTICS) diagnostics.push(diagnostic("PROVENANCE_STAGE_INVARIANT", path, message));
 }
 
-function validateRuntimeAuthority(
+function validateDelegator(
   input: unknown,
   path: string,
   diagnostics: CapabilityExecutionProvenanceDiagnostic[],
 ): input is { readonly id: string; readonly kid: string } {
   if (!isRecord(input)) {
-    invalid(path, diagnostics, "Runtime Authority identity must be an object.");
+    invalid(path, diagnostics, "Delegator identity must be an object.");
     return false;
   }
   addUnknownProperties(input, RUNTIME_KEYS, path, diagnostics);
@@ -215,8 +215,8 @@ function validateRuntimeAuthority(
     typeof input.kid === "string" &&
     RUNTIME_ID.test(input.kid) &&
     input.kid.length <= MAX_OPAQUE_ID_LENGTH;
-  if (!valid) invalid(`${path}.id`, diagnostics, "Runtime Authority id is invalid.");
-  if (!kidValid) invalid(`${path}.kid`, diagnostics, "Runtime Authority kid is invalid.");
+  if (!valid) invalid(`${path}.id`, diagnostics, "Delegator id is invalid.");
+  if (!kidValid) invalid(`${path}.kid`, diagnostics, "Delegator kid is invalid.");
   return valid && kidValid;
 }
 
@@ -474,8 +474,7 @@ function validateRoot(input: unknown): CapabilityExecutionProvenanceValidationRe
   if (repositoryPresent && (!repositoryResult?.valid || repositoryResult.value === undefined)) {
     invalid("$.repository", diagnostics, "Repository identity is invalid.");
   }
-  const runtimeValid =
-    runtimePresent && validateRuntimeAuthority(input.runtimeAuthority, "$.runtimeAuthority", diagnostics);
+  const runtimeValid = runtimePresent && validateDelegator(input.runtimeAuthority, "$.runtimeAuthority", diagnostics);
   const sessionValid = sessionPresent && validateSession(input.session, "$.session", diagnostics);
   const authorityValid = authorityPresent && validateAuthority(input.authority, "$.authority", diagnostics);
   const requestValid = requestPresent && validateRequest(input.request, "$.request", diagnostics);

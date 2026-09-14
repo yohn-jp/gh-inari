@@ -124,6 +124,26 @@
       "types": "./dist/agent-authority/index.d.ts",
       "import": "./dist/agent-authority/index.js"
     },
+    "./agent-authority/delegator": {
+      "types": "./dist/agent-authority/delegator.d.ts",
+      "import": "./dist/agent-authority/delegator.js"
+    },
+    "./agent-authority/delegator-trust": {
+      "types": "./dist/agent-authority/delegator-trust.d.ts",
+      "import": "./dist/agent-authority/delegator-trust.js"
+    },
+    "./agent-authority/delegator-lifecycle": {
+      "types": "./dist/agent-authority/delegator-lifecycle.d.ts",
+      "import": "./dist/agent-authority/delegator-lifecycle.js"
+    },
+    "./agent-authority/delegator-operations": {
+      "types": "./dist/agent-authority/delegator-operations.d.ts",
+      "import": "./dist/agent-authority/delegator-operations.js"
+    },
+    "./agent-authority/delegator-key": {
+      "types": "./dist/agent-authority/delegator-key.d.ts",
+      "import": "./dist/agent-authority/delegator-key.js"
+    },
     "./session-authorized-change-executor": {
       "types": "./dist/session-authorized-change-executor.d.ts",
       "import": "./dist/session-authorized-change-executor.js"

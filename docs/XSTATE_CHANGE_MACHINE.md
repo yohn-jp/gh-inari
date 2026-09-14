@@ -582,7 +582,8 @@ Rationale:
 - exact pinning makes state-runtime changes explicit in review;
 - dependency widening can be reconsidered after migration converges.
 
-Graph/model testing support is development/test-only and must not become a runtime authority.
+Graph/model testing support is development/test-only and must not become a
+Delegator or other runtime trust principal.
 
 ## 17. Testing architecture
 
