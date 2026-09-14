@@ -63,6 +63,8 @@ jobs:
         if: steps.build.outcome == 'success'
         env:
           INARI_CHANGE_REQUEST: ${{ inputs.request }}
+          # Bootstrap/transport identity read only; semantic evidence uses the
+          # broker-owned App installation capability inside the executor.
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_ACTOR: ${{ github.actor }}
           INARI_ISSUER_APP_ID: ${{ secrets.INARI_ISSUER_APP_ID }}

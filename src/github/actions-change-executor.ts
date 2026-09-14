@@ -49,9 +49,10 @@ import {
   GitHubAppInstallationCredentialBroker,
   resolveGitHubRepository,
   type GitHubAppInstallationCredentialBrokerOptions,
+  type GitHubAppRepositoryReadCapability,
   type GitHubAppCredentialFailureStage,
 } from "./app-installation-credential-broker.js";
-import { createRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
+import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { GitHubChangeStateProjector, type GitHubChangeStateProjectorOptions } from "./change-state-projector.js";
 import {
   GitHubRepositoryEvidenceReaderError,
@@ -71,6 +72,7 @@ import {
   TRUSTED_EXECUTION_EVENTS,
   type TrustedExecutionEvent,
   type TrustedExecutionContext,
+  type RepositoryIdentity,
   EffectAuthorizerError,
 } from "./effect-authorizer.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
@@ -258,6 +260,20 @@ function parseRepository(value: string, hostname = "github.com"): GitHubChangeEf
     };
   } catch (error: unknown) {
     throw atRepositoryEvidenceReason("repository-configuration")(error);
+  }
+}
+
+function assertBrokeredRepositoryScope(
+  capability: GitHubAppRepositoryReadCapability,
+  target: RepositoryIdentity,
+): void {
+  const scoped = capability.scope.repository;
+  if (
+    scoped.repositoryHost.toLowerCase() !== target.repositoryHost.toLowerCase() ||
+    scoped.repositoryId !== target.repositoryId ||
+    scoped.nameWithOwner !== target.nameWithOwner
+  ) {
+    throw new GitHubActionsChangeExecutorError(undefined, "installation-scope");
   }
 }
 
@@ -484,13 +500,16 @@ export async function createGitHubActionsChangeExecutor(
   const environment = options.environment ?? process.env;
   let repositoryNameWithOwner: string;
   let hostname = "github.com";
-  let readTransport: GitHubActionsApiTransport;
+  let bootstrapTransport: GitHubActionsApiTransport;
   try {
     repositoryNameWithOwner = requiredEnvironment(environment, "GITHUB_REPOSITORY", "repository-evidence");
     if (environment.GITHUB_SERVER_URL !== undefined) {
       hostname = new URL(environment.GITHUB_SERVER_URL).hostname;
     }
-    readTransport = new GitHubActionsApiTransport({
+    // GITHUB_TOKEN is retained only for the Actions bootstrap read that binds
+    // the workflow target to an immutable repository identity. All semantic
+    // evidence below is acquired through the App broker capability.
+    bootstrapTransport = new GitHubActionsApiTransport({
       apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
       token: requiredEnvironment(environment, "GITHUB_TOKEN", "repository-evidence"),
       fetch: options.fetch,
@@ -502,7 +521,7 @@ export async function createGitHubActionsChangeExecutor(
   const repository = parseRepository(repositoryNameWithOwner, hostname);
   const resolvedRepository = await resolveGitHubRepository(
     repository,
-    readTransport,
+    bootstrapTransport,
     (reason) => new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason),
   );
   const { target, repositoryNodeId } = resolvedRepository;
@@ -552,20 +571,79 @@ export async function createGitHubActionsChangeExecutor(
     throw withFailureStage(error, "trusted-execution");
   }
   const branchGovernance = await atFailureStage("branch-governance", () => loadBranchGovernance(options.cwd));
-  const reader = new GitHubActionsEvidenceReader({
-    repository,
-    identity: {
-      repositoryHost: repository.hostname,
-      repositoryId: target.repositoryId,
-      rootIssue: options.request.issue,
-    },
-    branchGovernance,
-    transport: readTransport,
-    cwd: options.cwd,
-    ...(options.request.operation !== "issue" || options.request.semanticPullRequestPlan === undefined
-      ? {}
-      : { semanticPullRequestPlan: options.request.semanticPullRequestPlan }),
-  });
+  let broker: GitHubActionsCredentialBroker;
+  let effectAuthorizer: InariEffectAuthorizer;
+  try {
+    const appId = requiredEnvironment(environment, "INARI_ISSUER_APP_ID", "issuer-configuration");
+    const installationId = requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID", "issuer-configuration");
+    const brokerOptions: GitHubActionsCredentialBrokerOptions = {
+      appId,
+      installationId,
+      privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
+      repository,
+      repositoryNodeId,
+      apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
+      fetch: options.fetch,
+    };
+    // Establish the broker before any Runtime Authority or semantic evidence
+    // read. The initial instance has no provenance signer and is read-only for
+    // bootstrap/trust discovery; issue effects use a fresh instance below with
+    // the already verified Runtime Authority record.
+    broker = new GitHubActionsCredentialBroker(brokerOptions);
+    if (options.request.operation === "issue") {
+      // Parse and validate the caller-produced record before selecting any
+      // repository trust anchor. The signed kid is the sole selector.
+      const signedRecord = requiredSignedProvenanceRecord(options.request);
+      const provenance = await broker.withRepositoryReadCapability({}, async (capability) => {
+        assertBrokeredRepositoryScope(capability, target);
+        const runtimeReader = createAppRepositoryEvidenceReader(capability, repository, target);
+        const loaded = await resolveDelegator(runtimeReader, signedRecord.signature.kid);
+        // The Runtime signs before this trusted executor boundary; this process
+        // never imports or holds the Runtime private key.
+        const payload = verifyChangeProvenanceRecord(signedRecord, loaded.authority);
+        if (payload.rootIssue !== options.request.issue || payload.operation !== "change.issue") {
+          throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
+        }
+        const signer: GitHubChangeProvenanceSignerOptions = {
+          runtimeAuthority: loaded.authority,
+          signedRecord,
+        };
+        return signer;
+      });
+      // The Runtime signs before this trusted executor boundary; this process
+      // never imports or holds the Runtime private key.
+      broker = new GitHubActionsCredentialBroker({ ...brokerOptions, provenance });
+    }
+    effectAuthorizer = new InariEffectAuthorizer({ appId, broker });
+  } catch (error: unknown) {
+    throw withFailureStage(error, "issuer-configuration");
+  }
+
+  const withBrokeredEvidence = <T>(
+    operation: (capability: GitHubAppRepositoryReadCapability) => Promise<T>,
+  ): Promise<T> =>
+    broker.withRepositoryReadCapability({}, async (capability) => {
+      assertBrokeredRepositoryScope(capability, target);
+      return operation(capability);
+    });
+
+  const buildReader = (capability: GitHubAppRepositoryReadCapability): GitHubActionsEvidenceReader =>
+    new GitHubActionsEvidenceReader({
+      repository,
+      identity: {
+        repositoryHost: capability.scope.repository.repositoryHost,
+        repositoryId: capability.scope.repository.repositoryId,
+        rootIssue: options.request.issue,
+      },
+      branchGovernance,
+      transport: capability.transport,
+      providerPrincipal: capability.providerPrincipal,
+      cwd: options.cwd,
+      ...(options.request.operation !== "issue" || options.request.semanticPullRequestPlan === undefined
+        ? {}
+        : { semanticPullRequestPlan: options.request.semanticPullRequestPlan }),
+    });
+
   if (options.request.operation === "show") {
     return {
       execute: async () => {
@@ -576,49 +654,14 @@ export async function createGitHubActionsChangeExecutor(
       },
       read: async (request) => {
         try {
-          return projectChangeFromGitHubEvidence(await reader.read(request));
+          return await withBrokeredEvidence(async (capability) =>
+            projectChangeFromGitHubEvidence(await buildReader(capability).read(request)),
+          );
         } catch (error: unknown) {
           throw withFailureStage(error, "projection-execution");
         }
       },
     };
-  }
-  let broker: GitHubActionsCredentialBroker;
-  let effectAuthorizer: InariEffectAuthorizer;
-  try {
-    const appId = requiredEnvironment(environment, "INARI_ISSUER_APP_ID", "issuer-configuration");
-    const installationId = requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID", "issuer-configuration");
-    let provenance: GitHubChangeProvenanceSignerOptions | undefined;
-    if (options.request.operation === "issue") {
-      // Parse and validate the caller-produced record before selecting any
-      // repository trust anchor. The signed kid is the sole selector.
-      const signedRecord = requiredSignedProvenanceRecord(options.request);
-      const runtimeReader = createRepositoryEvidenceReader(readTransport, repository, target);
-      const loaded = await resolveDelegator(runtimeReader, signedRecord.signature.kid);
-      // The Runtime signs before this trusted executor boundary; this process
-      // never imports or holds the Runtime private key.
-      const payload = verifyChangeProvenanceRecord(signedRecord, loaded.authority);
-      if (payload.rootIssue !== options.request.issue || payload.operation !== "change.issue") {
-        throw new GitHubActionsChangeExecutorError(undefined, "issuer-configuration");
-      }
-      provenance = {
-        runtimeAuthority: loaded.authority,
-        signedRecord,
-      };
-    }
-    broker = new GitHubActionsCredentialBroker({
-      appId,
-      installationId,
-      privateKeyPem: boundedSecret(environment.INARI_ISSUER_APP_PRIVATE_KEY, 16_384),
-      repository,
-      repositoryNodeId,
-      apiUrl: environment.GITHUB_API_URL ?? DEFAULT_API_URL,
-      fetch: options.fetch,
-      ...(provenance === undefined ? {} : { provenance }),
-    });
-    effectAuthorizer = new InariEffectAuthorizer({ appId, broker });
-  } catch (error: unknown) {
-    throw withFailureStage(error, "issuer-configuration");
   }
   let issuerStage: TrustedActionsFailureStage | undefined;
   const stagedEffectAuthorizer: Pick<InariEffectAuthorizer, "applyEffects"> = {
@@ -631,24 +674,28 @@ export async function createGitHubActionsChangeExecutor(
       }
     },
   };
-  const trustedExecutor = new TrustedChangeExecutor({
-    reader,
-    effectAuthorizer: stagedEffectAuthorizer,
-    execution,
-    target,
-  });
+  const withTrustedExecutor = <T>(operation: (executor: TrustedChangeExecutor) => Promise<T>): Promise<T> =>
+    withBrokeredEvidence(async (capability) => {
+      const trustedExecutor = new TrustedChangeExecutor({
+        reader: buildReader(capability),
+        effectAuthorizer: stagedEffectAuthorizer,
+        execution,
+        target,
+      });
+      return operation(trustedExecutor);
+    });
   return {
     execute: async (request) => {
       issuerStage = undefined;
       try {
-        return await trustedExecutor.execute(request);
+        return await withTrustedExecutor((trustedExecutor) => trustedExecutor.execute(request));
       } catch (error: unknown) {
         throw asTrustedActionsFailure(error, issuerStage);
       }
     },
     read: async (request) => {
       try {
-        return await trustedExecutor.read(request);
+        return await withTrustedExecutor((trustedExecutor) => trustedExecutor.read(request));
       } catch (error: unknown) {
         throw asTrustedActionsFailure(error, undefined);
       }

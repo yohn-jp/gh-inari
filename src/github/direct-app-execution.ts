@@ -75,6 +75,7 @@ function buildReader(
       rootIssue: request.issue,
     },
     transport: capability.transport,
+    providerPrincipal: capability.providerPrincipal,
     remoteGovernance: createAppRepositoryEvidenceReader(capability, config.repository, identity),
     ...(isMutationRequest(request) && request.semanticPullRequestPlan !== undefined
       ? { semanticPullRequestPlan: request.semanticPullRequestPlan }

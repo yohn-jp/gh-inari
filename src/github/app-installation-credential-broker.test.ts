@@ -105,7 +105,8 @@ test("pre-admission read capability requests the minimum read ceiling and expose
   let scope: unknown;
   await broker.withRepositoryReadCapability({}, async (capability) => {
     scope = capability.scope;
-    assert.deepEqual(Object.keys(capability).sort(), ["scope", "transport"]);
+    assert.deepEqual(Object.keys(capability).sort(), ["providerPrincipal", "scope", "transport"]);
+    assert.deepEqual(capability.providerPrincipal, capability.scope.app);
     assert.deepEqual(Object.keys(capability.transport), ["request"]);
     assert.equal("withScopedRepositoryRead" in broker, false);
     assert.equal("withRepositoryRead" in broker, false);

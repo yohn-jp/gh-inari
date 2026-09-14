@@ -77,6 +77,7 @@ function readCapability(authority: RuntimeAuthority): GitHubAppRepositoryReadCap
   const artifact = renderRuntimeAuthorityArtifact(authority);
   const content = Buffer.from(canonicalRuntimeAuthorityJson(authority), "utf8").toString("base64");
   return {
+    providerPrincipal: APP,
     scope: {
       app: APP,
       installation: { appId: APP.appId, installationId: APP.installationId, repositoryHost: REPOSITORY.hostname },

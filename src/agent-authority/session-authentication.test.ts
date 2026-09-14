@@ -108,6 +108,7 @@ function capability(
     expiresAt: "2026-09-12T00:10:00Z",
   };
   const readCapability: GitHubAppRepositoryReadCapability = {
+    providerPrincipal: scope.app,
     scope,
     transport: {
       async request(request) {

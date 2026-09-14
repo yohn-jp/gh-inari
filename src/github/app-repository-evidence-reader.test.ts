@@ -21,6 +21,12 @@ function fakeCapability(
   responder: (path: string) => { readonly status: number; readonly body?: unknown },
 ): GitHubAppRepositoryReadCapability {
   return {
+    providerPrincipal: {
+      kind: "github-app",
+      slug: "inari-issuer",
+      appId: "1",
+      principal: "app:inari-issuer",
+    },
     scope: {
       app: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
       installation: { appId: "1", installationId: "2", repositoryHost: "github.com" },
@@ -38,6 +44,7 @@ test("resolves the repository default branch through the bounded transport", asy
     path === "repos/acme/inari" ? { status: 200, body: { default_branch: "main" } } : { status: 404, body: {} },
   );
   const reader = createAppRepositoryEvidenceReader(capability, REPOSITORY, IDENTITY);
+  assert.deepEqual(reader.providerPrincipal, capability.providerPrincipal);
   assert.equal(await reader.getRepositoryDefaultBranch(), "main");
 });
 

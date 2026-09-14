@@ -44,6 +44,7 @@ import {
   type AppPermissionSet,
   type RepositoryIdentity,
   type AppScopedMutationCapability,
+  type AppPrincipalIdentity,
   type TrustedInstallationCredentialBroker,
 } from "./effect-authorizer.js";
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
@@ -133,6 +134,8 @@ export interface GitHubAppRepositoryReadTransport {
 }
 
 export interface GitHubAppRepositoryReadCapability {
+  /** Provider Principal that performed the bounded read; no credential value. */
+  readonly providerPrincipal: AppPrincipalIdentity;
   readonly scope: AppInstallationScope;
   readonly transport: GitHubAppRepositoryReadTransport;
 }
@@ -484,6 +487,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       requestTimeoutMs: this.#requestTimeoutMs,
     });
     const capability: GitHubAppRepositoryReadCapability = Object.freeze({
+      providerPrincipal: credential.scope.app,
       scope: credential.scope,
       transport: Object.freeze({
         request: async (readRequest: { readonly hostname: string; readonly method: "GET"; readonly path: string }) => {
