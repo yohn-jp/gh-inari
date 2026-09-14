@@ -408,7 +408,11 @@ test("default Change wiring constructs an Actions-backed executor and normalizes
   assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
 });
 
-test("GitHub Actions Change wiring uses GITHUB_ACTOR without resolving /user", async () => {
+test("GitHub Actions Change wiring never supplies caller-side requester or resolves /user", async () => {
+  // The trusted executor (the workflow_dispatch-authenticated actor) is the sole authority
+  // for requester provenance in the Actions execution lane -- see
+  // TrustedChangeExecutor.bindRequester(). The caller must not inject GITHUB_ACTOR (or
+  // GITHUB_TRIGGERING_ACTOR) as requester, and must not resolve /user either.
   const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
   let authenticatedUserReads = 0;
   const adapter = runtimeTrustAdapter({
@@ -436,8 +440,7 @@ test("GitHub Actions Change wiring uses GITHUB_ACTOR without resolving /user", a
   assert.equal(result.exitCode, 3);
   assert.equal(authenticatedUserReads, 0);
   const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
-  assert.equal(dispatched.requester, "github:actions-actor");
-  assert.notEqual(dispatched.requester, "github:triggering-actor");
+  assert.equal("requester" in dispatched, false);
 });
 
 test("fresh change issue fails before dispatch when the Runtime signer is not configured", async () => {

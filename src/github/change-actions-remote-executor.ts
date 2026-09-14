@@ -74,8 +74,14 @@ export interface GitHubActionsRemoteApi {
 export interface GitHubActionsChangeRemoteExecutorOptions extends ChangeRemoteExecutorOptions {
   /** Injectable repository/auth/API abstraction; the default is the normal gh session. */
   readonly api?: GitHubActionsRemoteApi;
-  /** Internal test/dogfood seam; never a public CLI option. */
-  readonly requester?: string;
+  /**
+   * True when this executor runs as the GitHub Actions caller (workflow A dispatching
+   * the trusted executor workflow), rather than the normal local/user path. Requester
+   * provenance is never resolved from `/user` in that case: the trusted executor
+   * (workflow B's authenticated actor) is the sole authority for requester identity.
+   * See TrustedChangeExecutor.bindRequester(). Never a public CLI option.
+   */
+  readonly actionsCallerEnvironment?: boolean;
   readonly maxPollAttempts?: number;
   readonly pollIntervalMs?: number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -439,7 +445,7 @@ function isNewRun(run: WorkflowRun, baseline: ReadonlySet<number>): boolean {
 export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
   readonly #api: GitHubActionsRemoteApi;
   readonly #cwd: string;
-  readonly #requester: string | undefined;
+  readonly #actionsCallerEnvironment: boolean;
   readonly #maxPollAttempts: number;
   readonly #pollIntervalMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -448,7 +454,7 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
   constructor(options: GitHubActionsChangeRemoteExecutorOptions) {
     this.#cwd = options.cwd;
     this.#api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
-    this.#requester = options.requester;
+    this.#actionsCallerEnvironment = options.actionsCallerEnvironment === true;
     this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 60);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -511,15 +517,18 @@ export class GitHubActionsChangeRemoteExecutor implements ChangeRemoteExecutor {
   }
 
   private async withRequester(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteMutationRequest> {
-    if (request.requester !== undefined) return request;
-    let requester = this.#requester;
-    if (requester === undefined) {
-      try {
-        const login = await this.#api.getAuthenticatedUser();
-        requester = canonicalGitHubRequester(login);
-      } catch (error: unknown) {
-        throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-      }
+    // The GitHub Actions caller (workflow A) never resolves or sends requester
+    // provenance: the trusted executor (workflow B) derives it from its own
+    // authenticated execution context. Restoring a /user lookup here would let a
+    // caller-observed actor collide with the actor workflow B actually authenticates
+    // as, which is exactly the trust violation this boundary exists to prevent.
+    if (request.requester !== undefined || this.#actionsCallerEnvironment) return request;
+    let requester: string;
+    try {
+      const login = await this.#api.getAuthenticatedUser();
+      requester = canonicalGitHubRequester(login);
+    } catch (error: unknown) {
+      throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
     }
     return changeRemoteMutationRequest(
       request.operation,

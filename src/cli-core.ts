@@ -106,7 +106,6 @@ import {
   type OptionId,
 } from "./command-contract.js";
 import {
-  canonicalGitHubRequester,
   changeRemoteMutationRequest,
   changeRemoteReadRequest,
   executeChangeRemoteMutationResult,
@@ -1395,18 +1394,6 @@ function rejectPartialSessionTransportOptions(
   );
 }
 
-function requesterForActionsEnvironment(environment: NodeJS.ProcessEnv): string | undefined {
-  if (environment.GITHUB_ACTIONS !== "true") return undefined;
-  const actor = environment.GITHUB_ACTOR;
-  if (typeof actor !== "string" || actor.length === 0) {
-    throw new CliError(
-      "CHANGE_ACTIONS_REQUESTER_UNAVAILABLE",
-      "GitHub Actions requester identity requires GITHUB_ACTOR.",
-    );
-  }
-  return canonicalGitHubRequester(actor);
-}
-
 /** Selects the direct App transport when both Session options are supplied; otherwise the existing Actions/gh path. */
 function createChangeExecutor(
   dependencies: CliDependencies,
@@ -1425,7 +1412,10 @@ function createChangeExecutor(
   const factory =
     dependencies.createChangeExecutor ??
     ((options: ChangeRemoteExecutorOptions) => {
-      const requester = requesterForActionsEnvironment(dependencies.environment ?? process.env);
+      // The GitHub Actions caller never supplies or resolves requester provenance: the
+      // trusted executor (workflow_dispatch's authenticated actor) is the sole authority
+      // for requester identity. See TrustedChangeExecutor.bindRequester().
+      const environment = dependencies.environment ?? process.env;
       const transportAdapter =
         adapter ??
         (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
@@ -1435,7 +1425,7 @@ function createChangeExecutor(
       return createGitHubActionsChangeRemoteExecutor({
         ...options,
         api: transportAdapter,
-        ...(requester === undefined ? {} : { requester }),
+        actionsCallerEnvironment: environment.GITHUB_ACTIONS === "true",
       });
     });
   return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });

@@ -135,9 +135,27 @@ export function verifySelfDogfoodRun(input) {
     throw new Error("installed package identity is not gh-inari");
   const declaredExecutablePath = resolveInstalledPackageExecutablePath(installedPackagePath, packageMetadata);
   const suppliedExecutablePath = path.resolve(input.installedExecutablePath);
-  if (suppliedExecutablePath !== declaredExecutablePath)
+  // The supplied executable's own logical (pre-realpath) path must already sit under the
+  // installed package's logical root. This is what distinguishes a pnpm-style symlinked
+  // node_modules/gh-inari (a logical descendant that happens to resolve through .pnpm/...)
+  // from a node_modules/.bin shim: a shim can realpath to the exact same physical file yet
+  // is not itself reached through the package's own path, so it must still be rejected.
+  if (!isWithin(path.resolve(input.installedPackagePath), suppliedExecutablePath))
     throw new Error("installed executable does not exactly match package.json bin.inari");
-  const installedExecutablePath = fs.realpathSync(suppliedExecutablePath);
+  let canonicalDeclaredExecutablePath;
+  let installedExecutablePath;
+  try {
+    canonicalDeclaredExecutablePath = fs.realpathSync(declaredExecutablePath);
+    installedExecutablePath = fs.realpathSync(suppliedExecutablePath);
+  } catch {
+    throw new Error("installed executable does not exactly match package.json bin.inari");
+  }
+  // installedPackagePath is already canonicalized above (fs.realpathSync), so a pnpm-style
+  // symlinked node_modules/gh-inari resolves to the same physical package root here as the
+  // declared and supplied executables do below; comparison is therefore physical identity,
+  // not the caller's logical/symlinked path.
+  if (installedExecutablePath !== canonicalDeclaredExecutablePath)
+    throw new Error("installed executable does not exactly match package.json bin.inari");
   if (!fs.statSync(installedExecutablePath).isFile()) throw new Error("installed bin.inari target is not a file");
   if (isWithin(sourceRoot, installedPackagePath) || isWithin(sourceRoot, installedExecutablePath))
     throw new Error("installed executable must be outside the source checkout");
