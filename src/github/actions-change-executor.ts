@@ -49,12 +49,12 @@ import { artifactContractProvenanceFromTemplate } from "../contract/ir.js";
 import { effectiveFieldConstraints } from "../contract/constraints.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
-  canonicalGitHubRequester,
   changeMutationRequest,
   changeReadRequest,
   normalizeChangeExecutionEvidence,
   normalizeChangeExecutionResult,
   normalizeChangeProjection,
+  validateChangeRequest,
   type ChangeExecutionPort,
   type ChangeExecutionEvidence,
   type ChangeMutationRequest,
@@ -121,6 +121,11 @@ const DEFAULT_API_URL = "https://api.github.com";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
 const GITHUB_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
+
+/** Convert the authenticated trusted workflow actor into Change provenance. */
+function canonicalGitHubRequester(login: string): string {
+  return `github:${login}`;
+}
 
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
 export const TRUSTED_ACTIONS_FAILURE_STAGES = Object.freeze([
@@ -1314,6 +1319,11 @@ export interface GitHubActionsRuntimeOptions {
 export async function createGitHubActionsChangeExecutor(
   options: GitHubActionsRuntimeOptions,
 ): Promise<ChangeExecutionPort> {
+  try {
+    validateChangeRequest(options.request);
+  } catch {
+    throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+  }
   const environment = options.environment ?? process.env;
   let repositoryNameWithOwner: string;
   let hostname = "github.com";
@@ -1521,14 +1531,10 @@ export async function runGitHubActionsChangeExecutor(
       "version",
       "operation",
       "issue",
-      "requester",
       "semanticPullRequestPlan",
       "signedProvenanceRecord",
     ]);
     if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
-      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
-    }
-    if (requestRecord.requester !== undefined && typeof requestRecord.requester !== "string") {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     if (
@@ -1547,14 +1553,12 @@ export async function runGitHubActionsChangeExecutor(
     if (requestRecord.signedProvenanceRecord !== undefined && requestRecord.operation !== "issue") {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
-    const requester = typeof requestRecord.requester === "string" ? requestRecord.requester : undefined;
     const request =
       requestRecord.operation === "show"
-        ? changeReadRequest(requestRecord.issue, requester)
+        ? changeReadRequest(requestRecord.issue)
         : changeMutationRequest(
             requestRecord.operation as "issue" | "ready" | "abort",
             requestRecord.issue,
-            requester,
             requestRecord.semanticPullRequestPlan,
             requestRecord.signedProvenanceRecord as SignedChangeProvenanceRecord | undefined,
           );

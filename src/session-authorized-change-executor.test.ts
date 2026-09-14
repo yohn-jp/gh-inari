@@ -380,12 +380,30 @@ test("unknown direct fields fail closed and semanticPullRequestPlan is issue-onl
   const executor = new FakeChangeExecutor(projection("absent"), projection("draft"));
   const configured = optionsFor(
     "change.ready",
-    directRequest("change.ready", { semanticPullRequestPlan: { leaked: "value" } }),
+    directRequest("change.ready", {
+      semanticPullRequestPlan: { leaked: "value" },
+      requester: "github:spoofed",
+    }),
     [{ kind: "change.ready", issue: ISSUE }],
     executor,
   );
   const result = await createCapabilityAuthorizedSessionExecutor(configured.options).execute(configured.envelope);
   assert.equal(result.failure?.phase, "request");
+  assert.deepEqual(executor.events, []);
+});
+
+test("a signed direct requester assertion cannot influence App execution", async () => {
+  const executor = new FakeChangeExecutor(projection("absent"), projection("draft"));
+  const configured = optionsFor(
+    "change.issue",
+    directRequest("change.issue", { requester: "github:spoofed" }),
+    [{ kind: "change.implement", issue: ISSUE }],
+    executor,
+  );
+  const result = await createCapabilityAuthorizedSessionExecutor(configured.options).execute(configured.envelope);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.phase, "request");
+  assert.equal(result.provenance, undefined);
   assert.deepEqual(executor.events, []);
 });
 
@@ -447,6 +465,7 @@ test("direct App trusted context dispatches without weakening the existing Actio
     requestId: "request-1",
     sessionId: "session-1",
     certificateJti: "certificate-1",
+    requester: "session:session-1",
   });
   assert.equal(direct.valid, true);
   const rejectedImpersonation = validateTrustedExecutionContext({

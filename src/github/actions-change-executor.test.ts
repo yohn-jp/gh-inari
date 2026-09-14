@@ -1182,7 +1182,7 @@ test("Actions selects the verifier exclusively from signed kid and rejects inact
   const validCalls: string[] = [];
   const validExecutor = await createGitHubActionsChangeExecutor({
     cwd: process.cwd(),
-    request: changeMutationRequest("issue", 218, undefined, undefined, secondRecord),
+    request: changeMutationRequest("issue", 218, undefined, secondRecord),
     environment: trustedEnvironment({ INARI_RUNTIME_AUTHORITY_ID: first.id }),
     fetch: runtimeTrustFetch([revokedFirst, second], validCalls),
   });
@@ -1219,7 +1219,7 @@ test("Actions selects the verifier exclusively from signed kid and rejects inact
     await assert.rejects(
       createGitHubActionsChangeExecutor({
         cwd: process.cwd(),
-        request: changeMutationRequest("issue", 218, undefined, undefined, testCase.record),
+        request: changeMutationRequest("issue", 218, undefined, testCase.record),
         environment: trustedEnvironment({ INARI_RUNTIME_AUTHORITY_ID: first.id }),
         fetch: runtimeTrustFetch(testCase.authorities, calls),
       }),
@@ -1457,6 +1457,37 @@ test("workflow entrypoint emits the bounded diagnostic and no exception payload"
     details: { stage: "repository-evidence", reason: "repository-configuration" },
   });
   assert.doesNotMatch(JSON.stringify(output), /privateKey|token|exception|\/home/iu);
+});
+
+test("workflow entrypoint rejects a legacy caller requester field at the trusted boundary", async () => {
+  const writes: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    const exitCode = await runGitHubActionsChangeExecutor(
+      trustedEnvironment({
+        INARI_CHANGE_REQUEST: JSON.stringify({
+          version: 1,
+          operation: "issue",
+          issue: 218,
+          requester: "github:spoofed",
+        }),
+      }),
+      process.cwd(),
+    );
+    assert.equal(exitCode, 1);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  const output = JSON.parse(writes.join("")) as { error?: Record<string, unknown> };
+  assert.deepEqual(output.error, {
+    code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+    message: "Trusted Change execution failed closed.",
+    details: { stage: "trusted-execution" },
+  });
 });
 
 test("trusted executor failures retain only bounded code, Core diagnostics, and evidence", () => {

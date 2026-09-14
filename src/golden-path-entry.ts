@@ -1170,7 +1170,6 @@ export interface GoldenPathEntryExecutionInput extends Omit<GoldenPathEntryProje
   /** Root Issue used for the read port when `projection` is omitted. */
   readonly issue?: number;
   readonly executor: ChangeExecutionPort;
-  readonly requester?: string;
   /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
   readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
 }
@@ -1199,7 +1198,7 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
     }
     const issue = requestedIssue as number;
     try {
-      projection = await input.executor.read(changeReadRequest(issue, input.requester));
+      projection = await input.executor.read(changeReadRequest(issue));
     } catch {
       return invalidResult([
         diagnostic(
@@ -1243,7 +1242,6 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
   const request: ChangeMutationRequest = changeMutationRequest(
     "issue",
     preflight.action.issue,
-    input.requester,
     undefined,
     input.signedProvenanceRecord,
   );

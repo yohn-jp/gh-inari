@@ -16,6 +16,7 @@ import {
   ChangeExecutionPortError,
   normalizeChangeExecutionResult,
   normalizeChangeProjection,
+  validateChangeRequest,
   type ChangeExecutionPort,
   type ChangeMutationRequest,
   type ChangeReadRequest,
@@ -258,6 +259,7 @@ export function createDirectAppChangeExecutionAdapter(
 
   return {
     async execute(request: ChangeMutationRequest) {
+      validateChangeRequest(request);
       const operation = `change.${request.operation}`;
       const semanticRequest: SemanticSessionRequest = {
         version: 1,
@@ -285,6 +287,7 @@ export function createDirectAppChangeExecutionAdapter(
       return normalizeChangeExecutionResult(request.operation, result.execution);
     },
     async read(request: ChangeReadRequest) {
+      validateChangeRequest(request);
       const operation = "change.show";
       const semanticRequest: SemanticSessionRequest = {
         version: 1,

@@ -21,15 +21,6 @@ export const MAX_CHANGE_EXECUTION_EVIDENCE_BYTES = 16_384 as const;
 export const CHANGE_EXECUTION_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
 export type ChangeMutation = (typeof CHANGE_EXECUTION_MUTATIONS)[number];
 
-/**
- * Canonical requester identity for GitHub-authenticated execution.  The
- * authenticated login is converted at the transport/runtime boundary; it
- * is never a substitute for an issuer or another Change provenance role.
- */
-export function canonicalGitHubRequester(login: string): string {
-  return `github:${login}`;
-}
-
 export interface ChangeExecutionPortOptions {
   /** Repository-local working directory used by a port implementation. */
   readonly cwd: string;
@@ -40,8 +31,6 @@ export interface ChangeExecutionPortOptions {
 interface ChangeRequestBase {
   readonly version: typeof CHANGE_EXECUTION_PORT_CONTRACT_VERSION;
   readonly issue: number;
-  /** Opaque requester provenance; never a credential. */
-  readonly requester?: string;
 }
 
 export interface ChangeMutationRequest extends ChangeRequestBase {
@@ -162,9 +151,19 @@ function assertMutation(operation: string): asserts operation is ChangeMutation 
   }
 }
 
-function validateRequest(
+export function validateChangeRequest(
   request: ChangeMutationRequest | ChangeReadRequest,
 ): ChangeMutationRequest | ChangeReadRequest {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    throw new ChangeExecutionPortError("CHANGE_REMOTE_REQUEST_INVALID", "A Change request must be an object.");
+  }
+  if (Object.prototype.hasOwnProperty.call(request, "requester")) {
+    throw new ChangeExecutionPortError(
+      "CHANGE_REMOTE_REQUEST_INVALID",
+      "Caller-supplied requester identity is not accepted by the Change request contract.",
+      { issue: request.issue, path: "$.requester" },
+    );
+  }
   if (request.version !== CHANGE_EXECUTION_PORT_CONTRACT_VERSION) {
     throw new ChangeExecutionPortError(
       "CHANGE_REMOTE_REQUEST_INVALID",
@@ -173,16 +172,6 @@ function validateRequest(
     );
   }
   assertIssueNumber(request.issue);
-  if (
-    request.requester !== undefined &&
-    (!validText(request.requester, 160) || /[\u0000-\u001F\u007F]/u.test(request.requester))
-  ) {
-    throw new ChangeExecutionPortError(
-      "CHANGE_REMOTE_REQUEST_INVALID",
-      "A Change request requester identity is invalid.",
-      { issue: request.issue },
-    );
-  }
   if (request.operation !== "show" && request.semanticPullRequestPlan !== undefined) {
     if (request.operation !== "issue") {
       throw new ChangeExecutionPortError(
@@ -256,12 +245,6 @@ export function normalizeChangeProjection(operation: string, result: unknown): C
     );
   }
   return validation.projection;
-}
-
-function validText(value: unknown, maxLength: number): value is string {
-  return (
-    typeof value === "string" && value.length > 0 && value.length <= maxLength && !/[\u0000-\u001F\u007F]/u.test(value)
-  );
 }
 
 export function normalizeChangeExecutionEvidence(operation: string, value: unknown): ChangeExecutionEvidence {
@@ -489,7 +472,6 @@ export function normalizeChangeExecutionResult(operation: string, result: unknow
 export function changeMutationRequest(
   operation: ChangeMutation,
   issue: number,
-  requester?: string,
   semanticPullRequestPlan?: unknown,
   signedProvenanceRecord?: SignedChangeProvenanceRecord,
 ): ChangeMutationRequest {
@@ -497,22 +479,20 @@ export function changeMutationRequest(
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation,
     issue,
-    ...(requester === undefined ? {} : { requester }),
     ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
     ...(signedProvenanceRecord === undefined ? {} : { signedProvenanceRecord }),
   };
-  validateRequest(request);
+  validateChangeRequest(request);
   return request;
 }
 
-export function changeReadRequest(issue: number, requester?: string): ChangeReadRequest {
+export function changeReadRequest(issue: number): ChangeReadRequest {
   const request: ChangeReadRequest = {
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "show",
     issue,
-    ...(requester === undefined ? {} : { requester }),
   };
-  validateRequest(request);
+  validateChangeRequest(request);
   return request;
 }
 
@@ -520,7 +500,7 @@ export async function executeChangeMutation(
   executor: ChangeExecutionPort,
   request: ChangeMutationRequest,
 ): Promise<ChangeProjectionResult> {
-  validateRequest(request);
+  validateChangeRequest(request);
   return (await executeChangeMutationResult(executor, request)).projection;
 }
 
@@ -528,7 +508,7 @@ export async function executeChangeMutationResult(
   executor: ChangeExecutionPort,
   request: ChangeMutationRequest,
 ): Promise<ChangeExecutionResult> {
-  validateRequest(request);
+  validateChangeRequest(request);
   return normalizeChangeExecutionResult(request.operation, await executor.execute(request));
 }
 
@@ -536,7 +516,7 @@ export async function readChangeProjection(
   executor: ChangeExecutionPort,
   request: ChangeReadRequest,
 ): Promise<ChangeProjectionResult> {
-  validateRequest(request);
+  validateChangeRequest(request);
   return normalizeChangeProjection(request.operation, await executor.read(request));
 }
 

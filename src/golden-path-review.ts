@@ -81,8 +81,6 @@ export type GoldenPathReviewAdmissionResult = GoldenPathReviewAdmissionSuccess |
 export interface GoldenPathReviewAdmissionRequest {
   readonly issue: number;
   readonly executor: ChangeExecutionPort;
-  /** Opaque requester provenance; credentials remain outside this contract. */
-  readonly requester?: string;
 }
 
 const DEFAULT_FAILURE_MESSAGE = "The governed implementation-to-review transition failed closed.";
@@ -269,7 +267,7 @@ export async function executeGoldenPathReviewAdmission(
   request: GoldenPathReviewAdmissionRequest,
 ): Promise<GoldenPathReviewAdmissionResult> {
   try {
-    const remoteRequest = changeMutationRequest("ready", request.issue, request.requester);
+    const remoteRequest = changeMutationRequest("ready", request.issue);
     const result = await executeChangeMutationResult(request.executor, remoteRequest);
     return projectGoldenPathReviewAdmission(request.issue, result);
   } catch (error: unknown) {
