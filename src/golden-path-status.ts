@@ -18,7 +18,7 @@ import {
   validateChangeProjectionResult,
   validateChange,
 } from "./change.js";
-import { CHANGE_REMOTE_EXECUTION_OUTCOMES, type ChangeRemoteExecutionOutcome } from "./change-executor.js";
+import { CHANGE_EXECUTION_OUTCOMES, type ChangeExecutionOutcome } from "./change-execution-port.js";
 
 export const GOLDEN_PATH_STATUS_VERSION = 1 as const;
 export type GoldenPathStatusVersion = typeof GOLDEN_PATH_STATUS_VERSION;
@@ -141,7 +141,7 @@ export interface GoldenPathStatusFields {
   readonly availability: GoldenPathAvailability;
   readonly changeState?: ChangeState;
   readonly projectionStatus?: ChangeProjectionStatus;
-  readonly executionOutcome?: ChangeRemoteExecutionOutcome;
+  readonly executionOutcome?: ChangeExecutionOutcome;
 }
 
 export interface GoldenPathNextAction {
@@ -272,8 +272,8 @@ export interface GoldenPathStatusInput {
   readonly change?: Change | ChangeIdentity | GoldenPathChangeEvidence;
   readonly changeProjection?: ChangeProjectionResult;
   readonly projection?: ChangeProjectionResult;
-  readonly executionOutcome?: ChangeRemoteExecutionOutcome;
-  readonly execution?: { readonly outcome?: ChangeRemoteExecutionOutcome };
+  readonly executionOutcome?: ChangeExecutionOutcome;
+  readonly execution?: { readonly outcome?: ChangeExecutionOutcome };
   readonly implementation?: GoldenPathImplementationEvidence | boolean | "ready" | "in-progress" | "unknown";
   readonly ready?: GoldenPathReadyEvidence | boolean | "eligible" | "ineligible" | "unknown";
   readonly review?: GoldenPathReviewEvidence;
@@ -694,10 +694,7 @@ function parseProjection(
   return { state, projectionStatus, subject };
 }
 
-function parseExecution(
-  input: RecordValue,
-  diagnostics: GoldenPathDiagnostic[],
-): ChangeRemoteExecutionOutcome | undefined {
+function parseExecution(input: RecordValue, diagnostics: GoldenPathDiagnostic[]): ChangeExecutionOutcome | undefined {
   let value = input.executionOutcome;
   if (value === undefined && isRecord(input.execution)) {
     unknownProperties(input.execution, EXECUTION_KEYS, "$.execution", diagnostics);
@@ -706,11 +703,11 @@ function parseExecution(
     addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.execution", "Execution evidence must be an object.");
   }
   if (value === undefined) return undefined;
-  if (!CHANGE_REMOTE_EXECUTION_OUTCOMES.includes(value as ChangeRemoteExecutionOutcome)) {
+  if (!CHANGE_EXECUTION_OUTCOMES.includes(value as ChangeExecutionOutcome)) {
     addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.executionOutcome", "Execution outcome is invalid.");
     return undefined;
   }
-  return value as ChangeRemoteExecutionOutcome;
+  return value as ChangeExecutionOutcome;
 }
 
 function readiness(
@@ -1170,7 +1167,7 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
       );
     if (
       input.status.executionOutcome !== undefined &&
-      !CHANGE_REMOTE_EXECUTION_OUTCOMES.includes(input.status.executionOutcome as ChangeRemoteExecutionOutcome)
+      !CHANGE_EXECUTION_OUTCOMES.includes(input.status.executionOutcome as ChangeExecutionOutcome)
     )
       addDiagnostic(
         diagnostics,

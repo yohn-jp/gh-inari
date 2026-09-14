@@ -322,7 +322,7 @@ function failureEvidence(
 }
 
 /** Executes exactly the bounded native effects admitted by Core. */
-export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecutionPort {
+export class LocalSemanticIssueRelationExecutor implements SemanticIssueRelationExecutionPort {
   readonly #adapter: GitHubAdapter;
   readonly #selector: string | undefined;
   readonly #capabilities: readonly string[] | undefined;
@@ -598,7 +598,10 @@ export class SemanticIssueRelationExecutor implements SemanticIssueRelationExecu
   }
 }
 
-export const LocalSemanticIssueRelationExecutor = SemanticIssueRelationExecutor;
+/** @deprecated Use `LocalSemanticIssueRelationExecutor` for the local execution profile. */
+export const SemanticIssueRelationExecutor = LocalSemanticIssueRelationExecutor;
+/** @deprecated Use `LocalSemanticIssueRelationExecutor` for the local execution profile. */
+export type SemanticIssueRelationExecutor = LocalSemanticIssueRelationExecutor;
 
 export interface ExistingIssueRelationPlanRequest {
   readonly subjectNumber: number;

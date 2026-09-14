@@ -19,7 +19,7 @@ export type {
   GitDataRefUpdateResult,
 } from "./git-data-capability.js";
 export * from "./actions-change-executor.js";
-export * from "./change-actions-remote-executor.js";
+export * from "./actions-change-execution-adapter.js";
 export * from "./errors.js";
 export * from "./issue-relation-observation-adapter.js";
 export * from "./issue-relation-mutation-adapter.js";

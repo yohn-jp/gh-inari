@@ -20,7 +20,7 @@ import {
   ChangeTrustedExecutorError,
   type ChangeTrustedEvidenceReader,
 } from "./change-trusted-executor.js";
-import type { ChangeRemoteMutationRequest } from "./change-executor.js";
+import type { ChangeMutationRequest } from "./change-execution-port.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -132,7 +132,7 @@ class MutableReader implements ChangeTrustedEvidenceReader {
 
   constructor(public current: ChangeProjectionInput) {}
 
-  async read(_request: ChangeRemoteMutationRequest): Promise<ChangeProjectionInput> {
+  async read(_request: ChangeMutationRequest): Promise<ChangeProjectionInput> {
     if (this.failNextRead) {
       this.failNextRead = false;
       throw new Error("provider detail must not cross the boundary");

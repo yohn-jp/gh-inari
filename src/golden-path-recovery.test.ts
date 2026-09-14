@@ -21,7 +21,7 @@ import {
   type ChangeProjectionResult,
   type ChangePullRequestEvidence,
 } from "./change.js";
-import type { ChangeRemoteExecutionEvidence } from "./change-executor.js";
+import type { ChangeExecutionEvidence } from "./change-execution-port.js";
 
 const branch = "feat/395-golden-path";
 const branchSha = "0123456789abcdef0123456789abcdef01234567";
@@ -92,16 +92,16 @@ function projection(
 }
 
 function evidence(
-  operation: ChangeRemoteExecutionEvidence["operation"],
-  outcome: ChangeRemoteExecutionEvidence["outcome"],
-  options: Partial<Pick<ChangeRemoteExecutionEvidence, "compensation" | "effects" | "failure">> = {},
-): ChangeRemoteExecutionEvidence {
+  operation: ChangeExecutionEvidence["operation"],
+  outcome: ChangeExecutionEvidence["outcome"],
+  options: Partial<Pick<ChangeExecutionEvidence, "compensation" | "effects" | "failure">> = {},
+): ChangeExecutionEvidence {
   return { version: 1, operation, outcome, effects: [], ...options };
 }
 
 function input(
   projectionValue: ChangeProjectionResult,
-  evidenceValue: ChangeRemoteExecutionEvidence,
+  evidenceValue: ChangeExecutionEvidence,
   options: Pick<GoldenPathRecoveryInput, "authoritativeReread"> = {},
 ): GoldenPathRecoveryInput {
   return { projection: projectionValue, evidence: evidenceValue, ...options };

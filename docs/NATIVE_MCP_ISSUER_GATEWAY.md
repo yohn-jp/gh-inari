@@ -20,7 +20,7 @@ Change executor are authoritative. MCP owns protocol translation only.
 | Native typed MCP tools and transport-neutral semantic contracts                | retained           | MCP may expose Core-backed contract, materialization, preview, observation, drift, status, and handoff projections. Governed PR comment/review/merge writes are not exposed through MCP; the canonical Session-authorized App executor does not admit those operations. |
 | Hosted MCP gateway as requester authentication/admission authority             | superseded         | A hosted endpoint may be a deployment adapter, but it cannot decide Session authority or become a trust root.                                                                                                                                                           |
 | Central Runtime/Agent Session registry or requester database                   | obsolete           | Session Certificates and proof-of-possession are verified against repository Runtime trust and current policy; no central registry is required.                                                                                                                         |
-| GitHub Actions as the mandatory privileged execution plane                     | compatibility-only | The existing Actions `ChangeRemoteExecutor` remains for callers that need it or for specialized repository-local execution; it is not the authorization architecture.                                                                                                   |
+| GitHub Actions as the mandatory privileged execution plane                     | compatibility-only | The existing `ActionsChangeExecutionAdapter` remains for callers that need it or for specialized repository-local transport; it is not the authorization architecture.                                                                                                  |
 | Actions OIDC as the normative caller-to-App authorization route                | obsolete           | Privileged requests use the canonical Session request and App admission path.                                                                                                                                                                                           |
 | App credential dispatch broker centered on consumer workflows                  | superseded         | App credentials remain inside trusted App execution; the existing broker is an implementation detail, never an MCP/client credential.                                                                                                                                   |
 | OAuth/MCP identity as a substitute for Session Certificate proof-of-possession | obsolete           | Protocol identity may be transport metadata, but it cannot enlarge or replace Runtime trust, Session proof, or capability admission.                                                                                                                                    |
@@ -38,7 +38,7 @@ Session-authorized App execution
 direct App client          MCP bridge / client
                                   (translation only)
 
-Actions ChangeRemoteExecutor = compatibility/specialized transport
+ActionsChangeExecutionAdapter = compatibility/specialized transport adapter
 ```
 
 ## Privileged MCP path
@@ -87,5 +87,15 @@ admits those operations.
 - Actions remains available as an explicit compatibility/specialized transport
   until equivalent Session/App parity is proven. It is not silently removed or
   treated as a trust root.
+- `ChangeExecutionPort` is the transport-neutral request/read contract. The
+  Actions and Direct-App implementations are adapters; neither is the semantic
+  Change `Executor` role. Legacy remote-executor exports remain aliases to the
+  canonical port/adapter symbols during the compatibility migration.
+
+For library compatibility, the deprecated `ChangeRemoteExecutor` and
+`GitHubActionsChangeRemoteExecutor` exports remain available as aliases for
+`ChangeExecutionPort` and `ActionsChangeExecutionAdapter`; they contain no
+separate behavior.
+
 - Hosted MCP/HTTP, local stdio, and future adapters may share this catalog, but
   none may add a second authorization plane.

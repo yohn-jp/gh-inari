@@ -11,7 +11,7 @@ import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import type { ArtifactContractProvenance } from "./contract/ir.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
 import {
-  SemanticBranchExecutor,
+  LocalSemanticBranchExecutor,
   type SemanticBranchExecutionRequest,
   SemanticBranchExecutorError,
 } from "./semantic-branch-executor.js";
@@ -165,7 +165,7 @@ test("local Semantic Branch Executor admits, creates, rereads, and verifies a pl
   const effective = await compileRepositoryEffectiveBranchContract(adapter, "default");
   const artifact = materializeSemanticArtifact(effective, { type: "feat", slug: "execute" });
   const plan = planSemanticBranch({ artifact });
-  const result = await new SemanticBranchExecutor({ adapter }).execute(
+  const result = await new LocalSemanticBranchExecutor({ adapter }).execute(
     request(plan, { type: "feat", slug: "execute" }),
   );
 
@@ -191,9 +191,9 @@ test("local Semantic Branch Executor rejects an existing target before effects",
   const transport = new ExecutorTransport(true);
   const plan = planSemanticBranch({ artifact: inputArtifact() });
   await assert.rejects(
-    new SemanticBranchExecutor({ adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }) }).execute(
-      request(plan),
-    ),
+    new LocalSemanticBranchExecutor({
+      adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    }).execute(request(plan)),
     (error: unknown) =>
       error instanceof SemanticBranchExecutorError && error.code === "SEMANTIC_BRANCH_EXECUTION_PRECONDITION_FAILED",
   );
@@ -207,9 +207,9 @@ test("local Semantic Branch Executor fails closed for a tampered plan", async ()
   const transport = new ExecutorTransport();
   const plan = planSemanticBranch({ artifact: inputArtifact() });
   await assert.rejects(
-    new SemanticBranchExecutor({ adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }) }).execute(
-      request({ ...plan, desired: { ...plan.desired, name: "evil" } }),
-    ),
+    new LocalSemanticBranchExecutor({
+      adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    }).execute(request({ ...plan, desired: { ...plan.desired, name: "evil" } })),
     (error: unknown) =>
       error instanceof SemanticBranchExecutorError && error.code === "SEMANTIC_BRANCH_EXECUTION_PLAN_INVALID",
   );
@@ -251,7 +251,7 @@ test("Semantic Branch execution preserves shared Canon resolution diagnostics", 
     const executorTransport = new ExecutorTransport(false, invalidCase.options);
     const executorAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: executorTransport });
     const executorError = await rejected(() =>
-      new SemanticBranchExecutor({ adapter: executorAdapter }).execute(request(plan)),
+      new LocalSemanticBranchExecutor({ adapter: executorAdapter }).execute(request(plan)),
     );
     assert.ok(executorError instanceof ArtifactContractResolutionError, invalidCase.name);
     assert.deepEqual(

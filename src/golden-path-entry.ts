@@ -29,15 +29,15 @@ import {
   validateGovernedRootIssueEvidence,
 } from "./change.js";
 import {
-  CHANGE_REMOTE_EXECUTION_OUTCOMES,
-  normalizeChangeRemoteExecutionResult,
-  type ChangeRemoteExecutionOutcome,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteExecutionResult,
-  type ChangeRemoteMutationRequest,
-  changeRemoteMutationRequest,
-  changeRemoteReadRequest,
-} from "./change-executor.js";
+  CHANGE_EXECUTION_OUTCOMES,
+  normalizeChangeExecutionResult,
+  type ChangeExecutionOutcome,
+  type ChangeExecutionPort,
+  type ChangeExecutionResult,
+  type ChangeMutationRequest,
+  changeMutationRequest,
+  changeReadRequest,
+} from "./change-execution-port.js";
 import type { EffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
 import {
   artifactContractProvenanceFromTemplate,
@@ -123,7 +123,7 @@ export interface GoldenPathEntryProjectionInput {
   readonly preflight?: GoldenPathEntryPreflightEvidence;
   /** Set false only after a trusted Change executor has admitted the operation. */
   readonly requireGovernedIssue?: boolean;
-  readonly executionOutcome?: ChangeRemoteExecutionOutcome;
+  readonly executionOutcome?: ChangeExecutionOutcome;
 }
 
 /** The fields accepted by the pure entry projection (adapter-only fields are excluded). */
@@ -150,7 +150,7 @@ export interface GoldenPathEntryAction {
 export interface GoldenPathEntryStatus {
   readonly changeState?: ChangeState;
   readonly projectionStatus?: ChangeProjectionStatus;
-  readonly executionOutcome?: ChangeRemoteExecutionOutcome;
+  readonly executionOutcome?: ChangeExecutionOutcome;
 }
 
 /** Bounded governance identity; full contracts remain owned by Core. */
@@ -198,7 +198,7 @@ const MAX_REPOSITORY_ID_LENGTH = 128;
 const MAX_GOVERNANCE_ID_LENGTH = 255;
 const MAX_OPERATION_RESULT_BYTES = 65_536;
 
-const CHANGE_EXECUTION_OUTCOME_SET = new Set<string>(CHANGE_REMOTE_EXECUTION_OUTCOMES);
+const CHANGE_EXECUTION_OUTCOME_SET = new Set<string>(CHANGE_EXECUTION_OUTCOMES);
 const CHANGE_PROJECTION_STATUS_SET = new Set<string>(CHANGE_PROJECTION_STATUSES);
 const CHANGE_STATE_SET = new Set<string>(CHANGE_STATES);
 const RESULT_KEYS = new Set([
@@ -651,7 +651,7 @@ function validateSemanticIntent(
  */
 function statusFor(
   projection: ChangeProjectionResult,
-  executionOutcome: ChangeRemoteExecutionOutcome | undefined,
+  executionOutcome: ChangeExecutionOutcome | undefined,
 ): GoldenPathEntryStatus {
   const state = projection.change?.state;
   return {
@@ -666,7 +666,7 @@ function resultFor(
   diagnostics: readonly GoldenPathEntryUnderlyingDiagnostic[],
   governedIssue: ChangeReadyArtifactEvidence | undefined,
   semanticIntent: GoldenPathEntrySemanticIntent | undefined,
-  executionOutcome: ChangeRemoteExecutionOutcome | undefined,
+  executionOutcome: ChangeExecutionOutcome | undefined,
   valid: boolean,
   subjectOverride: ChangeIdentity | undefined,
 ): GoldenPathEntryResult {
@@ -944,7 +944,7 @@ export function tryProjectGoldenPathEntry(input: unknown): GoldenPathEntryResult
     }
   }
 
-  const executionOutcome = input.executionOutcome as ChangeRemoteExecutionOutcome | undefined;
+  const executionOutcome = input.executionOutcome as ChangeExecutionOutcome | undefined;
   if (executionOutcome !== undefined && !CHANGE_EXECUTION_OUTCOME_SET.has(executionOutcome)) {
     diagnostics.push(
       diagnostic("GOLDEN_PATH_EXECUTION_INVALID", "$.executionOutcome", "Execution outcome is invalid."),
@@ -1169,7 +1169,7 @@ export interface GoldenPathEntryExecutionInput extends Omit<GoldenPathEntryProje
   readonly projection?: ChangeProjectionInput | ChangeProjectionResult;
   /** Root Issue used for the read port when `projection` is omitted. */
   readonly issue?: number;
-  readonly executor: ChangeRemoteExecutor;
+  readonly executor: ChangeExecutionPort;
   readonly requester?: string;
   /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
   readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
@@ -1199,7 +1199,7 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
     }
     const issue = requestedIssue as number;
     try {
-      projection = await input.executor.read(changeRemoteReadRequest(issue, input.requester));
+      projection = await input.executor.read(changeReadRequest(issue, input.requester));
     } catch {
       return invalidResult([
         diagnostic(
@@ -1240,7 +1240,7 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
   // Returning a healthy existing Change is a read-only idempotent outcome; no
   // second remote issuance request is necessary and no effect is possible.
   if (preflight.action.mode === "return-existing") return preflight;
-  const request: ChangeRemoteMutationRequest = changeRemoteMutationRequest(
+  const request: ChangeMutationRequest = changeMutationRequest(
     "issue",
     preflight.action.issue,
     input.requester,
@@ -1249,7 +1249,7 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
   );
   try {
     const raw = await input.executor.execute(request);
-    const execution: ChangeRemoteExecutionResult = normalizeChangeRemoteExecutionResult("issue", raw);
+    const execution: ChangeExecutionResult = normalizeChangeExecutionResult("issue", raw);
     return tryProjectGoldenPathEntry({
       ...projectionInput,
       projection: execution.projection,

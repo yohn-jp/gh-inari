@@ -1133,8 +1133,8 @@ The native MCP privileged bridge may forward the canonical signed Session
 request directly to the existing Session-authorized App executor. It adds no
 certificate, capability vocabulary, Session registry, or authorization
 authority. Read-only MCP tools remain available without Session coupling, and
-the existing Actions remote executor remains an explicit compatibility or
-specialized transport until parity justifies any retirement.
+the existing `ActionsChangeExecutionAdapter` remains an explicit compatibility
+or specialized transport until parity justifies any retirement.
 
 The following assumptions are superseded by #364 as normative architecture:
 

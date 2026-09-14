@@ -26,11 +26,11 @@ import {
   type CapabilityAuthorizedSessionExecutorOptions,
 } from "./session-authorized-change-executor.js";
 import type {
-  ChangeRemoteExecutionResult,
-  ChangeRemoteExecutor,
-  ChangeRemoteMutationRequest,
-  ChangeRemoteReadRequest,
-} from "./change-executor.js";
+  ChangeExecutionResult,
+  ChangeExecutionPort,
+  ChangeMutationRequest,
+  ChangeReadRequest,
+} from "./change-execution-port.js";
 import type { CapabilityClaim } from "./agent-authority/capability.js";
 import type { SemanticSessionRequest } from "./agent-authority/session-request.js";
 
@@ -224,7 +224,7 @@ function projection(kind: "absent" | "draft" | "review" | "aborted" | "duplicate
   });
 }
 
-class FakeChangeExecutor implements ChangeRemoteExecutor {
+class FakeChangeExecutor implements ChangeExecutionPort {
   readonly events: string[] = [];
   readonly #initial: ChangeProjectionResult;
   readonly #after: ChangeProjectionResult;
@@ -243,13 +243,13 @@ class FakeChangeExecutor implements ChangeRemoteExecutor {
     this.#failure = options.failure ?? "none";
   }
 
-  async read(_request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult> {
+  async read(_request: ChangeReadRequest): Promise<ChangeProjectionResult> {
     this.events.push("read");
     this.#reads += 1;
     return this.#reads === 1 ? this.#initial : this.#after;
   }
 
-  async execute(request: ChangeRemoteMutationRequest): Promise<ChangeProjectionResult | ChangeRemoteExecutionResult> {
+  async execute(request: ChangeMutationRequest): Promise<ChangeProjectionResult | ChangeExecutionResult> {
     this.events.push("execute");
     if (this.#failure === "provider") throw new Error("provider response token=secret stack=private-key");
     if (this.#failure === "recovery") {

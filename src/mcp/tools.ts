@@ -50,7 +50,7 @@ import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } f
 import { projectGoldenPathRecovery } from "../golden-path-recovery.js";
 import { tryProjectGoldenPathStatus } from "../golden-path-status.js";
 import {
-  createGitHubActionsChangeRemoteExecutor,
+  createActionsChangeExecutionAdapter,
   GitHubAdapter,
   GitHubIssueRelationObservationAdapter,
   isGitHubAdapterError,
@@ -59,12 +59,12 @@ import {
 } from "../github/index.js";
 import { GITHUB_ISSUE_PROJECTION_CAPABILITIES } from "../semantic-issue-projection.js";
 import {
-  changeRemoteReadRequest,
-  ChangeRemoteExecutorError,
-  readChangeRemoteProjection,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteExecutorOptions,
-} from "../change-executor.js";
+  changeReadRequest,
+  ChangeExecutionPortError,
+  readChangeProjection,
+  type ChangeExecutionPort,
+  type ChangeExecutionPortOptions,
+} from "../change-execution-port.js";
 import type {
   CapabilityAuthorizedSessionExecutionResult,
   CapabilityAuthorizedSessionExecutor,
@@ -286,9 +286,9 @@ export interface NativeSemanticArtifactDependencies extends NativeSemanticPullRe
 /** Injectable read boundary for Change projections exposed through MCP. */
 export interface NativeChangeDependencies extends NativeSemanticPullRequestDependencies {
   /** Direct semantic executor seam for tests or embedding applications. */
-  readonly changeExecutor?: ChangeRemoteExecutor;
+  readonly changeExecutor?: ChangeExecutionPort;
   /** Factory seam for repository-scoped Change executor construction. */
-  readonly createChangeExecutor?: (options: ChangeRemoteExecutorOptions) => ChangeRemoteExecutor;
+  readonly createChangeExecutor?: (options: ChangeExecutionPortOptions) => ChangeExecutionPort;
   /** Existing Session-authorized App executor; absent for the read-only catalog. */
   readonly sessionExecutor?: CapabilityAuthorizedSessionExecutor;
 }
@@ -436,17 +436,17 @@ function adapterFor(
 function changeExecutorFor(
   requestRepository: string | undefined,
   dependencies: NativeChangeDependencies,
-): ChangeRemoteExecutor {
+): ChangeExecutionPort {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
   const cwd = dependencies.repositoryRoot ?? process.cwd();
   const repository = requestRepository ?? dependencies.repository;
-  const options: ChangeRemoteExecutorOptions = {
+  const options: ChangeExecutionPortOptions = {
     cwd,
     ...(repository === undefined ? {} : { repository }),
   };
   if (dependencies.createChangeExecutor !== undefined) return dependencies.createChangeExecutor(options);
   const adapter = adapterFor(requestRepository, dependencies);
-  return createGitHubActionsChangeRemoteExecutor({ ...options, api: adapter });
+  return createActionsChangeExecutionAdapter({ ...options, api: adapter });
 }
 
 /** Resolve the repository Canon through the existing repository/Core boundary. */
@@ -556,7 +556,7 @@ function diagnosticsForError(error: unknown): unknown[] {
   if (error instanceof EffectiveArtifactContractCompilationError) {
     return [{ code: "EFFECTIVE_CONTRACT_INVALID", path: "$", message: boundedErrorMessage(error) }];
   }
-  if (error instanceof ChangeRemoteExecutorError) {
+  if (error instanceof ChangeExecutionPortError) {
     const diagnostics = error.diagnostics === undefined ? [] : boundedDiagnostics(error.diagnostics);
     return diagnostics.length > 0
       ? diagnostics
@@ -588,7 +588,7 @@ function result<T extends Record<string, unknown>>(data: T, summary: string): Ca
 
 function projectChangeHandoffResult(
   issue: number,
-  projection: Awaited<ReturnType<typeof readChangeRemoteProjection>>,
+  projection: Awaited<ReturnType<typeof readChangeProjection>>,
   options: { readonly repositoryNameWithOwner?: string } = {},
 ): Record<string, unknown> {
   const change = projection.change;
@@ -618,7 +618,7 @@ async function handleImplementationHandoff(
 ): Promise<CallToolResult> {
   try {
     const executor = changeExecutorFor(input.repository, dependencies);
-    const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    const projection = await readChangeProjection(executor, changeReadRequest(input.issue));
     let repositoryNameWithOwner: string | undefined;
     // Resolve a locator only when an adapter is actually available: either the
     // caller injected one directly, or no changeExecutor override exists (the
@@ -666,7 +666,7 @@ async function handleGoldenPathEntry(
 ): Promise<CallToolResult> {
   try {
     const executor = changeExecutorFor(input.repository, dependencies);
-    const projection = await readChangeRemoteProjection(executor, changeRemoteReadRequest(input.issue));
+    const projection = await readChangeProjection(executor, changeReadRequest(input.issue));
     const entry = tryProjectGoldenPathEntry({ projection, requireGovernedIssue: false });
     return result(
       {

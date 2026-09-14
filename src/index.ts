@@ -20,7 +20,7 @@ export * from "./command-contract.js";
 export * from "./change.js";
 export * from "./branch-naming.js";
 export * from "./change-provenance-record.js";
-export * from "./change-executor.js";
+export * from "./change-execution-port.js";
 export * from "./change-handoff.js";
 export * from "./change-trusted-executor.js";
 export * from "./golden-path-review.js";

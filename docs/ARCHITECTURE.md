@@ -23,22 +23,47 @@ code.
 The following terms describe different dimensions and MUST NOT be collapsed
 into one another:
 
-| Term                   | Meaning                                                                                                                                 |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **Role**               | One architectural responsibility or decision ownership. A Role says what must be done, not where it runs.                               |
-| **Component**          | Code, module, process, or service that implements one or more Roles. Co-location does not merge the logical boundaries.                 |
-| **Principal**          | An authenticated identity that can prove identity or possession. A Principal is not automatically an Authority or a semantic requester. |
-| **Canon**              | Authoritative governed data or rules held by the Authority. Canon is data, not an executing component.                                  |
-| **Port**               | A stable transport-neutral contract between Components or Roles.                                                                        |
-| **Adapter**            | A concrete binding between a Port and a protocol, provider, CLI, or Runtime Host.                                                       |
-| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create semantic authority.                                      |
-| **Runtime Host**       | The compute environment in which Components execute, such as local Node.js, an Actions Runner, or a Cloudflare Worker.                  |
-| **Deployment Profile** | An explicit composition of Components, Adapters, Transports, credentials, and Runtime Hosts.                                            |
-| **Trust Boundary**     | A boundary across which identity or credential authority changes and therefore requires explicit proof, scope, or containment.          |
+| Term                   | Meaning                                                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Role**               | One architectural responsibility or decision ownership. A Role says what must be done, not where it runs.                                                    |
+| **Component**          | Code, module, process, or service that implements one or more Roles. Co-location does not merge the logical boundaries.                                      |
+| **Principal**          | An authenticated identity that can prove identity or possession. A Principal is not automatically an Authority or a semantic requester.                      |
+| **Canon**              | Authoritative governed data or rules held by the Authority. Canon is data, not an executing component.                                                       |
+| **Port**               | A stable transport-neutral contract between Components or Roles.                                                                                             |
+| **Adapter**            | A concrete binding between a Port and a protocol, provider, CLI, or Runtime Host.                                                                            |
+| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create semantic authority.                                                           |
+| **Runtime Host**       | The compute environment in which Components execute, such as local Node.js, an Actions Runner, or a Cloudflare Worker.                                       |
+| **Deployment Profile** | An explicit composition of Components, Adapters, Transports, credentials, and Runtime Hosts.                                                                 |
+| **Trust Boundary**     | A boundary across which identity or credential authority changes and therefore requires explicit proof, scope, or containment.                               |
+| **Executor**           | The operation-coordination Role that admits a request or plan and carries it through a verified terminal result. It is not a Port, Adapter, or Runtime Host. |
 
 `same executable/process != same responsibility`. A compact deployment may
 co-locate Roles, but co-location never permits a Session, Delegator, provider,
 or transport credential to be treated as another credential domain.
+
+### 1.1 Execution boundaries
+
+`Executor` is reserved for operation coordination after admission. A Port
+defines a contract; an Adapter binds that contract to a provider or Transport;
+neither one becomes the semantic Executor merely because it can send requests or
+apply provider effects. Runtime Hosts, including Actions Runners and Workers,
+are deployment environments rather than Executors.
+
+The Change boundary uses these canonical names:
+
+- `ChangeExecutionPort` is the transport-neutral request/read contract.
+- `ActionsChangeExecutionAdapter` and the Direct-App adapter implement that
+  Port and own transport mechanics only.
+- `TrustedChangeExecutor` and Session-authorized coordination are Executor
+  implementations that admit operations and verify terminal results.
+- `LocalSemanticIssueExecutor`, `LocalSemanticBranchExecutor`, and
+  `LocalSemanticPullRequestExecutor` (including their bounded relation and
+  mutation profiles) are explicit local semantic execution profiles. They do
+  not collapse into privileged Change coordination.
+
+The deprecated `ChangeRemoteExecutor` and
+`GitHubActionsChangeRemoteExecutor` exports remain compatibility aliases to the
+canonical Port and Adapter; they contain no parallel behavior.
 
 ## 2. Provider principals
 
@@ -176,24 +201,29 @@ acquisition, not Actions-specific semantics.
 
 ## 6. Current vocabulary map
 
-This map records the safe classification for the current implementation. It is
-documentation, not a request to rename public symbols in this vocabulary-only
-Issue.
+This map records the safe classification for the current implementation. #548
+applies the explicit compatibility migration for execution ports, transport
+adapters, and local semantic execution profiles described above.
 
-| Current symbol or surface                                               | Canonical classification                                                                                                           |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `src/github/app-installation-credential-broker.ts`                      | Credential Broker containing App Principal Provider Credentials and issuing bounded provider capabilities.                         |
-| `src/github/issuer-authority.ts` / `InariIssuerAppAuthority`            | Effect Authorizer around App Principal provider effects; the compatibility name `Authority` does not make it repository Authority. |
-| `src/github/transport.ts` / `ProcessGhTransport`                        | Local process Transport at the User Principal Provider Credential boundary.                                                        |
-| `src/github/app-repository-evidence-reader.ts`                          | Provider Adapter / Evidence Reader for bounded App-backed repository evidence.                                                     |
-| `src/github/actions-change-executor.ts` / `GitHubActionsEvidenceReader` | Provider Evidence Reader with a legacy Actions-specific name; not a separate semantic Executor.                                    |
-| `src/github/direct-app-execution.ts`                                    | Deployment-agnostic composition that wires existing Roles; not a new authority.                                                    |
-| `.github/workflows/inari-change-executor.yml`                           | Actions Deployment Profile: Runner Runtime Host plus workflow Transport and trusted provider bindings.                             |
-| `src/operational-observation.ts`                                        | Observation Projector; pure provider-evidence normalization with no GitHub I/O.                                                    |
+| Current symbol or surface                                                                              | Canonical classification                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/github/app-installation-credential-broker.ts`                                                     | Credential Broker containing App Principal Provider Credentials and issuing bounded provider capabilities.                                |
+| `src/github/issuer-authority.ts` / `InariIssuerAppAuthority`                                           | Effect Authorizer around App Principal provider effects; the compatibility name `Authority` does not make it repository Authority.        |
+| `src/github/transport.ts` / `ProcessGhTransport`                                                       | Local process Transport at the User Principal Provider Credential boundary.                                                               |
+| `src/github/app-repository-evidence-reader.ts`                                                         | Provider Adapter / Evidence Reader for bounded App-backed repository evidence.                                                            |
+| `src/change-execution-port.ts`                                                                         | Transport-neutral Change Port; it defines request/result contracts and normalization, not orchestration.                                  |
+| `src/github/actions-change-execution-adapter.ts`                                                       | Actions Transport Adapter implementing `ChangeExecutionPort`; it dispatches/polls transport and does not own semantic admission.          |
+| `src/agent-authority/direct-app-client.ts`                                                             | Direct-App Transport Adapter implementing `ChangeExecutionPort`; Session/App authority remains outside this adapter.                      |
+| `src/change-trusted-executor.ts` / `TrustedChangeExecutor`                                             | Trusted Change Executor that coordinates admitted operation effects and verifies terminal projection.                                     |
+| `src/github/actions-change-executor.ts` / `GitHubActionsEvidenceReader`                                | Trusted Actions composition plus provider Evidence Reader; the reader's legacy Actions-specific name is not a separate semantic Executor. |
+| `src/semantic-issue-executor.ts`, `src/semantic-branch-executor.ts`, and `src/semantic-pr-executor.ts` | Local semantic execution profiles with explicit `LocalSemantic...Executor` names.                                                         |
+| `src/github/direct-app-execution.ts`                                                                   | Deployment-agnostic composition that wires existing Roles; not a new authority.                                                           |
+| `.github/workflows/inari-change-executor.yml`                                                          | Actions Deployment Profile: Runner Runtime Host plus workflow Transport and trusted provider bindings.                                    |
+| `src/operational-observation.ts`                                                                       | Observation Projector; pure provider-evidence normalization with no GitHub I/O.                                                           |
 
-All existing public and wire names remain unchanged by this document. Future
-renames require an explicit compatibility or migration decision. In
-particular, better prose must not silently turn a User Principal into an App
+Public and wire contracts remain compatible through the aliases documented
+above. Future renames require an explicit compatibility or migration decision.
+In particular, better prose must not silently turn a User Principal into an App
 Principal, a Transport Principal into a requester, a Provider Credential into
 a Session Credential, or an Observation Projector into a semantic policy
 engine.

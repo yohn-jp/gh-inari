@@ -88,7 +88,8 @@ GitHub and transport adapters own bounded external I/O:
 - normalize provider responses;
 - apply already-planned effects;
 - dispatch/receive Actions transport;
-- convert bounded machine/Core outcomes into existing public CLI/MCP/remote-executor results.
+- convert bounded machine/Core outcomes into existing public CLI/MCP/Change
+  execution-port results.
 
 Adapters must not add independent lifecycle policy.
 
@@ -515,7 +516,7 @@ A retry starts from fresh GitHub-derived projection and reclassifies the current
 
 ## 13. Outcome and error mapping
 
-XState terminal states are internal. Public consumers continue receiving existing Inari contracts such as `ChangeRemoteExecutionResult` and `ChangeTrustedExecutorError`.
+XState terminal states are internal. Public consumers continue receiving existing Inari contracts such as `ChangeExecutionResult` and `ChangeTrustedExecutorError`.
 
 The machine runtime should produce an internal discriminated outcome approximately equivalent to:
 

@@ -20,7 +20,7 @@ Inari Core             GitHub Actions          Inari GitHub App
 ```
 
 That architecture has now been implemented far enough to prove the model. Inari has a
-transport-neutral `ChangeRemoteExecutor`, a trusted Change executor, a GitHub effect
+transport-neutral `ChangeExecutionPort`, a trusted Change executor, a GitHub effect
 adapter, a typed issuer authority, and a GitHub Actions implementation that executes a
 semantic request on trusted repository code.
 
@@ -84,14 +84,14 @@ If an adapter disagrees with Core, Core wins and the adapter must fail closed.
 The target architecture should reuse the existing seams rather than introduce parallel
 business logic.
 
-### 3.1 `src/change-executor.ts` — retain
+### 3.1 `src/change-execution-port.ts` — retain
 
-`ChangeRemoteExecutor` is already the transport-neutral semantic remote boundary:
+`ChangeExecutionPort` is already the transport-neutral semantic port boundary:
 
 ```ts
-export interface ChangeRemoteExecutor {
-  execute(request: ChangeRemoteMutationRequest): Promise<ChangeProjectionResult | ChangeRemoteExecutionResult>;
-  read(request: ChangeRemoteReadRequest): Promise<ChangeProjectionResult>;
+export interface ChangeExecutionPort {
+  execute(request: ChangeMutationRequest): Promise<ChangeProjectionResult | ChangeExecutionResult>;
+  read(request: ChangeReadRequest): Promise<ChangeProjectionResult>;
 }
 ```
 
@@ -99,12 +99,12 @@ The request identifies a semantic operation and root Issue. The bounded result c
 a Change projection and optional execution evidence. It has no workflow filename,
 installation token, artifact ID, or HTTP endpoint.
 
-This interface remains the semantic remote execution contract used by the CLI and may
+This interface remains the semantic execution-port contract used by the CLI and may
 also back MCP Change tools.
 
-### 3.2 `src/github/change-actions-remote-executor.ts` — compatibility/internal transport
+### 3.2 `src/github/actions-change-execution-adapter.ts` — compatibility/internal transport
 
-`GitHubActionsChangeRemoteExecutor` currently owns the client-side mechanics that should
+`ActionsChangeExecutionAdapter` currently owns the client-side mechanics that should
 move behind the MCP gateway:
 
 - fixed workflow selection (`inari-change-executor.yml`);
@@ -115,7 +115,7 @@ move behind the MCP gateway:
 - artifact discovery;
 - ZIP validation/decompression;
 - `result.json` validation; and
-- mapping Actions failures into `ChangeRemoteExecutorError`.
+- mapping Actions failures into `ChangeExecutionPortError`.
 
 It should not be deleted early. It becomes the compatibility implementation while the
 MCP gateway is introduced and remains a useful local/dogfood diagnostic path.
@@ -232,13 +232,13 @@ effect adapter still decides how that one effect maps to GitHub.
 ### 3.8 `src/cli-core.ts` — retain dependency seam
 
 The CLI already supports an injectable `changeExecutor` and `createChangeExecutor`.
-Therefore a hosted MCP-backed remote executor can be introduced without changing Change
+Therefore a hosted MCP-backed execution adapter can be introduced without changing Change
 command semantics.
 
 The CLI may support both:
 
 ```text
-local / compatibility: CLI -> GitHubActionsChangeRemoteExecutor
+local / compatibility: CLI -> ActionsChangeExecutionAdapter
 hosted:              CLI -> Inari MCP client -> hosted gateway
 ```
 
@@ -1239,7 +1239,7 @@ Steps:
    Inari-owned native MCP modules;
 2. replace `execFile("inari", ...)` inside the native implementation with direct Inari
    application/Core calls where feasible, avoiding self-spawn as the permanent design;
-3. add Change tools from the current semantic remote executor;
+3. add Change tools from the current semantic execution port;
 4. prove local stdio parity;
 5. point Majiwari registry at the native Inari server and retain temporary compatibility
    aliases only where needed; and
@@ -1263,7 +1263,7 @@ There is no flag day.
 - port Majiwari tool schemas/handlers;
 - add Change tools;
 - provide native stdio server;
-- keep CLI and current Actions remote executor unchanged.
+- keep CLI and current Actions execution adapter unchanged.
 
 ### Phase 2 — hosted MCP + authentication/admission
 
@@ -1440,7 +1440,7 @@ E2. **Hosted Change dogfood**
 
 E3. **CLI hosted MCP executor**
 
-- implement MCP-backed `ChangeRemoteExecutor` using existing CLI dependency seam;
+- implement MCP-backed `ChangeExecutionPort` using existing CLI dependency seam;
 - default selection/configuration and fallback diagnostics.
 
 E4. **Majiwari native federation cutover**
@@ -1461,7 +1461,7 @@ Four versions must not be conflated:
 
 1. **MCP protocol version** — e.g. `2026-07-28`.
 2. **Inari MCP tool-contract version** — tool names/input/output semantics.
-3. **Change remote executor contract version** — existing semantic Change request/result
+3. **Change execution-port contract version** — existing semantic Change request/result
    generation.
 4. **Issuer/attestation protocol version** — Runner → issuer envelope/claims.
 
@@ -1570,7 +1570,7 @@ The following are architectural decisions, not open implementation choices:
 15. GitHub remains Change state authority; only ephemeral security/execution guard state is
     added centrally.
 16. MCP Tasks and MCP Apps are optional extensions, not baseline requirements.
-17. The current Actions remote executor remains a compatibility path during migration.
+17. The current Actions execution adapter remains a compatibility path during migration.
 
 ## 25. Implementation-level questions intentionally deferred
 

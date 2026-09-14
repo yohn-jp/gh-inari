@@ -10,10 +10,10 @@ import { projectChangeFromGitHubEvidence } from "../change.js";
 import { ChangeTrustedExecutorError } from "../change-trusted-executor.js";
 import { runCli } from "../cli.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  normalizeChangeRemoteExecutionResult,
-  type ChangeRemoteExecutionResult,
-} from "../change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  normalizeChangeExecutionResult,
+  type ChangeExecutionResult,
+} from "../change-execution-port.js";
 import {
   GOLDEN_PATH_BRANCH,
   GOLDEN_PATH_CREATED_COMMIT_SHA,
@@ -39,7 +39,7 @@ const GOLDEN_PATH_SCOPE = {
 };
 
 function goldenPathInput(
-  result: ChangeRemoteExecutionResult,
+  result: ChangeExecutionResult,
   extras: Omit<GoldenPathStatusInput, keyof typeof GOLDEN_PATH_SCOPE | "changeProjection" | "execution"> = {},
 ): GoldenPathStatusInput {
   return {
@@ -51,7 +51,7 @@ function goldenPathInput(
 }
 
 function goldenPathStatus(
-  result: ChangeRemoteExecutionResult,
+  result: ChangeExecutionResult,
   extras: Omit<GoldenPathStatusInput, keyof typeof GOLDEN_PATH_SCOPE | "changeProjection" | "execution"> = {},
 ) {
   const recovery = projectGoldenPathRecovery(result);
@@ -80,10 +80,10 @@ async function captureCliJson(
   }
 }
 
-function assertBoundedPublicResult(operation: "issue" | "ready" | "abort", result: ChangeRemoteExecutionResult): void {
-  const normalized = normalizeChangeRemoteExecutionResult(operation, result);
+function assertBoundedPublicResult(operation: "issue" | "ready" | "abort", result: ChangeExecutionResult): void {
+  const normalized = normalizeChangeExecutionResult(operation, result);
   assert.deepEqual(Object.keys(normalized).sort(), ["evidence", "projection"]);
-  assert.equal(normalized.evidence?.version, CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION);
+  assert.equal(normalized.evidence?.version, CHANGE_EXECUTION_PORT_CONTRACT_VERSION);
   assert.equal(normalized.evidence?.operation, operation);
   assert.equal("snapshot" in normalized, false);
   assert.doesNotMatch(JSON.stringify(normalized), /"(?:snapshot|stateNode|machineId)"\s*:/iu);
@@ -357,7 +357,7 @@ test("unavailable production evidence suppresses unsafe Golden Path mutation", (
 test("CLI and Actions serializers retain the same projector input envelope", async () => {
   const actors = createGoldenPathActors(reviewEvidenceInput());
   const expected = await actors.executor.execute(mutationRequest("ready"));
-  const normalized = normalizeChangeRemoteExecutionResult("ready", expected);
+  const normalized = normalizeChangeExecutionResult("ready", expected);
   assert.deepEqual(normalized, expected);
 
   const cli = await captureCliJson(["change", "ready", "411", "--json"], {
@@ -376,7 +376,7 @@ test("CLI and Actions serializers retain the same projector input envelope", asy
   const cliResult = {
     projection: cli.output.projection,
     evidence: cli.output.evidence,
-  } as ChangeRemoteExecutionResult;
+  } as ChangeExecutionResult;
   assert.deepEqual(
     goldenPathStatus(cliResult, { review: { status: "waiting", action: "wait" } }),
     goldenPathStatus(expected, {

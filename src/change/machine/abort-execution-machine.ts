@@ -10,7 +10,7 @@ import type {
   ChangeProjectionResult,
   ChangeTransitionPlan,
 } from "../../change.js";
-import type { ChangeRemoteExecutionResult, ChangeRemoteMutationRequest } from "../../change-executor.js";
+import type { ChangeExecutionResult, ChangeMutationRequest } from "../../change-execution-port.js";
 
 export type AbortExecutionFailureCode =
   | "CHANGE_EXECUTION_READ_FAILED"
@@ -23,7 +23,7 @@ export interface AbortExecutionFailure {
   readonly code: AbortExecutionFailureCode;
   readonly message: string;
   readonly diagnostics: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeRemoteExecutionResult["evidence"];
+  readonly evidence?: ChangeExecutionResult["evidence"];
 }
 
 export type AbortEffect = Extract<ChangeEffect, { readonly kind: "CLOSE_PULL_REQUEST" | "DELETE_BRANCH" }>;
@@ -98,7 +98,7 @@ export interface AbortVerificationResult {
 
 export interface AbortRecoverySuccess {
   readonly ok: true;
-  readonly result: ChangeRemoteExecutionResult;
+  readonly result: ChangeExecutionResult;
 }
 
 export interface AbortRecoveryFailure {
@@ -111,16 +111,16 @@ export type AbortRecoveryResult = AbortRecoverySuccess | AbortRecoveryFailure;
 export interface AbortExecutionSemantics {
   readonly project: (input: ChangeProjectionInput) => ChangeProjectionResult;
   readonly classify: (projection: ChangeProjectionResult) => AbortAdmissionResult;
-  readonly plan: (request: ChangeRemoteMutationRequest, projection: ChangeProjectionResult) => AbortPlanResult;
+  readonly plan: (request: ChangeMutationRequest, projection: ChangeProjectionResult) => AbortPlanResult;
   readonly recover: (
-    request: ChangeRemoteMutationRequest,
+    request: ChangeMutationRequest,
     transition: ChangeTransitionPlan,
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: AbortEffectFailure,
     input: ChangeProjectionInput,
   ) => AbortRecoveryResult;
   readonly verify: (
-    request: ChangeRemoteMutationRequest,
+    request: ChangeMutationRequest,
     input: ChangeProjectionInput,
     projection: ChangeProjectionResult,
     plan: ChangeTransitionPlan,
@@ -128,22 +128,22 @@ export interface AbortExecutionSemantics {
 }
 
 export interface AbortExecutionResults {
-  readonly returnedExisting: (projection: ChangeProjectionResult) => ChangeRemoteExecutionResult;
+  readonly returnedExisting: (projection: ChangeProjectionResult) => ChangeExecutionResult;
   readonly verified: (
     projection: ChangeProjectionResult,
     attempts: readonly ChangeIssuanceEffectAttempt[],
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
   readonly recoveryRequired: (
     projection: ChangeProjectionResult,
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: AbortEffectFailure,
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
 }
 
 export interface AbortExecutionServices {
-  readonly request: ChangeRemoteMutationRequest;
+  readonly request: ChangeMutationRequest;
   /** Evidence I/O is isolated behind the operation actor boundary. */
-  readonly read: (request: ChangeRemoteMutationRequest) => Promise<AbortReadResult>;
+  readonly read: (request: ChangeMutationRequest) => Promise<AbortReadResult>;
   /** Privileged effects are isolated behind the operation actor boundary. */
   readonly apply: (effect: AbortEffect) => Promise<AbortEffectResult>;
   readonly failureForEffect: (effect: AbortEffect) => {
@@ -155,7 +155,7 @@ export interface AbortExecutionServices {
   };
   /** Builds the bounded failure returned when recovery evidence cannot be read. */
   readonly recoveryReadFailure: (
-    request: ChangeRemoteMutationRequest,
+    request: ChangeMutationRequest,
     attempts: readonly ChangeIssuanceEffectAttempt[],
     failure: AbortEffectFailure,
   ) => AbortExecutionFailure;
@@ -164,7 +164,7 @@ export interface AbortExecutionServices {
 }
 
 export type AbortExecutionOutcome =
-  | { readonly kind: "result"; readonly result: ChangeRemoteExecutionResult }
+  | { readonly kind: "result"; readonly result: ChangeExecutionResult }
   | { readonly kind: "failure"; readonly failure: AbortExecutionFailure };
 
 interface AbortMachineContext {
@@ -179,7 +179,7 @@ interface AbortMachineContext {
   readonly attempts: readonly ChangeIssuanceEffectAttempt[];
   readonly effectFailure?: AbortEffectFailure;
   readonly failure?: AbortExecutionFailure;
-  readonly result?: ChangeRemoteExecutionResult;
+  readonly result?: ChangeExecutionResult;
   readonly outcome?: AbortExecutionOutcome;
 }
 

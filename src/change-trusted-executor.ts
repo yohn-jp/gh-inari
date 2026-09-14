@@ -3,15 +3,15 @@
  *
  * The operation machines and their transport/Core adapter live in the
  * internal machine module. This class intentionally only binds that adapter
- * to the stable ChangeRemoteExecutor contract.
+ * to the stable ChangeExecutionPort contract.
  */
 
 import type {
-  ChangeRemoteExecutionResult,
-  ChangeRemoteExecutor,
-  ChangeRemoteMutationRequest,
-  ChangeRemoteReadRequest,
-} from "./change-executor.js";
+  ChangeExecutionResult,
+  ChangeExecutionPort,
+  ChangeMutationRequest,
+  ChangeReadRequest,
+} from "./change-execution-port.js";
 import {
   TrustedChangeExecutionAdapter,
   type ChangeTrustedExecutorOptions,
@@ -28,18 +28,18 @@ export type {
   ChangeTrustedExecutorOptions,
 } from "./change/machine/trusted-execution-adapter.js";
 
-export class TrustedChangeExecutor implements ChangeRemoteExecutor {
+export class TrustedChangeExecutor implements ChangeExecutionPort {
   readonly #adapter: TrustedChangeExecutionAdapter;
 
   constructor(options: ChangeTrustedExecutorOptions) {
     this.#adapter = new TrustedChangeExecutionAdapter(options);
   }
 
-  read(request: ChangeRemoteReadRequest): Promise<ChangeRemoteExecutionResult["projection"]> {
+  read(request: ChangeReadRequest): Promise<ChangeExecutionResult["projection"]> {
     return this.#adapter.read(request);
   }
 
-  execute(request: ChangeRemoteMutationRequest): Promise<ChangeRemoteExecutionResult> {
+  execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     return this.#adapter.execute(request);
   }
 }

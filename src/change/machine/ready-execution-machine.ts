@@ -11,7 +11,7 @@ import type {
   ChangeTransitionPlan,
 } from "../../change.js";
 import { createChangeDiagnostic } from "../../change.js";
-import type { ChangeRemoteMutationRequest, ChangeRemoteExecutionResult } from "../../change-executor.js";
+import type { ChangeMutationRequest, ChangeExecutionResult } from "../../change-execution-port.js";
 import { transitionChangeLifecycle } from "./lifecycle-machine.js";
 
 export type ReadyExecutionFailureCode =
@@ -76,7 +76,7 @@ export interface ReadyExecutionSemantics {
   readonly validate: (input: unknown) => ChangeReadyTransitionValidationResult;
   readonly plan: (input: unknown) => ChangeTransitionPlan;
   readonly verify: (
-    request: ChangeRemoteMutationRequest,
+    request: ChangeMutationRequest,
     input: ChangeProjectionInput,
     projection: ChangeProjectionResult,
     plan: ChangeTransitionPlan,
@@ -84,19 +84,19 @@ export interface ReadyExecutionSemantics {
 }
 
 export interface ReadyExecutionResults {
-  readonly returnedExisting: (projection: ChangeProjectionResult) => ChangeRemoteExecutionResult;
-  readonly verified: (projection: ChangeProjectionResult, effect: ReadyEffect) => ChangeRemoteExecutionResult;
+  readonly returnedExisting: (projection: ChangeProjectionResult) => ChangeExecutionResult;
+  readonly verified: (projection: ChangeProjectionResult, effect: ReadyEffect) => ChangeExecutionResult;
   readonly failed: (
     projection: ChangeProjectionResult,
     effect: ReadyEffect,
     failure: ReadyEffectFailure,
-  ) => ChangeRemoteExecutionResult;
+  ) => ChangeExecutionResult;
 }
 
 export interface ReadyExecutionServices {
-  readonly request: ChangeRemoteMutationRequest;
+  readonly request: ChangeMutationRequest;
   /** The read actor is the only machine boundary for repository evidence I/O. */
-  readonly read: (request: ChangeRemoteMutationRequest) => Promise<ReadyReadResult>;
+  readonly read: (request: ChangeMutationRequest) => Promise<ReadyReadResult>;
   /** The effect actor is the only machine boundary for the privileged GitHub mutation. */
   readonly apply: (effect: ReadyEffect) => Promise<ReadyEffectResult>;
   readonly failureForEffect: (effect: ReadyEffect) => ReadyEffectFailure;
@@ -105,7 +105,7 @@ export interface ReadyExecutionServices {
 }
 
 export type ReadyExecutionOutcome =
-  | { readonly kind: "result"; readonly result: ChangeRemoteExecutionResult }
+  | { readonly kind: "result"; readonly result: ChangeExecutionResult }
   | { readonly kind: "failure"; readonly failure: ReadyExecutionFailure };
 
 interface ReadyMachineContext {
@@ -119,7 +119,7 @@ interface ReadyMachineContext {
   readonly effect?: ReadyEffect;
   readonly effectFailure?: ReadyEffectFailure;
   readonly failure?: ReadyExecutionFailure;
-  readonly result?: ChangeRemoteExecutionResult;
+  readonly result?: ChangeExecutionResult;
   readonly outcome?: ReadyExecutionOutcome;
 }
 

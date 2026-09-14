@@ -35,15 +35,15 @@ import {
 import { MAX_ISSUE_NUMBER } from "./agent-authority/capability.js";
 import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/issuer-authority.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  changeRemoteMutationRequest,
-  changeRemoteReadRequest,
-  normalizeChangeRemoteExecutionResult,
-  normalizeChangeRemoteProjection,
-  type ChangeRemoteExecutionEvidence,
-  type ChangeRemoteExecutionResult,
-  type ChangeRemoteExecutor,
-} from "./change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  changeMutationRequest,
+  changeReadRequest,
+  normalizeChangeExecutionResult,
+  normalizeChangeProjection,
+  type ChangeExecutionEvidence,
+  type ChangeExecutionResult,
+  type ChangeExecutionPort,
+} from "./change-execution-port.js";
 import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import type { ChangeDiagnostic, ChangeProjectionResult } from "./change.js";
 import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
@@ -94,7 +94,7 @@ export interface CapabilityAuthorizedSessionExecutionFailure {
   readonly phase: SessionExecutionPhase;
   readonly message: string;
   readonly diagnostics?: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeRemoteExecutionEvidence;
+  readonly evidence?: ChangeExecutionEvidence;
 }
 
 export interface CapabilityAuthorizedSessionExecutionResult {
@@ -102,7 +102,7 @@ export interface CapabilityAuthorizedSessionExecutionResult {
   readonly operation?: CapabilityAuthorizedSessionOperation;
   readonly status: "succeeded" | "failed";
   readonly projection?: ChangeProjectionResult;
-  readonly execution?: ChangeRemoteExecutionResult;
+  readonly execution?: ChangeExecutionResult;
   readonly branchAdvance?: BranchAdvanceSemanticResult;
   /** Present only after #376 has established bounded provenance. */
   readonly provenance?: CapabilityExecutionProvenance;
@@ -114,7 +114,7 @@ export interface CapabilityAuthorizedChangeExecutorFactoryInput {
   readonly execution: DirectAppTrustedExecutionContext;
   readonly admission: AdmittedSessionCapability;
   readonly request: {
-    readonly version: typeof CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION;
+    readonly version: typeof CHANGE_EXECUTION_PORT_CONTRACT_VERSION;
     readonly operation: "issue" | "ready" | "abort";
     readonly issue: number;
     readonly semanticPullRequestPlan?: unknown;
@@ -124,7 +124,7 @@ export interface CapabilityAuthorizedChangeExecutorFactoryInput {
 }
 
 export interface CapabilityAuthorizedChangeExecutorFactoryResult {
-  readonly executor: ChangeRemoteExecutor;
+  readonly executor: ChangeExecutionPort;
   /** Bounded App installation identity established by the existing App authority. */
   readonly app?: AppProvenance;
 }
@@ -141,13 +141,13 @@ export interface CapabilityAuthorizedSessionExecutorOptions {
   /** Existing #374 inputs. No alternate authentication callback is accepted. */
   readonly authentication: Omit<AuthenticateSessionRequestOptions, "request">;
   /** Existing read-only Change executor used before authorization. */
-  readonly readExecutor?: Pick<ChangeRemoteExecutor, "read">;
+  readonly readExecutor?: Pick<ChangeExecutionPort, "read">;
   /** Existing direct-App Change executor, when no post-admission factory is needed. */
-  readonly changeExecutor?: ChangeRemoteExecutor;
+  readonly changeExecutor?: ChangeExecutionPort;
   /** Called only after #375 admission; normally constructs TrustedChangeExecutor. */
   readonly createChangeExecutor?: (
     input: CapabilityAuthorizedChangeExecutorFactoryInput,
-  ) => Promise<ChangeRemoteExecutor | CapabilityAuthorizedChangeExecutorFactoryResult>;
+  ) => Promise<ChangeExecutionPort | CapabilityAuthorizedChangeExecutorFactoryResult>;
   /** Bounded identity returned by the existing App capability authority. */
   readonly app?: AppProvenance;
   /** #466 owns branch validation and Git tree/ref execution. */
@@ -296,7 +296,7 @@ function failure(
   message: string,
   options: {
     readonly diagnostics?: readonly ChangeDiagnostic[];
-    readonly evidence?: ChangeRemoteExecutionEvidence;
+    readonly evidence?: ChangeExecutionEvidence;
     readonly branchAdvance?: BranchAdvanceSemanticResult;
   } = {},
 ): CapabilityAuthorizedSessionExecutionResult {
@@ -323,7 +323,7 @@ function success(
   provenance: CapabilityExecutionProvenance,
   options: {
     readonly projection?: ChangeProjectionResult;
-    readonly execution?: ChangeRemoteExecutionResult;
+    readonly execution?: ChangeExecutionResult;
     readonly branchAdvance?: BranchAdvanceSemanticResult;
   },
 ): CapabilityAuthorizedSessionExecutionResult {
@@ -348,7 +348,7 @@ function trustedDiagnostics(error: ChangeTrustedExecutorError): readonly ChangeD
   return error.diagnostics.slice(0, 16);
 }
 
-function trustedEvidence(error: ChangeTrustedExecutorError): ChangeRemoteExecutionEvidence | undefined {
+function trustedEvidence(error: ChangeTrustedExecutorError): ChangeExecutionEvidence | undefined {
   return error.evidence;
 }
 
@@ -372,8 +372,8 @@ function executionFailure(
   });
 }
 
-function appFromFactory(value: ChangeRemoteExecutor | CapabilityAuthorizedChangeExecutorFactoryResult): {
-  readonly executor: ChangeRemoteExecutor;
+function appFromFactory(value: ChangeExecutionPort | CapabilityAuthorizedChangeExecutorFactoryResult): {
+  readonly executor: ChangeExecutionPort;
   readonly app?: AppProvenance;
 } {
   if (isRecord(value) && "executor" in value) {
@@ -384,12 +384,12 @@ function appFromFactory(value: ChangeRemoteExecutor | CapabilityAuthorizedChange
     ) {
       throw new TypeError("Change executor factory returned an invalid executor.");
     }
-    return { executor: value.executor as unknown as ChangeRemoteExecutor, app: value.app as AppProvenance | undefined };
+    return { executor: value.executor as unknown as ChangeExecutionPort, app: value.app as AppProvenance | undefined };
   }
   if (!isObject(value) || typeof value.execute !== "function" || typeof value.read !== "function") {
     throw new TypeError("Change executor factory returned an invalid executor.");
   }
-  return { executor: value as unknown as ChangeRemoteExecutor };
+  return { executor: value as unknown as ChangeExecutionPort };
 }
 
 function equivalentProjection(left: ChangeProjectionResult, right: ChangeProjectionResult, issue: number): boolean {
@@ -518,7 +518,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "evidence", authenticated, "Change evidence read failed closed.");
     let initial: ChangeProjectionResult;
     try {
-      initial = normalizeChangeRemoteProjection("show", await reader.read(changeRemoteReadRequest(issue)));
+      initial = normalizeChangeProjection("show", await reader.read(changeReadRequest(issue)));
     } catch {
       return failure(operation, "evidence", authenticated, "Current Change evidence could not be read.");
     }
@@ -559,7 +559,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     if (operation === "change.show") {
       let reread: ChangeProjectionResult;
       try {
-        reread = normalizeChangeRemoteProjection("show", await reader.read(changeRemoteReadRequest(issue)));
+        reread = normalizeChangeProjection("show", await reader.read(changeReadRequest(issue)));
       } catch {
         return failure(operation, "verification", authorized, "Authoritative Change verification failed.");
       }
@@ -573,7 +573,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return success(operation, authorized, { projection: reread });
     }
 
-    const request = changeRemoteMutationRequest(
+    const request = changeMutationRequest(
       operation === "change.issue" ? "issue" : operation === "change.ready" ? "ready" : "abort",
       issue,
       undefined,
@@ -595,7 +595,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "authorization", authorized, "Direct App trusted execution context is invalid.");
     }
 
-    let executor: ChangeRemoteExecutor = this.#options.changeExecutor as ChangeRemoteExecutor;
+    let executor: ChangeExecutionPort = this.#options.changeExecutor as ChangeExecutionPort;
     let app = this.#options.app;
     if (this.#options.createChangeExecutor !== undefined) {
       try {
@@ -638,9 +638,9 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       }
     }
 
-    let execution: ChangeRemoteExecutionResult;
+    let execution: ChangeExecutionResult;
     try {
-      execution = normalizeChangeRemoteExecutionResult(request.operation, await executor.execute(request));
+      execution = normalizeChangeExecutionResult(request.operation, await executor.execute(request));
     } catch (error: unknown) {
       return executionFailure(operation, appScoped, error);
     }
@@ -656,7 +656,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
 
     let verifiedProjection: ChangeProjectionResult;
     try {
-      verifiedProjection = normalizeChangeRemoteProjection("show", await executor.read(changeRemoteReadRequest(issue)));
+      verifiedProjection = normalizeChangeProjection("show", await executor.read(changeReadRequest(issue)));
     } catch {
       return failure(operation, "verification", appScoped, "Authoritative Change verification failed.", { evidence });
     }
@@ -721,7 +721,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "evidence", authenticated, "Change evidence read failed closed.");
     let projection: ChangeProjectionResult;
     try {
-      projection = normalizeChangeRemoteProjection("show", await reader.read(changeRemoteReadRequest(issue)));
+      projection = normalizeChangeProjection("show", await reader.read(changeReadRequest(issue)));
     } catch {
       return failure(operation, "evidence", authenticated, "Current Change evidence could not be read.");
     }

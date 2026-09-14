@@ -44,7 +44,7 @@ import {
   type IssuerRepositoryIdentity,
   type TrustedExecutionContext,
 } from "./issuer-authority.js";
-import { changeRemoteMutationRequest, changeRemoteReadRequest } from "../change-executor.js";
+import { changeMutationRequest, changeReadRequest } from "../change-execution-port.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority, canonicalRuntimeAuthorityJson } from "../agent-authority/runtime-authority.js";
 import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
@@ -218,7 +218,7 @@ test("Actions evidence reader retains the observed canonical branch generation",
     branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
     transport,
   });
-  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  const result = await reader.read(changeMutationRequest("issue", 218));
   assert.deepEqual(result.evidence.branches, {
     status: "available",
     value: [{ name: "feat/218-execute-change-plans-safely", sha }],
@@ -247,7 +247,7 @@ test("merge-boundary evidence retains the observed PR even when its branch is no
     transport,
   });
 
-  const result = await reader.read(changeRemoteReadRequest(218));
+  const result = await reader.read(changeReadRequest(218));
   assert.deepEqual(result.evidence.pullRequests, {
     status: "available",
     value: [
@@ -314,7 +314,7 @@ test("canonical PR lookup is independent of repository PR ordering", async () =>
     transport,
   });
 
-  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  const result = await reader.read(changeMutationRequest("issue", 218));
 
   assert.deepEqual(result.evidence.pullRequests, {
     status: "available",
@@ -370,7 +370,7 @@ test("canonical PR lookup does not fail when repository history hits the legacy 
     transport,
   });
 
-  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  const result = await reader.read(changeMutationRequest("issue", 218));
 
   assert.deepEqual(result.evidence.pullRequests, {
     status: "available",
@@ -402,7 +402,7 @@ test("canonical PR lookup reports bounded incomplete evidence", async () => {
   });
 
   await assert.rejects(
-    () => reader.read(changeRemoteMutationRequest("issue", 218)),
+    () => reader.read(changeMutationRequest("issue", 218)),
     (error: unknown) =>
       error instanceof GitHubActionsChangeExecutorError &&
       error.details?.stage === "repository-evidence" &&
@@ -424,7 +424,7 @@ test("repository root read failures retain a bounded repository reason", async (
   });
 
   await assert.rejects(
-    () => reader.read(changeRemoteMutationRequest("issue", 218)),
+    () => reader.read(changeMutationRequest("issue", 218)),
     (error: unknown) =>
       error instanceof GitHubActionsChangeExecutorError &&
       error.details?.stage === "repository-evidence" &&
@@ -441,7 +441,7 @@ test("Actions evidence reader accepts multiline Issue bodies while preserving si
     transport,
   });
 
-  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  const result = await reader.read(changeMutationRequest("issue", 218));
   assert.deepEqual(result.naming, { type: "feat", slug: "execute-change-plans-safely" });
 
   const invalidTitleReader = new GitHubActionsEvidenceReader({
@@ -450,7 +450,7 @@ test("Actions evidence reader accepts multiline Issue bodies while preserving si
     branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
     transport: new ReadTransport({ issueTitle: "feat: invalid\ntitle" }),
   });
-  await assert.rejects(() => invalidTitleReader.read(changeRemoteMutationRequest("issue", 218)));
+  await assert.rejects(() => invalidTitleReader.read(changeMutationRequest("issue", 218)));
 });
 
 class MultilineReadyTransport implements GitHubChangeEffectTransport {
@@ -515,7 +515,7 @@ test("ready evidence reader reaches multiline PR body through readPullRequestBod
     cwd: "/tmp/inari-missing-governance",
   });
 
-  const result = await reader.read(changeRemoteMutationRequest("ready", 239));
+  const result = await reader.read(changeMutationRequest("ready", 239));
   assert.deepEqual(result.naming, { type: "feat", slug: "dogfood-governed-change-lifecycle-through-trusted-actions" });
   assert.equal(result.readyEvidence, undefined);
   assert.equal(
@@ -532,7 +532,7 @@ test("Issue and PR body validation rejects non-line-break controls and preserves
       branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
       transport: new ReadTransport({ issueBody: `body${control}` }),
     });
-    await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)));
+    await assert.rejects(() => reader.read(changeMutationRequest("issue", 218)));
   }
 
   const reader = new GitHubActionsEvidenceReader({
@@ -541,7 +541,7 @@ test("Issue and PR body validation rejects non-line-break controls and preserves
     branchGovernance: { pattern: "^[a-z]+/[0-9]+-[a-z0-9-]+$" },
     transport: new ReadTransport({ issueBody: "x".repeat(MAX_CHANGE_ARTIFACT_BODY_LENGTH + 1) }),
   });
-  await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)));
+  await assert.rejects(() => reader.read(changeMutationRequest("issue", 218)));
 });
 
 test("Actions evidence reader returns only bounded Core projection input", async () => {
@@ -552,7 +552,7 @@ test("Actions evidence reader returns only bounded Core projection input", async
     branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
     transport,
   });
-  const result = await reader.read(changeRemoteMutationRequest("issue", 218));
+  const result = await reader.read(changeMutationRequest("issue", 218));
 
   assert.deepEqual(result.naming, {
     type: "feat",
@@ -579,7 +579,7 @@ test("Actions evidence reader rejects an Issue response that is already a pull r
     branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
     transport,
   });
-  await assert.rejects(() => reader.read(changeRemoteMutationRequest("issue", 218)), GitHubActionsChangeExecutorError);
+  await assert.rejects(() => reader.read(changeMutationRequest("issue", 218)), GitHubActionsChangeExecutorError);
 });
 
 function githubPullRequestEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -610,7 +610,7 @@ function evidenceReaderForPullRequests(
 test("Actions evidence reader requires validated merge evidence for closed PRs", async () => {
   const merged = await evidenceReaderForPullRequests([
     githubPullRequestEvidence({ merged_at: "2024-02-29T12:34:56.123Z" }),
-  ]).read(changeRemoteMutationRequest("issue", 218));
+  ]).read(changeMutationRequest("issue", 218));
   assert.deepEqual(merged.evidence.pullRequests, {
     status: "available",
     value: [
@@ -628,13 +628,13 @@ test("Actions evidence reader requires validated merge evidence for closed PRs",
   assert.equal(projectChangeFromGitHubEvidence(merged).change?.state, "MERGED");
 
   const aborted = await evidenceReaderForPullRequests([githubPullRequestEvidence()], false).read(
-    changeRemoteMutationRequest("issue", 218),
+    changeMutationRequest("issue", 218),
   );
   assert.equal(projectChangeFromGitHubEvidence(aborted).change?.state, "ABORTED");
 
   const openWithoutMergeEvidence = await evidenceReaderForPullRequests([
     githubPullRequestEvidence({ state: "open", draft: true, merged_at: undefined }),
-  ]).read(changeRemoteMutationRequest("issue", 218));
+  ]).read(changeMutationRequest("issue", 218));
   assert.equal(projectChangeFromGitHubEvidence(openWithoutMergeEvidence).change?.state, "DRAFT");
   assert.deepEqual(openWithoutMergeEvidence.evidence.pullRequests, {
     status: "available",
@@ -663,7 +663,7 @@ test("Actions evidence reader fails closed for omitted or malformed closed PR me
   ];
   for (const candidate of candidates) {
     await assert.rejects(
-      () => evidenceReaderForPullRequests([candidate]).read(changeRemoteMutationRequest("issue", 218)),
+      () => evidenceReaderForPullRequests([candidate]).read(changeMutationRequest("issue", 218)),
       GitHubActionsChangeExecutorError,
     );
   }
@@ -722,7 +722,7 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
     branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
     transport,
   });
-  const request = changeRemoteMutationRequest("issue", 239);
+  const request = changeMutationRequest("issue", 239);
   const initial = await reader.read(request);
   const initialProjection = projectChangeFromGitHubEvidence(initial);
   assert.equal(initialProjection.valid, true);
@@ -838,7 +838,7 @@ test("Actions evidence anchors an issued branch and PR after a root Issue title 
     branchGovernance: { pattern: "^(feat|fix|docs|refactor|test|chore)/[0-9]+-[a-z0-9-]+$" },
     transport: new TitleEditedIssuedTransport(),
   });
-  const input = await reader.read(changeRemoteMutationRequest("issue", 239));
+  const input = await reader.read(changeMutationRequest("issue", 239));
   const projection = projectChangeFromGitHubEvidence(input);
 
   assert.equal(projection.valid, true);
@@ -857,7 +857,7 @@ test("issued evidence survives a title edit that no longer matches pre-issuance 
     branchGovernance: { pattern: "^(feat|fix|docs|refactor|test|chore)/[0-9]+-[a-z0-9-]+$" },
     transport: new TitleEditedIssuedTransport("renamed descriptive title"),
   });
-  const projection = projectChangeFromGitHubEvidence(await reader.read(changeRemoteMutationRequest("issue", 239)));
+  const projection = projectChangeFromGitHubEvidence(await reader.read(changeMutationRequest("issue", 239)));
   assert.equal(projection.valid, true);
   assert.equal(projection.canonicalBranch, "feat/239-before-title-edit");
 });
@@ -1182,7 +1182,7 @@ test("Actions selects the verifier exclusively from signed kid and rejects inact
   const validCalls: string[] = [];
   const validExecutor = await createGitHubActionsChangeExecutor({
     cwd: process.cwd(),
-    request: changeRemoteMutationRequest("issue", 218, undefined, undefined, secondRecord),
+    request: changeMutationRequest("issue", 218, undefined, undefined, secondRecord),
     environment: trustedEnvironment({ INARI_RUNTIME_AUTHORITY_ID: first.id }),
     fetch: runtimeTrustFetch([revokedFirst, second], validCalls),
   });
@@ -1219,7 +1219,7 @@ test("Actions selects the verifier exclusively from signed kid and rejects inact
     await assert.rejects(
       createGitHubActionsChangeExecutor({
         cwd: process.cwd(),
-        request: changeRemoteMutationRequest("issue", 218, undefined, undefined, testCase.record),
+        request: changeMutationRequest("issue", 218, undefined, undefined, testCase.record),
         environment: trustedEnvironment({ INARI_RUNTIME_AUTHORITY_ID: first.id }),
         fetch: runtimeTrustFetch(testCase.authorities, calls),
       }),
@@ -1341,7 +1341,7 @@ test("runtime setup exposes the bounded stage at each setup boundary", async () 
     await assert.rejects(
       createGitHubActionsChangeExecutor({
         cwd: testCase.cwd ?? process.cwd(),
-        request: changeRemoteMutationRequest("issue", 218),
+        request: changeMutationRequest("issue", 218),
         environment: testCase.environment,
         fetch: repositoryOnlyFetch(false),
       }),
@@ -1414,7 +1414,7 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
     await assert.rejects(
       createGitHubActionsChangeExecutor({
         cwd: process.cwd(),
-        request: changeRemoteMutationRequest("issue", 218),
+        request: changeMutationRequest("issue", 218),
         environment: trustedEnvironment(),
         fetch: testCase.fetch,
       }),
@@ -1572,7 +1572,7 @@ test("Trusted executor construction rejects a workflow_ref naming a different wo
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment({
         GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/other.yml@refs/heads/main",
       }),
@@ -1585,7 +1585,7 @@ test("Trusted executor construction rejects a checkout that differs from the att
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment({ GITHUB_WORKFLOW_SHA: "a".repeat(40) }),
       fetch: repositoryOnlyFetch(false),
     }),
@@ -1600,7 +1600,7 @@ test("Trusted executor construction rejects a workflow_ref off the protected mai
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment({
         GITHUB_WORKFLOW_REF: "acme/inari/.github/workflows/inari-change-executor.yml@refs/heads/feature-x",
       }),
@@ -1613,7 +1613,7 @@ test("Trusted executor construction rejects a workflow_ref from a different repo
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment({
         GITHUB_WORKFLOW_REF: "other-org/other-repo/.github/workflows/inari-change-executor.yml@refs/heads/main",
       }),
@@ -1626,7 +1626,7 @@ test("Trusted executor construction rejects a caller ref that is not the protect
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment({ GITHUB_REF: "refs/heads/feature-x" }),
       fetch: repositoryOnlyFetch(false),
     }),
@@ -1637,7 +1637,7 @@ test("Trusted executor construction rejects a pull-request-triggered ref", async
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment({ GITHUB_REF: "refs/pull/1/merge" }),
       fetch: repositoryOnlyFetch(false),
     }),
@@ -1648,7 +1648,7 @@ test("Trusted executor construction rejects a forked target repository", async (
   await assert.rejects(
     createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("issue", 218),
+      request: changeMutationRequest("issue", 218),
       environment: trustedEnvironment(),
       fetch: repositoryOnlyFetch(true),
     }),
@@ -1658,7 +1658,7 @@ test("Trusted executor construction rejects a forked target repository", async (
 test("Trusted executor construction succeeds when the workflow ref, target ref, and repository identity are all proven", async () => {
   const executor = await createGitHubActionsChangeExecutor({
     cwd: process.cwd(),
-    request: changeRemoteMutationRequest("ready", 218),
+    request: changeMutationRequest("ready", 218),
     environment: trustedEnvironment(),
     fetch: repositoryOnlyFetch(false),
   });
@@ -1669,7 +1669,7 @@ test("workflow_dispatch and workflow_call both require a bounded authenticated a
   for (const event of ["workflow_dispatch", "workflow_call"] as const) {
     const executor = await createGitHubActionsChangeExecutor({
       cwd: process.cwd(),
-      request: changeRemoteMutationRequest("ready", 218),
+      request: changeMutationRequest("ready", 218),
       environment: trustedEnvironment({ GITHUB_EVENT_NAME: event }),
       fetch: repositoryOnlyFetch(false),
     });
@@ -1678,7 +1678,7 @@ test("workflow_dispatch and workflow_call both require a bounded authenticated a
     await assert.rejects(
       createGitHubActionsChangeExecutor({
         cwd: process.cwd(),
-        request: changeRemoteMutationRequest("ready", 218),
+        request: changeMutationRequest("ready", 218),
         environment: trustedEnvironment({ GITHUB_EVENT_NAME: event, GITHUB_ACTOR: undefined }),
         fetch: repositoryOnlyFetch(false),
       }),
@@ -1696,7 +1696,7 @@ test("read-only Change executor construction does not require Issuer App secrets
   delete environment.INARI_ISSUER_APP_PRIVATE_KEY;
   const executor = await createGitHubActionsChangeExecutor({
     cwd: process.cwd(),
-    request: changeRemoteReadRequest(218),
+    request: changeReadRequest(218),
     environment,
     fetch: repositoryOnlyFetch(false),
   });

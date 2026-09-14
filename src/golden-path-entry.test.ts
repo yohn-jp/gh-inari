@@ -13,10 +13,10 @@ import {
   type GoldenPathEntryProjectionInput,
 } from "./golden-path-entry.js";
 import {
-  CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
-  type ChangeRemoteExecutor,
-  type ChangeRemoteMutationRequest,
-} from "./change-executor.js";
+  CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+  type ChangeExecutionPort,
+  type ChangeMutationRequest,
+} from "./change-execution-port.js";
 import { runCli } from "./cli.js";
 import { createRuntimeAuthorityRecord } from "./agent-authority/runtime-authority-operations.js";
 import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
@@ -253,14 +253,14 @@ test("blocked repository preflight never becomes a Change issuance action", () =
 });
 
 test("the executor composition delegates only to the existing change issue request", async () => {
-  const calls: ChangeRemoteMutationRequest[] = [];
-  const executor: ChangeRemoteExecutor = {
+  const calls: ChangeMutationRequest[] = [];
+  const executor: ChangeExecutionPort = {
     async execute(request) {
       calls.push(request);
       return {
         projection: existingProjection(),
         evidence: {
-          version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+          version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
           operation: "issue",
           outcome: "returned-existing",
           effects: [],
@@ -277,7 +277,7 @@ test("the executor composition delegates only to the existing change issue reque
   assert.equal(result.status.executionOutcome, "returned-existing");
   assert.deepEqual(calls, [
     {
-      version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+      version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation: "issue",
       issue: identity.rootIssue,
     },
@@ -285,9 +285,9 @@ test("the executor composition delegates only to the existing change issue reque
 });
 
 test("the executor composition can read preflight evidence before a new issuance", async () => {
-  const calls: ChangeRemoteMutationRequest[] = [];
+  const calls: ChangeMutationRequest[] = [];
   const reads: unknown[] = [];
-  const executor: ChangeRemoteExecutor = {
+  const executor: ChangeExecutionPort = {
     async read(request) {
       reads.push(request);
       return projectChangeFromGitHubEvidence(projectionInput());
@@ -297,7 +297,7 @@ test("the executor composition can read preflight evidence before a new issuance
       return {
         projection: existingProjection(),
         evidence: {
-          version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+          version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
           operation: "issue",
           outcome: "verified",
           effects: [],
@@ -315,13 +315,13 @@ test("the executor composition can read preflight evidence before a new issuance
   assert.equal(result.valid, true);
   assert.equal(reads.length, 1);
   assert.deepEqual(reads[0], {
-    version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
     operation: "show",
     issue: identity.rootIssue,
   });
   assert.deepEqual(calls, [
     {
-      version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+      version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation: "issue",
       issue: identity.rootIssue,
     },
@@ -329,8 +329,8 @@ test("the executor composition can read preflight evidence before a new issuance
 });
 
 test("a healthy existing Change is read-only and does not invoke issuance", async () => {
-  const calls: ChangeRemoteMutationRequest[] = [];
-  const executor: ChangeRemoteExecutor = {
+  const calls: ChangeMutationRequest[] = [];
+  const executor: ChangeExecutionPort = {
     async read() {
       return existingProjection();
     },
@@ -398,7 +398,7 @@ test("the canonical change issue CLI exposes the shared entry projection", async
           return {
             projection: existingProjection(),
             evidence: {
-              version: CHANGE_REMOTE_EXECUTOR_CONTRACT_VERSION,
+              version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
               operation: "issue",
               outcome: "returned-existing",
               effects: [],

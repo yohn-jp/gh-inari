@@ -8,7 +8,7 @@ import type { ArtifactContractProvenance } from "./contract/ir.js";
 import type { GhCommandResult, GhTransport, GhTransportOptions } from "./github/index.js";
 import { GitHubAdapter } from "./github/index.js";
 import {
-  SemanticIssueExecutor,
+  LocalSemanticIssueExecutor,
   SemanticIssueExecutorError,
   type SemanticIssueExecutionRequest,
 } from "./semantic-issue-executor.js";
@@ -200,7 +200,7 @@ function createPlan(values: Readonly<Record<string, unknown>> = {}) {
 test("local Semantic Issue Executor re-resolves, creates, rereads, and verifies a plan", async () => {
   const transport = new ExecutorTransport();
   const { artifact, plan } = createPlan({ labels: ["semantic"], assignees: ["octocat"] });
-  const executor = new SemanticIssueExecutor({
+  const executor = new LocalSemanticIssueExecutor({
     adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
   });
 
@@ -226,7 +226,7 @@ test("local Semantic Issue Executor re-resolves, creates, rereads, and verifies 
 test("local Semantic Issue Executor fails closed on stale Canon generation before effects", async () => {
   const transport = new ExecutorTransport(["tree-other"]);
   const { plan } = createPlan();
-  const executor = new SemanticIssueExecutor({
+  const executor = new LocalSemanticIssueExecutor({
     adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
   });
   await assert.rejects(
@@ -243,7 +243,7 @@ test("local Semantic Issue Executor fails closed on stale Canon generation befor
 test("unsupported desired Issue semantics fail closed without silently dropping state", async () => {
   const transport = new ExecutorTransport();
   const { plan } = createPlan({ milestone: "wave" });
-  const executor = new SemanticIssueExecutor({
+  const executor = new LocalSemanticIssueExecutor({
     adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
   });
   await assert.rejects(
@@ -258,7 +258,7 @@ test("plan-only admission rejects tampered Issue plans", async () => {
   const transport = new ExecutorTransport();
   const { plan } = createPlan();
   const tampered = { ...plan, desired: { ...plan.desired, title: "tampered" } };
-  const executor = new SemanticIssueExecutor({
+  const executor = new LocalSemanticIssueExecutor({
     adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
   });
   const request: SemanticIssueExecutionRequest = { version: "1", plan: tampered };

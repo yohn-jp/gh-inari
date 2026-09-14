@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createInariMcpServer } from "./mcp/server.js";
 import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
-import { ChangeRemoteExecutorError, type ChangeRemoteExecutionResult } from "./change-executor.js";
+import { ChangeExecutionPortError, type ChangeExecutionResult } from "./change-execution-port.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
 import { projectGoldenPathStatus, type GoldenPathStatusInput } from "./golden-path-status.js";
@@ -203,10 +203,7 @@ const goldenPathScope = {
   subject: { repositoryHost: "github.com", repositoryId: "411000001", rootIssue: 411 },
 } as const;
 
-function goldenPathInput(
-  result: ChangeRemoteExecutionResult,
-  extras: Record<string, unknown> = {},
-): GoldenPathStatusInput {
+function goldenPathInput(result: ChangeExecutionResult, extras: Record<string, unknown> = {}): GoldenPathStatusInput {
   return {
     ...goldenPathScope,
     changeProjection: result.projection,
@@ -562,7 +559,7 @@ test("native MCP implementation handoff preserves bounded Change read diagnostic
         throw new Error("handoff must not mutate");
       },
       async read() {
-        throw new ChangeRemoteExecutorError(
+        throw new ChangeExecutionPortError(
           "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
           "The Change read executor is unavailable.",
           undefined,

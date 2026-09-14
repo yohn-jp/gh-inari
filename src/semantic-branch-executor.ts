@@ -224,7 +224,7 @@ function revalidationFailed(diagnostics: readonly SemanticBranchExecutionDiagnos
   );
 }
 
-export class SemanticBranchExecutor implements SemanticBranchExecutionPort {
+export class LocalSemanticBranchExecutor implements SemanticBranchExecutionPort {
   readonly #adapter: GitHubAdapter;
   readonly #selector: string | undefined;
 
@@ -408,5 +408,7 @@ export class SemanticBranchExecutor implements SemanticBranchExecutionPort {
   }
 }
 
-/** Explicit alias for callers naming the local deployment. */
-export const LocalSemanticBranchExecutor = SemanticBranchExecutor;
+/** @deprecated Use `LocalSemanticBranchExecutor` for the local execution profile. */
+export const SemanticBranchExecutor = LocalSemanticBranchExecutor;
+/** @deprecated Use `LocalSemanticBranchExecutor` for the local execution profile. */
+export type SemanticBranchExecutor = LocalSemanticBranchExecutor;

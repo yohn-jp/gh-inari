@@ -210,7 +210,7 @@ and a valid `syncInput.minimalExample`.
 current artifact, preserving values omitted from the input.
 
 Change commands use the semantic Change contract and return bounded JSON
-projections. Mutation commands request a configured remote executor; workflow
+projections. Mutation commands request a configured Change execution port; workflow
 names, dispatch inputs, Actions jobs, and privileged App credentials are not
 CLI inputs. `change show` is read-only. Existing Issue/PR artifact-level
 commands remain available as explicit migration-compatible direct mutation

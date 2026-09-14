@@ -33,11 +33,11 @@ import {
 } from "../session-authorized-change-executor.js";
 import { executeBranchAdvance } from "../agent-authority/branch-advance.js";
 import type {
-  ChangeRemoteExecutionResult,
-  ChangeRemoteExecutor,
-  ChangeRemoteMutationRequest,
-  ChangeRemoteReadRequest,
-} from "../change-executor.js";
+  ChangeExecutionResult,
+  ChangeExecutionPort,
+  ChangeMutationRequest,
+  ChangeReadRequest,
+} from "../change-execution-port.js";
 
 /** Deployment configuration for one stateless direct-App Session executor. */
 export interface DirectAppSessionExecutorConfig {
@@ -57,9 +57,7 @@ export interface DirectAppSessionExecutorConfig {
   readonly requestTimeoutMs?: number;
 }
 
-function isMutationRequest(
-  request: ChangeRemoteReadRequest | ChangeRemoteMutationRequest,
-): request is ChangeRemoteMutationRequest {
+function isMutationRequest(request: ChangeReadRequest | ChangeMutationRequest): request is ChangeMutationRequest {
   return request.operation !== "show";
 }
 
@@ -67,7 +65,7 @@ function buildReader(
   capability: GitHubAppRepositoryReadCapability,
   config: DirectAppSessionExecutorConfig,
   identity: IssuerRepositoryIdentity,
-  request: ChangeRemoteReadRequest | ChangeRemoteMutationRequest,
+  request: ChangeReadRequest | ChangeMutationRequest,
 ): GitHubActionsEvidenceReader {
   return new GitHubActionsEvidenceReader({
     repository: config.repository,
@@ -88,7 +86,7 @@ async function projectChangeFromCapability(
   capability: GitHubAppRepositoryReadCapability,
   config: DirectAppSessionExecutorConfig,
   identity: IssuerRepositoryIdentity,
-  request: ChangeRemoteReadRequest | ChangeRemoteMutationRequest,
+  request: ChangeReadRequest | ChangeMutationRequest,
 ): Promise<ChangeProjectionResult> {
   const reader = buildReader(capability, config, identity, request);
   return projectChangeFromGitHubEvidence(await reader.read(request));
@@ -98,7 +96,7 @@ async function readChangeProjection(
   broker: GitHubAppInstallationCredentialBroker,
   config: DirectAppSessionExecutorConfig,
   identity: IssuerRepositoryIdentity,
-  request: ChangeRemoteReadRequest | ChangeRemoteMutationRequest,
+  request: ChangeReadRequest | ChangeMutationRequest,
 ): Promise<ChangeProjectionResult> {
   return broker.withRepositoryReadCapability({}, async (capability) => {
     return projectChangeFromCapability(capability, config, identity, request);
@@ -187,9 +185,9 @@ export function createDirectAppSessionExecutor(
         broker: executionBroker,
         ...(config.now === undefined ? {} : { now: config.now }),
       });
-      const executor: ChangeRemoteExecutor = {
+      const executor: ChangeExecutionPort = {
         read: (request) => readChangeProjection(executionBroker, config, target, request),
-        execute: async (request): Promise<ChangeProjectionResult | ChangeRemoteExecutionResult> =>
+        execute: async (request): Promise<ChangeProjectionResult | ChangeExecutionResult> =>
           executionBroker.withRepositoryReadCapability({}, async (capability) => {
             const reader = buildReader(capability, config, target, request);
             const trustedExecutor = new TrustedChangeExecutor({
