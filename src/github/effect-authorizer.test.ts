@@ -3,35 +3,39 @@ import test from "node:test";
 import type { ChangeEffect, ChangeEffectSuccessEvidence } from "../change.js";
 import {
   INITIAL_CHANGE_EFFECT_PERMISSION_REQUIREMENTS,
-  INARI_ISSUER_APP_KIND,
-  INARI_ISSUER_APP_SLUG,
-  INARI_ISSUER_MAXIMUM_PERMISSIONS,
-  INARI_ISSUER_PRINCIPAL,
-  ISSUER_AUTHORITY_CONTRACT_VERSION,
-  InariIssuerAppAuthority,
-  IssuerAuthorityError,
-  createInariIssuerAppIdentity,
+  APP_PRINCIPAL_MAXIMUM_PERMISSIONS,
+  INARI_APP_PRINCIPAL_KIND,
+  INARI_APP_PRINCIPAL_SLUG,
+  INARI_APP_PRINCIPAL,
+  EFFECT_AUTHORIZER_CONTRACT_VERSION,
+  InariEffectAuthorizer,
+  EffectAuthorizerError,
+  createInariAppPrincipalIdentity,
   requiredPermissionsForEffects,
-  validateInariIssuerAppIdentity,
-  validateIssuerInstallationScope,
-  validateIssuerMutationRequest,
+  validateInariAppPrincipalIdentity,
+  validateAppInstallationScope,
+  validateEffectAuthorizerMutationRequest,
   validateTrustedExecutionContext,
-  type IssuerInstallationScope,
-  type IssuerCredentialRequest,
-  type IssuerMutationRequest,
-  type IssuerRepositoryIdentity,
+  type AppInstallationScope,
+  type EffectAuthorizerCredentialRequest,
+  type EffectAuthorizerMutationRequest,
+  type RepositoryIdentity,
   type TrustedExecutionContext,
   type TrustedInstallationCredentialBroker,
+} from "./effect-authorizer.js";
+import {
+  InariIssuerAppAuthority as LegacyIssuerAppAuthority,
+  IssuerAuthorityError as LegacyIssuerAuthorityError,
 } from "./issuer-authority.js";
 
-const repository: IssuerRepositoryIdentity = {
+const repository: RepositoryIdentity = {
   repositoryHost: "github.com",
   repositoryId: "100000217",
   nameWithOwner: "acme/inari",
 };
 
 const execution: TrustedExecutionContext = {
-  version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+  version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
   runtime: "github-actions",
   event: "workflow_dispatch",
   repository,
@@ -61,8 +65,8 @@ const effects = [
   },
 ] as const;
 
-const app = createInariIssuerAppIdentity("123456");
-const scope: IssuerInstallationScope = {
+const app = createInariAppPrincipalIdentity("123456");
+const scope: AppInstallationScope = {
   app,
   installation: {
     appId: app.appId,
@@ -110,9 +114,9 @@ function successEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidence {
   }
 }
 
-function request(overrides: Partial<IssuerMutationRequest> = {}): IssuerMutationRequest {
+function request(overrides: Partial<EffectAuthorizerMutationRequest> = {}): EffectAuthorizerMutationRequest {
   return {
-    version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+    version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
     authority: "issuer",
     execution,
     target: repository,
@@ -124,8 +128,8 @@ function request(overrides: Partial<IssuerMutationRequest> = {}): IssuerMutation
 function brokerFor(
   candidateScope: unknown = scope,
   onEffect: (effect: unknown) => Promise<void> = async () => undefined,
-): { broker: TrustedInstallationCredentialBroker; calls: IssuerCredentialRequest[] } {
-  const calls: IssuerCredentialRequest[] = [];
+): { broker: TrustedInstallationCredentialBroker; calls: EffectAuthorizerCredentialRequest[] } {
+  const calls: EffectAuthorizerCredentialRequest[] = [];
   return {
     calls,
     broker: {
@@ -143,20 +147,28 @@ function brokerFor(
   };
 }
 
-test("issuer App identity is explicit and has no reviewer authority", () => {
+test("App Principal identity is explicit and has no reviewer authority", () => {
   assert.deepEqual(app, {
-    kind: INARI_ISSUER_APP_KIND,
-    slug: INARI_ISSUER_APP_SLUG,
+    kind: INARI_APP_PRINCIPAL_KIND,
+    slug: INARI_APP_PRINCIPAL_SLUG,
     appId: "123456",
-    principal: INARI_ISSUER_PRINCIPAL,
+    principal: INARI_APP_PRINCIPAL,
   });
-  assert.deepEqual(INARI_ISSUER_MAXIMUM_PERMISSIONS, {
+  assert.deepEqual(APP_PRINCIPAL_MAXIMUM_PERMISSIONS, {
     contents: "write",
     issues: "read",
     pull_requests: "write",
   });
-  assert.equal("approve" in new InariIssuerAppAuthority({ appId: app.appId, broker: brokerFor().broker }), false);
-  assert.equal(validateInariIssuerAppIdentity(app).valid, true);
+  const authorizer = new InariEffectAuthorizer({ appId: app.appId, broker: brokerFor().broker });
+  assert.deepEqual(authorizer.appPrincipal, app);
+  assert.strictEqual(authorizer.identity, authorizer.appPrincipal);
+  assert.equal("approve" in authorizer, false);
+  assert.equal(validateInariAppPrincipalIdentity(app).valid, true);
+});
+
+test("legacy issuer-authority exports are aliases of the canonical Effect Authorizer", () => {
+  assert.equal(LegacyIssuerAppAuthority, InariEffectAuthorizer);
+  assert.equal(LegacyIssuerAuthorityError, EffectAuthorizerError);
 });
 
 test("each initial Change effect requests only its minimum permission", () => {
@@ -170,7 +182,7 @@ test("each initial Change effect requests only its minimum permission", () => {
 });
 
 test("trusted mutation requests are normalized without credential fields", () => {
-  const result = validateIssuerMutationRequest(request());
+  const result = validateEffectAuthorizerMutationRequest(request());
   assert.equal(result.valid, true);
   assert.deepEqual(result.value?.permissions, { contents: "write", pull_requests: "write" });
   assert.equal(JSON.stringify(result.value).includes("token"), false);
@@ -178,14 +190,14 @@ test("trusted mutation requests are normalized without credential fields", () =>
 });
 
 test("reviewer or approval authority cannot be substituted for issuer authority", () => {
-  const result = validateIssuerMutationRequest({
+  const result = validateEffectAuthorizerMutationRequest({
     ...request(),
     authority: "reviewer",
   } as unknown);
   assert.equal(result.valid, false);
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "ISSUER_REVIEW_AUTHORITY"));
 
-  const withReviewerField = validateIssuerMutationRequest({
+  const withReviewerField = validateEffectAuthorizerMutationRequest({
     ...request(),
     reviewer: "human:reviewer",
   } as unknown);
@@ -212,7 +224,7 @@ test("pull-request and fork execution fail closed before the broker is called", 
 });
 
 test("execution and target repository identities must match", () => {
-  const targetMismatch = validateIssuerMutationRequest({
+  const targetMismatch = validateEffectAuthorizerMutationRequest({
     ...request(),
     target: { ...repository, repositoryId: "100000218" },
   });
@@ -227,7 +239,7 @@ test("execution and target repository identities must match", () => {
 });
 
 test("installation scope proves App, host, repository, selected scope, expiry, and permissions", () => {
-  const valid = validateIssuerInstallationScope(scope, {
+  const valid = validateAppInstallationScope(scope, {
     app,
     target: repository,
     requiredPermissions: { contents: "write", pull_requests: "write" },
@@ -235,7 +247,7 @@ test("installation scope proves App, host, repository, selected scope, expiry, a
   });
   assert.equal(valid.valid, true);
 
-  const installationMismatch = validateIssuerInstallationScope(
+  const installationMismatch = validateAppInstallationScope(
     {
       ...scope,
       installation: { ...scope.installation, repositoryHost: "ghe.example.com" },
@@ -245,14 +257,14 @@ test("installation scope proves App, host, repository, selected scope, expiry, a
   assert.equal(installationMismatch.valid, false);
   assert.ok(installationMismatch.diagnostics.some((diagnostic) => diagnostic.code === "ISSUER_SCOPE_MISMATCH"));
 
-  const extraPermission = validateIssuerInstallationScope(
+  const extraPermission = validateAppInstallationScope(
     { ...scope, permissions: { ...scope.permissions, issues: "write" } },
     { app, target: repository, requiredPermissions: scope.permissions, now: new Date("2026-09-05T00:00:00.000Z") },
   );
   assert.equal(extraPermission.valid, false);
   assert.ok(extraPermission.diagnostics.some((diagnostic) => diagnostic.code === "ISSUER_PERMISSION_MISMATCH"));
 
-  const expired = validateIssuerInstallationScope(scope, {
+  const expired = validateAppInstallationScope(scope, {
     app,
     target: repository,
     requiredPermissions: scope.permissions,
@@ -262,12 +274,12 @@ test("installation scope proves App, host, repository, selected scope, expiry, a
   assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "ISSUER_CREDENTIAL_EXPIRED"));
 });
 
-test("authority holds the broker boundary and returns only bounded mutation receipts", async () => {
+test("Effect Authorizer holds the broker boundary and returns only bounded mutation receipts", async () => {
   const applied: unknown[] = [];
   const { broker, calls } = brokerFor(scope, async (effect) => {
     applied.push(effect);
   });
-  const authority = new InariIssuerAppAuthority({
+  const authority = new InariEffectAuthorizer({
     appId: app.appId,
     broker,
     now: () => new Date("2026-09-05T00:00:00.000Z"),
@@ -275,7 +287,7 @@ test("authority holds the broker boundary and returns only bounded mutation rece
   const result = await authority.applyEffects(request());
 
   assert.equal(calls.length, 1);
-  assert.deepEqual((calls[0] as unknown as IssuerCredentialRequest)?.permissions, {
+  assert.deepEqual((calls[0] as unknown as EffectAuthorizerCredentialRequest)?.permissions, {
     contents: "write",
     pull_requests: "write",
   });
@@ -313,26 +325,26 @@ test("authority holds the broker boundary and returns only bounded mutation rece
 test("scope mismatch and capability credential fields are rejected without reaching mutation", async () => {
   const mismatched = { ...scope, repository: { ...scope.repository, repositoryId: "100000218" } };
   const { broker } = brokerFor(mismatched);
-  const authority = new InariIssuerAppAuthority({
+  const authority = new InariEffectAuthorizer({
     appId: app.appId,
     broker,
     now: () => new Date("2026-09-05T00:00:00.000Z"),
   });
   await assert.rejects(authority.applyEffects(request()), (error: unknown) => {
-    assert.ok(error instanceof IssuerAuthorityError);
+    assert.ok(error instanceof EffectAuthorizerError);
     assert.equal(error.code, "ISSUER_SCOPE_MISMATCH");
     return true;
   });
 
   const secret = "installation-token-must-not-escape";
   const { broker: credentialLeakBroker } = brokerFor({ ...scope, token: secret });
-  const credentialLeakAuthority = new InariIssuerAppAuthority({
+  const credentialLeakAuthority = new InariEffectAuthorizer({
     appId: app.appId,
     broker: credentialLeakBroker,
     now: () => new Date("2026-09-05T00:00:00.000Z"),
   });
   await assert.rejects(credentialLeakAuthority.applyEffects(request()), (error: unknown) => {
-    assert.ok(error instanceof IssuerAuthorityError);
+    assert.ok(error instanceof EffectAuthorizerError);
     assert.equal(error.code, "ISSUER_UNKNOWN_PROPERTY");
     assert.equal(JSON.stringify(error).includes(secret), false);
     assert.equal(error.message.includes(secret), false);
@@ -344,9 +356,9 @@ test("broker failures are sanitized so credential-bearing errors cannot cross th
   const secret = "private-key-material";
   const broker: TrustedInstallationCredentialBroker = {
     async withScopedInstallationCredential() {
-      throw new IssuerAuthorityError([
+      throw new EffectAuthorizerError([
         {
-          version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+          version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
           code: "ISSUER_CREDENTIAL_BOUNDARY",
           path: "$.credential",
           message: `provider failed with token ${secret}`,
@@ -354,13 +366,13 @@ test("broker failures are sanitized so credential-bearing errors cannot cross th
       ]);
     },
   };
-  const authority = new InariIssuerAppAuthority({
+  const authority = new InariEffectAuthorizer({
     appId: app.appId,
     broker,
     now: () => new Date("2026-09-05T00:00:00.000Z"),
   });
   await assert.rejects(authority.applyEffects(request()), (error: unknown) => {
-    assert.ok(error instanceof IssuerAuthorityError);
+    assert.ok(error instanceof EffectAuthorizerError);
     assert.equal(error.code, "ISSUER_CREDENTIAL_BOUNDARY");
     assert.equal(error.message.includes(secret), false);
     assert.equal(JSON.stringify(error).includes(secret), false);
@@ -371,9 +383,9 @@ test("broker failures are sanitized so credential-bearing errors cannot cross th
 test("unsupported effect and extra credential permissions fail closed", () => {
   assert.throws(
     () => requiredPermissionsForEffects([{ kind: "APPROVE_PULL_REQUEST" }] as unknown),
-    (error: unknown) => error instanceof IssuerAuthorityError && error.code === "ISSUER_INVALID_EFFECT",
+    (error: unknown) => error instanceof EffectAuthorizerError && error.code === "ISSUER_INVALID_EFFECT",
   );
-  const result = validateIssuerInstallationScope(
+  const result = validateAppInstallationScope(
     { ...scope, permissions: { ...scope.permissions, administration: "write" } },
     { app, target: repository, requiredPermissions: scope.permissions, now: new Date("2026-09-05T00:00:00.000Z") },
   );

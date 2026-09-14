@@ -28,7 +28,7 @@ import {
 import { admitDelegatedWrite, PROTECTED_PATH_CLASSIFIER_VERSION, type DelegatedTreeDelta } from "./protected-paths.js";
 import type { AuthenticatedSessionContext } from "./session-authentication.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
-import { validateIssuerRepositoryIdentity, type IssuerRepositoryIdentity } from "../github/issuer-authority.js";
+import { validateRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 
 export const CAPABILITY_ADMISSION_CONTRACT_VERSION = 1 as const;
 
@@ -72,7 +72,7 @@ export interface CapabilityAdmissionRequest {
 export interface AdmittedSessionCapability {
   readonly version: 1;
   readonly operation: CapabilityAdmissionOperation;
-  readonly repository: IssuerRepositoryIdentity;
+  readonly repository: RepositoryIdentity;
   readonly runtimeAuthority: Readonly<{ id: string; kid: string }>;
   readonly session: Readonly<{ id: string; certificateJti: string }>;
   readonly authority: Readonly<{ ref: string; sha: string }>;
@@ -163,7 +163,7 @@ function safeTimestamp(value: unknown): value is number {
 
 function sameRepository(
   left: { readonly repositoryHost: string; readonly repositoryId: string },
-  right: IssuerRepositoryIdentity,
+  right: RepositoryIdentity,
 ): boolean {
   return (
     left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() && left.repositoryId === right.repositoryId
@@ -192,12 +192,12 @@ function validateContext(
   operation: CapabilityAdmissionOperation,
 ): {
   readonly context: AuthenticatedSessionContext;
-  readonly repository: IssuerRepositoryIdentity;
+  readonly repository: RepositoryIdentity;
   readonly claims: readonly CapabilityClaim[];
 } {
   if (!isRecord(context)) deny("session-capability");
 
-  const repositoryResult = validateIssuerRepositoryIdentity(context.repository);
+  const repositoryResult = validateRepositoryIdentity(context.repository);
   if (!repositoryResult.valid || repositoryResult.value === undefined) deny("repository");
 
   if (!isRecord(context.runtimeAuthority)) deny("session-capability");
@@ -342,7 +342,7 @@ interface CanonicalProjection {
   readonly pullRequest?: number;
 }
 
-function canonicalProjection(input: unknown, repository: IssuerRepositoryIdentity, issue: number): CanonicalProjection {
+function canonicalProjection(input: unknown, repository: RepositoryIdentity, issue: number): CanonicalProjection {
   const result = validateChangeProjectionResult(input);
   if (!result.valid || result.projection === undefined) deny("stale-evidence");
   const projection = result.projection;

@@ -13,7 +13,7 @@ import {
   type GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import { MAX_CHANGE_BRANCH_LENGTH } from "../change.js";
-import type { IssuerInstallationScope } from "./issuer-authority.js";
+import type { AppInstallationScope } from "./effect-authorizer.js";
 import { validateBranchName } from "../branch-naming.js";
 import { classifyRepositoryPath } from "../agent-authority/protected-paths.js";
 
@@ -83,7 +83,7 @@ export interface GitDataRefUpdateResult {
 
 /** The only App-internal Git surface used by branch advancement. */
 export interface GitHubBranchAdvanceCapability {
-  readonly scope: IssuerInstallationScope;
+  readonly scope: AppInstallationScope;
   readRef(branch: string): Promise<GitDataRef | undefined>;
   readCommit(sha: string): Promise<{ readonly sha: string; readonly treeSha: string }>;
   readTree(refOrSha: string): Promise<GitDataTree>;
@@ -120,7 +120,7 @@ export interface GitHubBranchAdvanceCapabilityOptions {
   readonly repositoryId: string;
   /** Provider node ID is retained only inside the credential-bound facade. */
   readonly repositoryNodeId: string;
-  readonly scope: IssuerInstallationScope;
+  readonly scope: AppInstallationScope;
   readonly transport: BranchAdvanceCapabilityTransport;
 }
 
@@ -142,7 +142,7 @@ export class GitDataCapabilityError extends Error {
 
 /** Credential-free facade over one broker-owned GitHub transport. */
 export class GitHubBranchAdvanceCapabilityImpl implements GitHubBranchAdvanceCapability {
-  readonly scope: IssuerInstallationScope;
+  readonly scope: AppInstallationScope;
   readonly #repository: GitHubChangeEffectRepository;
   readonly #repositoryNodeId: string;
   readonly #transport: BranchAdvanceCapabilityTransport;

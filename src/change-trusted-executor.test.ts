@@ -9,11 +9,11 @@ import {
 } from "./change.js";
 import {
   INARI_ISSUER_PRINCIPAL,
-  type IssuerMutationRequest,
-  type IssuerMutationResult,
-  type IssuerRepositoryIdentity,
+  type EffectAuthorizerMutationRequest,
+  type EffectAuthorizerMutationResult,
+  type RepositoryIdentity,
   type TrustedExecutionContext,
-} from "./github/issuer-authority.js";
+} from "./github/effect-authorizer.js";
 import { GitHubChangeEffectFailureError } from "./github/change-effect-adapter.js";
 import {
   TrustedChangeExecutor,
@@ -29,7 +29,7 @@ const identity = {
 } as const;
 const branch = "feat/218-execute-change-plans-through-trusted-github-actions";
 const createdCommitSha = "0123456789abcdef0123456789abcdef01234567";
-const target: IssuerRepositoryIdentity = {
+const target: RepositoryIdentity = {
   repositoryHost: "github.com",
   repositoryId: identity.repositoryId,
   nameWithOwner: "acme/inari",
@@ -153,7 +153,7 @@ class FakeIssuer {
     this.reader = reader;
   }
 
-  async applyEffects(inputValue: IssuerMutationRequest): Promise<IssuerMutationResult> {
+  async applyEffects(inputValue: EffectAuthorizerMutationRequest): Promise<EffectAuthorizerMutationResult> {
     const effect = inputValue.effects[0];
     assert.ok(effect);
     this.effects.push(effect);
@@ -204,7 +204,7 @@ function executor(
 ): TrustedChangeExecutor {
   return new TrustedChangeExecutor({
     reader,
-    issuerAuthority: issuer,
+    effectAuthorizer: issuer,
     execution: trustedExecution,
     target,
   });

@@ -150,7 +150,7 @@ For the Actions profile specifically:
 - `GITHUB_TOKEN` is used for bounded provider evidence reads. It is not a
   Delegation Credential, Session Credential, or transport-only credential;
 - App private-key and installation-token handling remains inside the trusted
-  App/issuer credential boundary. No Actions workflow input or result artifact
+  App Principal Credential Broker boundary. No Actions workflow input or result artifact
   carries those credentials to a caller.
 
 This preserves the distinction between the person or Agent Session that
@@ -205,25 +205,31 @@ This map records the safe classification for the current implementation. #548
 applies the explicit compatibility migration for execution ports, transport
 adapters, and local semantic execution profiles described above.
 
-| Current symbol or surface                                                                              | Canonical classification                                                                                                                  |
-| ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/github/app-installation-credential-broker.ts`                                                     | Credential Broker containing App Principal Provider Credentials and issuing bounded provider capabilities.                                |
-| `src/github/issuer-authority.ts` / `InariIssuerAppAuthority`                                           | Effect Authorizer around App Principal provider effects; the compatibility name `Authority` does not make it repository Authority.        |
-| `src/github/transport.ts` / `ProcessGhTransport`                                                       | Local process Transport at the User Principal Provider Credential boundary.                                                               |
-| `src/github/app-repository-evidence-reader.ts`                                                         | Provider Adapter / Evidence Reader for bounded App-backed repository evidence.                                                            |
-| `src/change-execution-port.ts`                                                                         | Transport-neutral Change Port; it defines request/result contracts and normalization, not orchestration.                                  |
-| `src/github/actions-change-execution-adapter.ts`                                                       | Actions Transport Adapter implementing `ChangeExecutionPort`; it dispatches/polls transport and does not own semantic admission.          |
-| `src/agent-authority/direct-app-client.ts`                                                             | Direct-App Transport Adapter implementing `ChangeExecutionPort`; Session/App authority remains outside this adapter.                      |
-| `src/change-trusted-executor.ts` / `TrustedChangeExecutor`                                             | Trusted Change Executor that coordinates admitted operation effects and verifies terminal projection.                                     |
-| `src/github/actions-change-executor.ts` / `GitHubActionsEvidenceReader`                                | Trusted Actions composition plus provider Evidence Reader; the reader's legacy Actions-specific name is not a separate semantic Executor. |
-| `src/semantic-issue-executor.ts`, `src/semantic-branch-executor.ts`, and `src/semantic-pr-executor.ts` | Local semantic execution profiles with explicit `LocalSemantic...Executor` names.                                                         |
-| `src/github/direct-app-execution.ts`                                                                   | Deployment-agnostic composition that wires existing Roles; not a new authority.                                                           |
-| `.github/workflows/inari-change-executor.yml`                                                          | Actions Deployment Profile: Runner Runtime Host plus workflow Transport and trusted provider bindings.                                    |
-| `src/operational-observation.ts`                                                                       | Observation Projector; pure provider-evidence normalization with no GitHub I/O.                                                           |
+| Current symbol or surface                                                                              | Canonical classification                                                                                                         |
+| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `src/github/app-principal.ts`                                                                          | Canonical App Principal identity surface; issuer-named identity constants remain compatibility/provenance names.                 |
+| `src/github/app-installation-credential-broker.ts`                                                     | Credential Broker containing App Principal Provider Credentials and issuing bounded provider capabilities.                       |
+| `src/github/effect-authorizer.ts` / `InariEffectAuthorizer`                                            | Effect Authorizer around App Principal provider effects; it admits only already-planned effects.                                 |
+| `src/github/issuer-authority.ts` / `InariIssuerAppAuthority`                                           | Compatibility module and class alias for the canonical Effect Authorizer; it is not repository Authority.                        |
+| `src/github/transport.ts` / `ProcessGhTransport`                                                       | Local process Transport at the User Principal Provider Credential boundary.                                                      |
+| `src/github/app-repository-evidence-reader.ts`                                                         | Provider Adapter / Evidence Reader for bounded App-backed repository evidence.                                                   |
+| `src/change-execution-port.ts`                                                                         | Transport-neutral Change Port; it defines request/result contracts and normalization, not orchestration.                         |
+| `src/github/actions-change-execution-adapter.ts`                                                       | Actions Transport Adapter implementing `ChangeExecutionPort`; it dispatches/polls transport and does not own semantic admission. |
+| `src/agent-authority/direct-app-client.ts`                                                             | Direct-App Transport Adapter implementing `ChangeExecutionPort`; Session/App authority remains outside this adapter.             |
+| `src/change-trusted-executor.ts` / `TrustedChangeExecutor`                                             | Trusted Change Executor that coordinates admitted operation effects and verifies terminal projection.                            |
+| `src/github/actions-change-executor.ts` / `GitHubActionsEvidenceReader`                                | Provider Evidence Reader with a legacy Actions-specific name; not a separate semantic Executor.                                  |
+| `src/semantic-issue-executor.ts`, `src/semantic-branch-executor.ts`, and `src/semantic-pr-executor.ts` | Local semantic execution profiles with explicit `LocalSemantic...Executor` names.                                                |
+| `src/github/direct-app-execution.ts`                                                                   | Deployment-agnostic composition that wires existing Roles; not a new authority.                                                  |
+| `.github/workflows/inari-change-executor.yml`                                                          | Actions Deployment Profile: Runner Runtime Host plus workflow Transport and trusted provider bindings.                           |
+| `src/operational-observation.ts`                                                                       | Observation Projector; pure provider-evidence normalization with no GitHub I/O.                                                  |
 
-Public and wire contracts remain compatible through the aliases documented
-above. Future renames require an explicit compatibility or migration decision.
-In particular, better prose must not silently turn a User Principal into an App
+Existing wire and provenance names remain compatible where they still carry
+issuer semantics. Public contracts remain compatible through the aliases
+documented above. Future renames require an explicit compatibility or
+migration decision. In particular, better prose must not silently turn a User
+Principal into an App Principal, a Transport Principal into a requester, a
+Provider Credential into a Session Credential, or an Observation Projector into
+a semantic policy engine.
 Principal, a Transport Principal into a requester, a Provider Credential into
 a Session Credential, or an Observation Projector into a semantic policy
 engine.

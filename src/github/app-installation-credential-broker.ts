@@ -4,7 +4,7 @@
  * This module owns App JWT creation, installation-token minting, repository
  * selection proof, scope validation, and credential-bound transports. A
  * caller receives either a read-only repository capability or the existing
- * issuer mutation capability; neither capability exposes a bearer token,
+ * Effect Authorizer mutation capability; neither capability exposes a bearer token,
  * App JWT, private key, or general GitHub client.
  */
 
@@ -32,20 +32,20 @@ import {
   type GitDataGraphqlRequest,
 } from "./git-data-capability.js";
 import {
-  INARI_ISSUER_MAXIMUM_PERMISSIONS,
-  ISSUER_PERMISSION_NAMES,
-  IssuerAuthorityError,
-  createInariIssuerAppIdentity,
-  validateIssuerInstallationScope,
-  validateIssuerRepositoryIdentity,
-  type IssuerCredentialRequest,
-  type IssuerInstallationScope,
-  type IssuerPermissionName,
-  type IssuerPermissionSet,
-  type IssuerRepositoryIdentity,
-  type IssuerScopedMutationCapability,
+  APP_PRINCIPAL_MAXIMUM_PERMISSIONS,
+  APP_PERMISSION_NAMES,
+  EffectAuthorizerError,
+  createInariAppPrincipalIdentity,
+  validateAppInstallationScope,
+  validateRepositoryIdentity,
+  type EffectAuthorizerCredentialRequest,
+  type AppInstallationScope,
+  type AppPermissionName,
+  type AppPermissionSet,
+  type RepositoryIdentity,
+  type AppScopedMutationCapability,
   type TrustedInstallationCredentialBroker,
-} from "./issuer-authority.js";
+} from "./effect-authorizer.js";
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
 
 const DEFAULT_API_URL = "https://api.github.com";
@@ -133,7 +133,7 @@ export interface GitHubAppRepositoryReadTransport {
 }
 
 export interface GitHubAppRepositoryReadCapability {
-  readonly scope: IssuerInstallationScope;
+  readonly scope: AppInstallationScope;
   readonly transport: GitHubAppRepositoryReadTransport;
 }
 
@@ -149,7 +149,7 @@ export type GitHubAppRepositoryResolutionFailureReason =
 
 export interface GitHubAppResolvedRepository {
   readonly repository: GitHubChangeEffectRepository;
-  readonly target: IssuerRepositoryIdentity;
+  readonly target: RepositoryIdentity;
   readonly repositoryNodeId?: string;
   readonly fork: boolean;
 }
@@ -399,32 +399,32 @@ export interface GitHubAppInstallationCredentialBrokerOptions {
 
 interface InstallationCredential {
   readonly token: string;
-  readonly scope: IssuerInstallationScope;
+  readonly scope: AppInstallationScope;
   readonly repositoryNodeId?: string;
 }
 
 type CredentialRequest =
   | {
-      readonly app: IssuerInstallationScope["app"];
-      readonly permissions: IssuerPermissionSet;
+      readonly app: AppInstallationScope["app"];
+      readonly permissions: AppPermissionSet;
       readonly kind: "read";
     }
   | {
-      readonly app: IssuerInstallationScope["app"];
-      readonly target: IssuerRepositoryIdentity;
-      readonly permissions: IssuerPermissionSet;
+      readonly app: AppInstallationScope["app"];
+      readonly target: RepositoryIdentity;
+      readonly permissions: AppPermissionSet;
       readonly kind: "mutation";
     }
   | {
-      readonly app: IssuerInstallationScope["app"];
-      readonly target: IssuerRepositoryIdentity;
-      readonly permissions: IssuerPermissionSet;
+      readonly app: AppInstallationScope["app"];
+      readonly target: RepositoryIdentity;
+      readonly permissions: AppPermissionSet;
       readonly kind: "git-data";
     };
 
 /** Shared implementation for pre-admission reads and post-admission mutations. */
 export class GitHubAppInstallationCredentialBroker implements TrustedInstallationCredentialBroker {
-  readonly #app: IssuerInstallationScope["app"];
+  readonly #app: AppInstallationScope["app"];
   readonly #installationId: string;
   readonly #privateKeyPem: string;
   readonly #repository: GitHubChangeEffectRepository;
@@ -444,7 +444,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     try {
       if (Object.prototype.hasOwnProperty.call(options, "target")) throw new Error("repository target is not accepted");
       this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
-      this.#app = createInariIssuerAppIdentity(options.appId);
+      this.#app = createInariAppPrincipalIdentity(options.appId);
       this.#installationId = boundedDecimalId(options.installationId);
       this.#privateKeyPem = boundedSecret(options.privateKeyPem, MAX_PRIVATE_KEY_LENGTH);
       this.#repository = Object.freeze({
@@ -513,8 +513,8 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
   }
 
   async withScopedInstallationCredential(
-    request: IssuerCredentialRequest,
-    operation: (capability: IssuerScopedMutationCapability) => Promise<void>,
+    request: EffectAuthorizerCredentialRequest,
+    operation: (capability: AppScopedMutationCapability) => Promise<void>,
   ): Promise<void> {
     const credential = await this.issueInstallationToken({
       app: request.app,
@@ -561,7 +561,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       transport,
       ...(provenance === undefined ? {} : { provenance }),
     });
-    const capability: IssuerScopedMutationCapability = {
+    const capability: AppScopedMutationCapability = {
       scope: credential.scope,
       apply: async (effect) => {
         const result = await adapter.execute(effect);
@@ -581,13 +581,13 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
    * token internally. The callback receives no generic transport or credential.
    */
   async withBranchAdvanceCapability<T>(
-    request: { readonly target: IssuerRepositoryIdentity },
+    request: { readonly target: RepositoryIdentity },
     operation: (capability: import("./git-data-capability.js").GitHubBranchAdvanceCapability) => Promise<T>,
   ): Promise<T> {
     if (!isRecord(request) || !isRecord(request.target) || typeof operation !== "function") {
       throw this.safeFailure("installation-scope", { reason: "scope" });
     }
-    const targetResult = validateIssuerRepositoryIdentity(request.target);
+    const targetResult = validateRepositoryIdentity(request.target);
     if (!targetResult.valid || targetResult.value === undefined) {
       throw this.safeFailure("installation-scope", { reason: "scope" });
     }
@@ -707,7 +707,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     const scopeRepository = request.kind === "read" ? selectedRepository : request.target;
     if (scopeRepository === undefined) throw this.safeFailure("installation-scope", { reason: "scope" });
 
-    const candidateScope: IssuerInstallationScope = {
+    const candidateScope: AppInstallationScope = {
       app: request.app,
       installation: {
         appId: request.app.appId,
@@ -716,10 +716,10 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       },
       repository: scopeRepository,
       repositorySelection: "selected",
-      permissions: permissions as IssuerPermissionSet,
+      permissions: permissions as AppPermissionSet,
       expiresAt,
     };
-    const scopeResult = validateIssuerInstallationScope(candidateScope, {
+    const scopeResult = validateAppInstallationScope(candidateScope, {
       app: request.app,
       ...(request.kind === "mutation" ? { target: scopeRepository } : {}),
       requiredPermissions: request.permissions,
@@ -791,7 +791,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
   private safeOperationError(error: unknown, token: string, stage: GitHubAppCredentialFailureStage): Error {
     const classification = readChangeEffectFailureClassification(error);
     if (classification !== undefined) return this.safeFailure(stage, classification);
-    if (error instanceof IssuerAuthorityError) {
+    if (error instanceof EffectAuthorizerError) {
       const serialized = errorText(error);
       if (!serialized.includes(token) && !serialized.includes(this.#privateKeyPem)) return error;
     }
@@ -924,7 +924,7 @@ function repositoryName(repository: GitHubChangeEffectRepository): string {
   return `${repository.owner}/${repository.name}`;
 }
 
-function sameRepository(left: IssuerRepositoryIdentity, right: IssuerRepositoryIdentity): boolean {
+function sameRepository(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
   return (
     left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() &&
     left.repositoryId === right.repositoryId &&
@@ -951,7 +951,7 @@ function isRepositoryRootPath(path: string, repository: GitHubChangeEffectReposi
 function selectedRepositoryIdentity(
   value: unknown,
   repository: GitHubChangeEffectRepository,
-): IssuerRepositoryIdentity | undefined {
+): RepositoryIdentity | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const candidate = value as Record<string, unknown>;
   const repositoryId =
@@ -962,7 +962,7 @@ function selectedRepositoryIdentity(
         : undefined;
   if (repositoryId === undefined || !DECIMAL_ID_PATTERN.test(repositoryId)) return undefined;
   if (typeof candidate.full_name !== "string") return undefined;
-  const target = validateIssuerRepositoryIdentity({
+  const target = validateRepositoryIdentity({
     repositoryHost: repository.hostname,
     repositoryId,
     nameWithOwner: candidate.full_name,
@@ -987,7 +987,7 @@ function repositoryNodeIdFrom(value: unknown): string | undefined {
 
 function isAuthoritativeRepositoryRead(
   response: GitHubChangeEffectResponse,
-  target: IssuerRepositoryIdentity,
+  target: RepositoryIdentity,
   repository: GitHubChangeEffectRepository,
 ): boolean {
   const selected = selectedRepositoryIdentity(response.status === 200 ? response.body : undefined, repository);
@@ -1012,12 +1012,12 @@ function isReadPermissionSet(value: Readonly<Partial<Record<string, string>>>): 
   );
 }
 
-function isMutationPermissionSet(value: IssuerPermissionSet): boolean {
+function isMutationPermissionSet(value: AppPermissionSet): boolean {
   if (typeof value !== "object" || value === null) return false;
   return Object.entries(value).every(([name, access]) => {
-    if (!(ISSUER_PERMISSION_NAMES as readonly string[]).includes(name)) return false;
+    if (!(APP_PERMISSION_NAMES as readonly string[]).includes(name)) return false;
     if (name === "metadata") return access === "read";
-    const maximum = INARI_ISSUER_MAXIMUM_PERMISSIONS[name as IssuerPermissionName];
+    const maximum = APP_PRINCIPAL_MAXIMUM_PERMISSIONS[name as AppPermissionName];
     return name !== "issues" && access === "write" && maximum === "write";
   });
 }
@@ -1040,7 +1040,7 @@ function isRepositoryReadPath(
   );
 }
 
-function sameConfiguredRepository(target: IssuerRepositoryIdentity, repository: GitHubChangeEffectRepository): boolean {
+function sameConfiguredRepository(target: RepositoryIdentity, repository: GitHubChangeEffectRepository): boolean {
   return (
     target.repositoryHost.toLowerCase() === repository.hostname.toLowerCase() &&
     target.nameWithOwner.toLowerCase() === repositoryName(repository).toLowerCase()

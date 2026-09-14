@@ -19,7 +19,7 @@ import {
   INARI_ISSUER_PRINCIPAL,
   validateTrustedExecutionContext,
   type TrustedExecutionContext,
-} from "./github/issuer-authority.js";
+} from "./github/effect-authorizer.js";
 import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import {
   createCapabilityAuthorizedSessionExecutor,

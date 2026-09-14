@@ -33,7 +33,7 @@ import {
   type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
 import { MAX_ISSUE_NUMBER } from "./agent-authority/capability.js";
-import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/issuer-authority.js";
+import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/effect-authorizer.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   changeMutationRequest,

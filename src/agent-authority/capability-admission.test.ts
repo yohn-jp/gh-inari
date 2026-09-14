@@ -28,7 +28,7 @@ import type { GitHubAppRepositoryReadCapability } from "../github/app-installati
 import type { GitHubChangeEffectRepository } from "../github/change-effect-adapter.js";
 import { projectChangeFromGitHubEvidence, type ChangeGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import type { SemanticSessionRequest } from "./session-request.js";
-import type { IssuerRepositoryIdentity } from "../github/issuer-authority.js";
+import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
 import type { ChangeState } from "../change.js";
 
@@ -63,7 +63,7 @@ type ExpectedCapabilityAdmissionRequest = {
 type ExpectedAdmittedSessionCapability = {
   readonly version: 1;
   readonly operation: ExpectedCapabilityAdmissionOperation;
-  readonly repository: IssuerRepositoryIdentity;
+  readonly repository: RepositoryIdentity;
   readonly runtimeAuthority: Readonly<{ id: string; kid: string }>;
   readonly session: Readonly<{ id: string; certificateJti: string }>;
   readonly authority: Readonly<{ ref: string; sha: string }>;

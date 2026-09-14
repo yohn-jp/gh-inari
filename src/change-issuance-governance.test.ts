@@ -10,10 +10,10 @@ import { issueContractFixture } from "./contract/fixtures.js";
 import { TrustedChangeExecutor } from "./change-trusted-executor.js";
 import {
   INARI_ISSUER_PRINCIPAL,
-  type IssuerMutationRequest,
-  type IssuerMutationResult,
+  type EffectAuthorizerMutationRequest,
+  type EffectAuthorizerMutationResult,
   type TrustedExecutionContext,
-} from "./github/issuer-authority.js";
+} from "./github/effect-authorizer.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -101,9 +101,9 @@ test("trusted issuance applies zero effects when root Issue governance fails", a
     requiresGovernedIssueValidation: true,
     read: async () => projection("### malformed\n"),
   };
-  const effects: IssuerMutationRequest[] = [];
+  const effects: EffectAuthorizerMutationRequest[] = [];
   const issuer = {
-    applyEffects: async (request: IssuerMutationRequest): Promise<IssuerMutationResult> => {
+    applyEffects: async (request: EffectAuthorizerMutationRequest): Promise<EffectAuthorizerMutationResult> => {
       effects.push(request);
       return {
         version: 1,
@@ -118,7 +118,7 @@ test("trusted issuance applies zero effects when root Issue governance fails", a
   };
   const executor = new TrustedChangeExecutor({
     reader,
-    issuerAuthority: issuer,
+    effectAuthorizer: issuer,
     execution,
     target: execution.repository,
   });

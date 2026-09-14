@@ -9,15 +9,15 @@ import {
   type GitHubAppInstallationCredentialBrokerOptions,
 } from "./app-installation-credential-broker.js";
 import {
-  ISSUER_AUTHORITY_CONTRACT_VERSION,
-  createInariIssuerAppIdentity,
-  type IssuerCredentialRequest,
-  type IssuerPermissionSet,
-  type IssuerRepositoryIdentity,
-} from "./issuer-authority.js";
+  EFFECT_AUTHORIZER_CONTRACT_VERSION,
+  createInariAppPrincipalIdentity,
+  type EffectAuthorizerCredentialRequest,
+  type AppPermissionSet,
+  type RepositoryIdentity,
+} from "./effect-authorizer.js";
 
 const repository = { hostname: "github.com", owner: "acme", name: "inari" } as const;
-const target: IssuerRepositoryIdentity = {
+const target: RepositoryIdentity = {
   repositoryHost: "github.com",
   repositoryId: "218000001",
   nameWithOwner: "acme/inari",
@@ -26,7 +26,7 @@ const now = new Date("2026-09-05T00:00:00.000Z");
 const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
   .toString();
-const app = createInariIssuerAppIdentity("218");
+const app = createInariAppPrincipalIdentity("218");
 
 function tokenResponse(
   overrides: Record<string, unknown> = {},
@@ -59,13 +59,13 @@ function brokerOptions(
   };
 }
 
-function mutationRequest(permissions: IssuerPermissionSet = { contents: "write" }): IssuerCredentialRequest {
+function mutationRequest(permissions: AppPermissionSet = { contents: "write" }): EffectAuthorizerCredentialRequest {
   return {
-    version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+    version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
     authority: "issuer",
     app,
     execution: {
-      version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+      version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
       runtime: "github-actions",
       event: "workflow_dispatch",
       repository: target,
@@ -127,7 +127,7 @@ test("pre-admission read capability requests the minimum read ceiling and expose
 
   const issued = JSON.parse(String(calls[0]?.body)) as { permissions: unknown };
   assert.deepEqual(issued.permissions, GITHUB_APP_REPOSITORY_READ_PERMISSIONS);
-  assert.deepEqual((scope as { repository: IssuerRepositoryIdentity }).repository, {
+  assert.deepEqual((scope as { repository: RepositoryIdentity }).repository, {
     repositoryHost: "github.com",
     repositoryId: "218000009",
     nameWithOwner: "acme/inari",

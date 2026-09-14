@@ -6,10 +6,10 @@ import {
 } from "./app-repository-evidence-reader.js";
 import type { GitHubAppRepositoryReadCapability } from "./app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
-import type { IssuerRepositoryIdentity } from "./issuer-authority.js";
+import type { RepositoryIdentity } from "./effect-authorizer.js";
 
 const REPOSITORY: GitHubChangeEffectRepository = { hostname: "github.com", owner: "acme", name: "inari" };
-const IDENTITY: IssuerRepositoryIdentity = {
+const IDENTITY: RepositoryIdentity = {
   repositoryHost: "github.com",
   repositoryId: "1",
   nameWithOwner: "acme/inari",

@@ -15,7 +15,7 @@ import {
 import { renderPullRequestArtifact } from "./artifact.js";
 import { pullRequestContractFixture } from "./contract/fixtures.js";
 import type { CanonicalContract } from "./contract/ir.js";
-import { INARI_ISSUER_PRINCIPAL } from "./github/issuer-authority.js";
+import { INARI_ISSUER_PRINCIPAL } from "./github/effect-authorizer.js";
 
 const identity = {
   repositoryHost: "github.com",

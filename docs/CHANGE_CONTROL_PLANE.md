@@ -241,8 +241,8 @@ A compliant issuance transition performs these semantic steps:
 - Determine the target base branch.
 - Compute the canonical Change branch name.
 - Inspect existing GitHub state for prior issuance or inconsistency.
-- Create the canonical remote branch through issuer authority.
-- Create the canonical Draft PR through issuer authority.
+- Create the canonical remote branch through the Effect Authorizer and App Principal provider boundary.
+- Create the canonical Draft PR through the Effect Authorizer and App Principal provider boundary.
 - Verify that the resulting branch and PR match the planned Change.
 - Return one bounded machine-readable Change result.
 
@@ -424,7 +424,7 @@ Inari Core defines deterministic Change semantics, policy resolution, canonical 
 
 ### 14.3 Request authority
 
-The authenticated human or agent requests a semantic transition without receiving issuer credentials.
+The authenticated human or agent requests a semantic transition without receiving App Principal Provider Credentials.
 
 ### 14.4 Issuance authority
 
@@ -503,7 +503,7 @@ Not every Inari operation belongs in Actions.
 
 Pure deterministic operations remain local-capable, including schema discovery, validation, rendering, explain diagnostics, canonical checks, and canonical reads where privileged credentials are not required.
 
-Authoritative repository transitions use the trusted remote path because they apply effects under issuer authority.
+Authoritative repository transitions use the trusted remote path because they apply already-planned effects through the Effect Authorizer as the App Principal.
 
 ```text
 pure deterministic computation     authoritative repository mutation
@@ -619,9 +619,9 @@ The privileged boundary is the trusted executor plus GitHub App credentials.
 
 App private keys and installation tokens must not be exposed to arbitrary coding-agent shells, PR jobs, fork code, or untrusted repository content.
 
-### 21.2 Do not execute untrusted PR code with issuer credentials
+### 21.2 Do not execute untrusted PR code with App Principal Provider Credentials
 
-A privileged workflow must not check out and execute arbitrary PR-controlled code under issuer credentials merely because a PR event triggered it.
+A privileged workflow must not check out and execute arbitrary PR-controlled code under App Principal Provider Credentials merely because a PR event triggered it.
 
 Unsafe `pull_request_target`-style trust patterns are rejected unless the trust boundary is explicitly proven.
 
@@ -775,7 +775,7 @@ The initial architecture does not include:
 - Making Issue creation issuer-only.
 - Routing every working-branch push through Actions.
 - Exposing GitHub App credentials directly to agents or humans.
-- Making the issuer App approve its own PRs.
+- Making the App Principal approve its own PRs.
 - Replacing GitHub with a proprietary Change database.
 - Creating a standalone always-on HTTP service before it is needed.
 - Requiring a custom Web GUI.
