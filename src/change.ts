@@ -3,7 +3,7 @@
  *
  * This module owns transport-independent Change data, validation, canonical
  * serialization, pure canonical branch identity derivation, the lifecycle
- * transition matrix, and pure effect planning. It does not read or mutate
+ * transition contract, and pure effect planning. It does not read or mutate
  * GitHub state or execute effects.
  */
 
@@ -121,28 +121,6 @@ export type ChangeTransition = (typeof CHANGE_TRANSITION_OPERATIONS)[number];
 export type ChangeTransitionOperation = ChangeTransition;
 export const CHANGE_TRANSITIONS = CHANGE_TRANSITION_OPERATIONS;
 export const CHANGE_IMPLEMENTED_TRANSITIONS = Object.freeze(["issue", "ready", "abort"] as const);
-
-/**
- * Migration-only compatibility snapshot of the lifecycle edges.
- *
- * Executable legality is owned by the internal XState lifecycle machine;
- * parity tests keep this public compatibility value equivalent until the
- * migration is complete.
- */
-export const CHANGE_TRANSITION_RULES = Object.freeze([
-  { transition: "issue", from: "DEFINED", to: "DRAFT" },
-  { transition: "ready", from: "DRAFT", to: "REVIEW" },
-  // A healthy REVIEW projection is a safe retry result, not a second
-  // lifecycle mutation.  The plan for this edge is intentionally empty.
-  { transition: "ready", from: "REVIEW", to: "REVIEW" },
-  { transition: "abort", from: "DRAFT", to: "ABORTED" },
-  { transition: "abort", from: "REVIEW", to: "ABORTED" },
-  // An already terminated Change is a deterministic no-op on retry. A
-  // RECOVERY_REQUIRED abort may retry only the remaining cleanup effect.
-  { transition: "abort", from: "ABORTED", to: "ABORTED" },
-  { transition: "abort", from: "RECOVERY_REQUIRED", to: "ABORTED" },
-] as const);
-export const CHANGE_TRANSITION_MATRIX = CHANGE_TRANSITION_RULES;
 
 /**
  * Inputs resolved by Core's projection policy before a transition is
@@ -2309,6 +2287,23 @@ export function classifyChangeAbortRecovery(projection: ChangeProjectionResult):
 }
 
 /**
+ * Return whether an abort cleanup has already removed the complete Change
+ * projection. This is a semantic no-op retry classification, not a lifecycle
+ * edge: no synthetic Change transition is introduced for an absent artifact.
+ */
+export function isChangeAbortCleanupComplete(projection: ChangeProjectionResult): boolean {
+  return (
+    projection.valid &&
+    projection.status === "absent" &&
+    projection.diagnostics.length === 0 &&
+    projection.change?.state === "DEFINED" &&
+    projection.change.projection === undefined &&
+    projection.candidates.branches.length === 0 &&
+    projection.candidates.pullRequests.length === 0
+  );
+}
+
+/**
  * Purely project one Change from bounded Issue, branch, and pull-request
  * evidence. Existing Change state is never used as authority, and no GitHub
  * client, persistence, mutation, or candidate heuristic is involved.
@@ -2836,12 +2831,6 @@ interface ResolvedTransitionTarget {
   readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
 }
 
-type ChangeTransitionRule = {
-  readonly transition: ChangeTransition;
-  readonly from: ChangeState;
-  readonly to: ChangeState;
-};
-
 function normalizeChangeTransition(input: unknown): ChangeTransition | undefined {
   if (typeof input !== "string") return undefined;
   const normalized = input.toLowerCase();
@@ -3023,10 +3012,6 @@ interface ChangeTransitionTargetValidation {
   readonly diagnostics: readonly ChangeDiagnostic[];
 }
 
-function transitionRule(transition: ChangeTransition, state: ChangeState): ChangeTransitionRule | undefined {
-  return resolveChangeLifecycleTransition(transition, state);
-}
-
 function reportTransitionMismatch(diagnostics: ChangeDiagnostic[], path: string, message: string): void {
   addDiagnostic(diagnostics, "CHANGE_TRANSITION_NOT_ALLOWED", path, message);
 }
@@ -3055,7 +3040,7 @@ function validateTransitionSemantics(
     return { diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
   }
 
-  const rule = transitionRule(transition, change.state);
+  const rule = resolveChangeLifecycleTransition(transition, change.state);
   if (rule === undefined) {
     reportTransitionMismatch(
       diagnostics,
@@ -3313,7 +3298,7 @@ function initialChangePullRequestCompatibilityPayload(rootIssue: number): {
 }
 
 function buildChangeTransitionPlan(request: ChangeTransitionRequest): ChangeTransitionPlan {
-  const rule = transitionRule(request.transition, request.change.state);
+  const rule = resolveChangeLifecycleTransition(request.transition, request.change.state);
   if (rule === undefined) {
     throw new Error("Cannot build a plan for an invalid Change transition request.");
   }

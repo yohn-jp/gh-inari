@@ -68,7 +68,7 @@ export interface AbortEffectFailure {
 
 export interface AbortAdmissionSuccess {
   readonly ok: true;
-  readonly phase: "normal" | "recovery";
+  readonly phase: "normal" | "recovery" | "clean";
 }
 
 export interface AbortAdmissionFailure {
@@ -169,7 +169,7 @@ export type AbortExecutionOutcome =
 
 interface AbortMachineContext {
   readonly services: AbortExecutionServices;
-  readonly phase?: "normal" | "recovery";
+  readonly phase?: "normal" | "recovery" | "clean";
   readonly readStage?: "initial" | "reread";
   readonly rereadMode?: "verify" | "recover";
   readonly input?: ChangeProjectionInput;
@@ -361,7 +361,18 @@ export const abortExecutionMachine = setup({
         return admission.ok ? { phase: admission.phase, failure: undefined } : { failure: admission.failure };
       }),
       always: [
-        { target: "planning", guard: ({ context }) => context.phase !== undefined && context.failure === undefined },
+        {
+          target: "completed",
+          guard: ({ context }) => context.phase === "clean" && context.projection !== undefined,
+          actions: assign(({ context }) => ({
+            result: context.services.results.returnedExisting(context.projection!),
+          })),
+        },
+        {
+          target: "planning",
+          guard: ({ context }) =>
+            context.phase !== undefined && context.phase !== "clean" && context.failure === undefined,
+        },
         { target: "preconditionFailed" },
       ],
     },
