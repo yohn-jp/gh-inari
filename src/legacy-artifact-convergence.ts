@@ -8,7 +8,7 @@
  * boundary; they never override a Semantic Artifact.
  */
 
-import { validateBranchName } from "../branch-naming-authority.mjs";
+import { validateBranchName } from "./branch-naming.js";
 import type { ArtifactCandidate, ArtifactInputDocument, ArtifactInputMetadata } from "./artifact.js";
 import {
   type ArtifactContract,

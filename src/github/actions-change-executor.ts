@@ -16,7 +16,6 @@ import {
   deriveCanonicalBranchIdentity,
   projectChangeFromGitHubEvidence,
   validateGovernedRootIssueEvidence,
-  type CanonicalBranchNamingInput,
   type ChangeBranchEvidence,
   type ChangeDiagnostic,
   type ChangeEffectFailureClassification,
@@ -24,6 +23,13 @@ import {
   type ChangePullRequestEvidence,
   type ChangeReadyEvidence,
 } from "../change.js";
+import {
+  MAX_BRANCH_TITLE_LENGTH,
+  branchBelongsToRootIssue,
+  deriveBranchNamingFromIssueTitle,
+  recognizeBranchNamingForIssue,
+  type BranchNaming,
+} from "../branch-naming.js";
 import {
   extractTemplateIdentityMarker,
   preparePullRequestArtifact,
@@ -109,14 +115,11 @@ import {
 const MAX_BRANCH_MATCHES = 100;
 const MAX_CANONICAL_PULL_REQUEST_MATCHES = 100;
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
-const MAX_TITLE_LENGTH = 255;
 const MAX_LOGIN_LENGTH = 160;
 const MAX_TIMESTAMP_LENGTH = 64;
 const DEFAULT_API_URL = "https://api.github.com";
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/iu;
-const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 const ISSUER_LOGIN_NAMES = new Set(["inari-issuer[bot]", "inari-issuer"]);
-const CANONICAL_BRANCH_TYPES = new Set(["feat", "fix", "docs", "refactor", "test", "chore"]);
 const GITHUB_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/u;
 
 /** Stable, non-secret boundaries exposed for trusted Actions runtime failures. */
@@ -434,46 +437,14 @@ function issuerPrincipal(login: string): string {
   return ISSUER_LOGIN_NAMES.has(login) ? INARI_ISSUER_PRINCIPAL : login;
 }
 
-function deriveNaming(title: string): CanonicalBranchNamingInput {
-  // Bound the input length before the regex runs (CodeQL polynomial-regex guard); callers
-  // within this module already pass a title bounded to MAX_TITLE_LENGTH.
-  if (title.length > MAX_TITLE_LENGTH) throw new GitHubActionsChangeExecutorError();
-  const match = ISSUE_TITLE_PATTERN.exec(title);
-  if (match === null) throw new GitHubActionsChangeExecutorError();
-  const type = match[1].toLowerCase();
-  const slug = match[2]
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036F]/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
-  if (slug.length === 0) throw new GitHubActionsChangeExecutorError();
-  return { type, slug };
-}
-
-/** Recognize only repository-governed branch names carrying this root Issue. */
-function branchBelongsToRootIssue(
-  branch: string,
-  rootIssue: number,
-  branchGovernance: PullRequestBranchGovernance | undefined,
-): boolean {
-  const match = /^(feat|fix|docs|refactor|test|chore)\/(\d+)-([a-z0-9-]+)$/u.exec(branch);
-  if (match === null || Number(match[2]) !== rootIssue || !CANONICAL_BRANCH_TYPES.has(match[1])) return false;
-  if (branchGovernance === undefined) return true;
+/** Preserve the Actions adapter's historical error boundary while delegating title parsing to Core. */
+export function deriveChangeNamingFromIssueTitle(title: string): BranchNaming {
   try {
-    return new RegExp(branchGovernance.pattern, "u").test(branch);
+    return deriveBranchNamingFromIssueTitle(title);
   } catch {
-    return false;
+    throw new GitHubActionsChangeExecutorError();
   }
 }
-
-function namingFromBranch(branch: string, rootIssue: number): CanonicalBranchNamingInput | undefined {
-  const match = /^(feat|fix|docs|refactor|test|chore)\/([0-9]+)-([a-z0-9-]+)$/u.exec(branch);
-  if (match === null || Number(match[2]) !== rootIssue) return undefined;
-  return { type: match[1] ?? "", slug: match[3] ?? "" };
-}
-
-export const deriveChangeNamingFromIssueTitle = deriveNaming;
 
 export interface GitHubActionsEvidenceReaderOptions {
   readonly repository: GitHubChangeEffectRepository;
@@ -567,13 +538,13 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
       throw new GitHubActionsChangeExecutorError();
     }
     const issueNumber = positiveNumber(issue.number);
-    const title = boundedString(issue.title, MAX_TITLE_LENGTH);
+    const title = boundedString(issue.title, MAX_BRANCH_TITLE_LENGTH);
     const state = issue.state === "open" || issue.state === "closed" ? issue.state : undefined;
     if (issueNumber !== request.issue || state === undefined) throw new GitHubActionsChangeExecutorError();
     const issueBody = boundedArtifactBody(issue.body);
-    let naming: CanonicalBranchNamingInput | undefined;
+    let naming: BranchNaming | undefined;
     try {
-      naming = deriveNaming(title);
+      naming = deriveBranchNamingFromIssueTitle(title);
     } catch {
       // A title can be edited into a non-governed descriptive value after
       // issuance. Existing GitHub evidence remains authoritative in that
@@ -599,7 +570,7 @@ export class GitHubActionsEvidenceReader implements ChangeTrustedEvidenceReader 
     if (anchoredBranches.size > 1) throw new GitHubActionsChangeExecutorError();
     const canonicalBranch = anchoredBranches.size === 1 ? [...anchoredBranches][0] : derivedBranch;
     if (naming === undefined && canonicalBranch !== undefined) {
-      naming = namingFromBranch(canonicalBranch, request.issue);
+      naming = recognizeBranchNamingForIssue(canonicalBranch, request.issue);
     }
     if (naming === undefined || canonicalBranch === undefined) {
       throw new GitHubActionsChangeExecutorError();

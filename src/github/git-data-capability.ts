@@ -14,7 +14,7 @@ import {
 } from "./change-effect-adapter.js";
 import { MAX_CHANGE_BRANCH_LENGTH } from "../change.js";
 import type { IssuerInstallationScope } from "./issuer-authority.js";
-import { validateBranchName } from "../../branch-naming-authority.mjs";
+import { validateBranchName } from "../branch-naming.js";
 import { classifyRepositoryPath } from "../agent-authority/protected-paths.js";
 
 const GIT_DATA_WRITE_MODES = Object.freeze(["100644", "100755"] as const);

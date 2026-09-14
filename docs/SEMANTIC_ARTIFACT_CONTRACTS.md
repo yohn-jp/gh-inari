@@ -610,11 +610,17 @@ The current Change invariant that its canonical branch is Issue-derived is a **C
 
 **Target:** retain `IssueReference` identity. Generalize dependency-specific relation handling into the common typed relation model, with inverse views derived rather than independently authored.
 
+### `src/branch-naming.ts`
+
+**Current:** Core's sole executable branch grammar, deterministic `type/issue-number-slug` derivation, Issue-title normalization, and inverse-compatible branch recognition for current repositories.
+
+**Target:** retain the Core naming rule while moving the declaration of whether/how branch is derived into repository Canon. Provider/deployment adapters consume its result and do not maintain a second branch grammar.
+
 ### `branch-naming-authority.mjs`
 
-**Current:** shared executable grammar and deterministic `type/issue-slug` derivation for current repositories.
+**Current:** compatibility package entrypoint that re-exports `src/branch-naming.ts`'s compiled Core implementation.
 
-**Target:** reuse its validation/derivation behavior as an implementation of repository-declared branch projection while moving the declaration of whether/how branch is derived into repository Canon. No second branch grammar is introduced.
+**Target:** retain only while external governance consumers migrate to the `gh-inari/branch-naming` Core subpath; it contains no independent naming or recognition logic.
 
 ### `src/change.ts`
 

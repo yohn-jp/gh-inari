@@ -1,6 +1,6 @@
 /** The bounded, credentialless branch-advance execution authority (#466). */
 import { createHash } from "node:crypto";
-import { validateBranchName } from "../../branch-naming-authority.mjs";
+import { validateBranchName } from "../branch-naming.js";
 import { MAX_SESSION_REQUEST_BYTES, canonicalizeSemanticRequest } from "./session-request.js";
 import { classifyDelegatedTreeDelta } from "./protected-paths.js";
 import { MAX_ISSUE_NUMBER, type BranchAdvanceCapabilityClaim } from "./capability.js";
