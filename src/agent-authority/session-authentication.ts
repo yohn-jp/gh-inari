@@ -21,11 +21,11 @@ import {
   SESSION_CERTIFICATE_ALG,
   SESSION_CERTIFICATE_TYP,
   decodeSessionCertificateCompact,
-  evaluateSessionCertificateAgainstRuntimeAuthority,
+  evaluateSessionCertificateAgainstDelegator,
   type DecodedSessionCertificate,
   type SessionCertificateTask,
 } from "./session-certificate.js";
-import { resolveRuntimeAuthority, type LoadedRuntimeAuthority } from "./runtime-authority-trust.js";
+import { resolveDelegator, type LoadedDelegator } from "./delegator-trust.js";
 import type { CapabilityClaim } from "./capability.js";
 import { verifySessionRequest, type VerifiedSessionRequest } from "./session-request.js";
 import { validateIssuerRepositoryIdentity, type IssuerRepositoryIdentity } from "../github/issuer-authority.js";
@@ -51,12 +51,15 @@ export interface AuthenticateSessionRequestOptions {
 
 export type AuthenticatedSessionRepository = IssuerRepositoryIdentity;
 
-export interface AuthenticatedSessionRuntimeAuthority {
-  /** Runtime Authority record identifier, as resolved by `kid`. */
+export interface AuthenticatedSessionDelegator {
+  /** Delegator record identifier, as resolved by `kid`. */
   readonly id: string;
   /** Certificate header key identifier; retained explicitly for diagnostics. */
   readonly kid: string;
 }
+
+/** @deprecated Use `AuthenticatedSessionDelegator`; the field shape is unchanged. */
+export type AuthenticatedSessionRuntimeAuthority = AuthenticatedSessionDelegator;
 
 export interface AuthenticatedSessionIdentity {
   /** Opaque Session ID without the `session:` subject prefix. */
@@ -86,7 +89,7 @@ export interface AuthenticatedSessionRequestIdentity {
  */
 export interface AuthenticatedSessionContext {
   readonly repository: AuthenticatedSessionRepository;
-  readonly runtimeAuthority: AuthenticatedSessionRuntimeAuthority;
+  readonly runtimeAuthority: AuthenticatedSessionDelegator;
   readonly session: AuthenticatedSessionIdentity;
   readonly task?: SessionCertificateTask;
   readonly capabilities: readonly CapabilityClaim[];
@@ -164,7 +167,7 @@ function sameRepositoryIdentity(left: IssuerRepositoryIdentity, right: IssuerRep
   );
 }
 
-function verifyRuntimeSignature(certificate: DecodedSessionCertificate, runtime: LoadedRuntimeAuthority): void {
+function verifyRuntimeSignature(certificate: DecodedSessionCertificate, runtime: LoadedDelegator): void {
   if (
     certificate.header.alg !== SESSION_CERTIFICATE_ALG ||
     certificate.header.typ !== SESSION_CERTIFICATE_TYP ||
@@ -188,12 +191,12 @@ function verifyRuntimeSignature(certificate: DecodedSessionCertificate, runtime:
 
 function verifyCertificateClaims(
   certificate: DecodedSessionCertificate,
-  runtime: LoadedRuntimeAuthority,
+  runtime: LoadedDelegator,
   repository: IssuerRepositoryIdentity,
   now: Date,
 ): void {
-  const evaluation = evaluateSessionCertificateAgainstRuntimeAuthority(certificate, {
-    runtimeAuthority: runtime.authority,
+  const evaluation = evaluateSessionCertificateAgainstDelegator(certificate, {
+    delegator: runtime.authority,
     expectedRepositoryId: repository.repositoryId,
     now,
   });
@@ -210,7 +213,7 @@ function sessionId(subject: string): string {
 function authenticatedContext(
   certificate: DecodedSessionCertificate,
   verifiedRequest: VerifiedSessionRequest,
-  runtime: LoadedRuntimeAuthority,
+  runtime: LoadedDelegator,
   repository: IssuerRepositoryIdentity,
 ): AuthenticatedSessionContext {
   const payload = certificate.payload;
@@ -257,9 +260,9 @@ export async function authenticateSessionRequest(
       if (!sameRepositoryIdentity(resolvedIdentity.value, capability.scope.repository)) fail("repository");
 
       const reader = createAppRepositoryEvidenceReader(capability, options.repository, resolvedIdentity.value);
-      let runtime: LoadedRuntimeAuthority;
+      let runtime: LoadedDelegator;
       try {
-        runtime = await resolveRuntimeAuthority(reader, certificate.header.kid, { now });
+        runtime = await resolveDelegator(reader, certificate.header.kid, { now });
       } catch {
         fail("runtime-trust");
       }

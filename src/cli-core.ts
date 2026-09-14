@@ -127,28 +127,24 @@ import {
 } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
 import {
-  canonicalRuntimeAuthorityPublicKeyJson,
-  defaultRuntimeAuthorityPrivateKeyPath,
-  generateAndPersistRuntimeAuthorityKeyPair,
-  loadRuntimeAuthorityKeyPair,
-} from "./agent-authority/runtime-key.js";
+  canonicalDelegatorPublicKeyJson,
+  defaultDelegatorPrivateKeyPath,
+  generateAndPersistDelegatorKeyPair,
+  loadDelegatorKeyPair,
+} from "./agent-authority/delegator-key.js";
 import {
-  checkRuntimeAuthorityRotationOrder,
-  createRuntimeAuthorityRecord,
-  createRuntimeSignedChangeProvenanceRecord,
-  deriveRuntimeAuthorityIdentity,
-  verifyRuntimeAuthorityReadiness,
-  type RuntimeAuthorityPublicKeyInput,
-  type RuntimeAuthorityRotationPhase,
-} from "./agent-authority/runtime-authority-operations.js";
-import { RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY } from "./agent-authority/runtime-authority.js";
-import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
+  checkDelegatorRotationOrder,
+  createDelegatorRecord,
+  createDelegatorSignedChangeProvenanceRecord,
+  deriveDelegatorIdentity,
+  verifyDelegatorReadiness,
+  type DelegatorPublicKeyInput,
+  type DelegatorRotationPhase,
+} from "./agent-authority/delegator-operations.js";
+import { DELEGATOR_ARTIFACT_DIRECTORY } from "./agent-authority/delegator.js";
+import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
 import type { CapabilityKind } from "./agent-authority/capability.js";
-import {
-  registerRuntimeAuthority,
-  revokeRuntimeAuthority,
-  rotateRuntimeAuthority,
-} from "./agent-authority/runtime-authority-lifecycle.js";
+import { registerDelegator, revokeDelegator, rotateDelegator } from "./agent-authority/delegator-lifecycle.js";
 import {
   createSessionCredentialBundle,
   inspectSessionCredentialBundle,
@@ -947,8 +943,8 @@ async function runAuthorityCommand(
     rejectUnsupportedAuthorityOptions(command, parsed.options, parsed.capabilities);
     const requestedPath = parsed.options.privateKey;
     const privateKeyPath =
-      typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultRuntimeAuthorityPrivateKeyPath();
-    const pair = generateAndPersistRuntimeAuthorityKeyPair(privateKeyPath, {
+      typeof requestedPath === "string" ? path.resolve(root, requestedPath) : defaultDelegatorPrivateKeyPath();
+    const pair = generateAndPersistDelegatorKeyPair(privateKeyPath, {
       replace: parsed.options.replace === true,
     });
     const output = {
@@ -956,7 +952,7 @@ async function runAuthorityCommand(
       operation: "authority.generate",
       privateKeyPath,
       publicKey: pair.publicKeyJwk,
-      publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(pair.publicKeyJwk),
+      publicKeyJson: canonicalDelegatorPublicKeyJson(pair.publicKeyJwk),
       repositoryTrustChanged: false,
     } as const;
     if (json) console.log(JSON.stringify(output));
@@ -996,8 +992,8 @@ async function runAuthorityCommand(
       );
     }
     const outputRelative = path.relative(root, outputPath).split(path.sep).join("/");
-    const trustRootPrefix = `${RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY}/`;
-    if (outputRelative === RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY || outputRelative.startsWith(trustRootPrefix)) {
+    const trustRootPrefix = `${DELEGATOR_ARTIFACT_DIRECTORY}/`;
+    if (outputRelative === DELEGATOR_ARTIFACT_DIRECTORY || outputRelative.startsWith(trustRootPrefix)) {
       throw new CliError(
         "INVALID_OPTION",
         "Bootstrap output must stay outside the canonical trust-root directory; use authority register for materialization.",
@@ -1008,16 +1004,16 @@ async function runAuthorityCommand(
     const key =
       privateKeyPath === undefined
         ? await readJsonValue(authorityInputPath(root, publicKeyValue as string))
-        : loadRuntimeAuthorityKeyPair(privateKeyPath);
-    const authority = createRuntimeAuthorityRecord({
+        : loadDelegatorKeyPair(privateKeyPath);
+    const authority = createDelegatorRecord({
       id: authorityId,
-      key: key as RuntimeAuthorityPublicKeyInput,
+      key: key as DelegatorPublicKeyInput,
       ...(typeof parsed.options.notBefore === "string" ? { notBefore: parsed.options.notBefore } : {}),
       ...(typeof parsed.options.notAfter === "string" ? { notAfter: parsed.options.notAfter } : {}),
       maxSessionTtlSeconds,
       capabilityCeiling: parsed.capabilities as CapabilityKind[],
     });
-    const rendered = renderRuntimeAuthorityArtifact(authority);
+    const rendered = renderDelegatorArtifact(authority);
     await writeBootstrapAuthorityOutput(outputPath, rendered.content);
     const output = {
       ok: true,
@@ -1025,8 +1021,8 @@ async function runAuthorityCommand(
       outputPath,
       artifactPath: rendered.path,
       authority,
-      publicKeyJson: canonicalRuntimeAuthorityPublicKeyJson(authority.key),
-      publicKeyFingerprint: deriveRuntimeAuthorityIdentity(authority.id, authority.key).publicKeyFingerprint,
+      publicKeyJson: canonicalDelegatorPublicKeyJson(authority.key),
+      publicKeyFingerprint: deriveDelegatorIdentity(authority.id, authority.key).publicKeyFingerprint,
       repositoryTrustChanged: false,
       deploymentBindingChanged: false,
     } as const;
@@ -1086,7 +1082,7 @@ async function runAuthorityCommand(
       );
     }
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
-    const result = await verifyRuntimeAuthorityReadiness(adapter, {
+    const result = await verifyDelegatorReadiness(adapter, {
       authorityId,
       ...(privateKeyPem === undefined ? {} : { privateKey: privateKeyPem }),
       ...(privateKeyPath === undefined ? {} : { privateKeyPath }),
@@ -1101,10 +1097,10 @@ async function runAuthorityCommand(
     const rotationOrder =
       rotationPhase === undefined || typeof currentAuthorityId !== "string"
         ? undefined
-        : checkRuntimeAuthorityRotationOrder({
+        : checkDelegatorRotationOrder({
             currentAuthorityId,
             nextAuthorityId: authorityId ?? "",
-            phase: rotationPhase as RuntimeAuthorityRotationPhase,
+            phase: rotationPhase as DelegatorRotationPhase,
             signerAuthorityId: authorityId,
             nextReadiness: result,
           });
@@ -1128,10 +1124,10 @@ async function runAuthorityCommand(
   rejectUnsupportedAuthorityLifecycleOptions(command, parsed.options, parsed.capabilities);
   const result =
     command === "revoke"
-      ? revokeRuntimeAuthority(root, rest[0] as string)
+      ? revokeDelegator(root, rest[0] as string)
       : command === "register"
-        ? registerRuntimeAuthority(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))))
-        : rotateRuntimeAuthority(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))));
+        ? registerDelegator(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))))
+        : rotateDelegator(root, await readJsonValue(authorityInputPath(root, requiredAuthorityFrom(parsed))));
   const output = { ...result } as const;
   if (json) console.log(JSON.stringify(output));
   else {
@@ -1259,7 +1255,7 @@ async function runSessionCommand(
     const privateKey = requiredSessionOption(parsed.options, "privateKey");
     const to = requiredSessionOption(parsed.options, "to");
     const request = await readJsonValue(from === "-" ? from : path.resolve(root, from));
-    const runtimeKey = loadRuntimeAuthorityKeyPair(path.resolve(root, privateKey));
+    const runtimeKey = loadDelegatorKeyPair(path.resolve(root, privateKey));
     const created = createSessionCredentialBundle({ request, runtimeKey });
     const bundlePath = persistSessionCredentialBundle(path.resolve(root, to), created.bundle);
     const safe = inspectSessionCredentialBundle(created);
@@ -1646,7 +1642,7 @@ async function runChangeCommand(
   const signedProvenanceRecord =
     runtimeTrustAdapter === undefined
       ? undefined
-      : await createRuntimeSignedChangeProvenanceRecord(runtimeTrustAdapter, issue, {
+      : await createDelegatorSignedChangeProvenanceRecord(runtimeTrustAdapter, issue, {
           authorityId: (dependencies.environment ?? process.env).INARI_RUNTIME_AUTHORITY_ID,
           privateKey: (dependencies.environment ?? process.env).INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
         });

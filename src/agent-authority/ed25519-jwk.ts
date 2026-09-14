@@ -1,7 +1,7 @@
 /**
  * Shared Ed25519 public-key JWK contract.
  *
- * Both the Runtime Authority trust record and the Session Certificate carry
+ * Both the Delegator trust record and the Session Certificate carry
  * an Ed25519 public key in JWK form. This module owns that one shape so
  * neither record reimplements key-structural validation; it validates the
  * public-key encoding only and never touches private-key material, storage,

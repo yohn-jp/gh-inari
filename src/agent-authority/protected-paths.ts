@@ -1,7 +1,7 @@
 /**
  * Immutable trust-root path classification for ordinary delegated writes.
  *
- * The Runtime Authority artifact constants are the only source of the V1
+ * The Delegator artifact constants are the only source of the V1
  * protected root.  This module deliberately does not add authorization-policy
  * paths: future trust-root classes require a separately governed expansion.
  *
@@ -11,7 +11,7 @@
  */
 
 import { validateCapabilityClaim, type CapabilityClaim, type CapabilityKind } from "./capability.js";
-import { RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY, RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX } from "./runtime-authority.js";
+import { DELEGATOR_ARTIFACT_DIRECTORY, DELEGATOR_ARTIFACT_PATH_PREFIX } from "./delegator.js";
 
 export const PROTECTED_PATH_CLASSIFIER_VERSION = 1 as const;
 
@@ -113,7 +113,7 @@ export function classifyRepositoryPath(value: unknown): RepositoryPathClassifica
     return invalidPath("DOT_SEGMENT", "Repository paths must not contain dot or traversal segments.");
   }
 
-  if (value === RUNTIME_AUTHORITY_ARTIFACT_DIRECTORY || value.startsWith(RUNTIME_AUTHORITY_ARTIFACT_PATH_PREFIX)) {
+  if (value === DELEGATOR_ARTIFACT_DIRECTORY || value.startsWith(DELEGATOR_ARTIFACT_PATH_PREFIX)) {
     return Object.freeze({ kind: "protected" as const, path: value });
   }
   return Object.freeze({ kind: "unprotected" as const, path: value });
@@ -360,7 +360,7 @@ export function classifyDelegatedTreeDelta(input: unknown): DelegatedTreeDeltaCl
       touchedPaths,
       protectedPaths,
       invalidPaths,
-      "Delegated writes cannot modify the Runtime Authority trust root.",
+      "Delegated writes cannot modify the Delegator trust root.",
     );
   }
 
@@ -370,7 +370,7 @@ export function classifyDelegatedTreeDelta(input: unknown): DelegatedTreeDeltaCl
     touchedPaths,
     protectedPaths,
     invalidPaths,
-    "Delegated tree delta does not affect the Runtime Authority trust root.",
+    "Delegated tree delta does not affect the Delegator trust root.",
   );
 }
 

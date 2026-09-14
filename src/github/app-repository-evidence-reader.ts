@@ -3,7 +3,7 @@
  *
  * Converts one #464 pre-admission repository-read capability into the
  * provider-neutral reader shapes existing Core/governance authorities
- * already accept (`RuntimeAuthoritySourceReader`, a superset of
+ * already accept (`DelegatorSourceReader`, a superset of
  * `RepositoryGovernanceSourceReader`). This module owns acquisition only:
  * bounded GitHub REST reads and their field validation. It performs no
  * Runtime trust, Session, capability admission, Change, or governance
@@ -17,7 +17,7 @@ import type {
 } from "./app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "./types.js";
-import type { RuntimeAuthoritySourceReader } from "../agent-authority/runtime-authority-trust.js";
+import type { DelegatorSourceReader } from "../agent-authority/delegator-trust.js";
 import type { IssuerRepositoryIdentity } from "./issuer-authority.js";
 
 const MAX_REPOSITORY_REF_LENGTH = 255;
@@ -70,7 +70,7 @@ function repositoryPath(repository: GitHubChangeEffectRepository, suffix = ""): 
 /**
  * Build a provider-neutral repository evidence reader over one #464
  * pre-admission read capability. The returned reader satisfies both
- * `RuntimeAuthoritySourceReader` (Runtime trust resolution) and the
+ * `DelegatorSourceReader` (Runtime trust resolution) and the
  * narrower `RepositoryGovernanceSourceReader` (governed Issue/PR template
  * evidence) -- the same acquisition surface, reused by every consumer that
  * only needs bounded repository-default-branch reads.
@@ -79,7 +79,7 @@ export function createRepositoryEvidenceReader(
   transport: GitHubAppRepositoryReadTransport,
   repository: GitHubChangeEffectRepository,
   identity: IssuerRepositoryIdentity,
-): RuntimeAuthoritySourceReader {
+): DelegatorSourceReader {
   const context: RepositoryContext = repositoryContext(identity);
   return {
     resolveRepositoryContext: async () => context,
@@ -166,7 +166,7 @@ export function createAppRepositoryEvidenceReader(
   capability: GitHubAppRepositoryReadCapability,
   repository: GitHubChangeEffectRepository,
   identity: IssuerRepositoryIdentity,
-): RuntimeAuthoritySourceReader {
+): DelegatorSourceReader {
   return createRepositoryEvidenceReader(capability.transport, repository, identity);
 }
 

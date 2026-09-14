@@ -59,7 +59,7 @@ import {
   isRepositoryEvidenceFailureReason,
 } from "./repository-evidence-reader.js";
 import type { RepositoryEvidenceFailureReason } from "./repository-evidence-reader.js";
-import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
+import { resolveDelegator } from "../agent-authority/delegator-trust.js";
 import {
   validateChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
@@ -595,7 +595,7 @@ export async function createGitHubActionsChangeExecutor(
       // repository trust anchor. The signed kid is the sole selector.
       const signedRecord = requiredSignedProvenanceRecord(options.request);
       const runtimeReader = createRepositoryEvidenceReader(readTransport, repository, target);
-      const loaded = await resolveRuntimeAuthority(runtimeReader, signedRecord.signature.kid);
+      const loaded = await resolveDelegator(runtimeReader, signedRecord.signature.kid);
       // The Runtime signs before this trusted executor boundary; this process
       // never imports or holds the Runtime private key.
       const payload = verifyChangeProvenanceRecord(signedRecord, loaded.authority);

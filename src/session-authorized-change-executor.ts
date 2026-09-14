@@ -227,7 +227,7 @@ function parseDirectRequest(
     let signedProvenanceRecord: SignedChangeProvenanceRecord | undefined;
     if (hasOwn(input, "signedProvenanceRecord")) {
       // Shape/signature validity is re-verified downstream against the
-      // repository-trusted Runtime Authority; this only rejects structurally
+      // repository-trusted Delegator; this only rejects structurally
       // invalid input early, matching how other optional fields here defer
       // deeper semantic validation to their owning authority.
       const validation = validateChangeProvenanceRecord(input.signedProvenanceRecord);
