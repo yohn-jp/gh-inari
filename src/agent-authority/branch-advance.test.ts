@@ -16,7 +16,7 @@ import type {
   GitDataTreeInput,
   GitHubBranchAdvanceCapability,
 } from "../github/git-data-capability.js";
-import type { IssuerInstallationScope } from "../github/issuer-authority.js";
+import type { AppInstallationScope } from "../github/effect-authorizer.js";
 
 const HEAD = "a".repeat(40),
   COMMIT = "d".repeat(40),
@@ -30,7 +30,7 @@ const scope = {
   repositorySelection: "selected",
   permissions: { contents: "write", metadata: "read" },
   expiresAt: "2099-01-01T00:00:00.000Z",
-} as IssuerInstallationScope;
+} as AppInstallationScope;
 const content = Buffer.from("hello", "utf8").toString("base64");
 const blobSha = createHash("sha1")
   .update(Buffer.concat([Buffer.from("blob 5\0"), Buffer.from("hello")]))

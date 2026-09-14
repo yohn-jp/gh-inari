@@ -28,7 +28,7 @@ import {
 import { resolveRuntimeAuthority, type LoadedRuntimeAuthority } from "./runtime-authority-trust.js";
 import type { CapabilityClaim } from "./capability.js";
 import { verifySessionRequest, type VerifiedSessionRequest } from "./session-request.js";
-import { validateIssuerRepositoryIdentity, type IssuerRepositoryIdentity } from "../github/issuer-authority.js";
+import { validateRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 
 /** The only broker operation accepted by this boundary. */
 export interface SessionAuthenticationReadCapabilityBroker {
@@ -49,7 +49,7 @@ export interface AuthenticateSessionRequestOptions {
   readonly now?: Date | number | (() => Date | number);
 }
 
-export type AuthenticatedSessionRepository = IssuerRepositoryIdentity;
+export type AuthenticatedSessionRepository = RepositoryIdentity;
 
 export interface AuthenticatedSessionRuntimeAuthority {
   /** Runtime Authority record identifier, as resolved by `kid`. */
@@ -158,7 +158,7 @@ function certificateFromRequest(input: unknown): {
  * `nameWithOwner` is diagnostic metadata: a provider-resolved rename must not
  * invalidate an otherwise identical immutable repository identity.
  */
-function sameRepositoryIdentity(left: IssuerRepositoryIdentity, right: IssuerRepositoryIdentity): boolean {
+function sameRepositoryIdentity(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
   return (
     left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() && left.repositoryId === right.repositoryId
   );
@@ -189,7 +189,7 @@ function verifyRuntimeSignature(certificate: DecodedSessionCertificate, runtime:
 function verifyCertificateClaims(
   certificate: DecodedSessionCertificate,
   runtime: LoadedRuntimeAuthority,
-  repository: IssuerRepositoryIdentity,
+  repository: RepositoryIdentity,
   now: Date,
 ): void {
   const evaluation = evaluateSessionCertificateAgainstRuntimeAuthority(certificate, {
@@ -211,7 +211,7 @@ function authenticatedContext(
   certificate: DecodedSessionCertificate,
   verifiedRequest: VerifiedSessionRequest,
   runtime: LoadedRuntimeAuthority,
-  repository: IssuerRepositoryIdentity,
+  repository: RepositoryIdentity,
 ): AuthenticatedSessionContext {
   const payload = certificate.payload;
   const context: AuthenticatedSessionContext = {
@@ -252,7 +252,7 @@ export async function authenticateSessionRequest(
       } catch {
         fail("repository-read");
       }
-      const resolvedIdentity = validateIssuerRepositoryIdentity(resolvedRepository.target);
+      const resolvedIdentity = validateRepositoryIdentity(resolvedRepository.target);
       if (!resolvedIdentity.valid || resolvedIdentity.value === undefined) fail("repository");
       if (!sameRepositoryIdentity(resolvedIdentity.value, capability.scope.repository)) fail("repository");
 

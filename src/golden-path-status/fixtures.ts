@@ -12,11 +12,11 @@ import { issueContractFixture, pullRequestContractFixture } from "../contract/fi
 import type { CanonicalContract } from "../contract/ir.js";
 import {
   INARI_ISSUER_PRINCIPAL,
-  type IssuerMutationRequest,
-  type IssuerMutationResult,
-  type IssuerRepositoryIdentity,
+  type EffectAuthorizerMutationRequest,
+  type EffectAuthorizerMutationResult,
+  type RepositoryIdentity,
   type TrustedExecutionContext,
-} from "../github/issuer-authority.js";
+} from "../github/effect-authorizer.js";
 import { TrustedChangeExecutor, type ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
 import type { ChangeMutationRequest, ChangeReadRequest } from "../change-execution-port.js";
 
@@ -32,7 +32,7 @@ export const GOLDEN_PATH_BASE_BRANCH = "main";
 export const GOLDEN_PATH_PULL_REQUEST = 4110;
 export const GOLDEN_PATH_CREATED_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
 
-export const GOLDEN_PATH_TARGET: IssuerRepositoryIdentity = Object.freeze({
+export const GOLDEN_PATH_TARGET: RepositoryIdentity = Object.freeze({
   repositoryHost: GOLDEN_PATH_IDENTITY.repositoryHost,
   repositoryId: GOLDEN_PATH_IDENTITY.repositoryId,
   nameWithOwner: "acme/inari",
@@ -222,7 +222,7 @@ export class DeterministicEvidenceReader implements ChangeTrustedEvidenceReader 
  */
 export class DeterministicIssuer {
   readonly effects: ChangeEffect[] = [];
-  readonly requests: IssuerMutationRequest[] = [];
+  readonly requests: EffectAuthorizerMutationRequest[] = [];
   private readonly options: DeterministicActorOptions;
 
   constructor(
@@ -232,7 +232,7 @@ export class DeterministicIssuer {
     this.options = options;
   }
 
-  async applyEffects(request: IssuerMutationRequest): Promise<IssuerMutationResult> {
+  async applyEffects(request: EffectAuthorizerMutationRequest): Promise<EffectAuthorizerMutationResult> {
     const effect = request.effects[0];
     if (effect === undefined) throw new Error("effect request was empty");
     this.requests.push(request);
@@ -389,6 +389,8 @@ function successEvidence(effect: ChangeEffect) {
 
 export interface GoldenPathActors {
   readonly reader: DeterministicEvidenceReader;
+  readonly effectAuthorizer: DeterministicIssuer;
+  /** @deprecated Use `effectAuthorizer`. */
   readonly issuer: DeterministicIssuer;
   readonly executor: TrustedChangeExecutor;
 }
@@ -398,14 +400,14 @@ export function createGoldenPathActors(
   options: DeterministicActorOptions = {},
 ): GoldenPathActors {
   const reader = new DeterministicEvidenceReader(initial);
-  const issuer = new DeterministicIssuer(reader, options);
+  const effectAuthorizer = new DeterministicIssuer(reader, options);
   const executor = new TrustedChangeExecutor({
     reader,
-    issuerAuthority: issuer,
+    effectAuthorizer,
     execution: GOLDEN_PATH_EXECUTION,
     target: GOLDEN_PATH_TARGET,
   });
-  return { reader, issuer, executor };
+  return { reader, effectAuthorizer, issuer: effectAuthorizer, executor };
 }
 
 export function mutationRequest(operation: "issue" | "ready" | "abort", requester?: string): ChangeMutationRequest {

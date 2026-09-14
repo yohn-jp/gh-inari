@@ -3,7 +3,7 @@
  *
  * The workflow supplies only a semantic request. This module resolves bounded
  * GitHub evidence, invokes Core planning, applies explicit effects through the
- * #217 issuer authority, and verifies a fresh #213 projection.
+ * #217 Effect Authorizer, and verifies a fresh #213 projection.
  */
 
 import { execFileSync } from "node:child_process";
@@ -93,14 +93,13 @@ import {
   type SignedChangeProvenanceRecord,
 } from "../change-provenance-record.js";
 import {
-  InariIssuerAppAuthority,
+  InariEffectAuthorizer,
   assertTrustedExecution,
   TRUSTED_EXECUTION_EVENTS,
-  type IssuerRepositoryIdentity,
   type TrustedExecutionEvent,
   type TrustedExecutionContext,
-  IssuerAuthorityError,
-} from "./issuer-authority.js";
+  EffectAuthorizerError,
+} from "./effect-authorizer.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
@@ -1248,7 +1247,7 @@ function assertAttestedCheckout(cwd: string, workflowSha: string): void {
 
 function issuerFailureStage(error: unknown): TrustedActionsFailureStage {
   if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error.details.stage;
-  if (error instanceof IssuerAuthorityError) {
+  if (error instanceof EffectAuthorizerError) {
     if (["ISSUER_INVALID_EXECUTION", "ISSUER_UNTRUSTED_EXECUTION", "ISSUER_UNSUPPORTED_EVENT"].includes(error.code)) {
       return "trusted-execution";
     }
@@ -1278,7 +1277,7 @@ function trustedFailureStage(
     if (error.code === "CHANGE_EXECUTION_READ_FAILED") return "repository-evidence";
     return issuerStage ?? "projection-execution";
   }
-  if (error instanceof IssuerAuthorityError) return issuerFailureStage(error);
+  if (error instanceof EffectAuthorizerError) return issuerFailureStage(error);
   return issuerStage ?? "projection-execution";
 }
 
@@ -1417,7 +1416,7 @@ export async function createGitHubActionsChangeExecutor(
     };
   }
   let broker: GitHubActionsCredentialBroker;
-  let authority: InariIssuerAppAuthority;
+  let effectAuthorizer: InariEffectAuthorizer;
   try {
     const appId = requiredEnvironment(environment, "INARI_ISSUER_APP_ID", "issuer-configuration");
     const installationId = requiredEnvironment(environment, "INARI_ISSUER_INSTALLATION_ID", "issuer-configuration");
@@ -1449,15 +1448,15 @@ export async function createGitHubActionsChangeExecutor(
       fetch: options.fetch,
       ...(provenance === undefined ? {} : { provenance }),
     });
-    authority = new InariIssuerAppAuthority({ appId, broker });
+    effectAuthorizer = new InariEffectAuthorizer({ appId, broker });
   } catch (error: unknown) {
     throw withFailureStage(error, "issuer-configuration");
   }
   let issuerStage: TrustedActionsFailureStage | undefined;
-  const stagedAuthority: Pick<InariIssuerAppAuthority, "applyEffects"> = {
+  const stagedEffectAuthorizer: Pick<InariEffectAuthorizer, "applyEffects"> = {
     applyEffects: async (input) => {
       try {
-        return await authority.applyEffects(input);
+        return await effectAuthorizer.applyEffects(input);
       } catch (error: unknown) {
         issuerStage = issuerFailureStage(error);
         throw error;
@@ -1466,7 +1465,7 @@ export async function createGitHubActionsChangeExecutor(
   };
   const trustedExecutor = new TrustedChangeExecutor({
     reader,
-    issuerAuthority: stagedAuthority,
+    effectAuthorizer: stagedEffectAuthorizer,
     execution,
     target,
   });

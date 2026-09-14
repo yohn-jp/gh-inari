@@ -24,7 +24,7 @@ import {
   type IssuerMutationResult,
   type IssuerRepositoryIdentity,
   type TrustedExecutionContext,
-} from "./github/issuer-authority.js";
+} from "./github/effect-authorizer.js";
 import {
   TrustedChangeExecutor,
   ChangeTrustedExecutorError,

@@ -20,7 +20,7 @@ import {
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { resolveRuntimeAuthority } from "../agent-authority/runtime-authority-trust.js";
 import { GitHubActionsEvidenceReader } from "./actions-change-executor.js";
-import { InariIssuerAppAuthority, type IssuerRepositoryIdentity } from "./issuer-authority.js";
+import { InariEffectAuthorizer, type RepositoryIdentity } from "./effect-authorizer.js";
 import type { GitHubChangeEffectRepository, GitHubChangeProvenanceSignerOptions } from "./change-effect-adapter.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
@@ -64,7 +64,7 @@ function isMutationRequest(request: ChangeReadRequest | ChangeMutationRequest): 
 function buildReader(
   capability: GitHubAppRepositoryReadCapability,
   config: DirectAppSessionExecutorConfig,
-  identity: IssuerRepositoryIdentity,
+  identity: RepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
 ): GitHubActionsEvidenceReader {
   return new GitHubActionsEvidenceReader({
@@ -85,7 +85,7 @@ function buildReader(
 async function projectChangeFromCapability(
   capability: GitHubAppRepositoryReadCapability,
   config: DirectAppSessionExecutorConfig,
-  identity: IssuerRepositoryIdentity,
+  identity: RepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
 ): Promise<ChangeProjectionResult> {
   const reader = buildReader(capability, config, identity, request);
@@ -95,7 +95,7 @@ async function projectChangeFromCapability(
 async function readChangeProjection(
   broker: GitHubAppInstallationCredentialBroker,
   config: DirectAppSessionExecutorConfig,
-  identity: IssuerRepositoryIdentity,
+  identity: RepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
 ): Promise<ChangeProjectionResult> {
   return broker.withRepositoryReadCapability({}, async (capability) => {
@@ -180,7 +180,7 @@ export function createDirectAppSessionExecutor(
           provenance,
         });
       }
-      const issuerAuthority = new InariIssuerAppAuthority({
+      const effectAuthorizer = new InariEffectAuthorizer({
         appId: config.appId,
         broker: executionBroker,
         ...(config.now === undefined ? {} : { now: config.now }),
@@ -192,7 +192,7 @@ export function createDirectAppSessionExecutor(
             const reader = buildReader(capability, config, target, request);
             const trustedExecutor = new TrustedChangeExecutor({
               reader,
-              issuerAuthority,
+              effectAuthorizer,
               execution: input.execution,
               target,
             });

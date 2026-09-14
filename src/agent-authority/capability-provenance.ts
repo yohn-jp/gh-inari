@@ -20,10 +20,10 @@ import {
   INARI_ISSUER_APP_KIND,
   INARI_ISSUER_APP_SLUG,
   INARI_ISSUER_PRINCIPAL,
-  validateInariIssuerAppIdentity,
-  validateIssuerRepositoryIdentity,
-  type IssuerRepositoryIdentity,
-} from "../github/issuer-authority.js";
+  validateInariAppPrincipalIdentity,
+  validateRepositoryIdentity,
+  type RepositoryIdentity,
+} from "../github/effect-authorizer.js";
 
 export const CAPABILITY_PROVENANCE_VERSION = 1 as const;
 export type CapabilityProvenanceStage = "authenticated" | "authorized" | "app-scoped" | "verified";
@@ -31,7 +31,7 @@ export type CapabilityProvenanceStage = "authenticated" | "authorized" | "app-sc
 export interface CapabilityExecutionProvenance {
   readonly version: 1;
   readonly stage: CapabilityProvenanceStage;
-  readonly repository: IssuerRepositoryIdentity;
+  readonly repository: RepositoryIdentity;
   readonly runtimeAuthority: Readonly<{ id: string; kid: string }>;
   readonly session: Readonly<{ id: string; certificateJti: string }>;
   readonly authority: Readonly<{ ref: string; sha: string }>;
@@ -377,7 +377,7 @@ function validateApp(
     return false;
   }
   addUnknownProperties(input, APP_KEYS, path, diagnostics);
-  const appResult = validateInariIssuerAppIdentity(
+  const appResult = validateInariAppPrincipalIdentity(
     { kind: input.kind, slug: input.slug, appId: input.appId, principal: input.principal },
     path,
   );
@@ -468,9 +468,7 @@ function validateRoot(input: unknown): CapabilityExecutionProvenanceValidationRe
   const stageValid = stagePresent && STAGES.includes(input.stage as CapabilityProvenanceStage);
   if (!stageValid) invalid("$.stage", diagnostics, "Provenance stage is invalid.");
 
-  const repositoryResult = repositoryPresent
-    ? validateIssuerRepositoryIdentity(input.repository, "$.repository")
-    : undefined;
+  const repositoryResult = repositoryPresent ? validateRepositoryIdentity(input.repository, "$.repository") : undefined;
   if (repositoryPresent && (!repositoryResult?.valid || repositoryResult.value === undefined)) {
     invalid("$.repository", diagnostics, "Repository identity is invalid.");
   }
@@ -530,14 +528,11 @@ function validateRoot(input: unknown): CapabilityExecutionProvenanceValidationRe
     commitAuthorValid;
   if (!valid) return { valid: false, diagnostics: Object.freeze([...diagnostics]) };
 
-  const value = materialize(input, repositoryResult.value as IssuerRepositoryIdentity);
+  const value = materialize(input, repositoryResult.value as RepositoryIdentity);
   return { valid: true, value, diagnostics: Object.freeze([]) };
 }
 
-function materialize(
-  input: Record<string, unknown>,
-  repository: IssuerRepositoryIdentity,
-): CapabilityExecutionProvenance {
+function materialize(input: Record<string, unknown>, repository: RepositoryIdentity): CapabilityExecutionProvenance {
   const runtimeAuthority = input.runtimeAuthority as { readonly id: string; readonly kid: string };
   const session = input.session as { readonly id: string; readonly certificateJti: string };
   const authority = input.authority as { readonly ref: string; readonly sha: string };

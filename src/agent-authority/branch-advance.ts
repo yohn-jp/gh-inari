@@ -14,7 +14,7 @@ import {
   type GitHubBranchAdvanceCapability,
 } from "../github/git-data-capability.js";
 import type { AdmittedSessionCapability } from "./capability-admission.js";
-import type { IssuerRepositoryIdentity } from "../github/issuer-authority.js";
+import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 
 export const BRANCH_ADVANCE_CONTRACT_VERSION = 1 as const;
 export const BRANCH_ADVANCE_OPERATION = "branch.advance" as const;
@@ -88,7 +88,7 @@ export interface BranchAdvanceValidationResult {
 }
 export interface BranchAdvanceCapabilityBroker {
   withBranchAdvanceCapability: <T>(
-    request: { readonly target: IssuerRepositoryIdentity },
+    request: { readonly target: RepositoryIdentity },
     operation: (capability: GitHubBranchAdvanceCapability) => Promise<T>,
   ) => Promise<T>;
 }

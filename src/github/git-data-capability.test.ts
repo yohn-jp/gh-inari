@@ -5,7 +5,7 @@ import {
   GitHubBranchAdvanceCapabilityImpl,
   type BranchAdvanceCapabilityTransport,
 } from "./git-data-capability.js";
-import type { IssuerInstallationScope } from "./issuer-authority.js";
+import type { AppInstallationScope } from "./effect-authorizer.js";
 
 const repository = { hostname: "github.com", owner: "acme", name: "inari" } as const;
 const repositoryIdentity = {
@@ -13,7 +13,7 @@ const repositoryIdentity = {
   repositoryId: "466000001",
   nameWithOwner: "acme/inari",
 } as const;
-const scope: IssuerInstallationScope = {
+const scope: AppInstallationScope = {
   app: { kind: "github-app", slug: "inari-issuer", appId: "466", principal: "app:inari-issuer" },
   installation: { appId: "466", installationId: "466001", repositoryHost: "github.com" },
   repository: repositoryIdentity,

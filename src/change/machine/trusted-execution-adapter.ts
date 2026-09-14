@@ -2,7 +2,7 @@
  * Trusted Change execution adapter.
  *
  * This module is the internal boundary between the semantic Core contracts,
- * the #216 effect adapter, the #217 issuer authority, and the XState
+ * the #216 Effect Adapter, the #217 Effect Authorizer, and the XState
  * operation machines. The public TrustedChangeExecutor delegates to this
  * adapter so its package-facing surface cannot become a second control-flow
  * authority.
@@ -41,13 +41,13 @@ import {
   type GitHubChangeEffectFailureEvidence,
 } from "../../github/change-effect-adapter.js";
 import {
-  ISSUER_AUTHORITY_CONTRACT_VERSION,
+  EFFECT_AUTHORIZER_CONTRACT_VERSION,
   INARI_ISSUER_PRINCIPAL,
-  type InariIssuerAppAuthority,
-  type IssuerMutationRequest,
-  type IssuerRepositoryIdentity,
+  type InariEffectAuthorizer,
+  type EffectAuthorizerMutationRequest,
+  type RepositoryIdentity,
   type TrustedExecutionContext,
-} from "../../github/issuer-authority.js";
+} from "../../github/effect-authorizer.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   type ChangeEffectEvidence,
@@ -91,12 +91,26 @@ export interface ChangeTrustedEvidenceReader {
   readonly requiresGovernedIssueValidation?: boolean;
 }
 
-export interface ChangeTrustedExecutorOptions {
+interface ChangeTrustedExecutorOptionsBase {
   readonly reader: ChangeTrustedEvidenceReader;
-  readonly issuerAuthority: Pick<InariIssuerAppAuthority, "applyEffects">;
   readonly execution: TrustedExecutionContext;
-  readonly target: IssuerRepositoryIdentity;
+  readonly target: RepositoryIdentity;
 }
+
+export type ChangeTrustedExecutorOptions = ChangeTrustedExecutorOptionsBase &
+  /** Canonical App-side effect admission boundary. */
+  (
+    | {
+        readonly effectAuthorizer: Pick<InariEffectAuthorizer, "applyEffects">;
+        /** @deprecated Use `effectAuthorizer`. */
+        readonly issuerAuthority?: Pick<InariEffectAuthorizer, "applyEffects">;
+      }
+    /** @deprecated Use `effectAuthorizer`. */
+    | {
+        readonly effectAuthorizer?: Pick<InariEffectAuthorizer, "applyEffects">;
+        readonly issuerAuthority: Pick<InariEffectAuthorizer, "applyEffects">;
+      }
+  );
 
 export type ChangeTrustedExecutorErrorCode =
   | "CHANGE_EXECUTION_READ_FAILED"
@@ -383,13 +397,13 @@ function verifyProjection(plan: PlannedChange, projection: ChangeProjectionResul
   }
 }
 
-function issuerMutation(
+function effectAuthorizationRequest(
   execution: TrustedExecutionContext,
-  target: IssuerRepositoryIdentity,
+  target: RepositoryIdentity,
   effect: ChangeEffect,
-): IssuerMutationRequest {
+): EffectAuthorizerMutationRequest {
   return {
-    version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+    version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
     authority: "issuer",
     execution,
     target,
@@ -409,13 +423,15 @@ const DEFAULT_ABORT_READ_FAILURE = {
 
 export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #reader: ChangeTrustedEvidenceReader;
-  readonly #issuerAuthority: Pick<InariIssuerAppAuthority, "applyEffects">;
+  readonly #effectAuthorizer: Pick<InariEffectAuthorizer, "applyEffects">;
   readonly #execution: TrustedExecutionContext;
-  readonly #target: IssuerRepositoryIdentity;
+  readonly #target: RepositoryIdentity;
 
   constructor(options: ChangeTrustedExecutorOptions) {
     this.#reader = options.reader;
-    this.#issuerAuthority = options.issuerAuthority;
+    const effectAuthorizer = options.effectAuthorizer ?? options.issuerAuthority;
+    if (effectAuthorizer === undefined) throw new Error("An Effect Authorizer is required.");
+    this.#effectAuthorizer = effectAuthorizer;
     this.#execution = options.execution;
     this.#target = options.target;
   }
@@ -557,7 +573,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
     effect: Extract<ChangeEffect, { readonly kind: "MARK_PULL_REQUEST_READY" }>,
   ): Promise<ReadyEffectResult> {
     try {
-      await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+      await this.#effectAuthorizer.applyEffects(effectAuthorizationRequest(this.#execution, this.#target, effect));
       return { ok: true };
     } catch (error: unknown) {
       const failure = failureFor(effect);
@@ -890,7 +906,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
 
   private async applyAbortEffect(effect: AbortEffect): Promise<AbortEffectResult> {
     try {
-      await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+      await this.#effectAuthorizer.applyEffects(effectAuthorizationRequest(this.#execution, this.#target, effect));
       return { ok: true };
     } catch (error: unknown) {
       const failure = failureFor(effect);
@@ -1099,7 +1115,9 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
 
   private async applyIssuanceEffect(effect: IssuanceEffect): Promise<IssuanceEffectResult> {
     try {
-      const mutation = await this.#issuerAuthority.applyEffects(issuerMutation(this.#execution, this.#target, effect));
+      const mutation = await this.#effectAuthorizer.applyEffects(
+        effectAuthorizationRequest(this.#execution, this.#target, effect),
+      );
       const evidence = mutation.effects[0]?.evidence;
       return { ok: true, ...(evidence === undefined ? {} : { evidence }) };
     } catch (error: unknown) {

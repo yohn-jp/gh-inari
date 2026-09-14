@@ -18,7 +18,7 @@ import type {
 import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "./types.js";
 import type { RuntimeAuthoritySourceReader } from "../agent-authority/runtime-authority-trust.js";
-import type { IssuerRepositoryIdentity } from "./issuer-authority.js";
+import type { RepositoryIdentity } from "./effect-authorizer.js";
 
 const MAX_REPOSITORY_REF_LENGTH = 255;
 const MAX_REPOSITORY_SHA_LENGTH = 128;
@@ -78,7 +78,7 @@ function repositoryPath(repository: GitHubChangeEffectRepository, suffix = ""): 
 export function createRepositoryEvidenceReader(
   transport: GitHubAppRepositoryReadTransport,
   repository: GitHubChangeEffectRepository,
-  identity: IssuerRepositoryIdentity,
+  identity: RepositoryIdentity,
 ): RuntimeAuthoritySourceReader {
   const context: RepositoryContext = repositoryContext(identity);
   return {
@@ -165,12 +165,12 @@ export function createRepositoryEvidenceReader(
 export function createAppRepositoryEvidenceReader(
   capability: GitHubAppRepositoryReadCapability,
   repository: GitHubChangeEffectRepository,
-  identity: IssuerRepositoryIdentity,
+  identity: RepositoryIdentity,
 ): RuntimeAuthoritySourceReader {
   return createRepositoryEvidenceReader(capability.transport, repository, identity);
 }
 
-function repositoryContext(identity: IssuerRepositoryIdentity): RepositoryContext {
+function repositoryContext(identity: RepositoryIdentity): RepositoryContext {
   const parts = identity.nameWithOwner.split("/");
   if (parts.length !== 2) fail();
   const owner = parts[0] as string;

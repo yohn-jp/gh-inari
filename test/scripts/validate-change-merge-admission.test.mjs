@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderPullRequestArtifact } from "../../src/artifact.ts";
 import { pullRequestContractFixture } from "../../src/contract/fixtures.ts";
-import { INARI_ISSUER_PRINCIPAL } from "../../src/github/issuer-authority.ts";
+import { INARI_ISSUER_PRINCIPAL } from "../../src/github/effect-authorizer.ts";
 import {
   classifyChangePullRequestContract,
   failureReport,

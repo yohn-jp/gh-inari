@@ -38,19 +38,19 @@ import {
 import { ChangeTrustedExecutorError, TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
   INARI_ISSUER_PRINCIPAL,
-  type IssuerCredentialRequest,
-  type IssuerMutationRequest,
-  type IssuerMutationResult,
-  type IssuerRepositoryIdentity,
+  type EffectAuthorizerCredentialRequest,
+  type EffectAuthorizerMutationRequest,
+  type EffectAuthorizerMutationResult,
+  type RepositoryIdentity,
   type TrustedExecutionContext,
-} from "./issuer-authority.js";
+} from "./effect-authorizer.js";
 import { changeMutationRequest, changeReadRequest } from "../change-execution-port.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority, canonicalRuntimeAuthorityJson } from "../agent-authority/runtime-authority.js";
 import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
 
 const repository = { hostname: "github.com", owner: "acme", name: "inari" } as const;
-const target: IssuerRepositoryIdentity = {
+const target: RepositoryIdentity = {
   repositoryHost: "github.com",
   repositoryId: "218000001",
   nameWithOwner: "acme/inari",
@@ -92,7 +92,7 @@ function effectSuccessEvidence(effect: ChangeEffect): ChangeEffectSuccessEvidenc
   }
 }
 
-function issuerCredentialRequest(): IssuerCredentialRequest {
+function issuerCredentialRequest(): EffectAuthorizerCredentialRequest {
   return {
     version: 1,
     authority: "issuer",
@@ -736,7 +736,7 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
   );
 
   const effects: string[] = [];
-  const target: IssuerRepositoryIdentity = {
+  const target: RepositoryIdentity = {
     repositoryHost: "github.com",
     repositoryId: "218000001",
     nameWithOwner: "acme/inari",
@@ -753,8 +753,8 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
     fork: false,
     pullRequest: false,
   };
-  const issuerAuthority = {
-    applyEffects: async (input: IssuerMutationRequest): Promise<IssuerMutationResult> => {
+  const effectAuthorizer = {
+    applyEffects: async (input: EffectAuthorizerMutationRequest): Promise<EffectAuthorizerMutationResult> => {
       const effect = input.effects[0];
       assert.ok(effect);
       effects.push(effect.kind);
@@ -777,7 +777,7 @@ test("trusted executor preserves a reader's DEFINED pre-issuance projection and 
       };
     },
   };
-  const executor = new TrustedChangeExecutor({ reader, issuerAuthority, execution, target });
+  const executor = new TrustedChangeExecutor({ reader, effectAuthorizer, execution, target });
   const result = await executor.execute({
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     operation: "issue",

@@ -1,4 +1,9 @@
-# Inari issuer GitHub App authority
+# Inari App Principal and Effect Authorizer
+
+This document retains its historical filename for compatibility. The
+canonical implementation surfaces are `src/github/app-principal.ts` and
+`src/github/effect-authorizer.ts`; `src/github/issuer-authority.ts` is a
+compatibility module only.
 
 Runtime signer provisioning and per-runtime key ownership are documented in the subordinate
 [`Runtime Authority operations runbook`](./RUNTIME_AUTHORITY_OPERATIONS.md).
@@ -10,12 +15,13 @@ not introduce a second semantic authority.
 
 ## Role
 
-The Inari GitHub App has two distinct trusted capabilities: a least-privilege
-repository evidence reader used before admission, and the issuer mutation
-capability used only after admission. It is not a semantic API, a frontend, a
-reviewer, or a merge authority.
+The Inari GitHub App is the App Principal for provider access. The trusted
+composition contains two distinct capabilities: a least-privilege repository
+evidence reader used before admission, and an Effect Authorizer used only to
+admit already-planned effects. The App Principal is not a semantic API, a
+frontend, a reviewer, or a merge authority.
 
-Inari Core computes and validates `ChangeEffect` values. The issuer authority
+Inari Core computes and validates `ChangeEffect` values. The Effect Authorizer
 accepts only those explicit effects and checks the credential boundary around
 their application. It does not derive branch names, choose lifecycle
 transitions, validate PR policy, or implement idempotency and recovery.
@@ -34,8 +40,8 @@ initial effect set. `metadata: read` is GitHub's automatic baseline.
 | `MARK_PULL_REQUEST_READY`    | `pull_requests: write`                                  |
 | `CLOSE_PULL_REQUEST`         | `pull_requests: write`                                  |
 
-Read authority cannot apply a Change effect, and mutation authority cannot be
-used as a general evidence reader. The mutation ceiling remains:
+The read capability cannot apply a Change effect, and the Effect Authorizer
+cannot be used as a general evidence reader. The mutation ceiling remains:
 
 | Initial `ChangeEffect`    | GitHub App permission  |
 | ------------------------- | ---------------------- |
@@ -45,9 +51,9 @@ used as a general evidence reader. The mutation ceiling remains:
 | `MARK_PULL_REQUEST_READY` | `pull_requests: write` |
 | `CLOSE_PULL_REQUEST`      | `pull_requests: write` |
 
-The issuer does not request Issue write, administration, Actions, workflow,
-review/approval, or merge permissions. `issues: read` is read-only evidence
-authority and is never part of a mutation request. When one effect is applied,
+The App Principal does not request Issue write, administration, Actions,
+workflow, review/approval, or merge permissions. `issues: read` is read-only
+evidence access and is never part of a mutation request. When one effect is applied,
 the short-lived credential is requested with only that effect's required
 permission. A Change issuance containing branch and PR effects requests the
 union of those two requirements.
@@ -76,7 +82,7 @@ evidence / admission
 admitted Change effect
         │ no App credential
         ▼
-trusted issuer authority
+trusted Effect Authorizer
         │ obtains a fresh mutation credential
         │ selects one repository and admitted permissions
         ▼
@@ -89,10 +95,10 @@ GitHub effect adapter
 ```
 
 The App private key and installation token exist only inside the trusted
-broker implementation. The request, scope evidence, mutation receipt, and
-authority errors contain no credential value. Broker errors are sanitized at
-the authority boundary so an accidental token-bearing provider error cannot
-cross to a caller.
+Credential Broker implementation. The request, scope evidence, mutation
+receipt, and Effect Authorizer errors contain no credential value. Broker
+errors are sanitized at the Effect Authorizer boundary so an accidental
+token-bearing provider error cannot cross to a caller.
 
 The broker must obtain a new short-lived credential for each operation; it
 must not cache or return a reusable bearer credential. The read capability
@@ -102,7 +108,7 @@ private key, authorization header, or general GitHub client.
 
 ## Identity and scope proof
 
-Every issuer operation carries all of these identities:
+Every Effect Authorizer operation carries all of these identities:
 
 - App identity: `kind=github-app`, slug `inari-issuer`, configured App ID,
   principal `app:inari-issuer`.
@@ -132,7 +138,7 @@ repository ID tuple.
 
 ## Trusted execution
 
-The authority accepts only an explicit trusted execution context from the
+The Effect Authorizer accepts only an explicit trusted execution context from the
 protected remote runtime:
 
 - runtime `github-actions`;
@@ -142,7 +148,8 @@ protected remote runtime:
 - `fork=false` and `pullRequest=false`.
 
 `pull_request`, `pull_request_target`, fork execution, PR merge refs,
-untrusted checkout, and unknown events cannot obtain issuer credentials. A
+untrusted checkout, and unknown events cannot obtain App Principal Provider
+Credentials. A
 privileged runtime must execute its protected workflow and canonical Inari
 dependencies without checking out or executing PR-controlled code. Repository
 protection, owner review, and immutable dependency controls protect the code
@@ -150,15 +157,17 @@ that constructs the trusted context.
 
 ## Authority separation
 
-The requester may be a human or agent, while the mutation issuer is always
-the Inari App. Commit authorship remains implementation provenance. Review and
-approval belong to a human or independent review authority; the issuer
-authority has no approve/review operation and cannot approve its own PR. Merge
-admission remains repository policy and is outside this module.
+The requester may be a human or agent, while the provider effect is performed
+as the Inari App Principal. Commit authorship remains implementation
+provenance. Review and approval belong to a human or independent review
+authority; the Effect Authorizer has no approve/review operation and cannot
+approve its own PR. Merge admission remains repository policy and is outside
+this module.
 
 ## Boundary with Issue #218
 
-This issue establishes the typed authority and broker contract. It does not
+This issue establishes the typed Effect Authorizer and Credential Broker
+contract. It does not
 add an Actions workflow, workflow dispatch API, checkout behavior, semantic
 request routing, effect journal, projection verification, or retry executor.
 Those are trusted execution responsibilities of Issue #218 and must consume
