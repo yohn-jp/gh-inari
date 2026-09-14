@@ -4,7 +4,7 @@ Status: normative implementation architecture for Epic #345 and child Issue #346
 
 ## 1. Purpose
 
-Inari already models governed Change lifecycle state and trusted execution semantics. The current implementation distributes those semantics across transition tables, projection helpers, planners, validators, recovery classifiers, and imperative trusted-executor sequencing.
+Inari models governed Change lifecycle state and trusted execution semantics through Change Core, XState operation machines, and bounded adapters.
 
 This document fixes the boundary for migrating that control flow to XState v5 without moving semantic authority, repository truth, or provider I/O into the machine runtime.
 
@@ -129,11 +129,12 @@ This layout is illustrative. Ownership boundaries are normative; exact filenames
 
 ### 3.1 Existing code mapping
 
-During migration:
+The converged implementation:
 
-- `src/change.ts` remains the source of public Change contract, projection/planning semantics, canonical serialization, and existing transition compatibility until those concerns are safely split.
-- `CHANGE_TRANSITION_RULES` is migration-era compatibility authority only after the lifecycle machine proves exact parity. It must not remain an independent long-term transition authority.
-- `src/change-trusted-executor.ts` currently owns imperative sequencing. Its end state is a thin adapter around operation actors.
+- `src/change.ts` remains the source of public Change contract, projection/planning semantics, and canonical serialization.
+- `src/change/machine/lifecycle-machine.ts` is the sole executable lifecycle transition authority; no production transition table mirrors it.
+- `src/change-trusted-executor.ts` is a stable public adapter around the internal operation-machine runtime.
+- `src/change/machine/trusted-execution-adapter.ts` binds Core semantics and bounded I/O to the operation actors without owning their sequencing.
 - Existing projection helpers remain semantic read-model functions outside XState.
 - Existing Semantic Branch and Semantic PR plan functions remain desired-state authorities outside XState.
 - Existing GitHub effect executors remain provider-I/O boundaries outside XState.
@@ -206,7 +207,7 @@ Event names are internal implementation details, but there must be a one-to-one 
 
 ### 4.4 Parity requirement
 
-Before the existing transition table can cease being authoritative, tests must exhaustively compare all current public state/event combinations.
+The lifecycle parity suite exhaustively compares all current public state/event combinations against a test-only expected set.
 
 For every combination, the machine must prove one of:
 
@@ -588,9 +589,9 @@ Testing has three distinct layers.
 
 ### 17.1 Lifecycle parity tests
 
-Before replacing `CHANGE_TRANSITION_RULES`, exhaustively test every public state/event pair against the pre-migration contract.
+The lifecycle parity suite keeps its expected state/event pairs as test-only data and exhaustively checks them against the production machine.
 
-This is the migration gate for #347.
+This prevents a compatibility oracle from becoming a second production authority.
 
 ### 17.2 Focused operation tests
 
@@ -626,7 +627,7 @@ Merge this architecture before runtime migration.
 
 ### Phase 1 — #347 lifecycle machine
 
-Introduce exact-pinned XState v5 and the pure lifecycle machine. Prove complete parity before retiring the existing transition table as authority.
+The pure lifecycle machine owns executable legality, with exhaustive parity coverage retained as a regression guard.
 
 ### Phase 2 — #348 Ready execution
 
@@ -646,7 +647,7 @@ Add structural reachable-path coverage over production machines.
 
 ### Phase 6 — #352 convergence
 
-Reduce `TrustedChangeExecutor` to dependency injection, actor invocation, and public-result mapping. Remove superseded imperative sequencing/recovery classifiers and duplicate transition authority.
+Reduce `TrustedChangeExecutor` to the stable public adapter boundary. Keep dependency injection, actor invocation, Core semantic callbacks, and public-result mapping in the internal runtime adapter; remove superseded imperative sequencing/recovery branches and duplicate transition authority.
 
 At every intermediate phase, supported public behavior must remain compatible.
 

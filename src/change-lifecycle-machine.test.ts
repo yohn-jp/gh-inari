@@ -1,18 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  CHANGE_STATES,
-  CHANGE_TRANSITION_OPERATIONS,
-  CHANGE_TRANSITION_RULES,
-  type ChangeState,
-  type ChangeTransition,
-} from "./change.js";
+import { CHANGE_STATES, CHANGE_TRANSITION_OPERATIONS, type ChangeState, type ChangeTransition } from "./change.js";
 import { createChangeLifecycleMachine, transitionChangeLifecycle } from "./change/machine/lifecycle-machine.js";
 
-test("XState lifecycle machine has complete parity with the migration transition contract", () => {
+const EXPECTED_TRANSITIONS: ReadonlyMap<string, { readonly from: ChangeState; readonly to: ChangeState }> = new Map([
+  ["issue/DEFINED", { from: "DEFINED", to: "DRAFT" }],
+  ["ready/DRAFT", { from: "DRAFT", to: "REVIEW" }],
+  ["ready/REVIEW", { from: "REVIEW", to: "REVIEW" }],
+  ["abort/DRAFT", { from: "DRAFT", to: "ABORTED" }],
+  ["abort/REVIEW", { from: "REVIEW", to: "ABORTED" }],
+  ["abort/ABORTED", { from: "ABORTED", to: "ABORTED" }],
+  ["abort/RECOVERY_REQUIRED", { from: "RECOVERY_REQUIRED", to: "ABORTED" }],
+]);
+
+test("XState lifecycle machine has complete parity with the test-only transition oracle", () => {
   for (const state of CHANGE_STATES) {
     for (const operation of CHANGE_TRANSITION_OPERATIONS) {
-      const expected = CHANGE_TRANSITION_RULES.find((rule) => rule.from === state && rule.transition === operation);
+      const expected = EXPECTED_TRANSITIONS.get(`${operation}/${state}`);
       const result = transitionChangeLifecycle(state, operation);
 
       assert.equal(result.from, state, `${state}/${operation} source state`);
