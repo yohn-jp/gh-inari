@@ -7,16 +7,10 @@
  * never derives a branch name or source from Change, Issue, or free-form input.
  */
 
-import { createHash } from "node:crypto";
-import {
-  ArtifactContractResolutionError,
-  type ArtifactContractResolutionDiagnostic,
-} from "./artifact-contract-governance.js";
-import { compileEffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
-import { ArtifactContractValidationError, parseArtifactContract } from "./contract/artifact-contract.js";
+import { compileRepositoryEffectiveBranchContract } from "./artifact-contract-governance.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import type { ArtifactContractProvenance } from "./contract/ir.js";
-import { GitHubAdapter, type GitHubBranch, type RepositoryTreeEntry } from "./github/index.js";
+import { GitHubAdapter, type GitHubBranch } from "./github/index.js";
 import {
   SEMANTIC_BRANCH_MUTATION_PLAN_VERSION,
   serializeSemanticBranchMutationPlan,
@@ -123,8 +117,6 @@ export interface SemanticBranchExecutionPort {
 
 type RecordValue = Record<string, unknown>;
 
-const BRANCH_CANON_PATH = ".github/inari/canon/branch.json";
-
 function isRecord(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -230,102 +222,6 @@ function revalidationFailed(diagnostics: readonly SemanticBranchExecutionDiagnos
     "Semantic Branch execution-time Core revalidation failed.",
     diagnostics,
   );
-}
-
-function sourceProvenance(
-  context: Awaited<ReturnType<GitHubAdapter["resolveRepositoryContext"]>>,
-  ref: string,
-  treeSha: string,
-  entry: RepositoryTreeEntry,
-  source: string,
-): ArtifactContractProvenance {
-  return {
-    authority: "repository-default-branch",
-    repository: {
-      host: context.hostname,
-      owner: context.owner,
-      name: context.name,
-      nameWithOwner: context.nameWithOwner,
-      ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
-    },
-    ref,
-    treeSha,
-    source: {
-      path: entry.path,
-      ref,
-      sha: entry.sha,
-      digest: createHash("sha256").update(source, "utf8").digest("hex"),
-    },
-  };
-}
-
-async function compileRepositoryEffectiveBranchContract(adapter: GitHubAdapter, selector?: string) {
-  const context = await adapter.resolveRepositoryContext();
-  const ref = await adapter.getRepositoryDefaultBranch();
-  const tree = await adapter.getRepositoryTree(ref);
-  if (selector !== undefined && selector !== BRANCH_CANON_PATH && selector !== "branch" && selector !== "default") {
-    const diagnostic: ArtifactContractResolutionDiagnostic = {
-      code: "ARTIFACT_CONTRACT_NOT_FOUND",
-      path: "$.selector",
-      message: `Branch Artifact Contract selector "${selector}" is not supported.`,
-    };
-    throw new ArtifactContractResolutionError(
-      "ARTIFACT_CONTRACT_NOT_FOUND",
-      diagnostic.path,
-      diagnostic.message,
-      { repository: context.nameWithOwner, ref, path: BRANCH_CANON_PATH },
-      [diagnostic],
-    );
-  }
-  const entry = tree.entries.find((candidate) => candidate.path === BRANCH_CANON_PATH && candidate.type === "blob");
-  if (entry === undefined) {
-    throw new ArtifactContractResolutionError(
-      "ARTIFACT_CONTRACT_NOT_FOUND",
-      "$.source",
-      `Branch Artifact Contract Canon "${BRANCH_CANON_PATH}" was not found for ${context.nameWithOwner}.`,
-      { repository: context.nameWithOwner, ref, path: BRANCH_CANON_PATH },
-    );
-  }
-  const source = await adapter.getRepositoryBlob(entry.sha);
-  let raw: unknown;
-  try {
-    raw = JSON.parse(source) as unknown;
-  } catch {
-    throw new ArtifactContractResolutionError(
-      "ARTIFACT_CONTRACT_SOURCE_INVALID",
-      BRANCH_CANON_PATH,
-      `Artifact Contract Canon "${BRANCH_CANON_PATH}" is not valid JSON.`,
-    );
-  }
-  try {
-    const contract = parseArtifactContract(raw);
-    if (contract.kind !== "branch") {
-      throw new ArtifactContractResolutionError(
-        "ARTIFACT_CONTRACT_KIND_INVALID",
-        "$.kind",
-        `Artifact Contract Canon "${BRANCH_CANON_PATH}" must declare kind "branch".`,
-      );
-    }
-    return compileEffectiveArtifactContract(contract, {
-      provenance: sourceProvenance(context, ref, tree.sha, entry, source),
-    });
-  } catch (error: unknown) {
-    if (error instanceof ArtifactContractResolutionError) throw error;
-    if (error instanceof ArtifactContractValidationError) {
-      throw new ArtifactContractResolutionError(
-        "ARTIFACT_CONTRACT_SOURCE_INVALID",
-        BRANCH_CANON_PATH,
-        `Artifact Contract Canon "${BRANCH_CANON_PATH}" failed Core validation.`,
-        { violations: error.violations },
-        error.violations,
-      );
-    }
-    throw new ArtifactContractResolutionError(
-      "ARTIFACT_CONTRACT_SOURCE_INVALID",
-      BRANCH_CANON_PATH,
-      `Artifact Contract Canon "${BRANCH_CANON_PATH}" failed Core compilation.`,
-    );
-  }
 }
 
 export class SemanticBranchExecutor implements SemanticBranchExecutionPort {

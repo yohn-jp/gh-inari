@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import {
+  ArtifactContractResolutionError,
+  compileRepositoryEffectiveBranchContract,
+} from "./artifact-contract-governance.js";
 import { compileEffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
 import { parseArtifactContract } from "./contract/artifact-contract.js";
 import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
@@ -32,6 +36,18 @@ const canon = JSON.stringify({
   },
 });
 
+const wrongKindCanon = JSON.stringify({
+  version: "1",
+  kind: "pull_request",
+  id: "wrong-kind",
+  properties: {
+    title: { presence: "required", authority: { kind: "supplied" } },
+    head: { presence: "required", authority: { kind: "supplied" } },
+    base: { presence: "required", authority: { kind: "fixed", value: "main" } },
+  },
+  fields: [{ id: "summary", primitive: "text", presence: "required", authority: { kind: "supplied" } }],
+});
+
 const provenance: ArtifactContractProvenance = {
   authority: "repository-default-branch",
   repository: {
@@ -44,7 +60,7 @@ const provenance: ArtifactContractProvenance = {
   ref: "main",
   treeSha: "tree-sha",
   source: {
-    path: ".github/inari/canon/branch.json",
+    path: ".github/inari/branches/default.json",
     ref: "main",
     sha: "canon-sha",
     digest: createHash("sha256").update(canon, "utf8").digest("hex"),
@@ -62,10 +78,23 @@ function included(status: number, body: unknown): string {
 class ExecutorTransport implements GhTransport {
   readonly calls: string[][] = [];
   readonly targetAlreadyExists: boolean;
+  private readonly canonPath: string;
+  private readonly canonSource: string;
+  private readonly treeEntries: readonly { readonly path: string; readonly type: string; readonly sha: string }[];
   private created = false;
 
-  constructor(targetAlreadyExists = false) {
+  constructor(
+    targetAlreadyExists = false,
+    options: {
+      readonly canonPath?: string;
+      readonly canonSource?: string;
+      readonly treeEntries?: readonly { readonly path: string; readonly type: string; readonly sha: string }[];
+    } = {},
+  ) {
     this.targetAlreadyExists = targetAlreadyExists;
+    this.canonPath = options.canonPath ?? ".github/inari/branches/default.json";
+    this.canonSource = options.canonSource ?? canon;
+    this.treeEntries = options.treeEntries ?? [{ path: this.canonPath, type: "blob", sha: "canon-sha" }];
   }
 
   async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
@@ -82,7 +111,7 @@ class ExecutorTransport implements GhTransport {
         JSON.stringify({
           sha: "tree-sha",
           truncated: false,
-          tree: [{ path: ".github/inari/canon/branch.json", type: "blob", sha: "canon-sha" }],
+          tree: this.treeEntries,
         }),
       );
     }
@@ -91,7 +120,7 @@ class ExecutorTransport implements GhTransport {
         JSON.stringify({
           sha: "canon-sha",
           encoding: "base64",
-          content: Buffer.from(canon, "utf8").toString("base64"),
+          content: Buffer.from(this.canonSource, "utf8").toString("base64"),
         }),
       );
     }
@@ -121,15 +150,27 @@ function request(plan: unknown, input?: unknown): SemanticBranchExecutionRequest
   return { version: "1", plan, ...(input === undefined ? {} : { input }) };
 }
 
+async function rejected(operation: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await operation();
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error("Expected operation to reject.");
+}
+
 test("local Semantic Branch Executor admits, creates, rereads, and verifies a plan", async () => {
   const transport = new ExecutorTransport();
-  const artifact = inputArtifact();
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const effective = await compileRepositoryEffectiveBranchContract(adapter, "default");
+  const artifact = materializeSemanticArtifact(effective, { type: "feat", slug: "execute" });
   const plan = planSemanticBranch({ artifact });
-  const result = await new SemanticBranchExecutor({
-    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
-  }).execute(request(plan, { type: "feat", slug: "execute" }));
+  const result = await new SemanticBranchExecutor({ adapter }).execute(
+    request(plan, { type: "feat", slug: "execute" }),
+  );
 
   assert.equal(result.evidence.outcome, "verified");
+  assert.deepEqual(result.plan.generation, effective.generation);
   assert.deepEqual(result.projection, {
     kind: "branch",
     name: "feat/execute",
@@ -173,4 +214,60 @@ test("local Semantic Branch Executor fails closed for a tampered plan", async ()
       error instanceof SemanticBranchExecutorError && error.code === "SEMANTIC_BRANCH_EXECUTION_PLAN_INVALID",
   );
   assert.equal(transport.calls.length, 0);
+});
+
+test("Semantic Branch execution preserves shared Canon resolution diagnostics", async () => {
+  const invalidCases = [
+    {
+      name: "missing Canon",
+      options: { treeEntries: [] },
+      code: "ARTIFACT_CONTRACT_NOT_FOUND",
+    },
+    {
+      name: "invalid JSON",
+      options: { canonSource: "{" },
+      code: "ARTIFACT_CONTRACT_SOURCE_INVALID",
+    },
+    {
+      name: "wrong kind",
+      options: { canonSource: wrongKindCanon },
+      code: "ARTIFACT_CONTRACT_KIND_INVALID",
+    },
+    {
+      name: "invalid contract",
+      options: { canonSource: JSON.stringify({}) },
+      code: "ARTIFACT_CONTRACT_SOURCE_INVALID",
+    },
+  ] as const;
+  const plan = planSemanticBranch({ artifact: inputArtifact() });
+
+  for (const invalidCase of invalidCases) {
+    const sharedTransport = new ExecutorTransport(false, invalidCase.options);
+    const sharedAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: sharedTransport });
+    const sharedError = await rejected(() => compileRepositoryEffectiveBranchContract(sharedAdapter));
+    assert.ok(sharedError instanceof ArtifactContractResolutionError, invalidCase.name);
+    assert.equal(sharedError.code, invalidCase.code, invalidCase.name);
+
+    const executorTransport = new ExecutorTransport(false, invalidCase.options);
+    const executorAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: executorTransport });
+    const executorError = await rejected(() =>
+      new SemanticBranchExecutor({ adapter: executorAdapter }).execute(request(plan)),
+    );
+    assert.ok(executorError instanceof ArtifactContractResolutionError, invalidCase.name);
+    assert.deepEqual(
+      {
+        code: executorError.code,
+        path: executorError.path,
+        message: executorError.message,
+        diagnostics: executorError.diagnostics,
+      },
+      {
+        code: sharedError.code,
+        path: sharedError.path,
+        message: sharedError.message,
+        diagnostics: sharedError.diagnostics,
+      },
+      invalidCase.name,
+    );
+  }
 });
