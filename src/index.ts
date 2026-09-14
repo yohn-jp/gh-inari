@@ -91,6 +91,8 @@ export * from "./golden-path-status.js";
 export * from "./release-certification.js";
 export * from "./agent-authority/index.js";
 export * from "./session-authorized-change-executor.js";
+export * from "./cross-deployment-conformance.js";
+export * from "./cross-deployment-conformance-fixtures.js";
 export * from "./mcp/index.js";
 export {
   discoverTemplates,
