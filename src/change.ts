@@ -7,7 +7,7 @@
  * GitHub state or execute effects.
  */
 
-import { deriveBranchName } from "../branch-naming-authority.mjs";
+import { deriveBranchName, type BranchNaming } from "./branch-naming.js";
 import { resolveChangeLifecycleTransition } from "./change/machine/lifecycle-machine.js";
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { validateSemanticBranchMutationPlan, type SemanticBranchMutationPlan } from "./semantic-branch-projection.js";
@@ -65,12 +65,8 @@ export const MAX_CHANGE_IDEMPOTENCY_KEY_LENGTH = 512 as const;
 export const MAX_CHANGE_PR_TITLE_LENGTH = 255 as const;
 export const MAX_CHANGE_PR_BODY_LENGTH = 65_536 as const;
 
-export interface CanonicalBranchNamingInput {
-  /** Repository-governed branch classification, not a complete branch name. */
-  readonly type: string;
-  /** Repository-governed, grammar-compatible branch slug. */
-  readonly slug: string;
-}
+/** Compatibility name for the Core branch naming parts consumed by Change. */
+export type CanonicalBranchNamingInput = BranchNaming;
 
 /** Stable repository identity plus the root Issue number. */
 export interface ChangeIdentity {
@@ -1585,7 +1581,7 @@ function validateConsumedSemanticBranchPlan(
  *
  * @deprecated Compatibility-only v1 adapter path. Converged callers pass a
  * Core-produced Branch plan to `projectChangeFromGitHubEvidence` instead.
- * The branch grammar is owned by the shared branch authority. This function
+ * The branch grammar is owned by the Core branch-naming rule. This function
  * only supplies the Change Issue number, verifies the repository policy, and
  * returns a pure projection; it never creates or updates a Git ref.
  */

@@ -36,6 +36,10 @@
       "types": "./dist/change.d.ts",
       "import": "./dist/change.js"
     },
+    "./branch-naming": {
+      "types": "./dist/branch-naming.d.ts",
+      "import": "./dist/branch-naming.js"
+    },
     "./change-provenance-record": {
       "types": "./dist/change-provenance-record.d.ts",
       "import": "./dist/change-provenance-record.js"

@@ -12,11 +12,11 @@
  * kind for them to begin with.
  *
  * Branch and pull-request-head identity reuses the repository's one branch
- * grammar (`branch-naming-authority.mjs`) instead of a second parallel
+ * grammar (`branch-naming.ts`) instead of a second parallel
  * pattern.
  */
 
-import { validateBranchName } from "../../branch-naming-authority.mjs";
+import { validateBranchName } from "../branch-naming.js";
 
 export const CAPABILITY_KINDS = Object.freeze([
   "change.implement",

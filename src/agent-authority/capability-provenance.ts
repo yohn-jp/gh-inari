@@ -10,7 +10,7 @@
 import { validateCapabilityClaim, MAX_ISSUE_NUMBER, type CapabilityClaim } from "./capability.js";
 import type { CapabilityAdmissionSubject } from "./capability-admission.js";
 import { MAX_OPAQUE_ID_LENGTH, MAX_UNIX_TIME_SECONDS } from "./session-certificate.js";
-import { validateBranchName } from "../../branch-naming-authority.mjs";
+import { validateBranchName } from "../branch-naming.js";
 import {
   MAX_SESSION_AGENT_METADATA_KEYS,
   MAX_SESSION_AGENT_METADATA_TEXT_LENGTH,
