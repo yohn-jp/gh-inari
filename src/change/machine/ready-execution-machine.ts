@@ -95,6 +95,8 @@ export interface ReadyExecutionResults {
 
 export interface ReadyExecutionServices {
   readonly request: ChangeMutationRequest;
+  /** Requester provenance derived by the trusted execution boundary. */
+  readonly trustedRequester?: string;
   /** The read actor is the only machine boundary for repository evidence I/O. */
   readonly read: (request: ChangeMutationRequest) => Promise<ReadyReadResult>;
   /** The effect actor is the only machine boundary for the privileged GitHub mutation. */
@@ -290,7 +292,7 @@ export const readyExecutionMachine = setup({
           const validationInput = context.services.semantics.validationInput(
             input,
             projection.change,
-            context.services.request.requester,
+            context.services.trustedRequester,
           );
           const validation = context.services.semantics.validate(validationInput);
           return validation.valid

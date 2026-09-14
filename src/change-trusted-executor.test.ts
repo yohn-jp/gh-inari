@@ -225,7 +225,7 @@ test("trusted execution actor is the sole requester provenance authority", async
   assert.equal(result.projection.change?.provenance.requester, "github:trusted-actor");
 });
 
-test("a caller requester that differs from the trusted actor fails closed", async () => {
+test("a caller requester assertion is rejected at the trusted boundary", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);
   const trustedExecution = { ...execution, requester: "github:trusted-actor" };
@@ -236,7 +236,7 @@ test("a caller requester that differs from the trusted actor fails closed", asyn
       operation: "issue",
       issue: identity.rootIssue,
       requester: "github:forged-actor",
-    }),
+    } as unknown as ChangeMutationRequest),
     (error: unknown) =>
       error instanceof ChangeTrustedExecutorError &&
       error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED" &&
@@ -248,11 +248,10 @@ test("a caller requester that differs from the trusted actor fails closed", asyn
 test("trusted issuance plans in Core, applies ordered effects, and verifies a fresh projection", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);
-  const result = await executor(reader, issuer).execute({
+  const result = await executor(reader, issuer, { ...execution, requester: "agent:alice" }).execute({
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     operation: "issue",
     issue: identity.rootIssue,
-    requester: "agent:alice",
   });
 
   assert.deepEqual(
@@ -750,11 +749,10 @@ test("DRAFT and REVIEW aborts close the canonical PR and delete only the canonic
       input(evidence([branch], { status: "available", value: [{ ...draftPullRequest(), draft }] })),
     );
     const issuer = new FakeIssuer(reader);
-    const result = await executor(reader, issuer).execute({
+    const result = await executor(reader, issuer, { ...execution, requester: "agent:aborter" }).execute({
       version: CHANGE_TRANSITION_CONTRACT_VERSION,
       operation: "abort",
       issue: identity.rootIssue,
-      requester: "agent:aborter",
     });
 
     assert.deepEqual(

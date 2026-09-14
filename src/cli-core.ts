@@ -1412,10 +1412,6 @@ function createChangeExecutor(
   const factory =
     dependencies.createChangeExecutor ??
     ((options: ChangeExecutionPortOptions) => {
-      // The GitHub Actions caller never supplies or resolves requester provenance: the
-      // trusted executor (workflow_dispatch's authenticated actor) is the sole authority
-      // for requester identity. See TrustedChangeExecutor.bindRequester().
-      const environment = dependencies.environment ?? process.env;
       const transportAdapter =
         adapter ??
         (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
@@ -1425,7 +1421,6 @@ function createChangeExecutor(
       return createActionsChangeExecutionAdapter({
         ...options,
         api: transportAdapter,
-        actionsCallerEnvironment: environment.GITHUB_ACTIONS === "true",
       });
     });
   return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
@@ -1670,13 +1665,7 @@ async function runChangeCommand(
       ? { projection: await readChangeProjection(executor, changeReadRequest(issue)) }
       : await executeChangeMutationResult(
           executor,
-          changeMutationRequest(
-            definition.operation as ChangeMutation,
-            issue,
-            undefined,
-            undefined,
-            signedProvenanceRecord,
-          ),
+          changeMutationRequest(definition.operation as ChangeMutation, issue, undefined, signedProvenanceRecord),
         );
   const projection = result.projection;
   if (definition.operation === "handoff") {

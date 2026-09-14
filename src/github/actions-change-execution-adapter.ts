@@ -9,12 +9,12 @@ import {
 } from "../change.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
-  canonicalGitHubRequester,
   ChangeExecutionPortError,
   changeMutationRequest,
   normalizeChangeExecutionEvidence,
   normalizeChangeExecutionResult,
   normalizeChangeProjection,
+  validateChangeRequest,
   type ChangeExecutionPort,
   type ChangeExecutionPortOptions,
   type ChangeExecutionEvidence,
@@ -58,7 +58,6 @@ export interface ActionsChangeExecutionAdapterApi {
   getRepositoryDefaultBranch(): Promise<string>;
   getRepositoryTree(ref: string): Promise<RepositoryTree>;
   getRepositoryBlob(sha: string): Promise<string>;
-  getAuthenticatedUser(): Promise<string>;
   requestActionsApi(
     actionsPath: string,
     method: "GET" | "POST",
@@ -74,14 +73,6 @@ export interface ActionsChangeExecutionAdapterApi {
 export interface ActionsChangeExecutionAdapterOptions extends ChangeExecutionPortOptions {
   /** Injectable repository/auth/API abstraction; the default is the normal gh session. */
   readonly api?: ActionsChangeExecutionAdapterApi;
-  /**
-   * True when this executor runs as the GitHub Actions caller (workflow A dispatching
-   * the trusted executor workflow), rather than the normal local/user path. Requester
-   * provenance is never resolved from `/user` in that case: the trusted executor
-   * (workflow B's authenticated actor) is the sole authority for requester identity.
-   * See TrustedChangeExecutor.bindRequester(). Never a public CLI option.
-   */
-  readonly actionsCallerEnvironment?: boolean;
   readonly maxPollAttempts?: number;
   readonly pollIntervalMs?: number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -432,7 +423,6 @@ function canonicalMutationRequest(request: ChangeMutationRequest): ChangeMutatio
   return changeMutationRequest(
     request.operation,
     request.issue,
-    request.requester,
     request.semanticPullRequestPlan,
     request.signedProvenanceRecord,
   );
@@ -445,7 +435,6 @@ function isNewRun(run: WorkflowRun, baseline: ReadonlySet<number>): boolean {
 export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #api: ActionsChangeExecutionAdapterApi;
   readonly #cwd: string;
-  readonly #actionsCallerEnvironment: boolean;
   readonly #maxPollAttempts: number;
   readonly #pollIntervalMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -454,7 +443,6 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   constructor(options: ActionsChangeExecutionAdapterOptions) {
     this.#cwd = options.cwd;
     this.#api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
-    this.#actionsCallerEnvironment = options.actionsCallerEnvironment === true;
     this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 60);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -462,7 +450,8 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   }
 
   async execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
-    const semanticRequest = await this.withRequester(canonicalMutationRequest(request));
+    validateChangeRequest(request);
+    const semanticRequest = canonicalMutationRequest(request);
     const result = await this.dispatchAndCollect(semanticRequest);
     if (result.failed) {
       throw remoteError(
@@ -476,6 +465,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
+    validateChangeRequest(request);
     const projection = await this.readCanonicalProjection(request);
     return normalizeChangeProjection("show", projection);
   }
@@ -516,29 +506,6 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     }
   }
 
-  private async withRequester(request: ChangeMutationRequest): Promise<ChangeMutationRequest> {
-    // The GitHub Actions caller (workflow A) never resolves or sends requester
-    // provenance: the trusted executor (workflow B) derives it from its own
-    // authenticated execution context. Restoring a /user lookup here would let a
-    // caller-observed actor collide with the actor workflow B actually authenticates
-    // as, which is exactly the trust violation this boundary exists to prevent.
-    if (request.requester !== undefined || this.#actionsCallerEnvironment) return request;
-    let requester: string;
-    try {
-      const login = await this.#api.getAuthenticatedUser();
-      requester = canonicalGitHubRequester(login);
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-    }
-    return changeMutationRequest(
-      request.operation,
-      request.issue,
-      requester,
-      request.semanticPullRequestPlan,
-      request.signedProvenanceRecord,
-    );
-  }
-
   private async dispatchAndCollect(request: ChangeMutationRequest): Promise<ActionResultEnvelope> {
     const correlation = this.#randomUUID();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(correlation)) {
@@ -563,7 +530,6 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
       operation: request.operation,
       issue: request.issue,
-      ...(request.requester === undefined ? {} : { requester: request.requester }),
       ...(request.semanticPullRequestPlan === undefined
         ? {}
         : { semanticPullRequestPlan: request.semanticPullRequestPlan }),

@@ -92,7 +92,7 @@ function assertBoundedPublicResult(operation: "issue" | "ready" | "abort", resul
 test("production issuance, Ready, and Abort machines consume one deterministic evidence fixture", async () => {
   const actors = createGoldenPathActors(absentEvidenceInput());
 
-  const issued = await actors.executor.execute(mutationRequest("issue", "agent:golden-path"));
+  const issued = await actors.executor.execute(mutationRequest("issue"));
   assert.deepEqual(
     actors.issuer.effects.map((effect) => effect.kind),
     ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST"],
@@ -119,7 +119,7 @@ test("production issuance, Ready, and Abort machines consume one deterministic e
   });
   assert.equal(issuedStatus.recovery, null);
 
-  const ready = await actors.executor.execute(mutationRequest("ready", "agent:golden-path"));
+  const ready = await actors.executor.execute(mutationRequest("ready"));
   assert.deepEqual(
     actors.issuer.effects.map((effect) => effect.kind),
     ["CREATE_BRANCH", "CREATE_PROVENANCE_COMMIT", "CREATE_PULL_REQUEST", "MARK_PULL_REQUEST_READY"],
@@ -139,7 +139,7 @@ test("production issuance, Ready, and Abort machines consume one deterministic e
   assert.deepEqual(readyStatus.nextAction, { kind: "REVIEW", owner: "repository", reasonCode: "REVIEW_ADMITTED" });
   assert.equal(readyStatus.recovery, null);
 
-  const aborted = await actors.executor.execute(mutationRequest("abort", "agent:golden-path"));
+  const aborted = await actors.executor.execute(mutationRequest("abort"));
   assert.deepEqual(
     actors.issuer.effects.map((effect) => effect.kind),
     [

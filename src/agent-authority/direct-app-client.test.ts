@@ -128,6 +128,35 @@ test("loads a valid Session credential bundle and signs a request with it", asyn
   }
 });
 
+test("rejects a caller requester assertion before signing or sending", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".direct-app-client-test-"));
+  try {
+    const { path: bundlePath } = await createBundleFile(dir);
+    const { session } = loadDirectAppSession(bundlePath);
+    let called = false;
+    const executor = createDirectAppChangeExecutionAdapter({
+      endpoint: new URL("https://app.example.com"),
+      session,
+      fetchImpl: fakeFetch(() => {
+        called = true;
+        return { status: 500, body: {} };
+      }),
+    });
+    await assert.rejects(
+      executor.execute({
+        version: 1,
+        issue: 467,
+        operation: "issue",
+        requester: "github:spoofed",
+      } as unknown as Parameters<typeof executor.execute>[0]),
+      (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_REQUEST_INVALID",
+    );
+    assert.equal(called, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("missing Session credential file fails closed without a network call", () => {
   assert.throws(
     () => loadDirectAppSession("/nonexistent/bundle.json"),

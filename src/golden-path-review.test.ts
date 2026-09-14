@@ -176,7 +176,6 @@ test("DRAFT implementation completion delegates only to semantic change ready an
   const executor = new FakeExecutor(result(false, "verified"));
   const output = await executeGoldenPathReviewAdmission({
     issue: identity.rootIssue,
-    requester: "agent:implementation",
     executor,
   });
 
@@ -195,7 +194,6 @@ test("DRAFT implementation completion delegates only to semantic change ready an
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     operation: "ready",
     issue: identity.rootIssue,
-    requester: "agent:implementation",
   });
   assert.deepEqual(executor.readRequests, []);
 });

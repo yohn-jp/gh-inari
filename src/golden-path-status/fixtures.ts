@@ -49,6 +49,7 @@ export const GOLDEN_PATH_EXECUTION: TrustedExecutionContext = Object.freeze({
   codeExecution: "trusted-only",
   fork: false,
   pullRequest: false,
+  requester: "agent:golden-path",
 });
 
 const BRANCH_GOVERNANCE = Object.freeze({
@@ -408,11 +409,10 @@ export function createGoldenPathActors(
   return { reader, issuer, executor };
 }
 
-export function mutationRequest(operation: "issue" | "ready" | "abort", requester?: string): ChangeMutationRequest {
+export function mutationRequest(operation: "issue" | "ready" | "abort"): ChangeMutationRequest {
   return {
     version: 1,
     operation,
     issue: GOLDEN_PATH_IDENTITY.rootIssue,
-    ...(requester === undefined ? {} : { requester }),
   };
 }
