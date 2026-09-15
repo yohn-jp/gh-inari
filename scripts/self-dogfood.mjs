@@ -42,7 +42,13 @@ export const MAX_DIAGNOSTIC_MESSAGE = MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGT
 const [CERTIFICATION_RESULT_PASSED, , CERTIFICATION_RESULT_BLOCKED] = CERTIFICATION_RESULTS;
 export const SELF_DOGFOOD_OPERATIONS = CERTIFICATION_SELF_DOGFOOD_OPERATIONS;
 export const SELF_DOGFOOD_OUTCOMES = CERTIFICATION_SELF_DOGFOOD_OUTCOMES;
-const COMMAND_TIMEOUT_MS = 120_000;
+// Must stay strictly greater than the installed CLI's own internal Actions
+// transport wait deadline (DEFAULT_MAX_WAIT_MS in
+// src/github/actions-change-execution-adapter.ts, currently 240_000ms real
+// wall-clock time, not just DEFAULT_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_MS
+// of sleep). An equal or smaller value races the outer spawnSync timeout
+// against the CLI's own internal wait and can kill an otherwise-healthy run.
+const COMMAND_TIMEOUT_MS = 300_000;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const REPOSITORY_PATTERN = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/u;

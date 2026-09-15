@@ -284,14 +284,21 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   }
 }
 
-function executor(api: FakeActionsApi, cwd = process.cwd(), maxPollAttempts = 2) {
+function executor(
+  api: FakeActionsApi,
+  cwd = process.cwd(),
+  maxPollAttempts = 2,
+  extra: { maxWaitMs?: number; now?: () => number; pollIntervalMs?: number; sleep?: () => Promise<void> } = {},
+) {
   return createActionsChangeExecutionAdapter({
     cwd,
     api,
     randomUUID: () => correlation,
-    pollIntervalMs: 0,
-    sleep: async () => undefined,
+    pollIntervalMs: extra.pollIntervalMs ?? 0,
+    sleep: extra.sleep ?? (async () => undefined),
     maxPollAttempts,
+    ...(extra.maxWaitMs === undefined ? {} : { maxWaitMs: extra.maxWaitMs }),
+    ...(extra.now === undefined ? {} : { now: extra.now }),
   });
 }
 
@@ -494,6 +501,22 @@ test("retries one transient run or artifact poll failure before observing succes
   }
 });
 
+test("retries one transient result artifact download failure before accepting success", async () => {
+  const api = new FakeActionsApi();
+  const originalDownloadActionsArtifact = api.downloadActionsArtifact.bind(api);
+  let downloads = 0;
+  api.downloadActionsArtifact = async (artifactId) => {
+    downloads += 1;
+    if (downloads === 1) throw new Error("transient Actions artifact download failure");
+    return originalDownloadActionsArtifact(artifactId);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(downloads, 2);
+});
+
 test("preserves the bounded result-timeout failure when no executor run becomes observable", async () => {
   const api = new FakeActionsApi();
   api.runState = "pending";
@@ -505,6 +528,52 @@ test("preserves the bounded result-timeout failure when no executor run becomes 
       error.code === "CHANGE_REMOTE_RUN_FAILED" &&
       JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
   );
+});
+
+test("stops on real wall-clock deadline even when the poll-attempt count has not been exhausted", async () => {
+  const api = new FakeActionsApi();
+  api.runState = "pending";
+  // Each attempt's API calls consume more real time than the sleep-only
+  // budget would suggest, exactly the gap issue #582 reported: a nominal
+  // maxPollAttempts of 60 would take far longer than 120s of real time to
+  // exhaust in practice, but the wall-clock deadline must still stop the
+  // wait promptly instead of running every attempt.
+  let elapsedMs = 0;
+  const now = () => elapsedMs;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    elapsedMs += 50_000;
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 60, { maxWaitMs: 120_000, now }).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
+  );
+  // Two readRuns calls each advance the clock 50s past the 120s deadline
+  // (readArtifacts also advances it, so bound the exact count loosely) and
+  // the loop must stop well short of the full 60-attempt nominal budget.
+  assert.ok(elapsedMs < 400_000, `expected the wait to stop near the deadline, elapsed=${elapsedMs}`);
+});
+
+test("a single slow-but-successful attempt still returns the result within the wall-clock deadline", async () => {
+  const api = new FakeActionsApi();
+  let elapsedMs = 0;
+  const now = () => elapsedMs;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    elapsedMs += 10_000;
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 60, { maxWaitMs: 240_000, now }).execute(
+    changeMutationRequest("issue", 42),
+  );
+
+  assert.deepEqual(result, { projection: api.result });
 });
 
 test("requester authentication is not consulted and repository resolution failures are normalized", async () => {

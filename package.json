@@ -16,6 +16,10 @@
       "types": "./dist/contract/index.d.ts",
       "import": "./dist/contract/index.js"
     },
+    "./implementation-contract": {
+      "types": "./dist/implementation-contract.d.ts",
+      "import": "./dist/implementation-contract.js"
+    },
     "./pull-request-template": {
       "types": "./dist/pull-request-template.d.ts",
       "import": "./dist/pull-request-template.js"

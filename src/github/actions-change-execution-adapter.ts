@@ -54,6 +54,12 @@ const MAX_RESULT_BYTES = 262_144;
 // request budget for a run that never becomes observable.
 const DEFAULT_POLL_ATTEMPTS = 60;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
+// DEFAULT_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_MS only bounds sleep time
+// between attempts, not the live API latency each attempt also spends on
+// readRuns/readArtifacts/downloadActionsArtifact. A live self-dogfood run
+// observed 188s of real wall-clock wait against that 120s nominal budget.
+// This wall-clock deadline is the actual authority for when to stop.
+const DEFAULT_MAX_WAIT_MS = 240_000;
 
 export interface ActionsChangeExecutionAdapterApi {
   getRepositoryContext(): Promise<RepositoryContext>;
@@ -78,7 +84,16 @@ export interface ActionsChangeExecutionAdapterOptions extends ChangeExecutionPor
   readonly api?: ActionsChangeExecutionAdapterApi;
   readonly maxPollAttempts?: number;
   readonly pollIntervalMs?: number;
+  /**
+   * Real wall-clock budget for the whole wait, in milliseconds. Each poll
+   * attempt also spends time on live API calls (readRuns/readArtifacts/
+   * downloadActionsArtifact) that is not otherwise counted against
+   * maxPollAttempts * pollIntervalMs, so this deadline is the authority for
+   * when to stop, not attempt count alone.
+   */
+  readonly maxWaitMs?: number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly now?: () => number;
   readonly randomUUID?: () => string;
 }
 
@@ -451,7 +466,9 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #cwd: string;
   readonly #maxPollAttempts: number;
   readonly #pollIntervalMs: number;
+  readonly #maxWaitMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
+  readonly #now: () => number;
   readonly #randomUUID: () => string;
 
   constructor(options: ActionsChangeExecutionAdapterOptions) {
@@ -459,7 +476,9 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     this.#api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
     this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 60);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
+    this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS, 1, 600_000);
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.#now = options.now ?? (() => Date.now());
     this.#randomUUID = options.randomUUID ?? generateRandomUUID;
   }
 
@@ -587,12 +606,15 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     semanticOperation: ChangeMutation,
   ): Promise<ActionResultEnvelope> {
     const baselineIds = new Set(baseline.map((run) => run.id));
+    const deadline = this.#now() + this.#maxWaitMs;
     for (let attempt = 0; attempt < this.#maxPollAttempts; attempt += 1) {
+      const timeRemaining = () => this.#now() < deadline;
       let runs: readonly WorkflowRun[];
       try {
         runs = await this.readRuns(operation);
       } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts) throw error;
+        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
+          throw error;
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
@@ -601,7 +623,8 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       try {
         artifacts = await this.readArtifacts(operation, artifactName, repositoryId);
       } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts) throw error;
+        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
+          throw error;
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
@@ -625,7 +648,11 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         try {
           archive = await this.#api.downloadActionsArtifact(artifact.id);
         } catch (error: unknown) {
-          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+          const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+          if (!isRetryablePollTransportError(normalized) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
+            throw normalized;
+          await this.#sleep(this.#pollIntervalMs);
+          continue;
         }
         const result = resultFromArchive(archive, semanticOperation);
         // A bounded trusted result is the authority for the Change outcome.
@@ -643,7 +670,8 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       ) {
         throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
       }
-      if (attempt + 1 < this.#maxPollAttempts) await this.#sleep(this.#pollIntervalMs);
+      if (attempt + 1 < this.#maxPollAttempts && timeRemaining()) await this.#sleep(this.#pollIntervalMs);
+      else if (!timeRemaining()) break;
     }
     throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
   }
