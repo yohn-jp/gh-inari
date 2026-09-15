@@ -49,8 +49,11 @@ const INARI_CHANGE_EXECUTOR_BRANCH = "main" as const;
 const MAX_ACTION_RUNS = 100;
 const MAX_ARTIFACTS = 100;
 const MAX_RESULT_BYTES = 262_144;
-const DEFAULT_POLL_ATTEMPTS = 30;
-const DEFAULT_POLL_INTERVAL_MS = 500;
+// The trusted executor took 47s in the observed self-dogfood run. Allow a
+// bounded two-minute queue/build/execute window while retaining a finite
+// request budget for a run that never becomes observable.
+const DEFAULT_POLL_ATTEMPTS = 60;
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
 
 export interface ActionsChangeExecutionAdapterApi {
   getRepositoryContext(): Promise<RepositoryContext>;
@@ -432,6 +435,17 @@ function isNewRun(run: WorkflowRun, baseline: ReadonlySet<number>): boolean {
   return !baseline.has(run.id) && run.event === "workflow_dispatch" && run.headBranch === INARI_CHANGE_EXECUTOR_BRANCH;
 }
 
+function isRetryablePollTransportError(error: unknown): error is ChangeExecutionPortError {
+  if (!(error instanceof ChangeExecutionPortError) || error.code !== "CHANGE_REMOTE_TRANSPORT_FAILED") return false;
+  const details = error.details;
+  return (
+    typeof details === "object" &&
+    details !== null &&
+    !Array.isArray(details) &&
+    (details as { readonly reason?: unknown }).reason === "transport"
+  );
+}
+
 export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #api: ActionsChangeExecutionAdapterApi;
   readonly #cwd: string;
@@ -574,9 +588,23 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   ): Promise<ActionResultEnvelope> {
     const baselineIds = new Set(baseline.map((run) => run.id));
     for (let attempt = 0; attempt < this.#maxPollAttempts; attempt += 1) {
-      const runs = await this.readRuns(operation);
+      let runs: readonly WorkflowRun[];
+      try {
+        runs = await this.readRuns(operation);
+      } catch (error: unknown) {
+        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts) throw error;
+        await this.#sleep(this.#pollIntervalMs);
+        continue;
+      }
       const candidates = runs.filter((run) => isNewRun(run, baselineIds));
-      const artifacts = await this.readArtifacts(operation, artifactName, repositoryId);
+      let artifacts: readonly WorkflowArtifact[];
+      try {
+        artifacts = await this.readArtifacts(operation, artifactName, repositoryId);
+      } catch (error: unknown) {
+        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts) throw error;
+        await this.#sleep(this.#pollIntervalMs);
+        continue;
+      }
       if (artifacts.length > 1) {
         throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "ambiguous-artifact");
       }
