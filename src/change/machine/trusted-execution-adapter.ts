@@ -43,6 +43,7 @@ import {
 import {
   EFFECT_AUTHORIZER_CONTRACT_VERSION,
   INARI_ISSUER_PRINCIPAL,
+  assertTrustedExecution,
   type InariEffectAuthorizer,
   type EffectAuthorizerMutationRequest,
   type RepositoryIdentity,
@@ -57,6 +58,7 @@ import {
   type ChangeExecutionPort,
   type ChangeMutationRequest,
   type ChangeReadRequest,
+  hasCallerSuppliedRequester,
   validateChangeRequest,
 } from "../../change-execution-port.js";
 import {
@@ -435,9 +437,12 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
     const effectAuthorizer = options.effectAuthorizer ?? options.issuerAuthority;
     if (effectAuthorizer === undefined) throw new Error("An Effect Authorizer is required.");
     this.#effectAuthorizer = effectAuthorizer;
-    this.#execution = options.execution;
+    // Canonicalize and freeze the authenticated execution claim once. The
+    // requester used by every operation and effect must come from this bound
+    // context, not from a mutable caller-owned object.
+    this.#execution = assertTrustedExecution(options.execution);
     this.#target = options.target;
-    this.#trustedRequester = options.execution.requester;
+    this.#trustedRequester = this.#execution.requester;
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
@@ -466,7 +471,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
    * fail closed at this boundary instead of being silently ignored.
    */
   private assertRequest(request: ChangeMutationRequest | ChangeReadRequest): void {
-    if (typeof request === "object" && request !== null && Object.prototype.hasOwnProperty.call(request, "requester")) {
+    if (hasCallerSuppliedRequester(request)) {
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_PRECONDITION_FAILED",
         "Caller-supplied requester identity is not accepted by trusted Change execution.",
