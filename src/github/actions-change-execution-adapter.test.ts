@@ -576,6 +576,54 @@ test("a single slow-but-successful attempt still returns the result within the w
   assert.deepEqual(result, { projection: api.result });
 });
 
+test("the default attempt-count ceiling does not cut off retries before the default wall-clock deadline", async () => {
+  // Issue #592: a fixed maxPollAttempts of 60 was exhausted in 230s of real
+  // time (under the 240s wall-clock deadline) purely from per-attempt API
+  // latency, aborting a wait that still had time remaining. Using the
+  // adapter's actual default maxPollAttempts/maxWaitMs (not an
+  // artificially small attempt cap), a recurring retryable transport error
+  // that consumes realistic per-attempt latency must keep retrying until
+  // the wall-clock deadline, not stop early because attempts ran out.
+  const api = new FakeActionsApi();
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  let elapsedMs = 0;
+  const now = () => elapsedMs;
+  let workflowRunReads = 0;
+  // 230s / 3s-per-read =~ 77 poll-loop reads is the same order of magnitude
+  // as the real self-dogfood failure; recover well before the 240s default
+  // deadline but well past the old fixed cap of 60.
+  const failingReads = 77;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) {
+      workflowRunReads += 1;
+      // The first read is dispatchAndCollect's pre-dispatch baseline read
+      // (outside the poll loop's retry handling); only fail the poll loop's
+      // own reads so the loop, not the baseline call, is under test.
+      if (workflowRunReads > 1 && workflowRunReads <= failingReads + 1) {
+        elapsedMs += 3_000;
+        throw new Error("transient Actions run lookup failure");
+      }
+    }
+    elapsedMs += 3_000;
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await createActionsChangeExecutionAdapter({
+    cwd: process.cwd(),
+    api,
+    randomUUID: () => correlation,
+    pollIntervalMs: 0,
+    sleep: async () => undefined,
+    now,
+  }).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.ok(
+    workflowRunReads > failingReads,
+    `expected retries to continue past the old 60-attempt cap, workflowRunReads=${workflowRunReads}`,
+  );
+});
+
 test("requester authentication is not consulted and repository resolution failures are normalized", async () => {
   const authApi = new FakeActionsApi();
   assert.deepEqual(await executor(authApi).execute(changeMutationRequest("issue", 42)), { projection: authApi.result });

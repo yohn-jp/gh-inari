@@ -49,17 +49,18 @@ const INARI_CHANGE_EXECUTOR_BRANCH = "main" as const;
 const MAX_ACTION_RUNS = 100;
 const MAX_ARTIFACTS = 100;
 const MAX_RESULT_BYTES = 262_144;
-// The trusted executor took 47s in the observed self-dogfood run. Allow a
-// bounded two-minute queue/build/execute window while retaining a finite
-// request budget for a run that never becomes observable.
-const DEFAULT_POLL_ATTEMPTS = 60;
-const DEFAULT_POLL_INTERVAL_MS = 2_000;
-// DEFAULT_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_MS only bounds sleep time
-// between attempts, not the live API latency each attempt also spends on
-// readRuns/readArtifacts/downloadActionsArtifact. A live self-dogfood run
-// observed 188s of real wall-clock wait against that 120s nominal budget.
-// This wall-clock deadline is the actual authority for when to stop.
+// DEFAULT_MAX_WAIT_MS is the real stopping authority for the poll loop (see
+// #582/#592): per-attempt API latency (readRuns/readArtifacts/
+// downloadActionsArtifact) is not otherwise bounded, so a fixed attempt
+// count alone is unreliable — a live self-dogfood run exhausted 60 attempts
+// in 230s of real time, under the 240s wall-clock deadline but well past
+// the naive 120s sleep-only estimate. DEFAULT_POLL_ATTEMPTS is only a
+// sanity ceiling against a runaway loop; it must comfortably exceed the
+// number of attempts reachable within DEFAULT_MAX_WAIT_MS at
+// DEFAULT_POLL_INTERVAL_MS, including per-attempt latency headroom.
 const DEFAULT_MAX_WAIT_MS = 240_000;
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_POLL_ATTEMPTS = 300;
 
 export interface ActionsChangeExecutionAdapterApi {
   getRepositoryContext(): Promise<RepositoryContext>;
@@ -474,7 +475,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   constructor(options: ActionsChangeExecutionAdapterOptions) {
     this.#cwd = options.cwd;
     this.#api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
-    this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 60);
+    this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 1_000);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
     this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS, 1, 600_000);
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -607,14 +608,18 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   ): Promise<ActionResultEnvelope> {
     const baselineIds = new Set(baseline.map((run) => run.id));
     const deadline = this.#now() + this.#maxWaitMs;
-    for (let attempt = 0; attempt < this.#maxPollAttempts; attempt += 1) {
+    // The wall-clock deadline is the real stopping authority (see #582):
+    // per-attempt API latency is not otherwise bounded, so a fixed attempt
+    // count can be exhausted well before real time runs out. maxPollAttempts
+    // remains only as a sanity ceiling against a runaway loop, not as the
+    // primary budget.
+    for (let attempt = 0; this.#now() < deadline && attempt < this.#maxPollAttempts; attempt += 1) {
       const timeRemaining = () => this.#now() < deadline;
       let runs: readonly WorkflowRun[];
       try {
         runs = await this.readRuns(operation);
       } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
-          throw error;
+        if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
@@ -623,8 +628,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       try {
         artifacts = await this.readArtifacts(operation, artifactName, repositoryId);
       } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
-          throw error;
+        if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
@@ -649,8 +653,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
           archive = await this.#api.downloadActionsArtifact(artifact.id);
         } catch (error: unknown) {
           const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-          if (!isRetryablePollTransportError(normalized) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
-            throw normalized;
+          if (!isRetryablePollTransportError(normalized) || !timeRemaining()) throw normalized;
           await this.#sleep(this.#pollIntervalMs);
           continue;
         }
@@ -670,8 +673,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       ) {
         throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
       }
-      if (attempt + 1 < this.#maxPollAttempts && timeRemaining()) await this.#sleep(this.#pollIntervalMs);
-      else if (!timeRemaining()) break;
+      if (timeRemaining()) await this.#sleep(this.#pollIntervalMs);
     }
     throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
   }
