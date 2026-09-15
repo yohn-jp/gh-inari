@@ -76,6 +76,8 @@ export type {
 } from "./semantic-pr-mutation.js";
 export * from "./semantic-issue-projection.js";
 export * from "./semantic-issue-observation.js";
+export * from "./semantic-issue-relations.js";
+export * from "./issue-relationship.js";
 export * from "./operational-observation.js";
 export * from "./semantic-issue-lifecycle.js";
 export * from "./semantic-branch-projection.js";
@@ -83,6 +85,7 @@ export * from "./semantic-branch-observation.js";
 export * from "./semantic-pr-executor.js";
 export * from "./semantic-issue-executor.js";
 export * from "./semantic-issue-relation-executor.js";
+export * from "./issue-relationship-executor.js";
 export * from "./semantic-branch-executor.js";
 export * from "./artifact-contract-governance.js";
 export * from "./golden-path-governance.js";

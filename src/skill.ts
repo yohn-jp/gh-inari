@@ -232,11 +232,22 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
   }),
   skillScenario({
     id: "manage-issue-relationships",
-    title: "Reconcile an existing Issue's native parent/dependency relationships",
+    title: "Inspect and reconcile an existing Issue's native parent/sub-issue relationships",
     whenToUse:
-      "Use when an existing Issue's GitHub-native parent (sub-issue) or blocked-by relationships must be set, changed, or removed through Inari's semantic authority, instead of editing relationship prose by hand.",
+      "Use when an existing Issue's GitHub-native parent, direct children, or blocked-by relationships must be inspected or changed through Inari's semantic authority, instead of editing relationship prose by hand.",
     scope: "specialized-alternative",
     workflow: [
+      [
+        "Inspect provider-authoritative parent and direct-child evidence before choosing a mutation.",
+        "issue.relations.inspectParent",
+      ],
+      [
+        "Inspect the provider-authoritative direct sub-issues when the Issue is a parent.",
+        "issue.relations.inspectChildren",
+      ],
+      ["Attach a child through the generic relationship authority.", "issue.relations.attach"],
+      ["Detach a child only from its explicitly observed parent.", "issue.relations.detach"],
+      ["Explicitly reparent a child from its old parent to a new parent.", "issue.relations.reparent"],
       [
         "Preview the deterministic relationship plan from live observation before mutating anything.",
         "issue.relations.plan",
@@ -247,7 +258,9 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ],
     ],
     invariants: [
-      "Always preview before executing; execute re-observes and rejects a plan the repository state has outgrown.",
+      "Inspect provider state before mutation; every generic mutation rereads and verifies its provider postcondition.",
+      "Explicit reparent requires the old and new parent; attach never silently replaces an existing parent.",
+      "Always preview before executing the semantic parent/dependency plan; execute re-observes and rejects a plan the repository state has outgrown.",
       "A real relationship mutation requires complete bounded relationship-graph evidence; omitted or incomplete evidence fails closed.",
       "Desired relationship state is expressed only through `parent`/`dependsOn`; `children`/`blocks` remain derived, never caller-supplied input.",
       "Markdown `Parent Epic:`/task-list references are compatibility projections only, never semantic authority once this command is used.",

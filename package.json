@@ -96,6 +96,14 @@
       "types": "./dist/semantic-issue-relations.d.ts",
       "import": "./dist/semantic-issue-relations.js"
     },
+    "./issue-relationship": {
+      "types": "./dist/issue-relationship.d.ts",
+      "import": "./dist/issue-relationship.js"
+    },
+    "./issue-relationship-executor": {
+      "types": "./dist/issue-relationship-executor.d.ts",
+      "import": "./dist/issue-relationship-executor.js"
+    },
     "./semantic-issue-relation-executor": {
       "types": "./dist/semantic-issue-relation-executor.d.ts",
       "import": "./dist/semantic-issue-relation-executor.js"

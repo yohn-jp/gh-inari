@@ -195,3 +195,24 @@ test("rejects malformed identity and unexpected mutation status", async () => {
       error.status === 200,
   );
 });
+
+test("projects explicit attach, detach, and reparent operations onto native sub-issue endpoints", async () => {
+  const mutator = new StubMutator([
+    issueIdentity(501, 10),
+    { status: 201, body: undefined },
+    { status: 200, body: undefined },
+    { status: 200, body: undefined },
+    { status: 201, body: undefined },
+  ]);
+  const adapter = new GitHubIssueRelationMutationAdapter(mutator, CONTEXT, CAPABILITIES);
+  await adapter.attachChild(reference(20), reference(10));
+  await adapter.detachChild(reference(20), reference(10));
+  await adapter.reparentChild(reference(10), reference(20), reference(30));
+  assert.deepEqual(mutator.calls, [
+    { path: "issues/10", method: "GET" },
+    { path: "issues/20/sub_issues", method: "POST", fields: { sub_issue_id: 501 } },
+    { path: "issues/20/sub_issue", method: "DELETE", fields: { sub_issue_id: 501 } },
+    { path: "issues/20/sub_issue", method: "DELETE", fields: { sub_issue_id: 501 } },
+    { path: "issues/30/sub_issues", method: "POST", fields: { sub_issue_id: 501 } },
+  ]);
+});

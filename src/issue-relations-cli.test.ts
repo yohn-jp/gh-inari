@@ -14,6 +14,10 @@ function parentIssue(number: number, id = number + 1000): string {
   return JSON.stringify({ id, number, repository_url: "https://api.github.com/repos/acme/repository-b" });
 }
 
+function parentIssueValue(number: number, id = number + 1000): Record<string, unknown> {
+  return JSON.parse(parentIssue(number, id)) as Record<string, unknown>;
+}
+
 const canonSource = JSON.stringify({
   version: "1",
   kind: "issue",
@@ -71,6 +75,61 @@ class IssueRelationsTransport implements GhTransport {
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
     return response;
+  }
+}
+
+class GenericRelationsTransport implements GhTransport {
+  readonly calls: string[][] = [];
+  private readonly parentByChild = new Map<number, number>([[701, 20]]);
+
+  parentFor(child: number): number | undefined {
+    return this.parentByChild.get(child);
+  }
+
+  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+    this.calls.push([...args]);
+    if (args[0] === "--version") return command("gh version 2.0");
+    if (args[0] === "auth" && args[1] === "status") return command();
+    if (args.includes("--jq")) return command("100000900\n");
+    const resource = args.find((value) => value.startsWith("repos/acme/repository-b/")) ?? "";
+    const path = resource.replace("repos/acme/repository-b/", "");
+    const methodIndex = args.indexOf("--method");
+    const method = methodIndex >= 0 ? args[methodIndex + 1] : "GET";
+    const issueMatch = /^issues\/(\d+)(?:\/|$)/u.exec(path);
+    const issueNumber = issueMatch === null ? undefined : Number(issueMatch[1]);
+    const field = (name: string): number | undefined => {
+      const index = args.findIndex((value) => value === "--field" || value === "--raw-field");
+      const value = index < 0 ? undefined : args[index + 1];
+      if (value === undefined || !value.startsWith(`${name}=`)) return undefined;
+      const parsed = Number(value.slice(name.length + 1));
+      return Number.isSafeInteger(parsed) ? parsed : undefined;
+    };
+    if (method === "GET" && issueNumber !== undefined && /^issues\/\d+$/u.test(path))
+      return command(`HTTP/2 200 OK\n\n${JSON.stringify({ id: issueNumber + 1000, number: issueNumber })}`);
+    if (method === "GET" && issueNumber !== undefined && path.endsWith("/parent")) {
+      const parent = this.parentByChild.get(issueNumber);
+      return parent === undefined
+        ? command("HTTP/2 404 Not Found\n\n")
+        : command(`HTTP/2 200 OK\n\n${JSON.stringify(parentIssueValue(parent))}`);
+    }
+    if (method === "GET" && issueNumber !== undefined && path.includes("/sub_issues?")) {
+      const children = [...this.parentByChild.entries()]
+        .filter(([, parent]) => parent === issueNumber)
+        .map(([child]) => parentIssueValue(child));
+      return command(`HTTP/2 200 OK\n\n${JSON.stringify(children)}`);
+    }
+    if (method === "POST" && issueNumber !== undefined && path.endsWith("/sub_issues")) {
+      const childId = field("sub_issue_id");
+      if (childId !== undefined) this.parentByChild.set(childId - 1000, issueNumber);
+      return command("HTTP/2 201 Created\n\n{}");
+    }
+    if (method === "DELETE" && issueNumber !== undefined && path.endsWith("/sub_issue")) {
+      const childId = field("sub_issue_id");
+      if (childId !== undefined && this.parentByChild.get(childId - 1000) === issueNumber)
+        this.parentByChild.delete(childId - 1000);
+      return command("HTTP/2 200 OK\n\n{}");
+    }
+    throw new Error(`Unexpected generic relation call: ${args.join(" ")}`);
   }
 }
 
@@ -293,6 +352,98 @@ test("issue relations rejects an unsupported option before touching the adapter"
       console.log = originalLog;
     }
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("generic Issue relationship CLI inspects provider parent and direct children", async () => {
+  const transport = new GenericRelationsTransport();
+  const lines: string[] = [];
+  const originalLog = console.log;
+  try {
+    console.log = (line: string) => lines.push(line);
+    const parentExit = await runCli(
+      [
+        "issue",
+        "relations",
+        "inspect-parent",
+        "701",
+        "--repository",
+        "acme/repository-b",
+        "--capability",
+        "github.issue.parent.native",
+        "--json",
+      ],
+      { repositoryRoot: "/tmp", createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(parentExit, 0);
+    const parentOutput = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+    assert.equal(parentOutput.operation, "issue.relations.inspect-parent");
+    assert.equal((parentOutput.parent as Record<string, unknown>).number, 20);
+
+    const childrenExit = await runCli(
+      [
+        "issue",
+        "relations",
+        "inspect-children",
+        "20",
+        "--repository",
+        "acme/repository-b",
+        "--capability",
+        "github.issue.parent.native",
+        "--json",
+      ],
+      { repositoryRoot: "/tmp", createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+    );
+    assert.equal(childrenExit, 0);
+    const childrenOutput = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
+    assert.equal(childrenOutput.operation, "issue.relations.inspect-children");
+    assert.deepEqual(
+      (childrenOutput.children as Array<Record<string, unknown>>).map((entry) => entry.number),
+      [701],
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("generic Issue relationship CLI mutates only through verified attach, detach, and reparent operations", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-issue-relationship-cli-"));
+  const transport = new GenericRelationsTransport();
+  const inputPath = path.join(directory, "relationship.json");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  try {
+    console.log = (line: string) => lines.push(line);
+    const invoke = async (operation: "attach" | "detach" | "reparent", input: Record<string, unknown>) => {
+      await writeFile(inputPath, JSON.stringify(input), "utf8");
+      return runCli(
+        [
+          "issue",
+          "relations",
+          operation,
+          "702",
+          "--repository",
+          "acme/repository-b",
+          "--from",
+          inputPath,
+          "--capability",
+          "github.issue.parent.native",
+          "--json",
+        ],
+        { repositoryRoot: directory, createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      );
+    };
+    assert.equal(await invoke("attach", { parent: 20 }), 0);
+    assert.equal(transport.parentFor(702), 20);
+    assert.equal(await invoke("detach", { parent: 20 }), 0);
+    assert.equal(transport.parentFor(702), undefined);
+    assert.equal(await invoke("attach", { parent: 20 }), 0);
+    assert.equal(await invoke("reparent", { previousParent: 20, parent: 30 }), 0);
+    assert.equal(transport.parentFor(702), 30);
+    assert.equal(JSON.parse(lines.at(-1) ?? "{}").operation, "issue.relations.reparent");
+  } finally {
+    console.log = originalLog;
     await rm(directory, { recursive: true, force: true });
   }
 });
