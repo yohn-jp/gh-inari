@@ -11,7 +11,14 @@ import {
   CERTIFICATION_KINDS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
 } from "../../scripts/certification-evidence.mjs";
-import { parseArguments, projectWorkerHandoff, sanitizeWorkerEnvironment } from "../../scripts/self-dogfood.mjs";
+import {
+  INARI_SUPERVISION_TIMEOUT_MS,
+  parseArguments,
+  projectWorkerHandoff,
+  runCommand,
+  sanitizeWorkerEnvironment,
+} from "../../scripts/self-dogfood.mjs";
+import { DEFAULT_CHANGE_EXECUTION_DEADLINE_MS } from "../../src/change-execution-port.ts";
 
 const scriptPath = fileURLToPath(new URL("../../scripts/self-dogfood.mjs", import.meta.url));
 
@@ -23,6 +30,34 @@ test("self-dogfood requires an exact disposable Issue confirmation", () => {
     parsed.options.issue,
     "the execution precondition must reject this mismatch before any provider call",
   );
+});
+
+test("self-dogfood derives the installed inari supervision timeout from the canonical execution deadline, not a duplicated magic constant", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  assert.doesNotMatch(source, /DEFAULT_(?:POLL_ATTEMPTS|POLL_INTERVAL_MS|MAX_WAIT_MS)/u);
+  assert.doesNotMatch(source, /const COMMAND_TIMEOUT_MS/u);
+  assert.ok(
+    INARI_SUPERVISION_TIMEOUT_MS > DEFAULT_CHANGE_EXECUTION_DEADLINE_MS,
+    "the outer process supervision timeout must exceed the canonical transport deadline it wraps",
+  );
+  // --timeout-ms remains a worker-specific override; it must not affect the
+  // installed inari invocation's own bounded supervision.
+  assert.equal(parseArguments(["--issue", "416", "--confirm-disposable", "416"]).options.timeoutMs, undefined);
+});
+
+test("runCommand terminates a hung child process within its bounded timeout", () => {
+  const start = Date.now();
+  const result = runCommand("node", ["-e", "setTimeout(() => {}, 60_000)"], { timeoutMs: 200 });
+  const elapsed = Date.now() - start;
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "ETIMEDOUT");
+  assert.ok(elapsed < 5_000, "a hung process must be terminated promptly by the bounded timeout, not left to run");
+});
+
+test("runCommand does not kill a healthy process finishing near a short timeout", () => {
+  const result = runCommand("node", ["-e", "setTimeout(() => { process.exit(0); }, 50)"], { timeoutMs: 5_000 });
+  assert.equal(result.ok, true);
+  assert.equal(result.error, undefined);
 });
 
 test("self-dogfood does not accept a replaceable evidence authority", () => {
@@ -167,6 +202,8 @@ test("live dogfood is opt-in and emits bounded blocked evidence without mutation
     const result = spawnSync(
       process.execPath,
       [
+        "--import",
+        "tsx",
         scriptPath,
         "--repository",
         "yohn-jp/gh-inari",
@@ -248,6 +285,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({
     const result = spawnSync(
       process.execPath,
       [
+        "--import",
+        "tsx",
         scriptPath,
         "--inari",
         fakeInari,
@@ -375,6 +414,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
     const result = spawnSync(
       process.execPath,
       [
+        "--import",
+        "tsx",
         scriptPath,
         "--inari",
         fakeInari,

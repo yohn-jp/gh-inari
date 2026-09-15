@@ -186,7 +186,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "smoke-test": "node scripts/smoke-test.mjs",
-    "self-dogfood": "node scripts/self-dogfood.mjs",
+    "self-dogfood": "node --import tsx scripts/self-dogfood.mjs",
     "templates:check": "node --import tsx src/index.ts template sync --check",
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "worker:build": "node scripts/build-worker.mjs",

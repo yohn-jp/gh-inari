@@ -10,10 +10,13 @@ import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   ChangeExecutionPortError,
   changeMutationRequest,
+  createChangeExecutionDeadline,
+  DEFAULT_CHANGE_EXECUTION_DEADLINE_MS,
   normalizeChangeExecutionEvidence,
   normalizeChangeExecutionResult,
   validateChangeRequest,
   type ChangeExecutionPort,
+  type ChangeExecutionDeadline,
   type ChangeExecutionPortOptions,
   type ChangeExecutionEvidence,
   type ChangeExecutionResult,
@@ -38,27 +41,21 @@ const INARI_CHANGE_EXECUTOR_BRANCH = "main" as const;
 const MAX_ACTION_RUNS = 100;
 const MAX_ARTIFACTS = 100;
 const MAX_RESULT_BYTES = 262_144;
-// DEFAULT_MAX_WAIT_MS is the real stopping authority for the poll loop (see
-// #582/#592): per-attempt API latency (readRuns/readArtifacts/
-// downloadActionsArtifact) is not otherwise bounded, so a fixed attempt
-// count alone is unreliable — a live self-dogfood run exhausted 60 attempts
-// in 230s of real time, under the 240s wall-clock deadline but well past
-// the naive 120s sleep-only estimate. DEFAULT_POLL_ATTEMPTS is only a
-// sanity ceiling against a runaway loop; it must comfortably exceed the
-// number of attempts reachable within DEFAULT_MAX_WAIT_MS at
-// DEFAULT_POLL_INTERVAL_MS, including per-attempt latency headroom.
-const DEFAULT_MAX_WAIT_MS = 240_000;
+// The execution deadline is owned by change-execution-port. These polling
+// settings only shape observation cadence; they never establish when the
+// semantic execution is allowed to stop.
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_POLL_ATTEMPTS = 300;
 
 export interface ActionsChangeExecutionAdapterApi {
-  getRepositoryContext(): Promise<RepositoryContext>;
+  getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext>;
   requestActionsApi(
     actionsPath: string,
     method: "GET" | "POST",
     fields?: Readonly<Record<string, string>>,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<unknown>;
-  downloadActionsArtifact(artifactId: number): Promise<Uint8Array>;
+  downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array>;
 }
 
 export interface ActionsChangeExecutionAdapterOptions extends ChangeExecutionPortOptions {
@@ -483,7 +480,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       } satisfies Pick<ChangeExecutionPort, "read">);
     this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 1_000);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
-    this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS, 1, 600_000);
+    this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_CHANGE_EXECUTION_DEADLINE_MS, 1, 600_000);
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#now = options.now ?? (() => Date.now());
     this.#randomUUID = options.randomUUID ?? generateRandomUUID;
@@ -492,7 +489,8 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   async execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     validateChangeRequest(request);
     const semanticRequest = canonicalMutationRequest(request);
-    const result = await this.dispatchAndCollect(semanticRequest);
+    const deadline = createChangeExecutionDeadline(this.#maxWaitMs, this.#now);
+    const result = await this.dispatchAndCollect(semanticRequest, deadline);
     if (result.failed) {
       throw remoteError(
         "CHANGE_REMOTE_RUN_FAILED",
@@ -511,25 +509,26 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     return this.#read.read(request);
   }
 
-  private async dispatchAndCollect(request: ChangeMutationRequest): Promise<ActionResultEnvelope> {
+  private async dispatchAndCollect(
+    request: ChangeMutationRequest,
+    deadline: ChangeExecutionDeadline,
+  ): Promise<ActionResultEnvelope> {
     const correlation = this.#randomUUID();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(correlation)) {
       throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", `change.${request.operation}`, "invalid-correlation");
     }
-    let context: RepositoryContext;
-    try {
-      context = await this.#api.getRepositoryContext();
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-    }
+    const operation = `change.${request.operation}`;
+    const context = await this.withinDeadline(operation, deadline, async () => {
+      try {
+        return await this.#api.getRepositoryContext(deadline);
+      } catch (error: unknown) {
+        throw normalizeTransportError(error, operation, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
+      }
+    });
     if (context.repositoryId === undefined) {
-      throw remoteError(
-        "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
-        `change.${request.operation}`,
-        "repository-identity-unavailable",
-      );
+      throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", operation, "repository-identity-unavailable");
     }
-    const baseline = await this.readRuns(`change.${request.operation}`);
+    const baseline = await this.readRuns(operation, deadline);
     const artifactName = `inari-change-result-${correlation}`;
     const semanticRequest = {
       version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
@@ -543,31 +542,35 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         : { signedProvenanceRecord: request.signedProvenanceRecord }),
     };
     try {
-      await this.#api.requestActionsApi(dispatchPath(), "POST", {
-        ref: INARI_CHANGE_EXECUTOR_REF,
-        "inputs[request]": JSON.stringify(semanticRequest),
-        "inputs[correlation]": correlation,
-      });
+      await this.withinDeadline(operation, deadline, () =>
+        this.#api.requestActionsApi(
+          dispatchPath(),
+          "POST",
+          {
+            ref: INARI_CHANGE_EXECUTOR_REF,
+            "inputs[request]": JSON.stringify(semanticRequest),
+            "inputs[correlation]": correlation,
+          },
+          deadline,
+        ),
+      );
     } catch (error: unknown) {
-      throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_DISPATCH_FAILED");
+      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_DISPATCH_FAILED");
     }
-    return this.waitForResult(
-      `change.${request.operation}`,
-      baseline,
-      artifactName,
-      context.repositoryId,
-      request.operation,
-    );
+    this.assertDeadline(operation, deadline);
+    return this.waitForResult(operation, baseline, artifactName, context.repositoryId, request.operation, deadline);
   }
 
-  private async readRuns(operation: string): Promise<readonly WorkflowRun[]> {
-    let value: unknown;
-    try {
-      value = await this.#api.requestActionsApi(workflowRunsPath(), "GET");
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-    }
-    return parseRuns(value);
+  private async readRuns(operation: string, deadline: ChangeExecutionDeadline): Promise<readonly WorkflowRun[]> {
+    return this.withinDeadline(operation, deadline, async () => {
+      let value: unknown;
+      try {
+        value = await this.#api.requestActionsApi(workflowRunsPath(), "GET", {}, deadline);
+      } catch (error: unknown) {
+        throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+      }
+      return parseRuns(value);
+    });
   }
 
   private async waitForResult(
@@ -576,19 +579,19 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     artifactName: string,
     repositoryId: string,
     semanticOperation: ChangeMutation,
+    deadline: ChangeExecutionDeadline,
   ): Promise<ActionResultEnvelope> {
     const baselineIds = new Set(baseline.map((run) => run.id));
-    const deadline = this.#now() + this.#maxWaitMs;
     // The wall-clock deadline is the real stopping authority (see #582):
     // per-attempt API latency is not otherwise bounded, so a fixed attempt
     // count can be exhausted well before real time runs out. maxPollAttempts
     // remains only as a sanity ceiling against a runaway loop, not as the
     // primary budget.
-    for (let attempt = 0; this.#now() < deadline && attempt < this.#maxPollAttempts; attempt += 1) {
-      const timeRemaining = () => this.#now() < deadline;
+    for (let attempt = 0; deadline.remainingMs() > 0 && attempt < this.#maxPollAttempts; attempt += 1) {
+      const timeRemaining = () => deadline.remainingMs() > 0;
       let runs: readonly WorkflowRun[];
       try {
-        runs = await this.readRuns(operation);
+        runs = await this.readRuns(operation, deadline);
       } catch (error: unknown) {
         if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
@@ -597,7 +600,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       const candidates = runs.filter((run) => isNewRun(run, baselineIds));
       let artifacts: readonly WorkflowArtifact[];
       try {
-        artifacts = await this.readArtifacts(operation, artifactName, repositoryId);
+        artifacts = await this.readArtifacts(operation, artifactName, repositoryId, deadline);
       } catch (error: unknown) {
         if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
@@ -621,7 +624,9 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         }
         let archive: Uint8Array;
         try {
-          archive = await this.#api.downloadActionsArtifact(artifact.id);
+          archive = await this.withinDeadline(operation, deadline, () =>
+            this.#api.downloadActionsArtifact(artifact.id, deadline),
+          );
         } catch (error: unknown) {
           const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
           if (!isRetryablePollTransportError(normalized) || !timeRemaining()) throw normalized;
@@ -653,14 +658,39 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     operation: string,
     name: string,
     repositoryId: string,
+    deadline: ChangeExecutionDeadline,
   ): Promise<readonly WorkflowArtifact[]> {
-    let value: unknown;
-    try {
-      value = await this.#api.requestActionsApi(artifactsPath(name), "GET");
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+    return this.withinDeadline(operation, deadline, async () => {
+      let value: unknown;
+      try {
+        value = await this.#api.requestActionsApi(artifactsPath(name), "GET", {}, deadline);
+      } catch (error: unknown) {
+        throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+      }
+      return parseArtifacts(value, name, repositoryId);
+    });
+  }
+
+  private assertDeadline(operation: string, deadline: ChangeExecutionDeadline): void {
+    if (deadline.remainingMs() <= 0) {
+      throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
     }
-    return parseArtifacts(value, name, repositoryId);
+  }
+
+  private async withinDeadline<T>(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    this.assertDeadline(operation, deadline);
+    try {
+      const result = await task();
+      this.assertDeadline(operation, deadline);
+      return result;
+    } catch (error: unknown) {
+      if (deadline.remainingMs() <= 0) this.assertDeadline(operation, deadline);
+      throw error;
+    }
   }
 }
 

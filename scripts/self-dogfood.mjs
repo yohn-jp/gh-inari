@@ -33,6 +33,7 @@ import {
   validateSelfDogfoodEvidence,
   writeCertificationEvidence,
 } from "./certification-evidence.mjs";
+import { DEFAULT_CHANGE_EXECUTION_DEADLINE_MS } from "../src/change-execution-port.ts";
 
 export const SELF_DOGFOOD_SCHEMA_VERSION = CERTIFICATION_EVIDENCE_SCHEMA_VERSION;
 export const SELF_DOGFOOD_KIND = CERTIFICATION_KINDS[1];
@@ -43,13 +44,13 @@ export const MAX_DIAGNOSTIC_MESSAGE = MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGT
 const [CERTIFICATION_RESULT_PASSED, , CERTIFICATION_RESULT_BLOCKED] = CERTIFICATION_RESULTS;
 export const SELF_DOGFOOD_OPERATIONS = CERTIFICATION_SELF_DOGFOOD_OPERATIONS;
 export const SELF_DOGFOOD_OUTCOMES = CERTIFICATION_SELF_DOGFOOD_OUTCOMES;
-// Must stay strictly greater than the installed CLI's own internal Actions
-// transport wait deadline (DEFAULT_MAX_WAIT_MS in
-// src/github/actions-change-execution-adapter.ts, currently 240_000ms real
-// wall-clock time, not just DEFAULT_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_MS
-// of sleep). An equal or smaller value races the outer spawnSync timeout
-// against the CLI's own internal wait and can kill an otherwise-healthy run.
-const COMMAND_TIMEOUT_MS = 300_000;
+// Bounded outer process fail-safe for an installed `inari` invocation. Inari
+// owns the semantic execution budget (DEFAULT_CHANGE_EXECUTION_DEADLINE_MS,
+// change-execution-port.ts); this harness only supervises the child process
+// with a fixed margin on top of that same canonical budget so a hung
+// installed process cannot block the coordinator forever.
+const INARI_SUPERVISION_MARGIN_MS = 60_000;
+export const INARI_SUPERVISION_TIMEOUT_MS = DEFAULT_CHANGE_EXECUTION_DEADLINE_MS + INARI_SUPERVISION_MARGIN_MS;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const REPOSITORY_PATTERN = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/u;
@@ -132,7 +133,11 @@ export function parseArguments(argv) {
     workerCwd: undefined,
     output: undefined,
     abort: false,
-    timeoutMs: COMMAND_TIMEOUT_MS,
+    // Inari owns the complete bounded execution budget (see
+    // INARI_SUPERVISION_TIMEOUT_MS, used unconditionally for the installed
+    // `inari` invocation). This optional value is only an explicit
+    // implementation-worker fail-safe.
+    timeoutMs: undefined,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -186,7 +191,7 @@ export function parseArguments(argv) {
     }
     if (token === "--timeout-ms") {
       const timeout = parsePositiveInteger(requireValue(argv, index, token), token);
-      options.timeoutMs = Math.min(timeout, COMMAND_TIMEOUT_MS);
+      options.timeoutMs = timeout;
       index += 1;
       continue;
     }
@@ -208,7 +213,7 @@ function usage() {
   ].join("\n");
 }
 
-function runCommand(command, args, options) {
+export function runCommand(command, args, options) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     env: options.env,
@@ -249,7 +254,7 @@ function runInari(options, args, evidence) {
   const result = runCommand(options.inari, [...args, "--json"], {
     cwd: repoRoot,
     env: process.env,
-    timeoutMs: options.timeoutMs,
+    timeoutMs: INARI_SUPERVISION_TIMEOUT_MS,
   });
   if (!result.ok) {
     let structuredFailure;

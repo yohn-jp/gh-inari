@@ -195,7 +195,7 @@ jobs:
             export INARI_SELF_DOGFOOD_ALLOW_RECOVERY=1
             args+=(--abort)
           fi
-          node scripts/self-dogfood.mjs "${args[@]}"
+          node --import tsx scripts/self-dogfood.mjs "${args[@]}"
 
       - name: Validate canonical evidence and record residual state
         id: evidence
