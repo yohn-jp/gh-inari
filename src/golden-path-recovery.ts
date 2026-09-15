@@ -7,6 +7,7 @@
  */
 
 import {
+  validateChangeProjectionResult,
   validateChangeIssuanceRecoveryPlan,
   validateChangeTransitionRecoveryPlan,
   type ChangeRecoveryPlan,
@@ -19,9 +20,11 @@ import type {
   ChangeExecutionFailureEvidence,
   ChangeExecutionResult,
 } from "./change-execution-port.js";
+import { normalizeChangeExecutionEvidence } from "./change-execution-port.js";
 import {
   GOLDEN_PATH_ACTION_OWNERS,
   GOLDEN_PATH_AUTOMATIC_CLEANUP,
+  GOLDEN_PATH_RECOVERY_METADATA,
   GOLDEN_PATH_NORMAL_ACTION_KINDS,
   GOLDEN_PATH_REASON_CODES,
   GOLDEN_PATH_RECOVERY_ACTION_KINDS,
@@ -98,82 +101,6 @@ const recoveryActions = new Set<string>(GOLDEN_PATH_RECOVERY_ACTION_KINDS);
 const cleanupPolicies = new Set<string>(GOLDEN_PATH_AUTOMATIC_CLEANUP);
 const reasonCodes = new Set<string>(GOLDEN_PATH_REASON_CODES);
 
-const ADMISSIBLE_RECOVERY_COMBINATIONS: readonly Pick<
-  GoldenPathRecovery,
-  "class" | "safeAction" | "retryable" | "automaticCleanup" | "reasonCode"
->[] = [
-  {
-    class: "ISSUANCE_PARTIAL_PROJECTION",
-    safeAction: "WAIT",
-    retryable: false,
-    automaticCleanup: "forbidden",
-    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
-  },
-  {
-    class: "ISSUANCE_PARTIAL_PROJECTION",
-    safeAction: "RECOVER",
-    retryable: false,
-    automaticCleanup: "conditional",
-    reasonCode: "RECOVERY_ACTION_REQUIRED",
-  },
-  {
-    class: "ISSUANCE_COMPENSATION_UNSAFE",
-    safeAction: "MANUAL_REVIEW",
-    retryable: false,
-    automaticCleanup: "forbidden",
-    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
-  },
-  {
-    class: "ABORT_CLEANUP_PENDING",
-    safeAction: "ABORT",
-    retryable: false,
-    automaticCleanup: "conditional",
-    reasonCode: "ABORT_CLEANUP_REQUIRED",
-  },
-  {
-    class: "ABORT_CLEANUP_PENDING",
-    safeAction: "RECOVER",
-    retryable: false,
-    automaticCleanup: "conditional",
-    reasonCode: "ABORT_CLEANUP_REQUIRED",
-  },
-  {
-    class: "ABORT_CLEANUP_UNSAFE",
-    safeAction: "WAIT",
-    retryable: false,
-    automaticCleanup: "forbidden",
-    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
-  },
-  {
-    class: "ABORT_CLEANUP_UNSAFE",
-    safeAction: "MANUAL_REVIEW",
-    retryable: false,
-    automaticCleanup: "forbidden",
-    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
-  },
-  {
-    class: "POST_EFFECT_VERIFICATION",
-    safeAction: "RETRY",
-    retryable: true,
-    automaticCleanup: "none",
-    reasonCode: "IDEMPOTENT_RETRY",
-  },
-  {
-    class: "POST_EFFECT_VERIFICATION",
-    safeAction: "WAIT",
-    retryable: false,
-    automaticCleanup: "forbidden",
-    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
-  },
-  {
-    class: "POST_EFFECT_VERIFICATION",
-    safeAction: "MANUAL_REVIEW",
-    retryable: false,
-    automaticCleanup: "forbidden",
-    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
-  },
-];
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -200,8 +127,26 @@ function sourceInput(source: GoldenPathRecoverySource): GoldenPathRecoveryInput 
 }
 
 function projectionFor(input: GoldenPathRecoveryInput): ChangeProjectionResult | undefined {
-  if (input.projection !== undefined) return input.projection;
-  return input.recoveryPlan?.failureEvidence.projection;
+  // A validated Core recovery plan is the authoritative source when both a
+  // plan and a caller projection are present; the latter cannot override it.
+  const candidate = input.recoveryPlan?.failureEvidence.projection ?? input.projection;
+  if (candidate === undefined) return undefined;
+  const validation = validateChangeProjectionResult(candidate);
+  return validation.valid ? validation.projection : undefined;
+}
+
+/**
+ * Recovery is an adapter over the Change execution port, not another result
+ * validator. Normalize port evidence once and never classify an untrusted
+ * object by reading its outcome/effects directly.
+ */
+function evidenceValue(input: GoldenPathRecoveryInput): ChangeExecutionEvidence | undefined {
+  if (input.evidence === undefined) return undefined;
+  try {
+    return normalizeChangeExecutionEvidence(input.evidence.operation, input.evidence);
+  } catch {
+    return undefined;
+  }
 }
 
 function failureEvidenceFor(failure: ChangeIssuanceFailureEvidence): ChangeExecutionFailureEvidence {
@@ -282,12 +227,15 @@ function evidenceFor(input: GoldenPathRecoveryInput): ChangeExecutionEvidence | 
 
 function rereadProven(input: GoldenPathRecoveryInput): boolean {
   const reread = input.authoritativeReread;
-  const projection = input.projection;
+  const projection = projectionFor(input);
+  const rereadProjection =
+    reread === undefined ? undefined : validateChangeProjectionResult(reread.projection).projection;
   return (
     reread !== undefined &&
     projection !== undefined &&
+    rereadProjection !== undefined &&
     reread.status === "complete" &&
-    canonicalJson(reread.projection) === canonicalJson(projection)
+    canonicalJson(rereadProjection) === canonicalJson(projection)
   );
 }
 
@@ -435,7 +383,27 @@ export function projectGoldenPathRecovery(source: GoldenPathRecoverySource): Gol
     if (!planResult.valid) return invalidPlanRecovery(rawInput);
     input = { ...rawInput, recoveryPlan: planResult.plan };
   }
+  const normalizedEvidence = evidenceValue(input);
+  if (input.evidence !== undefined && normalizedEvidence === undefined && input.recoveryPlan === undefined) {
+    return input.operation === "abort" || input.evidence.operation === "abort"
+      ? recovery("ABORT_CLEANUP_UNSAFE", "MANUAL_REVIEW", false, "forbidden", "MANUAL_RECOVERY_REVIEW_REQUIRED")
+      : recovery(
+          "ISSUANCE_COMPENSATION_UNSAFE",
+          "MANUAL_REVIEW",
+          false,
+          "forbidden",
+          "MANUAL_RECOVERY_REVIEW_REQUIRED",
+        );
+  }
+  // Ignore malformed supplemental evidence when a validated Core plan is
+  // present. The plan, not caller-supplied execution vocabulary, authorizes
+  // the remaining cleanup projection.
+  if (input.evidence !== undefined && normalizedEvidence === undefined) {
+    input = { ...input, evidence: undefined };
+  }
+  if (normalizedEvidence !== undefined) input = { ...input, evidence: normalizedEvidence };
   const evidence =
+    normalizedEvidence ??
     evidenceFor(input) ??
     (input.operation === undefined
       ? undefined
@@ -533,7 +501,7 @@ export function validateGoldenPathRecovery(input: unknown): GoldenPathRecoveryVa
       message: "Recovery retry target is unsupported.",
     });
   }
-  const admissible = ADMISSIBLE_RECOVERY_COMBINATIONS.some(
+  const admissible = GOLDEN_PATH_RECOVERY_METADATA.some(
     (combination) =>
       combination.class === input.class &&
       combination.safeAction === input.safeAction &&

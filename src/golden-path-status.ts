@@ -170,6 +170,84 @@ export interface GoldenPathRecoveryProjection {
   readonly reasonCode: GoldenPathReasonCode;
 }
 
+/**
+ * The sole compatibility metadata for recovery output.  Recovery legality
+ * still belongs to Change Core/XState; this table only bounds the Golden Path
+ * projection that can be serialized at this facade.
+ */
+export const GOLDEN_PATH_RECOVERY_METADATA = Object.freeze([
+  {
+    class: "ISSUANCE_PARTIAL_PROJECTION",
+    safeAction: "WAIT",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  },
+  {
+    class: "ISSUANCE_PARTIAL_PROJECTION",
+    safeAction: "RECOVER",
+    retryable: false,
+    automaticCleanup: "conditional",
+    reasonCode: "RECOVERY_ACTION_REQUIRED",
+  },
+  {
+    class: "ISSUANCE_COMPENSATION_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_PENDING",
+    safeAction: "ABORT",
+    retryable: false,
+    automaticCleanup: "conditional",
+    reasonCode: "ABORT_CLEANUP_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_PENDING",
+    safeAction: "RECOVER",
+    retryable: false,
+    automaticCleanup: "conditional",
+    reasonCode: "ABORT_CLEANUP_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_UNSAFE",
+    safeAction: "WAIT",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  },
+  {
+    class: "ABORT_CLEANUP_UNSAFE",
+    safeAction: "MANUAL_REVIEW",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  },
+  {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "RETRY",
+    retryable: true,
+    automaticCleanup: "none",
+    reasonCode: "IDEMPOTENT_RETRY",
+  },
+  {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "WAIT",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "AUTHORITATIVE_REREAD_REQUIRED",
+  },
+  {
+    class: "POST_EFFECT_VERIFICATION",
+    safeAction: "MANUAL_REVIEW",
+    retryable: false,
+    automaticCleanup: "forbidden",
+    reasonCode: "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  },
+] as const);
+
 export type GoldenPathDiagnosticCode =
   | "GOLDEN_PATH_INPUT_INVALID"
   | "GOLDEN_PATH_INPUT_UNKNOWN_PROPERTY"
@@ -889,15 +967,8 @@ function recoveryAction(
 ): GoldenPathRecoveryNextAction {
   const reasonCode: GoldenPathReasonCode =
     suppliedReasonCode ??
-    (kind === "ABORT"
-      ? "ABORT_CLEANUP_REQUIRED"
-      : kind === "MANUAL_REVIEW"
-        ? "MANUAL_RECOVERY_REVIEW_REQUIRED"
-        : kind === "RETRY"
-          ? "IDEMPOTENT_RETRY"
-          : kind === "WAIT"
-            ? "AUTHORITATIVE_REREAD_REQUIRED"
-            : "RECOVERY_ACTION_REQUIRED");
+    GOLDEN_PATH_RECOVERY_METADATA.find((metadata) => metadata.safeAction === kind)?.reasonCode ??
+    "RECOVERY_ACTION_REQUIRED";
   return { kind, owner: "recovery", reasonCode, ...(retryOf === undefined ? {} : { retryOf }) };
 }
 

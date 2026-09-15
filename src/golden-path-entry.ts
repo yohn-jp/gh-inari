@@ -669,6 +669,7 @@ function resultFor(
   executionOutcome: ChangeExecutionOutcome | undefined,
   valid: boolean,
   subjectOverride: ChangeIdentity | undefined,
+  issuanceMode: GoldenPathEntryAction["mode"] | undefined = undefined,
 ): GoldenPathEntryResult {
   const subject = projectionIdentity(projection) ?? subjectOverride;
   const action =
@@ -679,7 +680,7 @@ function resultFor(
       ? {
           operation: "change.issue" as const,
           issue: subject.rootIssue,
-          mode: projection.status === "absent" ? ("create" as const) : ("return-existing" as const),
+          mode: issuanceMode ?? (projection.status === "absent" ? ("create" as const) : ("return-existing" as const)),
         }
       : undefined;
   const normalizedDiagnostics = normalizeDiagnostics(diagnostics);
@@ -923,7 +924,7 @@ export function tryProjectGoldenPathEntry(input: unknown): GoldenPathEntryResult
   }
 
   let issuancePlan: ChangeIssuancePlan | undefined;
-  if (diagnostics.length === 0 && projection.status === "absent" && projectionInput !== undefined) {
+  if (diagnostics.length === 0 && projectionInput !== undefined) {
     try {
       issuancePlan = planChangeIssuance({
         ...projectionInput,
@@ -981,11 +982,18 @@ export function tryProjectGoldenPathEntry(input: unknown): GoldenPathEntryResult
     projection.valid &&
     (projection.status === "absent" || projection.status === "healthy") &&
     (executionOutcome === undefined || executionOutcome === "verified" || executionOutcome === "returned-existing");
-  const result = resultFor(projection, diagnostics, governedIssue, semanticIntent, executionOutcome, valid, identity);
-  // Keep the local variable as an explicit assertion that planning is part of
-  // admissibility, without leaking the full plan as a second public authority.
-  void issuancePlan;
-  return result;
+  // Change Core owns issuance mode. The entry exposes only that mode as its
+  // compatibility action and never republishes the full plan.
+  return resultFor(
+    projection,
+    diagnostics,
+    governedIssue,
+    semanticIntent,
+    executionOutcome,
+    valid,
+    identity,
+    issuancePlan?.mode,
+  );
 }
 
 /** Throwing Core entry point following the existing projection conventions. */
