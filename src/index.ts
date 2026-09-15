@@ -11,6 +11,7 @@ export * from "./pr-sync-input.js";
 export * from "./pr-policy.js";
 export * from "./governance.js";
 export * from "./contract/index.js";
+export * from "./implementation-contract.js";
 export * from "./github/index.js";
 export * from "./pull-request-template.js";
 export * from "./semantic-template.js";
