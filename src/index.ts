@@ -13,6 +13,7 @@ export * from "./governance.js";
 export * from "./contract/index.js";
 export * from "./implementation-contract.js";
 export * from "./implementation-authorization.js";
+export * from "./implementation-scope-projection.js";
 export * from "./github/index.js";
 export * from "./pull-request-template.js";
 export * from "./semantic-template.js";

@@ -30,6 +30,26 @@ are never inferred from `WRITE`, and `DENY` always narrows a matching
 allowlist. Creating or editing an Implementation does not grant authority or
 start a session.
 
+## Execution-scope projection
+
+The `implementation-scope-projection` package entry point exposes the
+transport-neutral `ImplementationScopeProjection` only from a current,
+valid #572 `ImplementationAuthorizationRecord` plus fresh verification
+evidence. The projection is versioned (`version: 1`, schema `1.0.0`) and
+contains the authorization identity and governed-body digest, repository/base
+binding, and independent `READONLY`, `WRITE`, `CREATE`, `DELETE`, and `DENY`
+path lists. It contains no architecture prose, Issue metadata, or
+enforcement-runtime-specific type.
+
+The projector has no scope override input. It re-verifies the authorization
+against the current governed body and base evidence, so body drift,
+supersession, and stale repository/base evidence fail closed. `WRITE`,
+`CREATE`, and `DELETE` remain separate allowlists; an omitted mutation list is
+an empty list, and a matching `DENY` excludes a path from every operation.
+Use `serializeImplementationScopeProjection` for deterministic transport and
+`isImplementationScopeProjectionPathAllowed` when applying the explicit
+deny-aware path policy.
+
 The future lifecycle surface uses the `impl` namespace (`inari impl ...`).
 This contract leaf provides the Core parser, validator, canonical serializer,
 Issue-form adapter, and schema; lifecycle and CLI operations are separate
