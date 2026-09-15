@@ -1,9 +1,9 @@
 # Inari Golden Path Architecture
 
-Status: normative architecture gate for Issue #395. This document freezes the
-Golden Path composition contract before implementation leaves are created. It
-does not add a Golden Path CLI, runtime orchestration code, a new persistence
-store, or a new operational playbook implementation.
+Status: normative architecture gate for Issue #395, reconciled with the
+completed XState leaves by #552. This document freezes the Golden Path
+composition contract; it does not add a Golden Path CLI, runtime orchestration
+code, a new persistence store, or a new operational playbook implementation.
 
 Issue #395 is the intent authority for this gate. Its Decision, Invariants, and
 Acceptance criteria are reflected here without replacing the executable
@@ -62,7 +62,8 @@ This architecture gate fixes:
   contract;
 - the package-level certification subject and isolation boundary;
 - the retry, abort, partial-effect, reread, and recovery certification matrix;
-- the dependency and implementation order for #239, #350, #351, and #352.
+- the dependency and implementation order for #239 and the completed #350,
+  #351, and #352 leaves.
 
 The document is normative for those boundaries. Executable schemas, validators,
 command contracts, Change types, XState machines, GitHub workflows, repository
@@ -126,7 +127,7 @@ The Golden Path is a composition layer. The following table is normative:
 | Authority                                                                   | Owns                                                                                                                                                                                                         | Golden Path must not do                                                                                           |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | Repository Canon and native repository contracts                            | Repository-specific Issue/PR meaning, template selection, branch policy, governance generation, and declared supplied/derived/fixed values                                                                   | Embed repository paths, regexes, title/body rules, branch grammars, or template defaults in orchestration         |
-| Semantic Artifact Core                                                      | Contract compilation, effective input schema, artifact materialization, relation semantics, canonical branch/PR desired projections, validation, observed-vs-desired reconciliation, and bounded diagnostics | Re-derive artifact values, render a parallel body, or turn GitHub presentation into semantic authority            |
+| Semantic Artifact Core                                                      | Contract compilation, effective input schema, artifact materialization, relation semantics, canonical branch/PR desired projections, validation, observed-vs-desired reconciliation, and bounded diagnostics | Re-derive artifact values, render a parallel body, or turn GitHub presentation into semantic policy               |
 | Change Core and [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md)      | Change identity, `DEFINED`/`DRAFT`/`REVIEW`/terminal lifecycle, provenance roles, transition legality, issuance idempotency, effect plans, compensation, abort, and recovery semantics                       | Add a parallel lifecycle, Change ID, effect plan, or persistent Change record                                     |
 | XState runtime and [`XSTATE_CHANGE_MACHINE.md`](./XSTATE_CHANGE_MACHINE.md) | Executable control flow: sequencing, explicit retry/no-op branches, reread, postcondition verification, compensation routing, and recovery routing                                                           | Decide semantic names, template meaning, provenance policy, GitHub normalization, or public state vocabulary      |
 | GitHub and bounded adapters                                                 | Observable repository state and bounded provider I/O; read normalization and application of already-admitted effects                                                                                         | Become semantic policy, infer missing intent, or report provider success as semantic success without verification |
@@ -508,7 +509,7 @@ responsibilities:
 
 ```text
 #239 Change dogfood / abort-cleanup evidence --\
-#350 issuance Saga --------------------------+--> Golden Path certification matrix
+#350 issuance Saga (complete) ---------------+--> Golden Path certification matrix
 #351 production-machine graph coverage -------/
 #352 TrustedChangeExecutor convergence -------/
 ```
@@ -520,14 +521,15 @@ Issues and their executable acceptance criteria.
 | Issue | Dependency role                                                                                                                                                                                                                          | Boundary preserved                                                                                                       |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | #239  | Supplies the end-to-end dogfood evidence for Change issuance/ready and the still-critical abort, canonical-branch cleanup, and orphan/partial-issuance cases. Its abort/cleanup acceptance must be part of the Golden Path release gate. | It owns dogfood evidence and lifecycle validation; Golden Path does not reimplement abort or cleanup.                    |
-| #350  | Supplies the XState issuance Saga: root-Issue admission, authoritative projection, idempotent existing-Change path, branch-before-PR effects, compensation, reread, and verification.                                                    | XState sequences the Saga; Core still owns branch/PR semantics and effect plans.                                         |
-| #351  | Supplies graph/model coverage over production lifecycle and operation machines, including retries, failures, compensation, and recovery.                                                                                                 | Production machines are traversed; no hand-written Golden Path state model becomes a second authority.                   |
-| #352  | Converges `TrustedChangeExecutor` on the canonical XState runtime while preserving public Change/Actions/CLI/MCP contracts.                                                                                                              | The executor remains an adapter; Golden Path consumes its bounded results and does not classify lifecycle independently. |
+| #350  | **Complete.** Supplies the XState issuance Saga: root-Issue admission, authoritative projection, idempotent existing-Change path, branch-before-PR effects, compensation, reread, and verification.                                      | XState sequences the Saga; Core still owns branch/PR semantics and effect plans.                                         |
+| #351  | **Complete.** Supplies graph/model coverage over production lifecycle and operation machines, including retries, failures, compensation, and recovery.                                                                                   | Production machines are traversed; no hand-written Golden Path state model becomes a second authority.                   |
+| #352  | **Complete.** Converges `TrustedChangeExecutor` on the canonical XState runtime while preserving public Change/Actions/CLI/MCP contracts.                                                                                                | The executor remains an adapter; Golden Path consumes its bounded results and does not classify lifecycle independently. |
 
-Until these dependencies' acceptance criteria are met, an architecture-level
-matrix can be defined but must not be reported as completed package
-certification. In particular, #350/#351/#352 do not authorize a new facade to
-duplicate their sequencing, coverage, or convergence work.
+The #350/#351/#352 implementation dependencies are complete at the current
+main baseline. Their completion does not constitute package certification:
+#239 dogfood/abort-cleanup evidence and the later #553 cross-deployment
+conformance suite remain separate gates. No new facade may duplicate the
+completed sequencing, coverage, or convergence work.
 
 ## 8. Post-gate implementation order
 
@@ -542,8 +544,9 @@ Issues in this order:
 3. Add the `inari skill golden-path` playbook as a thin composition over the
    existing live skill scenarios and exact command help. Do not copy its
    content into `skills/inari/SKILL.md`.
-4. Integrate #239 abort/cleanup and the #350/#351/#352 evidence into the
-   package certification matrix and dogfood lane.
+4. Integrate the completed #350/#351/#352 evidence and the outstanding #239
+   abort/cleanup evidence into the package certification matrix and dogfood
+   lane.
 5. Make the packed certification release-blocking after dogfood proves
    stability; add no new authority as a shortcut around an incomplete
    dependency.

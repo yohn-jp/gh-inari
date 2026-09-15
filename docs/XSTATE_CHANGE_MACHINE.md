@@ -1,29 +1,39 @@
 # XState Change Machine Architecture
 
-Status: normative implementation architecture for Epic #345 and child Issue #346. This document refines, but does not replace, the product architecture in #188 and `docs/CHANGE_CONTROL_PLANE.md`.
+Status: normative implementation architecture for Epic #345 and child Issue
+#346, reconciled with the completed #350/#351/#352 leaves by #552. This
+document refines, but does not replace, the product architecture in #188 and
+[`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## 1. Purpose
 
 Inari models governed Change lifecycle state and trusted execution semantics through Change Core, XState operation machines, and bounded adapters.
 
-This document fixes the boundary for migrating that control flow to XState v5 without moving semantic authority, repository truth, or provider I/O into the machine runtime.
+This document fixes the boundary for implementing the Lifecycle Controller with
+XState v5 without making XState an Authority or state store, and without
+moving repository truth or provider I/O into the machine runtime.
 
 The key rule is:
 
 ```text
-XState = control-flow authority
-Core pure functions = semantic authority
-Adapters = I/O authority
-GitHub projection = repository truth
+GitHub = repository Authority
+Core = deterministic semantic Roles
+XState = Lifecycle Controller implementation
+Adapters = bounded provider/transport I/O
+GitHub projection = observed repository state
 ```
 
-XState is an internal executable statechart implementation. It is not a new persistence layer, public API, repository policy engine, or artifact-definition authority.
+XState is an internal executable statechart implementation. It is not a new
+persistence layer, public API, repository policy engine, or artifact-definition
+owner.
 
 ## 2. Authority model
 
 ### 2.1 Repository Canon and Semantic Artifact Core
 
-Repository Canon and Semantic Artifact Core remain authoritative for governed Issue, Branch, and PR meaning.
+Repository Canon and Semantic Artifact Core own the deterministic meaning of
+governed Issue, Branch, and PR artifacts. GitHub remains the repository
+Authority whose evidence is observed and projected.
 
 They own, among other things:
 
@@ -41,7 +51,10 @@ A machine may invoke these functions. It must not independently reimplement thei
 
 ### 2.2 Change Core
 
-Change Core remains authoritative for the public Change vocabulary and semantic transition contract.
+Change Core owns the public Change vocabulary and semantic transition contract.
+The Lifecycle Controller implements the execution sequencing for those
+contracts; neither it nor its XState runtime becomes a second repository
+Authority or persisted Change store.
 
 The public lifecycle vocabulary remains:
 
@@ -65,9 +78,10 @@ abort
 
 `merge` remains reserved/non-executable until separately governed implementation exists.
 
-### 2.3 XState runtime
+### 2.3 Lifecycle Controller implementation
 
-XState owns executable control flow only:
+XState is the current implementation of the Lifecycle Controller. It owns
+executable control flow only:
 
 - lifecycle transition legality;
 - operation sequencing;
@@ -78,7 +92,9 @@ XState owns executable control flow only:
 - required reread and postcondition-verification sequencing;
 - final typed machine outcome selection.
 
-It does not decide canonical names, render artifacts, normalize provider responses, resolve repository policy, or define provenance rules.
+It is not an Authority or state store. It does not decide canonical names,
+render artifacts, normalize provider responses, resolve repository policy, or
+define provenance rules.
 
 ### 2.4 Adapters
 
@@ -566,7 +582,8 @@ Do not export as product contracts:
 - `ActorRef`;
 - `Snapshot`;
 - state-node values used only for internal execution phases;
-- machine implementation objects as semantic authority.
+- machine implementation objects as repository Authority or public semantic
+  contracts.
 
 Public API remains Inari-owned domain types and semantic commands.
 
@@ -623,35 +640,47 @@ Model coverage supplements, not replaces, semantic/provenance/adapter/security r
 
 The migration order is normative because it minimizes simultaneous authorities.
 
-### Gate 0 — #346
+### Gate 0 — #346 (complete)
 
-Merge this architecture before runtime migration.
+The architecture was merged before runtime migration.
 
-### Phase 1 — #347 lifecycle machine
+### Phase 1 — #347 lifecycle machine (complete)
 
-The pure lifecycle machine owns executable legality, with exhaustive parity coverage retained as a regression guard.
+The pure lifecycle machine owns executable legality, with exhaustive parity
+coverage retained as a regression guard.
 
-### Phase 2 — #348 Ready execution
+### Phase 2 — #348 Ready execution (complete)
 
-Migrate the smallest complete privileged operation and establish shared operation-machine conventions.
+The smallest complete privileged operation established the shared
+operation-machine conventions.
 
-### Phase 3 — #349 Abort/recovery
+### Phase 3 — #349 Abort/recovery (complete)
 
-Migrate normal abort, idempotent terminal retry, and explicit cleanup recovery.
+Normal abort, idempotent terminal retry, and explicit cleanup recovery are
+machine-driven.
 
-### Phase 4 — #350 issuance Saga
+### Phase 4 — #350 issuance Saga (complete)
 
-Migrate canonical branch + Draft PR transaction, compensation, generation-safe recovery, and issuance idempotency.
+The canonical branch + Draft PR transaction, compensation, generation-safe
+recovery, and issuance idempotency are machine-driven.
 
-### Phase 5 — #351 graph/model coverage
+### Phase 5 — #351 graph/model coverage (complete)
 
-Add structural reachable-path coverage over production machines.
+Structural reachable-path coverage consumes the production machines.
 
-### Phase 6 — #352 convergence
+### Phase 6 — #352 convergence (complete)
 
-Reduce `TrustedChangeExecutor` to the stable public adapter boundary. Keep dependency injection, actor invocation, Core semantic callbacks, and public-result mapping in the internal runtime adapter; remove superseded imperative sequencing/recovery branches and duplicate transition authority.
+`TrustedChangeExecutor` is the stable public adapter boundary. Dependency
+injection, actor invocation, Core semantic callbacks, and public-result mapping
+remain in the internal runtime adapter; superseded imperative sequencing and
+duplicate lifecycle-control logic are removed.
 
 At every intermediate phase, supported public behavior must remain compatible.
+
+The XState migration is complete at the current main baseline. #239 remains an
+independent Change dogfood/abort-cleanup gate, and #553 remains the open
+cross-deployment semantic conformance follow-up. Neither is made complete by
+the machine migration or by this documentation update.
 
 ## 19. Explicit non-goals
 
@@ -681,7 +710,8 @@ An implementation PR in #347-#352 should be rejected if it does any of the follo
 - exposes XState implementation types through public package contracts;
 - creates operation-specific lifecycle rules that diverge from the canonical lifecycle machine;
 - converts ACCEPTED/MERGED into invented mutation events without separate governance;
-- adds workflow/adapter policy that competes with Core/machine authority;
+- adds workflow/adapter policy that competes with Core semantic Roles or the
+  Lifecycle Controller;
 - silently treats #263 or #343 as solved by the XState migration.
 
 ## 21. Completion condition
@@ -697,4 +727,6 @@ The migration is complete when:
 - public Change/CLI/MCP/Actions contracts remain implementation-independent;
 - GitHub remains the sole initial observable Change state store.
 
-At that point, XState is an implementation mechanism for making Inari's already-governed semantics executable and mechanically complete, not a new source of product truth.
+At that point, XState is an implementation mechanism for making Inari's
+already-governed semantics executable and mechanically complete, not a new
+Authority, state store, or source of product truth.

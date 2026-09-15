@@ -1,6 +1,13 @@
 # Inari Native MCP Issuer Gateway Architecture
 
-Status: proposed architecture for Epic #267 and Issue #268.
+Status: historical/superseded architecture for Epic #267 and Issue #268.
+
+This file is retained as design history and transport prior art. Its uses of
+`semantic authority`, `issuer authority`, Actions-centric execution, and hosted
+gateway trust are not the current architecture. For current guidance, use
+[`ARCHITECTURE.md`](./ARCHITECTURE.md),
+[`AGENT_CAPABILITY_AUTHORIZATION.md`](./AGENT_CAPABILITY_AUTHORIZATION.md),
+and [`NATIVE_MCP_ISSUER_GATEWAY.md`](./NATIVE_MCP_ISSUER_GATEWAY.md).
 
 This document extends, and does not replace, [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md).
 The Change model, lifecycle, semantic authority, canonical branch/PR invariants,

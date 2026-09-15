@@ -1,8 +1,10 @@
 # Inari Native MCP Transport Architecture
 
-Status: reconciled by #381. This document records the transport/tool-contract
-parts of Epic #267 and Issue #268 that remain compatible with the normative
-Session/App authorization architecture in [`AGENT_CAPABILITY_AUTHORIZATION.md`](./AGENT_CAPABILITY_AUTHORIZATION.md).
+Status: reconciled by #381 and #552. This document records the
+transport/tool-contract parts of Epic #267 and Issue #268 that remain
+compatible with the normative responsibility vocabulary in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) and the Session/App authorization
+architecture in [`AGENT_CAPABILITY_AUTHORIZATION.md`](./AGENT_CAPABILITY_AUTHORIZATION.md).
 
 The original #267/#268 proposal is preserved at
 [`NATIVE_MCP_ISSUER_GATEWAY_LEGACY.md`](./NATIVE_MCP_ISSUER_GATEWAY_LEGACY.md)
@@ -11,9 +13,11 @@ authority.
 
 ## Authority and #267/#268 classification
 
+[`ARCHITECTURE.md`](./ARCHITECTURE.md),
 [`AGENT_CAPABILITY_AUTHORIZATION.md`](./AGENT_CAPABILITY_AUTHORIZATION.md), the
 production `src/agent-authority/` contracts, and the existing Session-authorized
-Change executor are authoritative. MCP owns protocol translation only.
+Change executor define the relevant boundaries. MCP owns protocol translation
+only.
 
 | Legacy design/work item                                                        | Classification     | Current meaning                                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -72,8 +76,9 @@ admits those operations.
 
 ## Transport rules
 
-- Core, repository policy, Change lifecycle, and XState remain semantic and
-  execution authorities.
+- GitHub remains repository Authority; Repository Canon/Core define their
+  deterministic semantic contracts; and XState implements the Lifecycle
+  Controller. None of those distinctions are changed by MCP transport.
 - Read-only MCP tools remain direct Core adapters and do not require Session
   credentials.
 - Governed PR comment, review, and merge tools use the same versioned Core

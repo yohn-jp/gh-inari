@@ -1,14 +1,15 @@
 # Semantic Artifact Contracts and Projection Architecture
 
-Status: proposed architecture for Epic #278 and Issue #279. This document becomes the normative implementation boundary for #278 when merged.
+Status: normative artifact-semantics architecture for completed Epic #278 and
+Issue #279, reconciled with the current responsibility vocabulary by #552.
 
 This document refines the artifact-semantics layer of [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md) and composes with [`NATIVE_MCP_ISSUER_GATEWAY.md`](./NATIVE_MCP_ISSUER_GATEWAY.md). It does not replace the Change lifecycle, Session/App authorization model, issuer identity, or MCP transport boundary defined there.
 
-The current v1 semantic-template behavior described in [`SEMANTIC_TEMPLATES.md`](./SEMANTIC_TEMPLATES.md) remains the executable compatibility authority until the migration in this document is implemented.
+The current v1 semantic-template behavior described in [`SEMANTIC_TEMPLATES.md`](./SEMANTIC_TEMPLATES.md) remains the executable compatibility contract until the migration in this document is implemented.
 
 ## 1. Purpose
 
-Inari currently has repository-owned semantic JSON under `.github/inari/`, a compiler-generated `CanonicalContract`, semantic artifact loaders/validators, deterministic branch derivation for governed Changes, and a trusted execution path. Those pieces already establish the important principle that GitHub presentation and transport must not become independent policy authorities.
+Inari currently has repository-owned semantic JSON under `.github/inari/`, a compiler-generated `CanonicalContract`, semantic artifact loaders/validators, deterministic branch derivation for governed Changes, and a trusted execution path. Those pieces already establish the important principle that GitHub presentation and transport must not become independent policy owners.
 
 The remaining architectural problem is that the pieces do not yet share one general artifact model:
 
@@ -57,12 +58,14 @@ The layers are intentionally distinct.
 - **Semantic Artifact** is one fully validated/materialized instance after supplied input, derived values, fixed values, defaults, and relations have converged.
 - **Desired Projection** is the deterministic GitHub-facing representation of that semantic artifact for a declared target capability set.
 - **Mutation Plan** is a versioned set of preconditions and effects produced by reconciling desired projection with observed state.
-- **Observed Projection** is structured evidence reconstructed from GitHub state. It is evidence, not semantic authority.
+- **Observed Projection** is structured evidence reconstructed from GitHub state. It is evidence, not semantic policy or repository Authority.
 - **Executor** is the logical trusted component that admits and applies a mutation plan and verifies the resulting projection.
 
-Names, titles, Markdown bodies, labels, ref names, hidden markers, closing-keyword strings, and native GitHub relation objects are representations of semantic facts. They are not independent semantic authorities.
+Names, titles, Markdown bodies, labels, ref names, hidden markers,
+closing-keyword strings, and native GitHub relation objects are representations
+of semantic facts. They are not independent semantic policy owners.
 
-## 3. Authority hierarchy
+## 3. Semantic contract hierarchy
 
 For artifact semantics, authority is ordered as follows:
 
@@ -70,7 +73,8 @@ For artifact semantics, authority is ordered as follows:
 2. The target repository owns the concrete Repository Contract values under `.github/inari/`.
 3. Effective Contract and Semantic Artifact are compiler/validator products of Core + repository Canon.
 4. CLI and MCP expose discovery, schema, validation, preview, and plan capabilities over Core. They do not own repository-specific rules.
-5. Executor implementations re-resolve authoritative repository state and invoke the same Core authority for admission.
+5. Executor implementations re-resolve current GitHub Authority evidence and
+   invoke the same Core semantic contracts for admission.
 6. GitHub-native templates, bodies, metadata, relations, branches, workflow YAML, and API response shapes are projections or observed evidence.
 
 No adapter may turn a repository-specific convention into a second hard-coded semantic rule.
@@ -406,7 +410,9 @@ Examples:
 
 Projection capability detection is explicit input to the projector. GitHub.com/GHES differences must not silently change canonical semantics.
 
-When the same semantic fact is intentionally projected to more than one GitHub surface for behavior and usability, the projections remain one semantic authority. Conflicting observed representations are drift.
+When the same semantic fact is intentionally projected to more than one GitHub
+surface for behavior and usability, the projections remain one semantic
+contract. Conflicting observed representations are drift.
 
 ## 11. Desired Projection and Mutation Plan
 
@@ -452,7 +458,7 @@ resolve authoritative repository + Canon generation
 recompile Effective Contract with Core
         |
         v
-revalidate/materialize semantic intent with the same Core authority
+revalidate/materialize semantic intent with the same Core semantic contracts
         |
         v
 re-read authoritative bounded GitHub state
@@ -632,7 +638,9 @@ The current Change invariant that its canonical branch is Issue-derived is a **C
 
 **Current:** transport-independent Change contract, canonical branch derivation composition, transition planning, effects, projection/admission validation, issuance and recovery semantics.
 
-**Target:** retain lifecycle and transition authority. Consume Artifact Contract derivation/projection instead of independently owning artifact title/body/branch policy where those semantics have moved to the Artifact Contract.
+**Target:** retain the Change lifecycle contract and consume Artifact Contract
+derivation/projection instead of independently owning artifact title/body/branch
+policy where those semantics have moved to the Artifact Contract.
 
 ### `src/github/*`
 
@@ -654,17 +662,22 @@ The current Change invariant that its canonical branch is Issue-derived is a **C
 
 ### `docs/NATIVE_MCP_ISSUER_GATEWAY.md`
 
-**Current:** authoritative hosted MCP ingress, repository-local runner, OIDC/issuer boundary, and transport migration architecture.
+**Current:** reconciled MCP protocol/transport adapter and Session/App bridge
+architecture. Hosted gateway authentication, OIDC-as-trust-root, and
+Actions-required execution are superseded.
 
-**Target:** remains authoritative for hosted trust/deployment. Its MCP tools consume Effective Contracts and plans from this architecture rather than acquiring semantic policy ownership.
+**Target:** remains the transport/deployment reference. Its MCP tools consume
+Effective Contracts and plans from this architecture rather than acquiring
+semantic policy ownership.
 
 ## 17. Compatibility and migration
 
 Migration is additive and staged; no flag day is required.
 
-### Phase 0 — architecture authority
+### Phase 0 — architecture gate
 
-Merge this document and decompose #278. Do not implement #161/#272/#273 as independent new semantic authorities before the decomposition is fixed.
+This document and #278 are complete. Do not implement #161/#272/#273 as
+independent new policy owners before the decomposition is fixed.
 
 ### Phase 1 — Contract IR and compiler
 
@@ -698,7 +711,9 @@ Make trusted execution re-resolve the same Contract generation and admit/revalid
 
 ### Phase 8 — repository/organization consumer migration
 
-Migrate organization CI/governance consumers to the new Core result and delete duplicated title/branch/relation validation only after equivalent Inari authority exists.
+Migrate organization CI/governance consumers to the new Core result and delete
+duplicated title/branch/relation validation only after an equivalent Core
+semantic contract exists.
 
 ## 18. Issue disposition after this document
 
@@ -717,7 +732,8 @@ After merge, #278 should be decomposed into bounded implementation leaves. At mi
 Existing issues are then dispositioned against those leaves:
 
 - #157 is completed foundation and its semantic behavior must be preserved;
-- #161 is absorbed into the typed relation / Issue observation work rather than becoming a separate lifecycle semantic authority;
+- #161 is absorbed into the typed relation / Issue observation work rather than
+  becoming a separate lifecycle policy owner;
 - #272 is absorbed into PR identity/title projection work;
 - #273 is absorbed into branch authority/derivation work;
 - #275 remains an independent projection-renderer correctness bug and may proceed separately.
@@ -738,7 +754,8 @@ The following are non-negotiable for implementations derived from #278:
 - CLI/MCP and Executor use the same Core compiler/validator semantics.
 - CLI/MCP preflight never substitutes for Executor mutation admission.
 - Mutation admission re-resolves immutable governance generation and current state.
-- Desired/observed GitHub representations are projections/evidence, not semantic authorities.
+- Desired/observed GitHub representations are projections/evidence, not
+  semantic policy owners.
 - Plan/evidence contracts are transport-independent and credential-free.
 - GitHub Actions is an Executor deployment, not a Core primitive.
 - Change lifecycle and artifact semantics remain distinct and composable.

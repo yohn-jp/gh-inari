@@ -1,9 +1,10 @@
 # Inari Architecture Vocabulary
 
 Status: normative vocabulary for the architecture established by Issues #542
-and #543. This document names responsibility, identity, credential, provider,
-and deployment boundaries. It does not change authentication behavior,
-provider permissions, Change/XState semantics, or public and wire contracts.
+and #543 and reconciled by #552. This document names responsibility, identity,
+credential, provider, and deployment boundaries. It does not change
+authentication behavior, provider permissions, Change/XState semantics, or
+public and wire contracts.
 
 Issue #542 remains the intent and topology authority for the broader
 architecture. This document makes its provider-principal, credential-domain,
@@ -31,7 +32,7 @@ into one another:
 | **Canon**              | Authoritative governed data or rules held by the Authority. Canon is data, not an executing component.                                                       |
 | **Port**               | A stable transport-neutral contract between Components or Roles.                                                                                             |
 | **Adapter**            | A concrete binding between a Port and a protocol, provider, CLI, or Runtime Host.                                                                            |
-| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create semantic authority.                                                           |
+| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create repository Authority or semantic capability.                                  |
 | **Runtime Host**       | The compute environment in which Components execute, such as local Node.js, an Actions Runner, or a Cloudflare Worker.                                       |
 | **Deployment Profile** | An explicit composition of Components, Adapters, Transports, credentials, and Runtime Hosts.                                                                 |
 | **Trust Boundary**     | A boundary across which identity or credential authority changes and therefore requires explicit proof, scope, or containment.                               |
@@ -205,7 +206,42 @@ is a compatibility/naming-debt case: the reader is reused by the deployment-
 agnostic Direct App composition and its responsibility is provider evidence
 acquisition, not Actions-specific semantics.
 
-## 6. Current vocabulary map
+## 6. Evidence-to-effect responsibility boundaries
+
+The privileged execution path is a sequence of distinct Roles. A component may
+co-locate them, but no Role may absorb another Role's responsibility merely
+because the same process performs both steps.
+
+| Role                       | Owns                                                                                                                                                                        | Must not own                                                                                     |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **Credential Broker**      | App private-key and installation-token containment; bounded provider capability issuance for the target repository and permission ceiling.                                  | Session capability admission, semantic planning, reusable credential return, or caller identity. |
+| **Evidence Reader**        | Bounded current evidence acquisition through an admitted Provider Credential.                                                                                               | GitHub-to-Inari semantic interpretation, lifecycle transitions, or policy decisions.             |
+| **Observation Projector**  | Pure normalization of provider evidence into versioned Operational Observation.                                                                                             | GitHub I/O, mutation, repository policy, or semantic Change state.                               |
+| **State Projector**        | Deterministic interpretation of admissible observations plus Canon/contracts into Inari state and projections.                                                              | Provider I/O, credential handling, or lifecycle/effect sequencing.                               |
+| **Operation Planner**      | Conversion of a requested semantic operation and projected state into bounded intended effects and postconditions.                                                          | Applying effects, minting credentials, or inventing provider-specific policy.                    |
+| **Lifecycle Controller**   | Legal event sequencing, retry/no-op branches, compensation, recovery, reread, and postcondition-verification control flow. XState is the current implementation technology. | Repository Authority, persistent Change state, artifact derivation, or provider normalization.   |
+| **Effect Authorizer**      | Validation that one already-planned effect may cross the App Principal credential boundary for the execution context and permission ceiling.                                | Choosing lifecycle transitions, deriving artifacts, or acting as a general provider client.      |
+| **Effect Adapter**         | Translation of one admitted effect into bounded GitHub provider operations and bounded result evidence.                                                                     | Adding effects, semantic policy, or success claims without reread and verification.              |
+| **Postcondition Verifier** | Comparison of reread/projected Authority state with the planned semantic postcondition before success.                                                                      | Applying effects, changing policy, or treating a transport response as proof of success.         |
+
+The resulting boundary is:
+
+```text
+Credential Broker -> Provider Credential
+        -> Evidence Reader -> Observation Projector -> State Projector
+        -> Operation Planner -> Lifecycle Controller
+        -> Effect Authorizer -> Effect Adapter -> GitHub Authority
+        -> Evidence Reader -> Observation Projector -> State Projector
+        -> Postcondition Verifier -> bounded result / recovery
+```
+
+`Executor` is the transport- and Runtime-Host-neutral coordinator around this
+sequence. It composes the Roles; it does not replace them with a single generic
+authority. `ChangeExecutionPort`, CLI, Direct App, MCP, and Actions bind the
+same execution semantics to different client, protocol, or deployment
+surfaces.
+
+## 7. Current vocabulary map
 
 This map records the safe classification for the current implementation. #548
 applies the explicit compatibility migration for execution ports, transport
@@ -236,6 +272,25 @@ migration decision. In particular, better prose must not silently turn a User
 Principal into an App Principal, a Transport Principal into a requester, a
 Provider Credential into a Session Credential, or an Observation Projector into
 a semantic policy engine.
-Principal, a Transport Principal into a requester, a Provider Credential into
-a Session Credential, or an Observation Projector into a semantic policy
-engine.
+
+## 8. Tracking convergence
+
+The documentation and implementation leaves are intentionally separate:
+
+- [#542](https://github.com/yohn-jp/gh-inari/issues/542) defines the
+  responsibility topology and reserves `Authority` for GitHub.
+- [#543](https://github.com/yohn-jp/gh-inari/issues/543) through
+  [#551](https://github.com/yohn-jp/gh-inari/issues/551) establish the
+  provider, observation, port/adapter, Delegator, App Principal, and branch
+  vocabulary reflected here.
+- [#352](https://github.com/yohn-jp/gh-inari/issues/352) is complete; the
+  trusted Change executor now converges on the canonical XState runtime.
+- [#552](https://github.com/yohn-jp/gh-inari/issues/552) reconciles current
+  architecture prose and active tracking; it does not add production
+  behavior.
+- [#553](https://github.com/yohn-jp/gh-inari/issues/553) remains the open
+  cross-deployment semantic conformance follow-up. Documentation convergence
+  is not evidence that this parity suite is complete.
+
+Release and self-dogfood gates remain operational gates and are not closed by
+this documentation status map.

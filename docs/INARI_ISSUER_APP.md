@@ -9,9 +9,9 @@ Runtime signer provisioning and per-runtime key ownership are documented in the 
 [`Delegator operations runbook`](./DELEGATOR_OPERATIONS.md).
 
 This document is the implementation contract for Issues #217 and #464. The product and
-trust-boundary authority remains
+trust-boundary architecture remains
 [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md); this document does
-not introduce a second semantic authority.
+not introduce a second semantic policy owner.
 
 ## Role
 
@@ -159,8 +159,8 @@ that constructs the trusted context.
 
 The requester may be a human or agent, while the provider effect is performed
 as the Inari App Principal. Commit authorship remains implementation
-provenance. Review and approval belong to a human or independent review
-authority; the Effect Authorizer has no approve/review operation and cannot
+provenance. Review and approval belong to a human or independent reviewer; the
+Effect Authorizer has no approve/review operation and cannot
 approve its own PR. Merge admission remains repository policy and is outside
 this module.
 

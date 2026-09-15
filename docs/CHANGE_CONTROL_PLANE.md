@@ -1,6 +1,10 @@
 # Inari Governed Change Control Plane
 
-Status: proposed architecture for Epic #188. Implementation begins only after this document is merged.
+Status: historical Change-control-plane architecture for Epic #188. Change
+lifecycle and publication invariants remain normative; the current
+responsibility, identity, credential, and deployment vocabulary is defined by
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) and the Session/App boundary by
+[`AGENT_CAPABILITY_AUTHORIZATION.md`](./AGENT_CAPABILITY_AUTHORIZATION.md).
 
 ## 1. Purpose
 
@@ -14,7 +18,12 @@ A Change is the governed execution identity that connects one intent-bearing Iss
 
 This document defines the product model, lifecycle, authority boundaries, caller interfaces, trusted execution path, security model, failure semantics, provenance, and migration constraints for that control plane.
 
-This document is architectural authority for those boundaries. It does not replace executable semantic templates, schemas, validators, command metadata, repository Rulesets, or tests. Where a rule can be expressed and enforced mechanically, the executable authority remains canonical and this document describes its intended role.
+This document remains the Change lifecycle/publication reference for those
+boundaries. It does not define the current responsibility vocabulary and does
+not replace executable semantic templates, schemas, validators, command
+metadata, repository Rulesets, or tests. Where a rule can be expressed and
+enforced mechanically, the executable contract remains canonical and this
+document describes its intended role.
 
 ## 2. Product definition
 
@@ -24,22 +33,33 @@ The target product definition is:
 
 Inari is not defined as GitHub Actions, a GitHub App, a CLI, or a Web application. Those are separate roles.
 
-- **Inari Core** owns semantic contracts, policy resolution, canonicalization, Change state-machine validation, transition planning, invariants, and diagnostics.
+- **Inari Core** implements deterministic semantic contracts, policy
+  resolution, canonicalization, projection, planning, and diagnostics.
+- **Lifecycle Controller** owns Change lifecycle sequencing, retry,
+  compensation, recovery, and postcondition-verification control flow. XState
+  is its current implementation technology.
 - **Inari CLI** is the canonical human- and agent-facing client surface.
-- **GitHub Actions** is the initial trusted remote execution runtime for privileged Change transitions.
-- **Inari GitHub App** is the authority identity and capability used by trusted execution to apply privileged GitHub effects.
-- **GitHub** is the initial observable state store and primary human visualization surface for Issue, branch, PR, CI, review, and merge state.
-- **MCP, GitHub-native UI adapters, or a future service** may become additional clients or transports without becoming new semantic authorities.
+- **GitHub Actions** is an Actions compatibility Deployment Profile: a
+  Runner Runtime Host plus workflow Transport and deployment adapter.
+- **Inari GitHub App** is the App Principal used by the Credential Broker and
+  Effect Authorizer to apply already-planned provider effects.
+- **GitHub** is the repository Authority and observable state store for Issue,
+  branch, PR, CI, review, and merge state.
+- **MCP, Direct App, CLI, GitHub-native UI adapters, or a future service** may
+  bind the same execution semantics as client, protocol, ingress, or
+  deployment adapters without becoming semantic or repository Authorities.
 
 The architecture separates three concerns that must not collapse into one another:
 
 ```text
-semantic authority     execution runtime       mutation identity
-------------------     -----------------       -----------------
-Inari Core             GitHub Actions          Inari GitHub App
+semantic roles         deployment profile      provider principal
+--------------         ------------------      -----------------
+Inari Core + XState    Actions compatibility   App Principal
 ```
 
-Actions executes a transition plan. The App authenticates privileged effects. Neither defines the meaning of a Change.
+The Lifecycle Controller sequences a transition plan. The App Principal and
+Effect Authorizer admit bounded provider effects. Neither Actions nor the App
+defines the meaning of a Change.
 
 ## 3. Why Change exists
 
@@ -142,10 +162,11 @@ The following invariants are architectural requirements.
 - Human and agent callers never receive GitHub App private keys or installation tokens.
 - Requester, issuer, implementer, reviewer, and merger identities remain distinguishable.
 - Pure deterministic operations remain local-capable.
-- Authoritative repository transitions use a trusted Change Executor reached
-  through the transport-neutral Change execution port.
-- Actions workflow YAML is not a second semantic authority.
-- GitHub is the initial state store for Change projection.
+- Privileged repository transitions use a trusted Change Executor reached
+  through the transport-neutral `ChangeExecutionPort`.
+- Actions workflow YAML is a deployment adapter, not a semantic policy owner or
+  repository Authority.
+- GitHub is the repository Authority and state store for Change projection.
 - A separate persistent Change database is not introduced without a demonstrated requirement.
 - Existing semantic template authority remains authoritative for Issue and PR artifact contracts.
 - Humans and agents share the same semantic Change contract.
@@ -153,7 +174,9 @@ The following invariants are architectural requirements.
 
 ## 6. Change lifecycle
 
-The lifecycle is modeled semantically by Inari Core and projected onto GitHub-native states where possible.
+The lifecycle is defined by the Change contract and controlled operationally by
+the Lifecycle Controller. It is projected onto GitHub-native states where
+possible; XState is not a second state store or repository Authority.
 
 ```text
 DEFINED
@@ -331,10 +354,10 @@ The architecture explicitly rejects routing every feature-branch push through th
 
 Branch deletion is a lifecycle and governance concern distinct from creation and update. Implementation must define cleanup behavior while preserving merged or aborted Change provenance.
 
-Issuance compensation and Abort are separate semantic authorities: compensation may
-delete only the exact issuer-created generation, while Abort uses the ordinary
-governed cleanup effect. A branch that advanced after issuance is never automatically
-deleted by compensation.
+Issuance compensation and Abort are separate lifecycle responsibilities:
+compensation may delete only the exact issuer-created generation, while Abort
+uses the ordinary governed cleanup effect. A branch that advanced after
+issuance is never automatically deleted by compensation.
 
 ## 11. PR authority model
 
@@ -503,7 +526,10 @@ Not every Inari operation belongs in Actions.
 
 Pure deterministic operations remain local-capable, including schema discovery, validation, rendering, explain diagnostics, canonical checks, and canonical reads where privileged credentials are not required.
 
-Authoritative repository transitions use the trusted remote path because they apply already-planned effects through the Effect Authorizer as the App Principal.
+Privileged repository transitions use a trusted execution path because they
+apply already-planned effects through the Effect Authorizer as the App
+Principal. The path may be Direct App, MCP/App, or Actions compatibility; the
+deployment profile does not change semantic execution.
 
 ```text
 pure deterministic computation     authoritative repository mutation
@@ -515,7 +541,10 @@ The architecture does not turn Inari into an "everything is a GitHub Action" pro
 
 ## 17. Remote execution transport
 
-The first implementation may use GitHub Actions `workflow_dispatch` or an equivalent GitHub-native dispatch mechanism as the remote execution transport.
+The historical first implementation used GitHub Actions `workflow_dispatch` or
+an equivalent GitHub-native dispatch mechanism as the remote execution
+transport. Actions remains a supported compatibility profile, not a required
+semantic or trust layer.
 
 That choice is hidden behind the semantic CLI or client surface.
 
@@ -543,11 +572,11 @@ inari change show 189 --repository yohn-jp/gh-inari --json
 gh pr view "$(inari change show 189 --repository yohn-jp/gh-inari --json | jq -r .pullRequest)" --json headRefName,isDraft,author
 ```
 
-The first command dispatches the protected Actions executor. The executor
-keeps the Issuer App credentials in Actions secrets, creates the canonical
-branch and Draft PR, and returns only the bounded Change projection. `ready`
-and `abort` use the same semantic path; no #223 ruleset enforcement is
-required for this dogfood.
+The first command dispatches the protected Actions deployment adapter. The
+trusted Executor keeps App Principal credentials inside the protected
+credential boundary, creates the canonical branch and Draft PR, and returns
+only the bounded Change projection. `ready` and `abort` use the same semantic
+path; no #223 ruleset enforcement is required for this historical dogfood.
 
 Workflow filename, dispatch input shape, job structure, and token-generation details are implementation concerns.
 
@@ -555,7 +584,11 @@ The transport may later be replaced or supplemented by MCP, a GitHub App event h
 
 ## 18. GitHub Actions role
 
-GitHub Actions is the initial authoritative execution runtime because it provides a repository-native trusted environment, auditable runs, secret confinement, repository scoping, and no separate always-on service requirement.
+GitHub Actions is the compatibility Deployment Profile because it provides a
+repository-native Runtime Host, auditable Transport, secret confinement,
+repository scoping, and no separate always-on service requirement. The Runner
+is not a semantic or repository Authority; Direct App and MCP/App profiles
+must reach the same Executor and Lifecycle Controller semantics.
 
 Actions YAML must remain thin.
 
@@ -572,7 +605,8 @@ The workflow must not contain an independent handwritten naming policy, PR schem
 
 ## 19. GitHub App role
 
-The Inari GitHub App is an authority identity, not a frontend.
+The Inari GitHub App is the App Principal for provider access, not a frontend,
+repository Authority, Session Authenticator, or semantic Executor.
 
 It provides least-privilege, auditable, short-lived mutation capability for trusted execution.
 
@@ -796,9 +830,11 @@ Rejected because publication authority remains distributed and privileged issuer
 
 Rejected for the initial architecture because it would make the ordinary edit, commit, and push loop unnecessarily expensive and slow.
 
-### 29.3 Make GitHub Actions the semantic authority
+### 29.3 Make GitHub Actions the product authority
 
-Rejected because workflow YAML would become a second business-logic contract and lock Inari to one executor.
+Rejected because workflow YAML would become a second business-logic contract,
+compete with Core/Lifecycle Controller semantics, and lock Inari to one
+deployment profile.
 
 ### 29.4 Expose the GitHub App directly to agents
 
@@ -841,7 +877,9 @@ semantic Change
    -> verify GitHub projection
 ```
 
-Issue Forms and PR templates remain semantic authorities for their artifacts. Change composes those contracts into a lifecycle rather than replacing them.
+Issue Forms and PR templates remain repository-contract projections for their
+artifacts; the Semantic Artifact Core owns their deterministic interpretation.
+Change composes those contracts into a lifecycle rather than replacing them.
 
 The largest operational consequence is that a dedicated trusted execution path and GitHub App become part of Inari deployment.
 
@@ -858,7 +896,8 @@ Before implementation decomposition, reviewers should be able to answer yes to a
 - Is Draft-at-issuance justified as lifecycle state rather than automation convenience?
 - Can an implementation author formally review an issuer-authored PR without erasing commit provenance?
 - Are requester, issuer, implementer, reviewer, and merger identities distinct?
-- Is Inari Core clearly the semantic authority while Actions remains an executor and the GitHub App remains an identity and capability?
+- Are Core semantic Roles and the Lifecycle Controller clearly separated from
+  the Actions deployment profile and App Principal/Effect Authorizer?
 - Can humans and agents use the same semantic request model without a GUI dependency?
 - Are App credentials confined to trusted execution?
 - Are issuance retries idempotent?
