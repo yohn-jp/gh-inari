@@ -12,8 +12,8 @@ importers:
         specifier: 1.30.0
         version: 1.30.0(supports-color@10.2.2)(zod@4.5.4)
       xstate:
-        specifier: 5.32.6
-        version: 5.32.6
+        specifier: 5.33.0
+        version: 5.33.0
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -26,7 +26,7 @@ importers:
         version: 26.4.0
       '@xstate/graph':
         specifier: 3.0.4
-        version: 3.0.4(xstate@5.32.6)
+        version: 3.0.4(xstate@5.33.0)
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
@@ -1424,8 +1424,8 @@ packages:
       utf-8-validate:
         optional: true
 
-  xstate@5.32.6:
-    resolution: {integrity: sha512-WfA8WNrh6r9osuGwVm+aIPM4jmMW2LKHV1Yv9thYpOtL4HVF/kobh95K/O8v2jDCpDmP2EoY+6uvuqHXCZ6ZLw==}
+  xstate@5.33.0:
+    resolution: {integrity: sha512-C58ZnDXlP5WNiiGVMxHTlKpUBtC46HN+H4o2po9Lvglt2pmPzqaqunXRmrvU4NIDvMbjVvaqqL4pGbgFSiYhgw==}
 
   yaml@2.9.0:
     resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
@@ -1944,9 +1944,9 @@ snapshots:
       '@typescript-eslint/types': 8.69.0
       eslint-visitor-keys: 5.0.1
 
-  '@xstate/graph@3.0.4(xstate@5.32.6)':
+  '@xstate/graph@3.0.4(xstate@5.33.0)':
     dependencies:
-      xstate: 5.32.6
+      xstate: 5.33.0
 
   accepts@2.0.0:
     dependencies:
@@ -2703,7 +2703,7 @@ snapshots:
 
   ws@8.21.0: {}
 
-  xstate@5.32.6: {}
+  xstate@5.33.0: {}
 
   yaml@2.9.0: {}
 

@@ -198,7 +198,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "xstate": "5.32.6",
+    "xstate": "5.33.0",
     "yaml": "^2.9.0",
     "zod": "4.5.4"
   },
