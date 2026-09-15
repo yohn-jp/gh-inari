@@ -494,6 +494,22 @@ test("retries one transient run or artifact poll failure before observing succes
   }
 });
 
+test("retries one transient result artifact download failure before accepting success", async () => {
+  const api = new FakeActionsApi();
+  const originalDownloadActionsArtifact = api.downloadActionsArtifact.bind(api);
+  let downloads = 0;
+  api.downloadActionsArtifact = async (artifactId) => {
+    downloads += 1;
+    if (downloads === 1) throw new Error("transient Actions artifact download failure");
+    return originalDownloadActionsArtifact(artifactId);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(downloads, 2);
+});
+
 test("preserves the bounded result-timeout failure when no executor run becomes observable", async () => {
   const api = new FakeActionsApi();
   api.runState = "pending";
