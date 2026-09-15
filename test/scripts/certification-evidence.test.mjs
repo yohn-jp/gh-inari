@@ -5,10 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  appendCertificationDiagnostic,
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
   CertificationEvidenceError,
   assertCertificationEvidence,
+  projectStructuredCommandError,
   readCertificationEvidence,
+  sanitizeCertificationText,
   serializeCertificationEvidence,
   sha256Tarball,
   validateCertificationEvidence,
@@ -18,6 +21,132 @@ import {
 const sourceCommitSha = "a".repeat(40);
 const tarballSha256 = `sha256:${"b".repeat(64)}`;
 const contractVersions = { goldenPath: "1", statusRecovery: "1", skill: "1.3.0" };
+
+function structuredCommandError() {
+  return {
+    error: {
+      code: "CHANGE_REMOTE_RUN_FAILED",
+      message: "The trusted Change workflow did not produce a successful result.",
+      details: {
+        operation: "change.ready",
+        reason: "workflow-failed",
+        stage: "projection-execution",
+        trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        token: "issuer-secret",
+        diagnostics: [
+          {
+            version: 1,
+            code: "CHANGE_PROVENANCE_CONFLICT",
+            path: "$.projection.change.provenance",
+            message: "The trusted Change provenance is inconsistent.",
+          },
+        ],
+        evidence: {
+          version: 1,
+          operation: "ready",
+          outcome: "recovery-required",
+          requester: "change-executor",
+          issuer: "app-principal",
+          effects: [
+            { kind: "CREATE_PROVENANCE_COMMIT", status: "succeeded", createdCommitSha: "a".repeat(40) },
+            { kind: "MARK_PULL_REQUEST_READY", status: "failed" },
+          ],
+          compensation: "failed",
+          failure: {
+            kind: "MARK_PULL_REQUEST_READY",
+            code: "CHANGE_EFFECT_FAILED",
+            message: "The ready effect failed.",
+            reason: "provider-http",
+            status: 422,
+            provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+          },
+        },
+      },
+    },
+  };
+}
+
+test("projects structured Change errors through the canonical evidence authority", () => {
+  const projected = projectStructuredCommandError(structuredCommandError());
+
+  assert.deepEqual(projected, {
+    code: "CHANGE_REMOTE_RUN_FAILED",
+    message: "The trusted Change workflow did not produce a successful result.",
+    structured: {
+      details: {
+        operation: "change.ready",
+        reason: "workflow-failed",
+        stage: "projection-execution",
+        trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        diagnostics: [
+          {
+            version: 1,
+            code: "CHANGE_PROVENANCE_CONFLICT",
+            path: "$.projection.change.provenance",
+            message: "The trusted Change provenance is inconsistent.",
+          },
+        ],
+        evidence: {
+          version: 1,
+          operation: "ready",
+          outcome: "recovery-required",
+          requester: "change-executor",
+          issuer: "app-principal",
+          effects: [
+            { kind: "CREATE_PROVENANCE_COMMIT", status: "succeeded", createdCommitSha: "a".repeat(40) },
+            { kind: "MARK_PULL_REQUEST_READY", status: "failed" },
+          ],
+          compensation: "failed",
+          failure: {
+            kind: "MARK_PULL_REQUEST_READY",
+            code: "CHANGE_EFFECT_FAILED",
+            message: "The ready effect failed.",
+            reason: "provider-http",
+            status: 422,
+            provider: { category: "validation-failed", resource: "PullRequest", field: "head", code: "custom" },
+          },
+        },
+      },
+    },
+  });
+});
+
+test("canonical structured projection fails closed for unknown and unsafe command evidence", () => {
+  const command = structuredCommandError();
+  const withUnknownErrorField = {
+    ...command,
+    error: { ...command.error, rawProviderPayload: "must not be recorded" },
+  };
+  assert.equal(projectStructuredCommandError(withUnknownErrorField), undefined);
+
+  const withUnknownEvidenceField = {
+    ...command,
+    error: {
+      ...command.error,
+      details: {
+        ...command.error.details,
+        evidence: { ...command.error.details.evidence, unmodeledEvidence: "ignored" },
+      },
+    },
+  };
+  const unknownProjection = projectStructuredCommandError(withUnknownEvidenceField);
+  assert.equal(unknownProjection?.structured.details?.evidence, undefined);
+
+  const withUnsafeRequester = {
+    ...command,
+    error: {
+      ...command.error,
+      details: {
+        ...command.error.details,
+        evidence: { ...command.error.details.evidence, requester: "https://provider.example.invalid/raw" },
+      },
+    },
+  };
+  const unsafeProjection = projectStructuredCommandError(withUnsafeRequester);
+  assert.equal(unsafeProjection?.structured.details?.evidence, undefined);
+  assert.equal(sanitizeCertificationText("https://provider.example.invalid/raw"), undefined);
+  assert.doesNotMatch(JSON.stringify(unknownProjection), /must not be recorded|rawProviderPayload/iu);
+});
 
 function packedEvidence(overrides = {}) {
   return {
@@ -93,6 +222,14 @@ for (const [label, mutate] of [
     "diagnostic message bound",
     (value) => ({ ...value, result: "failed", diagnostics: [{ code: "E", message: "x".repeat(513) }] }),
   ],
+  [
+    "diagnostic unsafe message",
+    (value) => ({
+      ...value,
+      result: "failed",
+      diagnostics: [{ code: "E", message: "https://provider.example.invalid/raw" }],
+    }),
+  ],
   ["diagnostics on pass", (value) => ({ ...value, diagnostics: [{ code: "E", message: "failure" }] })],
 ]) {
   test(`rejects ${label}`, () => {
@@ -102,6 +239,33 @@ for (const [label, mutate] of [
     assert.throws(() => assertCertificationEvidence(mutate(packedEvidence())), CertificationEvidenceError);
   });
 }
+
+test("appended structured diagnostics are normalized by the canonical authority", () => {
+  const diagnostics = [];
+  appendCertificationDiagnostic(diagnostics, "CHANGE_FAILED", "safe message", {
+    details: { operation: "change.ready", token: "issuer-secret" },
+    evidence: {
+      version: 1,
+      operation: "ready",
+      outcome: "failed",
+      effects: [{ kind: "MARK_PULL_REQUEST_READY", status: "failed" }],
+    },
+  });
+
+  assert.deepEqual(diagnostics, [
+    {
+      code: "CHANGE_FAILED",
+      message: "safe message",
+      details: { operation: "change.ready" },
+      evidence: {
+        version: 1,
+        operation: "ready",
+        outcome: "failed",
+        effects: [{ kind: "MARK_PULL_REQUEST_READY", status: "failed" }],
+      },
+    },
+  ]);
+});
 
 test("compares observed contract versions only when an expected version set is supplied", () => {
   const evidence = packedEvidence({
