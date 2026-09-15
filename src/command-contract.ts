@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.8.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.9.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -47,6 +47,11 @@ export type CommandId =
   | "issue.semantic.check"
   | "issue.relations.plan"
   | "issue.relations.execute"
+  | "issue.relations.inspectParent"
+  | "issue.relations.inspectChildren"
+  | "issue.relations.attach"
+  | "issue.relations.detach"
+  | "issue.relations.reparent"
   | "issue.render"
   | "issue.create"
   | "issue.explain"
@@ -754,6 +759,51 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Reconcile an existing Issue's native parent/dependency relationships through the governed Core executor.",
     [...ISSUE_RELATIONS_OPTIONS],
     "<number>",
+  ),
+  command(
+    "issue.relations.inspectParent",
+    "issue",
+    "relations-inspect-parent",
+    ["issue", "relations", "inspect-parent"],
+    "Inspect the provider-authoritative parent relationship for an existing Issue.",
+    ["help", "json", "repository", "capability"],
+    "<number>",
+  ),
+  command(
+    "issue.relations.inspectChildren",
+    "issue",
+    "relations-inspect-children",
+    ["issue", "relations", "inspect-children"],
+    "Inspect provider-authoritative direct sub-issues for an existing Issue.",
+    ["help", "json", "repository", "capability"],
+    "<number>",
+  ),
+  command(
+    "issue.relations.attach",
+    "issue",
+    "relations-attach",
+    ["issue", "relations", "attach"],
+    "Attach a child Issue to a parent through the provider relationship authority.",
+    ISSUE_RELATIONS_OPTIONS,
+    "<child-number>",
+  ),
+  command(
+    "issue.relations.detach",
+    "issue",
+    "relations-detach",
+    ["issue", "relations", "detach"],
+    "Detach a child Issue from its explicitly observed parent.",
+    ISSUE_RELATIONS_OPTIONS,
+    "<child-number>",
+  ),
+  command(
+    "issue.relations.reparent",
+    "issue",
+    "relations-reparent",
+    ["issue", "relations", "reparent"],
+    "Explicitly detach a child from its old parent and attach it to a new parent.",
+    ISSUE_RELATIONS_OPTIONS,
+    "<child-number>",
   ),
   command(
     "issue.render",

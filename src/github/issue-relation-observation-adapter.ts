@@ -37,6 +37,8 @@ export interface IssueRelationApiReader {
 export interface IssueRelationCapabilities {
   readonly parent: boolean;
   readonly blockedBy: boolean;
+  /** Native sub-issue reads share GitHub's parent capability by default. */
+  readonly children?: boolean;
 }
 
 /**
@@ -80,9 +82,18 @@ export interface IssueBlockedByObservation {
   readonly diagnostics: readonly IssueRelationDiagnostic[];
 }
 
+export interface IssueChildrenObservation {
+  readonly kind: IssueRelationEvidenceKind;
+  readonly references: readonly IssueReference[];
+  readonly diagnostics: readonly IssueRelationDiagnostic[];
+}
+
 const BLOCKED_BY_PAGE_SIZE = 100;
 /** Bounded page limit for blocked_by pagination; caps evidence at 1,000 entries per read. */
 const BLOCKED_BY_MAX_PAGES = 10;
+const CHILDREN_PAGE_SIZE = 100;
+/** Bounded page limit for sub-issue pagination; caps evidence at 1,000 entries per read. */
+const CHILDREN_MAX_PAGES = 10;
 const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 500;
 
 /**
@@ -115,6 +126,13 @@ export class GitHubIssueRelationObservationAdapter {
       return { kind: "unavailable", reference: undefined, diagnostics: [readFailedDiagnostic(error)] };
     }
     if (response.status === 404) return { kind: "empty", reference: undefined, diagnostics: [] };
+    if (response.status !== 200) {
+      return {
+        kind: "unavailable",
+        reference: undefined,
+        diagnostics: [responseMalformedDiagnostic("GitHub returned an unavailable parent response.")],
+      };
+    }
     if (!isRecord(response.body)) {
       return {
         kind: "malformed",
@@ -132,6 +150,71 @@ export class GitHubIssueRelationObservationAdapter {
       reference: undefined,
       diagnostics: [resolved.diagnostic],
     };
+  }
+
+  /** Observe the direct native sub-issues for one Issue. */
+  async observeChildren(issueNumber: number): Promise<IssueChildrenObservation> {
+    assertIssueNumber(issueNumber);
+    if (!(this.capabilities.children ?? this.capabilities.parent)) {
+      return { kind: "unavailable", references: [], diagnostics: [capabilityUnsupportedDiagnostic("children")] };
+    }
+
+    const entries: unknown[] = [];
+    for (let page = 1; page <= CHILDREN_MAX_PAGES; page += 1) {
+      let response: GitHubApiResponse;
+      try {
+        response = await this.reader.requestRepositoryApi(
+          `issues/${issueNumber}/sub_issues?per_page=${CHILDREN_PAGE_SIZE}&page=${page}`,
+        );
+      } catch (error) {
+        return { kind: "unavailable", references: [], diagnostics: [readFailedDiagnostic(error)] };
+      }
+      if (response.status === 404) {
+        if (page === 1) return { kind: "empty", references: [], diagnostics: [] };
+        return {
+          kind: "unavailable",
+          references: [],
+          diagnostics: [
+            {
+              code: "RELATION_RESULT_TRUNCATED",
+              path: "$",
+              message: `GitHub returned 404 while paginating sub-issues at page ${page}; the accumulated evidence cannot be confirmed complete.`,
+            },
+          ],
+        };
+      }
+      if (response.status < 200 || response.status >= 300) {
+        return {
+          kind: "unavailable",
+          references: [],
+          diagnostics: [responseMalformedDiagnostic("GitHub returned an unavailable sub-issue response.")],
+        };
+      }
+      if (!Array.isArray(response.body)) {
+        return {
+          kind: "malformed",
+          references: [],
+          diagnostics: [responseMalformedDiagnostic("GitHub returned a non-array sub-issue response.")],
+        };
+      }
+      entries.push(...response.body);
+      if (response.body.length < CHILDREN_PAGE_SIZE) return classifyChildrenEntries(entries, this.context);
+      if (page === CHILDREN_MAX_PAGES) {
+        return {
+          kind: "unavailable",
+          references: [],
+          diagnostics: [
+            {
+              code: "RELATION_RESULT_TRUNCATED",
+              path: "$",
+              message: `GitHub returned at least ${CHILDREN_MAX_PAGES * CHILDREN_PAGE_SIZE} sub-issues; the bounded read seam cannot confirm completeness beyond this limit.`,
+            },
+          ],
+        };
+      }
+    }
+    /* c8 ignore next */
+    return classifyChildrenEntries(entries, this.context);
   }
 
   /**
@@ -229,6 +312,29 @@ function classifyBlockedByEntries(entries: readonly unknown[], context: Reposito
   };
 }
 
+function classifyChildrenEntries(entries: readonly unknown[], context: RepositoryContext): IssueChildrenObservation {
+  if (entries.length === 0) return { kind: "empty", references: [], diagnostics: [] };
+
+  const references: IssueReference[] = [];
+  const diagnostics: IssueRelationDiagnostic[] = [];
+  let malformedCount = 0;
+  let unresolvedCount = 0;
+  entries.forEach((entry, index) => {
+    const resolved = resolveRelatedIssue(entry, context, `$[${index}]`);
+    if (resolved.status === "resolved") {
+      references.push(resolved.reference);
+      return;
+    }
+    diagnostics.push(resolved.diagnostic);
+    if (resolved.status === "malformed") malformedCount += 1;
+    else unresolvedCount += 1;
+  });
+
+  if (malformedCount > 0) return { kind: "malformed", references: [], diagnostics };
+  if (unresolvedCount > 0) return { kind: "unavailable", references: [], diagnostics };
+  return { kind: "present", references: references.sort(compareReferences), diagnostics: [] };
+}
+
 /** Match the repository IssueReference canonical order, including numeric issue numbers. */
 function compareReferences(left: IssueReference, right: IssueReference): number {
   return (
@@ -324,7 +430,7 @@ function parseRepositoryUrl(value: unknown): { readonly host: string; readonly n
   return { host, nameWithOwner: `${match[1]}/${match[2]}` };
 }
 
-function capabilityUnsupportedDiagnostic(relation: "parent" | "blocked_by"): IssueRelationDiagnostic {
+function capabilityUnsupportedDiagnostic(relation: "parent" | "blocked_by" | "children"): IssueRelationDiagnostic {
   return {
     code: "RELATION_CAPABILITY_UNSUPPORTED",
     path: "$",

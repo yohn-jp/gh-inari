@@ -199,6 +199,12 @@ import {
   type SemanticIssueRelationExecutionPort,
   type SemanticIssueRelationExecutorOptions,
 } from "./semantic-issue-relation-executor.js";
+import {
+  IssueRelationshipExecutorError,
+  LocalIssueRelationshipExecutor,
+  type IssueRelationshipMutationRequest,
+} from "./issue-relationship-executor.js";
+import { GitHubIssueRelationMutationAdapter } from "./github/issue-relation-mutation-adapter.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -1735,7 +1741,7 @@ async function runArtifactCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
-  if (domain === "issue" && command === "relations") {
+  if (domain === "issue" && (command === "relations" || command === "relationships")) {
     return runIssueRelationsCommand(rest, parsed, root, dependencies);
   }
   if (domain === "issue") {
@@ -2146,9 +2152,32 @@ async function runIssueRelationsCommand(
   dependencies: CliDependencies,
 ): Promise<number> {
   const operation = rest[0];
-  if (operation !== "plan" && operation !== "execute")
+  if (
+    operation !== "plan" &&
+    operation !== "execute" &&
+    operation !== "inspect" &&
+    operation !== "inspect-parent" &&
+    operation !== "inspect-children" &&
+    operation !== "parent" &&
+    operation !== "children" &&
+    operation !== "attach" &&
+    operation !== "detach" &&
+    operation !== "reparent"
+  )
     throw new CliError("UNKNOWN_COMMAND", `Unknown Issue relations command "${operation ?? ""}".`);
   if (rest.length !== 2 || !isPositiveInteger(rest[1])) throw invalidArtifactNumberError("issue", rest[1]);
+
+  if (
+    operation === "inspect" ||
+    operation === "inspect-parent" ||
+    operation === "inspect-children" ||
+    operation === "parent" ||
+    operation === "children" ||
+    operation === "attach" ||
+    operation === "detach" ||
+    operation === "reparent"
+  )
+    return runGenericIssueRelationshipCommand(operation, Number(rest[1]), parsed, root, dependencies);
 
   const allowed = new Set(["json", "repository", "from", "capability"]);
   const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
@@ -2260,6 +2289,130 @@ async function runIssueRelationsCommand(
     }
     throw error;
   }
+}
+
+type GenericIssueRelationshipOperation =
+  "inspect" | "inspect-parent" | "inspect-children" | "parent" | "children" | "attach" | "detach" | "reparent";
+
+function nativeParentCapability(capabilities: readonly string[]): boolean {
+  return capabilities.some(
+    (entry) =>
+      entry === GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation ||
+      entry === "issue.parent.native" ||
+      entry === "github.issue.sub-issues.native" ||
+      entry === "github.issue.sub_issues.native",
+  );
+}
+
+function relationshipInputReference(input: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    if (input[key] !== undefined) return input[key];
+  }
+  return undefined;
+}
+
+async function runGenericIssueRelationshipCommand(
+  operation: GenericIssueRelationshipOperation,
+  issueNumber: number,
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const allowed = new Set(["json", "repository", "from", "capability"]);
+  const unsupported = Object.keys(parsed.options).find((key) => !allowed.has(key));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by the Issue relationship ${operation} command.`,
+      "$argv",
+      { command: `issue relations ${operation}`, option: option.id },
+    );
+  }
+  if (parsed.fields.length > 0)
+    throw new CliError(
+      "INVALID_OPTION",
+      "Issue relationship commands accept caller input only through --from; --field is not a Core semantic input adapter.",
+      "--field",
+    );
+
+  const input = parsed.options.from === undefined ? {} : await readJsonValue(parsed.options.from);
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    throw new CliError("INVALID_INPUT", "Issue relationship input must be a JSON object.", "--from");
+  const inputRecord = input as Record<string, unknown>;
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const context = await adapter.getRepositoryContext();
+  const relationAdapter = new GitHubIssueRelationMutationAdapter(adapter, context, {
+    parent: nativeParentCapability(parsed.capabilities),
+    blockedBy: false,
+    children: nativeParentCapability(parsed.capabilities),
+  });
+  const executor = new LocalIssueRelationshipExecutor({ adapter: relationAdapter, context });
+  const subject = issueNumber;
+  let result: unknown;
+  try {
+    if (operation === "inspect" || operation === "inspect-parent" || operation === "parent") {
+      const requestedView =
+        operation === "inspect" ? relationshipInputReference(inputRecord, ["view", "relation"]) : "parent";
+      if (requestedView !== undefined && requestedView !== "parent")
+        throw new CliError("INVALID_INPUT", 'Relationship inspect view must be "parent".', "$.view");
+      result = await executor.inspectParent(subject);
+    } else if (operation === "inspect-children" || operation === "children") {
+      result = await executor.inspectChildren(subject);
+    } else {
+      const child = relationshipInputReference(inputRecord, ["child"]) ?? subject;
+      const parent = relationshipInputReference(inputRecord, ["parent", "to", "newParent"]);
+      const previousParent = relationshipInputReference(inputRecord, ["previousParent", "from", "oldParent"]);
+      if (operation !== "detach" && parent === undefined)
+        throw new CliError("INVALID_INPUT", `Issue relationship ${operation} requires a parent in --from.`, "$.parent");
+      if (operation === "reparent" && previousParent === undefined)
+        throw new CliError(
+          "INVALID_INPUT",
+          "Issue relationship reparent requires the old parent in --from.",
+          "$.previousParent",
+        );
+      const request: IssueRelationshipMutationRequest = {
+        operation: operation as IssueRelationshipMutationRequest["operation"],
+        child: child as IssueRelationshipMutationRequest["child"],
+        ...(parent === undefined ? {} : { parent: parent as IssueRelationshipMutationRequest["parent"] }),
+        ...(previousParent === undefined
+          ? {}
+          : { previousParent: previousParent as IssueRelationshipMutationRequest["previousParent"] }),
+      };
+      result = await executor.execute(request);
+    }
+  } catch (error: unknown) {
+    if (error instanceof IssueRelationshipExecutorError) {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          valid: false,
+          operation: `issue.relations.${operation}`,
+          issue: issueNumber,
+          diagnostics: error.diagnostics,
+          violations: error.diagnostics,
+          ...(error.evidence === undefined ? {} : { evidence: error.evidence }),
+        }),
+      );
+      return EXIT_VALIDATION;
+    }
+    throw error;
+  }
+  if (result !== undefined && typeof result === "object" && result !== null) {
+    const value = result as Record<string, unknown>;
+    const mutation = operation === "attach" || operation === "detach" || operation === "reparent";
+    console.log(
+      JSON.stringify({
+        ok: true,
+        valid: true,
+        issue: issueNumber,
+        ...value,
+        operation: `issue.relations.${operation}`,
+        mutation,
+      }),
+    );
+  }
+  return 0;
 }
 
 type SemanticPullRequestOperation = "contract" | "materialize" | "plan" | "execute" | "check";
