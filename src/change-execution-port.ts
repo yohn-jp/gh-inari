@@ -151,13 +151,22 @@ function assertMutation(operation: string): asserts operation is ChangeMutation 
   }
 }
 
+/**
+ * Requester provenance is an output of trusted execution, never caller input.
+ * Check the prototype chain as well as own properties so a legacy field cannot
+ * be smuggled through a request object with an inherited property.
+ */
+export function hasCallerSuppliedRequester(request: unknown): boolean {
+  return typeof request === "object" && request !== null && !Array.isArray(request) && "requester" in request;
+}
+
 export function validateChangeRequest(
   request: ChangeMutationRequest | ChangeReadRequest,
 ): ChangeMutationRequest | ChangeReadRequest {
   if (typeof request !== "object" || request === null || Array.isArray(request)) {
     throw new ChangeExecutionPortError("CHANGE_REMOTE_REQUEST_INVALID", "A Change request must be an object.");
   }
-  if (Object.prototype.hasOwnProperty.call(request, "requester")) {
+  if (hasCallerSuppliedRequester(request)) {
     throw new ChangeExecutionPortError(
       "CHANGE_REMOTE_REQUEST_INVALID",
       "Caller-supplied requester identity is not accepted by the Change request contract.",
