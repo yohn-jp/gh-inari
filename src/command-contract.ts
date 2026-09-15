@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.9.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.10.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -27,7 +27,7 @@ export const RUNTIME_CAPABILITIES = [
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
 export type CommandDomain =
-  "root" | "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill";
+  "root" | "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -85,6 +85,11 @@ export type CommandId =
   | "pr.comment"
   | "pr.review"
   | "pr.merge"
+  | "impl.plan"
+  | "impl.show"
+  | "impl.validate"
+  | "impl.authorize"
+  | "impl.inspect"
   | "branch.check"
   | "branch.semantic.check"
   | "template.list"
@@ -240,6 +245,7 @@ const PR_CREATE_OPTIONS = [
 const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHead"] as const;
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
+const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
 
 const option = (
   id: OptionId,
@@ -1094,6 +1100,51 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "impl.plan",
+    "impl",
+    "plan",
+    ["impl", "plan"],
+    "Draft a bounded Implementation recommendation from authoritative Issue evidence without granting authority.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.show",
+    "impl",
+    "show",
+    ["impl", "show"],
+    "Show the current Implementation body, canonical contract projection, and authorization state.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.validate",
+    "impl",
+    "validate",
+    ["impl", "validate"],
+    "Validate an existing Implementation body against the canonical contract without mutation.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.authorize",
+    "impl",
+    "authorize",
+    ["impl", "authorize"],
+    "Authorize one current canonical Implementation body through the #572 Core boundary.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.inspect",
+    "impl",
+    "inspect",
+    ["impl", "inspect"],
+    "Inspect Implementation lifecycle and provider-authoritative parent/source relationships.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
     "branch.check",
     "branch",
     "check",
@@ -1445,7 +1496,7 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr", template
 }
 
 export function helpInvocation(
-  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill",
+  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill",
 ): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
@@ -1527,6 +1578,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
   if (
     domain === "issue" ||
     domain === "pr" ||
+    domain === "impl" ||
     domain === "branch" ||
     domain === "change" ||
     domain === "authority" ||

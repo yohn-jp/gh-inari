@@ -205,6 +205,18 @@ import {
   type IssueRelationshipMutationRequest,
 } from "./issue-relationship-executor.js";
 import { GitHubIssueRelationMutationAdapter } from "./github/issue-relation-mutation-adapter.js";
+import {
+  IMPLEMENTATION_CONTRACT_VERSION,
+  IMPLEMENTATION_KIND,
+  implementationIssueBodyDigest,
+  parseImplementationIssueBody,
+} from "./implementation-contract.js";
+import {
+  inspectImplementationLifecycle,
+  tryAuthorizeImplementation,
+  tryVerifyImplementationAuthorization,
+} from "./implementation-authorization.js";
+import type { IssueReference } from "./contract/issue-reference.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -415,6 +427,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
+    }
+    if (domain === "impl") {
+      return await runImplementationCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "issue" || domain === "pr") {
       return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
@@ -1730,6 +1745,379 @@ async function runMcpCommand(
     ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
   });
   return 0;
+}
+
+interface ImplementationIssueEvidence {
+  readonly adapter: GitHubAdapter;
+  readonly context: Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>;
+  readonly issue: GitHubIssue;
+  readonly reference: IssueReference;
+  readonly repository: {
+    readonly repositoryHost: string;
+    readonly repositoryId: string;
+    readonly repository: string;
+  };
+  readonly body: string;
+}
+
+interface ImplementationInputEvidence {
+  readonly authorization?: unknown;
+  readonly base?: unknown;
+  readonly supersession?: unknown;
+  readonly completed?: boolean;
+}
+
+function implementationIssueEvidence(
+  adapter: GitHubAdapter,
+  context: Awaited<ReturnType<GitHubAdapter["getRepositoryContext"]>>,
+  issue: GitHubIssue,
+  number: number,
+): ImplementationIssueEvidence {
+  const repositoryId = issue.repositoryId ?? context.repositoryId;
+  if (repositoryId === undefined) {
+    throw new CliError(
+      "IMPLEMENTATION_EVIDENCE_UNAVAILABLE",
+      "A repository database identity is required for Implementation evidence.",
+      "$.repository.repositoryId",
+    );
+  }
+  const repository = {
+    repositoryHost: (issue.repositoryHost ?? context.hostname).toLocaleLowerCase("en-US"),
+    repositoryId,
+    repository: context.nameWithOwner.toLocaleLowerCase("en-US"),
+  };
+  const reference = { ...repository, number };
+  return {
+    adapter,
+    context,
+    issue,
+    reference,
+    repository,
+    body: issue.body ?? "",
+  };
+}
+
+async function readImplementationIssue(
+  number: number,
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<ImplementationIssueEvidence> {
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const context = await adapter.getRepositoryContext();
+  const issue = await adapter.getIssue(number);
+  return implementationIssueEvidence(adapter, context, issue, number);
+}
+
+function implementationBodyProjection(body: string): Record<string, unknown> {
+  const parsed = parseImplementationIssueBody(body);
+  return {
+    valid: parsed.valid,
+    ...(parsed.contract === undefined
+      ? {}
+      : { contract: parsed.contract, digest: implementationIssueBodyDigest(body) }),
+    ...(parsed.fields === undefined ? {} : { fields: parsed.fields }),
+    violations: parsed.violations,
+  };
+}
+
+function implementationInputEvidence(value: unknown): ImplementationInputEvidence {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { authorization: value };
+  const record = value as Record<string, unknown>;
+  const envelope =
+    Object.prototype.hasOwnProperty.call(record, "authorization") ||
+    Object.prototype.hasOwnProperty.call(record, "base") ||
+    Object.prototype.hasOwnProperty.call(record, "supersession") ||
+    Object.prototype.hasOwnProperty.call(record, "completed");
+  if (!envelope && record.kind === "implementation-authorization") return { authorization: value };
+  if (!envelope) return { authorization: value };
+  const authorization = record.authorization;
+  const authorizationRecord =
+    typeof authorization === "object" && authorization !== null && !Array.isArray(authorization)
+      ? (authorization as Record<string, unknown>).record
+      : undefined;
+  return {
+    ...(Object.prototype.hasOwnProperty.call(record, "authorization")
+      ? { authorization: authorizationRecord ?? authorization }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, "base") ? { base: record.base } : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, "supersession") ? { supersession: record.supersession } : {}),
+    ...(typeof record.completed === "boolean" ? { completed: record.completed } : {}),
+  };
+}
+
+function implementationRelationCapabilities(capabilities: readonly string[]): {
+  readonly parent: boolean;
+  readonly blockedBy: false;
+  readonly children: boolean;
+} {
+  const parent = nativeParentCapability(capabilities);
+  return { parent, blockedBy: false, children: parent };
+}
+
+async function observeImplementationRelationships(
+  evidence: ImplementationIssueEvidence,
+  capabilities: readonly string[],
+): Promise<Record<string, unknown>> {
+  const relationAdapter = new GitHubIssueRelationObservationAdapter(
+    evidence.adapter,
+    evidence.context,
+    implementationRelationCapabilities(capabilities),
+  );
+  const [parent, children] = await Promise.all([
+    relationAdapter.observeParent(evidence.issue.number),
+    relationAdapter.observeChildren(evidence.issue.number),
+  ]);
+  return {
+    authority: "github.issue.parent.native",
+    parent,
+    children,
+  };
+}
+
+async function implementationBaseEvidence(
+  evidence: ImplementationIssueEvidence,
+  contract: Record<string, unknown> | undefined,
+  supplied: unknown,
+): Promise<unknown> {
+  if (supplied !== undefined) return supplied;
+  if (contract === undefined) return undefined;
+  const execution = contract.execution;
+  if (typeof execution !== "object" || execution === null || Array.isArray(execution)) return undefined;
+  const branchName = (execution as Record<string, unknown>).baseBranch;
+  if (typeof branchName !== "string" || branchName.length === 0) return undefined;
+  const branch = await evidence.adapter.findBranch(branchName);
+  if (branch === undefined || typeof branch.sha !== "string" || branch.sha.length === 0) return undefined;
+  return { branch: branch.name, revision: branch.sha, freshness: branch.sha };
+}
+
+function implementationLifecycle(
+  evidence: ImplementationIssueEvidence,
+  body: string,
+  input: ImplementationInputEvidence,
+  base: unknown,
+): Record<string, unknown> {
+  const result =
+    input.authorization === undefined
+      ? inspectImplementationLifecycle({
+          body,
+          implementation: evidence.reference,
+          repository: evidence.repository,
+          ...(base === undefined ? {} : { base }),
+        })
+      : tryVerifyImplementationAuthorization({
+          authorization: input.authorization,
+          issue: { reference: evidence.reference, body },
+          repository: evidence.repository,
+          ...(base === undefined ? {} : { base }),
+          ...(input.supersession === undefined ? {} : { supersession: input.supersession }),
+          ...(input.completed === undefined ? {} : { completed: input.completed }),
+        });
+  return {
+    status: result.status,
+    authorized: result.authorized,
+    current: result.current,
+    ...(result.authorization === undefined ? {} : { record: result.authorization }),
+    ...(result.governedBodyDigest === undefined ? {} : { governedBodyDigest: result.governedBodyDigest }),
+    violations: result.violations,
+  };
+}
+
+function implementationCurrent(evidence: ImplementationIssueEvidence): Record<string, unknown> {
+  return {
+    issue: {
+      number: evidence.issue.number,
+      title: evidence.issue.title,
+      state: evidence.issue.state,
+      url: evidence.issue.url,
+      metadata: {
+        labels: evidence.issue.labels,
+        assignees: evidence.issue.assignees,
+      },
+    },
+    body: evidence.body,
+  };
+}
+
+function sourceChecklist(body: string): readonly string[] {
+  const values: string[] = [];
+  for (const line of body.split(/\r?\n/u)) {
+    const match = /^\s*-\s*\[[ xX]\]\s+(.+?)\s*$/u.exec(line);
+    if (match !== null && match[1] !== undefined && match[1].length > 0) values.push(match[1]);
+    if (values.length === 256) break;
+  }
+  return values;
+}
+
+function implementationPlanRecommendations(evidence: ImplementationIssueEvidence): Record<string, unknown> {
+  return {
+    authoritative: false,
+    repository: evidence.repository,
+    sources: [evidence.reference],
+    objective: evidence.issue.title,
+    verification: {
+      acceptanceCriteria: sourceChecklist(evidence.body),
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    scope: { readOnly: [], write: [], create: [], delete: [], deny: [] },
+    missing: [
+      "nonGoals",
+      "architecture.decision",
+      "architecture.affectedComponents",
+      "architecture.invariants",
+      "execution.baseBranch",
+      "verification.targetedTests",
+      "verification.requiredChecks",
+      "verification.postconditions",
+    ],
+  };
+}
+
+function printImplementationResult(result: Record<string, unknown>, json: boolean): void {
+  console.log(JSON.stringify(result, null, json ? 0 : 2));
+}
+
+async function runImplementationCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  if (
+    command !== "plan" &&
+    command !== "show" &&
+    command !== "validate" &&
+    command !== "authorize" &&
+    command !== "inspect"
+  )
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command ?? ""}".`);
+  const definition = getCommandForPositionals(["impl", command]);
+  if (definition === undefined) throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command}".`);
+  if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("issue", rest[0]);
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by impl ${command}.`,
+      "$argv",
+      { command: `impl ${command}`, option: option.id },
+    );
+  }
+  const number = Number(rest[0]);
+  const evidence = await readImplementationIssue(number, parsed, root, dependencies);
+  const bodyProjection = implementationBodyProjection(evidence.body);
+  const from = parsed.options.from === undefined ? undefined : await readJsonValue(parsed.options.from);
+  const input = from === undefined ? {} : implementationInputEvidence(from);
+
+  if (command === "plan") {
+    const relationships = await observeImplementationRelationships(evidence, parsed.capabilities);
+    const result = {
+      ok: true,
+      valid: true,
+      operation: "impl.plan",
+      kind: IMPLEMENTATION_KIND,
+      version: IMPLEMENTATION_CONTRACT_VERSION,
+      source: evidence.reference,
+      sourceEvidence: { title: evidence.issue.title, body: evidence.body },
+      recommendations: implementationPlanRecommendations(evidence),
+      relationships,
+      authorization: { status: "draft", authorized: false, current: false, inferred: false, violations: [] },
+      preview: true,
+      mutation: false,
+    };
+    printImplementationResult(result, json);
+    return 0;
+  }
+
+  const contract = bodyProjection.contract as Record<string, unknown> | undefined;
+  const base =
+    command === "authorize" || input.authorization !== undefined
+      ? await implementationBaseEvidence(evidence, contract, input.base)
+      : undefined;
+  if (command === "validate") {
+    const result = {
+      ok: bodyProjection.valid === true,
+      valid: bodyProjection.valid === true,
+      operation: "impl.validate",
+      kind: IMPLEMENTATION_KIND,
+      implementation: evidence.reference,
+      current: implementationCurrent(evidence),
+      canonical: bodyProjection,
+      mutation: false,
+    };
+    printImplementationResult(result, json);
+    return bodyProjection.valid === true ? 0 : EXIT_VALIDATION;
+  }
+
+  const lifecycle = implementationLifecycle(evidence, evidence.body, input, base);
+  if (command === "show") {
+    const result = {
+      ok: bodyProjection.valid === true && lifecycle.status !== "invalidated" && lifecycle.status !== "superseded",
+      valid: bodyProjection.valid === true,
+      operation: "impl.show",
+      kind: IMPLEMENTATION_KIND,
+      implementation: evidence.reference,
+      current: implementationCurrent(evidence),
+      canonical: bodyProjection,
+      authorization: lifecycle,
+      mutation: false,
+    };
+    printImplementationResult(result, json);
+    return result.ok ? 0 : EXIT_VALIDATION;
+  }
+
+  if (command === "inspect") {
+    const relationships = await observeImplementationRelationships(evidence, parsed.capabilities);
+    const result = {
+      ok: bodyProjection.valid === true && lifecycle.status !== "invalidated" && lifecycle.status !== "superseded",
+      valid: bodyProjection.valid === true,
+      operation: "impl.inspect",
+      kind: IMPLEMENTATION_KIND,
+      implementation: evidence.reference,
+      current: implementationCurrent(evidence),
+      canonical: bodyProjection,
+      authorization: lifecycle,
+      relationships,
+      mutation: false,
+    };
+    printImplementationResult(result, json);
+    return result.ok ? 0 : EXIT_VALIDATION;
+  }
+
+  const authorization = tryAuthorizeImplementation({
+    issue: { reference: evidence.reference, body: evidence.body },
+    repository: evidence.repository,
+    ...(base === undefined ? {} : { base }),
+    ...(input.authorization === undefined ? {} : { existingAuthorization: input.authorization }),
+  });
+  const result = {
+    ok: authorization.valid,
+    valid: authorization.valid,
+    operation: "impl.authorize",
+    kind: IMPLEMENTATION_KIND,
+    implementation: evidence.reference,
+    current: implementationCurrent(evidence),
+    canonical: bodyProjection,
+    authorization: {
+      status: authorization.status,
+      authorized: authorization.valid && authorization.status === "authorized",
+      current: authorization.valid && authorization.status === "authorized",
+      ...(authorization.authorization === undefined ? {} : { record: authorization.authorization }),
+      ...(authorization.governedBodyDigest === undefined
+        ? {}
+        : { governedBodyDigest: authorization.governedBodyDigest }),
+      violations: authorization.violations,
+    },
+    base: base === undefined ? { available: false } : { available: true, evidence: base },
+    mutation: false,
+  };
+  printImplementationResult(result, json);
+  return authorization.valid ? 0 : EXIT_VALIDATION;
 }
 
 async function runArtifactCommand(
@@ -3797,6 +4185,7 @@ function classifyExitCode(error: unknown): number {
     return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("IMPLEMENTATION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
@@ -3819,6 +4208,7 @@ function isOwnedInvocation(argv: readonly string[]): boolean {
     helpRequested &&
     (first === "issue" ||
       first === "pr" ||
+      first === "impl" ||
       first === "branch" ||
       first === "template" ||
       first === "change" ||
@@ -3903,10 +4293,11 @@ async function readStdin(): Promise<string> {
 }
 
 const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<
-  Record<"issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp", string>
+  Record<"issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp", string>
 > = {
   issue: "issue list",
   pr: "pr checks",
+  impl: "impl show",
   branch: "branch list",
   template: "template view",
   change: "change list",
@@ -3923,6 +4314,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
   if (
     domain === "issue" ||
     domain === "pr" ||
+    domain === "impl" ||
     domain === "branch" ||
     domain === "change" ||
     domain === "authority" ||
@@ -3952,6 +4344,7 @@ with the original argv and exit status.
 Domains:
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
+  impl       Canonical Implementation planning, validation, and authorization
   branch     Semantic Branch observation and drift checks
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
@@ -3968,7 +4361,7 @@ Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime che
 }
 
 function printDomainHelp(
-  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp",
+  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp",
 ): void {
   const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
