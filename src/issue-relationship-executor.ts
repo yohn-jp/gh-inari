@@ -43,11 +43,15 @@ export interface IssueRelationshipInspection {
 
 export interface IssueRelationshipExecutionEvidence {
   readonly version: IssueRelationshipExecutorVersion;
-  readonly outcome: "verified" | "idempotent";
+  readonly outcome: "verified" | "idempotent" | "partial-effect";
   readonly effects: readonly Readonly<{
     readonly kind: IssueRelationshipEffect["kind"];
-    readonly status: "succeeded" | "skipped";
+    readonly status: "succeeded" | "failed" | "skipped";
   }>[];
+  readonly recovery?: Readonly<{
+    readonly child: IssueRelationshipObservedState;
+    readonly parents: readonly IssueRelationshipObservedState[];
+  }>;
 }
 
 export interface IssueRelationshipExecutionResult {
@@ -68,6 +72,7 @@ export type IssueRelationshipExecutorErrorCode =
   | "ISSUE_RELATIONSHIP_READ_FAILED"
   | "ISSUE_RELATIONSHIP_STALE"
   | "ISSUE_RELATIONSHIP_EFFECT_FAILED"
+  | "ISSUE_RELATIONSHIP_RECOVERY_READ_FAILED"
   | "ISSUE_RELATIONSHIP_POSTCONDITION_FAILED";
 
 export class IssueRelationshipExecutorError extends Error {
@@ -310,31 +315,68 @@ export class LocalIssueRelationshipExecutor {
         ],
       );
 
-    const statuses: Array<"succeeded" | "failed"> = [];
+    const statuses: Array<"succeeded" | "failed" | "skipped"> = freshPlan.effects.map(() => "skipped");
+    let failedIndex = -1;
     try {
-      for (const effect of freshPlan.effects) {
-        await this.executeEffect(effect);
-        statuses.push("succeeded");
+      for (let index = 0; index < freshPlan.effects.length; index += 1) {
+        await this.executeEffect(freshPlan.effects[index] as IssueRelationshipEffect);
+        statuses[index] = "succeeded";
       }
     } catch {
-      statuses.push("failed");
+      failedIndex = statuses.findIndex((status) => status === "skipped");
+      if (failedIndex === -1) failedIndex = statuses.length - 1;
+      statuses[failedIndex] = "failed";
+
+      const hasSucceededEffect = statuses.includes("succeeded");
+      const effects = freshPlan.effects.map((effect, index) => ({ kind: effect.kind, status: statuses[index] }));
+
+      if (!hasSucceededEffect)
+        throw new IssueRelationshipExecutorError(
+          "ISSUE_RELATIONSHIP_EFFECT_FAILED",
+          "A native parent/sub-issue mutation failed before any effect took hold; no provider state changed.",
+          [
+            diagnostic(
+              "RELATION_EFFECT_FAILED",
+              `$.effects[${failedIndex}]`,
+              "The provider rejected a relationship effect.",
+            ),
+          ],
+          { version: ISSUE_RELATIONSHIP_EXECUTOR_VERSION, outcome: "verified", effects },
+        );
+
+      let recoverySnapshot: RelationshipSnapshot;
+      try {
+        recoverySnapshot = await this.readSnapshot(child, freshPlan.parent, freshPlan.previousParent);
+      } catch {
+        throw new IssueRelationshipExecutorError(
+          "ISSUE_RELATIONSHIP_RECOVERY_READ_FAILED",
+          "A native parent/sub-issue mutation partially applied and the authoritative recovery state could not be reread; the provider relationship is left in an unverified, possibly inconsistent state.",
+          [
+            diagnostic(
+              "RELATION_RECOVERY_READ_FAILED",
+              `$.effects[${failedIndex}]`,
+              "The provider relationship state could not be reread after a partial mutation failure.",
+            ),
+          ],
+          { version: ISSUE_RELATIONSHIP_EXECUTOR_VERSION, outcome: "partial-effect", effects },
+        );
+      }
+
       throw new IssueRelationshipExecutorError(
         "ISSUE_RELATIONSHIP_EFFECT_FAILED",
-        "A native parent/sub-issue mutation failed; no compensation was attempted.",
+        "A native parent/sub-issue mutation partially applied; the provider relationship changed but the requested operation did not complete. No compensation was attempted.",
         [
           diagnostic(
-            "RELATION_EFFECT_FAILED",
-            `$.effects[${statuses.length - 1}]`,
-            "The provider rejected a relationship effect.",
+            "RELATION_PARTIAL_EFFECT",
+            `$.effects[${failedIndex}]`,
+            "The provider rejected a relationship effect after a prior effect in the same operation already applied.",
           ),
         ],
         {
           version: ISSUE_RELATIONSHIP_EXECUTOR_VERSION,
-          outcome: "verified",
-          effects: freshPlan.effects.map((effect, index) => ({
-            kind: effect.kind,
-            status: statuses[index] === "succeeded" ? "succeeded" : "skipped",
-          })),
+          outcome: "partial-effect",
+          effects,
+          recovery: recoverySnapshot,
         },
       );
     }

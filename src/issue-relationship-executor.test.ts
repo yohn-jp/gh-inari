@@ -31,6 +31,7 @@ class StatefulMutator implements IssueRelationApiMutator {
   readonly parents = new Map<number, number>();
   readonly issueIds = new Map<number, number>();
   sabotageNextPostcondition = false;
+  failNextAttach = false;
 
   constructor() {
     for (let number = 1; number <= 100; number += 1) this.issueIds.set(number, number + 1000);
@@ -57,6 +58,10 @@ class StatefulMutator implements IssueRelationApiMutator {
       return { status: 200, body: children };
     }
     if (method === "POST" && issueNumber !== undefined && path.endsWith("/sub_issues")) {
+      if (this.failNextAttach) {
+        this.failNextAttach = false;
+        throw new Error("simulated provider rejection of attach");
+      }
       if (!this.sabotageNextPostcondition) {
         const childId = Number(fields.sub_issue_id);
         const child = [...this.issueIds.entries()].find(([, id]) => id === childId)?.[0];
@@ -122,5 +127,70 @@ test("fails closed for cycles and provider postcondition mismatch", async () => 
     () => executor(mismatchMutator).execute({ operation: "attach", child: 10, parent: 20 }),
     (error: unknown) =>
       error instanceof IssueRelationshipExecutorError && error.code === "ISSUE_RELATIONSHIP_POSTCONDITION_FAILED",
+  );
+});
+
+test("reports truthful partial-effect evidence when reparent detaches then fails to attach", async () => {
+  const mutator = new StatefulMutator();
+  mutator.parents.set(10, 20);
+  mutator.failNextAttach = true;
+
+  await assert.rejects(
+    () => executor(mutator).execute({ operation: "reparent", child: 10, previousParent: 20, parent: 30 }),
+    (error: unknown) => {
+      assert.ok(error instanceof IssueRelationshipExecutorError);
+      assert.equal(error.code, "ISSUE_RELATIONSHIP_EFFECT_FAILED");
+      assert.ok(error.diagnostics.some((entry) => entry.code === "RELATION_PARTIAL_EFFECT"));
+
+      const evidence = error.evidence;
+      assert.ok(evidence !== undefined);
+      assert.equal(evidence.outcome, "partial-effect");
+      assert.deepEqual(
+        evidence.effects.map((entry) => entry.status),
+        ["succeeded", "failed"],
+      );
+      assert.equal(evidence.effects[0]?.kind, "DETACH_CHILD");
+      assert.equal(evidence.effects[1]?.kind, "ATTACH_CHILD");
+
+      // The reread authoritative recovery state must reflect the real
+      // provider state (detach applied, attach did not), not a guess.
+      assert.ok(evidence.recovery !== undefined);
+      assert.equal(evidence.recovery.child.parent, undefined);
+      return true;
+    },
+  );
+
+  // Provider state actually changed: child lost its old parent and was not
+  // attached to the new one. A caller must be able to see this from the
+  // authoritative reread, not assume no-op.
+  assert.equal(mutator.parents.get(10), undefined);
+});
+
+test("surfaces a distinct recovery-read-failed code when the post-failure reread itself fails", async () => {
+  const mutator = new StatefulMutator();
+  mutator.parents.set(10, 20);
+  const relationExecutor = executor(mutator);
+
+  const originalRequest = mutator.requestRepositoryApi.bind(mutator);
+  let attachFailed = false;
+  mutator.requestRepositoryApi = async (path, method = "GET", fields = {}) => {
+    if (method === "POST" && path.endsWith("/sub_issues") && !attachFailed) {
+      attachFailed = true;
+      throw new Error("simulated provider rejection of attach");
+    }
+    if (attachFailed && method === "GET") throw new Error("simulated transport failure during recovery reread");
+    return originalRequest(path, method, fields);
+  };
+
+  await assert.rejects(
+    () => relationExecutor.execute({ operation: "reparent", child: 10, previousParent: 20, parent: 30 }),
+    (error: unknown) => {
+      assert.ok(error instanceof IssueRelationshipExecutorError);
+      assert.equal(error.code, "ISSUE_RELATIONSHIP_RECOVERY_READ_FAILED");
+      assert.ok(error.diagnostics.some((entry) => entry.code === "RELATION_RECOVERY_READ_FAILED"));
+      assert.equal(error.evidence?.outcome, "partial-effect");
+      assert.equal(error.evidence?.recovery, undefined);
+      return true;
+    },
   );
 });
