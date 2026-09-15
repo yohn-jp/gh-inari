@@ -165,13 +165,29 @@ test("Issue Form fields and canonical body round-trip without metadata", () => {
 test("the public schema is versioned and defaults do not grant WRITE", () => {
   assert.equal(IMPLEMENTATION_CONTRACT_SCHEMA.$id, "urn:inari:implementation-contract:1.0.0");
   assert.deepEqual(projectImplementationSchema(), IMPLEMENTATION_CONTRACT_SCHEMA);
-  assert.deepEqual(IMPLEMENTATION_CONTRACT_SCHEMA.properties?.scope?.required, [
-    "readOnly",
-    "write",
-    "create",
-    "delete",
-    "deny",
-  ]);
+  assert.deepEqual(IMPLEMENTATION_CONTRACT_SCHEMA.properties?.scope?.required, ["readOnly"]);
   const omittedWrite = validContract({ scope: { readOnly: ["src/**"] } });
   assert.equal(parseImplementationContract(omittedWrite).scope.write.length, 0);
+});
+
+test("schema-facing and production validation agree on an omitted mutation scope", () => {
+  const ajvLikeRequired = new Set(IMPLEMENTATION_CONTRACT_SCHEMA.properties?.scope?.required ?? []);
+  const fixture = validContract({ scope: { readOnly: ["src/**"] } });
+  const scopeFixture = fixture.scope as Record<string, unknown>;
+
+  const missingFromSchemaBoundary = ["write", "create", "delete", "deny"].filter(
+    (key) => ajvLikeRequired.has(key) && !Object.hasOwn(scopeFixture, key),
+  );
+  assert.deepEqual(
+    missingFromSchemaBoundary,
+    [],
+    "schema requires a scope property the fixture omits: production and schema validation would disagree",
+  );
+
+  const result = validateImplementationContract(fixture);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.contract?.scope.write, []);
+  assert.deepEqual(result.contract?.scope.create, []);
+  assert.deepEqual(result.contract?.scope.delete, []);
+  assert.deepEqual(result.contract?.scope.deny, []);
 });

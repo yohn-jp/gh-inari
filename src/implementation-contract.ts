@@ -1347,7 +1347,13 @@ export const IMPLEMENTATION_CONTRACT_SCHEMA: ImplementationSchemaDocument = {
         delete: pathArraySchema,
         deny: pathArraySchema,
       },
-      required: ["readOnly", "write", "create", "delete", "deny"],
+      /**
+       * WRITE/CREATE/DELETE/DENY are omissible at the schema boundary; the
+       * production parser normalizes an omitted mutation list to an empty
+       * allowlist (fail-closed). Only READONLY is required so schema
+       * validation and normalizeContract() accept the same documents.
+       */
+      required: ["readOnly"],
       additionalProperties: false,
     },
     constraints: {
