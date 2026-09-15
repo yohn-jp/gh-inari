@@ -12,9 +12,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   deriveCanonicalBranchIdentity,
+  projectChangeFromGitHubEvidence,
   type CanonicalBranchNamingInput,
   type ChangeBranchEvidence,
   type ChangeProjectionInput,
+  type ChangeProjectionResult,
   type ChangePullRequestEvidence,
   type ChangeReadyEvidence,
 } from "../change.js";
@@ -37,12 +39,20 @@ import {
   compileLocalGovernedContract,
   compileRepositoryGovernedContract,
   resolveGovernedIssueEvidence,
+  resolveRepositoryBranchGovernance,
   type RepositoryGovernanceSourceReader,
 } from "../governance.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import { artifactContractProvenanceFromTemplate } from "../contract/ir.js";
 import { effectiveFieldConstraints } from "../contract/constraints.js";
-import { type ChangeMutationRequest, type ChangeReadRequest } from "../change-execution-port.js";
+import {
+  ChangeExecutionPortError,
+  normalizeChangeProjection,
+  validateChangeRequest,
+  type ChangeExecutionPort,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
+} from "../change-execution-port.js";
 import {
   SEMANTIC_PULL_REQUEST_MUTATION_PLAN_VERSION,
   SEMANTIC_PULL_REQUEST_PROJECTION_VERSION,
@@ -51,6 +61,11 @@ import {
 } from "../semantic-pr-projection.js";
 import type { ChangeTrustedEvidenceReader } from "../change-trusted-executor.js";
 import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
+import type {
+  GitHubChangeEffectRequest,
+  GitHubChangeEffectResponse,
+  GitHubChangeEffectTransport,
+} from "./change-effect-adapter.js";
 import {
   GitHubRepositoryEvidenceReader,
   type GitHubRepositoryBranchEvidence,
@@ -61,6 +76,8 @@ import {
 import type { InariIssuerAppIdentity, IssuerRepositoryIdentity } from "./issuer-authority.js";
 import type { ContractProvenance, CanonicalContract, PullRequestBranchGovernance } from "../contract/ir.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
+import { isGitHubAdapterError } from "./errors.js";
+import type { RepositoryContext, RepositoryTree } from "./types.js";
 
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
 export interface GitHubChangeStateProjectorOptions {
@@ -77,6 +94,22 @@ export interface GitHubChangeStateProjectorOptions {
   /** Optional deployment-specific translation of bounded reader failures. */
   readonly onReadFailure?: (error: unknown) => never;
   readonly evidenceReader?: GitHubRepositoryEvidenceReader;
+}
+
+/**
+ * Read-only repository primitives used to compose the Core-facing Change
+ * projection. This is deliberately separate from any deployment transport;
+ * Actions and Direct App callers provide their own bounded implementation.
+ */
+export interface GitHubChangeProjectionApi {
+  getRepositoryContext(): Promise<RepositoryContext>;
+  getRepositoryDefaultBranch(): Promise<string>;
+  getRepositoryTree(ref: string): Promise<RepositoryTree>;
+  getRepositoryBlob(sha: string): Promise<string>;
+  requestRepositoryApi(
+    repositoryPath: string,
+    method?: "GET",
+  ): Promise<{ readonly status: number; readonly body: unknown }>;
 }
 
 interface GovernanceTree {
@@ -549,6 +582,111 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
     const source = await this.readLocalGovernanceFile(cwd, filePath);
     return source !== undefined && gitBlobSha(source) === expectedSha ? source : undefined;
   }
+}
+
+function projectionError(
+  code: ConstructorParameters<typeof ChangeExecutionPortError>[0],
+  reason: string,
+): ChangeExecutionPortError {
+  const messages: Record<string, string> = {
+    CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Change projection source is unavailable.",
+    CHANGE_REMOTE_TRANSPORT_FAILED: "The GitHub Change projection source failed.",
+    CHANGE_REMOTE_RESULT_INVALID: "The GitHub Change projection source returned an invalid result.",
+  };
+  return new ChangeExecutionPortError(code, messages[code] ?? "The GitHub Change projection failed.", {
+    operation: "change.show",
+    reason,
+  });
+}
+
+function normalizeProjectionError(
+  error: unknown,
+  code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE" | "CHANGE_REMOTE_TRANSPORT_FAILED",
+  reason: string,
+): ChangeExecutionPortError {
+  if (error instanceof ChangeExecutionPortError) return error;
+  if (isGitHubAdapterError(error) && error.category === "authentication") {
+    return projectionError(code, "authentication");
+  }
+  return projectionError(code, reason);
+}
+
+function remoteGovernanceSourceReader(
+  api: GitHubChangeProjectionApi,
+  context: RepositoryContext,
+): RepositoryGovernanceSourceReader {
+  return {
+    resolveRepositoryContext: async () => context,
+    getRepositoryDefaultBranch: () => api.getRepositoryDefaultBranch(),
+    getRepositoryTree: (ref) => api.getRepositoryTree(ref),
+    getRepositoryBlob: (sha) => api.getRepositoryBlob(sha),
+  };
+}
+
+class GitHubRepositoryReadTransport implements GitHubChangeEffectTransport {
+  constructor(
+    private readonly api: GitHubChangeProjectionApi,
+    private readonly context: RepositoryContext,
+  ) {}
+
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    const base = `repos/${this.context.nameWithOwner}`;
+    if (request.method !== "GET" || !(request.path === base || request.path.startsWith(`${base}/`))) {
+      throw projectionError("CHANGE_REMOTE_RESULT_INVALID", "invalid-read-path");
+    }
+    const path = request.path.slice(base.length).replace(/^\//u, "");
+    try {
+      return await this.api.requestRepositoryApi.call(this.api, path, "GET");
+    } catch (error: unknown) {
+      throw normalizeProjectionError(error, "CHANGE_REMOTE_TRANSPORT_FAILED", "transport");
+    }
+  }
+}
+
+/**
+ * Compose the shared Core-facing GitHub projection behind a transport-neutral
+ * Change read port. Deployment adapters provide only bounded repository I/O;
+ * projection and repository governance stay in the canonical projector.
+ */
+export function createGitHubChangeReadAdapter(options: {
+  readonly cwd: string;
+  readonly api: GitHubChangeProjectionApi;
+}): Pick<ChangeExecutionPort, "read"> {
+  return {
+    read: async (request: ChangeReadRequest): Promise<ChangeProjectionResult> => {
+      validateChangeRequest(request);
+      let context: RepositoryContext;
+      try {
+        context = await options.api.getRepositoryContext();
+      } catch (error: unknown) {
+        throw normalizeProjectionError(error, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "repository-context");
+      }
+      if (context.repositoryId === undefined) {
+        throw projectionError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "repository-identity-unavailable");
+      }
+
+      let branchGovernance: PullRequestBranchGovernance | undefined;
+      try {
+        branchGovernance = await resolveRepositoryBranchGovernance(remoteGovernanceSourceReader(options.api, context));
+      } catch (error: unknown) {
+        throw normalizeProjectionError(error, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "remote-governance-unavailable");
+      }
+
+      try {
+        const projector = new GitHubChangeStateProjector({
+          repository: { hostname: context.hostname, owner: context.owner, name: context.name },
+          identity: { repositoryHost: context.hostname, repositoryId: context.repositoryId, rootIssue: request.issue },
+          branchGovernance,
+          transport: new GitHubRepositoryReadTransport(options.api, context),
+          cwd: options.cwd,
+          remoteGovernance: remoteGovernanceSourceReader(options.api, context),
+        });
+        return normalizeChangeProjection("show", projectChangeFromGitHubEvidence(await projector.read(request)));
+      } catch (error: unknown) {
+        throw normalizeProjectionError(error, "CHANGE_REMOTE_TRANSPORT_FAILED", "transport");
+      }
+    },
+  };
 }
 
 export function createGitHubChangeStateProjector(
