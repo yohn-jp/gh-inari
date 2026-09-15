@@ -589,10 +589,9 @@ test("the default attempt-count ceiling does not cut off retries before the defa
   let elapsedMs = 0;
   const now = () => elapsedMs;
   let workflowRunReads = 0;
-  // 230s / 3s-per-read =~ 77 poll-loop reads is the same order of magnitude
-  // as the real self-dogfood failure; recover well before the 240s default
-  // deadline but well past the old fixed cap of 60.
-  const failingReads = 77;
+  // Include setup and dispatch in the shared budget, then recover well past
+  // the old fixed cap of 60 attempts while remaining inside the deadline.
+  const failingReads = 65;
   api.requestActionsApi = async (path, method, fields = {}) => {
     if (method === "GET" && path.startsWith("actions/workflows/")) {
       workflowRunReads += 1;

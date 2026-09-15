@@ -25,6 +25,13 @@ test("self-dogfood requires an exact disposable Issue confirmation", () => {
   );
 });
 
+test("self-dogfood leaves Change execution timing to the installed transport", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  assert.doesNotMatch(source, /DEFAULT_(?:POLL_ATTEMPTS|POLL_INTERVAL_MS|MAX_WAIT_MS)/u);
+  assert.doesNotMatch(source, /COMMAND_TIMEOUT_MS/u);
+  assert.equal(parseArguments(["--issue", "416", "--confirm-disposable", "416"]).options.timeoutMs, undefined);
+});
+
 test("self-dogfood does not accept a replaceable evidence authority", () => {
   assert.throws(
     () =>

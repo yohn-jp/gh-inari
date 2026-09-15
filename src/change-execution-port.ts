@@ -15,8 +15,45 @@ import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } fro
 
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_EXECUTION_PORT_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
+/**
+ * Default bounded budget for one transport-backed Change mutation. The
+ * execution port owns this budget; callers and coordination harnesses must
+ * not duplicate knowledge of the transport's polling strategy.
+ */
+export const DEFAULT_CHANGE_EXECUTION_DEADLINE_MS = 240_000 as const;
 const MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES = 1_048_576;
 export const MAX_CHANGE_EXECUTION_EVIDENCE_BYTES = 16_384 as const;
+
+/** Absolute deadline shared by every nested operation in one execution. */
+export interface ChangeExecutionDeadline {
+  readonly startedAt: number;
+  readonly expiresAt: number;
+  /** Remaining budget at the clock owned by the transport boundary. */
+  readonly remainingMs: () => number;
+}
+
+/** Create one bounded execution deadline from a single transport-owned budget. */
+export function createChangeExecutionDeadline(
+  maxWaitMs: number = DEFAULT_CHANGE_EXECUTION_DEADLINE_MS,
+  now: () => number = () => Date.now(),
+): ChangeExecutionDeadline {
+  if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 1) {
+    throw new RangeError("Change execution deadline must be a positive safe integer.");
+  }
+  const startedAt = now();
+  if (!Number.isFinite(startedAt)) {
+    throw new RangeError("Change execution deadline requires a finite clock value.");
+  }
+  const expiresAt = startedAt + maxWaitMs;
+  if (!Number.isSafeInteger(expiresAt)) {
+    throw new RangeError("Change execution deadline exceeds the safe clock range.");
+  }
+  return Object.freeze({
+    startedAt,
+    expiresAt,
+    remainingMs: () => Math.max(0, expiresAt - now()),
+  });
+}
 
 export const CHANGE_EXECUTION_MUTATIONS = CHANGE_IMPLEMENTED_TRANSITIONS;
 export type ChangeMutation = (typeof CHANGE_EXECUTION_MUTATIONS)[number];
