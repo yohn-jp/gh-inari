@@ -20,6 +20,10 @@
       "types": "./dist/implementation-contract.d.ts",
       "import": "./dist/implementation-contract.js"
     },
+    "./implementation-authorization": {
+      "types": "./dist/implementation-authorization.d.ts",
+      "import": "./dist/implementation-authorization.js"
+    },
     "./pull-request-template": {
       "types": "./dist/pull-request-template.d.ts",
       "import": "./dist/pull-request-template.js"
