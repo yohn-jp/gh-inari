@@ -32,7 +32,7 @@ into one another:
 | **Canon**              | Authoritative governed data or rules held by the Authority. Canon is data, not an executing component.                                                       |
 | **Port**               | A stable transport-neutral contract between Components or Roles.                                                                                             |
 | **Adapter**            | A concrete binding between a Port and a protocol, provider, CLI, or Runtime Host.                                                                            |
-| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create repository Authority or semantic capability.                                   |
+| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create repository Authority or semantic capability.                                  |
 | **Runtime Host**       | The compute environment in which Components execute, such as local Node.js, an Actions Runner, or a Cloudflare Worker.                                       |
 | **Deployment Profile** | An explicit composition of Components, Adapters, Transports, credentials, and Runtime Hosts.                                                                 |
 | **Trust Boundary**     | A boundary across which identity or credential authority changes and therefore requires explicit proof, scope, or containment.                               |
@@ -212,17 +212,17 @@ The privileged execution path is a sequence of distinct Roles. A component may
 co-locate them, but no Role may absorb another Role's responsibility merely
 because the same process performs both steps.
 
-| Role | Owns | Must not own |
-| --- | --- | --- |
-| **Credential Broker** | App private-key and installation-token containment; bounded provider capability issuance for the target repository and permission ceiling. | Session capability admission, semantic planning, reusable credential return, or caller identity. |
-| **Evidence Reader** | Bounded current evidence acquisition through an admitted Provider Credential. | GitHub-to-Inari semantic interpretation, lifecycle transitions, or policy decisions. |
-| **Observation Projector** | Pure normalization of provider evidence into versioned Operational Observation. | GitHub I/O, mutation, repository policy, or semantic Change state. |
-| **State Projector** | Deterministic interpretation of admissible observations plus Canon/contracts into Inari state and projections. | Provider I/O, credential handling, or lifecycle/effect sequencing. |
-| **Operation Planner** | Conversion of a requested semantic operation and projected state into bounded intended effects and postconditions. | Applying effects, minting credentials, or inventing provider-specific policy. |
-| **Lifecycle Controller** | Legal event sequencing, retry/no-op branches, compensation, recovery, reread, and postcondition-verification control flow. XState is the current implementation technology. | Repository Authority, persistent Change state, artifact derivation, or provider normalization. |
-| **Effect Authorizer** | Validation that one already-planned effect may cross the App Principal credential boundary for the execution context and permission ceiling. | Choosing lifecycle transitions, deriving artifacts, or acting as a general provider client. |
-| **Effect Adapter** | Translation of one admitted effect into bounded GitHub provider operations and bounded result evidence. | Adding effects, semantic policy, or success claims without reread and verification. |
-| **Postcondition Verifier** | Comparison of reread/projected Authority state with the planned semantic postcondition before success. | Applying effects, changing policy, or treating a transport response as proof of success. |
+| Role                       | Owns                                                                                                                                                                        | Must not own                                                                                     |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **Credential Broker**      | App private-key and installation-token containment; bounded provider capability issuance for the target repository and permission ceiling.                                  | Session capability admission, semantic planning, reusable credential return, or caller identity. |
+| **Evidence Reader**        | Bounded current evidence acquisition through an admitted Provider Credential.                                                                                               | GitHub-to-Inari semantic interpretation, lifecycle transitions, or policy decisions.             |
+| **Observation Projector**  | Pure normalization of provider evidence into versioned Operational Observation.                                                                                             | GitHub I/O, mutation, repository policy, or semantic Change state.                               |
+| **State Projector**        | Deterministic interpretation of admissible observations plus Canon/contracts into Inari state and projections.                                                              | Provider I/O, credential handling, or lifecycle/effect sequencing.                               |
+| **Operation Planner**      | Conversion of a requested semantic operation and projected state into bounded intended effects and postconditions.                                                          | Applying effects, minting credentials, or inventing provider-specific policy.                    |
+| **Lifecycle Controller**   | Legal event sequencing, retry/no-op branches, compensation, recovery, reread, and postcondition-verification control flow. XState is the current implementation technology. | Repository Authority, persistent Change state, artifact derivation, or provider normalization.   |
+| **Effect Authorizer**      | Validation that one already-planned effect may cross the App Principal credential boundary for the execution context and permission ceiling.                                | Choosing lifecycle transitions, deriving artifacts, or acting as a general provider client.      |
+| **Effect Adapter**         | Translation of one admitted effect into bounded GitHub provider operations and bounded result evidence.                                                                     | Adding effects, semantic policy, or success claims without reread and verification.              |
+| **Postcondition Verifier** | Comparison of reread/projected Authority state with the planned semantic postcondition before success.                                                                      | Applying effects, changing policy, or treating a transport response as proof of success.         |
 
 The resulting boundary is:
 
