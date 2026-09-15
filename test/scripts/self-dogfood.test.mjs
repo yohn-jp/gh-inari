@@ -42,6 +42,15 @@ test("self-dogfood does not accept a replaceable evidence authority", () => {
   );
 });
 
+test("self-dogfood delegates structured evidence handling to the canonical authority", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  assert.match(source, /projectStructuredCommandError/u);
+  assert.match(source, /sanitizeCertificationText/u);
+  assert.doesNotMatch(source, /\bconst STRUCTURED_/u);
+  assert.doesNotMatch(source, /\bfunction projectStructured/u);
+  assert.doesNotMatch(source, /\bfunction redact\(/u);
+});
+
 test("worker handoff allowlists environment and carries only bounded identities", () => {
   const environment = sanitizeWorkerEnvironment(
     {
