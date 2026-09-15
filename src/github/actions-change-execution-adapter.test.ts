@@ -284,14 +284,14 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   }
 }
 
-function executor(api: FakeActionsApi, cwd = process.cwd()) {
+function executor(api: FakeActionsApi, cwd = process.cwd(), maxPollAttempts = 2) {
   return createActionsChangeExecutionAdapter({
     cwd,
     api,
     randomUUID: () => correlation,
     pollIntervalMs: 0,
     sleep: async () => undefined,
-    maxPollAttempts: 2,
+    maxPollAttempts,
   });
 }
 
@@ -418,6 +418,93 @@ test("show distinguishes a target repository with no branch policy from unavaila
   } finally {
     await rm(noPolicyCwd, { recursive: true, force: true });
   }
+});
+
+test("waits through queued and in-progress executor runs before accepting the completed result", async () => {
+  const api = new FakeActionsApi();
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  let workflowReads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) {
+      workflowReads += 1;
+      const run =
+        workflowReads === 1
+          ? { id: api.baselineRunId, status: "completed", conclusion: "success" }
+          : workflowReads === 2
+            ? { id: api.resultRunId, status: "queued", conclusion: null }
+            : workflowReads === 3
+              ? { id: api.resultRunId, status: "in_progress", conclusion: null }
+              : { id: api.resultRunId, status: "completed", conclusion: "success" };
+      api.calls.push({ path, method, fields });
+      return {
+        workflow_runs: [
+          { ...run, event: "workflow_dispatch", head_branch: "main" },
+          ...(run.id === api.resultRunId
+            ? [
+                {
+                  id: api.baselineRunId,
+                  status: "completed",
+                  conclusion: "success",
+                  event: "workflow_dispatch",
+                  head_branch: "main",
+                },
+              ]
+            : []),
+        ],
+      };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(workflowReads, 4);
+});
+
+test("retries one transient run or artifact poll failure before observing success", async () => {
+  for (const failureTarget of ["runs", "artifacts"] as const) {
+    const api = new FakeActionsApi();
+    const originalRequestActionsApi = api.requestActionsApi.bind(api);
+    let workflowReads = 0;
+    let artifactReads = 0;
+    let failed = false;
+    api.requestActionsApi = async (path, method, fields = {}) => {
+      if (method === "GET" && path.startsWith("actions/workflows/")) {
+        workflowReads += 1;
+        if (failureTarget === "runs" && workflowReads === 2 && !failed) {
+          failed = true;
+          throw new Error("transient Actions run lookup failure");
+        }
+      }
+      if (method === "GET" && path.startsWith("actions/artifacts?")) {
+        artifactReads += 1;
+        if (failureTarget === "artifacts" && artifactReads === 1 && !failed) {
+          failed = true;
+          throw new Error("transient Actions artifact lookup failure");
+        }
+      }
+      return originalRequestActionsApi(path, method, fields);
+    };
+
+    const result = await executor(api).execute(changeMutationRequest("issue", 42));
+
+    assert.deepEqual(result, { projection: api.result });
+    assert.equal(failed, true);
+  }
+});
+
+test("preserves the bounded result-timeout failure when no executor run becomes observable", async () => {
+  const api = new FakeActionsApi();
+  api.runState = "pending";
+
+  await assert.rejects(
+    executor(api).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
+  );
 });
 
 test("requester authentication is not consulted and repository resolution failures are normalized", async () => {
