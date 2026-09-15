@@ -59,6 +59,16 @@ export interface CertificationDiagnostic {
   readonly diagnostics?: readonly Record<string, unknown>[];
   readonly evidence?: Record<string, unknown>;
 }
+
+export interface CertificationStructuredCommandError {
+  readonly code: string;
+  readonly message: string;
+  readonly structured: CertificationDiagnosticStructuredFields;
+}
+
+export function sanitizeCertificationText(value: unknown, maximum?: number): string | undefined;
+export function projectStructuredCommandError(value: unknown): CertificationStructuredCommandError | undefined;
+
 export type CertificationDiagnosticCode =
   | "EXPECTED_IDENTITY_INVALID"
   | "EVIDENCE_MISSING"
