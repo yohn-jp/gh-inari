@@ -11,6 +11,7 @@ import {
 } from "../change-execution-port.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
+  ActionsChangeExecutionAdapter,
   createActionsChangeExecutionAdapter,
   INARI_CHANGE_EXECUTOR_REF,
   INARI_CHANGE_EXECUTOR_WORKFLOW,
@@ -301,6 +302,27 @@ function executor(
     ...(extra.now === undefined ? {} : { now: extra.now }),
   });
 }
+
+test("Actions transport accepts no repository projection API and delegates reads", async () => {
+  const source = new FakeActionsApi();
+  const transport: GitHubActionsRemoteApi = {
+    getRepositoryContext: source.getRepositoryContext.bind(source),
+    requestActionsApi: source.requestActionsApi.bind(source),
+    downloadActionsArtifact: source.downloadActionsArtifact.bind(source),
+  };
+  const adapter = new ActionsChangeExecutionAdapter({
+    cwd: process.cwd(),
+    api: transport,
+    read: { read: async () => source.result },
+    randomUUID: () => correlation,
+    pollIntervalMs: 0,
+    sleep: async () => undefined,
+    maxPollAttempts: 2,
+  });
+
+  assert.deepEqual(await adapter.read(changeReadRequest(42)), source.result);
+  assert.deepEqual(await adapter.execute(changeMutationRequest("issue", 42)), { projection: source.result });
+});
 
 test("issue, ready, and abort dispatch the same semantic request through the trusted workflow", async () => {
   for (const operation of ["issue", "ready", "abort"] as const) {

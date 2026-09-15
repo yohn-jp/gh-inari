@@ -2,7 +2,6 @@ import { randomUUID as generateRandomUUID } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import {
   normalizeChangeEffectFailureClassification,
-  projectChangeFromGitHubEvidence,
   type ChangeDiagnostic,
   type ChangeEffectFailureClassification,
   type ChangeProjectionResult,
@@ -13,7 +12,6 @@ import {
   changeMutationRequest,
   normalizeChangeExecutionEvidence,
   normalizeChangeExecutionResult,
-  normalizeChangeProjection,
   validateChangeRequest,
   type ChangeExecutionPort,
   type ChangeExecutionPortOptions,
@@ -25,21 +23,12 @@ import {
 } from "../change-execution-port.js";
 import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
 import { GitHubAdapter } from "./adapter.js";
-import {
-  GitHubActionsEvidenceReader,
-  isRepositoryEvidenceFailureReason,
-  isTrustedActionsFailureStage,
-  type TrustedActionsFailureDiagnostic,
-} from "./actions-change-executor.js";
+import { isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage } from "./actions-change-executor.js";
+import type { TrustedActionsFailureDiagnostic } from "./actions-change-executor.js";
 import { isChangeTrustedExecutorErrorCode } from "../change-trusted-executor.js";
-import type {
-  GitHubChangeEffectRequest,
-  GitHubChangeEffectResponse,
-  GitHubChangeEffectTransport,
-} from "./change-effect-adapter.js";
 import { isGitHubAdapterError } from "./errors.js";
-import { resolveRepositoryBranchGovernance, type RepositoryGovernanceSourceReader } from "../governance.js";
-import type { RepositoryContext, RepositoryTree } from "./types.js";
+import { createGitHubChangeReadAdapter, type GitHubChangeProjectionApi } from "./change-state-projector.js";
+import type { RepositoryContext } from "./types.js";
 
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml" as const;
@@ -64,25 +53,21 @@ const DEFAULT_POLL_ATTEMPTS = 300;
 
 export interface ActionsChangeExecutionAdapterApi {
   getRepositoryContext(): Promise<RepositoryContext>;
-  /** Repository-default-branch governance primitives; GitHubAdapter supplies these. */
-  getRepositoryDefaultBranch(): Promise<string>;
-  getRepositoryTree(ref: string): Promise<RepositoryTree>;
-  getRepositoryBlob(sha: string): Promise<string>;
   requestActionsApi(
     actionsPath: string,
     method: "GET" | "POST",
     fields?: Readonly<Record<string, string>>,
   ): Promise<unknown>;
-  requestRepositoryApi?(
-    repositoryPath: string,
-    method?: "GET",
-  ): Promise<{ readonly status: number; readonly body: unknown }>;
   downloadActionsArtifact(artifactId: number): Promise<Uint8Array>;
 }
 
 export interface ActionsChangeExecutionAdapterOptions extends ChangeExecutionPortOptions {
-  /** Injectable repository/auth/API abstraction; the default is the normal gh session. */
+  /** Injectable Actions transport abstraction; the default is the normal gh session. */
   readonly api?: ActionsChangeExecutionAdapterApi;
+  /** Optional shared GitHub read composition when the transport has no read API. */
+  readonly readApi?: GitHubChangeProjectionApi;
+  /** Shared Core-facing read adapter; Actions itself never projects Change state. */
+  readonly read?: Pick<ChangeExecutionPort, "read">;
   readonly maxPollAttempts?: number;
   readonly pollIntervalMs?: number;
   /**
@@ -462,9 +447,17 @@ function isRetryablePollTransportError(error: unknown): error is ChangeExecution
   );
 }
 
+/**
+ * Bounded GitHub Actions transport for the transport-neutral Change port.
+ *
+ * This class owns workflow dispatch, run/artifact correlation, polling
+ * deadlines, artifact framing, and request/result contract normalization.
+ * Semantic Change projection is supplied as a delegated read port; this class
+ * never selects governance, lifecycle, recovery, requester, or effect policy.
+ */
 export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #api: ActionsChangeExecutionAdapterApi;
-  readonly #cwd: string;
+  readonly #read: Pick<ChangeExecutionPort, "read">;
   readonly #maxPollAttempts: number;
   readonly #pollIntervalMs: number;
   readonly #maxWaitMs: number;
@@ -473,8 +466,21 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #randomUUID: () => string;
 
   constructor(options: ActionsChangeExecutionAdapterOptions) {
-    this.#cwd = options.cwd;
-    this.#api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
+    const api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
+    const projectionApi = options.readApi ?? projectionApiFromTransport(api);
+    const read =
+      options.read ??
+      (projectionApi === undefined
+        ? undefined
+        : createGitHubChangeReadAdapter({ cwd: options.cwd, api: projectionApi }));
+    this.#api = api;
+    this.#read =
+      read ??
+      ({
+        read: async () => {
+          throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "read-path-unavailable");
+        },
+      } satisfies Pick<ChangeExecutionPort, "read">);
     this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 1_000);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
     this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS, 1, 600_000);
@@ -499,45 +505,10 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
-    validateChangeRequest(request);
-    const projection = await this.readCanonicalProjection(request);
-    return normalizeChangeProjection("show", projection);
-  }
-
-  private async readCanonicalProjection(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
-    const repositoryApi = this.#api.requestRepositoryApi;
-    if (repositoryApi === undefined) {
-      throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "read-path-unavailable");
-    }
-    let context: RepositoryContext;
-    try {
-      context = await this.#api.getRepositoryContext();
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, "change.show", "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-    }
-    try {
-      if (context.repositoryId === undefined) {
-        throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "repository-identity-unavailable");
-      }
-      let branchGovernance;
-      try {
-        branchGovernance = await resolveRepositoryBranchGovernance(remoteGovernanceSourceReader(this.#api, context));
-      } catch (error: unknown) {
-        if (error instanceof ChangeExecutionPortError) throw error;
-        throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "remote-governance-unavailable");
-      }
-      const reader = new GitHubActionsEvidenceReader({
-        repository: { hostname: context.hostname, owner: context.owner, name: context.name },
-        identity: { repositoryHost: context.hostname, repositoryId: context.repositoryId, rootIssue: request.issue },
-        branchGovernance,
-        transport: new GitHubRepositoryReadTransport(this.#api, context, repositoryApi),
-        cwd: this.#cwd,
-      });
-      return projectChangeFromGitHubEvidence(await reader.read(request));
-    } catch (error: unknown) {
-      if (error instanceof ChangeExecutionPortError) throw error;
-      throw normalizeTransportError(error, "change.show", "CHANGE_REMOTE_TRANSPORT_FAILED");
-    }
+    // The shared projector is injected by the composition factory. Keeping
+    // this method as delegation preserves the ChangeExecutionPort API without
+    // putting GitHub-derived semantic policy in the Actions transport.
+    return this.#read.read(request);
   }
 
   private async dispatchAndCollect(request: ChangeMutationRequest): Promise<ActionResultEnvelope> {
@@ -693,52 +664,6 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   }
 }
 
-/**
- * Adapt the read-only Change transport to the shared repository governance
- * authority. The same direct primitives are used by GitHubAdapter and by the
- * injectable remote seam, without consulting cwd.
- */
-function remoteGovernanceSourceReader(
-  api: ActionsChangeExecutionAdapterApi,
-  context: RepositoryContext,
-): RepositoryGovernanceSourceReader {
-  return {
-    resolveRepositoryContext: async () => context,
-    getRepositoryDefaultBranch: () => api.getRepositoryDefaultBranch(),
-    getRepositoryTree: (ref) => api.getRepositoryTree(ref),
-    getRepositoryBlob: (sha) => api.getRepositoryBlob(sha),
-  };
-}
-
-class GitHubRepositoryReadTransport implements GitHubChangeEffectTransport {
-  readonly #api: ActionsChangeExecutionAdapterApi;
-  readonly #context: RepositoryContext;
-  readonly #requestRepositoryApi: NonNullable<ActionsChangeExecutionAdapterApi["requestRepositoryApi"]>;
-
-  constructor(
-    api: ActionsChangeExecutionAdapterApi,
-    context: RepositoryContext,
-    requestRepositoryApi: NonNullable<ActionsChangeExecutionAdapterApi["requestRepositoryApi"]>,
-  ) {
-    this.#api = api;
-    this.#context = context;
-    this.#requestRepositoryApi = requestRepositoryApi;
-  }
-
-  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
-    const base = `repos/${this.#context.nameWithOwner}`;
-    if (request.method !== "GET" || !(request.path === base || request.path.startsWith(`${base}/`))) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "change.show", "invalid-read-path");
-    }
-    const path = request.path.slice(base.length).replace(/^\//u, "");
-    try {
-      return await this.#requestRepositoryApi.call(this.#api, path, "GET");
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, "change.show", "CHANGE_REMOTE_TRANSPORT_FAILED");
-    }
-  }
-}
-
 function boundedOption(value: number, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new RangeError("GitHub Actions polling options are outside their bounded range.");
@@ -750,6 +675,20 @@ export function createActionsChangeExecutionAdapter(
   options: ActionsChangeExecutionAdapterOptions,
 ): ChangeExecutionPort {
   return new ActionsChangeExecutionAdapter(options);
+}
+
+function projectionApiFromTransport(value: ActionsChangeExecutionAdapterApi): GitHubChangeProjectionApi | undefined {
+  const candidate = value as Partial<GitHubChangeProjectionApi>;
+  if (
+    typeof candidate.getRepositoryContext !== "function" ||
+    typeof candidate.getRepositoryDefaultBranch !== "function" ||
+    typeof candidate.getRepositoryTree !== "function" ||
+    typeof candidate.getRepositoryBlob !== "function" ||
+    typeof candidate.requestRepositoryApi !== "function"
+  ) {
+    return undefined;
+  }
+  return candidate as GitHubChangeProjectionApi;
 }
 
 /**
