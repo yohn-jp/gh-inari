@@ -1252,6 +1252,28 @@ export function parseImplementationIssueBody(body: string): ImplementationIssueB
     : { valid: false, violations: result.violations };
 }
 
+/**
+ * Return the canonical governed representation of an Issue body.
+ *
+ * Issue metadata and discussion are deliberately outside this function.  The
+ * body is parsed through the canonical Implementation adapter first, so
+ * equivalent field formatting receives the same representation and invalid
+ * bodies cannot acquire an authorization identity.
+ */
+export function canonicalizeImplementationIssueBody(body: string): string {
+  const parsed = parseImplementationIssueBody(body);
+  if (!parsed.valid || parsed.contract === undefined) throw new ImplementationContractError(parsed.violations);
+  return serializeImplementationContract(parsed.contract);
+}
+
+/** SHA-256 identity of the canonical governed Implementation body. */
+export function implementationIssueBodyDigest(body: string): string {
+  return createHash("sha256").update(canonicalizeImplementationIssueBody(body), "utf8").digest("hex");
+}
+
+/** Compatibility spelling for callers that name the governed body directly. */
+export const implementationGovernedBodyDigest = implementationIssueBodyDigest;
+
 function globRegex(pattern: string): RegExp {
   let source = "^";
   for (let index = 0; index < pattern.length; index += 1) {
