@@ -461,14 +461,19 @@ export function normalizeCrossDeploymentSessionResult(
   );
 }
 
-/** Build a bounded semantic failure for a profile that cannot execute a case. */
+/**
+ * Build a bounded semantic failure from diagnostics a real execution boundary
+ * already produced. A bare string is shorthand for a single-code diagnostic;
+ * this never manufactures a diagnostic that no production code emitted.
+ */
 export function normalizeCrossDeploymentFailure(
-  operation: CrossDeploymentOperation,
+  operation: CrossDeploymentOperation | undefined,
   phase: string,
-  code: string,
+  diagnostics: string | readonly CrossDeploymentDiagnostic[],
   requesterBinding?: CrossDeploymentSemanticResult["requesterBinding"],
 ): CrossDeploymentSemanticResult {
-  return failureResult(operation, phase, [{ code }], requesterBinding);
+  const list = typeof diagnostics === "string" ? [{ code: diagnostics }] : diagnostics;
+  return failureResult(operation, phase, list, requesterBinding);
 }
 
 /** Convert an adapter error to a bounded semantic failure without retaining its message. */

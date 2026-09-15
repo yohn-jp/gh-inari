@@ -1,4 +1,5 @@
 import type { ChangeGitHubEvidence } from "./change.js";
+import { INARI_ISSUER_PRINCIPAL } from "./issuer-identity.js";
 import {
   CROSS_DEPLOYMENT_CONFORMANCE_VERSION,
   type CrossDeploymentAuthoritySnapshot,
@@ -41,6 +42,7 @@ const DRAFT_EVIDENCE: ChangeGitHubEvidence = {
         draft: true,
         merged: false,
         rootIssue: ISSUE,
+        provenance: { issuer: INARI_ISSUER_PRINCIPAL },
       },
     ],
   },
@@ -63,6 +65,7 @@ const RECOVERY_EVIDENCE: ChangeGitHubEvidence = {
         draft: false,
         merged: false,
         rootIssue: ISSUE,
+        provenance: { issuer: INARI_ISSUER_PRINCIPAL },
       },
     ],
   },
@@ -183,24 +186,38 @@ export const CROSS_DEPLOYMENT_FIXTURES: readonly CrossDeploymentFixture[] = Obje
       outcome: "recovery-required",
       diagnostics: [
         {
-          code: "COMPENSATION_REQUIRED",
+          code: "BRANCH_DELETE_FAILED",
           phase: "recovery-required",
-          message: "Bounded cleanup could not prove the canonical branch generation.",
+          message: "The branch deletion effect failed.",
         },
       ],
       verified: false,
     },
   },
   {
+    // Unlike the other fixtures, `before`/`after` here are the two reads a
+    // single Change issuance attempt takes of the Governance Canon
+    // generation (initial, then fresh-before-planning), not a pre/post
+    // effect state. A real production issuance boundary re-reads Governance
+    // Canon between those two points and fails closed when the generation
+    // drifted; the conformance runner supplies exactly that reader input and
+    // lets the production drift check derive the failure.
     version: CROSS_DEPLOYMENT_CONFORMANCE_VERSION,
     name: "stale-authority-generation",
-    request: { version: 1, operation: "ready", issue: ISSUE },
+    request: { version: 1, operation: "issue", issue: ISSUE },
     before: snapshot("canon-generation-stale", DRAFT_EVIDENCE),
     after: snapshot("canon-generation-3", DRAFT_EVIDENCE),
     expected: {
       admission: "denied",
       outcome: "denied",
-      diagnostics: [{ code: "STALE_AUTHORITY_GENERATION", phase: "authorization" }],
+      diagnostics: [
+        {
+          code: "CHANGE_PROVENANCE_CONFLICT",
+          phase: "conflict",
+          path: "$.governedIssue.contract.provenance.treeSha",
+          message: "The validated root Issue governance generation changed before issuance.",
+        },
+      ],
       verified: false,
     },
   },
