@@ -625,7 +625,10 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         try {
           archive = await this.#api.downloadActionsArtifact(artifact.id);
         } catch (error: unknown) {
-          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+          const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+          if (!isRetryablePollTransportError(normalized) || attempt + 1 >= this.#maxPollAttempts) throw normalized;
+          await this.#sleep(this.#pollIntervalMs);
+          continue;
         }
         const result = resultFromArchive(archive, semanticOperation);
         // A bounded trusted result is the authority for the Change outcome.
