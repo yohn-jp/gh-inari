@@ -217,8 +217,12 @@ export class GitHubAdapter {
   private readonly executable: string;
   private readonly timeoutsMs: Readonly<Record<GhOperationClass, number>>;
   private readonly outputLimitsBytes: Readonly<GhTransportOutputLimits>;
+  /** No-deadline coalescing only; a deadline-bound caller never joins these. */
   private availablePromise: Promise<void> | undefined;
   private contextPromise: Promise<RepositoryContext> | undefined;
+  /** Completed evidence: reusable by every caller without any further wait. */
+  private ghAvailable = false;
+  private contextValue: RepositoryContext | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
   private readonly authenticationPromises = new Map<string | undefined, Promise<void>>();
 
@@ -257,14 +261,20 @@ export class GitHubAdapter {
   }
 
   async resolveRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
-    if (this.contextPromise === undefined) {
-      const pending = this.resolveRepositoryContextOnce(deadline);
-      this.contextPromise = pending;
-      pending.catch(() => {
-        if (this.contextPromise === pending) this.contextPromise = undefined;
-      });
+    if (this.contextValue !== undefined) return this.contextValue;
+    if (deadline === undefined) {
+      if (this.contextPromise === undefined) {
+        const pending = this.resolveRepositoryContextOnce(undefined);
+        this.contextPromise = pending;
+        pending.catch(() => {
+          if (this.contextPromise === pending) this.contextPromise = undefined;
+        });
+      }
+      return this.contextPromise;
     }
-    return this.contextPromise;
+    // A deadline-bound caller with no completed context must never join an
+    // in-flight resolution started by another (possibly unbounded) caller.
+    return this.resolveRepositoryContextOnce(deadline);
   }
 
   async getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
@@ -1149,13 +1159,12 @@ export class GitHubAdapter {
   private async resolveRepositoryContextOnce(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
     await this.ensureGhAvailable(deadline);
     const override = this.repositoryOverride();
-    if (override !== undefined) {
-      await this.ensureAuthenticated(override.hostname, deadline);
-      return this.resolveRepositoryView(`${override.hostname}/${override.nameWithOwner}`, override.hostname, deadline);
-    }
-
-    await this.ensureAuthenticated(this.normalizedHostname(), deadline);
-    return this.resolveRepositoryView(undefined, this.normalizedHostname() ?? DEFAULT_HOSTNAME, deadline);
+    const hostname = override?.hostname ?? this.normalizedHostname();
+    await this.ensureAuthenticated(hostname, deadline);
+    const repositoryArgument = override === undefined ? undefined : `${override.hostname}/${override.nameWithOwner}`;
+    const context = await this.resolveRepositoryView(repositoryArgument, hostname ?? DEFAULT_HOSTNAME, deadline);
+    this.contextValue = context;
+    return context;
   }
 
   /** Resolve the host-scoped REST repository database identity for both local and explicit targets. */
@@ -1254,14 +1263,20 @@ export class GitHubAdapter {
   }
 
   private async ensureGhAvailable(deadline?: ChangeExecutionDeadline): Promise<void> {
-    if (this.availablePromise === undefined) {
-      const pending = this.ensureGhAvailableOnce(deadline);
-      this.availablePromise = pending;
-      pending.catch(() => {
-        if (this.availablePromise === pending) this.availablePromise = undefined;
-      });
+    if (this.ghAvailable) return;
+    if (deadline === undefined) {
+      if (this.availablePromise === undefined) {
+        const pending = this.ensureGhAvailableOnce(undefined);
+        this.availablePromise = pending;
+        pending.catch(() => {
+          if (this.availablePromise === pending) this.availablePromise = undefined;
+        });
+      }
+      return this.availablePromise;
     }
-    return this.availablePromise;
+    // A deadline-bound caller with no completed availability evidence must
+    // never join an in-flight check started by another (possibly unbounded) caller.
+    return this.ensureGhAvailableOnce(deadline);
   }
 
   private async ensureGhAvailableOnce(deadline?: ChangeExecutionDeadline): Promise<void> {
@@ -1269,21 +1284,27 @@ export class GitHubAdapter {
     if (result.exitCode !== 0) {
       throw new GhNotInstalledError(this.executable);
     }
+    this.ghAvailable = true;
   }
 
   private async ensureAuthenticated(hostname: string | undefined, deadline?: ChangeExecutionDeadline): Promise<void> {
     if (this.authenticatedHostnames.has(hostname)) return;
-    let pending = this.authenticationPromises.get(hostname);
-    if (pending === undefined) {
-      pending = this.ensureAuthenticatedOnce(hostname, deadline);
-      this.authenticationPromises.set(hostname, pending);
-      pending
-        .catch(() => undefined)
-        .finally(() => {
-          this.authenticationPromises.delete(hostname);
-        });
+    if (deadline === undefined) {
+      let pending = this.authenticationPromises.get(hostname);
+      if (pending === undefined) {
+        pending = this.ensureAuthenticatedOnce(hostname, undefined);
+        this.authenticationPromises.set(hostname, pending);
+        pending
+          .catch(() => undefined)
+          .finally(() => {
+            this.authenticationPromises.delete(hostname);
+          });
+      }
+      return pending;
     }
-    return pending;
+    // A deadline-bound caller for a not-yet-authenticated host must never join
+    // an in-flight promise keyed only by hostname from another caller.
+    return this.ensureAuthenticatedOnce(hostname, deadline);
   }
 
   private async ensureAuthenticatedOnce(

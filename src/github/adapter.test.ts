@@ -59,6 +59,57 @@ class StubGhTransport implements GhTransport {
   }
 }
 
+/**
+ * Sequential fake transport whose steps may be `"hold"`: that call's promise
+ * stays pending until released, letting a test observe a caller mid-flight
+ * before deciding what happens next.
+ */
+class DeferredGhTransport implements GhTransport {
+  readonly calls: RecordedCall[] = [];
+  private readonly steps: Array<GhCommandResult | Error | "hold">;
+  private readonly held: Array<(result: GhCommandResult) => void> = [];
+
+  constructor(steps: ReadonlyArray<GhCommandResult | Error | "hold">) {
+    this.steps = [...steps];
+  }
+
+  async run(args: readonly string[], options?: GhTransportOptions): Promise<GhCommandResult> {
+    this.calls.push({
+      args: [...args],
+      cwd: options?.cwd,
+      timeoutMs: options?.timeoutMs,
+      maxStdoutBytes: options?.maxStdoutBytes,
+      maxStderrBytes: options?.maxStderrBytes,
+    });
+    const step = this.steps.shift();
+    if (step === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
+    if (step === "hold") return new Promise<GhCommandResult>((resolve) => this.held.push(resolve));
+    if (step instanceof Error) throw step;
+    return step;
+  }
+
+  /** Queue one more response, consumed by the next call once prior steps drain. */
+  pushStep(step: GhCommandResult | Error | "hold"): void {
+    this.steps.push(step);
+  }
+
+  /** Resolve the oldest still-pending held call. */
+  releaseNextHold(result: GhCommandResult): void {
+    const resolve = this.held.shift();
+    if (resolve === undefined) throw new Error("No held gh call to release.");
+    resolve(result);
+  }
+
+  get heldCount(): number {
+    return this.held.length;
+  }
+}
+
+/** Drain pending microtasks so a caller blocked on a held gh call is observably in flight. */
+async function flushMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 class ArtifactGhTransport implements GhTransport {
   readonly mode: "regular" | "oversized" | "missing";
   binaryStdoutRequests = 0;
@@ -330,6 +381,82 @@ test("coalesces concurrent gh availability checks onto one in-flight call", asyn
     transport.calls.map((call) => call.args[0]),
     ["--version", "auth", "api"],
   );
+});
+
+test("a deadline-bound repository resolution does not join an unbounded in-flight resolution", async () => {
+  const transport = new DeferredGhTransport([command(0, "gh version 2.0"), command(), "hold"]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const ordinary = adapter.resolveRepositoryContext();
+  await flushMicrotasks();
+  assert.equal(transport.calls.length, 3);
+  assert.equal(transport.heldCount, 1);
+
+  transport.pushStep(repositoryIdentityResponse());
+  const deadline = createChangeExecutionDeadline(5, () => 0);
+  const bounded = await adapter.resolveRepositoryContext(deadline);
+
+  assert.equal(bounded.nameWithOwner, "acme/inari");
+  assert.equal(transport.calls.length, 4);
+  assert.deepEqual(transport.calls[3]?.args.slice(0, 2), ["api", "repos/acme/inari"]);
+  assert.equal(transport.calls[3]?.timeoutMs, 5);
+
+  transport.releaseNextHold(repositoryIdentityResponse());
+  const ordinaryContext = await ordinary;
+  assert.equal(ordinaryContext.nameWithOwner, "acme/inari");
+});
+
+test("a deadline-bound authentication check does not join an unbounded in-flight auth status call", async () => {
+  const transport = new DeferredGhTransport([command(0, "gh version 2.0"), "hold"]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const ordinary = adapter.resolveRepositoryContext();
+  await flushMicrotasks();
+  assert.equal(transport.calls.length, 2);
+  assert.equal(transport.heldCount, 1);
+  assert.deepEqual(transport.calls[1]?.args, ["auth", "status", "--hostname", "github.com"]);
+
+  transport.pushStep(command());
+  transport.pushStep(repositoryIdentityResponse());
+  const deadline = createChangeExecutionDeadline(5, () => 0);
+  const bounded = await adapter.resolveRepositoryContext(deadline);
+
+  assert.equal(bounded.nameWithOwner, "acme/inari");
+  assert.equal(transport.calls.length, 4);
+  assert.deepEqual(transport.calls[2]?.args, ["auth", "status", "--hostname", "github.com"]);
+  assert.equal(transport.calls[2]?.timeoutMs, 5);
+  assert.equal(transport.calls[3]?.timeoutMs, 5);
+
+  transport.pushStep(repositoryIdentityResponse());
+  transport.releaseNextHold(command());
+  const ordinaryContext = await ordinary;
+  assert.equal(ordinaryContext.nameWithOwner, "acme/inari");
+});
+
+test("an ordinary caller retains its configured timeout instead of inheriting a shorter in-flight Change deadline", async () => {
+  const transport = new DeferredGhTransport(["hold"]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const deadline = createChangeExecutionDeadline(5, () => 0);
+  const bounded = adapter.resolveRepositoryContext(deadline);
+  await flushMicrotasks();
+  assert.equal(transport.calls.length, 1);
+  assert.equal(transport.calls[0]?.timeoutMs, 5);
+  assert.equal(transport.heldCount, 1);
+
+  transport.pushStep(command(0, "gh version 2.0"));
+  transport.pushStep(command());
+  transport.pushStep(repositoryIdentityResponse());
+  const ordinary = await adapter.resolveRepositoryContext();
+
+  assert.equal(ordinary.nameWithOwner, "acme/inari");
+  assert.equal(transport.calls.length, 4);
+  assert.equal(transport.calls[1]?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.auth);
+
+  transport.pushStep(repositoryIdentityResponse());
+  transport.releaseNextHold(command(0, "gh version 2.0"));
+  const boundedContext = await bounded;
+  assert.equal(boundedContext.nameWithOwner, "acme/inari");
 });
 
 test("retries repository context resolution after a transient failure instead of replaying a stale rejection", async () => {
