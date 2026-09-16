@@ -242,18 +242,21 @@ function sortChanges(changes: readonly ImplementationConformanceChange[]): reado
 
 function normalizePath(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const normalized = value
-    .normalize("NFKC")
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/\/{2,}/gu, "/");
+  // Provider-observed paths are an authorization boundary: only trim and
+  // canonicalize separators, which cannot change filename identity. Unicode
+  // compatibility normalization (NFKC) can collapse a distinct path onto an
+  // authorized one (e.g. a full-width character onto its ASCII counterpart),
+  // so a non-canonical path is rejected fail-closed rather than normalized.
+  const normalized = value.trim().replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
   const segments = normalized.split("/");
   if (
     normalized.length === 0 ||
     normalized.length > SAFE_PATH_MAX_LENGTH ||
     normalized.startsWith("/") ||
     segments.some((segment) => segment === ".." || segment.length === 0) ||
-    /^[A-Za-z]:/u.test(normalized)
+    /^[A-Za-z]:/u.test(normalized) ||
+    normalized.normalize("NFC") !== normalized ||
+    normalized.normalize("NFKC") !== normalized
   )
     return undefined;
   return normalized.replace(/^\.\//u, "");
@@ -713,6 +716,29 @@ function evaluateVerification(
   };
   if (requiredChecks.length === 0 && requiredTests.length === 0)
     return { verification: result, missing: false, unverifiable: false };
+
+  let missing = false;
+  let unverifiable = false;
+
+  // Targeted tests name a test-execution command, not a repository check.
+  // The Operational Observation boundary carries no authoritative
+  // test-execution evidence (only provider check/status results), so a
+  // targeted test can never be resolved by matching its name against check
+  // items — that would accept an unrelated check that happens to share a
+  // name. Report it as unverifiable instead of treating absence as failure.
+  requiredTests.forEach((name, index) => {
+    result.unverifiableTests.push(name);
+    unverifiable = true;
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE",
+      `$.verification.targetedTests[${index}]`,
+      "Targeted-test evidence is not available from provider check evidence.",
+    );
+  });
+
+  if (requiredChecks.length === 0) return { verification: result, missing, unverifiable };
+
   if (
     observation.checks.status !== "available" ||
     observation.checks.pagination.truncated ||
@@ -725,49 +751,41 @@ function evaluateVerification(
       "$.pullRequest.checks",
       "Required verification evidence is unavailable or incomplete.",
     );
-    return { verification: result, missing: false, unverifiable: true };
+    return { verification: result, missing, unverifiable: true };
   }
 
-  const groups = [["check", requiredChecks] as const, ["test", requiredTests] as const];
-  let missing = false;
-  let unverifiable = false;
-  for (const [kind, names] of groups) {
-    for (const [index, name] of names.entries()) {
-      const disposition = checkDisposition(observation.checks.items, name);
-      const key = kind === "check" ? "Checks" : "Tests";
-      if (disposition === "satisfied") result[`satisfied${key}` as "satisfiedChecks" | "satisfiedTests"].push(name);
-      else if (disposition === "missing") {
-        result[`missing${key}` as "missingChecks" | "missingTests"].push(name);
-        missing = true;
-        diagnostic(
-          diagnostics,
-          kind === "check" ? "IMPLEMENTATION_CONFORMANCE_CHECK_MISSING" : "IMPLEMENTATION_CONFORMANCE_TEST_MISSING",
-          `$.verification.${kind === "check" ? "requiredChecks" : "targetedTests"}[${index}]`,
-          "Required verification evidence is missing.",
-        );
-      } else if (disposition === "failed") {
-        result[`failed${key}` as "failedChecks" | "failedTests"].push(name);
-        missing = true;
-        diagnostic(
-          diagnostics,
-          kind === "check" ? "IMPLEMENTATION_CONFORMANCE_CHECK_FAILED" : "IMPLEMENTATION_CONFORMANCE_TEST_FAILED",
-          `$.verification.${kind === "check" ? "requiredChecks" : "targetedTests"}[${index}]`,
-          "Required verification evidence is not successful.",
-        );
-      } else {
-        result[`unverifiable${key}` as "unverifiableChecks" | "unverifiableTests"].push(name);
-        unverifiable = true;
-        diagnostic(
-          diagnostics,
-          kind === "check"
-            ? "IMPLEMENTATION_CONFORMANCE_CHECK_UNVERIFIABLE"
-            : "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE",
-          `$.verification.${kind === "check" ? "requiredChecks" : "targetedTests"}[${index}]`,
-          "Required verification evidence has an indeterminate result.",
-        );
-      }
+  requiredChecks.forEach((name, index) => {
+    const disposition = checkDisposition(observation.checks.items, name);
+    if (disposition === "satisfied") result.satisfiedChecks.push(name);
+    else if (disposition === "missing") {
+      result.missingChecks.push(name);
+      missing = true;
+      diagnostic(
+        diagnostics,
+        "IMPLEMENTATION_CONFORMANCE_CHECK_MISSING",
+        `$.verification.requiredChecks[${index}]`,
+        "Required verification evidence is missing.",
+      );
+    } else if (disposition === "failed") {
+      result.failedChecks.push(name);
+      missing = true;
+      diagnostic(
+        diagnostics,
+        "IMPLEMENTATION_CONFORMANCE_CHECK_FAILED",
+        `$.verification.requiredChecks[${index}]`,
+        "Required verification evidence is not successful.",
+      );
+    } else {
+      result.unverifiableChecks.push(name);
+      unverifiable = true;
+      diagnostic(
+        diagnostics,
+        "IMPLEMENTATION_CONFORMANCE_CHECK_UNVERIFIABLE",
+        `$.verification.requiredChecks[${index}]`,
+        "Required verification evidence has an indeterminate result.",
+      );
     }
-  }
+  });
   return { verification: result, missing, unverifiable };
 }
 

@@ -331,3 +331,63 @@ test("conformance output contains only the safe semantic projection", () => {
   assert.equal(serialized.includes("provider-secret"), false);
   assert.equal(Object.isFrozen(result), true);
 });
+
+test("a targeted test is never satisfied by a same-named or successful CI check", () => {
+  const testBody = renderImplementationIssueBody(
+    parseImplementationContract(
+      contract({
+        verification: {
+          acceptanceCriteria: ["Every changed path is checked."],
+          targetedTests: ["pnpm test -- src/foo.test.ts"],
+          requiredChecks: ["verify"],
+          postconditions: ["The result is deterministic."],
+        },
+      }),
+    ),
+  );
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorizeImplementation({ implementation, body: testBody, repository, base }),
+      testBody,
+      pullRequest({
+        checks: collection([
+          {
+            id: "check-1",
+            name: "verify",
+            kind: "check-run",
+            status: "completed",
+            conclusion: "success",
+          },
+          {
+            // A CI check that happens to share its name with the targeted-test
+            // command must not be treated as test-execution evidence.
+            id: "check-2",
+            name: "pnpm test -- src/foo.test.ts",
+            kind: "check-run",
+            status: "completed",
+            conclusion: "success",
+          },
+        ]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.requiredTests, ["pnpm test -- src/foo.test.ts"]);
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test -- src/foo.test.ts"]);
+  assert.deepEqual(result.verification.satisfiedTests, []);
+  assert.deepEqual(result.verification.satisfiedChecks, ["verify"]);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE"));
+});
+
+test("a compatibility-equivalent but byte-distinct changed path cannot inherit authority from an allowed path", () => {
+  // U+FF41 FULLWIDTH LATIN SMALL LETTER A NFKC-normalizes to ASCII "a", so
+  // this filename is byte-distinct from the authorized "src/allowed.ts" yet
+  // would collapse onto it under NFKC normalization.
+  const fullWidthPath = "src/ａllowed.ts";
+  const result = tryVerifyImplementationConformance(
+    input(authorization(), body, pullRequest({ changedFiles: collection([changedFile(fullWidthPath, "modified")]) })),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.changes, []);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_PATH_INVALID"));
+});

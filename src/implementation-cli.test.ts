@@ -310,10 +310,18 @@ test("impl verify rereads the Implementation and checks the normalized PR eviden
       ["impl", "verify", "42", "--from", authorizationPath, "--pr", "90", "--json"],
       adapter,
     );
-    assert.equal(verified.exitCode, 0);
     assert.equal(verified.output.operation, "impl.verify");
-    assert.equal(verified.output.status, "conformant");
-    assert.equal(verified.output.valid, true);
+    // The contract's targetedTests name a test-execution command ("pnpm
+    // test"), which has no authoritative provider evidence distinct from a
+    // same-named CI check, so it is reported unverifiable rather than
+    // satisfied even though the mock PR carries a successful check with a
+    // matching name.
+    assert.equal(verified.output.status, "unverifiable");
+    assert.equal(verified.output.valid, false);
+    assert.equal(verified.exitCode, 2);
+    const verification = verified.output.verification as Record<string, unknown>;
+    assert.deepEqual(verification.satisfiedChecks, ["pnpm run verify"]);
+    assert.deepEqual(verification.unverifiableTests, ["pnpm test"]);
     assert.equal(JSON.stringify(verified.output).includes("PR body is not conformance authority."), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
