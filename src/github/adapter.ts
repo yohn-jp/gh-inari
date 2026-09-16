@@ -33,6 +33,7 @@ import {
   type GitHubOperationalActor,
   type GitHubOperationalChangedFile,
   type GitHubOperationalCheck,
+  type GitHubOperationalCheckIdentity,
   type GitHubOperationalCollection,
   type GitHubOperationalComment,
   type GitHubOperationalIssueEvidence,
@@ -40,6 +41,7 @@ import {
   type GitHubOperationalProvenance,
   type GitHubOperationalPullRequestEvidence,
   type GitHubOperationalRepository,
+  type GitHubOperationalRequiredCheckBinding,
   type GitHubOperationalReview,
   type GitHubBranch,
   type GitHubMilestone,
@@ -731,18 +733,28 @@ export class GitHubAdapter {
             "PR head SHA was not supplied by GitHub.",
           )
         : await this.readOperationalChecks(base.head.sha, deadline);
+    const requiredCheckBindings =
+      base.base.ref === undefined
+        ? unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+            "pull_request.required_check_policy",
+            "PR base ref was not supplied by GitHub.",
+          )
+        : await this.readOperationalRequiredCheckBindings(base.base.ref, deadline);
     const reviewDecisionResult =
       base.reviewDecision === undefined
         ? await this.readOperationalReviewDecision(context, pullRequestNumber, deadline)
         : { value: undefined, attempted: false };
     const checksEndpoints =
       base.head.sha === undefined ? [] : [`commits/${base.head.sha}/check-runs`, `commits/${base.head.sha}/status`];
+    const requiredCheckPolicyEndpoint =
+      base.base.ref === undefined ? [] : [`branches/${base.base.ref}/protection/required_status_checks`];
     return {
       ...base,
       ...(base.reviewDecision === undefined && reviewDecisionResult.value !== undefined
         ? { reviewDecision: reviewDecisionResult.value }
         : {}),
       checks,
+      requiredCheckBindings,
       reviews,
       comments,
       inlineReviewComments,
@@ -754,6 +766,7 @@ export class GitHubAdapter {
         reviewsEndpoint,
         filesEndpoint,
         ...checksEndpoints,
+        ...requiredCheckPolicyEndpoint,
         ...(reviewDecisionResult.attempted ? ["graphql:pullRequest.reviewDecision"] : []),
       ]),
     };
@@ -793,7 +806,7 @@ export class GitHubAdapter {
       (entry, path) => parseOperationalCheck(entry, path, "status"),
       deadline,
     );
-    const items = [...runs.items, ...statuses.items].sort(compareOperationalChecks);
+    const items = annotateCurrentOperationalChecks([...runs.items, ...statuses.items]).sort(compareOperationalChecks);
     const checks: GitHubOperationalCollection<GitHubOperationalCheck> = {
       status: runs.status === "available" && statuses.status === "available" ? "available" : "unavailable",
       items,
@@ -801,6 +814,59 @@ export class GitHubAdapter {
       diagnostics: [...runs.diagnostics, ...statuses.diagnostics].slice(0, 100),
     };
     return checks;
+  }
+
+  /**
+   * Read the base branch's authoritative required-status-check policy and
+   * normalize each governed context to its bounded expected producer
+   * binding. Reuses the same branch-protection endpoint already read by
+   * `getPullRequestMergePolicy`; a missing/unavailable policy is explicitly
+   * non-authoritative rather than raising, so Core can fail closed per check.
+   */
+  private async readOperationalRequiredCheckBindings(
+    baseRef: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubOperationalCollection<GitHubOperationalRequiredCheckBinding>> {
+    const operation = "pull_request.required_check_policy";
+    let response: GitHubApiResponse;
+    try {
+      response = await this.requestRepositoryApi(
+        `branches/${encodeURIComponent(baseRef)}/protection/required_status_checks`,
+        "GET",
+        {},
+        deadline,
+      );
+    } catch {
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} read failed.`,
+      );
+    }
+    if (response.status === 404)
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} endpoint was not available from GitHub.`,
+      );
+    if (response.status < 200 || response.status >= 300)
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} returned an unavailable response.`,
+      );
+    let items: readonly GitHubOperationalRequiredCheckBinding[];
+    try {
+      items = parseRequiredCheckBindings(response.body, operation);
+    } catch {
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} returned malformed provider evidence.`,
+      );
+    }
+    return {
+      status: "available",
+      items,
+      pagination: { perPage: OPERATIONAL_PAGE_SIZE, pages: 1, returned: items.length, truncated: false },
+      diagnostics: [],
+    };
   }
 
   /** Read GitHub's aggregate review decision through one fixed GraphQL query. */
@@ -1865,7 +1931,7 @@ function parseOperationalPullRequest(
   operation: string,
 ): Omit<
   GitHubOperationalPullRequestEvidence,
-  "checks" | "reviews" | "comments" | "inlineReviewComments" | "changedFiles" | "provenance"
+  "checks" | "requiredCheckBindings" | "reviews" | "comments" | "inlineReviewComments" | "changedFiles" | "provenance"
 > {
   const record = responseRecord(value, operation);
   const requestedReviewers =
@@ -2019,6 +2085,39 @@ function parseOperationalReview(value: unknown, path: string): GitHubOperational
   };
 }
 
+function operationalCheckIdentity(
+  record: Record<string, unknown>,
+  kind: "check-run" | "status",
+  path: string,
+  context: string,
+): GitHubOperationalCheckIdentity {
+  if (kind === "check-run") {
+    if (record.app === undefined || record.app === null) return { context };
+    if (!isRecord(record.app))
+      throw new GitHubApiResponseError("operational.check-run", `GitHub response field ${path}.app is invalid.`, {
+        path: `${path}.app`,
+      });
+    const appId = optionalProviderNumber(record.app.id, `${path}.app.id`, "operational.check-run");
+    const appSlug = optionalProviderText(record.app.slug, `${path}.app.slug`, "operational.check-run", 256);
+    const producer = appId === undefined ? (appSlug === undefined ? undefined : `app:slug:${appSlug}`) : `app:${appId}`;
+    return { context, ...(producer === undefined ? {} : { producer }) };
+  }
+  if (record.creator === undefined || record.creator === null) return { context };
+  if (!isRecord(record.creator))
+    throw new GitHubApiResponseError("operational.status", `GitHub response field ${path}.creator is invalid.`, {
+      path: `${path}.creator`,
+    });
+  const creatorId = optionalProviderNumber(record.creator.id, `${path}.creator.id`, "operational.status");
+  const creatorLogin = optionalProviderText(record.creator.login, `${path}.creator.login`, "operational.status", 512);
+  const producer =
+    creatorId === undefined
+      ? creatorLogin === undefined
+        ? undefined
+        : `creator:login:${creatorLogin}`
+      : `creator:${creatorId}`;
+  return { context, ...(producer === undefined ? {} : { producer }) };
+}
+
 function parseOperationalCheck(value: unknown, path: string, kind: "check-run" | "status"): GitHubOperationalCheck {
   const record = responseRecord(value, `operational.${kind}`);
   const rawId = record.id ?? record.context;
@@ -2026,7 +2125,9 @@ function parseOperationalCheck(value: unknown, path: string, kind: "check-run" |
     typeof rawId === "number"
       ? String(responseNumber(rawId, `${path}.id`, `operational.${kind}`))
       : providerText(rawId, `${path}.id`, `operational.${kind}`, 128);
+  const context = providerText(record.context ?? record.name, `${path}.context`, `operational.${kind}`, 512);
   const name = providerText(record.name ?? record.context, `${path}.name`, `operational.${kind}`, 512);
+  const identity = operationalCheckIdentity(record, kind, path, context);
   const status = providerText(record.status ?? record.state, `${path}.status`, `operational.${kind}`, 64);
   const conclusion =
     record.conclusion === undefined
@@ -2042,16 +2143,21 @@ function parseOperationalCheck(value: unknown, path: string, kind: "check-run" |
     `operational.${kind}`,
     2_048,
   );
+  const createdAt = optionalProviderText(record.created_at, `${path}.created_at`, `operational.${kind}`, 128);
+  const updatedAt = optionalProviderText(record.updated_at, `${path}.updated_at`, `operational.${kind}`, 128);
   const startedAt = optionalProviderText(record.started_at, `${path}.started_at`, `operational.${kind}`, 128);
   const completedAt = optionalProviderText(record.completed_at, `${path}.completed_at`, `operational.${kind}`, 128);
   return {
     id,
     name,
     kind,
+    identity,
     status,
     ...(conclusion === undefined ? {} : { conclusion }),
     ...(description === undefined ? {} : { description }),
     ...(url === undefined ? {} : { url }),
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(startedAt === undefined ? {} : { startedAt }),
     ...(completedAt === undefined ? {} : { completedAt }),
   };
@@ -2152,8 +2258,54 @@ function combineOperationalPagination(
   };
 }
 
+function operationalCheckIdentityKey(check: GitHubOperationalCheck): string {
+  return [check.kind, check.identity?.context ?? check.name, check.identity?.producer ?? "producer:unknown"].join(
+    "\u001f",
+  );
+}
+
+function operationalCheckOrder(check: GitHubOperationalCheck): number | undefined {
+  const timestamp = check.updatedAt ?? check.completedAt ?? check.startedAt ?? check.createdAt;
+  if (timestamp === undefined) return undefined;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Mark the provider-selected current execution for every normalized identity. */
+function annotateCurrentOperationalChecks(items: readonly GitHubOperationalCheck[]): GitHubOperationalCheck[] {
+  const groups = new Map<string, number[]>();
+  items.forEach((check, index) => {
+    const key = operationalCheckIdentityKey(check);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [index]);
+    else group.push(index);
+  });
+  const current = new Map<number, boolean | "unknown">();
+  for (const indexes of groups.values()) {
+    if (indexes.length === 1) {
+      current.set(indexes[0]!, true);
+      continue;
+    }
+    const ordered = indexes.map((index) => operationalCheckOrder(items[index]!));
+    if (ordered.some((value) => value === undefined)) {
+      indexes.forEach((index) => current.set(index, "unknown"));
+      continue;
+    }
+    const maximum = Math.max(...(ordered as number[]));
+    const winners = indexes.filter((_, index) => ordered[index] === maximum);
+    if (winners.length !== 1) {
+      indexes.forEach((index) => current.set(index, "unknown"));
+      continue;
+    }
+    indexes.forEach((index) => current.set(index, index === winners[0]));
+  }
+  return items.map((check, index) => ({ ...check, current: current.get(index) ?? "unknown" }));
+}
+
 function compareOperationalChecks(left: GitHubOperationalCheck, right: GitHubOperationalCheck): number {
   return (
+    (left.identity?.context ?? left.name).localeCompare(right.identity?.context ?? right.name, "en-US") ||
+    (left.identity?.producer ?? "").localeCompare(right.identity?.producer ?? "", "en-US") ||
     left.name.localeCompare(right.name, "en-US") ||
     left.kind.localeCompare(right.kind, "en-US") ||
     left.id.localeCompare(right.id, "en-US")
@@ -2415,6 +2567,72 @@ function requiredCheckNames(value: unknown, operation: string): readonly string[
     }
   }
   return [...new Set(names)].sort();
+}
+
+/**
+ * Normalize the base branch's required-status-check policy into bounded
+ * expected producer bindings. The `checks` entries carry the authoritative
+ * `app_id` (a specific app, or `null` for "any app"); the legacy `contexts`
+ * list carries no app binding. A `null`/absent `app_id` yields no producer,
+ * which Core must treat as an unproven authority, never as a wildcard match.
+ *
+ * Every entry is collected before any binding is decided: a context backed
+ * by more than one distinct explicit app binding is unresolvable policy
+ * evidence (order in the provider array must never decide authority), and a
+ * malformed entry anywhere in `checks[]`/`contexts` invalidates the whole
+ * read rather than being silently dropped, since it could belong to a
+ * governed context.
+ */
+function parseRequiredCheckBindings(
+  value: unknown,
+  operation: string,
+): readonly GitHubOperationalRequiredCheckBinding[] {
+  const record = responseRecord(value, operation);
+  const checks = record.checks;
+  const contexts = record.contexts;
+  const producersByContext = new Map<string, Set<string | undefined>>();
+  const observe = (context: string, producer: string | undefined): void => {
+    const producers = producersByContext.get(context);
+    if (producers === undefined) producersByContext.set(context, new Set([producer]));
+    else producers.add(producer);
+  };
+  if (checks !== undefined) {
+    if (!Array.isArray(checks))
+      throw new GitHubApiResponseError(operation, "Required checks are invalid.", { path: "checks" });
+    checks.forEach((entry, index) => {
+      if (!isRecord(entry) || typeof entry.context !== "string" || entry.context.length === 0)
+        throw new GitHubApiResponseError(operation, "A required check entry is invalid.", {
+          path: `checks[${index}]`,
+        });
+      const appId = entry.app_id;
+      if (appId !== undefined && appId !== null && !(typeof appId === "number" && Number.isSafeInteger(appId)))
+        throw new GitHubApiResponseError(operation, "A required check app binding is invalid.", {
+          path: `checks[${index}].app_id`,
+        });
+      observe(entry.context, typeof appId === "number" ? `app:${appId}` : undefined);
+    });
+  }
+  if (contexts !== undefined) {
+    if (!Array.isArray(contexts))
+      throw new GitHubApiResponseError(operation, "Required check contexts are invalid.", { path: "contexts" });
+    contexts.forEach((entry, index) => {
+      if (typeof entry !== "string" || entry.length === 0)
+        throw new GitHubApiResponseError(operation, "A required check context is invalid.", {
+          path: `contexts[${index}]`,
+        });
+      if (!producersByContext.has(entry)) observe(entry, undefined);
+    });
+  }
+  const bindings: GitHubOperationalRequiredCheckBinding[] = [];
+  for (const [context, producers] of producersByContext) {
+    const explicit = [...producers].filter((producer): producer is string => producer !== undefined);
+    if (explicit.length > 1)
+      throw new GitHubApiResponseError(operation, "Required check policy has conflicting producer bindings.", {
+        path: "checks",
+      });
+    bindings.push({ context, ...(explicit[0] === undefined ? {} : { producer: explicit[0] }) });
+  }
+  return bindings.sort((left, right) => left.context.localeCompare(right.context, "en-US"));
 }
 
 function parseBranch(value: unknown, expectedName: string, operation: string): GitHubBranch {

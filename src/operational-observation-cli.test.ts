@@ -58,6 +58,7 @@ const pullRequest: GitHubOperationalPullRequestEvidence = {
   assignees: [],
   url: "https://github.com/acme/inari/pull/8",
   checks: collection(),
+  requiredCheckBindings: collection(),
   reviews: collection(),
   comments: collection(),
   inlineReviewComments: collection(),

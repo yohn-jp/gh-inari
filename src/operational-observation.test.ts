@@ -8,6 +8,7 @@ import {
 } from "./operational-observation.js";
 import type {
   GitHubOperationalCollection,
+  GitHubOperationalCheck,
   GitHubOperationalIssueEvidence,
   GitHubOperationalPullRequestEvidence,
 } from "./github/types.js";
@@ -58,6 +59,7 @@ function pullRequestEvidence(
     assignees: [],
     url: "https://github.com/acme/inari/pull/522",
     checks: collection([]),
+    requiredCheckBindings: collection([]),
     reviews: collection([]),
     comments: collection([]),
     inlineReviewComments: collection([]),
@@ -149,6 +151,121 @@ test("Core derives success from a mix of check-runs and legacy commit statuses",
     }),
   });
   assert.equal(observed.checksSummary, "success");
+});
+
+test("Core preserves bounded check identity and current-execution evidence", () => {
+  const observed = observeOperationalPullRequest({
+    pullRequest: pullRequestEvidence({
+      checks: collection([
+        {
+          id: "old",
+          name: "verify",
+          kind: "check-run",
+          identity: { context: "verify", producer: "app:1" },
+          status: "completed",
+          conclusion: "failure",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:01Z",
+          current: false,
+        },
+        {
+          id: "new",
+          name: "verify",
+          kind: "check-run",
+          identity: { context: "verify", producer: "app:1" },
+          status: "completed",
+          conclusion: "success",
+          createdAt: "2026-01-01T00:01:00Z",
+          updatedAt: "2026-01-01T00:01:01Z",
+          current: true,
+        },
+      ]),
+    }),
+  });
+  assert.deepEqual(observed.checks.items[1]?.identity, { context: "verify", producer: "app:1" });
+  assert.equal(observed.checks.items.find((check) => check.id === "old")?.current, false);
+  assert.equal(observed.checks.items.find((check) => check.id === "new")?.current, true);
+  assert.equal(observed.checksSummary, "success");
+});
+
+test("Core rejects unbounded check identity fields and invalid current state", () => {
+  const result = tryObserveOperationalPullRequest({
+    pullRequest: pullRequestEvidence({
+      checks: collection([
+        {
+          id: "check",
+          name: "verify",
+          kind: "check-run",
+          identity: { context: "verify", producer: "app:1", raw: "secret" },
+          status: "completed",
+          conclusion: "success",
+          current: "latest",
+        } as unknown as GitHubOperationalCheck,
+      ]),
+    }),
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.violations.some((entry) => entry.path.endsWith("identity.raw")));
+  assert.ok(result.violations.some((entry) => entry.path.endsWith("current")));
+});
+
+test("Core applies Check Run precedence over a colliding commit status", () => {
+  const observed = observeOperationalPullRequest({
+    pullRequest: pullRequestEvidence({
+      checks: collection([
+        {
+          id: "run",
+          name: "verify",
+          kind: "check-run",
+          identity: { context: "verify", producer: "app:1" },
+          status: "completed",
+          conclusion: "failure",
+          current: true,
+        },
+        {
+          id: "status",
+          name: "verify",
+          kind: "status",
+          identity: { context: "verify", producer: "creator:2" },
+          status: "success",
+          current: true,
+        },
+      ]),
+    }),
+  });
+  assert.equal(observed.checksSummary, "failure");
+});
+
+test("Core normalizes required-check producer bindings independently of observed checks", () => {
+  const observed = observeOperationalPullRequest({
+    pullRequest: pullRequestEvidence({
+      requiredCheckBindings: collection([{ context: "verify", producer: "app:101" }, { context: "lint" }]),
+    }),
+  });
+  assert.deepEqual(observed.requiredCheckBindings.items, [
+    { context: "lint" },
+    { context: "verify", producer: "app:101" },
+  ]);
+});
+
+test("absent required-check policy evidence is explicitly unavailable, not an empty policy", () => {
+  const observed = observeOperationalPullRequest({
+    pullRequest: (() => {
+      const { requiredCheckBindings: _omitted, ...rest } = pullRequestEvidence();
+      return rest as unknown as GitHubOperationalPullRequestEvidence;
+    })(),
+  });
+  assert.equal(observed.requiredCheckBindings.status, "unavailable");
+});
+
+test("Core rejects a required-check binding item that is not a record", () => {
+  const result = tryObserveOperationalPullRequest({
+    pullRequest: pullRequestEvidence({
+      requiredCheckBindings: collection([undefined as unknown as { context: string }]),
+    }),
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.violations.some((entry) => entry.path.endsWith("requiredCheckBindings.items[0]")));
 });
 
 test("truncated collections require an explicit continuation page", () => {

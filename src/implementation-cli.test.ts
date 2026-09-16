@@ -162,9 +162,17 @@ class ImplementationCliAdapter extends GitHubAdapter {
       assignees: [],
       url: `https://github.com/${CONTEXT.nameWithOwner}/pull/${pullRequestNumber}`,
       checks: collection([
-        { id: "verify", name: "pnpm run verify", kind: "check-run", status: "completed", conclusion: "success" },
+        {
+          id: "verify",
+          name: "pnpm run verify",
+          kind: "check-run",
+          identity: { context: "pnpm run verify", producer: "app:trusted" },
+          status: "completed",
+          conclusion: "success",
+        },
         { id: "test", name: "pnpm test", kind: "check-run", status: "completed", conclusion: "success" },
       ]),
+      requiredCheckBindings: collection([{ context: "pnpm run verify", producer: "app:trusted" }]),
       reviews: collection([]),
       comments: collection([]),
       inlineReviewComments: collection([]),

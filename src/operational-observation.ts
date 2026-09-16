@@ -12,14 +12,16 @@ import type {
   GitHubOperationalActor,
   GitHubOperationalChangedFile,
   GitHubOperationalCheck,
+  GitHubOperationalCheckIdentity,
   GitHubOperationalCollection,
   GitHubOperationalComment,
   GitHubOperationalDiagnostic,
   GitHubOperationalIssueEvidence,
   GitHubOperationalPagination,
   GitHubOperationalPullRequestEvidence,
-  GitHubOperationalReview,
   GitHubOperationalRepository,
+  GitHubOperationalRequiredCheckBinding,
+  GitHubOperationalReview,
 } from "./github/types.js";
 
 export const OPERATIONAL_OBSERVATION_VERSION = 1 as const;
@@ -117,16 +119,39 @@ export interface OperationalReview {
   readonly url?: string;
 }
 
+/** Provider-neutral, bounded identity for a check context. */
+export interface OperationalCheckIdentity {
+  readonly context: string;
+  readonly producer?: string;
+}
+
+/**
+ * Repository-governed expected producer binding for one required-check
+ * context, independent of any observed check evidence.
+ */
+export type OperationalRequiredCheckBinding = OperationalCheckIdentity;
+
 export interface OperationalCheck {
   readonly id: string;
   readonly name: string;
   readonly kind: "check-run" | "status";
+  readonly identity?: OperationalCheckIdentity;
   readonly status: string;
   readonly conclusion?: string | null;
   readonly description?: string | null;
   readonly url?: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
   readonly startedAt?: string;
   readonly completedAt?: string;
+  /** Provider-normalized current-execution evidence. */
+  readonly current?: boolean | "unknown";
+}
+
+/** Result of selecting current executions without consulting collection order. */
+export interface OperationalCheckSelection {
+  readonly current: readonly OperationalCheck[];
+  readonly ambiguous: boolean;
 }
 
 export interface OperationalChangedFile {
@@ -213,6 +238,8 @@ export interface OperationalPullRequestObservation {
   readonly url: string;
   readonly checks: OperationalCollection<OperationalCheck>;
   readonly checksSummary: OperationalChecksSummary;
+  /** Repository-governed expected required-check producer bindings for the base branch. */
+  readonly requiredCheckBindings: OperationalCollection<OperationalRequiredCheckBinding>;
   readonly reviews: OperationalCollection<OperationalReview>;
   readonly comments: OperationalCollection<OperationalComment>;
   readonly inlineReviewComments: OperationalCollection<OperationalComment>;
@@ -317,11 +344,28 @@ const OPERATIONAL_PULL_REQUEST_KEYS = new Set([
   "mergedAt",
   "url",
   "checks",
+  "requiredCheckBindings",
   "reviews",
   "comments",
   "inlineReviewComments",
   "changedFiles",
   "provenance",
+]);
+const OPERATIONAL_CHECK_IDENTITY_KEYS = new Set(["context", "producer"]);
+const OPERATIONAL_CHECK_KEYS = new Set([
+  "id",
+  "name",
+  "kind",
+  "identity",
+  "status",
+  "conclusion",
+  "description",
+  "url",
+  "createdAt",
+  "updatedAt",
+  "startedAt",
+  "completedAt",
+  "current",
 ]);
 
 function isRecord(value: unknown): value is RecordValue {
@@ -561,6 +605,17 @@ function normalizeTimestamp(
   return text(value, path, OPERATIONAL_OBSERVATION_LIMITS.timestampLength, violations, false);
 }
 
+function normalizeCurrentCheckState(
+  value: unknown,
+  path: string,
+  violations: OperationalObservationViolation[],
+): boolean | "unknown" | undefined {
+  if (value === undefined) return undefined;
+  if (value === true || value === false || value === "unknown") return value;
+  violation(violations, "OPERATIONAL_OBSERVATION_VALUE_INVALID", path, `Current check state at ${path} is invalid.`);
+  return undefined;
+}
+
 function timestamps(
   source: RecordValue,
   path: string,
@@ -776,10 +831,97 @@ function sortCollection<T>(
 
 function compareChecks(left: OperationalCheck, right: OperationalCheck): number {
   return (
+    (left.identity?.context ?? left.name).localeCompare(right.identity?.context ?? right.name, "en-US") ||
+    (left.identity?.producer ?? "").localeCompare(right.identity?.producer ?? "", "en-US") ||
     left.name.localeCompare(right.name, "en-US") ||
     left.kind.localeCompare(right.kind, "en-US") ||
     left.id.localeCompare(right.id, "en-US")
   );
+}
+
+/**
+ * Return the one identity key used by Core for execution grouping.
+ * The unit-separator cannot occur in normalized text, so concatenation is
+ * unambiguous while the returned value remains a bounded semantic key.
+ */
+export function operationalCheckIdentityKey(check: Pick<OperationalCheck, "name" | "kind" | "identity">): string {
+  return [check.kind, check.identity?.context ?? check.name, check.identity?.producer ?? "producer:unknown"].join(
+    "\u001f",
+  );
+}
+
+function checkExecutionOrder(check: OperationalCheck): number | undefined {
+  const timestamp = check.updatedAt ?? check.completedAt ?? check.startedAt ?? check.createdAt;
+  if (timestamp === undefined) return undefined;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Select current executions for each normalized identity. Explicit adapter
+ * selection is authoritative. The timestamp fallback exists for direct,
+ * already-normalized callers and never uses array order as a tie-breaker.
+ */
+export function selectCurrentOperationalChecks(checks: readonly OperationalCheck[]): OperationalCheckSelection {
+  const groups = new Map<string, OperationalCheck[]>();
+  for (const check of checks) {
+    const key = operationalCheckIdentityKey(check);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [check]);
+    else group.push(check);
+  }
+
+  const current: OperationalCheck[] = [];
+  let ambiguous = false;
+  for (const group of groups.values()) {
+    const explicitlyMarked = group.some((check) => check.current !== undefined);
+    if (explicitlyMarked) {
+      const winners = group.filter((check) => check.current === true);
+      if (winners.length !== 1 || group.some((check) => check.current === "unknown" || check.current === undefined)) {
+        ambiguous = true;
+        continue;
+      }
+      current.push(winners[0]!);
+      continue;
+    }
+    if (group.length === 1) {
+      current.push(group[0]!);
+      continue;
+    }
+    const ordered = group.map((check) => checkExecutionOrder(check));
+    if (ordered.some((value) => value === undefined)) {
+      ambiguous = true;
+      continue;
+    }
+    const maximum = Math.max(...(ordered as number[]));
+    const winners = group.filter((_, index) => ordered[index] === maximum);
+    if (winners.length !== 1) {
+      ambiguous = true;
+      continue;
+    }
+    current.push(winners[0]!);
+  }
+  return { current: current.sort(compareChecks), ambiguous };
+}
+
+function preferredCheckKind(checks: readonly OperationalCheck[], context: string): "check-run" | "status" {
+  return checks.some((check) => (check.identity?.context ?? check.name) === context && check.kind === "check-run")
+    ? "check-run"
+    : "status";
+}
+
+function preferredCurrentChecks(selection: OperationalCheckSelection): OperationalCheckSelection {
+  if (selection.ambiguous) return selection;
+  const contexts = new Set(selection.current.map((check) => check.identity?.context ?? check.name));
+  const current = selection.current.filter(
+    (check) => check.kind === preferredCheckKind(selection.current, check.identity?.context ?? check.name),
+  );
+  for (const context of contexts) {
+    const candidates = current.filter((check) => (check.identity?.context ?? check.name) === context);
+    const identities = new Set(candidates.map((check) => operationalCheckIdentityKey(check)));
+    if (identities.size > 1) return { current: [], ambiguous: true };
+  }
+  return { current, ambiguous: false };
 }
 
 function compareFiles(left: OperationalChangedFile, right: OperationalChangedFile): number {
@@ -947,6 +1089,71 @@ function normalizeReview(
   };
 }
 
+function normalizeCheckIdentity(
+  value: unknown,
+  path: string,
+  violations: OperationalObservationViolation[],
+): OperationalCheckIdentity | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    violation(violations, "OPERATIONAL_OBSERVATION_VALUE_INVALID", path, `Check identity at ${path} is invalid.`);
+    return undefined;
+  }
+  unknownProperties(value, OPERATIONAL_CHECK_IDENTITY_KEYS, path, violations);
+  const context = text(value.context, `${path}.context`, OPERATIONAL_OBSERVATION_LIMITS.actorTextLength, violations);
+  const producer =
+    value.producer === undefined || value.producer === null
+      ? undefined
+      : text(value.producer, `${path}.producer`, OPERATIONAL_OBSERVATION_LIMITS.actorTextLength, violations);
+  if (context === undefined) return undefined;
+  return {
+    context,
+    ...(producer === undefined ? {} : { producer }),
+  };
+}
+
+/**
+ * Normalize one required-check binding item. Unlike `normalizeCheckIdentity`,
+ * an undefined item is a malformed collection entry, not an absent optional
+ * field, so it must raise a violation rather than being silently dropped.
+ */
+function normalizeRequiredCheckBinding(
+  value: unknown,
+  path: string,
+  violations: OperationalObservationViolation[],
+): OperationalRequiredCheckBinding | undefined {
+  if (!isRecord(value)) {
+    violation(
+      violations,
+      "OPERATIONAL_OBSERVATION_VALUE_INVALID",
+      path,
+      `Required-check binding at ${path} is invalid.`,
+    );
+    return undefined;
+  }
+  unknownProperties(value, OPERATIONAL_CHECK_IDENTITY_KEYS, path, violations);
+  const context = text(value.context, `${path}.context`, OPERATIONAL_OBSERVATION_LIMITS.actorTextLength, violations);
+  const producer =
+    value.producer === undefined || value.producer === null
+      ? undefined
+      : text(value.producer, `${path}.producer`, OPERATIONAL_OBSERVATION_LIMITS.actorTextLength, violations);
+  if (context === undefined) return undefined;
+  return {
+    context,
+    ...(producer === undefined ? {} : { producer }),
+  };
+}
+
+function compareRequiredCheckBindings(
+  left: OperationalRequiredCheckBinding,
+  right: OperationalRequiredCheckBinding,
+): number {
+  return (
+    left.context.localeCompare(right.context, "en-US") ||
+    (left.producer ?? "").localeCompare(right.producer ?? "", "en-US")
+  );
+}
+
 function normalizeCheck(
   value: unknown,
   path: string,
@@ -956,29 +1163,44 @@ function normalizeCheck(
     violation(violations, "OPERATIONAL_OBSERVATION_VALUE_INVALID", path, `Check at ${path} is invalid.`);
     return undefined;
   }
+  unknownProperties(value, OPERATIONAL_CHECK_KEYS, path, violations);
   const id = text(value.id, `${path}.id`, 128, violations);
   const name = text(value.name, `${path}.name`, 512, violations);
   const kind = value.kind;
+  const identity = normalizeCheckIdentity(value.identity, `${path}.identity`, violations);
   const status = text(value.status, `${path}.status`, 64, violations);
   const conclusion = nullableText(value.conclusion, `${path}.conclusion`, 64, violations);
   const description = nullableText(value.description, `${path}.description`, 2_048, violations);
   const url = text(value.url, `${path}.url`, OPERATIONAL_OBSERVATION_LIMITS.urlLength, violations, false);
+  const createdAt = normalizeTimestamp(value.createdAt, `${path}.createdAt`, violations);
+  const updatedAt = normalizeTimestamp(value.updatedAt, `${path}.updatedAt`, violations);
   const startedAt = normalizeTimestamp(value.startedAt, `${path}.startedAt`, violations);
   const completedAt = normalizeTimestamp(value.completedAt, `${path}.completedAt`, violations);
+  const current = normalizeCurrentCheckState(value.current, `${path}.current`, violations);
   if (kind !== "check-run" && kind !== "status")
     violation(violations, "OPERATIONAL_OBSERVATION_VALUE_INVALID", `${path}.kind`, "Check kind is invalid.");
-  if (id === undefined || name === undefined || status === undefined || (kind !== "check-run" && kind !== "status"))
+  if (
+    id === undefined ||
+    name === undefined ||
+    status === undefined ||
+    (kind !== "check-run" && kind !== "status") ||
+    (value.identity !== undefined && identity === undefined)
+  )
     return undefined;
   return {
     id,
     name,
     kind,
+    ...(identity === undefined ? {} : { identity }),
     status: status.toLowerCase(),
     ...(conclusion === undefined ? {} : { conclusion }),
     ...(description === undefined ? {} : { description }),
     ...(url === undefined ? {} : { url }),
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(startedAt === undefined ? {} : { startedAt }),
     ...(completedAt === undefined ? {} : { completedAt }),
+    ...(current === undefined ? {} : { current }),
   };
 }
 
@@ -1174,9 +1396,11 @@ function normalizeReviewDecision(value: unknown): OperationalReviewDecision {
 function deriveChecksSummary(collection: OperationalCollection<OperationalCheck>): OperationalChecksSummary {
   if (collection.status !== "available" || collection.pagination.truncated || collection.items.length === 0)
     return "unknown";
+  const selection = preferredCurrentChecks(selectCurrentOperationalChecks(collection.items));
+  if (selection.ambiguous || selection.current.length === 0) return "unknown";
   let pending = false;
   let unknown = false;
-  for (const check of collection.items) {
+  for (const check of selection.current) {
     const status = check.status.toLowerCase();
     const conclusion = check.conclusion?.toLowerCase();
     if (status === "error" || conclusion === "startup_failure") return "error";
@@ -1253,6 +1477,15 @@ function pullRequestProjection(
     compareChecks,
   );
   const checksSummary = deriveChecksSummary(checks);
+  const requiredCheckBindings = sortCollection(
+    normalizeCollection(
+      evidence.requiredCheckBindings,
+      "$.pullRequest.requiredCheckBindings",
+      normalizeRequiredCheckBinding,
+      violations,
+    ),
+    compareRequiredCheckBindings,
+  );
   const reviews = sortCollection(
     normalizeCollection(evidence.reviews, "$.pullRequest.reviews", normalizeReview, violations),
     compareReviews,
@@ -1314,6 +1547,7 @@ function pullRequestProjection(
     url,
     checks,
     checksSummary,
+    requiredCheckBindings,
     reviews,
     comments: normalizedComments,
     inlineReviewComments,
@@ -1361,12 +1595,14 @@ export type {
   GitHubOperationalActor,
   GitHubOperationalChangedFile,
   GitHubOperationalCheck,
+  GitHubOperationalCheckIdentity,
   GitHubOperationalCollection,
   GitHubOperationalComment,
   GitHubOperationalDiagnostic,
   GitHubOperationalIssueEvidence,
   GitHubOperationalPagination,
   GitHubOperationalPullRequestEvidence,
-  GitHubOperationalReview,
   GitHubOperationalRepository,
+  GitHubOperationalRequiredCheckBinding,
+  GitHubOperationalReview,
 };

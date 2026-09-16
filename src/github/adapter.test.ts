@@ -219,6 +219,41 @@ function pullRequestPayload(number = 43): string {
   });
 }
 
+function operationalPullRequestPayload(number = 43): string {
+  const payload = JSON.parse(pullRequestPayload(number)) as Record<string, unknown>;
+  payload.head = { ref: "feature", sha: "head-sha" };
+  payload.review_decision = "APPROVED";
+  return JSON.stringify(payload);
+}
+
+function jsonCommand(value: unknown): GhCommandResult {
+  return command(0, JSON.stringify(value));
+}
+
+function includedJsonCommand(value: unknown, status = 200): GhCommandResult {
+  return command(0, `HTTP/2 ${status} OK\ncontent-type: application/json\n\n${JSON.stringify(value)}`);
+}
+
+function operationalPullRequestTransport(
+  checkRuns: readonly Record<string, unknown>[],
+  statuses: readonly Record<string, unknown>[],
+  requiredStatusChecks: Record<string, unknown> = { contexts: [], checks: [] },
+): StubGhTransport {
+  return new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    jsonCommand(JSON.parse(operationalPullRequestPayload())),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand({ check_runs: checkRuns }),
+    includedJsonCommand({ statuses }),
+    includedJsonCommand(requiredStatusChecks),
+  ]);
+}
+
 function withField(payload: string, field: string, value: unknown): string {
   const record = JSON.parse(payload) as Record<string, unknown>;
   record[field] = value;
@@ -635,6 +670,201 @@ test("reads the repository root without adding a trailing slash", async () => {
     "GET",
     "--include",
   ]);
+});
+
+test("normalizes Check Run app identity and commit-status source identity", async () => {
+  const transport = operationalPullRequestTransport(
+    [
+      {
+        id: 11,
+        name: "verify",
+        app: { id: 101, slug: "trusted-ci" },
+        status: "completed",
+        conclusion: "failure",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:01Z",
+      },
+    ],
+    [
+      {
+        id: 21,
+        context: "verify",
+        creator: { id: 202, login: "spoof" },
+        state: "success",
+        created_at: "2026-01-01T00:00:02Z",
+        updated_at: "2026-01-01T00:00:03Z",
+      },
+    ],
+  );
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.checks.status, "available");
+  assert.deepEqual(
+    observed.checks.items.map((check) => check.identity),
+    [
+      { context: "verify", producer: "app:101" },
+      { context: "verify", producer: "creator:202" },
+    ],
+  );
+  assert.deepEqual(
+    observed.checks.items.map((check) => check.current),
+    [true, true],
+  );
+  assert.deepEqual(observed.provenance.endpoints, [
+    "branches/main/protection/required_status_checks",
+    "commits/head-sha/check-runs",
+    "commits/head-sha/status",
+    "issues/43/comments",
+    "pulls/43",
+    "pulls/43/comments",
+    "pulls/43/files",
+    "pulls/43/reviews",
+  ]);
+});
+
+test("normalizes the base branch's required-status-check policy into expected producer bindings", async () => {
+  const transport = operationalPullRequestTransport([], [], {
+    contexts: ["legacy-context"],
+    checks: [
+      { context: "verify", app_id: 101 },
+      { context: "legacy-context", app_id: null },
+    ],
+  });
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.requiredCheckBindings.status, "available");
+  assert.deepEqual(observed.requiredCheckBindings.items, [
+    { context: "legacy-context" },
+    { context: "verify", producer: "app:101" },
+  ]);
+});
+
+test("conflicting producer bindings for one context fail closed regardless of provider array order", async () => {
+  for (const checks of [
+    [
+      { context: "verify", app_id: 101 },
+      { context: "verify", app_id: 202 },
+    ],
+    [
+      { context: "verify", app_id: 202 },
+      { context: "verify", app_id: 101 },
+    ],
+  ]) {
+    const transport = operationalPullRequestTransport([], [], { checks });
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    const observed = await adapter.observePullRequest(43);
+    assert.equal(observed.requiredCheckBindings.status, "unavailable");
+    assert.equal(observed.requiredCheckBindings.items.length, 0);
+  }
+});
+
+test("duplicate identical producer bindings for one context dedupe to a single authoritative binding", async () => {
+  const transport = operationalPullRequestTransport([], [], {
+    checks: [
+      { context: "verify", app_id: 101 },
+      { context: "verify", app_id: 101 },
+    ],
+  });
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.requiredCheckBindings.status, "available");
+  assert.deepEqual(observed.requiredCheckBindings.items, [{ context: "verify", producer: "app:101" }]);
+});
+
+test("a malformed required-check policy entry fails the whole policy read closed", async () => {
+  for (const checks of [
+    [{ context: "verify", app_id: 101 }, { app_id: 202 }],
+    [{ context: "verify", app_id: "not-a-number" }],
+  ]) {
+    const transport = operationalPullRequestTransport([], [], { checks });
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    const observed = await adapter.observePullRequest(43);
+    assert.equal(observed.requiredCheckBindings.status, "unavailable");
+    assert.equal(observed.requiredCheckBindings.items.length, 0);
+  }
+});
+
+test("a missing required-status-check policy is explicitly unavailable, not an empty policy", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    jsonCommand(JSON.parse(operationalPullRequestPayload())),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand({ check_runs: [] }),
+    includedJsonCommand({ statuses: [] }),
+    includedJsonCommand({}, 404),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.requiredCheckBindings.status, "unavailable");
+  assert.equal(observed.requiredCheckBindings.items.length, 0);
+});
+
+test("adapter marks the newest same-producer execution current and ties unknown", async () => {
+  const transport = operationalPullRequestTransport(
+    [
+      {
+        id: 11,
+        name: "verify",
+        app: { id: 101 },
+        status: "completed",
+        conclusion: "failure",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:01Z",
+      },
+      {
+        id: 12,
+        name: "verify",
+        app: { id: 101 },
+        status: "completed",
+        conclusion: "success",
+        created_at: "2026-01-01T00:01:00Z",
+        updated_at: "2026-01-01T00:01:01Z",
+      },
+    ],
+    [],
+  );
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.checks.items.find((check) => check.id === "11")?.current, false);
+  assert.equal(observed.checks.items.find((check) => check.id === "12")?.current, true);
+
+  const tiedTransport = operationalPullRequestTransport(
+    [
+      {
+        id: 13,
+        name: "verify",
+        app: { id: 101 },
+        status: "completed",
+        conclusion: "success",
+        updated_at: "2026-01-01T00:02:00Z",
+      },
+      {
+        id: 14,
+        name: "verify",
+        app: { id: 101 },
+        status: "completed",
+        conclusion: "failure",
+        updated_at: "2026-01-01T00:02:00Z",
+      },
+    ],
+    [],
+  );
+  const tied = await new GitHubAdapter({ repository: "acme/inari", transport: tiedTransport }).observePullRequest(43);
+  assert.deepEqual(
+    tied.checks.items.map((check) => check.current),
+    ["unknown", "unknown"],
+  );
 });
 
 test("rejects missing and non-boolean pull request draft response fields", async () => {

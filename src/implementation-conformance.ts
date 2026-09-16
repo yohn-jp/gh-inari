@@ -23,8 +23,11 @@ import {
   type ImplementationScopeProjectionViolationCode,
 } from "./implementation-scope-projection.js";
 import {
+  operationalCheckIdentityKey,
+  selectCurrentOperationalChecks,
   tryObserveOperationalPullRequest,
   type OperationalChangedFile,
+  type OperationalCheck,
   type OperationalPullRequestObservation,
 } from "./operational-observation.js";
 import {
@@ -637,43 +640,70 @@ function evaluateChanges(
 
 type VerificationDisposition = "satisfied" | "missing" | "failed" | "unverifiable";
 
+/**
+ * Resolve one required-check name against the independently expected
+ * producer binding from repository policy, never against the observed
+ * checks alone. A same-context check from any producer other than the
+ * authoritative expected one cannot satisfy, replace, mask, or poison the
+ * result: it is excluded from selection entirely, not treated as an
+ * ambiguity. Absence of an authoritative expected binding is itself a
+ * fail-closed "unverifiable", independent of how many same-name checks are
+ * observed — a lone observed check is never implicitly authoritative.
+ */
 function checkDisposition(
   checks: OperationalPullRequestObservation["checks"]["items"],
+  bindings: OperationalPullRequestObservation["requiredCheckBindings"]["items"],
   name: string,
 ): VerificationDisposition {
-  const matches = checks.filter((check) => check.name === name);
-  if (matches.length === 0) return "missing";
-  const dispositions = matches.map((check): VerificationDisposition => {
-    const status = check.status.toLowerCase();
-    const conclusion = check.conclusion?.toLowerCase();
-    if (
-      status === "success" ||
-      (status === "completed" && conclusion === "success") ||
-      (status === "completed" && conclusion === undefined && check.kind === "status")
-    )
-      return "satisfied";
-    if (
-      status === "failure" ||
-      status === "error" ||
-      conclusion === "failure" ||
-      conclusion === "timed_out" ||
-      conclusion === "cancelled" ||
-      conclusion === "startup_failure"
-    )
-      return "failed";
-    if (
-      status === "queued" ||
-      status === "in_progress" ||
-      status === "requested" ||
-      status === "waiting" ||
-      status === "pending"
-    )
-      return "failed";
-    return "unverifiable";
-  });
-  if (dispositions.some((entry) => entry === "unverifiable")) return "unverifiable";
-  if (dispositions.some((entry) => entry === "failed")) return "failed";
-  return "satisfied";
+  const context = (check: OperationalCheck): string => check.identity?.context ?? check.name;
+  const contextMatches = checks.filter((check) => context(check) === name);
+  if (contextMatches.length === 0) return "missing";
+  const binding = bindings.find((entry) => entry.context === name);
+  if (binding?.producer === undefined) return "unverifiable";
+  const producerMatches = contextMatches.filter((check) => check.identity?.producer === binding.producer);
+  if (producerMatches.length === 0) return "unverifiable";
+  const selection = selectCurrentOperationalChecks(producerMatches);
+  if (selection.ambiguous) return "unverifiable";
+  const matchingCurrent = selection.current.filter((check) => context(check) === name);
+  const checkRuns = matchingCurrent.filter((check) => check.kind === "check-run");
+  const statuses = matchingCurrent.filter((check) => check.kind === "status");
+  // GitHub Check Runs are the authoritative source when the same context is
+  // also represented by a legacy commit status. A status cannot replace a
+  // present check-run, including when the check-run is unsuccessful.
+  const candidates = checkRuns.length > 0 ? checkRuns : statuses;
+  if (candidates.length !== 1) return "unverifiable";
+  const identityKeys = new Set(candidates.map((check) => operationalCheckIdentityKey(check)));
+  if (identityKeys.size !== 1) return "unverifiable";
+  return checkResultDisposition(candidates[0]!);
+}
+
+function checkResultDisposition(check: OperationalCheck): VerificationDisposition {
+  const status = check.status.toLowerCase();
+  const conclusion = check.conclusion?.toLowerCase();
+  if (
+    status === "success" ||
+    (status === "completed" && conclusion === "success") ||
+    (status === "completed" && conclusion === undefined && check.kind === "status")
+  )
+    return "satisfied";
+  if (
+    status === "failure" ||
+    status === "error" ||
+    conclusion === "failure" ||
+    conclusion === "timed_out" ||
+    conclusion === "cancelled" ||
+    conclusion === "startup_failure"
+  )
+    return "failed";
+  if (
+    status === "queued" ||
+    status === "in_progress" ||
+    status === "requested" ||
+    status === "waiting" ||
+    status === "pending"
+  )
+    return "failed";
+  return "unverifiable";
 }
 
 function evaluateVerification(
@@ -739,8 +769,23 @@ function evaluateVerification(
     return { verification: result, missing, unverifiable: true };
   }
 
+  if (
+    observation.requiredCheckBindings.status !== "available" ||
+    observation.requiredCheckBindings.pagination.truncated ||
+    observation.requiredCheckBindings.pagination.returned !== observation.requiredCheckBindings.items.length ||
+    observation.requiredCheckBindings.diagnostics.length > 0
+  ) {
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_VERIFICATION_UNAVAILABLE",
+      "$.pullRequest.requiredCheckBindings",
+      "Required-check policy evidence is unavailable or incomplete.",
+    );
+    return { verification: result, missing, unverifiable: true };
+  }
+
   requiredChecks.forEach((name, index) => {
-    const disposition = checkDisposition(observation.checks.items, name);
+    const disposition = checkDisposition(observation.checks.items, observation.requiredCheckBindings.items, name);
     if (disposition === "satisfied") result.satisfiedChecks.push(name);
     else if (disposition === "missing") {
       result.missingChecks.push(name);
