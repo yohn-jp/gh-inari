@@ -904,6 +904,91 @@ test("#632 rejects a wrong exact-run observation after positive correlation inst
   assert.doesNotMatch(JSON.stringify(api.calls), /secret|token|private/iu);
 });
 
+test("#632 recovers a transient artifact-list failure via exact-artifact observation without touching the run-list-failure path", async () => {
+  const api = new FakeActionsApi();
+  let runListReads = 0;
+  let artifactListReads = 0;
+  let downloads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      runListReads += 1;
+      if (runListReads === 1)
+        return { workflow_runs: [runFixture(api.baselineRunId, unrelatedCorrelation, "completed", "success")] };
+      const status = runListReads === 2 ? "in_progress" : "completed";
+      return {
+        workflow_runs: [runFixture(api.resultRunId, correlation, status, runListReads === 2 ? null : "success")],
+      };
+    }
+    if (path.startsWith("actions/artifacts?")) {
+      artifactListReads += 1;
+      if (artifactListReads === 1) return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+      if (artifactListReads === 2) throw new Error("transient artifact-list read failure");
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    if (path === `actions/artifacts/${api.resultArtifactId}`) {
+      return artifactFixture(api.resultArtifactId, api.resultRunId);
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+  api.downloadActionsArtifact = async (artifactId) => {
+    assert.equal(artifactId, api.resultArtifactId);
+    downloads += 1;
+    return archive(api.archiveValue);
+  };
+
+  const result = await executor(api, process.cwd(), 4).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(downloads, 1);
+  assert.ok(api.calls.some((call) => call.path === `actions/artifacts/${api.resultArtifactId}`));
+  assert.ok(!api.calls.some((call) => call.path === `actions/runs/${api.resultRunId}`));
+  assert.doesNotMatch(JSON.stringify(api.calls), /secret|token|private/iu);
+});
+
+test("#632 recovers a transient artifact-list omission via exact-artifact observation without touching the run-list-failure path", async () => {
+  const api = new FakeActionsApi();
+  let runListReads = 0;
+  let artifactListReads = 0;
+  let downloads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      runListReads += 1;
+      if (runListReads === 1)
+        return { workflow_runs: [runFixture(api.baselineRunId, unrelatedCorrelation, "completed", "success")] };
+      const status = runListReads === 2 ? "in_progress" : "completed";
+      return {
+        workflow_runs: [runFixture(api.resultRunId, correlation, status, runListReads === 2 ? null : "success")],
+      };
+    }
+    if (path.startsWith("actions/artifacts?")) {
+      artifactListReads += 1;
+      if (artifactListReads === 2) return { artifacts: [] };
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    if (path === `actions/artifacts/${api.resultArtifactId}`) {
+      return artifactFixture(api.resultArtifactId, api.resultRunId);
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+  api.downloadActionsArtifact = async (artifactId) => {
+    assert.equal(artifactId, api.resultArtifactId);
+    downloads += 1;
+    return archive(api.archiveValue);
+  };
+
+  const result = await executor(api, process.cwd(), 4).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(downloads, 1);
+  assert.ok(api.calls.some((call) => call.path === `actions/artifacts/${api.resultArtifactId}`));
+  assert.ok(!api.calls.some((call) => call.path === `actions/runs/${api.resultRunId}`));
+  assert.doesNotMatch(JSON.stringify(api.calls), /secret|token|private/iu);
+});
+
 test("preserves the bounded result-timeout failure when no executor run becomes observable", async () => {
   const api = new FakeActionsApi();
   api.runState = "pending";
