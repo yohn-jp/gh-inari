@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 export interface GhCommandResult {
   readonly exitCode: number;
   readonly stdout: string;
+  /** Raw stdout when the caller requested binary capture. */
+  readonly stdoutBytes?: Uint8Array;
   readonly stderr: string;
   readonly signal?: NodeJS.Signals;
 }
@@ -21,6 +23,8 @@ export interface GhTransportOptions {
   readonly maxStdoutBytes?: number;
   /** Maximum UTF-8 byte count captured from stderr for this invocation. */
   readonly maxStderrBytes?: number;
+  /** Preserve stdout bytes instead of decoding them as UTF-8 text. */
+  readonly binaryStdout?: boolean;
 }
 
 /** Every ProcessGhTransport invocation is bounded, including calls without explicit options. */
@@ -96,6 +100,7 @@ export class ProcessGhTransport implements GhTransport {
         options.maxStderrBytes ?? DEFAULT_GH_OUTPUT_LIMITS_BYTES.stderr,
         "maxStderrBytes",
       );
+      const binaryStdout = options.binaryStdout === true;
       const timeoutMs = validateTimeoutMs(options.timeoutMs);
 
       let child: ReturnType<typeof spawn>;
@@ -197,9 +202,11 @@ export class ProcessGhTransport implements GhTransport {
           reject(new GhTransportTimeoutError(termination.timeoutMs));
           return;
         }
+        const stdoutBuffer = Buffer.concat(stdoutChunks);
         resolve({
           exitCode: exitCode ?? 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stdout: binaryStdout ? "" : stdoutBuffer.toString("utf8"),
+          ...(binaryStdout ? { stdoutBytes: new Uint8Array(stdoutBuffer) } : {}),
           stderr: Buffer.concat(stderrChunks).toString("utf8"),
           ...(signal === null ? {} : { signal }),
         });

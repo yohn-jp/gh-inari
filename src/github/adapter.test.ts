@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdir, stat as statPath, symlink, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { test } from "node:test";
 import {
   ContractViolationError,
@@ -61,54 +59,36 @@ class StubGhTransport implements GhTransport {
 }
 
 class ArtifactGhTransport implements GhTransport {
-  readonly mode: "regular" | "oversized" | "directory" | "symlink";
-  destination: string | undefined;
+  readonly mode: "regular" | "oversized" | "missing";
+  binaryStdoutRequests = 0;
 
-  constructor(mode: "regular" | "oversized" | "directory" | "symlink") {
+  constructor(mode: "regular" | "oversized" | "missing") {
     this.mode = mode;
   }
 
-  async run(args: readonly string[]): Promise<GhCommandResult> {
+  async run(args: readonly string[], options?: GhTransportOptions): Promise<GhCommandResult> {
     if (args[0] === "--version") return command(0, "gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
     if (args.includes("--jq")) return command(0, "100000157\n");
-    const outputIndex = args.indexOf("--output");
-    if (outputIndex >= 0) {
-      const destination = args[outputIndex + 1];
-      assert.ok(destination);
-      this.destination = destination;
-      if (this.mode === "directory") await mkdir(destination);
-      else if (this.mode === "symlink") {
-        const target = `${destination}.target`;
-        await writeFile(target, Buffer.from("artifact target"));
-        await symlink(target, destination);
-      } else {
-        await writeFile(destination, this.mode === "oversized" ? Buffer.alloc(1_048_577) : Buffer.from("artifact"));
-      }
-      return command();
-    }
-    throw new Error(`Unexpected gh call: ${args.join(" ")}`);
+    assert.equal(args.includes("--output"), false);
+    assert.equal(options?.binaryStdout, true);
+    this.binaryStdoutRequests += 1;
+    if (this.mode === "missing") return command();
+    const bytes = this.mode === "oversized" ? Buffer.alloc(1_048_577) : Buffer.from("artifact");
+    return { exitCode: 0, stdout: "", stderr: "", stdoutBytes: new Uint8Array(bytes) };
   }
 }
 
-async function assertArtifactDirectoryRemoved(transport: ArtifactGhTransport): Promise<void> {
-  assert.ok(transport.destination);
-  await assert.rejects(
-    statPath(path.dirname(transport.destination)),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
-  );
-}
-
-test("reads an Actions artifact through one descriptor and cleans up after success", async () => {
+test("reads an Actions artifact through bounded binary stdout", async () => {
   const transport = new ArtifactGhTransport("regular");
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
   assert.deepEqual(await adapter.downloadActionsArtifact(21), new Uint8Array(Buffer.from("artifact")));
-  await assertArtifactDirectoryRemoved(transport);
+  assert.equal(transport.binaryStdoutRequests, 1);
 });
 
-test("fails closed for oversized, non-regular, and symlink artifact destinations", async () => {
-  for (const mode of ["oversized", "directory", "symlink"] as const) {
+test("fails closed for missing and oversized binary artifact responses", async () => {
+  for (const mode of ["missing", "oversized"] as const) {
     const transport = new ArtifactGhTransport(mode);
     const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
 
@@ -117,9 +97,8 @@ test("fails closed for oversized, non-regular, and symlink artifact destinations
       (error: unknown) =>
         error instanceof GitHubApiResponseError &&
         error.code === "GITHUB_API_RESPONSE_INVALID" &&
-        !error.message.includes(transport.destination ?? "unexpected-path"),
+        !error.message.includes("unexpected-path"),
     );
-    await assertArtifactDirectoryRemoved(transport);
   }
 });
 
