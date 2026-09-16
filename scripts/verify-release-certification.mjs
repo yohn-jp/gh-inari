@@ -10,17 +10,21 @@ import {
   appendCertificationDiagnostic,
   isCertificationPackageName,
   isCertificationSourceCommitSha,
+  isCertificationWorkflowRunAttempt,
+  isCertificationWorkflowRunId,
   sha256Tarball,
+  selfDogfoodArtifactName,
   validateSelfDogfoodEvidence,
 } from "./certification-evidence.mjs";
 import { verifyReleaseCertification } from "../src/release-certification.js";
 
 const REPOSITORY_OWNER = "yohn-jp";
 const REPOSITORY_NAME = "gh-inari";
-const SELF_DOGFOOD_ARTIFACT_PREFIX = "self-dogfood-golden-path-";
 const SELF_DOGFOOD_EVIDENCE_FILE = "self-dogfood-golden-path.json";
 const MAX_GITHUB_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ARTIFACT_ARCHIVE_BYTES = 32 * 1024 * 1024;
+const MAX_ARTIFACT_LIST_PAGE_SIZE = 100;
+const MAX_ARTIFACT_LIST_PAGES = 100;
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW_CONTEXT_KEYS = Object.freeze([
   "GITHUB_REPOSITORY",
@@ -33,7 +37,8 @@ const WORKFLOW_CONTEXT_KEYS = Object.freeze([
 const USAGE =
   "usage: node --import tsx scripts/verify-release-certification.mjs --source-sha <sha> --package-name <name> " +
   "--package-version <version> --tarball-sha256 sha256:<digest> --repository-owner <owner> " +
-  "--repository-name <name> --packed-evidence <file> --dogfood-evidence <file>";
+  "--repository-name <name> --packed-evidence <file> --dogfood-evidence <file> " +
+  "--dogfood-workflow-run-id <id> --dogfood-workflow-run-attempt <attempt>";
 const OPTION_NAMES = new Set([
   "--source-sha",
   "--package-name",
@@ -43,6 +48,8 @@ const OPTION_NAMES = new Set([
   "--repository-name",
   "--packed-evidence",
   "--dogfood-evidence",
+  "--dogfood-workflow-run-id",
+  "--dogfood-workflow-run-attempt",
 ]);
 
 class WorkflowCertificationError extends Error {
@@ -86,6 +93,8 @@ function parseArgs(argumentsList) {
     repositoryName: values.get("--repository-name"),
     packedEvidence: values.get("--packed-evidence"),
     dogfoodEvidence: values.get("--dogfood-evidence"),
+    dogfoodWorkflowRunId: values.get("--dogfood-workflow-run-id"),
+    dogfoodWorkflowRunAttempt: values.get("--dogfood-workflow-run-attempt"),
   };
 }
 
@@ -255,20 +264,157 @@ function githubHeaders(environment) {
   };
 }
 
-async function readGitHubJson(response, label) {
-  if (!response?.ok)
-    throw workflowError("ARTIFACT_LOOKUP_FAILED", `${label} returned HTTP ${String(response?.status)}`);
+async function readGitHubJson(response, label, errorCode = "ARTIFACT_LOOKUP_FAILED") {
+  if (!response?.ok) throw workflowError(errorCode, `${label} returned HTTP ${String(response?.status)}`);
   const text = await response.text();
   if (Buffer.byteLength(text, "utf8") > MAX_GITHUB_RESPONSE_BYTES)
-    throw workflowError("ARTIFACT_LOOKUP_FAILED", `${label} response exceeded the bounded size limit`);
+    throw workflowError(errorCode, `${label} response exceeded the bounded size limit`);
   try {
     return JSON.parse(text);
   } catch (error) {
     throw workflowError(
-      "ARTIFACT_LOOKUP_FAILED",
+      errorCode,
       `${label} did not return JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+function compareNumericStringsDescending(left, right) {
+  if (left.length !== right.length) return right.length - left.length;
+  return right.localeCompare(left);
+}
+
+function parseSelfDogfoodArtifactIdentity(name, sourceSha) {
+  if (typeof name !== "string") return undefined;
+  const prefix = `self-dogfood-golden-path-${sourceSha}-`;
+  if (!name.startsWith(prefix)) return undefined;
+  const match = new RegExp(`^self-dogfood-golden-path-${sourceSha}-([1-9][0-9]{0,19})-([1-9][0-9]{0,9})$`, "u").exec(
+    name,
+  );
+  if (match === null)
+    throw workflowError("CERTIFICATION_RUN_LOOKUP_FAILED", "self-dogfood artifact identity is malformed");
+  return { workflowRunId: match[1], workflowRunAttempt: match[2] };
+}
+
+async function listSelfDogfoodArtifacts({ sourceSha, environment, fetchImpl }) {
+  const base = githubApiBase(environment);
+  const headers = githubHeaders(environment);
+  const artifacts = [];
+  let page = 1;
+  let totalCount;
+  while (page <= MAX_ARTIFACT_LIST_PAGES) {
+    const pageQuery =
+      page === 1 ? `?per_page=${MAX_ARTIFACT_LIST_PAGE_SIZE}` : `?per_page=${MAX_ARTIFACT_LIST_PAGE_SIZE}&page=${page}`;
+    const listPath = `repos/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/actions/artifacts${pageQuery}`;
+    let response;
+    try {
+      response = await fetchImpl(new URL(listPath, base).toString(), { headers });
+    } catch (error) {
+      throw workflowError(
+        "CERTIFICATION_RUN_LOOKUP_FAILED",
+        `self-dogfood artifact lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const payload = await readGitHubJson(response, "self-dogfood artifact lookup", "CERTIFICATION_RUN_LOOKUP_FAILED");
+    if (!isRecord(payload) || !Array.isArray(payload.artifacts))
+      throw workflowError("CERTIFICATION_RUN_LOOKUP_FAILED", "self-dogfood artifact response is invalid");
+    if (page === 1 && payload.total_count !== undefined) {
+      if (!Number.isSafeInteger(payload.total_count) || payload.total_count < 0)
+        throw workflowError("CERTIFICATION_RUN_LOOKUP_FAILED", "self-dogfood artifact total_count is invalid");
+      totalCount = payload.total_count;
+    }
+    artifacts.push(...payload.artifacts);
+    if (
+      (totalCount !== undefined && artifacts.length >= totalCount) ||
+      (totalCount === undefined && payload.artifacts.length < MAX_ARTIFACT_LIST_PAGE_SIZE)
+    )
+      return artifacts;
+    page += 1;
+  }
+  throw workflowError(
+    "CERTIFICATION_RUN_LOOKUP_FAILED",
+    "self-dogfood artifact listing exceeded the bounded page limit",
+  );
+}
+
+/** Resolve an exact passing identity from retained self-dogfood artifacts. */
+export async function resolveSelfDogfoodWorkflowRun({
+  sourceSha,
+  repositoryOwner = REPOSITORY_OWNER,
+  repositoryName = REPOSITORY_NAME,
+  environment = process.env,
+  fetchImpl = globalThis.fetch,
+  now = Date.now(),
+  candidateEvidenceRetriever = retrieveSelfDogfoodEvidence,
+} = {}) {
+  if (repositoryOwner !== REPOSITORY_OWNER || repositoryName !== REPOSITORY_NAME)
+    throw workflowError("REPOSITORY_MISMATCH", "self-dogfood workflow lookup is restricted to yohn-jp/gh-inari");
+  if (!isCertificationSourceCommitSha(sourceSha))
+    throw workflowError("WORKFLOW_CONTEXT_INVALID", "self-dogfood artifact lookup requires an exact source SHA");
+  if (typeof fetchImpl !== "function") throw workflowError("CERTIFICATION_RUN_LOOKUP_FAILED", "fetch is unavailable");
+
+  if (typeof candidateEvidenceRetriever !== "function")
+    throw workflowError("CERTIFICATION_RUN_LOOKUP_FAILED", "self-dogfood evidence retriever is unavailable");
+  const candidates = (await listSelfDogfoodArtifacts({ sourceSha, environment, fetchImpl }))
+    .map((artifact) => {
+      const identity = parseSelfDogfoodArtifactIdentity(artifact?.name, sourceSha);
+      if (identity === undefined) return undefined;
+      try {
+        selectArtifact(
+          { artifacts: [artifact] },
+          artifact.name,
+          sourceSha,
+          identity.workflowRunId,
+          identity.workflowRunAttempt,
+          now,
+        );
+        const createdAt = artifactDate(artifact.created_at, "created_at");
+        if (createdAt === undefined)
+          throw workflowError("CERTIFICATION_RUN_LOOKUP_FAILED", "self-dogfood artifact created_at is invalid");
+        return { ...identity, createdAt };
+      } catch (error) {
+        if (error instanceof WorkflowCertificationError && error.code === "SELF_DOGFOOD_ARTIFACT_EXPIRED")
+          return undefined;
+        throw error;
+      }
+    })
+    .filter((candidate) => candidate !== undefined)
+    .sort(
+      (left, right) =>
+        right.createdAt - left.createdAt ||
+        compareNumericStringsDescending(left.workflowRunId, right.workflowRunId) ||
+        compareNumericStringsDescending(left.workflowRunAttempt, right.workflowRunAttempt),
+    );
+  for (const candidate of candidates) {
+    try {
+      const evidence = await candidateEvidenceRetriever({
+        sourceSha,
+        workflowRunId: candidate.workflowRunId,
+        workflowRunAttempt: candidate.workflowRunAttempt,
+        repositoryOwner,
+        repositoryName,
+        environment,
+        fetchImpl,
+        now,
+      });
+      if (isRecord(evidence) && evidence.result === "passed")
+        return {
+          workflowRunId: candidate.workflowRunId,
+          workflowRunAttempt: candidate.workflowRunAttempt,
+        };
+    } catch {
+      // A retained candidate that cannot prove a passed envelope is not a release authority.
+    }
+  }
+  if (candidates.length === 0)
+    throw workflowError(
+      "SELF_DOGFOOD_WORKFLOW_RUN_MISSING",
+      `no retained self-dogfood artifact was found for source SHA ${sourceSha}`,
+    );
+  throw workflowError(
+    "SELF_DOGFOOD_WORKFLOW_RUN_MISSING",
+    `no retained passing self-dogfood artifact was found for source SHA ${sourceSha}`,
+  );
 }
 
 function artifactDate(value, field) {
@@ -279,7 +425,14 @@ function artifactDate(value, field) {
   return timestamp;
 }
 
-function selectArtifact(payload, expectedName, sourceSha, now) {
+function normalizeArtifactWorkflowValue(value, field, validator) {
+  const normalized =
+    Number.isSafeInteger(value) && value > 0 ? String(value) : typeof value === "string" ? value : undefined;
+  if (!validator(normalized)) throw workflowError("ARTIFACT_METADATA_INVALID", `self-dogfood ${field} is invalid`);
+  return normalized;
+}
+
+function selectArtifact(payload, expectedName, sourceSha, workflowRunId, workflowRunAttempt, now) {
   if (!isRecord(payload) || !Array.isArray(payload.artifacts))
     throw workflowError("ARTIFACT_LOOKUP_FAILED", "Actions artifact response did not contain an artifact list");
   const named = payload.artifacts.filter((artifact) => isRecord(artifact) && artifact.name === expectedName);
@@ -292,19 +445,31 @@ function selectArtifact(payload, expectedName, sourceSha, now) {
       throw workflowError("ARTIFACT_METADATA_INVALID", "self-dogfood artifact has an invalid id");
     if (typeof artifact.expired !== "boolean")
       throw workflowError("ARTIFACT_METADATA_INVALID", "self-dogfood artifact has an invalid expiration flag");
-    const expiresAt = artifactDate(artifact.expires_at, "expires_at");
-    if (!artifact.expired && (expiresAt === undefined || expiresAt > now)) active.push(artifact);
-  }
-  if (active.length === 0) throw workflowError("SELF_DOGFOOD_ARTIFACT_EXPIRED", `artifact ${expectedName} is expired`);
-
-  active.sort((left, right) => {
-    const leftCreated = artifactDate(left.created_at, "created_at") ?? 0;
-    const rightCreated = artifactDate(right.created_at, "created_at") ?? 0;
-    return rightCreated - leftCreated || right.id - left.id;
-  });
-  const selected = active[0];
-  const headSha = selected.workflow_run?.head_sha;
-  if (headSha !== undefined) {
+    if (!isRecord(artifact.workflow_run))
+      throw workflowError("ARTIFACT_METADATA_INVALID", "self-dogfood artifact is missing workflow run metadata");
+    const artifactRunId = normalizeArtifactWorkflowValue(
+      artifact.workflow_run.id,
+      "workflow run ID",
+      isCertificationWorkflowRunId,
+    );
+    if (artifactRunId !== workflowRunId)
+      throw workflowError(
+        "CERTIFICATION_RUN_MISMATCH",
+        "self-dogfood artifact workflow run does not match the explicitly intended certification run",
+      );
+    if (artifact.workflow_run.run_attempt !== undefined) {
+      const artifactRunAttempt = normalizeArtifactWorkflowValue(
+        artifact.workflow_run.run_attempt,
+        "workflow run attempt",
+        isCertificationWorkflowRunAttempt,
+      );
+      if (artifactRunAttempt !== workflowRunAttempt)
+        throw workflowError(
+          "CERTIFICATION_RUN_MISMATCH",
+          "self-dogfood artifact workflow run attempt does not match the explicitly intended certification attempt",
+        );
+    }
+    const headSha = artifact.workflow_run.head_sha;
     if (!isCertificationSourceCommitSha(headSha))
       throw workflowError("ARTIFACT_METADATA_INVALID", "self-dogfood workflow head SHA is invalid");
     if (headSha !== sourceSha)
@@ -312,8 +477,16 @@ function selectArtifact(payload, expectedName, sourceSha, now) {
         "DOGFOOD_SOURCE_MISMATCH",
         "self-dogfood artifact workflow head SHA does not match the release",
       );
+    const expiresAt = artifactDate(artifact.expires_at, "expires_at");
+    if (!artifact.expired && (expiresAt === undefined || expiresAt > now)) active.push(artifact);
   }
-  return selected;
+  if (active.length === 0) throw workflowError("SELF_DOGFOOD_ARTIFACT_EXPIRED", `artifact ${expectedName} is expired`);
+  if (active.length !== 1)
+    throw workflowError(
+      "ARTIFACT_EVIDENCE_AMBIGUOUS",
+      `multiple active artifacts named ${expectedName} match the intended certification run`,
+    );
+  return active[0];
 }
 
 function archiveCommand(command, argumentsList) {
@@ -366,6 +539,8 @@ export function extractSelfDogfoodEvidence(archivePath, { runCommand = archiveCo
 /** Retrieve #449 evidence without trusting artifact names as the evidence authority. */
 export async function retrieveSelfDogfoodEvidence({
   sourceSha,
+  workflowRunId,
+  workflowRunAttempt,
   repositoryOwner = REPOSITORY_OWNER,
   repositoryName = REPOSITORY_NAME,
   environment = process.env,
@@ -377,9 +552,13 @@ export async function retrieveSelfDogfoodEvidence({
     throw workflowError("REPOSITORY_MISMATCH", "self-dogfood retrieval is restricted to yohn-jp/gh-inari");
   if (!isCertificationSourceCommitSha(sourceSha))
     throw workflowError("WORKFLOW_CONTEXT_INVALID", "self-dogfood retrieval requires an exact source SHA");
+  if (!isCertificationWorkflowRunId(workflowRunId))
+    throw workflowError("WORKFLOW_CONTEXT_INVALID", "self-dogfood retrieval requires an exact workflow run ID");
+  if (!isCertificationWorkflowRunAttempt(workflowRunAttempt))
+    throw workflowError("WORKFLOW_CONTEXT_INVALID", "self-dogfood retrieval requires an exact workflow run attempt");
   if (typeof fetchImpl !== "function") throw workflowError("ARTIFACT_LOOKUP_FAILED", "fetch is unavailable");
 
-  const artifactName = `${SELF_DOGFOOD_ARTIFACT_PREFIX}${sourceSha}`;
+  const artifactName = selfDogfoodArtifactName(sourceSha, workflowRunId, workflowRunAttempt);
   const base = githubApiBase(environment);
   const repositoryPath = `repos/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/actions/artifacts`;
   const listUrl = new URL(`${repositoryPath}?name=${encodeURIComponent(artifactName)}&per_page=100`, base).toString();
@@ -397,6 +576,8 @@ export async function retrieveSelfDogfoodEvidence({
     await readGitHubJson(listResponse, "Actions artifact lookup"),
     artifactName,
     sourceSha,
+    workflowRunId,
+    workflowRunAttempt,
     now,
   );
   const downloadUrl = new URL(`${repositoryPath}/${String(selected.id)}/zip`, base).toString();
@@ -430,7 +611,19 @@ export async function retrieveSelfDogfoodEvidence({
   const archivePath = path.join(temporaryDirectory, "artifact.zip");
   try {
     fs.writeFileSync(archivePath, archiveBytes, { mode: 0o600 });
-    return await extractArchive(archivePath);
+    const evidence = await extractArchive(archivePath);
+    if (
+      !isRecord(evidence) ||
+      evidence.sourceCommitSha !== sourceSha ||
+      !isRecord(evidence.workflow) ||
+      evidence.workflow.runId !== workflowRunId ||
+      evidence.workflow.runAttempt !== workflowRunAttempt
+    )
+      throw workflowError(
+        "CERTIFICATION_RUN_MISMATCH",
+        "self-dogfood evidence does not match the explicitly intended certification run",
+      );
+    return evidence;
   } finally {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
@@ -450,6 +643,8 @@ export async function runWorkflowCertification({
   packageMetadata,
   packedEvidenceGenerator = generatePackedEvidence,
   dogfoodEvidenceRetriever = retrieveSelfDogfoodEvidence,
+  workflowRunResolver = resolveSelfDogfoodWorkflowRun,
+  candidateEvidenceRetriever = retrieveSelfDogfoodEvidence,
   fetchImpl = globalThis.fetch,
   now = Date.now(),
 } = {}) {
@@ -474,8 +669,19 @@ export async function runWorkflowCertification({
       evidencePath: path.join(temporaryDirectory, "packed-evidence.json"),
       repositoryRoot,
     });
+    const dogfoodWorkflowRun = await workflowRunResolver({
+      sourceSha: context.sourceSha,
+      repositoryOwner: context.repositoryOwner,
+      repositoryName: context.repositoryName,
+      environment,
+      fetchImpl,
+      now,
+      candidateEvidenceRetriever,
+    });
     const dogfoodEvidence = await dogfoodEvidenceRetriever({
       sourceSha: context.sourceSha,
+      workflowRunId: dogfoodWorkflowRun.workflowRunId,
+      workflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
       repositoryOwner: context.repositoryOwner,
       repositoryName: context.repositoryName,
       environment,
@@ -489,6 +695,8 @@ export async function runWorkflowCertification({
       expectedTarballSha256,
       expectedRepositoryOwner: context.repositoryOwner,
       expectedRepositoryName: context.repositoryName,
+      expectedDogfoodWorkflowRunId: dogfoodWorkflowRun.workflowRunId,
+      expectedDogfoodWorkflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
       packedEvidence,
       dogfoodEvidence,
     });
@@ -515,6 +723,8 @@ function explicitModeResult(argumentsList) {
     expectedTarballSha256: options.tarballSha256,
     expectedRepositoryOwner: options.repositoryOwner,
     expectedRepositoryName: options.repositoryName,
+    expectedDogfoodWorkflowRunId: options.dogfoodWorkflowRunId,
+    expectedDogfoodWorkflowRunAttempt: options.dogfoodWorkflowRunAttempt,
     packedEvidence: readJson(options.packedEvidence, "packed evidence"),
     dogfoodEvidence: readJson(options.dogfoodEvidence, "dogfood evidence"),
   });

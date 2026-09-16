@@ -13,6 +13,11 @@ import {
 import { resolveInstalledPackageExecutablePath, verifySelfDogfoodRun } from "../../scripts/self-dogfood-workflow.mjs";
 
 const sourceCommitSha = "a".repeat(40);
+const workflowEnvironment = (overrides = {}) => ({
+  GITHUB_RUN_ID: "12345",
+  GITHUB_RUN_ATTEMPT: "1",
+  ...overrides,
+});
 
 test("the installed package declares a real package-owned inari executable", () => {
   const packageMetadata = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
@@ -36,6 +41,7 @@ function evidence() {
     sourceCommitSha,
     contractVersions: { goldenPath: "1", statusRecovery: "1", skill: "1.3.0" },
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: "12345", runAttempt: "1" },
     scenario: "fresh-create",
     rootIssue: 239,
     change: { issue: 239, branch: "feat/239-self-dogfood", pullRequest: 9239 },
@@ -109,8 +115,9 @@ test("workflow verifier binds passed evidence to the exact installed tarball and
       },
     });
     assert.equal(result.passed, true);
+    assert.equal(result.metadata.artifact.name, `self-dogfood-golden-path-${sourceCommitSha}-12345-1`);
     assert.equal(result.metadata.scenario, "fresh-create");
-    assert.equal(result.metadata.artifact.name, `self-dogfood-golden-path-${sourceCommitSha}`);
+    assert.equal(result.metadata.artifact.name, `self-dogfood-golden-path-${sourceCommitSha}-12345-1`);
     assert.equal(result.metadata.residualChange.status, "none");
     assert.match(result.summary, /Scenario: `fresh-create`/u);
     assert.match(result.summary, /Residual disposable Change: none/u);
@@ -156,7 +163,7 @@ test("workflow verifier rejects an arbitrary executable or .bin shim", () => {
           workerObservation: workerObservation(),
           sourceRoot,
           exerciseAbort: true,
-          environment: {},
+          environment: workflowEnvironment(),
         }),
       /exactly match package\.json bin\.inari/u,
     );
@@ -209,7 +216,7 @@ test("workflow verifier accepts a pnpm-style symlinked installed package resolvi
       workerObservation: workerObservation(),
       sourceRoot,
       exerciseAbort: true,
-      environment: {},
+      environment: workflowEnvironment(),
     });
     assert.equal(result.passed, true);
   } finally {
@@ -252,7 +259,7 @@ test("workflow verifier rejects a supplied executable resolving to a different p
           workerObservation: workerObservation(),
           sourceRoot,
           exerciseAbort: true,
-          environment: {},
+          environment: workflowEnvironment(),
         }),
       /exactly match package\.json bin\.inari/u,
     );
@@ -293,7 +300,7 @@ test("workflow verifier rejects installed products resolved inside the source ch
           workerObservation: workerObservation(),
           sourceRoot: root,
           exerciseAbort: true,
-          environment: {},
+          environment: workflowEnvironment(),
         }),
       /outside the source checkout/u,
     );

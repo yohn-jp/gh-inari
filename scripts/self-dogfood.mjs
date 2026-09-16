@@ -521,6 +521,10 @@ function initialEvidence(options, sha) {
     sourceCommitSha: sha ?? null,
     contractVersions: { goldenPath: "unknown", statusRecovery: "unknown", skill: "unknown" },
     repository: options.repository,
+    workflow: {
+      runId: process.env.GITHUB_RUN_ID ?? "",
+      runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? "",
+    },
     scenario: options.scenario,
     rootIssue: options.issue,
     change: { issue: options.issue, branch: "unresolved", pullRequest: 0 },

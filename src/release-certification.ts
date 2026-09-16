@@ -21,6 +21,8 @@ import {
   isCertificationReviewState,
   isCertificationSourceCommitSha,
   isCertificationTarballSha256,
+  isCertificationWorkflowRunAttempt,
+  isCertificationWorkflowRunId,
   MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH,
   MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH,
   MAX_CERTIFICATION_DIAGNOSTICS,
@@ -42,6 +44,7 @@ import {
   type CertificationRecoveryEvidence,
   type CertificationRepositoryIdentity,
   type CertificationSchemaVersion,
+  type CertificationWorkflowIdentity,
 } from "../scripts/certification-evidence.mjs";
 
 export const RELEASE_CERTIFICATION_SCHEMA_VERSION = CERTIFICATION_EVIDENCE_SCHEMA_VERSION;
@@ -82,6 +85,7 @@ export type ReleaseCertificationOperationEvidence = CertificationOperationEviden
 export type SelfDogfoodOperationName = CertificationOperationEvidence["operation"];
 export type SelfDogfoodOperationOutcome = CertificationOperationEvidence["outcome"];
 export type ReleaseCertificationRepositoryIdentity = CertificationRepositoryIdentity;
+export type ReleaseCertificationWorkflowIdentity = CertificationWorkflowIdentity;
 export type ReleaseCertificationChangeIdentity = CertificationChangeIdentity;
 export type SelfDogfoodRecoveryEvidence = CertificationRecoveryEvidence;
 export type SelfDogfoodFinalStateEvidence = CertificationFinalStateEvidence;
@@ -103,6 +107,8 @@ export interface ReleaseCertificationVerificationInput {
   readonly expectedTarballSha256: string;
   readonly expectedRepositoryOwner: string;
   readonly expectedRepositoryName: string;
+  readonly expectedDogfoodWorkflowRunId: string;
+  readonly expectedDogfoodWorkflowRunAttempt: string;
   readonly packedEvidence: unknown;
   readonly dogfoodEvidence: unknown;
 }
@@ -122,6 +128,8 @@ export interface GhExtensionReleaseCertificationVerificationInput {
   readonly expectedReleaseSourceCommitSha: string;
   readonly expectedRepositoryOwner: string;
   readonly expectedRepositoryName: string;
+  readonly expectedDogfoodWorkflowRunId: string;
+  readonly expectedDogfoodWorkflowRunAttempt: string;
   readonly expectedReleaseTag?: string;
   readonly expectedArtifactManifestSha256: string;
   readonly observedArtifactManifestSha256: string;
@@ -163,7 +171,9 @@ function validExpectedIdentity(input: ReleaseCertificationVerificationInput): bo
     isCertificationBoundedString(input.expectedPackageVersion, MAX_CERTIFICATION_STRING_LENGTH) &&
     isCertificationTarballSha256(input.expectedTarballSha256) &&
     isCertificationRepositoryPart(input.expectedRepositoryOwner) &&
-    isCertificationRepositoryPart(input.expectedRepositoryName)
+    isCertificationRepositoryPart(input.expectedRepositoryName) &&
+    isCertificationWorkflowRunId(input.expectedDogfoodWorkflowRunId) &&
+    isCertificationWorkflowRunAttempt(input.expectedDogfoodWorkflowRunAttempt)
   );
 }
 
@@ -187,6 +197,8 @@ function verifySelfDogfoodIdentityValue(
   dogfood: SelfDogfoodCertificationEvidence,
   expectedRepositoryOwner: string,
   expectedRepositoryName: string,
+  expectedWorkflowRunId: string,
+  expectedWorkflowRunAttempt: string,
   diagnostics: { code: string; message: string }[],
 ): boolean {
   let valid = true;
@@ -206,6 +218,14 @@ function verifySelfDogfoodIdentityValue(
     );
     valid = false;
   }
+  if (dogfood.workflow.runId !== expectedWorkflowRunId || dogfood.workflow.runAttempt !== expectedWorkflowRunAttempt) {
+    appendCertificationDiagnostic(
+      diagnostics,
+      "CERTIFICATION_RUN_MISMATCH",
+      "Self-dogfood evidence does not match the explicitly intended certification run.",
+    );
+    valid = false;
+  }
   if (!(isCertificationReviewState(dogfood.finalState) || isCertificationCompletedRecoveryState(dogfood.finalState))) {
     appendCertificationDiagnostic(
       diagnostics,
@@ -222,6 +242,8 @@ function verifySelfDogfoodEvidence(
   expectedReleaseSourceCommitSha: string,
   expectedRepositoryOwner: string,
   expectedRepositoryName: string,
+  expectedWorkflowRunId: string,
+  expectedWorkflowRunAttempt: string,
   diagnostics: { code: string; message: string }[],
 ): boolean {
   const evidence = validatedEvidence(value, CERTIFICATION_KINDS[1], diagnostics);
@@ -240,7 +262,16 @@ function verifySelfDogfoodEvidence(
     );
     valid = false;
   }
-  return verifySelfDogfoodIdentityValue(dogfood, expectedRepositoryOwner, expectedRepositoryName, diagnostics) && valid;
+  return (
+    verifySelfDogfoodIdentityValue(
+      dogfood,
+      expectedRepositoryOwner,
+      expectedRepositoryName,
+      expectedWorkflowRunId,
+      expectedWorkflowRunAttempt,
+      diagnostics,
+    ) && valid
+  );
 }
 
 function verifyEvidence(
@@ -289,6 +320,8 @@ function verifyEvidence(
     evidence as SelfDogfoodCertificationEvidence,
     expected.expectedRepositoryOwner,
     expected.expectedRepositoryName,
+    expected.expectedDogfoodWorkflowRunId,
+    expected.expectedDogfoodWorkflowRunAttempt,
     diagnostics,
   );
 }
@@ -326,6 +359,8 @@ function validGhExtensionExpectedIdentity(input: GhExtensionReleaseCertification
     isCertificationSourceCommitSha(input.expectedReleaseSourceCommitSha) &&
     isCertificationRepositoryPart(input.expectedRepositoryOwner) &&
     isCertificationRepositoryPart(input.expectedRepositoryName) &&
+    isCertificationWorkflowRunId(input.expectedDogfoodWorkflowRunId) &&
+    isCertificationWorkflowRunAttempt(input.expectedDogfoodWorkflowRunAttempt) &&
     (input.expectedReleaseTag === undefined ||
       isCertificationBoundedString(input.expectedReleaseTag, MAX_CERTIFICATION_STRING_LENGTH)) &&
     ARTIFACT_MANIFEST_SHA256_PATTERN.test(input.expectedArtifactManifestSha256)
@@ -370,6 +405,8 @@ export function verifyGhExtensionReleaseCertification(
       input.expectedReleaseSourceCommitSha,
       input.expectedRepositoryOwner,
       input.expectedRepositoryName,
+      input.expectedDogfoodWorkflowRunId,
+      input.expectedDogfoodWorkflowRunAttempt,
       diagnostics,
     );
   }

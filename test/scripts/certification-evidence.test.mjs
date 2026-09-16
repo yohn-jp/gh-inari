@@ -295,6 +295,7 @@ function dogfoodEvidence(overrides = {}) {
     contractVersions: { ...contractVersions },
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: "4101", runAttempt: "1" },
     scenario: SELF_DOGFOOD_SCENARIOS.FRESH_CREATE,
     rootIssue: 614,
     change: { issue: 614, branch: "chore/614-isolate-fresh-self-dogfood-fixtures", pullRequest: 622 },

@@ -10,7 +10,11 @@ import {
   isCertificationBoundedString,
   isCertificationSourceCommitSha,
 } from "./certification-evidence.mjs";
-import { readCurrentSourceSha, retrieveSelfDogfoodEvidence } from "./verify-release-certification.mjs";
+import {
+  readCurrentSourceSha,
+  resolveSelfDogfoodWorkflowRun,
+  retrieveSelfDogfoodEvidence,
+} from "./verify-release-certification.mjs";
 import { verifyGhExtensionReleaseCertification } from "../src/release-certification.js";
 
 const REPOSITORY_OWNER = "yohn-jp";
@@ -239,6 +243,8 @@ export async function runWorkflowCertification({
   repositoryRoot = REPOSITORY_ROOT,
   currentSourceSha,
   dogfoodEvidenceRetriever = retrieveSelfDogfoodEvidence,
+  workflowRunResolver = resolveSelfDogfoodWorkflowRun,
+  candidateEvidenceRetriever = retrieveSelfDogfoodEvidence,
   fetchImpl = globalThis.fetch,
   now = Date.now(),
 } = {}) {
@@ -249,8 +255,19 @@ export async function runWorkflowCertification({
       return failureResult("SOURCE_SHA_MISMATCH", "checked-out source SHA does not match RELEASE_SOURCE_SHA");
 
     const observedArtifactManifestSha256 = computeArtifactManifestSha256(context.artifactDirectory);
+    const dogfoodWorkflowRun = await workflowRunResolver({
+      sourceSha: context.sourceSha,
+      repositoryOwner: context.repositoryOwner,
+      repositoryName: context.repositoryName,
+      environment,
+      fetchImpl,
+      now,
+      candidateEvidenceRetriever,
+    });
     const dogfoodEvidence = await dogfoodEvidenceRetriever({
       sourceSha: context.sourceSha,
+      workflowRunId: dogfoodWorkflowRun.workflowRunId,
+      workflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
       repositoryOwner: context.repositoryOwner,
       repositoryName: context.repositoryName,
       environment,
@@ -261,6 +278,8 @@ export async function runWorkflowCertification({
       expectedReleaseSourceCommitSha: context.sourceSha,
       expectedRepositoryOwner: context.repositoryOwner,
       expectedRepositoryName: context.repositoryName,
+      expectedDogfoodWorkflowRunId: dogfoodWorkflowRun.workflowRunId,
+      expectedDogfoodWorkflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
       expectedReleaseTag: context.releaseTag,
       expectedArtifactManifestSha256: context.artifactManifestSha256,
       observedArtifactManifestSha256,
