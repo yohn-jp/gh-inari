@@ -64,7 +64,7 @@ function run(command, args, options = {}) {
 }
 
 function invoke(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: "utf8", timeout: 10_000, ...options });
+  return spawnSync(command, args, { encoding: "utf8", ...options });
 }
 
 /**
