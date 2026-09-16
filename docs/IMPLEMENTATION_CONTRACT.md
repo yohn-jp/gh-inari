@@ -129,45 +129,49 @@ evidence fails closed.
 
 ## 4. Current `impl` command surface
 
-The current command contract is version `1.10.0` (`urn:inari:command-contract:1.10.0`).
-The `impl` namespace has exactly these operations:
+<!-- BEGIN GENERATED IMPLEMENTATION COMMAND SURFACE -->
 
-| Command                         | Current metadata summary                                                                                    | Effect                                                                               |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `inari impl plan <number>`      | Draft a bounded Implementation recommendation from authoritative Issue evidence without granting authority. | Preview only; recommendations are not authoritative and authorization remains false. |
-| `inari impl show <number>`      | Show the current Implementation body, canonical contract projection, and authorization state.               | Read-only projection.                                                                |
-| `inari impl validate <number>`  | Validate an existing Implementation body against the canonical contract without mutation.                   | Read-only validation.                                                                |
-| `inari impl authorize <number>` | Authorize one current canonical Implementation body through the #572 Core boundary.                         | Produces authorization evidence; the CLI result is non-mutating.                     |
-| `inari impl inspect <number>`   | Inspect Implementation lifecycle and provider-authoritative parent/source relationships.                    | Read-only lifecycle and relationship observation.                                    |
+The current command contract is version `1.11.0` (`urn:inari:command-contract:1.11.0`).
+The `impl` namespace projects these operations from the command contract:
 
-Each operation accepts a positive Issue number. The command metadata declares
-these options for every operation:
+| Command                         | Command ID       | Metadata summary                                                                                            |
+| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------- |
+| `inari impl plan <number>`      | `impl.plan`      | Draft a bounded Implementation recommendation from authoritative Issue evidence without granting authority. |
+| `inari impl show <number>`      | `impl.show`      | Show the current Implementation body, canonical contract projection, and authorization state.               |
+| `inari impl validate <number>`  | `impl.validate`  | Validate an existing Implementation body against the canonical contract without mutation.                   |
+| `inari impl authorize <number>` | `impl.authorize` | Authorize one current canonical Implementation body through the #572 Core boundary.                         |
+| `inari impl inspect <number>`   | `impl.inspect`   | Inspect Implementation lifecycle and provider-authoritative parent/source relationships.                    |
+| `inari impl verify <number>`    | `impl.verify`    | Verify a pull request and its authoritative diff against one current authorized Implementation.             |
 
-```text
---help[=full|json]
---json
---repository <repository>
---from <path>
---capability <id> ...
-```
+The exact contract usage and option applicability are:
 
-`--capability` is repeatable. `--from` accepts a JSON input file or `-` for
-stdin; for lifecycle verification it can carry the current authorization,
-base, supersession, or completion evidence accepted by the existing Core
-boundary. `--repository` overrides the repository context for the governed
-read. Use `--json` for structured output.
+- `impl plan <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl show <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl validate <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl authorize <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl inspect <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl verify <number> [--repository <repository>] --from <path> [--capability <id> ...] --pr <number>`
 
-There is no current `impl create`, `impl edit`, `impl start`, `impl complete`,
-or `impl ready` command. Author the separate Issue through the existing
-governed Issue operation with the Implementation template, for example:
+<!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->
+
+Each operation accepts a positive Issue number. The generated projection above
+owns the command IDs, version, contract ID, summaries, usage, and option
+applicability. `--capability` is repeatable. `--from` accepts a JSON input file
+or `-` for stdin; for lifecycle verification it can carry the current
+authorization, base, supersession, or completion evidence accepted by the
+existing Core boundary. `--repository` overrides the repository context for
+the governed read. Use `--json` for structured output.
+
+Author the separate Issue through the existing governed Issue operation with
+the Implementation template, for example:
 
 ```text
 inari issue create --template implementation
 ```
 
-Then use only the command surface above to plan, inspect, validate, authorize,
-and verify the contract. Do not infer a new command or authorization behavior
-from the prose.
+Then use only the current `impl` command surface shown above to operate on
+the contract. Do not infer a new command or authorization behavior from
+prose outside the generated projection.
 
 ## 5. Canonical parent and source relationships
 
