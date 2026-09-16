@@ -47,6 +47,21 @@ const MAX_RESULT_BYTES = 262_144;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_POLL_ATTEMPTS = 300;
 
+/**
+ * Adapter-owned transport boundaries. These values describe where Actions
+ * transport processing failed; they are not Change semantic diagnostics.
+ */
+export const ACTIONS_TRANSPORT_FAILURE_STAGES = Object.freeze([
+  "repository-context",
+  "dispatch",
+  "run-read",
+  "artifact-read",
+  "artifact-download",
+  "result-decode",
+  "correlation",
+] as const);
+export type ActionsTransportFailureStage = (typeof ACTIONS_TRANSPORT_FAILURE_STAGES)[number];
+
 export interface ActionsChangeExecutionAdapterApi {
   getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext>;
   requestActionsApi(
@@ -110,28 +125,28 @@ interface ActionResultEnvelope {
   readonly diagnostic?: TrustedActionsFailureDiagnostic;
 }
 
-function record(value: unknown): Record<string, unknown> {
+function record(value: unknown, stage: ActionsTransportFailureStage = "result-decode"): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, stage);
   }
   return value as Record<string, unknown>;
 }
 
-function boundedText(value: unknown, maximum: number): string {
+function boundedText(value: unknown, maximum: number, stage: ActionsTransportFailureStage = "result-decode"): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.length > maximum ||
     /[\u0000-\u001F\u007F]/u.test(value)
   ) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, stage);
   }
   return value;
 }
 
-function positiveInteger(value: unknown): number {
+function positiveInteger(value: unknown, stage: ActionsTransportFailureStage = "result-decode"): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.metadata", "invalid-metadata");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.metadata", "invalid-metadata", undefined, stage);
   }
   return value as number;
 }
@@ -141,6 +156,7 @@ function remoteError(
   operation: string,
   reason: string,
   diagnostic?: TrustedActionsFailureDiagnostic,
+  stage?: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   const messages: Record<string, string> = {
     CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Actions Change executor is unavailable.",
@@ -157,6 +173,7 @@ function remoteError(
     {
       operation,
       reason,
+      ...(stage === undefined || diagnostic !== undefined ? {} : { stage }),
       ...(diagnostic === undefined
         ? {}
         : {
@@ -171,6 +188,22 @@ function remoteError(
   );
 }
 
+function resultValidationError(
+  error: unknown,
+  operation: string,
+  stage: ActionsTransportFailureStage,
+): ChangeExecutionPortError {
+  if (!(error instanceof ChangeExecutionPortError)) {
+    return remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, stage);
+  }
+  if (error.code !== "CHANGE_REMOTE_RESULT_INVALID") return error;
+  const details =
+    typeof error.details === "object" && error.details !== null && !Array.isArray(error.details)
+      ? { ...(error.details as Record<string, unknown>), stage }
+      : { operation, stage };
+  return new ChangeExecutionPortError(error.code, error.message, details, error.diagnostics);
+}
+
 function normalizeTransportError(
   error: unknown,
   operation: string,
@@ -179,12 +212,13 @@ function normalizeTransportError(
     | "CHANGE_REMOTE_TRANSPORT_FAILED"
     | "CHANGE_REMOTE_DISPATCH_FAILED"
     | "CHANGE_REMOTE_RUN_FAILED",
+  stage: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   if (error instanceof ChangeExecutionPortError) return error;
   if (isGitHubAdapterError(error) && error.category === "authentication") {
-    return remoteError(code, operation, "authentication");
+    return remoteError(code, operation, "authentication", undefined, stage);
   }
-  return remoteError(code, operation, "transport");
+  return remoteError(code, operation, "transport", undefined, stage);
 }
 
 function workflowRunsPath(): string {
@@ -201,7 +235,7 @@ function dispatchPath(): string {
 
 function parseFailureDiagnostic(value: unknown, operation: string): TrustedActionsFailureDiagnostic | undefined {
   if (value === undefined) return undefined;
-  const details = record(value);
+  const details = record(value, "result-decode");
   if (
     Object.keys(details).some(
       (key) => !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure"].includes(key),
@@ -210,23 +244,51 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
     (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason)) ||
     (details.trustedCode !== undefined && !isChangeTrustedExecutorErrorCode(details.trustedCode))
   ) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
   }
   let diagnostics: readonly ChangeDiagnostic[] | undefined;
   try {
     diagnostics = normalizeTrustedFailureDiagnostics(details.diagnostics);
   } catch {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
   }
   let evidence: ChangeExecutionEvidence | undefined;
   if (details.evidence !== undefined) {
-    evidence = normalizeChangeExecutionEvidence(operation, details.evidence);
+    try {
+      evidence = normalizeChangeExecutionEvidence(operation, details.evidence);
+    } catch {
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.result",
+        "invalid-diagnostic",
+        undefined,
+        "result-decode",
+      );
+    }
   }
   let effectFailure: ChangeEffectFailureClassification | undefined;
   try {
     effectFailure = normalizeChangeEffectFailureClassification(details.effectFailure);
   } catch {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
   }
   return Object.freeze({
     stage: details.stage,
@@ -239,34 +301,34 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
 }
 
 function parseRuns(value: unknown): readonly WorkflowRun[] {
-  const payload = record(value);
+  const payload = record(value, "run-read");
   if (!Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > MAX_ACTION_RUNS) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
   }
   return payload.workflow_runs.map((candidate) => {
-    const item = record(candidate);
-    const id = positiveInteger(item.id);
+    const item = record(candidate, "run-read");
+    const id = positiveInteger(item.id, "run-read");
     const status = item.status;
     if (status !== "queued" && status !== "in_progress" && status !== "completed") {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
     }
     if (item.conclusion !== null && typeof item.conclusion !== "string") {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
     }
-    const path = item.path === undefined ? undefined : boundedText(item.path, 512);
+    const path = item.path === undefined ? undefined : boundedText(item.path, 512, "run-read");
     if (path !== undefined && path !== `.github/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}`) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-workflow");
+      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-workflow", undefined, "correlation");
     }
     if (item.ref !== undefined && item.ref !== INARI_CHANGE_EXECUTOR_REF) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-ref");
+      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-ref", undefined, "correlation");
     }
     return {
       id,
       status,
       conclusion: item.conclusion as string | null,
-      event: boundedText(item.event, 64),
-      headBranch: boundedText(item.head_branch, 255),
-      displayTitle: boundedText(item.display_title, 512),
+      event: boundedText(item.event, 64, "run-read"),
+      headBranch: boundedText(item.head_branch, 255, "run-read"),
+      displayTitle: boundedText(item.display_title, 512, "run-read"),
       ...(path === undefined ? {} : { path }),
     };
   });
@@ -277,31 +339,51 @@ function parseArtifacts(
   expectedName: string,
   expectedRepositoryId: string,
 ): readonly WorkflowArtifact[] {
-  const payload = record(value);
+  const payload = record(value, "artifact-read");
   if (!Array.isArray(payload.artifacts) || payload.artifacts.length > MAX_ARTIFACTS) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifacts", "invalid-metadata");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.artifacts",
+      "invalid-metadata",
+      undefined,
+      "artifact-read",
+    );
   }
   return payload.artifacts
     .filter((candidate) => {
-      const item = record(candidate);
+      const item = record(candidate, "artifact-read");
       return item.name === expectedName;
     })
     .map((candidate) => {
-      const item = record(candidate);
-      const workflowRun = record(item.workflow_run);
+      const item = record(candidate, "artifact-read");
+      const workflowRun = record(item.workflow_run, "artifact-read");
       const repositoryId =
-        workflowRun.repository_id === undefined ? undefined : positiveInteger(workflowRun.repository_id);
+        workflowRun.repository_id === undefined
+          ? undefined
+          : positiveInteger(workflowRun.repository_id, "artifact-read");
       if (repositoryId !== undefined && String(repositoryId) !== expectedRepositoryId) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.artifacts", "wrong-repository");
+        throw remoteError(
+          "CHANGE_REMOTE_CORRELATION_FAILED",
+          "actions.artifacts",
+          "wrong-repository",
+          undefined,
+          "correlation",
+        );
       }
       if (typeof item.expired !== "boolean") {
-        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifacts", "invalid-metadata");
+        throw remoteError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "actions.artifacts",
+          "invalid-metadata",
+          undefined,
+          "artifact-read",
+        );
       }
       return {
-        id: positiveInteger(item.id),
-        name: boundedText(item.name, 255),
+        id: positiveInteger(item.id, "artifact-read"),
+        name: boundedText(item.name, 255, "artifact-read"),
         expired: item.expired,
-        workflowRunId: positiveInteger(workflowRun.id),
+        workflowRunId: positiveInteger(workflowRun.id, "artifact-read"),
         ...(repositoryId === undefined ? {} : { repositoryId }),
       };
     });
@@ -310,22 +392,46 @@ function parseArtifacts(
 function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): ActionResultEnvelope {
   try {
     if (archive.byteLength === 0 || archive.byteLength > 1_048_576) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const bytes = Buffer.from(archive);
     const endOfCentralDirectory = findEndOfCentralDirectory(bytes);
     if (endOfCentralDirectory === undefined) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const entryCount = bytes.readUInt16LE(endOfCentralDirectory + 10);
     const directorySize = bytes.readUInt32LE(endOfCentralDirectory + 12);
     const directoryOffset = bytes.readUInt32LE(endOfCentralDirectory + 16);
     if (entryCount !== 1 || directoryOffset + directorySize > bytes.length) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const directory = directoryOffset;
     if (bytes.readUInt32LE(directory) !== 0x02014b50) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const compression = bytes.readUInt16LE(directory + 10);
     const compressedSize = bytes.readUInt32LE(directory + 20);
@@ -340,7 +446,13 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
       directoryEntryEnd > directory + directorySize ||
       uncompressedSize > MAX_RESULT_BYTES
     ) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const fileName = decodeUtf8(bytes.subarray(directory + 46, directory + 46 + fileNameLength));
     if (
@@ -348,14 +460,26 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
       localOffset + 30 > bytes.length ||
       bytes.readUInt32LE(localOffset) !== 0x04034b50
     ) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const localNameLength = bytes.readUInt16LE(localOffset + 26);
     const localExtraLength = bytes.readUInt16LE(localOffset + 28);
     const contentStart = localOffset + 30 + localNameLength + localExtraLength;
     const contentEnd = contentStart + compressedSize;
     if (contentEnd > bytes.length) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     let content: Buffer;
     try {
@@ -365,32 +489,62 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
           : compression === 8
             ? inflateRawSync(bytes.subarray(contentStart, contentEnd), { maxOutputLength: MAX_RESULT_BYTES })
             : (() => {
-                throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "unsupported-compression");
+                throw remoteError(
+                  "CHANGE_REMOTE_RESULT_INVALID",
+                  "actions.artifact",
+                  "unsupported-compression",
+                  undefined,
+                  "result-decode",
+                );
               })();
     } catch (error: unknown) {
       if (error instanceof ChangeExecutionPortError) throw error;
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     if (content.byteLength !== uncompressedSize || content.byteLength > MAX_RESULT_BYTES) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     let value: unknown;
     try {
       value = JSON.parse(decodeUtf8(content)) as unknown;
     } catch (error: unknown) {
       if (error instanceof ChangeExecutionPortError) throw error;
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-json");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-json", undefined, "result-decode");
     }
-    const result = record(value);
+    const result = record(value, "result-decode");
     if (result.ok === false) {
-      const failure = record(result.error);
+      const failure = record(result.error, "result-decode");
       if (Object.keys(failure).some((key) => !["code", "message", "details"].includes(key))) {
-        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+        throw remoteError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "actions.result",
+          "invalid-result",
+          undefined,
+          "result-decode",
+        );
       }
       if (failure.code !== "CHANGE_ACTIONS_RUNTIME_INVALID") {
-        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+        throw remoteError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "actions.result",
+          "invalid-result",
+          undefined,
+          "result-decode",
+        );
       }
-      boundedText(failure.message, 240);
+      boundedText(failure.message, 240, "result-decode");
       const diagnostic = parseFailureDiagnostic(failure.details, operation);
       return {
         value: undefined,
@@ -399,12 +553,18 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
       };
     }
     if (result.ok !== undefined) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, "result-decode");
     }
     return { value, failed: false };
   } catch (error: unknown) {
     if (error instanceof ChangeExecutionPortError) throw error;
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.artifact",
+      "invalid-archive",
+      undefined,
+      "result-decode",
+    );
   }
 }
 
@@ -424,7 +584,7 @@ function decodeUtf8(bytes: Uint8Array): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-utf8");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-utf8", undefined, "result-decode");
   }
 }
 
@@ -521,7 +681,11 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         result.diagnostic,
       );
     }
-    return normalizeChangeExecutionResult(request.operation, result.value);
+    try {
+      return normalizeChangeExecutionResult(request.operation, result.value);
+    } catch (error: unknown) {
+      throw resultValidationError(error, `change.${request.operation}`, "result-decode");
+    }
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
@@ -537,18 +701,35 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   ): Promise<ActionResultEnvelope> {
     const correlation = this.#randomUUID();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(correlation)) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", `change.${request.operation}`, "invalid-correlation");
+      throw remoteError(
+        "CHANGE_REMOTE_CORRELATION_FAILED",
+        `change.${request.operation}`,
+        "invalid-correlation",
+        undefined,
+        "correlation",
+      );
     }
     const operation = `change.${request.operation}`;
-    const context = await this.withinDeadline(operation, deadline, async () => {
-      try {
-        return await this.#api.getRepositoryContext(deadline);
-      } catch (error: unknown) {
-        throw normalizeTransportError(error, operation, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-      }
-    });
+    const context = await this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        try {
+          return await this.#api.getRepositoryContext(deadline);
+        } catch (error: unknown) {
+          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "repository-context");
+        }
+      },
+      "repository-context",
+    );
     if (context.repositoryId === undefined) {
-      throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", operation, "repository-identity-unavailable");
+      throw remoteError(
+        "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
+        operation,
+        "repository-identity-unavailable",
+        undefined,
+        "repository-context",
+      );
     }
     const baseline = await this.readRuns(operation, deadline);
     const artifactName = `inari-change-result-${correlation}`;
@@ -564,22 +745,26 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         : { signedProvenanceRecord: request.signedProvenanceRecord }),
     };
     try {
-      await this.withinDeadline(operation, deadline, () =>
-        this.#api.requestActionsApi(
-          dispatchPath(),
-          "POST",
-          {
-            ref: INARI_CHANGE_EXECUTOR_REF,
-            "inputs[request]": JSON.stringify(semanticRequest),
-            "inputs[correlation]": correlation,
-          },
-          deadline,
-        ),
+      await this.withinDeadline(
+        operation,
+        deadline,
+        () =>
+          this.#api.requestActionsApi(
+            dispatchPath(),
+            "POST",
+            {
+              ref: INARI_CHANGE_EXECUTOR_REF,
+              "inputs[request]": JSON.stringify(semanticRequest),
+              "inputs[correlation]": correlation,
+            },
+            deadline,
+          ),
+        "dispatch",
       );
     } catch (error: unknown) {
-      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_DISPATCH_FAILED");
+      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_DISPATCH_FAILED", "dispatch");
     }
-    this.assertDeadline(operation, deadline);
+    this.assertDeadline(operation, deadline, "dispatch");
     return this.waitForResult(
       operation,
       correlation,
@@ -592,15 +777,20 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   }
 
   private async readRuns(operation: string, deadline: ChangeExecutionDeadline): Promise<readonly WorkflowRun[]> {
-    return this.withinDeadline(operation, deadline, async () => {
-      let value: unknown;
-      try {
-        value = await this.#api.requestActionsApi(workflowRunsPath(), "GET", {}, deadline);
-      } catch (error: unknown) {
-        throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-      }
-      return parseRuns(value);
-    });
+    return this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        let value: unknown;
+        try {
+          value = await this.#api.requestActionsApi(workflowRunsPath(), "GET", {}, deadline);
+        } catch (error: unknown) {
+          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "run-read");
+        }
+        return parseRuns(value);
+      },
+      "run-read",
+    );
   }
 
   private async waitForResult(
@@ -618,9 +808,11 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     // count can be exhausted well before real time runs out. maxPollAttempts
     // remains only as a sanity ceiling against a runaway loop, not as the
     // primary budget.
+    let observationStage: ActionsTransportFailureStage = "run-read";
     for (let attempt = 0; deadline.remainingMs() > 0 && attempt < this.#maxPollAttempts; attempt += 1) {
       const timeRemaining = () => deadline.remainingMs() > 0;
       let runs: readonly WorkflowRun[];
+      observationStage = "run-read";
       try {
         runs = await this.readRuns(operation, deadline);
       } catch (error: unknown) {
@@ -633,6 +825,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       // decide which run belongs to this request.
       const correlatedRun = runs.find((candidate) => isCorrelatedRun(candidate, correlation));
       let artifacts: readonly WorkflowArtifact[];
+      observationStage = "artifact-read";
       try {
         artifacts = await this.readArtifacts(operation, artifactName, repositoryId, deadline);
       } catch (error: unknown) {
@@ -641,27 +834,42 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         continue;
       }
       if (artifacts.length > 1) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "ambiguous-artifact");
+        throw remoteError(
+          "CHANGE_REMOTE_CORRELATION_FAILED",
+          operation,
+          "ambiguous-artifact",
+          undefined,
+          "correlation",
+        );
       }
       const artifact = artifacts[0];
       if (artifact !== undefined && artifact.expired) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "expired-artifact");
+        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "expired-artifact", undefined, "correlation");
       }
       const run =
         artifact !== undefined && correlatedRun !== undefined && correlatedRun.id === artifact.workflowRunId
           ? correlatedRun
           : undefined;
       if (artifact !== undefined && run === undefined && baselineIds.has(artifact.workflowRunId)) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "stale-artifact");
+        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "stale-artifact", undefined, "correlation");
       }
       if (artifact !== undefined && run !== undefined && run.status === "completed") {
         let archive: Uint8Array;
+        observationStage = "artifact-download";
         try {
-          archive = await this.withinDeadline(operation, deadline, () =>
-            this.#api.downloadActionsArtifact(artifact.id, deadline),
+          archive = await this.withinDeadline(
+            operation,
+            deadline,
+            () => this.#api.downloadActionsArtifact(artifact.id, deadline),
+            "artifact-download",
           );
         } catch (error: unknown) {
-          const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
+          const normalized = normalizeTransportError(
+            error,
+            operation,
+            "CHANGE_REMOTE_TRANSPORT_FAILED",
+            "artifact-download",
+          );
           if (!isRetryablePollTransportError(normalized) || !timeRemaining()) throw normalized;
           await this.#sleep(this.#pollIntervalMs);
           continue;
@@ -684,7 +892,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       // never by a second timeout/attempt authority of its own.
       if (timeRemaining()) await this.#sleep(this.#pollIntervalMs);
     }
-    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
+    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout", undefined, observationStage);
   }
 
   private async readArtifacts(
@@ -693,20 +901,29 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     repositoryId: string,
     deadline: ChangeExecutionDeadline,
   ): Promise<readonly WorkflowArtifact[]> {
-    return this.withinDeadline(operation, deadline, async () => {
-      let value: unknown;
-      try {
-        value = await this.#api.requestActionsApi(artifactsPath(name), "GET", {}, deadline);
-      } catch (error: unknown) {
-        throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-      }
-      return parseArtifacts(value, name, repositoryId);
-    });
+    return this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        let value: unknown;
+        try {
+          value = await this.#api.requestActionsApi(artifactsPath(name), "GET", {}, deadline);
+        } catch (error: unknown) {
+          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "artifact-read");
+        }
+        return parseArtifacts(value, name, repositoryId);
+      },
+      "artifact-read",
+    );
   }
 
-  private assertDeadline(operation: string, deadline: ChangeExecutionDeadline): void {
+  private assertDeadline(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+    stage?: ActionsTransportFailureStage,
+  ): void {
     if (deadline.remainingMs() <= 0) {
-      throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
+      throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout", undefined, stage);
     }
   }
 
@@ -714,14 +931,15 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     operation: string,
     deadline: ChangeExecutionDeadline,
     task: () => Promise<T>,
+    stage: ActionsTransportFailureStage,
   ): Promise<T> {
-    this.assertDeadline(operation, deadline);
+    this.assertDeadline(operation, deadline, stage);
     try {
       const result = await task();
-      this.assertDeadline(operation, deadline);
+      this.assertDeadline(operation, deadline, stage);
       return result;
     } catch (error: unknown) {
-      if (deadline.remainingMs() <= 0) this.assertDeadline(operation, deadline);
+      if (deadline.remainingMs() <= 0) this.assertDeadline(operation, deadline, stage);
       throw error;
     }
   }
