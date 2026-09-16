@@ -169,9 +169,9 @@ the Implementation template, for example:
 inari issue create --template implementation
 ```
 
-Then use only the command surface above to plan, show, validate, authorize,
-inspect, and verify the contract. Do not infer a new command or authorization
-behavior from the prose.
+Then use only the current `impl` command surface shown above to operate on
+the contract. Do not infer a new command or authorization behavior from
+prose outside the generated projection.
 
 ## 5. Canonical parent and source relationships
 
