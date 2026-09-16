@@ -919,9 +919,7 @@ async function actionsApi(argv) {
       (candidate) => candidate.id === Number(artifactMatch[1]),
     );
     if (artifact === undefined) throw new Error("Actions artifact not found");
-    const output = optionValue(argv, "--output");
-    if (typeof output !== "string") throw new Error("Actions artifact output is required");
-    fs.writeFileSync(output, Buffer.from(artifact.bytes, "base64"), { mode: 0o600 });
+    process.stdout.write(Buffer.from(artifact.bytes, "base64"));
     return;
   }
   throw new Error(`unsupported Actions API endpoint: ${endpoint}`);
