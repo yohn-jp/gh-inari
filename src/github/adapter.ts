@@ -1,7 +1,3 @@
-import { constants as fsConstants } from "node:fs";
-import { mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import {
   ContractViolationError,
   GhNotInstalledError,
@@ -28,6 +24,7 @@ import {
   ProcessGhTransport,
   type GhCommandResult,
   type GhTransport,
+  type GhTransportOptions,
   type GhTransportOutputLimits,
 } from "./transport.js";
 import {
@@ -323,44 +320,25 @@ export class GitHubAdapter {
       throw new ContractViolationError("Actions artifact ID must be a positive integer.", "artifactId");
     }
     const context = await this.resolveRepositoryContext();
-    const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-actions-"));
-    const destination = path.join(directory, "artifact.zip");
-    let handle: FileHandle | undefined;
-    try {
-      const result = await this.runCommand(
-        [
-          "api",
-          `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
-          "--hostname",
-          context.hostname,
-          "--method",
-          "GET",
-          "--output",
-          destination,
-        ],
-        "actions.artifact.download",
-      );
-      if (result.exitCode !== 0) {
-        throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
-      }
-      try {
-        handle = await open(destination, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-        const metadata = await handle.stat();
-        if (!metadata.isFile() || metadata.size > MAX_ACTIONS_ARTIFACT_BYTES) {
-          throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
-        }
-        return new Uint8Array(await readBoundedActionsArtifact(handle));
-      } catch (error: unknown) {
-        if (error instanceof GitHubAdapterError) throw error;
-        throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
-      }
-    } finally {
-      try {
-        if (handle !== undefined) await handle.close();
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
+    const result = await this.runCommand(
+      [
+        "api",
+        `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
+        "--hostname",
+        context.hostname,
+        "--method",
+        "GET",
+      ],
+      "actions.artifact.download",
+      { binaryStdout: true },
+    );
+    if (result.exitCode !== 0) {
+      throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
     }
+    if (result.stdoutBytes === undefined || result.stdoutBytes.byteLength > MAX_ACTIONS_ARTIFACT_BYTES) {
+      throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
+    }
+    return new Uint8Array(result.stdoutBytes);
   }
 
   /** Read the target repository metadata used to select the trusted governance ref. */
@@ -1214,7 +1192,11 @@ export class GitHubAdapter {
     return parseJson(result.stdout, operation);
   }
 
-  private async runCommand(args: readonly string[], operation: string): Promise<GhCommandResult> {
+  private async runCommand(
+    args: readonly string[],
+    operation: string,
+    transportOptions: Pick<GhTransportOptions, "binaryStdout"> = {},
+  ): Promise<GhCommandResult> {
     const timeoutMs = this.timeoutsMs[operationClass(operation)];
     try {
       return await this.transport.run(args, {
@@ -1222,6 +1204,7 @@ export class GitHubAdapter {
         timeoutMs,
         maxStdoutBytes: this.outputLimitsBytes.stdout,
         maxStderrBytes: this.outputLimitsBytes.stderr,
+        ...transportOptions,
       });
     } catch (error) {
       if (error instanceof GhTransportOutputLimitError) {
@@ -1473,20 +1456,6 @@ function parseJson(value: string, operation: string): unknown {
       error,
     );
   }
-}
-
-async function readBoundedActionsArtifact(handle: FileHandle): Promise<Buffer> {
-  const buffer = Buffer.alloc(MAX_ACTIONS_ARTIFACT_BYTES + 1);
-  let bytesRead = 0;
-  while (bytesRead < buffer.length) {
-    const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, null);
-    bytesRead += result.bytesRead;
-    if (result.bytesRead === 0) break;
-  }
-  if (bytesRead > MAX_ACTIONS_ARTIFACT_BYTES) {
-    throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
-  }
-  return buffer.subarray(0, bytesRead);
 }
 
 function parseIncludedApiResponse(value: string, operation: string): GitHubApiResponse | undefined {

@@ -23,6 +23,16 @@ test("resolves a non-zero exit code without a timeout configured", async () => {
   assert.equal(result.exitCode, 3);
 });
 
+test("preserves binary stdout when requested", async () => {
+  const transport = new ProcessGhTransport(process.execPath);
+  const result = await transport.run(["-e", "process.stdout.write(Buffer.from([0, 255, 16, 128]));"], {
+    binaryStdout: true,
+  });
+
+  assert.equal(result.stdout, "");
+  assert.deepEqual([...(result.stdoutBytes ?? [])], [0, 255, 16, 128]);
+});
+
 test("resolves output that stays within the configured per-stream byte bounds", async () => {
   const transport = new ProcessGhTransport(process.execPath);
 
