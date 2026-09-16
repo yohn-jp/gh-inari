@@ -33,6 +33,7 @@ import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   ChangeExecutionPortError,
   changeMutationRequest,
+  hasCallerSuppliedRequester,
   validateChangeRequest,
   type ChangeExecutionPort,
   type ChangeMutation,
@@ -115,6 +116,16 @@ const TRUSTED_EXECUTION: TrustedExecutionContext = {
   codeExecution: "trusted-only",
   fork: false,
   pullRequest: false,
+};
+
+const TRUSTED_LOCAL_EXECUTION: TrustedExecutionContext = {
+  ...TRUSTED_EXECUTION,
+  requester: "user:trusted-local",
+};
+
+const ACTIONS_EXECUTION: TrustedExecutionContext = {
+  ...TRUSTED_EXECUTION,
+  requester: "github:authenticated-actions-actor",
 };
 
 /** Which effect a fixture's Authority evidence implies fails during application. */
@@ -237,13 +248,16 @@ class FixtureEffectAuthorizer {
 }
 
 /** Builds a fresh instance of the real trusted execution boundary from one fixture's evidence. */
-function createTrustedAdapter(fixture: CrossDeploymentFixture): {
+function createTrustedAdapter(
+  fixture: CrossDeploymentFixture,
+  execution: TrustedExecutionContext = TRUSTED_EXECUTION,
+): {
   readonly adapter: ChangeExecutionPort;
   readonly reader: FixtureEvidenceReader;
 } {
   const reader = new FixtureEvidenceReader(fixture);
   const effectAuthorizer = new FixtureEffectAuthorizer(reader, fixture, FIXTURE_FAILING_EFFECT[fixture.name]);
-  const adapter = new TrustedChangeExecutor({ reader, effectAuthorizer, execution: TRUSTED_EXECUTION, target: TARGET });
+  const adapter = new TrustedChangeExecutor({ reader, effectAuthorizer, execution, target: TARGET });
   return { adapter, reader };
 }
 
@@ -316,7 +330,10 @@ class DriftEvidenceReader implements ChangeTrustedEvidenceReader {
   }
 }
 
-function createDriftAdapter(fixture: CrossDeploymentFixture): { readonly adapter: ChangeExecutionPort } {
+function createDriftAdapter(
+  fixture: CrossDeploymentFixture,
+  execution: TrustedExecutionContext = TRUSTED_EXECUTION,
+): { readonly adapter: ChangeExecutionPort } {
   const reader = new DriftEvidenceReader(
     fixture.before.generation,
     fixture.after?.generation ?? fixture.before.generation,
@@ -326,12 +343,17 @@ function createDriftAdapter(fixture: CrossDeploymentFixture): { readonly adapter
       throw new Error("A governance-drift fixture must fail before any effect is attempted.");
     },
   };
-  const adapter = new TrustedChangeExecutor({ reader, effectAuthorizer, execution: TRUSTED_EXECUTION, target: TARGET });
+  const adapter = new TrustedChangeExecutor({ reader, effectAuthorizer, execution, target: TARGET });
   return { adapter };
 }
 
-function buildFixtureAdapter(fixture: CrossDeploymentFixture): { readonly adapter: ChangeExecutionPort } {
-  return fixture.name === "stale-authority-generation" ? createDriftAdapter(fixture) : createTrustedAdapter(fixture);
+function buildFixtureAdapter(
+  fixture: CrossDeploymentFixture,
+  execution: TrustedExecutionContext = TRUSTED_EXECUTION,
+): { readonly adapter: ChangeExecutionPort } {
+  return fixture.name === "stale-authority-generation"
+    ? createDriftAdapter(fixture, execution)
+    : createTrustedAdapter(fixture, execution);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -427,6 +449,7 @@ class FixtureActionsApi implements ActionsChangeExecutionAdapterApi {
               conclusion: "success",
               event: "workflow_dispatch",
               head_branch: "main",
+              display_title: "Inari Change 00000000-0000-4000-8000-000000000000",
             },
           ],
         };
@@ -439,6 +462,7 @@ class FixtureActionsApi implements ActionsChangeExecutionAdapterApi {
             conclusion: "success",
             event: "workflow_dispatch",
             head_branch: "main",
+            display_title: `Inari Change ${CORRELATION}`,
           },
         ],
       };
@@ -752,7 +776,8 @@ async function runProfile(
   profile: "trusted-local" | "actions" | "direct-app" | "mcp",
   fixture: CrossDeploymentFixture,
 ): Promise<CrossDeploymentSemanticResult> {
-  const { adapter } = buildFixtureAdapter(fixture);
+  const execution = profile === "trusted-local" ? TRUSTED_LOCAL_EXECUTION : ACTIONS_EXECUTION;
+  const { adapter } = buildFixtureAdapter(fixture, execution);
   if (profile === "trusted-local") return runTrustedLocal(fixture, adapter);
   if (profile === "actions") return runActions(fixture, adapter);
   return runSessionProfile(fixture, profile, adapter);
@@ -787,15 +812,40 @@ test("stale Authority generation is represented as an offline admission failure"
   }
 });
 
-test("requester spoofing is rejected before semantic admission on the Session/App path", async () => {
+test("requester spoofing is rejected before semantic admission in every deployment profile", async () => {
   const fixture = CROSS_DEPLOYMENT_FIXTURES[0]!;
-  const { adapter, reader } = createTrustedAdapter(fixture);
-  const configured = sessionExecutor(fixture, adapter, { requester: "github:spoofed-caller" });
-  const result = await configured.executor.execute(configured.envelope);
-  assert.equal(result.status, "failed");
-  assert.equal(result.failure?.phase, "request");
-  assert.equal(reader.reads, 0);
-  assert.equal(JSON.stringify(result).includes("spoofed-caller"), false);
+  const spoofedRequester = "github:spoofed-caller";
+
+  for (const profile of ["trusted-local", "actions", "direct-app", "mcp"] as const) {
+    if (profile === "direct-app" || profile === "mcp") {
+      const { adapter, reader } = createTrustedAdapter(fixture, ACTIONS_EXECUTION);
+      const configured = sessionExecutor(fixture, adapter, { requester: spoofedRequester });
+      const result = await configured.executor.execute(configured.envelope);
+      assert.equal(result.status, "failed", profile);
+      assert.equal(result.failure?.phase, "request", profile);
+      assert.equal(reader.reads, 0, profile);
+      assert.equal(JSON.stringify(result).includes(spoofedRequester), false, profile);
+      continue;
+    }
+
+    const { adapter, reader } = createTrustedAdapter(
+      fixture,
+      profile === "trusted-local" ? TRUSTED_LOCAL_EXECUTION : ACTIONS_EXECUTION,
+    );
+    const request = {
+      ...changeMutationRequest(fixture.request.operation as ChangeMutation, ISSUE),
+      requester: spoofedRequester,
+    } as unknown as ChangeMutationRequest;
+    await assert.rejects(
+      adapter.execute(request),
+      (error: unknown) =>
+        error instanceof ChangeTrustedExecutorError &&
+        error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED" &&
+        error.diagnostics.some((item) => item.code === "CHANGE_PROVENANCE_CONFLICT" && item.path === "$.requester"),
+      profile,
+    );
+    assert.equal(reader.reads, 0, profile);
+  }
 
   const normal = sessionExecutor(fixture, createTrustedAdapter(fixture).adapter);
   const accepted = await normal.executor.execute(normal.envelope);
@@ -880,4 +930,13 @@ test("caller requester fields remain outside the local Change Port contract", ()
     requester: "github:spoofed-caller",
   };
   assert.throws(() => validateChangeRequest(request as never));
+
+  const inherited = Object.create({ requester: "github:inherited-spoof" }) as Record<string, unknown>;
+  Object.assign(inherited, {
+    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+    operation: "issue",
+    issue: ISSUE,
+  });
+  assert.equal(hasCallerSuppliedRequester(inherited), true);
+  assert.throws(() => validateChangeRequest(inherited as never));
 });

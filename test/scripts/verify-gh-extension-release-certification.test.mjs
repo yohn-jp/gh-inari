@@ -24,6 +24,8 @@ import {
 
 const SOURCE_SHA = "a".repeat(40);
 const OTHER_SOURCE_SHA = "b".repeat(40);
+const DOGFOOD_RUN_ID = "4101";
+const DOGFOOD_RUN_ATTEMPT = "1";
 const CONTRACT_VERSIONS = { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS };
 
 function dogfoodOperations() {
@@ -42,6 +44,8 @@ function dogfoodEvidence(overrides = {}) {
     contractVersions: CONTRACT_VERSIONS,
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -91,6 +95,10 @@ function environment(directory, manifestSha256, overrides = {}) {
   };
 }
 
+function jsonResponse(value) {
+  return { ok: true, status: 200, text: async () => JSON.stringify(value) };
+}
+
 function fixture() {
   const directory = makeDirectory();
   writeArtifacts(directory);
@@ -102,6 +110,8 @@ function extensionIdentity(manifestSha256, overrides = {}) {
     expectedReleaseSourceCommitSha: SOURCE_SHA,
     expectedRepositoryOwner: "yohn-jp",
     expectedRepositoryName: "gh-inari",
+    expectedDogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+    expectedDogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     expectedReleaseTag: "v0.11.0",
     expectedArtifactManifestSha256: manifestSha256,
     observedArtifactManifestSha256: manifestSha256,
@@ -226,6 +236,10 @@ test("rejects checkout/source and manifest mismatches before certifying", async 
     const manifestMismatch = await runWorkflowCertification({
       environment: environment(directory, "c".repeat(64)),
       currentSourceSha: SOURCE_SHA,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       dogfoodEvidenceRetriever: async () => dogfoodEvidence(),
     });
     assert.equal(manifestMismatch.diagnostics[0].code, "ARTIFACT_MANIFEST_MISMATCH");
@@ -239,9 +253,31 @@ test("reuses the exact-source dogfood retrieval seam and certifies the complete 
   const { directory, manifest } = fixture();
   try {
     let retrievalInput;
+    const requests = [];
     const result = await runWorkflowCertification({
       environment: environment(directory, crypto.createHash("sha256").update(manifest).digest("hex")),
       currentSourceSha: SOURCE_SHA,
+      now: Date.parse("2026-01-01T00:00:00Z"),
+      fetchImpl: async (url, init) => {
+        requests.push({ url, init });
+        return jsonResponse({
+          artifacts: [
+            {
+              id: 41011,
+              name: `self-dogfood-golden-path-${SOURCE_SHA}-${DOGFOOD_RUN_ID}-${DOGFOOD_RUN_ATTEMPT}`,
+              expired: false,
+              created_at: "2026-01-01T00:00:00Z",
+              expires_at: "2026-03-01T00:00:00Z",
+              workflow_run: {
+                id: Number(DOGFOOD_RUN_ID),
+                run_attempt: Number(DOGFOOD_RUN_ATTEMPT),
+                head_sha: SOURCE_SHA,
+              },
+            },
+          ],
+        });
+      },
+      candidateEvidenceRetriever: async () => dogfoodEvidence(),
       dogfoodEvidenceRetriever: async (input) => {
         retrievalInput = input;
         return dogfoodEvidence();
@@ -251,6 +287,12 @@ test("reuses the exact-source dogfood retrieval seam and certifies the complete 
     assert.equal(retrievalInput.sourceSha, SOURCE_SHA);
     assert.equal(retrievalInput.repositoryOwner, "yohn-jp");
     assert.equal(retrievalInput.repositoryName, "gh-inari");
+    assert.deepEqual(
+      { workflowRunId: retrievalInput.workflowRunId, workflowRunAttempt: retrievalInput.workflowRunAttempt },
+      { workflowRunId: DOGFOOD_RUN_ID, workflowRunAttempt: DOGFOOD_RUN_ATTEMPT },
+    );
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /actions\/artifacts\?per_page=100$/u);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

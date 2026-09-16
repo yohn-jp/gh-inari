@@ -10,6 +10,7 @@ import {
   CERTIFICATION_KINDS,
   CERTIFICATION_RESULTS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  selfDogfoodArtifactName,
 } from "../../scripts/certification-evidence.mjs";
 import {
   RELEASE_CERTIFICATION_CONTRACT_VERSIONS,
@@ -20,12 +21,15 @@ import {
   generatePackedEvidence,
   parseArgs,
   parseWorkflowContext,
+  resolveSelfDogfoodWorkflowRun,
   retrieveSelfDogfoodEvidence,
   runWorkflowCertification,
 } from "../../scripts/verify-release-certification.mjs";
 
 const SOURCE_SHA = "a".repeat(40);
 const OTHER_SOURCE_SHA = "b".repeat(40);
+const DOGFOOD_RUN_ID = "4101";
+const DOGFOOD_RUN_ATTEMPT = "1";
 const PACKAGE = { name: "gh-inari", version: "0.12.0" };
 const CONTRACT_VERSIONS = { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS };
 const BASE_ARGS = [
@@ -45,6 +49,10 @@ const BASE_ARGS = [
   "packed.json",
   "--dogfood-evidence",
   "dogfood.json",
+  "--dogfood-workflow-run-id",
+  DOGFOOD_RUN_ID,
+  "--dogfood-workflow-run-attempt",
+  DOGFOOD_RUN_ATTEMPT,
 ];
 
 function dogfoodOperations() {
@@ -76,6 +84,8 @@ function dogfoodEvidence(overrides = {}) {
     contractVersions: { ...CONTRACT_VERSIONS },
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -120,6 +130,8 @@ test("parses every required explicit option", () => {
     repositoryName: "gh-inari",
     packedEvidence: "packed.json",
     dogfoodEvidence: "dogfood.json",
+    dogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+    dogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
   });
 });
 
@@ -156,6 +168,82 @@ test("rejects missing or invalid workflow context", () => {
     () =>
       parseWorkflowContext({ ...workflowEnvironment("release.tgz", "a".repeat(64)), GITHUB_REPOSITORY: "other/repo" }),
     /GITHUB_REPOSITORY must be yohn-jp\/gh-inari/u,
+  );
+});
+
+test("resolves a retained passing attempt without letting a failed rerun replace it", async () => {
+  const requests = [];
+  const candidateAttempts = [];
+  const artifact = (runId, runAttempt, createdAt) => ({
+    id: Number(runId) * 10 + Number(runAttempt),
+    name: selfDogfoodArtifactName(SOURCE_SHA, runId, runAttempt),
+    expired: false,
+    created_at: createdAt,
+    expires_at: "2026-03-01T00:00:00Z",
+    workflow_run: { id: Number(runId), run_attempt: Number(runAttempt), head_sha: SOURCE_SHA },
+  });
+  const resolved = await resolveSelfDogfoodWorkflowRun({
+    sourceSha: SOURCE_SHA,
+    environment: { GITHUB_API_URL: "https://api.example.test", GITHUB_TOKEN: "bounded-token" },
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({
+        artifacts: [
+          artifact("4101", "1", "2025-12-31T00:00:00Z"),
+          artifact("4101", "2", "2025-12-31T00:02:00Z"),
+          artifact("4102", "1", "2025-12-31T00:01:00Z"),
+        ],
+      });
+    },
+    now: Date.parse("2026-01-01T00:00:00Z"),
+    candidateEvidenceRetriever: async ({ workflowRunId, workflowRunAttempt }) => {
+      candidateAttempts.push({ workflowRunId, workflowRunAttempt });
+      return dogfoodEvidence({
+        result: workflowRunId === "4101" && workflowRunAttempt === "1" ? "passed" : "blocked",
+        workflow: { runId: workflowRunId, runAttempt: workflowRunAttempt },
+      });
+    },
+  });
+  assert.deepEqual(resolved, { workflowRunId: "4101", workflowRunAttempt: "1" });
+  assert.deepEqual(candidateAttempts, [
+    { workflowRunId: "4101", workflowRunAttempt: "2" },
+    { workflowRunId: "4102", workflowRunAttempt: "1" },
+    { workflowRunId: "4101", workflowRunAttempt: "1" },
+  ]);
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /repos\/yohn-jp\/gh-inari\/actions\/artifacts\?per_page=100$/u);
+  assert.equal(requests[0].init.headers.authorization, "Bearer bounded-token");
+});
+
+test("fails closed when retained self-dogfood artifacts have no passing evidence", async () => {
+  const base = {
+    sourceSha: SOURCE_SHA,
+    environment: { GITHUB_API_URL: "https://api.example.test" },
+    now: Date.parse("2026-01-01T00:00:00Z"),
+  };
+  await assert.rejects(
+    resolveSelfDogfoodWorkflowRun({ ...base, fetchImpl: async () => jsonResponse({ artifacts: [] }) }),
+    /no retained self-dogfood artifact/u,
+  );
+  await assert.rejects(
+    resolveSelfDogfoodWorkflowRun({
+      ...base,
+      fetchImpl: async () =>
+        jsonResponse({
+          artifacts: [
+            {
+              id: 4101,
+              name: selfDogfoodArtifactName(SOURCE_SHA, DOGFOOD_RUN_ID, DOGFOOD_RUN_ATTEMPT),
+              expired: false,
+              created_at: "2025-12-31T00:00:00Z",
+              expires_at: "2026-03-01T00:00:00Z",
+              workflow_run: { id: Number(DOGFOOD_RUN_ID), run_attempt: 1, head_sha: SOURCE_SHA },
+            },
+          ],
+        }),
+      candidateEvidenceRetriever: async () => dogfoodEvidence({ result: "blocked" }),
+    }),
+    /no retained passing self-dogfood artifact/u,
   );
 });
 
@@ -249,6 +337,10 @@ test("composes a successful workflow result from exact-artifact and exact-source
       environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
       currentSourceSha: SOURCE_SHA,
       packageMetadata: PACKAGE,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       packedEvidenceGenerator: async (input) => {
         packedInput = input;
         return packedEvidence({ package: { ...PACKAGE, tarballSha256: `sha256:${fixture.artifactSha256}` } });
@@ -275,6 +367,10 @@ test("delegates failed, malformed, package-mismatched, and repository-mismatched
       environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
       currentSourceSha: SOURCE_SHA,
       packageMetadata: PACKAGE,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       dogfoodEvidenceRetriever: async () => dogfoodEvidence(),
     };
     const failed = await runWorkflowCertification({
@@ -311,20 +407,22 @@ test("delegates failed, malformed, package-mismatched, and repository-mismatched
   }
 });
 
-test("retrieves newest unexpired exact-source artifact through a bounded fake GitHub API", async () => {
+test("retrieves the explicitly intended unexpired exact-source artifact through a bounded fake GitHub API", async () => {
   const now = Date.parse("2026-01-01T00:00:00Z");
   const requests = [];
   const artifact = {
     id: 42,
-    name: `${"self-dogfood-golden-path-"}${SOURCE_SHA}`,
+    name: selfDogfoodArtifactName(SOURCE_SHA, DOGFOOD_RUN_ID, DOGFOOD_RUN_ATTEMPT),
     expired: false,
     created_at: "2025-12-31T00:00:00Z",
     expires_at: "2026-03-01T00:00:00Z",
-    workflow_run: { head_sha: SOURCE_SHA },
+    workflow_run: { id: Number(DOGFOOD_RUN_ID), run_attempt: Number(DOGFOOD_RUN_ATTEMPT), head_sha: SOURCE_SHA },
   };
   const evidence = dogfoodEvidence();
   const retrieved = await retrieveSelfDogfoodEvidence({
     sourceSha: SOURCE_SHA,
+    workflowRunId: DOGFOOD_RUN_ID,
+    workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     environment: { GITHUB_API_URL: "https://api.example.test", GITHUB_TOKEN: "bounded-token" },
     now,
     fetchImpl: async (url, init) => {
@@ -339,14 +437,122 @@ test("retrieves newest unexpired exact-source artifact through a bounded fake Gi
   });
   assert.deepEqual(retrieved, evidence);
   assert.equal(requests.length, 2);
-  assert.match(requests[0].url, /repos\/yohn-jp\/gh-inari\/actions\/artifacts\?name=self-dogfood-golden-path-/u);
+  assert.match(
+    requests[0].url,
+    new RegExp(
+      `repos/yohn-jp/gh-inari/actions/artifacts\\?name=self-dogfood-golden-path-${SOURCE_SHA}-${DOGFOOD_RUN_ID}-${DOGFOOD_RUN_ATTEMPT}`,
+    ),
+  );
   assert.match(requests[1].url, /repos\/yohn-jp\/gh-inari\/actions\/artifacts\/42\/zip$/u);
   assert.equal(requests[0].init.headers.authorization, "Bearer bounded-token");
+});
+
+test("does not let a newer same-source attempt replace the explicitly intended attempt", async () => {
+  const now = Date.parse("2026-01-01T00:00:00Z");
+  const intendedRunId = "4101";
+  const newerRunId = "4102";
+  const artifactNameFor = (runId) => `self-dogfood-golden-path-${SOURCE_SHA}-${runId}-1`;
+  const artifacts = [
+    {
+      id: 41,
+      name: artifactNameFor(intendedRunId),
+      expired: false,
+      created_at: "2025-12-31T00:00:00Z",
+      expires_at: "2026-03-01T00:00:00Z",
+      workflow_run: { id: Number(intendedRunId), run_attempt: 1, head_sha: SOURCE_SHA },
+    },
+    {
+      id: 42,
+      name: artifactNameFor(newerRunId),
+      expired: false,
+      created_at: "2025-12-31T00:01:00Z",
+      expires_at: "2026-03-01T00:00:00Z",
+      workflow_run: { id: Number(newerRunId), run_attempt: 1, head_sha: SOURCE_SHA },
+    },
+  ];
+  const evidenceFor = (runId) => ({
+    ...dogfoodEvidence(),
+    workflow: { runId, runAttempt: "1" },
+  });
+
+  const retrieved = await retrieveSelfDogfoodEvidence({
+    sourceSha: SOURCE_SHA,
+    workflowRunId: intendedRunId,
+    workflowRunAttempt: "1",
+    environment: { GITHUB_API_URL: "https://api.example.test" },
+    now,
+    fetchImpl: async (url) => {
+      if (url.includes("/actions/artifacts?")) return jsonResponse({ artifacts });
+      const marker = url.endsWith("/41/zip") ? intendedRunId : newerRunId;
+      return { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(marker).buffer };
+    },
+    extractArchive: async (archivePath) => evidenceFor(fs.readFileSync(archivePath, "utf8")),
+  });
+
+  assert.equal(retrieved.workflow.runId, intendedRunId);
+  const retrievedFromReverseListing = await retrieveSelfDogfoodEvidence({
+    sourceSha: SOURCE_SHA,
+    workflowRunId: intendedRunId,
+    workflowRunAttempt: "1",
+    environment: { GITHUB_API_URL: "https://api.example.test" },
+    now,
+    fetchImpl: async (url) => {
+      if (url.includes("/actions/artifacts?")) return jsonResponse({ artifacts: [...artifacts].reverse() });
+      return { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode(intendedRunId).buffer };
+    },
+    extractArchive: async () => evidenceFor(intendedRunId),
+  });
+  assert.equal(retrievedFromReverseListing.workflow.runId, intendedRunId);
+});
+
+test("fails closed when the selected artifact or evidence names another workflow run", async () => {
+  const expectedName = selfDogfoodArtifactName(SOURCE_SHA, DOGFOOD_RUN_ID, DOGFOOD_RUN_ATTEMPT);
+  const base = {
+    sourceSha: SOURCE_SHA,
+    workflowRunId: DOGFOOD_RUN_ID,
+    workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+    environment: { GITHUB_API_URL: "https://api.example.test" },
+    now: Date.parse("2026-01-01T00:00:00Z"),
+  };
+  const fetchFor = (artifact) => async (url) => {
+    if (url.includes("/actions/artifacts?")) return jsonResponse({ artifacts: [artifact] });
+    return { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode("archive").buffer };
+  };
+  await assert.rejects(
+    retrieveSelfDogfoodEvidence({
+      ...base,
+      fetchImpl: fetchFor({
+        id: 41,
+        name: expectedName,
+        expired: false,
+        expires_at: "2026-03-01T00:00:00Z",
+        workflow_run: { id: 4102, run_attempt: 1, head_sha: SOURCE_SHA },
+      }),
+      extractArchive: async () => dogfoodEvidence(),
+    }),
+    /does not match the explicitly intended certification run/u,
+  );
+  await assert.rejects(
+    retrieveSelfDogfoodEvidence({
+      ...base,
+      fetchImpl: fetchFor({
+        id: 41,
+        name: expectedName,
+        expired: false,
+        expires_at: "2026-03-01T00:00:00Z",
+        workflow_run: { id: 4101, run_attempt: 1, head_sha: SOURCE_SHA },
+      }),
+      extractArchive: async () => dogfoodEvidence({ workflow: { runId: "4102", runAttempt: "1" } }),
+    }),
+    /does not match the explicitly intended certification run/u,
+  );
 });
 
 test("rejects missing, expired, and wrong-head self-dogfood artifacts", async () => {
   const base = {
     sourceSha: SOURCE_SHA,
+    workflowRunId: DOGFOOD_RUN_ID,
+    workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     environment: { GITHUB_API_URL: "https://api.example.test" },
     now: Date.parse("2026-01-01T00:00:00Z"),
     extractArchive: async () => dogfoodEvidence(),
@@ -362,7 +568,12 @@ test("rejects missing, expired, and wrong-head self-dogfood artifacts", async ()
   await assert.rejects(
     retrieveSelfDogfoodEvidence({
       ...base,
-      fetchImpl: responseFor({ id: 1, name: `self-dogfood-golden-path-${SOURCE_SHA}`, expired: true }),
+      fetchImpl: responseFor({
+        id: 1,
+        name: `self-dogfood-golden-path-${SOURCE_SHA}-${DOGFOOD_RUN_ID}-${DOGFOOD_RUN_ATTEMPT}`,
+        expired: true,
+        workflow_run: { id: Number(DOGFOOD_RUN_ID), run_attempt: Number(DOGFOOD_RUN_ATTEMPT), head_sha: SOURCE_SHA },
+      }),
     }),
     /expired/u,
   );
@@ -371,9 +582,13 @@ test("rejects missing, expired, and wrong-head self-dogfood artifacts", async ()
       ...base,
       fetchImpl: responseFor({
         id: 2,
-        name: `self-dogfood-golden-path-${SOURCE_SHA}`,
+        name: `self-dogfood-golden-path-${SOURCE_SHA}-${DOGFOOD_RUN_ID}-${DOGFOOD_RUN_ATTEMPT}`,
         expired: false,
-        workflow_run: { head_sha: OTHER_SOURCE_SHA },
+        workflow_run: {
+          id: Number(DOGFOOD_RUN_ID),
+          run_attempt: Number(DOGFOOD_RUN_ATTEMPT),
+          head_sha: OTHER_SOURCE_SHA,
+        },
       }),
     }),
     /head SHA does not match/u,
@@ -411,6 +626,10 @@ test("rejects exact-source dogfood content mismatch and bounds adapter failures"
       environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
       currentSourceSha: SOURCE_SHA,
       packageMetadata: PACKAGE,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       packedEvidenceGenerator: async () =>
         packedEvidence({ package: { ...PACKAGE, tarballSha256: `sha256:${fixture.artifactSha256}` } }),
       dogfoodEvidenceRetriever: async () => dogfoodEvidence({ sourceCommitSha: OTHER_SOURCE_SHA }),

@@ -6,8 +6,11 @@ import test from "node:test";
 import { exportsTargetPaths, validateCodexPluginMetadata } from "../../scripts/run-package-suite.mjs";
 import {
   CERTIFICATION_ENTRY_COMMANDS,
+  EXPECTED_FORGED_REQUESTER_REJECTION,
+  MAX_SECURITY_SMOKE_OUTPUT_BYTES,
   REQUIRED_BIN_NAMES,
   freshEnvironment,
+  validateForgedRequesterSecuritySmoke,
   validatePreflightOutput,
   validateSkillIndex,
   validateVersionOutput,
@@ -181,6 +184,30 @@ test("complete certification uses the installed Golden Path and provider boundar
   assert.match(smokeScript, /INARI_PACKED_PROVIDER_STATE/u);
   assert.doesNotMatch(smokeScript, /GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE|certification.*blocked/u);
   assert.doesNotMatch(smokeScript, /packed-golden-path-runner/u);
+});
+
+test("forged-requester security smoke accepts only the expected bounded rejection", () => {
+  const expectedResult = {
+    status: 1,
+    stdout: `${JSON.stringify(EXPECTED_FORGED_REQUESTER_REJECTION)}\n`,
+    stderr: "",
+  };
+  assert.deepEqual(validateForgedRequesterSecuritySmoke(expectedResult), EXPECTED_FORGED_REQUESTER_REJECTION);
+  assert.equal(MAX_SECURITY_SMOKE_OUTPUT_BYTES, 64 * 1024);
+
+  assert.throws(() => validateForgedRequesterSecuritySmoke({ ...expectedResult, status: 0 }), /unexpectedly accepted/u);
+  for (const mutation of [{ code: "CHANGE_REMOTE_REQUEST_INVALID" }, { stage: "repository-evidence" }]) {
+    const error = { ...EXPECTED_FORGED_REQUESTER_REJECTION.error, ...mutation };
+    if (mutation.stage !== undefined) error.details = { stage: mutation.stage };
+    assert.throws(
+      () =>
+        validateForgedRequesterSecuritySmoke({
+          ...expectedResult,
+          stdout: `${JSON.stringify({ ...EXPECTED_FORGED_REQUESTER_REJECTION, error })}\n`,
+        }),
+      /unexpected rejection/u,
+    );
+  }
 });
 
 test("packed certification isolates ambient GitHub Actions requester context", () => {

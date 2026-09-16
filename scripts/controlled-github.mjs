@@ -847,9 +847,11 @@ async function actionsApi(argv) {
   const fields = parseFields(argv);
   if (
     relativeEndpoint.startsWith("actions/workflows/") &&
-    relativeEndpoint.endsWith("/runs?event=workflow_dispatch&branch=main&per_page=100")
+    relativeEndpoint.includes("/runs?event=workflow_dispatch&branch=main&per_page=100&page=")
   ) {
-    process.stdout.write(`${JSON.stringify({ workflow_runs: state.runs ?? [] })}\n`);
+    const page = Number(new URL(`https://provider.invalid/${relativeEndpoint}`).searchParams.get("page"));
+    const runs = Array.isArray(state.runs) ? state.runs : [];
+    process.stdout.write(`${JSON.stringify({ workflow_runs: runs.slice((page - 1) * 100, page * 100) })}\n`);
     return;
   }
   if (relativeEndpoint === "actions/workflows/inari-change-executor.yml/dispatches" && method === "POST") {
@@ -869,6 +871,10 @@ async function actionsApi(argv) {
       head_branch: "main",
       ref: "refs/heads/main",
       path: ".github/workflows/inari-change-executor.yml",
+      // Mirrors the executor's `run-name: Inari Change ${{ inputs.correlation }}`
+      // (exposed by the real Actions API as `display_title`), which the
+      // adapter now requires as positive correlation evidence (#612).
+      display_title: `Inari Change ${correlation}`,
     };
     state.runs = [run, ...(state.runs ?? [])];
     const worker = await dispatchWorker(state, statePath, requestJson);
@@ -879,10 +885,12 @@ async function actionsApi(argv) {
     return;
   }
   if (relativeEndpoint.startsWith("actions/artifacts?name=") && method === "GET") {
-    const name = new URL(`https://provider.invalid/${relativeEndpoint}`).searchParams.get("name");
+    const requestUrl = new URL(`https://provider.invalid/${relativeEndpoint}`);
+    const name = requestUrl.searchParams.get("name");
+    const page = Number(requestUrl.searchParams.get("page"));
     const artifact = name === null ? undefined : state.artifacts?.[name.replace("inari-change-result-", "")];
     process.stdout.write(
-      `${JSON.stringify({ artifacts: artifact === undefined ? [] : [{ id: artifact.id, name, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } }] })}\n`,
+      `${JSON.stringify({ artifacts: artifact === undefined || page !== 1 ? [] : [{ id: artifact.id, name, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } }] })}\n`,
     );
     return;
   }

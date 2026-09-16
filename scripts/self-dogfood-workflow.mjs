@@ -2,7 +2,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { CERTIFICATION_KINDS, sha256Tarball, validateSelfDogfoodEvidence } from "./certification-evidence.mjs";
+import {
+  CERTIFICATION_KINDS,
+  isCertificationWorkflowRunAttempt,
+  isCertificationWorkflowRunId,
+  selfDogfoodArtifactName,
+  SELF_DOGFOOD_SCENARIOS,
+  sha256Tarball,
+  validateSelfDogfoodEvidence,
+} from "./certification-evidence.mjs";
 
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const TARBALL_SHA_PATTERN = /^sha256:[0-9a-f]{64}$/u;
@@ -71,15 +79,19 @@ function validateWorkerObservation(observation, sourceCommitSha, issue) {
 }
 
 function workflowIdentity(environment, sourceCommitSha, repository, exerciseAbort) {
+  const runId = environment.GITHUB_RUN_ID;
+  const runAttempt = environment.GITHUB_RUN_ATTEMPT;
+  if (!isCertificationWorkflowRunId(runId) || !isCertificationWorkflowRunAttempt(runAttempt))
+    throw new Error("workflow run identity must contain an exact run ID and run attempt");
   return {
-    runId: environment.GITHUB_RUN_ID ?? null,
-    runAttempt: environment.GITHUB_RUN_ATTEMPT ?? null,
+    runId,
+    runAttempt,
     workflow: environment.GITHUB_WORKFLOW ?? null,
     url:
       environment.GITHUB_SERVER_URL !== undefined && environment.GITHUB_REPOSITORY !== undefined
-        ? `${environment.GITHUB_SERVER_URL}/${environment.GITHUB_REPOSITORY}/actions/runs/${environment.GITHUB_RUN_ID ?? ""}`
+        ? `${environment.GITHUB_SERVER_URL}/${environment.GITHUB_REPOSITORY}/actions/runs/${runId}`
         : null,
-    artifactName: `self-dogfood-golden-path-${sourceCommitSha}`,
+    artifactName: selfDogfoodArtifactName(sourceCommitSha, runId, runAttempt),
     exerciseAbort,
     repository,
   };
@@ -125,6 +137,15 @@ export function verifySelfDogfoodRun(input) {
   )
     throw new Error("evidence repository or Issue identity does not match the workflow input");
 
+  const workflow = workflowIdentity(
+    input.environment ?? {},
+    input.sourceCommitSha,
+    repository,
+    input.exerciseAbort === true,
+  );
+  if (input.evidence.workflow.runId !== workflow.runId || input.evidence.workflow.runAttempt !== workflow.runAttempt)
+    throw new Error("evidence workflow run identity does not match the certification workflow");
+
   const sourceRoot = fs.realpathSync(input.sourceRoot);
   const tarballPath = fs.realpathSync(input.tarballPath);
   const installedPackagePath = fs.realpathSync(input.installedPackagePath);
@@ -165,6 +186,8 @@ export function verifySelfDogfoodRun(input) {
     throw new Error("workflow tarball digest does not match the recorded digest");
 
   if (input.evidence.result === "passed") {
+    if (input.evidence.scenario !== SELF_DOGFOOD_SCENARIOS.FRESH_CREATE)
+      throw new Error("passed self-dogfood evidence must identify the fresh-create scenario");
     if (input.workerObservation === undefined) throw new Error("passed evidence is missing worker observation");
     validateWorkerObservation(input.workerObservation, input.sourceCommitSha, input.issue);
   }
@@ -175,19 +198,15 @@ export function verifySelfDogfoodRun(input) {
     certificationKind: CERTIFICATION_KIND,
     result: input.evidence.result,
     sourceCommitSha: input.sourceCommitSha,
+    scenario: input.evidence.scenario,
     repository,
     rootIssue: input.issue,
     artifact: {
-      name: `self-dogfood-golden-path-${input.sourceCommitSha}`,
+      name: workflow.artifactName,
       tarballSha256: input.tarballSha256,
     },
     package: { name: packageMetadata.name, version: packageMetadata.version },
-    workflow: workflowIdentity(
-      input.environment ?? {},
-      input.sourceCommitSha,
-      repository,
-      input.exerciseAbort === true,
-    ),
+    workflow,
     change: input.evidence.change,
     finalState: input.evidence.finalState,
     residualChange,
@@ -205,6 +224,7 @@ function renderSummary(metadata) {
     "",
     `- Result: \`${boundedText(metadata.result)}\``,
     `- Source SHA: \`${boundedText(metadata.sourceCommitSha)}\``,
+    `- Scenario: \`${boundedText(metadata.scenario)}\``,
     `- Repository: \`${boundedText(metadata.repository.owner)}/${boundedText(metadata.repository.name)}\``,
     `- Root Issue: #${String(metadata.rootIssue)}`,
     `- Change: branch \`${boundedText(change.branch)}\`, PR #${String(change.pullRequest)}`,

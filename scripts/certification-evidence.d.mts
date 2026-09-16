@@ -16,6 +16,10 @@ export const SELF_DOGFOOD_OPERATION_REQUIREMENTS: readonly {
   readonly operation: string;
   readonly outcomes: readonly string[];
 }[];
+export const SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS: readonly {
+  readonly operation: string;
+  readonly outcomes: readonly string[];
+}[];
 export const SELF_DOGFOOD_RECOVERY_OPERATION: {
   readonly operation: string;
   readonly outcomes: readonly string[];
@@ -25,11 +29,16 @@ export const SELF_DOGFOOD_OUTCOMES: {
   readonly RETURNED_EXISTING: "returned-existing";
   readonly SUCCESS: "success";
 };
+export const SELF_DOGFOOD_SCENARIOS: {
+  readonly FRESH_CREATE: "fresh-create";
+  readonly RECONCILIATION_RECOVERY: "reconciliation-recovery";
+};
 export const SELF_DOGFOOD_OPERATIONS: {
   readonly OPT_IN: string;
   readonly EXECUTABLE: string;
   readonly SKILL: string;
   readonly GOVERNANCE: string;
+  readonly FRESH_PREFLIGHT: string;
   readonly FIRST_ISSUANCE: string;
   readonly RETURN_EXISTING: string;
   readonly HANDOFF: string;
@@ -59,6 +68,16 @@ export interface CertificationDiagnostic {
   readonly diagnostics?: readonly Record<string, unknown>[];
   readonly evidence?: Record<string, unknown>;
 }
+
+export interface CertificationStructuredCommandError {
+  readonly code: string;
+  readonly message: string;
+  readonly structured: CertificationDiagnosticStructuredFields;
+}
+
+export function sanitizeCertificationText(value: unknown, maximum?: number): string | undefined;
+export function projectStructuredCommandError(value: unknown): CertificationStructuredCommandError | undefined;
+
 export type CertificationDiagnosticCode =
   | "EXPECTED_IDENTITY_INVALID"
   | "EVIDENCE_MISSING"
@@ -71,7 +90,9 @@ export type CertificationDiagnosticCode =
   | "PACKAGE_MISMATCH"
   | "TARBALL_DIGEST_MISMATCH"
   | "REPOSITORY_MISMATCH"
+  | "CERTIFICATION_RUN_MISMATCH"
   | "DOGFOOD_IDENTITY_INVALID"
+  | "DOGFOOD_SCENARIO_INVALID"
   | "DOGFOOD_OPERATION_MISSING"
   | "DOGFOOD_OPERATION_OUTCOME_INVALID"
   | "DOGFOOD_FINAL_STATE_INVALID";
@@ -90,6 +111,11 @@ export interface CertificationOperationEvidence {
 export interface CertificationRepositoryIdentity {
   readonly owner: string;
   readonly name: string;
+}
+
+export interface CertificationWorkflowIdentity {
+  readonly runId: string;
+  readonly runAttempt: string;
 }
 
 export interface CertificationChangeIdentity {
@@ -125,6 +151,8 @@ export interface PackedArtifactCertificationEvidence extends CertificationEnvelo
 export interface SelfDogfoodCertificationEvidence extends CertificationEnvelopeBase {
   readonly certificationKind: "self-dogfood-golden-path";
   readonly repository: CertificationRepositoryIdentity;
+  readonly workflow: CertificationWorkflowIdentity;
+  readonly scenario: "fresh-create" | "reconciliation-recovery";
   readonly rootIssue: number;
   readonly change: CertificationChangeIdentity;
   readonly operations: readonly CertificationOperationEvidence[];
@@ -180,11 +208,18 @@ export function appendCertificationDiagnostic<T extends CertificationDiagnostic>
 
 export function isCertificationBoundedString(value: unknown, maximum?: number): value is string;
 export function isCertificationSourceCommitSha(value: unknown): value is string;
+export function isCertificationWorkflowRunId(value: unknown): value is string;
+export function isCertificationWorkflowRunAttempt(value: unknown): value is string;
 export function isCertificationTarballSha256(value: unknown): value is string;
 export function isCertificationPackageName(value: unknown): value is string;
 export function isCertificationRepositoryPart(value: unknown): value is string;
 export function isCertificationReviewState(value: unknown): boolean;
 export function isCertificationCompletedRecoveryState(value: unknown): boolean;
+export function selfDogfoodArtifactName(
+  sourceCommitSha: string,
+  workflowRunId: string,
+  workflowRunAttempt: string,
+): string;
 
 export class CertificationEvidenceError extends Error {
   readonly errors: readonly string[];

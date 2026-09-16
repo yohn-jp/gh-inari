@@ -225,6 +225,25 @@ test("trusted execution actor is the sole requester provenance authority", async
   assert.equal(result.projection.change?.provenance.requester, "github:trusted-actor");
 });
 
+test("trusted requester binding is fixed from the validated execution context", async () => {
+  const reader = new MutableReader(input(evidence([])));
+  const issuer = new FakeIssuer(reader);
+  const mutableExecution = { ...execution, requester: "github:trusted-actor" } as TrustedExecutionContext & {
+    requester: string;
+  };
+  const trusted = executor(reader, issuer, mutableExecution);
+  mutableExecution.requester = "github:caller-mutated";
+
+  const result = await trusted.execute({
+    version: CHANGE_TRANSITION_CONTRACT_VERSION,
+    operation: "issue",
+    issue: identity.rootIssue,
+  });
+
+  assert.equal(result.evidence?.requester, "github:trusted-actor");
+  assert.equal(result.projection.change?.provenance.requester, "github:trusted-actor");
+});
+
 test("a caller requester assertion is rejected at the trusted boundary", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);

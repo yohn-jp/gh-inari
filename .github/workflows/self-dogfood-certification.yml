@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       disposable_issue:
-        description: "Existing governed Issue containing the exact inari:self-dogfood:v1 marker"
+        description: "Governed fresh fixture Issue with the exact inari:self-dogfood:v1 marker and no Change history"
         required: true
         type: string
       confirm_disposable:
@@ -50,7 +50,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
         with:
           version: 11.18.0
 
@@ -185,6 +185,7 @@ jobs:
           args=(
             --inari "$DOGFOOD_INSTALLED_EXECUTABLE"
             --repository "$GITHUB_REPOSITORY"
+            --scenario fresh-create
             --issue "$DOGFOOD_ISSUE"
             --confirm-disposable "$DOGFOOD_CONFIRMATION"
             --worker-cwd "$DOGFOOD_WORKER_CWD"
@@ -195,7 +196,7 @@ jobs:
             export INARI_SELF_DOGFOOD_ALLOW_RECOVERY=1
             args+=(--abort)
           fi
-          node scripts/self-dogfood.mjs "${args[@]}"
+          node --import tsx scripts/self-dogfood.mjs "${args[@]}"
 
       - name: Validate canonical evidence and record residual state
         id: evidence
@@ -224,11 +225,11 @@ jobs:
           )
           node scripts/self-dogfood-workflow.mjs "${args[@]}"
 
-      - name: Retain source-addressable certification artifact
+      - name: Retain immutable source-and-run certification artifact
         if: always()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: self-dogfood-golden-path-${{ github.sha }}
+          name: self-dogfood-golden-path-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/self-dogfood/self-dogfood-golden-path.json
             ${{ runner.temp }}/self-dogfood/certification-metadata.json

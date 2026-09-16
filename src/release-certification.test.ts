@@ -6,6 +6,7 @@ import {
   CERTIFICATION_KINDS,
   CERTIFICATION_RESULTS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS,
   SELF_DOGFOOD_RECOVERY_OPERATION,
 } from "../scripts/certification-evidence.mjs";
 import {
@@ -18,12 +19,23 @@ import {
 
 const SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567";
 const TARBALL_SHA = `sha256:${"a".repeat(64)}`;
+const DOGFOOD_RUN_ID = "4101";
+const DOGFOOD_RUN_ATTEMPT = "1";
 
 function dogfoodOperations(): ReleaseCertificationOperationEvidence[] {
   let operations: ReleaseCertificationOperationEvidence[] = [];
   for (const requirement of SELF_DOGFOOD_OPERATION_REQUIREMENTS)
     operations = [...appendSelfDogfoodOperation(operations, requirement.operation, requirement.outcomes[0])];
   return operations;
+}
+
+function reconciliationRecoveryOperations(): ReleaseCertificationOperationEvidence[] {
+  return SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS.map(
+    (requirement: { operation: string; outcomes: readonly string[] }) => ({
+      operation: requirement.operation,
+      outcome: requirement.outcomes[0],
+    }),
+  );
 }
 
 function packedEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -48,6 +60,8 @@ function dogfoodEvidence(overrides: Record<string, unknown> = {}): Record<string
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -64,6 +78,8 @@ function input(overrides: Partial<ReleaseCertificationVerificationInput> = {}): 
     expectedTarballSha256: TARBALL_SHA,
     expectedRepositoryOwner: "yohn-jp",
     expectedRepositoryName: "gh-inari",
+    expectedDogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+    expectedDogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     packedEvidence: packedEvidence(),
     dogfoodEvidence: dogfoodEvidence(),
     ...overrides,
@@ -108,6 +124,25 @@ test("binds self-dogfood evidence to the expected release repository", () => {
   );
   assert.equal(result.passed, false);
   assert.equal(result.diagnostics[0]?.code, "REPOSITORY_MISMATCH");
+});
+
+test("binds self-dogfood evidence to the explicitly intended workflow run", () => {
+  const result = verifyReleaseCertification(input({ expectedDogfoodWorkflowRunId: "4102" }));
+  assert.equal(result.passed, false);
+  assert.equal(result.diagnostics[0]?.code, "CERTIFICATION_RUN_MISMATCH");
+});
+
+test("does not accept reconciliation/recovery evidence as fresh-create certification", () => {
+  const result = verifyReleaseCertification(
+    input({
+      dogfoodEvidence: dogfoodEvidence({
+        scenario: "reconciliation-recovery",
+        operations: reconciliationRecoveryOperations(),
+      }),
+    }),
+  );
+  assert.equal(result.passed, false);
+  assert.equal(result.diagnostics[0]?.code, "DOGFOOD_SCENARIO_INVALID");
 });
 
 test("binds the canonical Change identity to the dogfood root Issue", () => {
@@ -208,7 +243,7 @@ test("requires the bounded idempotency and handoff operation proofs", () => {
 
   const wrongOutcome = dogfoodEvidence();
   (wrongOutcome.operations as Array<Record<string, string>>)[5] = {
-    operation: SELF_DOGFOOD_OPERATION_REQUIREMENTS[5].operation,
+    operation: SELF_DOGFOOD_OPERATION_REQUIREMENTS[6].operation,
     outcome: "verified",
   };
   const wrongOutcomeResult = verifyReleaseCertification(input({ dogfoodEvidence: wrongOutcome }));

@@ -17,6 +17,8 @@ import {
 } from "../../src/release-certification.js";
 
 const SOURCE_SHA = "c".repeat(40);
+const DOGFOOD_RUN_ID = "4101";
+const DOGFOOD_RUN_ATTEMPT = "1";
 const TARBALL_SHA = `sha256:${"d".repeat(64)}`;
 const PACKAGE = { name: "gh-inari", version: "0.12.0", tarballSha256: TARBALL_SHA };
 
@@ -47,6 +49,8 @@ function dogfoodEvidence() {
     sourceCommitSha: SOURCE_SHA,
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: completeOperations(),
@@ -67,6 +71,8 @@ function verificationInput(packedEvidenceValue, dogfoodEvidenceValue) {
     expectedTarballSha256: PACKAGE.tarballSha256,
     expectedRepositoryOwner: "yohn-jp",
     expectedRepositoryName: "gh-inari",
+    expectedDogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+    expectedDogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     packedEvidence: packedEvidenceValue,
     dogfoodEvidence: dogfoodEvidenceValue,
   };
@@ -91,7 +97,7 @@ test("canonical operation and version drift is rejected before release compositi
   const packed = roundTrip(packedEvidence());
   const dogfood = roundTrip(dogfoodEvidence());
   const driftedOperations = dogfood.operations.map((entry, index) =>
-    index === 5 ? { ...entry, outcome: "verified" } : entry,
+    index === 6 ? { ...entry, outcome: "verified" } : entry,
   );
   const driftedDogfood = { ...dogfood, operations: driftedOperations };
 

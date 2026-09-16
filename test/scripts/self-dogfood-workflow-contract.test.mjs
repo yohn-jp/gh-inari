@@ -14,6 +14,7 @@ test("self-dogfood certification is an explicit, source-addressable privileged o
   assert.match(workflow, /workflow_dispatch:/u);
   assert.match(workflow, /disposable_issue:/u);
   assert.match(workflow, /confirm_disposable:/u);
+  assert.match(workflow, /--scenario fresh-create/u);
   assert.match(workflow, /exercise_abort:/u);
   assert.match(workflow, /actions: write/u);
   assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/u);
@@ -25,7 +26,10 @@ test("self-dogfood certification is an explicit, source-addressable privileged o
   assert.match(workflow, /--inari "\$DOGFOOD_INSTALLED_EXECUTABLE"/u);
   assert.match(workflow, /scripts\/self-dogfood\.mjs/u);
   assert.match(workflow, /scripts\/self-dogfood-workflow\.mjs/u);
-  assert.match(workflow, /name: self-dogfood-golden-path-\$\{\{ github\.sha \}\}/u);
+  assert.match(
+    workflow,
+    /name: self-dogfood-golden-path-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u,
+  );
   assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/u);
 });
 

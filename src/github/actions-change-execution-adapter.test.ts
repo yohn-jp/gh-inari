@@ -11,17 +11,25 @@ import {
 } from "../change-execution-port.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
+  ActionsChangeExecutionAdapter,
   createActionsChangeExecutionAdapter,
   INARI_CHANGE_EXECUTOR_REF,
   INARI_CHANGE_EXECUTOR_WORKFLOW,
   type GitHubActionsRemoteApi,
 } from "./actions-change-execution-adapter.js";
+import { GhUnauthenticatedError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
 import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
 
 const correlation = "123e4567-e89b-42d3-a456-426614174000";
+const unrelatedCorrelation = "00000000-0000-4000-8000-000000000001";
+const otherUnrelatedCorrelation = "00000000-0000-4000-8000-000000000002";
+
+function runDisplayTitle(runCorrelation: string): string {
+  return `Inari Change ${runCorrelation}`;
+}
 const repository: RepositoryContext = {
   hostname: "github.com",
   host: "github.com",
@@ -200,6 +208,7 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
               conclusion: "success",
               event: "workflow_dispatch",
               head_branch: "main",
+              display_title: runDisplayTitle(unrelatedCorrelation),
             },
           ],
         };
@@ -212,14 +221,23 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
             conclusion: this.runState === "success" ? "success" : "failure",
             event: "workflow_dispatch",
             head_branch: "main",
+            display_title: runDisplayTitle(correlation),
           },
-          { id: 12, status: "completed", conclusion: "success", event: "workflow_dispatch", head_branch: "main" },
+          {
+            id: 12,
+            status: "completed",
+            conclusion: "success",
+            event: "workflow_dispatch",
+            head_branch: "main",
+            display_title: runDisplayTitle(otherUnrelatedCorrelation),
+          },
           {
             id: this.baselineRunId,
             status: "completed",
             conclusion: "success",
             event: "workflow_dispatch",
             head_branch: "main",
+            display_title: runDisplayTitle(unrelatedCorrelation),
           },
         ],
       };
@@ -301,6 +319,27 @@ function executor(
     ...(extra.now === undefined ? {} : { now: extra.now }),
   });
 }
+
+test("Actions transport accepts no repository projection API and delegates reads", async () => {
+  const source = new FakeActionsApi();
+  const transport: GitHubActionsRemoteApi = {
+    getRepositoryContext: source.getRepositoryContext.bind(source),
+    requestActionsApi: source.requestActionsApi.bind(source),
+    downloadActionsArtifact: source.downloadActionsArtifact.bind(source),
+  };
+  const adapter = new ActionsChangeExecutionAdapter({
+    cwd: process.cwd(),
+    api: transport,
+    read: { read: async () => source.result },
+    randomUUID: () => correlation,
+    pollIntervalMs: 0,
+    sleep: async () => undefined,
+    maxPollAttempts: 2,
+  });
+
+  assert.deepEqual(await adapter.read(changeReadRequest(42)), source.result);
+  assert.deepEqual(await adapter.execute(changeMutationRequest("issue", 42)), { projection: source.result });
+});
 
 test("issue, ready, and abort dispatch the same semantic request through the trusted workflow", async () => {
   for (const operation of ["issue", "ready", "abort"] as const) {
@@ -436,16 +475,23 @@ test("waits through queued and in-progress executor runs before accepting the co
       workflowReads += 1;
       const run =
         workflowReads === 1
-          ? { id: api.baselineRunId, status: "completed", conclusion: "success" }
+          ? { id: api.baselineRunId, status: "completed", conclusion: "success", displayTitle: unrelatedCorrelation }
           : workflowReads === 2
-            ? { id: api.resultRunId, status: "queued", conclusion: null }
+            ? { id: api.resultRunId, status: "queued", conclusion: null, displayTitle: correlation }
             : workflowReads === 3
-              ? { id: api.resultRunId, status: "in_progress", conclusion: null }
-              : { id: api.resultRunId, status: "completed", conclusion: "success" };
+              ? { id: api.resultRunId, status: "in_progress", conclusion: null, displayTitle: correlation }
+              : { id: api.resultRunId, status: "completed", conclusion: "success", displayTitle: correlation };
       api.calls.push({ path, method, fields });
       return {
         workflow_runs: [
-          { ...run, event: "workflow_dispatch", head_branch: "main" },
+          {
+            id: run.id,
+            status: run.status,
+            conclusion: run.conclusion,
+            event: "workflow_dispatch",
+            head_branch: "main",
+            display_title: runDisplayTitle(run.displayTitle),
+          },
           ...(run.id === api.resultRunId
             ? [
                 {
@@ -454,6 +500,7 @@ test("waits through queued and in-progress executor runs before accepting the co
                   conclusion: "success",
                   event: "workflow_dispatch",
                   head_branch: "main",
+                  display_title: runDisplayTitle(unrelatedCorrelation),
                 },
               ]
             : []),
@@ -467,6 +514,260 @@ test("waits through queued and in-progress executor runs before accepting the co
 
   assert.deepEqual(result, { projection: api.result });
   assert.equal(workflowReads, 4);
+});
+
+function runFixture(
+  id: number,
+  runCorrelation: string,
+  status: "queued" | "in_progress" | "completed",
+  conclusion: string | null,
+): Record<string, unknown> {
+  return {
+    id,
+    status,
+    conclusion,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    display_title: runDisplayTitle(runCorrelation),
+  };
+}
+
+function artifactFixture(id: number, workflowRunId: number): Record<string, unknown> {
+  return { id, name: `inari-change-result-${correlation}`, expired: false, workflow_run: { id: workflowRunId } };
+}
+
+function pageFromPath(value: string): number {
+  const match = /[?&]page=(\d+)/u.exec(value);
+  if (match === null) throw new Error(`missing page in Actions path: ${value}`);
+  return Number(match[1]);
+}
+
+function unrelatedRunPage(startId: number): Record<string, unknown>[] {
+  return Array.from({ length: 100 }, (_, index) =>
+    runFixture(startId + index, unrelatedCorrelation, "completed", "success"),
+  );
+}
+
+test("#617 paginates workflow runs until the correlated run is found on page 2", async () => {
+  const api = new FakeActionsApi();
+  let dispatched = false;
+  const baselinePages: number[] = [];
+  const pollPages: number[] = [];
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") {
+      dispatched = true;
+      return undefined;
+    }
+    if (path.startsWith("actions/workflows/")) {
+      const page = pageFromPath(path);
+      (dispatched ? pollPages : baselinePages).push(page);
+      if (page === 1) return { workflow_runs: unrelatedRunPage(dispatched ? 1_000 : 2_000) };
+      return dispatched
+        ? { workflow_runs: [runFixture(api.resultRunId, correlation, "completed", "success")] }
+        : { workflow_runs: [] };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api, process.cwd(), 1).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.deepEqual(baselinePages, [1, 2]);
+  assert.deepEqual(pollPages, [1, 2]);
+});
+
+test("#617 paginates artifact discovery until the result artifact is found on page 2", async () => {
+  const api = new FakeActionsApi();
+  const artifactPages: number[] = [];
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      api.calls.push({ path, method, fields });
+      const page = pageFromPath(path);
+      artifactPages.push(page);
+      if (page === 1) {
+        return {
+          artifacts: Array.from({ length: 100 }, (_, index) => ({
+            id: 1_000 + index,
+            name: `unrelated-artifact-${index}`,
+            expired: false,
+            workflow_run: { id: 900 + index },
+          })),
+        };
+      }
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 1).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.deepEqual(artifactPages, [1, 2]);
+});
+
+test("#617 stops absent workflow-run discovery at the bounded page limit", async () => {
+  const api = new FakeActionsApi();
+  let dispatched = false;
+  const pollPages: number[] = [];
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") {
+      dispatched = true;
+      return undefined;
+    }
+    if (path.startsWith("actions/workflows/")) {
+      const page = pageFromPath(path);
+      if (!dispatched) return page === 1 ? { workflow_runs: unrelatedRunPage(2_000) } : { workflow_runs: [] };
+      pollPages.push(page);
+      return { workflow_runs: unrelatedRunPage(3_000 + page * 100) };
+    }
+    if (path.startsWith("actions/artifacts?")) return { artifacts: [] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 1).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "artifact-read" }),
+  );
+
+  assert.deepEqual(
+    pollPages,
+    Array.from({ length: 10 }, (_, index) => index + 1),
+  );
+});
+
+test("a sole unrelated completed executor run is not sufficient evidence and never reports a missing result artifact for this request", async () => {
+  const api = new FakeActionsApi();
+  let workflowReads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      workflowReads += 1;
+      if (workflowReads === 1) return { workflow_runs: [] };
+      // Only ever one unrelated completed run is observed; the target's
+      // run-name never appears within the bounded poll budget. Candidate
+      // cardinality (exactly one) must never substitute for correlation.
+      return { workflow_runs: [runFixture(90, unrelatedCorrelation, "completed", "success")] };
+    }
+    if (path.startsWith("actions/artifacts?")) return { artifacts: [] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "artifact-read" }),
+  );
+});
+
+test("an unrelated completed executor run observed before the target does not disrupt eventual correlation", async () => {
+  const api = new FakeActionsApi();
+  let workflowReads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      workflowReads += 1;
+      if (workflowReads === 1) return { workflow_runs: [] };
+      if (workflowReads === 2) {
+        return { workflow_runs: [runFixture(90, unrelatedCorrelation, "completed", "success")] };
+      }
+      return {
+        workflow_runs: [
+          runFixture(90, unrelatedCorrelation, "completed", "success"),
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?")) {
+      return workflowReads < 3
+        ? { artifacts: [] }
+        : { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("an unrelated completed run listed before the target in the same response does not divert correlation", async () => {
+  const api = new FakeActionsApi();
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      return {
+        workflow_runs: [
+          runFixture(90, unrelatedCorrelation, "completed", "failure"),
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("an unrelated completed run listed after the target in the same response does not divert correlation", async () => {
+  const api = new FakeActionsApi();
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      return {
+        workflow_runs: [
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+          runFixture(90, unrelatedCorrelation, "completed", "failure"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("with multiple candidate runs visible, only the run positively correlated by run-name is interpreted", async () => {
+  const api = new FakeActionsApi();
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      return {
+        workflow_runs: [
+          runFixture(90, unrelatedCorrelation, "completed", "failure"),
+          runFixture(91, otherUnrelatedCorrelation, "completed", "success"),
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
 });
 
 test("retries one transient run or artifact poll failure before observing success", async () => {
@@ -526,7 +827,8 @@ test("preserves the bounded result-timeout failure when no executor run becomes 
     (error: unknown) =>
       error instanceof ChangeExecutionPortError &&
       error.code === "CHANGE_REMOTE_RUN_FAILED" &&
-      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "artifact-read" }),
   );
 });
 
@@ -551,7 +853,8 @@ test("stops on real wall-clock deadline even when the poll-attempt count has not
     (error: unknown) =>
       error instanceof ChangeExecutionPortError &&
       error.code === "CHANGE_REMOTE_RUN_FAILED" &&
-      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "run-read" }),
   );
   // Two readRuns calls each advance the clock 50s past the 120s deadline
   // (readArtifacts also advances it, so bound the exact count loosely) and
@@ -574,6 +877,53 @@ test("a single slow-but-successful attempt still returns the result within the w
   );
 
   assert.deepEqual(result, { projection: api.result });
+});
+
+test("the default attempt-count ceiling does not cut off retries before the default wall-clock deadline", async () => {
+  // Issue #592: a fixed maxPollAttempts of 60 was exhausted in 230s of real
+  // time (under the 240s wall-clock deadline) purely from per-attempt API
+  // latency, aborting a wait that still had time remaining. Using the
+  // adapter's actual default maxPollAttempts/maxWaitMs (not an
+  // artificially small attempt cap), a recurring retryable transport error
+  // that consumes realistic per-attempt latency must keep retrying until
+  // the wall-clock deadline, not stop early because attempts ran out.
+  const api = new FakeActionsApi();
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  let elapsedMs = 0;
+  const now = () => elapsedMs;
+  let workflowRunReads = 0;
+  // Include setup and dispatch in the shared budget, then recover well past
+  // the old fixed cap of 60 attempts while remaining inside the deadline.
+  const failingReads = 65;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) {
+      workflowRunReads += 1;
+      // The first read is dispatchAndCollect's pre-dispatch baseline read
+      // (outside the poll loop's retry handling); only fail the poll loop's
+      // own reads so the loop, not the baseline call, is under test.
+      if (workflowRunReads > 1 && workflowRunReads <= failingReads + 1) {
+        elapsedMs += 3_000;
+        throw new Error("transient Actions run lookup failure");
+      }
+    }
+    elapsedMs += 3_000;
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await createActionsChangeExecutionAdapter({
+    cwd: process.cwd(),
+    api,
+    randomUUID: () => correlation,
+    pollIntervalMs: 0,
+    sleep: async () => undefined,
+    now,
+  }).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.ok(
+    workflowRunReads > failingReads,
+    `expected retries to continue past the old 60-attempt cap, workflowRunReads=${workflowRunReads}`,
+  );
 });
 
 test("requester authentication is not consulted and repository resolution failures are normalized", async () => {
@@ -623,6 +973,279 @@ test("dispatch, run, missing, ambiguous, stale, and malformed result failures fa
           : error.code === "CHANGE_REMOTE_CORRELATION_FAILED"),
     );
   }
+});
+
+test("#615 preserves a bounded transport stage at each Actions boundary", async () => {
+  const expectFailure = async (
+    api: FakeActionsApi,
+    expected: {
+      readonly code: string;
+      readonly reason: string;
+      readonly stage: string;
+      readonly operation?: string;
+    },
+  ): Promise<void> => {
+    await assert.rejects(executor(api).execute(changeMutationRequest("issue", 42)), (error: unknown) => {
+      assert.ok(error instanceof ChangeExecutionPortError);
+      assert.equal(error.code, expected.code);
+      assert.deepEqual(error.details, {
+        operation: expected.operation ?? "change.issue",
+        reason: expected.reason,
+        stage: expected.stage,
+      });
+      assert.doesNotMatch(JSON.stringify(error), /Bearer|secret|private|provider|token|\/private/iu);
+      return true;
+    });
+  };
+
+  const contextApi = new FakeActionsApi();
+  contextApi.getRepositoryContext = async () => {
+    throw new Error("Bearer context-secret /private/provider/context");
+  };
+  await expectFailure(contextApi, {
+    code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
+    reason: "transport",
+    stage: "repository-context",
+  });
+
+  const dispatchApi = new FakeActionsApi();
+  const dispatchRequest = dispatchApi.requestActionsApi.bind(dispatchApi);
+  dispatchApi.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "POST") throw new Error("Bearer dispatch-secret /private/provider/dispatch");
+    return dispatchRequest(path, method, fields);
+  };
+  await expectFailure(dispatchApi, {
+    code: "CHANGE_REMOTE_DISPATCH_FAILED",
+    reason: "transport",
+    stage: "dispatch",
+  });
+
+  const runApi = new FakeActionsApi();
+  const runRequest = runApi.requestActionsApi.bind(runApi);
+  let runReads = 0;
+  runApi.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) {
+      runReads += 1;
+      if (runReads === 2) throw new GhUnauthenticatedError("github.com", "run-secret");
+    }
+    return runRequest(path, method, fields);
+  };
+  await expectFailure(runApi, {
+    code: "CHANGE_REMOTE_TRANSPORT_FAILED",
+    reason: "authentication",
+    stage: "run-read",
+  });
+
+  const artifactApi = new FakeActionsApi();
+  const artifactRequest = artifactApi.requestActionsApi.bind(artifactApi);
+  artifactApi.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      throw new GhUnauthenticatedError("github.com", "artifact-secret");
+    }
+    return artifactRequest(path, method, fields);
+  };
+  await expectFailure(artifactApi, {
+    code: "CHANGE_REMOTE_TRANSPORT_FAILED",
+    reason: "authentication",
+    stage: "artifact-read",
+  });
+
+  const downloadApi = new FakeActionsApi();
+  downloadApi.downloadActionsArtifact = async () => {
+    throw new GhUnauthenticatedError("github.com", "download-secret");
+  };
+  await expectFailure(downloadApi, {
+    code: "CHANGE_REMOTE_TRANSPORT_FAILED",
+    reason: "authentication",
+    stage: "artifact-download",
+  });
+
+  const decodeApi = new FakeActionsApi();
+  decodeApi.artifactMode = "malformed";
+  await expectFailure(decodeApi, {
+    code: "CHANGE_REMOTE_RESULT_INVALID",
+    reason: "invalid-archive",
+    stage: "result-decode",
+    operation: "actions.artifact",
+  });
+
+  const correlationApi = new FakeActionsApi();
+  correlationApi.artifactMode = "ambiguous";
+  await expectFailure(correlationApi, {
+    code: "CHANGE_REMOTE_CORRELATION_FAILED",
+    reason: "ambiguous-artifact",
+    stage: "correlation",
+  });
+});
+
+test("#615 keeps unknown transport data bounded and preserves semantic port errors", async () => {
+  const unknownApi = new FakeActionsApi();
+  const unknownRequest = unknownApi.requestActionsApi.bind(unknownApi);
+  unknownApi.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "POST") {
+      throw {
+        message: "provider response Bearer unknown-secret /private/provider/body",
+        token: "unknown-secret",
+      };
+    }
+    return unknownRequest(path, method, fields);
+  };
+  await assert.rejects(executor(unknownApi).execute(changeMutationRequest("issue", 42)), (error: unknown) => {
+    assert.ok(error instanceof ChangeExecutionPortError);
+    assert.deepEqual(error.details, {
+      operation: "change.issue",
+      reason: "transport",
+      stage: "dispatch",
+    });
+    assert.doesNotMatch(JSON.stringify(error), /unknown-secret|\/private\/provider\/body/iu);
+    return true;
+  });
+
+  const semanticApi = new FakeActionsApi();
+  const semanticError = new ChangeExecutionPortError(
+    "CHANGE_REMOTE_RUN_FAILED",
+    "The trusted Change workflow did not produce a successful result.",
+    { operation: "change.issue", reason: "workflow-failed", stage: "installation-token" },
+    [
+      {
+        version: 1,
+        code: "CHANGE_PROVENANCE_CONFLICT",
+        path: "$.projection.change.provenance",
+        message: "The trusted Change provenance is inconsistent.",
+      },
+    ],
+  );
+  const semanticRequest = semanticApi.requestActionsApi.bind(semanticApi);
+  semanticApi.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "POST") throw semanticError;
+    return semanticRequest(path, method, fields);
+  };
+  await assert.rejects(executor(semanticApi).execute(changeMutationRequest("issue", 42)), (error: unknown) => {
+    assert.equal(error, semanticError);
+    return true;
+  });
+});
+
+test("#613: continues polling for the correlated result artifact after the target run completes, and succeeds once visibility catches up", async () => {
+  // The correlated run is already observed as completed on the very first
+  // poll (FakeActionsApi's default fixture), but the exact result artifact
+  // is absent on that same first poll — reproducing GitHub Actions' run
+  // completion and artifact-listing convergence not being atomic. Absence
+  // here must be treated as an observation state, not immediate proof of
+  // failure, as long as the canonical deadline has time remaining.
+  const api = new FakeActionsApi();
+  let artifactReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      artifactReads += 1;
+      if (artifactReads === 1) return { artifacts: [] };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(artifactReads, 2);
+});
+
+test("#613: an artifact that never becomes visible fails closed at the canonical deadline without an independent artifact timeout", async () => {
+  const api = new FakeActionsApi();
+  api.artifactMode = "missing";
+  let workflowReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) workflowReads += 1;
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 4).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "artifact-read" }),
+  );
+  // Bounded exactly by the shared maxPollAttempts/deadline (one baseline read
+  // plus one read per poll-loop attempt) — no unbounded polling and no
+  // second, artifact-specific timeout authority.
+  assert.equal(workflowReads, 5);
+});
+
+test("#613: an artifact with a non-matching name during the lag window does not satisfy the request", async () => {
+  const api = new FakeActionsApi();
+  let artifactReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      artifactReads += 1;
+      if (artifactReads === 1) {
+        return {
+          artifacts: [
+            {
+              id: 999,
+              name: `inari-change-result-${otherUnrelatedCorrelation}`,
+              expired: false,
+              workflow_run: { id: api.resultRunId },
+            },
+          ],
+        };
+      }
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("#613: a same-named artifact bound to an unrelated baseline run remains a fail-closed correlation failure, not a lag observation", async () => {
+  const api = new FakeActionsApi();
+  api.artifactMode = "stale";
+  await assert.rejects(
+    executor(api).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_CORRELATION_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "stale-artifact", stage: "correlation" }),
+  );
+});
+
+test("#613: a correlated run's failure conclusion and diagnostic remain authoritative once the delayed result artifact becomes visible", async () => {
+  const api = new FakeActionsApi();
+  api.runState = "failure";
+  api.archiveValue = {
+    ok: false,
+    error: {
+      code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+      message: "Bearer installation-secret-token /private/provider/path",
+      details: { stage: "installation-token" },
+    },
+  };
+  let artifactReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      artifactReads += 1;
+      if (artifactReads === 1) return { artifacts: [] };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "workflow-conclusion", stage: "installation-token" }) &&
+      !JSON.stringify(error).includes("installation-secret-token"),
+  );
+  assert.equal(artifactReads, 2);
 });
 
 test("a valid semantic recovery result remains authoritative over a failed workflow conclusion", async () => {
@@ -874,6 +1497,10 @@ test("untrusted execution envelope fields are rejected before crossing the remot
   api.archiveValue = { projection: api.result, token: "secret", effect: { kind: "CREATE_BRANCH" } };
   await assert.rejects(
     executor(api).execute(changeMutationRequest("issue", 42)),
-    (error: unknown) => error instanceof ChangeExecutionPortError && error.code === "CHANGE_REMOTE_RESULT_INVALID",
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RESULT_INVALID" &&
+      JSON.stringify(error.details) === JSON.stringify({ operation: "issue", stage: "result-decode" }) &&
+      !JSON.stringify(error).includes("secret"),
   );
 });

@@ -2,7 +2,6 @@ import { randomUUID as generateRandomUUID } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import {
   normalizeChangeEffectFailureClassification,
-  projectChangeFromGitHubEvidence,
   type ChangeDiagnostic,
   type ChangeEffectFailureClassification,
   type ChangeProjectionResult,
@@ -11,11 +10,13 @@ import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   ChangeExecutionPortError,
   changeMutationRequest,
+  createChangeExecutionDeadline,
+  DEFAULT_CHANGE_EXECUTION_DEADLINE_MS,
   normalizeChangeExecutionEvidence,
   normalizeChangeExecutionResult,
-  normalizeChangeProjection,
   validateChangeRequest,
   type ChangeExecutionPort,
+  type ChangeExecutionDeadline,
   type ChangeExecutionPortOptions,
   type ChangeExecutionEvidence,
   type ChangeExecutionResult,
@@ -25,63 +26,63 @@ import {
 } from "../change-execution-port.js";
 import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
 import { GitHubAdapter } from "./adapter.js";
-import {
-  GitHubActionsEvidenceReader,
-  isRepositoryEvidenceFailureReason,
-  isTrustedActionsFailureStage,
-  type TrustedActionsFailureDiagnostic,
-} from "./actions-change-executor.js";
+import { isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage } from "./actions-change-executor.js";
+import type { TrustedActionsFailureDiagnostic } from "./actions-change-executor.js";
 import { isChangeTrustedExecutorErrorCode } from "../change-trusted-executor.js";
-import type {
-  GitHubChangeEffectRequest,
-  GitHubChangeEffectResponse,
-  GitHubChangeEffectTransport,
-} from "./change-effect-adapter.js";
 import { isGitHubAdapterError } from "./errors.js";
-import { resolveRepositoryBranchGovernance, type RepositoryGovernanceSourceReader } from "../governance.js";
-import type { RepositoryContext, RepositoryTree } from "./types.js";
+import { createGitHubChangeReadAdapter, type GitHubChangeProjectionApi } from "./change-state-projector.js";
+import type { RepositoryContext } from "./types.js";
 
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml" as const;
 export const INARI_CHANGE_EXECUTOR_REF = "refs/heads/main" as const;
 
 const INARI_CHANGE_EXECUTOR_BRANCH = "main" as const;
-const MAX_ACTION_RUNS = 100;
-const MAX_ARTIFACTS = 100;
+const ACTIONS_PAGE_SIZE = 100;
+const MAX_ACTION_RUN_PAGES = 10;
+const MAX_ARTIFACT_PAGES = 10;
+const MAX_ACTION_RUNS = ACTIONS_PAGE_SIZE * MAX_ACTION_RUN_PAGES;
+const MAX_ARTIFACTS = ACTIONS_PAGE_SIZE * MAX_ARTIFACT_PAGES;
 const MAX_RESULT_BYTES = 262_144;
-// The trusted executor took 47s in the observed self-dogfood run. Allow a
-// bounded two-minute queue/build/execute window while retaining a finite
-// request budget for a run that never becomes observable.
-const DEFAULT_POLL_ATTEMPTS = 60;
+// The execution deadline is owned by change-execution-port. These polling
+// settings only shape observation cadence; they never establish when the
+// semantic execution is allowed to stop.
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
-// DEFAULT_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_MS only bounds sleep time
-// between attempts, not the live API latency each attempt also spends on
-// readRuns/readArtifacts/downloadActionsArtifact. A live self-dogfood run
-// observed 188s of real wall-clock wait against that 120s nominal budget.
-// This wall-clock deadline is the actual authority for when to stop.
-const DEFAULT_MAX_WAIT_MS = 240_000;
+const DEFAULT_POLL_ATTEMPTS = 300;
+
+/**
+ * Adapter-owned transport boundaries. These values describe where Actions
+ * transport processing failed; they are not Change semantic diagnostics.
+ */
+export const ACTIONS_TRANSPORT_FAILURE_STAGES = Object.freeze([
+  "repository-context",
+  "dispatch",
+  "run-read",
+  "artifact-read",
+  "artifact-download",
+  "result-decode",
+  "correlation",
+] as const);
+export type ActionsTransportFailureStage = (typeof ACTIONS_TRANSPORT_FAILURE_STAGES)[number];
 
 export interface ActionsChangeExecutionAdapterApi {
-  getRepositoryContext(): Promise<RepositoryContext>;
-  /** Repository-default-branch governance primitives; GitHubAdapter supplies these. */
-  getRepositoryDefaultBranch(): Promise<string>;
-  getRepositoryTree(ref: string): Promise<RepositoryTree>;
-  getRepositoryBlob(sha: string): Promise<string>;
+  getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext>;
   requestActionsApi(
     actionsPath: string,
     method: "GET" | "POST",
     fields?: Readonly<Record<string, string>>,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<unknown>;
-  requestRepositoryApi?(
-    repositoryPath: string,
-    method?: "GET",
-  ): Promise<{ readonly status: number; readonly body: unknown }>;
-  downloadActionsArtifact(artifactId: number): Promise<Uint8Array>;
+  downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array>;
 }
 
 export interface ActionsChangeExecutionAdapterOptions extends ChangeExecutionPortOptions {
-  /** Injectable repository/auth/API abstraction; the default is the normal gh session. */
+  /** Injectable Actions transport abstraction; the default is the normal gh session. */
   readonly api?: ActionsChangeExecutionAdapterApi;
+  /** Optional shared GitHub read composition when the transport has no read API. */
+  readonly readApi?: GitHubChangeProjectionApi;
+  /** Shared Core-facing read adapter; Actions itself never projects Change state. */
+  readonly read?: Pick<ChangeExecutionPort, "read">;
   readonly maxPollAttempts?: number;
   readonly pollIntervalMs?: number;
   /**
@@ -103,6 +104,13 @@ interface WorkflowRun {
   readonly conclusion: string | null;
   readonly event: string;
   readonly headBranch: string;
+  /**
+   * The evaluated `run-name` (GitHub API `display_title`). The executor
+   * workflow sets this to `Inari Change <correlation>`, which is the only
+   * evidence strong enough to positively bind a run to this request; it is
+   * never inferred from ordering, cardinality, or baseline membership.
+   */
+  readonly displayTitle: string;
   readonly path?: string;
 }
 
@@ -120,28 +128,28 @@ interface ActionResultEnvelope {
   readonly diagnostic?: TrustedActionsFailureDiagnostic;
 }
 
-function record(value: unknown): Record<string, unknown> {
+function record(value: unknown, stage: ActionsTransportFailureStage = "result-decode"): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, stage);
   }
   return value as Record<string, unknown>;
 }
 
-function boundedText(value: unknown, maximum: number): string {
+function boundedText(value: unknown, maximum: number, stage: ActionsTransportFailureStage = "result-decode"): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.length > maximum ||
     /[\u0000-\u001F\u007F]/u.test(value)
   ) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, stage);
   }
   return value;
 }
 
-function positiveInteger(value: unknown): number {
+function positiveInteger(value: unknown, stage: ActionsTransportFailureStage = "result-decode"): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.metadata", "invalid-metadata");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.metadata", "invalid-metadata", undefined, stage);
   }
   return value as number;
 }
@@ -151,6 +159,7 @@ function remoteError(
   operation: string,
   reason: string,
   diagnostic?: TrustedActionsFailureDiagnostic,
+  stage?: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   const messages: Record<string, string> = {
     CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Actions Change executor is unavailable.",
@@ -167,6 +176,7 @@ function remoteError(
     {
       operation,
       reason,
+      ...(stage === undefined || diagnostic !== undefined ? {} : { stage }),
       ...(diagnostic === undefined
         ? {}
         : {
@@ -181,6 +191,22 @@ function remoteError(
   );
 }
 
+function resultValidationError(
+  error: unknown,
+  operation: string,
+  stage: ActionsTransportFailureStage,
+): ChangeExecutionPortError {
+  if (!(error instanceof ChangeExecutionPortError)) {
+    return remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, stage);
+  }
+  if (error.code !== "CHANGE_REMOTE_RESULT_INVALID") return error;
+  const details =
+    typeof error.details === "object" && error.details !== null && !Array.isArray(error.details)
+      ? { ...(error.details as Record<string, unknown>), stage }
+      : { operation, stage };
+  return new ChangeExecutionPortError(error.code, error.message, details, error.diagnostics);
+}
+
 function normalizeTransportError(
   error: unknown,
   operation: string,
@@ -189,20 +215,21 @@ function normalizeTransportError(
     | "CHANGE_REMOTE_TRANSPORT_FAILED"
     | "CHANGE_REMOTE_DISPATCH_FAILED"
     | "CHANGE_REMOTE_RUN_FAILED",
+  stage: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   if (error instanceof ChangeExecutionPortError) return error;
   if (isGitHubAdapterError(error) && error.category === "authentication") {
-    return remoteError(code, operation, "authentication");
+    return remoteError(code, operation, "authentication", undefined, stage);
   }
-  return remoteError(code, operation, "transport");
+  return remoteError(code, operation, "transport", undefined, stage);
 }
 
-function workflowRunsPath(): string {
-  return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/runs?event=workflow_dispatch&branch=${INARI_CHANGE_EXECUTOR_BRANCH}&per_page=${MAX_ACTION_RUNS}`;
+function workflowRunsPath(page: number): string {
+  return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/runs?event=workflow_dispatch&branch=${INARI_CHANGE_EXECUTOR_BRANCH}&per_page=${ACTIONS_PAGE_SIZE}&page=${page}`;
 }
 
-function artifactsPath(name: string): string {
-  return `actions/artifacts?name=${encodeURIComponent(name)}&per_page=${MAX_ARTIFACTS}`;
+function artifactsPath(name: string, page: number): string {
+  return `actions/artifacts?name=${encodeURIComponent(name)}&per_page=${ACTIONS_PAGE_SIZE}&page=${page}`;
 }
 
 function dispatchPath(): string {
@@ -211,7 +238,7 @@ function dispatchPath(): string {
 
 function parseFailureDiagnostic(value: unknown, operation: string): TrustedActionsFailureDiagnostic | undefined {
   if (value === undefined) return undefined;
-  const details = record(value);
+  const details = record(value, "result-decode");
   if (
     Object.keys(details).some(
       (key) => !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure"].includes(key),
@@ -220,23 +247,51 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
     (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason)) ||
     (details.trustedCode !== undefined && !isChangeTrustedExecutorErrorCode(details.trustedCode))
   ) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
   }
   let diagnostics: readonly ChangeDiagnostic[] | undefined;
   try {
     diagnostics = normalizeTrustedFailureDiagnostics(details.diagnostics);
   } catch {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
   }
   let evidence: ChangeExecutionEvidence | undefined;
   if (details.evidence !== undefined) {
-    evidence = normalizeChangeExecutionEvidence(operation, details.evidence);
+    try {
+      evidence = normalizeChangeExecutionEvidence(operation, details.evidence);
+    } catch {
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.result",
+        "invalid-diagnostic",
+        undefined,
+        "result-decode",
+      );
+    }
   }
   let effectFailure: ChangeEffectFailureClassification | undefined;
   try {
     effectFailure = normalizeChangeEffectFailureClassification(details.effectFailure);
   } catch {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-diagnostic");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
   }
   return Object.freeze({
     stage: details.stage,
@@ -249,33 +304,34 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
 }
 
 function parseRuns(value: unknown): readonly WorkflowRun[] {
-  const payload = record(value);
-  if (!Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > MAX_ACTION_RUNS) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata");
+  const payload = record(value, "run-read");
+  if (!Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > ACTIONS_PAGE_SIZE) {
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
   }
   return payload.workflow_runs.map((candidate) => {
-    const item = record(candidate);
-    const id = positiveInteger(item.id);
+    const item = record(candidate, "run-read");
+    const id = positiveInteger(item.id, "run-read");
     const status = item.status;
     if (status !== "queued" && status !== "in_progress" && status !== "completed") {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
     }
     if (item.conclusion !== null && typeof item.conclusion !== "string") {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
     }
-    const path = item.path === undefined ? undefined : boundedText(item.path, 512);
+    const path = item.path === undefined ? undefined : boundedText(item.path, 512, "run-read");
     if (path !== undefined && path !== `.github/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}`) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-workflow");
+      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-workflow", undefined, "correlation");
     }
     if (item.ref !== undefined && item.ref !== INARI_CHANGE_EXECUTOR_REF) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-ref");
+      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-ref", undefined, "correlation");
     }
     return {
       id,
       status,
       conclusion: item.conclusion as string | null,
-      event: boundedText(item.event, 64),
-      headBranch: boundedText(item.head_branch, 255),
+      event: boundedText(item.event, 64, "run-read"),
+      headBranch: boundedText(item.head_branch, 255, "run-read"),
+      displayTitle: boundedText(item.display_title, 512, "run-read"),
       ...(path === undefined ? {} : { path }),
     };
   });
@@ -286,31 +342,51 @@ function parseArtifacts(
   expectedName: string,
   expectedRepositoryId: string,
 ): readonly WorkflowArtifact[] {
-  const payload = record(value);
-  if (!Array.isArray(payload.artifacts) || payload.artifacts.length > MAX_ARTIFACTS) {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifacts", "invalid-metadata");
+  const payload = record(value, "artifact-read");
+  if (!Array.isArray(payload.artifacts) || payload.artifacts.length > ACTIONS_PAGE_SIZE) {
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.artifacts",
+      "invalid-metadata",
+      undefined,
+      "artifact-read",
+    );
   }
   return payload.artifacts
     .filter((candidate) => {
-      const item = record(candidate);
+      const item = record(candidate, "artifact-read");
       return item.name === expectedName;
     })
     .map((candidate) => {
-      const item = record(candidate);
-      const workflowRun = record(item.workflow_run);
+      const item = record(candidate, "artifact-read");
+      const workflowRun = record(item.workflow_run, "artifact-read");
       const repositoryId =
-        workflowRun.repository_id === undefined ? undefined : positiveInteger(workflowRun.repository_id);
+        workflowRun.repository_id === undefined
+          ? undefined
+          : positiveInteger(workflowRun.repository_id, "artifact-read");
       if (repositoryId !== undefined && String(repositoryId) !== expectedRepositoryId) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.artifacts", "wrong-repository");
+        throw remoteError(
+          "CHANGE_REMOTE_CORRELATION_FAILED",
+          "actions.artifacts",
+          "wrong-repository",
+          undefined,
+          "correlation",
+        );
       }
       if (typeof item.expired !== "boolean") {
-        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifacts", "invalid-metadata");
+        throw remoteError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "actions.artifacts",
+          "invalid-metadata",
+          undefined,
+          "artifact-read",
+        );
       }
       return {
-        id: positiveInteger(item.id),
-        name: boundedText(item.name, 255),
+        id: positiveInteger(item.id, "artifact-read"),
+        name: boundedText(item.name, 255, "artifact-read"),
         expired: item.expired,
-        workflowRunId: positiveInteger(workflowRun.id),
+        workflowRunId: positiveInteger(workflowRun.id, "artifact-read"),
         ...(repositoryId === undefined ? {} : { repositoryId }),
       };
     });
@@ -319,22 +395,46 @@ function parseArtifacts(
 function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): ActionResultEnvelope {
   try {
     if (archive.byteLength === 0 || archive.byteLength > 1_048_576) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const bytes = Buffer.from(archive);
     const endOfCentralDirectory = findEndOfCentralDirectory(bytes);
     if (endOfCentralDirectory === undefined) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const entryCount = bytes.readUInt16LE(endOfCentralDirectory + 10);
     const directorySize = bytes.readUInt32LE(endOfCentralDirectory + 12);
     const directoryOffset = bytes.readUInt32LE(endOfCentralDirectory + 16);
     if (entryCount !== 1 || directoryOffset + directorySize > bytes.length) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const directory = directoryOffset;
     if (bytes.readUInt32LE(directory) !== 0x02014b50) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const compression = bytes.readUInt16LE(directory + 10);
     const compressedSize = bytes.readUInt32LE(directory + 20);
@@ -349,7 +449,13 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
       directoryEntryEnd > directory + directorySize ||
       uncompressedSize > MAX_RESULT_BYTES
     ) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const fileName = decodeUtf8(bytes.subarray(directory + 46, directory + 46 + fileNameLength));
     if (
@@ -357,14 +463,26 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
       localOffset + 30 > bytes.length ||
       bytes.readUInt32LE(localOffset) !== 0x04034b50
     ) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     const localNameLength = bytes.readUInt16LE(localOffset + 26);
     const localExtraLength = bytes.readUInt16LE(localOffset + 28);
     const contentStart = localOffset + 30 + localNameLength + localExtraLength;
     const contentEnd = contentStart + compressedSize;
     if (contentEnd > bytes.length) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     let content: Buffer;
     try {
@@ -374,32 +492,62 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
           : compression === 8
             ? inflateRawSync(bytes.subarray(contentStart, contentEnd), { maxOutputLength: MAX_RESULT_BYTES })
             : (() => {
-                throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "unsupported-compression");
+                throw remoteError(
+                  "CHANGE_REMOTE_RESULT_INVALID",
+                  "actions.artifact",
+                  "unsupported-compression",
+                  undefined,
+                  "result-decode",
+                );
               })();
     } catch (error: unknown) {
       if (error instanceof ChangeExecutionPortError) throw error;
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     if (content.byteLength !== uncompressedSize || content.byteLength > MAX_RESULT_BYTES) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+      throw remoteError(
+        "CHANGE_REMOTE_RESULT_INVALID",
+        "actions.artifact",
+        "invalid-archive",
+        undefined,
+        "result-decode",
+      );
     }
     let value: unknown;
     try {
       value = JSON.parse(decodeUtf8(content)) as unknown;
     } catch (error: unknown) {
       if (error instanceof ChangeExecutionPortError) throw error;
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-json");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-json", undefined, "result-decode");
     }
-    const result = record(value);
+    const result = record(value, "result-decode");
     if (result.ok === false) {
-      const failure = record(result.error);
+      const failure = record(result.error, "result-decode");
       if (Object.keys(failure).some((key) => !["code", "message", "details"].includes(key))) {
-        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+        throw remoteError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "actions.result",
+          "invalid-result",
+          undefined,
+          "result-decode",
+        );
       }
       if (failure.code !== "CHANGE_ACTIONS_RUNTIME_INVALID") {
-        throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+        throw remoteError(
+          "CHANGE_REMOTE_RESULT_INVALID",
+          "actions.result",
+          "invalid-result",
+          undefined,
+          "result-decode",
+        );
       }
-      boundedText(failure.message, 240);
+      boundedText(failure.message, 240, "result-decode");
       const diagnostic = parseFailureDiagnostic(failure.details, operation);
       return {
         value: undefined,
@@ -408,12 +556,18 @@ function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): Acti
       };
     }
     if (result.ok !== undefined) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result");
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.result", "invalid-result", undefined, "result-decode");
     }
     return { value, failed: false };
   } catch (error: unknown) {
     if (error instanceof ChangeExecutionPortError) throw error;
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-archive");
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.artifact",
+      "invalid-archive",
+      undefined,
+      "result-decode",
+    );
   }
 }
 
@@ -433,7 +587,7 @@ function decodeUtf8(bytes: Uint8Array): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-utf8");
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.artifact", "invalid-utf8", undefined, "result-decode");
   }
 }
 
@@ -446,8 +600,22 @@ function canonicalMutationRequest(request: ChangeMutationRequest): ChangeMutatio
   );
 }
 
-function isNewRun(run: WorkflowRun, baseline: ReadonlySet<number>): boolean {
-  return !baseline.has(run.id) && run.event === "workflow_dispatch" && run.headBranch === INARI_CHANGE_EXECUTOR_BRANCH;
+/**
+ * The executor's `run-name: Inari Change ${{ inputs.correlation }}` is the
+ * authoritative correlation evidence between a dispatched request and an
+ * observed workflow run. Candidate cardinality, "new since baseline", and
+ * observation order are never substitutes for this positive match.
+ */
+function expectedRunDisplayTitle(correlation: string): string {
+  return `Inari Change ${correlation}`;
+}
+
+function isCorrelatedRun(run: WorkflowRun, correlation: string): boolean {
+  return (
+    run.event === "workflow_dispatch" &&
+    run.headBranch === INARI_CHANGE_EXECUTOR_BRANCH &&
+    run.displayTitle === expectedRunDisplayTitle(correlation)
+  );
 }
 
 function isRetryablePollTransportError(error: unknown): error is ChangeExecutionPortError {
@@ -461,9 +629,17 @@ function isRetryablePollTransportError(error: unknown): error is ChangeExecution
   );
 }
 
+/**
+ * Bounded GitHub Actions transport for the transport-neutral Change port.
+ *
+ * This class owns workflow dispatch, run/artifact correlation, polling
+ * deadlines, artifact framing, and request/result contract normalization.
+ * Semantic Change projection is supplied as a delegated read port; this class
+ * never selects governance, lifecycle, recovery, requester, or effect policy.
+ */
 export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #api: ActionsChangeExecutionAdapterApi;
-  readonly #cwd: string;
+  readonly #read: Pick<ChangeExecutionPort, "read">;
   readonly #maxPollAttempts: number;
   readonly #pollIntervalMs: number;
   readonly #maxWaitMs: number;
@@ -472,11 +648,24 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #randomUUID: () => string;
 
   constructor(options: ActionsChangeExecutionAdapterOptions) {
-    this.#cwd = options.cwd;
-    this.#api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
-    this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 60);
+    const api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
+    const projectionApi = options.readApi ?? projectionApiFromTransport(api);
+    const read =
+      options.read ??
+      (projectionApi === undefined
+        ? undefined
+        : createGitHubChangeReadAdapter({ cwd: options.cwd, api: projectionApi }));
+    this.#api = api;
+    this.#read =
+      read ??
+      ({
+        read: async () => {
+          throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "read-path-unavailable");
+        },
+      } satisfies Pick<ChangeExecutionPort, "read">);
+    this.#maxPollAttempts = boundedOption(options.maxPollAttempts ?? DEFAULT_POLL_ATTEMPTS, 1, 1_000);
     this.#pollIntervalMs = boundedOption(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS, 0, 10_000);
-    this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS, 1, 600_000);
+    this.#maxWaitMs = boundedOption(options.maxWaitMs ?? DEFAULT_CHANGE_EXECUTION_DEADLINE_MS, 1, 600_000);
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#now = options.now ?? (() => Date.now());
     this.#randomUUID = options.randomUUID ?? generateRandomUUID;
@@ -485,7 +674,8 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   async execute(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
     validateChangeRequest(request);
     const semanticRequest = canonicalMutationRequest(request);
-    const result = await this.dispatchAndCollect(semanticRequest);
+    const deadline = createChangeExecutionDeadline(this.#maxWaitMs, this.#now);
+    const result = await this.dispatchAndCollect(semanticRequest, deadline);
     if (result.failed) {
       throw remoteError(
         "CHANGE_REMOTE_RUN_FAILED",
@@ -494,70 +684,57 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         result.diagnostic,
       );
     }
-    return normalizeChangeExecutionResult(request.operation, result.value);
+    try {
+      return normalizeChangeExecutionResult(request.operation, result.value);
+    } catch (error: unknown) {
+      throw resultValidationError(error, `change.${request.operation}`, "result-decode");
+    }
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
-    validateChangeRequest(request);
-    const projection = await this.readCanonicalProjection(request);
-    return normalizeChangeProjection("show", projection);
+    // The shared projector is injected by the composition factory. Keeping
+    // this method as delegation preserves the ChangeExecutionPort API without
+    // putting GitHub-derived semantic policy in the Actions transport.
+    return this.#read.read(request);
   }
 
-  private async readCanonicalProjection(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
-    const repositoryApi = this.#api.requestRepositoryApi;
-    if (repositoryApi === undefined) {
-      throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "read-path-unavailable");
-    }
-    let context: RepositoryContext;
-    try {
-      context = await this.#api.getRepositoryContext();
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, "change.show", "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-    }
-    try {
-      if (context.repositoryId === undefined) {
-        throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "repository-identity-unavailable");
-      }
-      let branchGovernance;
-      try {
-        branchGovernance = await resolveRepositoryBranchGovernance(remoteGovernanceSourceReader(this.#api, context));
-      } catch (error: unknown) {
-        if (error instanceof ChangeExecutionPortError) throw error;
-        throw remoteError("CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "change.show", "remote-governance-unavailable");
-      }
-      const reader = new GitHubActionsEvidenceReader({
-        repository: { hostname: context.hostname, owner: context.owner, name: context.name },
-        identity: { repositoryHost: context.hostname, repositoryId: context.repositoryId, rootIssue: request.issue },
-        branchGovernance,
-        transport: new GitHubRepositoryReadTransport(this.#api, context, repositoryApi),
-        cwd: this.#cwd,
-      });
-      return projectChangeFromGitHubEvidence(await reader.read(request));
-    } catch (error: unknown) {
-      if (error instanceof ChangeExecutionPortError) throw error;
-      throw normalizeTransportError(error, "change.show", "CHANGE_REMOTE_TRANSPORT_FAILED");
-    }
-  }
-
-  private async dispatchAndCollect(request: ChangeMutationRequest): Promise<ActionResultEnvelope> {
+  private async dispatchAndCollect(
+    request: ChangeMutationRequest,
+    deadline: ChangeExecutionDeadline,
+  ): Promise<ActionResultEnvelope> {
     const correlation = this.#randomUUID();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(correlation)) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", `change.${request.operation}`, "invalid-correlation");
+      throw remoteError(
+        "CHANGE_REMOTE_CORRELATION_FAILED",
+        `change.${request.operation}`,
+        "invalid-correlation",
+        undefined,
+        "correlation",
+      );
     }
-    let context: RepositoryContext;
-    try {
-      context = await this.#api.getRepositoryContext();
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
-    }
+    const operation = `change.${request.operation}`;
+    const context = await this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        try {
+          return await this.#api.getRepositoryContext(deadline);
+        } catch (error: unknown) {
+          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE", "repository-context");
+        }
+      },
+      "repository-context",
+    );
     if (context.repositoryId === undefined) {
       throw remoteError(
         "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
-        `change.${request.operation}`,
+        operation,
         "repository-identity-unavailable",
+        undefined,
+        "repository-context",
       );
     }
-    const baseline = await this.readRuns(`change.${request.operation}`);
+    const baseline = await this.readRuns(operation, deadline);
     const artifactName = `inari-change-result-${correlation}`;
     const semanticRequest = {
       version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
@@ -571,86 +748,153 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         : { signedProvenanceRecord: request.signedProvenanceRecord }),
     };
     try {
-      await this.#api.requestActionsApi(dispatchPath(), "POST", {
-        ref: INARI_CHANGE_EXECUTOR_REF,
-        "inputs[request]": JSON.stringify(semanticRequest),
-        "inputs[correlation]": correlation,
-      });
+      await this.withinDeadline(
+        operation,
+        deadline,
+        () =>
+          this.#api.requestActionsApi(
+            dispatchPath(),
+            "POST",
+            {
+              ref: INARI_CHANGE_EXECUTOR_REF,
+              "inputs[request]": JSON.stringify(semanticRequest),
+              "inputs[correlation]": correlation,
+            },
+            deadline,
+          ),
+        "dispatch",
+      );
     } catch (error: unknown) {
-      throw normalizeTransportError(error, `change.${request.operation}`, "CHANGE_REMOTE_DISPATCH_FAILED");
+      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_DISPATCH_FAILED", "dispatch");
     }
+    this.assertDeadline(operation, deadline, "dispatch");
     return this.waitForResult(
-      `change.${request.operation}`,
+      operation,
+      correlation,
       baseline,
       artifactName,
       context.repositoryId,
       request.operation,
+      deadline,
     );
   }
 
-  private async readRuns(operation: string): Promise<readonly WorkflowRun[]> {
-    let value: unknown;
-    try {
-      value = await this.#api.requestActionsApi(workflowRunsPath(), "GET");
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-    }
-    return parseRuns(value);
+  private async readRuns(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+    correlation?: string,
+  ): Promise<readonly WorkflowRun[]> {
+    return this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        const runs: WorkflowRun[] = [];
+        for (let page = 1; page <= MAX_ACTION_RUN_PAGES; page += 1) {
+          let value: unknown;
+          try {
+            value = await this.#api.requestActionsApi(workflowRunsPath(page), "GET", {}, deadline);
+          } catch (error: unknown) {
+            throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "run-read");
+          }
+          const pageRuns = parseRuns(value);
+          runs.push(...pageRuns);
+          if (runs.length > MAX_ACTION_RUNS) {
+            throw remoteError(
+              "CHANGE_REMOTE_RESULT_INVALID",
+              "actions.runs",
+              "invalid-metadata",
+              undefined,
+              "run-read",
+            );
+          }
+          if (correlation !== undefined && pageRuns.some((run) => isCorrelatedRun(run, correlation))) return runs;
+          if (pageRuns.length < ACTIONS_PAGE_SIZE) return runs;
+          this.assertDeadline(operation, deadline, "run-read");
+        }
+        return runs;
+      },
+      "run-read",
+    );
   }
 
   private async waitForResult(
     operation: string,
+    correlation: string,
     baseline: readonly WorkflowRun[],
     artifactName: string,
     repositoryId: string,
     semanticOperation: ChangeMutation,
+    deadline: ChangeExecutionDeadline,
   ): Promise<ActionResultEnvelope> {
     const baselineIds = new Set(baseline.map((run) => run.id));
-    const deadline = this.#now() + this.#maxWaitMs;
-    for (let attempt = 0; attempt < this.#maxPollAttempts; attempt += 1) {
-      const timeRemaining = () => this.#now() < deadline;
+    // The wall-clock deadline is the real stopping authority (see #582):
+    // per-attempt API latency is not otherwise bounded, so a fixed attempt
+    // count can be exhausted well before real time runs out. maxPollAttempts
+    // remains only as a sanity ceiling against a runaway loop, not as the
+    // primary budget.
+    let observationStage: ActionsTransportFailureStage = "run-read";
+    for (let attempt = 0; deadline.remainingMs() > 0 && attempt < this.#maxPollAttempts; attempt += 1) {
+      const timeRemaining = () => deadline.remainingMs() > 0;
       let runs: readonly WorkflowRun[];
+      observationStage = "run-read";
       try {
-        runs = await this.readRuns(operation);
+        runs = await this.readRuns(operation, deadline, correlation);
       } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
-          throw error;
+        if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
-      const candidates = runs.filter((run) => isNewRun(run, baselineIds));
+      // The run-name correlation is the only identity evidence used below.
+      // Candidate count, "new since baseline", and observation order never
+      // decide which run belongs to this request.
+      const correlatedRun = runs.find((candidate) => isCorrelatedRun(candidate, correlation));
       let artifacts: readonly WorkflowArtifact[];
+      observationStage = "artifact-read";
       try {
-        artifacts = await this.readArtifacts(operation, artifactName, repositoryId);
+        artifacts = await this.readArtifacts(operation, artifactName, repositoryId, deadline);
       } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
-          throw error;
+        if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
       if (artifacts.length > 1) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "ambiguous-artifact");
+        throw remoteError(
+          "CHANGE_REMOTE_CORRELATION_FAILED",
+          operation,
+          "ambiguous-artifact",
+          undefined,
+          "correlation",
+        );
       }
       const artifact = artifacts[0];
       if (artifact !== undefined && artifact.expired) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "expired-artifact");
+        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "expired-artifact", undefined, "correlation");
       }
       const run =
-        artifact === undefined ? undefined : candidates.find((candidate) => candidate.id === artifact.workflowRunId);
+        artifact !== undefined && correlatedRun !== undefined && correlatedRun.id === artifact.workflowRunId
+          ? correlatedRun
+          : undefined;
       if (artifact !== undefined && run === undefined && baselineIds.has(artifact.workflowRunId)) {
-        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "stale-artifact");
+        throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "stale-artifact", undefined, "correlation");
       }
-      if (run !== undefined && run.status === "completed") {
-        if (artifact === undefined) {
-          throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
-        }
+      if (artifact !== undefined && run !== undefined && run.status === "completed") {
         let archive: Uint8Array;
+        observationStage = "artifact-download";
         try {
-          archive = await this.#api.downloadActionsArtifact(artifact.id);
+          archive = await this.withinDeadline(
+            operation,
+            deadline,
+            () => this.#api.downloadActionsArtifact(artifact.id, deadline),
+            "artifact-download",
+          );
         } catch (error: unknown) {
-          const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-          if (!isRetryablePollTransportError(normalized) || attempt + 1 >= this.#maxPollAttempts || !timeRemaining())
-            throw normalized;
+          const normalized = normalizeTransportError(
+            error,
+            operation,
+            "CHANGE_REMOTE_TRANSPORT_FAILED",
+            "artifact-download",
+          );
+          if (!isRetryablePollTransportError(normalized) || !timeRemaining()) throw normalized;
           await this.#sleep(this.#pollIntervalMs);
           continue;
         }
@@ -663,76 +907,82 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         }
         return result;
       }
-      if (
-        candidates.some((candidate) => candidate.status === "completed") &&
-        artifact === undefined &&
-        candidates.length === 1
-      ) {
-        throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
-      }
-      if (attempt + 1 < this.#maxPollAttempts && timeRemaining()) await this.#sleep(this.#pollIntervalMs);
-      else if (!timeRemaining()) break;
+      // The positively correlated run reaching `completed` does not mean its
+      // result artifact is visible yet (#613): GitHub Actions run completion
+      // and artifact-listing convergence are not atomic. Absence here is an
+      // observation state, not proof of failure, so this falls through to
+      // keep polling for the exact correlated artifact — bounded only by the
+      // same canonical deadline that governs every other observation above,
+      // never by a second timeout/attempt authority of its own.
+      if (timeRemaining()) await this.#sleep(this.#pollIntervalMs);
     }
-    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
+    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout", undefined, observationStage);
   }
 
   private async readArtifacts(
     operation: string,
     name: string,
     repositoryId: string,
+    deadline: ChangeExecutionDeadline,
   ): Promise<readonly WorkflowArtifact[]> {
-    let value: unknown;
-    try {
-      value = await this.#api.requestActionsApi(artifactsPath(name), "GET");
-    } catch (error: unknown) {
-      throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED");
-    }
-    return parseArtifacts(value, name, repositoryId);
-  }
-}
-
-/**
- * Adapt the read-only Change transport to the shared repository governance
- * authority. The same direct primitives are used by GitHubAdapter and by the
- * injectable remote seam, without consulting cwd.
- */
-function remoteGovernanceSourceReader(
-  api: ActionsChangeExecutionAdapterApi,
-  context: RepositoryContext,
-): RepositoryGovernanceSourceReader {
-  return {
-    resolveRepositoryContext: async () => context,
-    getRepositoryDefaultBranch: () => api.getRepositoryDefaultBranch(),
-    getRepositoryTree: (ref) => api.getRepositoryTree(ref),
-    getRepositoryBlob: (sha) => api.getRepositoryBlob(sha),
-  };
-}
-
-class GitHubRepositoryReadTransport implements GitHubChangeEffectTransport {
-  readonly #api: ActionsChangeExecutionAdapterApi;
-  readonly #context: RepositoryContext;
-  readonly #requestRepositoryApi: NonNullable<ActionsChangeExecutionAdapterApi["requestRepositoryApi"]>;
-
-  constructor(
-    api: ActionsChangeExecutionAdapterApi,
-    context: RepositoryContext,
-    requestRepositoryApi: NonNullable<ActionsChangeExecutionAdapterApi["requestRepositoryApi"]>,
-  ) {
-    this.#api = api;
-    this.#context = context;
-    this.#requestRepositoryApi = requestRepositoryApi;
+    return this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        const artifacts: WorkflowArtifact[] = [];
+        for (let page = 1; page <= MAX_ARTIFACT_PAGES; page += 1) {
+          let value: unknown;
+          try {
+            value = await this.#api.requestActionsApi(artifactsPath(name, page), "GET", {}, deadline);
+          } catch (error: unknown) {
+            throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "artifact-read");
+          }
+          const pageArtifacts = parseArtifacts(value, name, repositoryId);
+          artifacts.push(...pageArtifacts);
+          if (artifacts.length > MAX_ARTIFACTS) {
+            throw remoteError(
+              "CHANGE_REMOTE_RESULT_INVALID",
+              "actions.artifacts",
+              "invalid-metadata",
+              undefined,
+              "artifact-read",
+            );
+          }
+          if (pageArtifacts.length > 0) return artifacts;
+          const pageEntries = record(value, "artifact-read").artifacts;
+          if (!Array.isArray(pageEntries) || pageEntries.length < ACTIONS_PAGE_SIZE) return artifacts;
+          this.assertDeadline(operation, deadline, "artifact-read");
+        }
+        return artifacts;
+      },
+      "artifact-read",
+    );
   }
 
-  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
-    const base = `repos/${this.#context.nameWithOwner}`;
-    if (request.method !== "GET" || !(request.path === base || request.path.startsWith(`${base}/`))) {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "change.show", "invalid-read-path");
+  private assertDeadline(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+    stage?: ActionsTransportFailureStage,
+  ): void {
+    if (deadline.remainingMs() <= 0) {
+      throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout", undefined, stage);
     }
-    const path = request.path.slice(base.length).replace(/^\//u, "");
+  }
+
+  private async withinDeadline<T>(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+    task: () => Promise<T>,
+    stage: ActionsTransportFailureStage,
+  ): Promise<T> {
+    this.assertDeadline(operation, deadline, stage);
     try {
-      return await this.#requestRepositoryApi.call(this.#api, path, "GET");
+      const result = await task();
+      this.assertDeadline(operation, deadline, stage);
+      return result;
     } catch (error: unknown) {
-      throw normalizeTransportError(error, "change.show", "CHANGE_REMOTE_TRANSPORT_FAILED");
+      if (deadline.remainingMs() <= 0) this.assertDeadline(operation, deadline, stage);
+      throw error;
     }
   }
 }
@@ -748,6 +998,20 @@ export function createActionsChangeExecutionAdapter(
   options: ActionsChangeExecutionAdapterOptions,
 ): ChangeExecutionPort {
   return new ActionsChangeExecutionAdapter(options);
+}
+
+function projectionApiFromTransport(value: ActionsChangeExecutionAdapterApi): GitHubChangeProjectionApi | undefined {
+  const candidate = value as Partial<GitHubChangeProjectionApi>;
+  if (
+    typeof candidate.getRepositoryContext !== "function" ||
+    typeof candidate.getRepositoryDefaultBranch !== "function" ||
+    typeof candidate.getRepositoryTree !== "function" ||
+    typeof candidate.getRepositoryBlob !== "function" ||
+    typeof candidate.requestRepositoryApi !== "function"
+  ) {
+    return undefined;
+  }
+  return candidate as GitHubChangeProjectionApi;
 }
 
 /**
