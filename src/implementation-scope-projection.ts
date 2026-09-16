@@ -686,7 +686,10 @@ function safePath(value: string): string | undefined {
   // normalization (NFKC) can collapse a distinct candidate path onto an
   // authorized glob pattern (e.g. a full-width character onto its ASCII
   // counterpart), so a non-canonical path is rejected fail-closed instead.
-  const normalized = value.trim().replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
+  const normalized = value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/{2,}/gu, "/");
   const segments = normalized.split("/");
   if (
     normalized.length === 0 ||

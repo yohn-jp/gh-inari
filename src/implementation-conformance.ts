@@ -247,7 +247,10 @@ function normalizePath(value: unknown): string | undefined {
   // compatibility normalization (NFKC) can collapse a distinct path onto an
   // authorized one (e.g. a full-width character onto its ASCII counterpart),
   // so a non-canonical path is rejected fail-closed rather than normalized.
-  const normalized = value.trim().replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
+  const normalized = value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/{2,}/gu, "/");
   const segments = normalized.split("/");
   if (
     normalized.length === 0 ||
