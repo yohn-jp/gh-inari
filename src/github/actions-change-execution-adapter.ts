@@ -86,6 +86,13 @@ interface WorkflowRun {
   readonly conclusion: string | null;
   readonly event: string;
   readonly headBranch: string;
+  /**
+   * The evaluated `run-name` (GitHub API `display_title`). The executor
+   * workflow sets this to `Inari Change <correlation>`, which is the only
+   * evidence strong enough to positively bind a run to this request; it is
+   * never inferred from ordering, cardinality, or baseline membership.
+   */
+  readonly displayTitle: string;
   readonly path?: string;
 }
 
@@ -259,6 +266,7 @@ function parseRuns(value: unknown): readonly WorkflowRun[] {
       conclusion: item.conclusion as string | null,
       event: boundedText(item.event, 64),
       headBranch: boundedText(item.head_branch, 255),
+      displayTitle: boundedText(item.display_title, 512),
       ...(path === undefined ? {} : { path }),
     };
   });
@@ -429,8 +437,22 @@ function canonicalMutationRequest(request: ChangeMutationRequest): ChangeMutatio
   );
 }
 
-function isNewRun(run: WorkflowRun, baseline: ReadonlySet<number>): boolean {
-  return !baseline.has(run.id) && run.event === "workflow_dispatch" && run.headBranch === INARI_CHANGE_EXECUTOR_BRANCH;
+/**
+ * The executor's `run-name: Inari Change ${{ inputs.correlation }}` is the
+ * authoritative correlation evidence between a dispatched request and an
+ * observed workflow run. Candidate cardinality, "new since baseline", and
+ * observation order are never substitutes for this positive match.
+ */
+function expectedRunDisplayTitle(correlation: string): string {
+  return `Inari Change ${correlation}`;
+}
+
+function isCorrelatedRun(run: WorkflowRun, correlation: string): boolean {
+  return (
+    run.event === "workflow_dispatch" &&
+    run.headBranch === INARI_CHANGE_EXECUTOR_BRANCH &&
+    run.displayTitle === expectedRunDisplayTitle(correlation)
+  );
 }
 
 function isRetryablePollTransportError(error: unknown): error is ChangeExecutionPortError {
@@ -558,7 +580,15 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       throw normalizeTransportError(error, operation, "CHANGE_REMOTE_DISPATCH_FAILED");
     }
     this.assertDeadline(operation, deadline);
-    return this.waitForResult(operation, baseline, artifactName, context.repositoryId, request.operation, deadline);
+    return this.waitForResult(
+      operation,
+      correlation,
+      baseline,
+      artifactName,
+      context.repositoryId,
+      request.operation,
+      deadline,
+    );
   }
 
   private async readRuns(operation: string, deadline: ChangeExecutionDeadline): Promise<readonly WorkflowRun[]> {
@@ -575,6 +605,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
 
   private async waitForResult(
     operation: string,
+    correlation: string,
     baseline: readonly WorkflowRun[],
     artifactName: string,
     repositoryId: string,
@@ -597,7 +628,10 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
-      const candidates = runs.filter((run) => isNewRun(run, baselineIds));
+      // The run-name correlation is the only identity evidence used below.
+      // Candidate count, "new since baseline", and observation order never
+      // decide which run belongs to this request.
+      const correlatedRun = runs.find((candidate) => isCorrelatedRun(candidate, correlation));
       let artifacts: readonly WorkflowArtifact[];
       try {
         artifacts = await this.readArtifacts(operation, artifactName, repositoryId, deadline);
@@ -614,14 +648,13 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "expired-artifact");
       }
       const run =
-        artifact === undefined ? undefined : candidates.find((candidate) => candidate.id === artifact.workflowRunId);
+        artifact !== undefined && correlatedRun !== undefined && correlatedRun.id === artifact.workflowRunId
+          ? correlatedRun
+          : undefined;
       if (artifact !== undefined && run === undefined && baselineIds.has(artifact.workflowRunId)) {
         throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "stale-artifact");
       }
-      if (run !== undefined && run.status === "completed") {
-        if (artifact === undefined) {
-          throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
-        }
+      if (artifact !== undefined && run !== undefined && run.status === "completed") {
         let archive: Uint8Array;
         try {
           archive = await this.withinDeadline(operation, deadline, () =>
@@ -642,11 +675,11 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         }
         return result;
       }
-      if (
-        candidates.some((candidate) => candidate.status === "completed") &&
-        artifact === undefined &&
-        candidates.length === 1
-      ) {
+      // Only the positively correlated run may report a missing result
+      // artifact for this request. An unrelated completed run — regardless
+      // of how many other candidates are or are not visible — must never be
+      // interpreted as this request's target.
+      if (correlatedRun !== undefined && correlatedRun.status === "completed" && artifact === undefined) {
         throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
       }
       if (timeRemaining()) await this.#sleep(this.#pollIntervalMs);

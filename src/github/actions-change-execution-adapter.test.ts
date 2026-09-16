@@ -23,6 +23,12 @@ import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js"
 import { generateRuntimeAuthorityKeyPair } from "../agent-authority/runtime-key.js";
 
 const correlation = "123e4567-e89b-42d3-a456-426614174000";
+const unrelatedCorrelation = "00000000-0000-4000-8000-000000000001";
+const otherUnrelatedCorrelation = "00000000-0000-4000-8000-000000000002";
+
+function runDisplayTitle(runCorrelation: string): string {
+  return `Inari Change ${runCorrelation}`;
+}
 const repository: RepositoryContext = {
   hostname: "github.com",
   host: "github.com",
@@ -201,6 +207,7 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
               conclusion: "success",
               event: "workflow_dispatch",
               head_branch: "main",
+              display_title: runDisplayTitle(unrelatedCorrelation),
             },
           ],
         };
@@ -213,14 +220,23 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
             conclusion: this.runState === "success" ? "success" : "failure",
             event: "workflow_dispatch",
             head_branch: "main",
+            display_title: runDisplayTitle(correlation),
           },
-          { id: 12, status: "completed", conclusion: "success", event: "workflow_dispatch", head_branch: "main" },
+          {
+            id: 12,
+            status: "completed",
+            conclusion: "success",
+            event: "workflow_dispatch",
+            head_branch: "main",
+            display_title: runDisplayTitle(otherUnrelatedCorrelation),
+          },
           {
             id: this.baselineRunId,
             status: "completed",
             conclusion: "success",
             event: "workflow_dispatch",
             head_branch: "main",
+            display_title: runDisplayTitle(unrelatedCorrelation),
           },
         ],
       };
@@ -458,16 +474,23 @@ test("waits through queued and in-progress executor runs before accepting the co
       workflowReads += 1;
       const run =
         workflowReads === 1
-          ? { id: api.baselineRunId, status: "completed", conclusion: "success" }
+          ? { id: api.baselineRunId, status: "completed", conclusion: "success", displayTitle: unrelatedCorrelation }
           : workflowReads === 2
-            ? { id: api.resultRunId, status: "queued", conclusion: null }
+            ? { id: api.resultRunId, status: "queued", conclusion: null, displayTitle: correlation }
             : workflowReads === 3
-              ? { id: api.resultRunId, status: "in_progress", conclusion: null }
-              : { id: api.resultRunId, status: "completed", conclusion: "success" };
+              ? { id: api.resultRunId, status: "in_progress", conclusion: null, displayTitle: correlation }
+              : { id: api.resultRunId, status: "completed", conclusion: "success", displayTitle: correlation };
       api.calls.push({ path, method, fields });
       return {
         workflow_runs: [
-          { ...run, event: "workflow_dispatch", head_branch: "main" },
+          {
+            id: run.id,
+            status: run.status,
+            conclusion: run.conclusion,
+            event: "workflow_dispatch",
+            head_branch: "main",
+            display_title: runDisplayTitle(run.displayTitle),
+          },
           ...(run.id === api.resultRunId
             ? [
                 {
@@ -476,6 +499,7 @@ test("waits through queued and in-progress executor runs before accepting the co
                   conclusion: "success",
                   event: "workflow_dispatch",
                   head_branch: "main",
+                  display_title: runDisplayTitle(unrelatedCorrelation),
                 },
               ]
             : []),
@@ -489,6 +513,151 @@ test("waits through queued and in-progress executor runs before accepting the co
 
   assert.deepEqual(result, { projection: api.result });
   assert.equal(workflowReads, 4);
+});
+
+function runFixture(
+  id: number,
+  runCorrelation: string,
+  status: "queued" | "in_progress" | "completed",
+  conclusion: string | null,
+): Record<string, unknown> {
+  return {
+    id,
+    status,
+    conclusion,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    display_title: runDisplayTitle(runCorrelation),
+  };
+}
+
+function artifactFixture(id: number, workflowRunId: number): Record<string, unknown> {
+  return { id, name: `inari-change-result-${correlation}`, expired: false, workflow_run: { id: workflowRunId } };
+}
+
+test("a sole unrelated completed executor run is not sufficient evidence and never reports a missing result artifact for this request", async () => {
+  const api = new FakeActionsApi();
+  let workflowReads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      workflowReads += 1;
+      if (workflowReads === 1) return { workflow_runs: [] };
+      // Only ever one unrelated completed run is observed; the target's
+      // run-name never appears within the bounded poll budget. Candidate
+      // cardinality (exactly one) must never substitute for correlation.
+      return { workflow_runs: [runFixture(90, unrelatedCorrelation, "completed", "success")] };
+    }
+    if (path.startsWith("actions/artifacts?")) return { artifacts: [] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
+  );
+});
+
+test("an unrelated completed executor run observed before the target does not disrupt eventual correlation", async () => {
+  const api = new FakeActionsApi();
+  let workflowReads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      workflowReads += 1;
+      if (workflowReads === 1) return { workflow_runs: [] };
+      if (workflowReads === 2) {
+        return { workflow_runs: [runFixture(90, unrelatedCorrelation, "completed", "success")] };
+      }
+      return {
+        workflow_runs: [
+          runFixture(90, unrelatedCorrelation, "completed", "success"),
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?")) {
+      return workflowReads < 3
+        ? { artifacts: [] }
+        : { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("an unrelated completed run listed before the target in the same response does not divert correlation", async () => {
+  const api = new FakeActionsApi();
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      return {
+        workflow_runs: [
+          runFixture(90, unrelatedCorrelation, "completed", "failure"),
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("an unrelated completed run listed after the target in the same response does not divert correlation", async () => {
+  const api = new FakeActionsApi();
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      return {
+        workflow_runs: [
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+          runFixture(90, unrelatedCorrelation, "completed", "failure"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("with multiple candidate runs visible, only the run positively correlated by run-name is interpreted", async () => {
+  const api = new FakeActionsApi();
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      return {
+        workflow_runs: [
+          runFixture(90, unrelatedCorrelation, "completed", "failure"),
+          runFixture(91, otherUnrelatedCorrelation, "completed", "success"),
+          runFixture(api.resultRunId, correlation, "completed", "success"),
+        ],
+      };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(result, { projection: api.result });
 });
 
 test("retries one transient run or artifact poll failure before observing success", async () => {

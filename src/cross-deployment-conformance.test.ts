@@ -449,6 +449,7 @@ class FixtureActionsApi implements ActionsChangeExecutionAdapterApi {
               conclusion: "success",
               event: "workflow_dispatch",
               head_branch: "main",
+              display_title: "Inari Change 00000000-0000-4000-8000-000000000000",
             },
           ],
         };
@@ -461,6 +462,7 @@ class FixtureActionsApi implements ActionsChangeExecutionAdapterApi {
             conclusion: "success",
             event: "workflow_dispatch",
             head_branch: "main",
+            display_title: `Inari Change ${CORRELATION}`,
           },
         ],
       };
