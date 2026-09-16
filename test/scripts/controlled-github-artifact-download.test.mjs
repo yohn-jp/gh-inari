@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const provider = path.join(import.meta.dirname, "..", "..", "scripts", "controlled-github.mjs");
@@ -20,20 +20,11 @@ function withProviderState(state, run) {
 }
 
 function downloadArtifact(statePath, artifactId) {
-  return spawnSync(
-    process.execPath,
-    [
-      provider,
-      "api",
-      `repos/yohn-jp/gh-inari/actions/artifacts/${artifactId}/zip`,
-      "--method",
-      "GET",
-    ],
-    {
-      env: { ...process.env, INARI_PACKED_PROVIDER_STATE: statePath },
-      maxBuffer: 1024 * 1024,
-    },
-  );
+  const args = [provider, "api", `repos/yohn-jp/gh-inari/actions/artifacts/${artifactId}/zip`, "--method", "GET"];
+  return spawnSync(process.execPath, args, {
+    env: { ...process.env, INARI_PACKED_PROVIDER_STATE: statePath },
+    maxBuffer: 1024 * 1024,
+  });
 }
 
 test("controlled Actions artifact download emits the exact ZIP bytes on stdout", () => {
