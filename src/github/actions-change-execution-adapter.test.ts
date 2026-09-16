@@ -536,6 +536,114 @@ function artifactFixture(id: number, workflowRunId: number): Record<string, unkn
   return { id, name: `inari-change-result-${correlation}`, expired: false, workflow_run: { id: workflowRunId } };
 }
 
+function pageFromPath(value: string): number {
+  const match = /[?&]page=(\d+)/u.exec(value);
+  if (match === null) throw new Error(`missing page in Actions path: ${value}`);
+  return Number(match[1]);
+}
+
+function unrelatedRunPage(startId: number): Record<string, unknown>[] {
+  return Array.from({ length: 100 }, (_, index) =>
+    runFixture(startId + index, unrelatedCorrelation, "completed", "success"),
+  );
+}
+
+test("#617 paginates workflow runs until the correlated run is found on page 2", async () => {
+  const api = new FakeActionsApi();
+  let dispatched = false;
+  const baselinePages: number[] = [];
+  const pollPages: number[] = [];
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") {
+      dispatched = true;
+      return undefined;
+    }
+    if (path.startsWith("actions/workflows/")) {
+      const page = pageFromPath(path);
+      (dispatched ? pollPages : baselinePages).push(page);
+      if (page === 1) return { workflow_runs: unrelatedRunPage(dispatched ? 1_000 : 2_000) };
+      return dispatched
+        ? { workflow_runs: [runFixture(api.resultRunId, correlation, "completed", "success")] }
+        : { workflow_runs: [] };
+    }
+    if (path.startsWith("actions/artifacts?"))
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  const result = await executor(api, process.cwd(), 1).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.deepEqual(baselinePages, [1, 2]);
+  assert.deepEqual(pollPages, [1, 2]);
+});
+
+test("#617 paginates artifact discovery until the result artifact is found on page 2", async () => {
+  const api = new FakeActionsApi();
+  const artifactPages: number[] = [];
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      api.calls.push({ path, method, fields });
+      const page = pageFromPath(path);
+      artifactPages.push(page);
+      if (page === 1) {
+        return {
+          artifacts: Array.from({ length: 100 }, (_, index) => ({
+            id: 1_000 + index,
+            name: `unrelated-artifact-${index}`,
+            expired: false,
+            workflow_run: { id: 900 + index },
+          })),
+        };
+      }
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 1).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.deepEqual(artifactPages, [1, 2]);
+});
+
+test("#617 stops absent workflow-run discovery at the bounded page limit", async () => {
+  const api = new FakeActionsApi();
+  let dispatched = false;
+  const pollPages: number[] = [];
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") {
+      dispatched = true;
+      return undefined;
+    }
+    if (path.startsWith("actions/workflows/")) {
+      const page = pageFromPath(path);
+      if (!dispatched) return page === 1 ? { workflow_runs: unrelatedRunPage(2_000) } : { workflow_runs: [] };
+      pollPages.push(page);
+      return { workflow_runs: unrelatedRunPage(3_000 + page * 100) };
+    }
+    if (path.startsWith("actions/artifacts?")) return { artifacts: [] };
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 1).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "artifact-read" }),
+  );
+
+  assert.deepEqual(
+    pollPages,
+    Array.from({ length: 10 }, (_, index) => index + 1),
+  );
+});
+
 test("a sole unrelated completed executor run is not sufficient evidence and never reports a missing result artifact for this request", async () => {
   const api = new FakeActionsApi();
   let workflowReads = 0;

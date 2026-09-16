@@ -38,8 +38,11 @@ export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml" as con
 export const INARI_CHANGE_EXECUTOR_REF = "refs/heads/main" as const;
 
 const INARI_CHANGE_EXECUTOR_BRANCH = "main" as const;
-const MAX_ACTION_RUNS = 100;
-const MAX_ARTIFACTS = 100;
+const ACTIONS_PAGE_SIZE = 100;
+const MAX_ACTION_RUN_PAGES = 10;
+const MAX_ARTIFACT_PAGES = 10;
+const MAX_ACTION_RUNS = ACTIONS_PAGE_SIZE * MAX_ACTION_RUN_PAGES;
+const MAX_ARTIFACTS = ACTIONS_PAGE_SIZE * MAX_ARTIFACT_PAGES;
 const MAX_RESULT_BYTES = 262_144;
 // The execution deadline is owned by change-execution-port. These polling
 // settings only shape observation cadence; they never establish when the
@@ -221,12 +224,12 @@ function normalizeTransportError(
   return remoteError(code, operation, "transport", undefined, stage);
 }
 
-function workflowRunsPath(): string {
-  return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/runs?event=workflow_dispatch&branch=${INARI_CHANGE_EXECUTOR_BRANCH}&per_page=${MAX_ACTION_RUNS}`;
+function workflowRunsPath(page: number): string {
+  return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/runs?event=workflow_dispatch&branch=${INARI_CHANGE_EXECUTOR_BRANCH}&per_page=${ACTIONS_PAGE_SIZE}&page=${page}`;
 }
 
-function artifactsPath(name: string): string {
-  return `actions/artifacts?name=${encodeURIComponent(name)}&per_page=${MAX_ARTIFACTS}`;
+function artifactsPath(name: string, page: number): string {
+  return `actions/artifacts?name=${encodeURIComponent(name)}&per_page=${ACTIONS_PAGE_SIZE}&page=${page}`;
 }
 
 function dispatchPath(): string {
@@ -302,7 +305,7 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
 
 function parseRuns(value: unknown): readonly WorkflowRun[] {
   const payload = record(value, "run-read");
-  if (!Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > MAX_ACTION_RUNS) {
+  if (!Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > ACTIONS_PAGE_SIZE) {
     throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
   }
   return payload.workflow_runs.map((candidate) => {
@@ -340,7 +343,7 @@ function parseArtifacts(
   expectedRepositoryId: string,
 ): readonly WorkflowArtifact[] {
   const payload = record(value, "artifact-read");
-  if (!Array.isArray(payload.artifacts) || payload.artifacts.length > MAX_ARTIFACTS) {
+  if (!Array.isArray(payload.artifacts) || payload.artifacts.length > ACTIONS_PAGE_SIZE) {
     throw remoteError(
       "CHANGE_REMOTE_RESULT_INVALID",
       "actions.artifacts",
@@ -776,18 +779,39 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     );
   }
 
-  private async readRuns(operation: string, deadline: ChangeExecutionDeadline): Promise<readonly WorkflowRun[]> {
+  private async readRuns(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+    correlation?: string,
+  ): Promise<readonly WorkflowRun[]> {
     return this.withinDeadline(
       operation,
       deadline,
       async () => {
-        let value: unknown;
-        try {
-          value = await this.#api.requestActionsApi(workflowRunsPath(), "GET", {}, deadline);
-        } catch (error: unknown) {
-          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "run-read");
+        const runs: WorkflowRun[] = [];
+        for (let page = 1; page <= MAX_ACTION_RUN_PAGES; page += 1) {
+          let value: unknown;
+          try {
+            value = await this.#api.requestActionsApi(workflowRunsPath(page), "GET", {}, deadline);
+          } catch (error: unknown) {
+            throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "run-read");
+          }
+          const pageRuns = parseRuns(value);
+          runs.push(...pageRuns);
+          if (runs.length > MAX_ACTION_RUNS) {
+            throw remoteError(
+              "CHANGE_REMOTE_RESULT_INVALID",
+              "actions.runs",
+              "invalid-metadata",
+              undefined,
+              "run-read",
+            );
+          }
+          if (correlation !== undefined && pageRuns.some((run) => isCorrelatedRun(run, correlation))) return runs;
+          if (pageRuns.length < ACTIONS_PAGE_SIZE) return runs;
+          this.assertDeadline(operation, deadline, "run-read");
         }
-        return parseRuns(value);
+        return runs;
       },
       "run-read",
     );
@@ -814,7 +838,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       let runs: readonly WorkflowRun[];
       observationStage = "run-read";
       try {
-        runs = await this.readRuns(operation, deadline);
+        runs = await this.readRuns(operation, deadline, correlation);
       } catch (error: unknown) {
         if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
         await this.#sleep(this.#pollIntervalMs);
@@ -905,13 +929,31 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       operation,
       deadline,
       async () => {
-        let value: unknown;
-        try {
-          value = await this.#api.requestActionsApi(artifactsPath(name), "GET", {}, deadline);
-        } catch (error: unknown) {
-          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "artifact-read");
+        const artifacts: WorkflowArtifact[] = [];
+        for (let page = 1; page <= MAX_ARTIFACT_PAGES; page += 1) {
+          let value: unknown;
+          try {
+            value = await this.#api.requestActionsApi(artifactsPath(name, page), "GET", {}, deadline);
+          } catch (error: unknown) {
+            throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "artifact-read");
+          }
+          const pageArtifacts = parseArtifacts(value, name, repositoryId);
+          artifacts.push(...pageArtifacts);
+          if (artifacts.length > MAX_ARTIFACTS) {
+            throw remoteError(
+              "CHANGE_REMOTE_RESULT_INVALID",
+              "actions.artifacts",
+              "invalid-metadata",
+              undefined,
+              "artifact-read",
+            );
+          }
+          if (pageArtifacts.length > 0) return artifacts;
+          const pageEntries = record(value, "artifact-read").artifacts;
+          if (!Array.isArray(pageEntries) || pageEntries.length < ACTIONS_PAGE_SIZE) return artifacts;
+          this.assertDeadline(operation, deadline, "artifact-read");
         }
-        return parseArtifacts(value, name, repositoryId);
+        return artifacts;
       },
       "artifact-read",
     );
