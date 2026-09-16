@@ -28,6 +28,15 @@ function generatedImplementationSurface(document: string): string {
   return document.slice(start, end + IMPLEMENTATION_COMMAND_SURFACE_MARKERS.end.length);
 }
 
+function implementationContractDocumentationOutsideGeneratedSurface(document: string): string {
+  const start = document.indexOf(IMPLEMENTATION_COMMAND_SURFACE_MARKERS.start);
+  assert.notEqual(start, -1, "normative documentation must contain the generated surface start marker");
+  const end = document.indexOf(IMPLEMENTATION_COMMAND_SURFACE_MARKERS.end, start);
+  assert.notEqual(end, -1, "normative documentation must contain the generated surface end marker");
+  const blockEnd = end + IMPLEMENTATION_COMMAND_SURFACE_MARKERS.end.length;
+  return document.slice(0, start) + document.slice(blockEnd);
+}
+
 test("Implementation command projection is a complete view of the command authority", () => {
   const projection = projectImplementationCommandSurface();
   const definitions = getDomainCommands("impl");
@@ -91,4 +100,29 @@ test("normative Implementation documentation is exactly the contract projection"
   assert.doesNotMatch(document, /command contract is version `1\.10\.0`/u);
   assert.doesNotMatch(document, /has exactly these operations/u);
   assert.doesNotMatch(document, /five current operations/u);
+});
+
+test("the generated marker block is the only exact impl command inventory in the documentation", () => {
+  const document = implementationContractDocumentation();
+  const remainder = implementationContractDocumentationOutsideGeneratedSurface(document);
+
+  for (const definition of getDomainCommands("impl")) {
+    const invocation = `${commandInvocation(definition.id)}${
+      definition.positionalSyntax === undefined ? "" : ` ${definition.positionalSyntax}`
+    }`;
+    assert.ok(
+      !remainder.includes(invocation),
+      `${definition.id} exact invocation must not be duplicated outside the generated block: ${invocation}`,
+    );
+    assert.ok(
+      !remainder.includes(commandUsage(definition)),
+      `${definition.id} exact usage must not be duplicated outside the generated block`,
+    );
+  }
+
+  assert.doesNotMatch(
+    remainder,
+    /plan,\s*show,\s*validate,\s*authorize,\s*inspect,\s*(and\s+)?verify/iu,
+    "documentation prose must not re-enumerate the impl operation verbs outside the generated projection",
+  );
 });
