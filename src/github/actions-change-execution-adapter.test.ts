@@ -863,6 +863,126 @@ test("dispatch, run, missing, ambiguous, stale, and malformed result failures fa
   }
 });
 
+test("#613: continues polling for the correlated result artifact after the target run completes, and succeeds once visibility catches up", async () => {
+  // The correlated run is already observed as completed on the very first
+  // poll (FakeActionsApi's default fixture), but the exact result artifact
+  // is absent on that same first poll — reproducing GitHub Actions' run
+  // completion and artifact-listing convergence not being atomic. Absence
+  // here must be treated as an observation state, not immediate proof of
+  // failure, as long as the canonical deadline has time remaining.
+  const api = new FakeActionsApi();
+  let artifactReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      artifactReads += 1;
+      if (artifactReads === 1) return { artifacts: [] };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(artifactReads, 2);
+});
+
+test("#613: an artifact that never becomes visible fails closed at the canonical deadline without an independent artifact timeout", async () => {
+  const api = new FakeActionsApi();
+  api.artifactMode = "missing";
+  let workflowReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) workflowReads += 1;
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 4).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "result-timeout" }),
+  );
+  // Bounded exactly by the shared maxPollAttempts/deadline (one baseline read
+  // plus one read per poll-loop attempt) — no unbounded polling and no
+  // second, artifact-specific timeout authority.
+  assert.equal(workflowReads, 5);
+});
+
+test("#613: an artifact with a non-matching name during the lag window does not satisfy the request", async () => {
+  const api = new FakeActionsApi();
+  let artifactReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      artifactReads += 1;
+      if (artifactReads === 1) {
+        return {
+          artifacts: [
+            {
+              id: 999,
+              name: `inari-change-result-${otherUnrelatedCorrelation}`,
+              expired: false,
+              workflow_run: { id: api.resultRunId },
+            },
+          ],
+        };
+      }
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  const result = await executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+});
+
+test("#613: a same-named artifact bound to an unrelated baseline run remains a fail-closed correlation failure, not a lag observation", async () => {
+  const api = new FakeActionsApi();
+  api.artifactMode = "stale";
+  await assert.rejects(
+    executor(api).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_CORRELATION_FAILED" &&
+      JSON.stringify(error.details) === JSON.stringify({ operation: "change.issue", reason: "stale-artifact" }),
+  );
+});
+
+test("#613: a correlated run's failure conclusion and diagnostic remain authoritative once the delayed result artifact becomes visible", async () => {
+  const api = new FakeActionsApi();
+  api.runState = "failure";
+  api.archiveValue = {
+    ok: false,
+    error: {
+      code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+      message: "Bearer installation-secret-token /private/provider/path",
+      details: { stage: "installation-token" },
+    },
+  };
+  let artifactReads = 0;
+  const originalRequestActionsApi = api.requestActionsApi.bind(api);
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    if (method === "GET" && path.startsWith("actions/artifacts?")) {
+      artifactReads += 1;
+      if (artifactReads === 1) return { artifacts: [] };
+    }
+    return originalRequestActionsApi(path, method, fields);
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 3).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "workflow-conclusion", stage: "installation-token" }) &&
+      !JSON.stringify(error).includes("installation-secret-token"),
+  );
+  assert.equal(artifactReads, 2);
+});
+
 test("a valid semantic recovery result remains authoritative over a failed workflow conclusion", async () => {
   const api = new FakeActionsApi();
   api.runState = "failure";
