@@ -23,6 +23,7 @@ test("SKILL_SCENARIOS has a fixed, deterministic order", () => {
     "inspect-governance",
     "repair-invalid-artifact",
     "manage-issue-relationships",
+    "manage-implementation",
     "manage-change",
     "golden-path",
   ]);
@@ -109,6 +110,26 @@ test("authoring scenarios make direct governed creation the conditional golden p
     assert.match(scenario.invariants.join(" "), /not a mandatory step/);
     assert.match(scenario.invariants.join(" "), /not mandatory ceremony/);
   }
+});
+
+test("Implementation authoring uses the current impl command surface", () => {
+  const scenario = findSkillScenario("manage-implementation");
+  assert.ok(scenario);
+  assert.deepEqual(
+    scenario.workflow.map((step) => step.command),
+    [
+      "inari impl plan <number>",
+      "inari issue create",
+      "inari impl show <number>",
+      "inari impl validate <number>",
+      "inari impl authorize <number>",
+      "inari impl inspect <number>",
+    ],
+  );
+  assert.match(scenario.invariants.join(" "), /not authoritative/u);
+  assert.match(scenario.invariants.join(" "), /without a GitHub mutation/u);
+  assert.match(scenario.invariants.join(" "), /native parent\/sub-issue/u);
+  assert.doesNotMatch(JSON.stringify(scenario), /impl (?:create|edit|start|complete|ready)/u);
 });
 
 function resolvedGovernance(
@@ -216,7 +237,7 @@ test("the Golden Path is the only default route and existing flows point to it",
     [SKILL_DEFAULT_SCENARIO_ID],
   );
 
-  for (const id of ["author-issue", "author-pr", "manage-change"] as const) {
+  for (const id of ["author-issue", "author-pr", "manage-implementation", "manage-change"] as const) {
     const scenario = findSkillScenario(id);
     assert.ok(scenario);
     assert.equal(scenario.scope, "leaf-operation");

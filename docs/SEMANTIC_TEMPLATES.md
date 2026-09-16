@@ -4,6 +4,42 @@ Migrated repositories keep editable template contracts under `.github/inari/`. G
 
 The canonical machine format is JSON. An Issue Form is stored under `.github/inari/issues/<id>.json`. A repository with a single pull-request template uses `.github/inari/pull-request.json`; a repository with multiple pull-request templates uses `.github/inari/pull-requests/<id>.json` instead (plural directory, one file per template). Only files at these exact paths are discovered by `template list`/`template sync`; any other location is written but silently ignored. A contract contains `version`, `kind`, `id`, `name`, optional native metadata, and ordered semantic `sections`. Input sections declare an `id`, type (`string`, `enum`, `array`, or `checklist`), label, requiredness, choices, and constraints. Pull-request headings and fixed documentation are represented only by bounded `headingLevel`, `placeholder`, and documentation section values.
 
+## Issue and Implementation authoring
+
+Ordinary Issue contracts record a problem, request, or decision. Architecture,
+Bug, Feature, Research, and Maintenance forms remain usable without a session
+plan, execution path scopes, branch/base binding, targeted checks,
+postconditions, or authorization.
+
+The `implementation` Issue contract is the separate one-session execution
+contract. Use it when implementation is being prepared, and keep its
+objective, non-goals, selected design, scopes, constraints, prerequisites,
+verification, base, and dependencies in that contract. Creating or editing an
+Implementation does not itself authorize or start a session; the current
+`impl` command surface and #572 authorization evidence define that boundary.
+See [`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md) for the
+normative lifecycle and the exact current `impl` metadata.
+
+Where GitHub native parent/sub-issue support is available, attach an
+Implementation to its immediate source Issue through the provider relationship
+authority. That provider relationship is canonical. A legacy `Parent:` or
+`Parent Epic:` line is compatibility guidance for older Issues only; it is not
+a substitute for provider evidence and does not trigger automatic historical
+reparenting or bulk migration.
+
+The supported relationship shapes are:
+
+```text
+Epic -> Architecture -> Implementation
+Epic -> Bug -> Implementation 1 / Implementation 2
+Feature -> Implementation
+```
+
+Pull-request templates describe delivered work, linked work, validation, and
+review context. They do not duplicate the Implementation contract or provide
+a second authorization record. Epic PRs are integration objects; one-session
+Implementation detail belongs to child Issues.
+
 Generate projections after editing a semantic source:
 
 ```sh

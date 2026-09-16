@@ -11,7 +11,7 @@ import type { GoldenPathGovernanceDiscoveryResult } from "./golden-path-governan
 
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 
-export const SKILL_MODEL_VERSION = "1.4.0";
+export const SKILL_MODEL_VERSION = "1.5.0";
 export const SKILL_DEFAULT_SCENARIO_ID = "golden-path" as const;
 
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
@@ -128,6 +128,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     invariants: [
       "Never call raw `gh issue create` for a governed template; it bypasses contract validation.",
       "Normal development follows `inari skill golden-path`; this leaf does not issue a Change or create a PR.",
+      "An ordinary Issue records a problem, request, or decision; session scopes, base binding, verification, and authorization belong in a separate Implementation Issue.",
       "Direct governed creation is the conditional leaf fast path when required fields are already known.",
       "Schema inspection is conditional, not a mandatory step when field requirements are known.",
       "Validate and render are explicit preview, debugging, or artifact-generation paths, not mandatory ceremony.",
@@ -164,6 +165,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     invariants: [
       "Never call raw `gh pr create` for a governed template; it bypasses contract validation.",
       "Normal development uses Golden Path Change issuance; this leaf does not replace the canonical Draft PR.",
+      "A PR records delivered work and validation; it does not replace an Implementation contract or carry a second session authorization.",
       "Direct governed creation is the conditional leaf fast path when required fields are already known.",
       "Schema inspection is conditional, not a mandatory step when field requirements are known.",
       "Validate and render are explicit preview, debugging, or artifact-generation paths, not mandatory ceremony.",
@@ -263,11 +265,44 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       "Always preview before executing the semantic parent/dependency plan; execute re-observes and rejects a plan the repository state has outgrown.",
       "A real relationship mutation requires complete bounded relationship-graph evidence; omitted or incomplete evidence fails closed.",
       "Desired relationship state is expressed only through `parent`/`dependsOn`; `children`/`blocks` remain derived, never caller-supplied input.",
-      "Markdown `Parent Epic:`/task-list references are compatibility projections only, never semantic authority once this command is used.",
+      "Markdown `Parent:`/`Parent Epic:`/task-list references are compatibility projections only; native provider relationship evidence is the authority where supported.",
       HELP_DISCLAIMER,
     ],
     canonicalCommandId: "issue.relations.plan",
     helpDomain: "issue",
+  }),
+  skillScenario({
+    id: "manage-implementation",
+    title: "Prepare and inspect an Implementation",
+    whenToUse:
+      "Use when an ordinary Issue has reached the point where one concrete implementation session must be planned, validated, or authorized.",
+    scope: "leaf-operation",
+    delegatesTo: SKILL_DEFAULT_SCENARIO_ID,
+    workflow: [
+      [
+        "Draft a bounded Implementation recommendation from authoritative source Issue evidence without granting authority.",
+        "impl.plan",
+      ],
+      [
+        "Create a separate Implementation Issue through the governed Issue operation using the Implementation template.",
+        "issue.create",
+      ],
+      ["Show the current Implementation body, contract projection, and authorization state.", "impl.show"],
+      ["Validate the current Implementation body without mutation.", "impl.validate"],
+      ["Authorize the current canonical Implementation body through the existing Core boundary.", "impl.authorize"],
+      ["Inspect lifecycle and provider-authoritative parent/source relationships.", "impl.inspect"],
+    ],
+    invariants: [
+      "The ordinary Issue remains the problem, request, or decision record; this scenario keeps one-session detail in the Implementation.",
+      "`impl.plan` is a preview and its recommendations are not authoritative; it does not authorize or mutate an Issue.",
+      "`impl.validate` is read-only. `impl.show` and `impl.inspect` project current evidence without mutation.",
+      "`impl.authorize` requires the current canonical body and authoritative base evidence, then emits Core authorization evidence without a GitHub mutation.",
+      "Use native parent/sub-issue provider evidence where supported; prose `Parent:` is compatibility guidance for older artifacts and never triggers bulk reparenting.",
+      "The five current operations are `plan`, `show`, `validate`, `authorize`, and `inspect`; do not invent an `impl` create/edit/start/complete/ready command.",
+      HELP_DISCLAIMER,
+    ],
+    canonicalCommandId: "impl.plan",
+    helpDomain: "impl",
   }),
   skillScenario({
     id: "manage-change",
