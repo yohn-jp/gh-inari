@@ -21,6 +21,7 @@ import {
   generatePackedEvidence,
   parseArgs,
   parseWorkflowContext,
+  resolveSelfDogfoodWorkflowRun,
   retrieveSelfDogfoodEvidence,
   runWorkflowCertification,
 } from "../../scripts/verify-release-certification.mjs";
@@ -103,8 +104,6 @@ function workflowEnvironment(artifactPath, artifactSha256, overrides = {}) {
     RELEASE_TAG: `v${PACKAGE.version}`,
     RELEASE_ARTIFACT_PATH: artifactPath,
     RELEASE_ARTIFACT_SHA256: artifactSha256,
-    RELEASE_DOGFOOD_WORKFLOW_RUN_ID: DOGFOOD_RUN_ID,
-    RELEASE_DOGFOOD_WORKFLOW_RUN_ATTEMPT: DOGFOOD_RUN_ATTEMPT,
     ...overrides,
   };
 }
@@ -152,8 +151,6 @@ test("parses the no-argument reusable-workflow context", () => {
     releaseTag: `v${PACKAGE.version}`,
     artifactPath: path.resolve("./release.tgz"),
     artifactSha256: "a".repeat(64),
-    dogfoodWorkflowRunId: DOGFOOD_RUN_ID,
-    dogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
   });
 });
 
@@ -170,6 +167,74 @@ test("rejects missing or invalid workflow context", () => {
     () =>
       parseWorkflowContext({ ...workflowEnvironment("release.tgz", "a".repeat(64)), GITHUB_REPOSITORY: "other/repo" }),
     /GITHUB_REPOSITORY must be yohn-jp\/gh-inari/u,
+  );
+});
+
+test("resolves the latest successful self-dogfood run for the exact source SHA", async () => {
+  const requests = [];
+  const resolved = await resolveSelfDogfoodWorkflowRun({
+    sourceSha: SOURCE_SHA,
+    environment: { GITHUB_API_URL: "https://api.example.test", GITHUB_TOKEN: "bounded-token" },
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({
+        workflow_runs: [
+          {
+            id: 4101,
+            run_attempt: 1,
+            head_sha: SOURCE_SHA,
+            conclusion: "success",
+            created_at: "2025-12-31T00:00:00Z",
+          },
+          {
+            id: 4103,
+            run_attempt: 1,
+            head_sha: SOURCE_SHA,
+            conclusion: "failure",
+            created_at: "2025-12-31T00:02:00Z",
+          },
+          {
+            id: 4102,
+            run_attempt: 2,
+            head_sha: SOURCE_SHA,
+            conclusion: "success",
+            created_at: "2025-12-31T00:01:00Z",
+          },
+        ],
+      });
+    },
+  });
+  assert.deepEqual(resolved, { workflowRunId: "4102", workflowRunAttempt: "2" });
+  assert.equal(requests.length, 1);
+  assert.match(
+    requests[0].url,
+    new RegExp(
+      `repos/yohn-jp/gh-inari/actions/workflows/self-dogfood-certification\.yml/runs\\?head_sha=${SOURCE_SHA}&per_page=100$`,
+    ),
+  );
+  assert.equal(requests[0].init.headers.authorization, "Bearer bounded-token");
+});
+
+test("fails closed when the self-dogfood workflow run response has no usable success", async () => {
+  const base = {
+    sourceSha: SOURCE_SHA,
+    environment: { GITHUB_API_URL: "https://api.example.test" },
+  };
+  await assert.rejects(
+    resolveSelfDogfoodWorkflowRun({ ...base, fetchImpl: async () => jsonResponse({ workflow_runs: [] }) }),
+    /no successful self-dogfood workflow run/u,
+  );
+  await assert.rejects(
+    resolveSelfDogfoodWorkflowRun({
+      ...base,
+      fetchImpl: async () =>
+        jsonResponse({
+          workflow_runs: [
+            { id: 4101, run_attempt: 1, head_sha: SOURCE_SHA, conclusion: "success" },
+          ],
+        }),
+    }),
+    /created_at is invalid/u,
   );
 });
 
@@ -263,6 +328,10 @@ test("composes a successful workflow result from exact-artifact and exact-source
       environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
       currentSourceSha: SOURCE_SHA,
       packageMetadata: PACKAGE,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       packedEvidenceGenerator: async (input) => {
         packedInput = input;
         return packedEvidence({ package: { ...PACKAGE, tarballSha256: `sha256:${fixture.artifactSha256}` } });
@@ -289,6 +358,10 @@ test("delegates failed, malformed, package-mismatched, and repository-mismatched
       environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
       currentSourceSha: SOURCE_SHA,
       packageMetadata: PACKAGE,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       dogfoodEvidenceRetriever: async () => dogfoodEvidence(),
     };
     const failed = await runWorkflowCertification({
@@ -544,6 +617,10 @@ test("rejects exact-source dogfood content mismatch and bounds adapter failures"
       environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
       currentSourceSha: SOURCE_SHA,
       packageMetadata: PACKAGE,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       packedEvidenceGenerator: async () =>
         packedEvidence({ package: { ...PACKAGE, tarballSha256: `sha256:${fixture.artifactSha256}` } }),
       dogfoodEvidenceRetriever: async () => dogfoodEvidence({ sourceCommitSha: OTHER_SOURCE_SHA }),

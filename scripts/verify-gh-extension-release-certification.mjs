@@ -9,10 +9,12 @@ import {
   appendCertificationDiagnostic,
   isCertificationBoundedString,
   isCertificationSourceCommitSha,
-  isCertificationWorkflowRunAttempt,
-  isCertificationWorkflowRunId,
 } from "./certification-evidence.mjs";
-import { readCurrentSourceSha, retrieveSelfDogfoodEvidence } from "./verify-release-certification.mjs";
+import {
+  readCurrentSourceSha,
+  resolveSelfDogfoodWorkflowRun,
+  retrieveSelfDogfoodEvidence,
+} from "./verify-release-certification.mjs";
 import { verifyGhExtensionReleaseCertification } from "../src/release-certification.js";
 
 const REPOSITORY_OWNER = "yohn-jp";
@@ -30,8 +32,6 @@ const WORKFLOW_CONTEXT_KEYS = Object.freeze([
   "RELEASE_TAG",
   "RELEASE_ARTIFACT_DIR",
   "RELEASE_ARTIFACT_MANIFEST_SHA256",
-  "RELEASE_DOGFOOD_WORKFLOW_RUN_ID",
-  "RELEASE_DOGFOOD_WORKFLOW_RUN_ATTEMPT",
 ]);
 
 class WorkflowCertificationError extends Error {
@@ -88,15 +88,6 @@ export function parseWorkflowContext(environment = process.env) {
       "WORKFLOW_CONTEXT_INVALID",
       "RELEASE_ARTIFACT_MANIFEST_SHA256 must be a lowercase SHA-256 digest",
     );
-  const dogfoodWorkflowRunId = requireEnvironmentValue(environment, "RELEASE_DOGFOOD_WORKFLOW_RUN_ID");
-  const dogfoodWorkflowRunAttempt = requireEnvironmentValue(environment, "RELEASE_DOGFOOD_WORKFLOW_RUN_ATTEMPT");
-  if (!isCertificationWorkflowRunId(dogfoodWorkflowRunId))
-    throw workflowError("WORKFLOW_CONTEXT_INVALID", "RELEASE_DOGFOOD_WORKFLOW_RUN_ID must be an exact run ID");
-  if (!isCertificationWorkflowRunAttempt(dogfoodWorkflowRunAttempt))
-    throw workflowError(
-      "WORKFLOW_CONTEXT_INVALID",
-      "RELEASE_DOGFOOD_WORKFLOW_RUN_ATTEMPT must be an exact positive run attempt",
-    );
 
   return {
     repositoryOwner: REPOSITORY_OWNER,
@@ -105,8 +96,6 @@ export function parseWorkflowContext(environment = process.env) {
     releaseTag,
     artifactDirectory: path.resolve(artifactDirectory),
     artifactManifestSha256,
-    dogfoodWorkflowRunId,
-    dogfoodWorkflowRunAttempt,
   };
 }
 
@@ -254,6 +243,7 @@ export async function runWorkflowCertification({
   repositoryRoot = REPOSITORY_ROOT,
   currentSourceSha,
   dogfoodEvidenceRetriever = retrieveSelfDogfoodEvidence,
+  workflowRunResolver = resolveSelfDogfoodWorkflowRun,
   fetchImpl = globalThis.fetch,
   now = Date.now(),
 } = {}) {
@@ -264,10 +254,17 @@ export async function runWorkflowCertification({
       return failureResult("SOURCE_SHA_MISMATCH", "checked-out source SHA does not match RELEASE_SOURCE_SHA");
 
     const observedArtifactManifestSha256 = computeArtifactManifestSha256(context.artifactDirectory);
+    const dogfoodWorkflowRun = await workflowRunResolver({
+      sourceSha: context.sourceSha,
+      repositoryOwner: context.repositoryOwner,
+      repositoryName: context.repositoryName,
+      environment,
+      fetchImpl,
+    });
     const dogfoodEvidence = await dogfoodEvidenceRetriever({
       sourceSha: context.sourceSha,
-      workflowRunId: context.dogfoodWorkflowRunId,
-      workflowRunAttempt: context.dogfoodWorkflowRunAttempt,
+      workflowRunId: dogfoodWorkflowRun.workflowRunId,
+      workflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
       repositoryOwner: context.repositoryOwner,
       repositoryName: context.repositoryName,
       environment,
@@ -278,8 +275,8 @@ export async function runWorkflowCertification({
       expectedReleaseSourceCommitSha: context.sourceSha,
       expectedRepositoryOwner: context.repositoryOwner,
       expectedRepositoryName: context.repositoryName,
-      expectedDogfoodWorkflowRunId: context.dogfoodWorkflowRunId,
-      expectedDogfoodWorkflowRunAttempt: context.dogfoodWorkflowRunAttempt,
+      expectedDogfoodWorkflowRunId: dogfoodWorkflowRun.workflowRunId,
+      expectedDogfoodWorkflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
       expectedReleaseTag: context.releaseTag,
       expectedArtifactManifestSha256: context.artifactManifestSha256,
       observedArtifactManifestSha256,

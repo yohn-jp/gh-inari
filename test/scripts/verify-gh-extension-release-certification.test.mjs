@@ -90,10 +90,12 @@ function environment(directory, manifestSha256, overrides = {}) {
     RELEASE_TAG: "v0.11.0",
     RELEASE_ARTIFACT_DIR: directory,
     RELEASE_ARTIFACT_MANIFEST_SHA256: manifestSha256,
-    RELEASE_DOGFOOD_WORKFLOW_RUN_ID: DOGFOOD_RUN_ID,
-    RELEASE_DOGFOOD_WORKFLOW_RUN_ATTEMPT: DOGFOOD_RUN_ATTEMPT,
     ...overrides,
   };
+}
+
+function jsonResponse(value) {
+  return { ok: true, status: 200, text: async () => JSON.stringify(value) };
 }
 
 function fixture() {
@@ -128,8 +130,6 @@ test("parses the no-argument shared-workflow environment contract", () => {
       releaseTag: "v0.11.0",
       artifactDirectory: path.resolve(directory),
       artifactManifestSha256: "a".repeat(64),
-      dogfoodWorkflowRunId: DOGFOOD_RUN_ID,
-      dogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -235,6 +235,10 @@ test("rejects checkout/source and manifest mismatches before certifying", async 
     const manifestMismatch = await runWorkflowCertification({
       environment: environment(directory, "c".repeat(64)),
       currentSourceSha: SOURCE_SHA,
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
       dogfoodEvidenceRetriever: async () => dogfoodEvidence(),
     });
     assert.equal(manifestMismatch.diagnostics[0].code, "ARTIFACT_MANIFEST_MISMATCH");
@@ -248,9 +252,24 @@ test("reuses the exact-source dogfood retrieval seam and certifies the complete 
   const { directory, manifest } = fixture();
   try {
     let retrievalInput;
+    const requests = [];
     const result = await runWorkflowCertification({
       environment: environment(directory, crypto.createHash("sha256").update(manifest).digest("hex")),
       currentSourceSha: SOURCE_SHA,
+      fetchImpl: async (url, init) => {
+        requests.push({ url, init });
+        return jsonResponse({
+          workflow_runs: [
+            {
+              id: Number(DOGFOOD_RUN_ID),
+              run_attempt: Number(DOGFOOD_RUN_ATTEMPT),
+              head_sha: SOURCE_SHA,
+              conclusion: "success",
+              created_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+        });
+      },
       dogfoodEvidenceRetriever: async (input) => {
         retrievalInput = input;
         return dogfoodEvidence();
@@ -260,6 +279,12 @@ test("reuses the exact-source dogfood retrieval seam and certifies the complete 
     assert.equal(retrievalInput.sourceSha, SOURCE_SHA);
     assert.equal(retrievalInput.repositoryOwner, "yohn-jp");
     assert.equal(retrievalInput.repositoryName, "gh-inari");
+    assert.deepEqual(
+      { workflowRunId: retrievalInput.workflowRunId, workflowRunAttempt: retrievalInput.workflowRunAttempt },
+      { workflowRunId: DOGFOOD_RUN_ID, workflowRunAttempt: DOGFOOD_RUN_ATTEMPT },
+    );
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /actions\/workflows\/self-dogfood-certification\.yml\/runs\?head_sha=/u);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
