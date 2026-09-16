@@ -69,6 +69,8 @@ const [CERTIFICATION_RESULT_PASSED] = CERTIFICATION_RESULTS;
 const CERTIFICATION_KIND_SET = new Set(CERTIFICATION_KINDS);
 const CERTIFICATION_RESULT_SET = new Set(CERTIFICATION_RESULTS);
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
+const WORKFLOW_RUN_ID_PATTERN = /^[1-9][0-9]{0,19}$/u;
+const WORKFLOW_RUN_ATTEMPT_PATTERN = /^[1-9][0-9]{0,9}$/u;
 const TARBALL_SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
 const DIAGNOSTIC_CODE_PATTERN = /^[A-Z][A-Z0-9_.-]{0,127}$/u;
@@ -100,7 +102,16 @@ const COMMON_KEYS = new Set([
   "diagnostics",
 ]);
 const PACKED_KEYS = new Set([...COMMON_KEYS, "package"]);
-const DOGFOOD_KEYS = new Set([...COMMON_KEYS, "repository", "rootIssue", "change", "operations", "finalState"]);
+const WORKFLOW_KEYS = new Set(["runId", "runAttempt"]);
+const DOGFOOD_KEYS = new Set([
+  ...COMMON_KEYS,
+  "repository",
+  "workflow",
+  "rootIssue",
+  "change",
+  "operations",
+  "finalState",
+]);
 const CERTIFICATION_DIAGNOSTIC_KEYS = new Set(["code", "message", "details", "diagnostics", "evidence"]);
 const STRUCTURED_DETAIL_KEYS = new Set([
   "operation",
@@ -308,6 +319,25 @@ export function isCertificationBoundedString(value, maximum = MAX_CERTIFICATION_
 
 export function isCertificationSourceCommitSha(value) {
   return typeof value === "string" && SOURCE_SHA_PATTERN.test(value);
+}
+
+export function isCertificationWorkflowRunId(value) {
+  return typeof value === "string" && WORKFLOW_RUN_ID_PATTERN.test(value);
+}
+
+export function isCertificationWorkflowRunAttempt(value) {
+  return typeof value === "string" && WORKFLOW_RUN_ATTEMPT_PATTERN.test(value);
+}
+
+/** Build the immutable source/run identity used by retained self-dogfood artifacts. */
+export function selfDogfoodArtifactName(sourceCommitSha, workflowRunId, workflowRunAttempt) {
+  if (
+    !isCertificationSourceCommitSha(sourceCommitSha) ||
+    !isCertificationWorkflowRunId(workflowRunId) ||
+    !isCertificationWorkflowRunAttempt(workflowRunAttempt)
+  )
+    throw new TypeError("self-dogfood artifact identity is malformed");
+  return `self-dogfood-golden-path-${sourceCommitSha}-${workflowRunId}-${workflowRunAttempt}`;
 }
 
 export function isCertificationTarballSha256(value) {
@@ -1000,6 +1030,25 @@ function validateRepository(value, errors) {
   );
 }
 
+function validateWorkflowIdentity(value, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "DOGFOOD_IDENTITY_INVALID", "$.workflow: must be an object");
+    return false;
+  }
+  rejectUnknownKeys(value, WORKFLOW_KEYS, "$.workflow", errors);
+  const runIdValid = requireString(value.runId, "$.workflow.runId", errors, {
+    pattern: WORKFLOW_RUN_ID_PATTERN,
+    maxLength: 20,
+    diagnosticCode: "DOGFOOD_IDENTITY_INVALID",
+  });
+  const runAttemptValid = requireString(value.runAttempt, "$.workflow.runAttempt", errors, {
+    pattern: WORKFLOW_RUN_ATTEMPT_PATTERN,
+    maxLength: 10,
+    diagnosticCode: "DOGFOOD_IDENTITY_INVALID",
+  });
+  return runIdValid && runAttemptValid;
+}
+
 function validateChangeIdentity(value, rootIssue, errors, { allowUnavailable = false } = {}) {
   if (!isRecord(value)) {
     addValidationError(errors, "DOGFOOD_IDENTITY_INVALID", "$.change: must be an object");
@@ -1159,6 +1208,7 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
     return false;
   }
   const repositoryValid = validateRepository(value.repository, errors);
+  const workflowValid = validateWorkflowIdentity(value.workflow, errors);
   const rootIssueValid = requirePositiveInteger(value.rootIssue, "$.rootIssue", errors, "DOGFOOD_IDENTITY_INVALID");
   const changeValid = validateChangeIdentity(value.change, value.rootIssue, errors, { allowUnavailable: !strict });
   const operationsValid = validateOperationEntries(value.operations, errors, {
@@ -1166,7 +1216,7 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
     finalStatus: value.finalState?.status,
   });
   const finalStateValid = validateFinalState(value.finalState, errors, { allowUnavailable: !strict });
-  return repositoryValid && rootIssueValid && changeValid && operationsValid && finalStateValid;
+  return repositoryValid && workflowValid && rootIssueValid && changeValid && operationsValid && finalStateValid;
 }
 
 function validateSharedEnvelope(value, { certificationKind, expectedContractVersions } = {}) {
@@ -1349,6 +1399,7 @@ export function canonicalizeCertificationEvidence(value, options) {
     };
   } else {
     common.repository = { owner: value.repository.owner, name: value.repository.name };
+    common.workflow = { runId: value.workflow.runId, runAttempt: value.workflow.runAttempt };
     common.rootIssue = value.rootIssue;
     common.change = {
       issue: value.change.issue,

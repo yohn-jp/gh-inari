@@ -24,6 +24,8 @@ import {
 
 const SOURCE_SHA = "a".repeat(40);
 const OTHER_SOURCE_SHA = "b".repeat(40);
+const DOGFOOD_RUN_ID = "4101";
+const DOGFOOD_RUN_ATTEMPT = "1";
 const CONTRACT_VERSIONS = { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS };
 
 function dogfoodOperations() {
@@ -42,6 +44,7 @@ function dogfoodEvidence(overrides = {}) {
     contractVersions: CONTRACT_VERSIONS,
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -87,6 +90,8 @@ function environment(directory, manifestSha256, overrides = {}) {
     RELEASE_TAG: "v0.11.0",
     RELEASE_ARTIFACT_DIR: directory,
     RELEASE_ARTIFACT_MANIFEST_SHA256: manifestSha256,
+    RELEASE_DOGFOOD_WORKFLOW_RUN_ID: DOGFOOD_RUN_ID,
+    RELEASE_DOGFOOD_WORKFLOW_RUN_ATTEMPT: DOGFOOD_RUN_ATTEMPT,
     ...overrides,
   };
 }
@@ -102,6 +107,8 @@ function extensionIdentity(manifestSha256, overrides = {}) {
     expectedReleaseSourceCommitSha: SOURCE_SHA,
     expectedRepositoryOwner: "yohn-jp",
     expectedRepositoryName: "gh-inari",
+    expectedDogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+    expectedDogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     expectedReleaseTag: "v0.11.0",
     expectedArtifactManifestSha256: manifestSha256,
     observedArtifactManifestSha256: manifestSha256,
@@ -121,6 +128,8 @@ test("parses the no-argument shared-workflow environment contract", () => {
       releaseTag: "v0.11.0",
       artifactDirectory: path.resolve(directory),
       artifactManifestSha256: "a".repeat(64),
+      dogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+      dogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

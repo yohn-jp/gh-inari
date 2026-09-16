@@ -224,11 +224,11 @@ jobs:
           )
           node scripts/self-dogfood-workflow.mjs "${args[@]}"
 
-      - name: Retain source-addressable certification artifact
+      - name: Retain immutable source-and-run certification artifact
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
-          name: self-dogfood-golden-path-${{ github.sha }}
+          name: self-dogfood-golden-path-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/self-dogfood/self-dogfood-golden-path.json
             ${{ runner.temp }}/self-dogfood/certification-metadata.json

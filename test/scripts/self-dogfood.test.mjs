@@ -216,7 +216,10 @@ test("live dogfood is opt-in and emits bounded blocked evidence without mutation
         "--worker-command",
         '["node","-e","process.exit(0)"]',
       ],
-      { encoding: "utf8", env: { ...process.env, INARI_SELF_DOGFOOD: undefined } },
+      {
+        encoding: "utf8",
+        env: { ...process.env, INARI_SELF_DOGFOOD: undefined, GITHUB_RUN_ID: "5101", GITHUB_RUN_ATTEMPT: "1" },
+      },
     );
     assert.equal(result.status, 2);
     const evidence = JSON.parse(result.stdout);
@@ -311,6 +314,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({
           GH_TOKEN: "issuer-secret",
           INARI_RUNTIME_AUTHORITY_ID: "yohn-self-dogfood-ci-2026-09",
           INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "runtime-private-key",
+          GITHUB_RUN_ID: "5102",
+          GITHUB_RUN_ATTEMPT: "1",
           FAKE_INARI_STATE: stateFile,
           FAKE_INARI_READY_STATE: path.join(root, "provider-ready-state"),
         },
@@ -438,6 +443,8 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
           ...process.env,
           INARI_SELF_DOGFOOD: "1",
           GH_TOKEN: "issuer-secret",
+          GITHUB_RUN_ID: "5103",
+          GITHUB_RUN_ATTEMPT: "1",
           FAKE_INARI_ISSUE_STATE: issueStateFile,
         },
       },

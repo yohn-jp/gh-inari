@@ -2,7 +2,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { CERTIFICATION_KINDS, sha256Tarball, validateSelfDogfoodEvidence } from "./certification-evidence.mjs";
+import {
+  CERTIFICATION_KINDS,
+  isCertificationWorkflowRunAttempt,
+  isCertificationWorkflowRunId,
+  selfDogfoodArtifactName,
+  sha256Tarball,
+  validateSelfDogfoodEvidence,
+} from "./certification-evidence.mjs";
 
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const TARBALL_SHA_PATTERN = /^sha256:[0-9a-f]{64}$/u;
@@ -71,15 +78,19 @@ function validateWorkerObservation(observation, sourceCommitSha, issue) {
 }
 
 function workflowIdentity(environment, sourceCommitSha, repository, exerciseAbort) {
+  const runId = environment.GITHUB_RUN_ID;
+  const runAttempt = environment.GITHUB_RUN_ATTEMPT;
+  if (!isCertificationWorkflowRunId(runId) || !isCertificationWorkflowRunAttempt(runAttempt))
+    throw new Error("workflow run identity must contain an exact run ID and run attempt");
   return {
-    runId: environment.GITHUB_RUN_ID ?? null,
-    runAttempt: environment.GITHUB_RUN_ATTEMPT ?? null,
+    runId,
+    runAttempt,
     workflow: environment.GITHUB_WORKFLOW ?? null,
     url:
       environment.GITHUB_SERVER_URL !== undefined && environment.GITHUB_REPOSITORY !== undefined
-        ? `${environment.GITHUB_SERVER_URL}/${environment.GITHUB_REPOSITORY}/actions/runs/${environment.GITHUB_RUN_ID ?? ""}`
+        ? `${environment.GITHUB_SERVER_URL}/${environment.GITHUB_REPOSITORY}/actions/runs/${runId}`
         : null,
-    artifactName: `self-dogfood-golden-path-${sourceCommitSha}`,
+    artifactName: selfDogfoodArtifactName(sourceCommitSha, runId, runAttempt),
     exerciseAbort,
     repository,
   };
@@ -124,6 +135,15 @@ export function verifySelfDogfoodRun(input) {
     input.evidence.change.issue !== input.issue
   )
     throw new Error("evidence repository or Issue identity does not match the workflow input");
+
+  const workflow = workflowIdentity(
+    input.environment ?? {},
+    input.sourceCommitSha,
+    repository,
+    input.exerciseAbort === true,
+  );
+  if (input.evidence.workflow.runId !== workflow.runId || input.evidence.workflow.runAttempt !== workflow.runAttempt)
+    throw new Error("evidence workflow run identity does not match the certification workflow");
 
   const sourceRoot = fs.realpathSync(input.sourceRoot);
   const tarballPath = fs.realpathSync(input.tarballPath);
@@ -178,16 +198,11 @@ export function verifySelfDogfoodRun(input) {
     repository,
     rootIssue: input.issue,
     artifact: {
-      name: `self-dogfood-golden-path-${input.sourceCommitSha}`,
+      name: workflow.artifactName,
       tarballSha256: input.tarballSha256,
     },
     package: { name: packageMetadata.name, version: packageMetadata.version },
-    workflow: workflowIdentity(
-      input.environment ?? {},
-      input.sourceCommitSha,
-      repository,
-      input.exerciseAbort === true,
-    ),
+    workflow,
     change: input.evidence.change,
     finalState: input.evidence.finalState,
     residualChange,

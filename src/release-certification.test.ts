@@ -18,6 +18,8 @@ import {
 
 const SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567";
 const TARBALL_SHA = `sha256:${"a".repeat(64)}`;
+const DOGFOOD_RUN_ID = "4101";
+const DOGFOOD_RUN_ATTEMPT = "1";
 
 function dogfoodOperations(): ReleaseCertificationOperationEvidence[] {
   let operations: ReleaseCertificationOperationEvidence[] = [];
@@ -48,6 +50,7 @@ function dogfoodEvidence(overrides: Record<string, unknown> = {}): Record<string
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -64,6 +67,8 @@ function input(overrides: Partial<ReleaseCertificationVerificationInput> = {}): 
     expectedTarballSha256: TARBALL_SHA,
     expectedRepositoryOwner: "yohn-jp",
     expectedRepositoryName: "gh-inari",
+    expectedDogfoodWorkflowRunId: DOGFOOD_RUN_ID,
+    expectedDogfoodWorkflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
     packedEvidence: packedEvidence(),
     dogfoodEvidence: dogfoodEvidence(),
     ...overrides,
@@ -108,6 +113,12 @@ test("binds self-dogfood evidence to the expected release repository", () => {
   );
   assert.equal(result.passed, false);
   assert.equal(result.diagnostics[0]?.code, "REPOSITORY_MISMATCH");
+});
+
+test("binds self-dogfood evidence to the explicitly intended workflow run", () => {
+  const result = verifyReleaseCertification(input({ expectedDogfoodWorkflowRunId: "4102" }));
+  assert.equal(result.passed, false);
+  assert.equal(result.diagnostics[0]?.code, "CERTIFICATION_RUN_MISMATCH");
 });
 
 test("binds the canonical Change identity to the dogfood root Issue", () => {
