@@ -3,6 +3,7 @@ import {
   commandInvocation,
   getCommand,
   helpInvocation,
+  projectImplementationCommandSurface,
   type CommandArgumentBindings,
   type CommandDomain,
   type CommandId,
@@ -77,8 +78,14 @@ export interface SkillScenario {
 const HELP_DISCLAIMER = "This playbook does not restate exact flags; run the help pointer below for precise syntax.";
 
 function workflowStep(summary: string, commandId: CommandId): SkillWorkflowStep {
-  return { summary, commandId, command: commandExample(commandId) };
+  const command = getCommand(commandId);
+  return { summary, commandId, command: commandExample(command.id) };
 }
+
+const IMPLEMENTATION_COMMAND_CONTRACT_INVARIANT = (() => {
+  const projection = projectImplementationCommandSurface();
+  return `The \`impl\` workflow is projected from command contract ${projection.id} (version ${projection.version}); follow its command metadata and do not invent an \`impl\` command.`;
+})();
 
 function skillScenario(input: {
   readonly id: string;
@@ -291,14 +298,19 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ["Validate the current Implementation body without mutation.", "impl.validate"],
       ["Authorize the current canonical Implementation body through the existing Core boundary.", "impl.authorize"],
       ["Inspect lifecycle and provider-authoritative parent/source relationships.", "impl.inspect"],
+      [
+        "Verify a pull request and its authoritative diff against the current authorized Implementation.",
+        "impl.verify",
+      ],
     ],
     invariants: [
       "The ordinary Issue remains the problem, request, or decision record; this scenario keeps one-session detail in the Implementation.",
       "`impl.plan` is a preview and its recommendations are not authoritative; it does not authorize or mutate an Issue.",
       "`impl.validate` is read-only. `impl.show` and `impl.inspect` project current evidence without mutation.",
       "`impl.authorize` requires the current canonical body and authoritative base evidence, then emits Core authorization evidence without a GitHub mutation.",
+      "`impl.verify` requires current authorization and verifies the pull request and diff against that bounded Implementation.",
       "Use native parent/sub-issue provider evidence where supported; prose `Parent:` is compatibility guidance for older artifacts and never triggers bulk reparenting.",
-      "The five current operations are `plan`, `show`, `validate`, `authorize`, and `inspect`; do not invent an `impl` create/edit/start/complete/ready command.",
+      IMPLEMENTATION_COMMAND_CONTRACT_INVARIANT,
       HELP_DISCLAIMER,
     ],
     canonicalCommandId: "impl.plan",

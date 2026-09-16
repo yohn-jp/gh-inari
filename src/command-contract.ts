@@ -1552,6 +1552,26 @@ export interface CommandContractProjection {
   readonly commands: readonly CommandDiscoveryEntry[];
 }
 
+export interface CommandSurfaceProjectionEntry {
+  readonly id: CommandId;
+  readonly domain: CommandDomain;
+  readonly operation: string;
+  readonly path: readonly string[];
+  readonly invocation: string;
+  readonly positionalSyntax?: string;
+  readonly usage: string;
+  readonly summary: string;
+  readonly optionIds: readonly OptionId[];
+  readonly options: readonly CommandDiscoveryOption[];
+}
+
+export interface ImplementationCommandSurfaceProjection {
+  readonly id: typeof COMMAND_CONTRACT_ID;
+  readonly version: typeof COMMAND_CONTRACT_VERSION;
+  readonly domain: "impl";
+  readonly commands: readonly CommandSurfaceProjectionEntry[];
+}
+
 function projectOption(optionDefinition: CommandOptionDefinition): CommandDiscoveryOption {
   return {
     id: optionDefinition.id,
@@ -1586,6 +1606,82 @@ export function projectCommandContract(): CommandContractProjection {
     capabilities: RUNTIME_CAPABILITIES,
     commands: INARI_COMMANDS.map(projectCommand),
   };
+}
+
+/**
+ * Deterministic documentation/agent projection for the Implementation command
+ * surface. The command definitions remain the only source of command ids,
+ * usage, option applicability, and metadata summaries.
+ */
+export function projectImplementationCommandSurface(): ImplementationCommandSurfaceProjection {
+  return {
+    id: COMMAND_CONTRACT_ID,
+    version: COMMAND_CONTRACT_VERSION,
+    domain: "impl",
+    commands: getDomainCommands("impl").map((entry) => ({
+      id: entry.id,
+      domain: entry.domain,
+      operation: entry.operation,
+      path: entry.path,
+      invocation: commandInvocation(entry.id),
+      ...(entry.positionalSyntax === undefined ? {} : { positionalSyntax: entry.positionalSyntax }),
+      usage: commandUsage(entry),
+      summary: entry.summary,
+      optionIds: entry.optionIds,
+      options: entry.optionIds.map((optionId) => projectOption(getOption(optionId))),
+    })),
+  };
+}
+
+export const IMPLEMENTATION_COMMAND_SURFACE_MARKERS = {
+  start: "<!-- BEGIN GENERATED IMPLEMENTATION COMMAND SURFACE -->",
+  end: "<!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->",
+} as const;
+
+function renderMarkdownTable(rows: readonly (readonly string[])[]): readonly string[] {
+  const columnCount = rows[0]?.length ?? 0;
+  const widths = Array.from({ length: columnCount }, (_, column) =>
+    Math.max(3, ...rows.map((row) => row[column]?.length ?? 0)),
+  );
+  const renderRow = (row: readonly string[]) =>
+    `| ${row.map((cell, column) => cell.padEnd(widths[column] ?? cell.length)).join(" | ")} |`;
+  return [
+    renderRow(rows[0] ?? []),
+    renderRow(widths.map((width) => "-".repeat(width))),
+    ...rows.slice(1).map(renderRow),
+  ];
+}
+
+/**
+ * Render the bounded projection consumed by the normative Implementation
+ * documentation. Keep the markers stable so a check can reject stale prose
+ * without making Markdown itself an authority.
+ */
+export function projectImplementationCommandSurfaceMarkdown(): string {
+  const projection = projectImplementationCommandSurface();
+  const commandRows = [
+    ["Command", "Command ID", "Metadata summary"],
+    ...projection.commands.map((command) => [
+      `\`${command.invocation}${command.positionalSyntax === undefined ? "" : ` ${command.positionalSyntax}`}\``,
+      `\`${command.id}\``,
+      command.summary,
+    ]),
+  ] as const;
+  const lines = [
+    IMPLEMENTATION_COMMAND_SURFACE_MARKERS.start,
+    "",
+    `The current command contract is version \`${projection.version}\` (\`${projection.id}\`).`,
+    "The `impl` namespace projects these operations from the command contract:",
+    "",
+    ...renderMarkdownTable(commandRows),
+    "",
+    "The exact contract usage and option applicability are:",
+    "",
+    ...projection.commands.map((command) => `- \`${command.usage}\``),
+    "",
+    IMPLEMENTATION_COMMAND_SURFACE_MARKERS.end,
+  ];
+  return lines.join("\n");
 }
 
 export function projectCommandHelp(positionals: readonly string[]): CommandContractProjection {
