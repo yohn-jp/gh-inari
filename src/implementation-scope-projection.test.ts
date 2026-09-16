@@ -140,6 +140,42 @@ test("does not widen authorization and applies DENY before every operation allow
   );
 });
 
+test("projection scope validation reuses the authored path canonicalization rule", () => {
+  const projection = projectImplementationScope(projectionInput());
+  const normalized = validateImplementationScopeProjection({
+    ...projection,
+    scope: {
+      readOnly: [" src\\** "],
+      write: ["src\\**"],
+      create: ["docs//**"],
+      delete: [" tmp//** "],
+      deny: ["src\\private//**"],
+    },
+  });
+  assert.equal(normalized.valid, true);
+  assert.deepEqual(normalized.projection?.scope, {
+    readOnly: ["src/**"],
+    write: ["src/**"],
+    create: ["docs/**"],
+    delete: ["tmp/**"],
+    deny: ["src/private/**"],
+  });
+
+  const exactCandidates = [
+    "src\\index.ts",
+    " src/index.ts",
+    "src/index.ts ",
+    "src//index.ts",
+    "./src/index.ts",
+    "src/ｉndex.ts",
+    "src/../index.ts",
+    "/src/index.ts",
+  ];
+  for (const path of exactCandidates)
+    assert.equal(isImplementationScopeProjectionPathAllowed(projection, "WRITE", path), false, path);
+  assert.equal(isImplementationScopeProjectionPathAllowed(projection, "WRITE", "src/index.ts"), true);
+});
+
 test("invalidated and stale authorization cannot produce execution authority", () => {
   const changedBody = renderImplementationIssueBody(
     parseImplementationContract(contract({ objective: "A different authorized objective." })),

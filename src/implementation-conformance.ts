@@ -27,7 +27,11 @@ import {
   type OperationalChangedFile,
   type OperationalPullRequestObservation,
 } from "./operational-observation.js";
-import type { ImplementationContract, ImplementationRepositoryIdentity } from "./implementation-contract.js";
+import {
+  validateImplementationGitPathIdentity,
+  type ImplementationContract,
+  type ImplementationRepositoryIdentity,
+} from "./implementation-contract.js";
 
 export const IMPLEMENTATION_CONFORMANCE_VERSION = 1 as const;
 export type ImplementationConformanceVersion = typeof IMPLEMENTATION_CONFORMANCE_VERSION;
@@ -185,7 +189,6 @@ const INPUT_KEYS = new Set([
   "completed",
 ]);
 const ISSUE_KEYS = new Set(["reference", "body"]);
-const SAFE_PATH_MAX_LENGTH = 1_024;
 
 type RecordValue = Record<string, unknown>;
 
@@ -241,28 +244,7 @@ function sortChanges(changes: readonly ImplementationConformanceChange[]): reado
 }
 
 function normalizePath(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  // Provider-observed paths are an authorization boundary: only trim and
-  // canonicalize separators, which cannot change filename identity. Unicode
-  // compatibility normalization (NFKC) can collapse a distinct path onto an
-  // authorized one (e.g. a full-width character onto its ASCII counterpart),
-  // so a non-canonical path is rejected fail-closed rather than normalized.
-  const normalized = value
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/\/{2,}/gu, "/");
-  const segments = normalized.split("/");
-  if (
-    normalized.length === 0 ||
-    normalized.length > SAFE_PATH_MAX_LENGTH ||
-    normalized.startsWith("/") ||
-    segments.some((segment) => segment === ".." || segment.length === 0) ||
-    /^[A-Za-z]:/u.test(normalized) ||
-    normalized.normalize("NFC") !== normalized ||
-    normalized.normalize("NFKC") !== normalized
-  )
-    return undefined;
-  return normalized.replace(/^\.\//u, "");
+  return validateImplementationGitPathIdentity(value);
 }
 
 function authorizationSummary(
@@ -603,9 +585,9 @@ function evaluateFile(
     if (previousPath === undefined) {
       diagnostic(
         diagnostics,
-        "IMPLEMENTATION_CONFORMANCE_FILE_STATUS_UNSUPPORTED",
+        "IMPLEMENTATION_CONFORMANCE_PATH_INVALID",
         `$.pullRequest.changedFiles.items[${index}].previousFilename`,
-        "A rename requires authoritative old and new paths.",
+        "Previous changed file path is not a safe repository-relative path.",
       );
       return false;
     }

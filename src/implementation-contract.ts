@@ -254,6 +254,55 @@ const REPOSITORY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.
 const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const IMPLEMENTATION_MARKER = "<!-- inari:implementation v1 -->";
 
+/**
+ * Canonicalize one authored scope pattern.  This is the only path
+ * canonicalization rule used for Implementation scope representations.
+ */
+export function canonicalizeImplementationScopePath(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/\r\n?/gu, "\n")
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/{2,}/gu, "/");
+  const segments = normalized.split("/");
+  if (
+    normalized.length === 0 ||
+    normalized.length > MAX_PATH_LENGTH ||
+    normalized.startsWith("/") ||
+    /[\u0000-\u001f\u007f]/u.test(normalized) ||
+    segments.some((segment) => segment === ".." || segment.length === 0) ||
+    /^[A-Za-z]:/u.test(normalized)
+  )
+    return undefined;
+  return normalized;
+}
+
+/**
+ * Validate a provider filename without changing its Git path identity.
+ * Non-canonical Unicode and unsupported repository-relative forms fail
+ * closed; every accepted value is returned byte-for-byte as supplied.
+ */
+export function validateImplementationGitPathIdentity(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const segments = value.split("/");
+  if (
+    value.length === 0 ||
+    value.length > MAX_PATH_LENGTH ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
+    /^\s|\s$/u.test(value) ||
+    value.startsWith("/") ||
+    value.startsWith("./") ||
+    segments.some((segment) => segment === ".." || segment.length === 0) ||
+    /^[A-Za-z]:/u.test(value) ||
+    value.normalize("NFC") !== value ||
+    value.normalize("NFKC") !== value
+  )
+    return undefined;
+  return value;
+}
+
 const ROOT_KEYS = new Set([
   "version",
   "kind",
@@ -395,14 +444,8 @@ function normalizePath(
 ): string | undefined {
   const raw = normalizeText(value, path, violations);
   if (raw === undefined) return undefined;
-  const normalized = raw.replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
-  const segments = normalized.split("/");
-  if (
-    normalized.length > MAX_PATH_LENGTH ||
-    normalized.startsWith("/") ||
-    segments.some((segment) => segment === ".." || segment.length === 0) ||
-    /^[A-Za-z]:/u.test(normalized)
-  ) {
+  const normalized = canonicalizeImplementationScopePath(raw);
+  if (normalized === undefined) {
     addViolation(
       violations,
       "IMPLEMENTATION_SCOPE_INVALID_PATH",
@@ -1304,8 +1347,7 @@ export function isImplementationPathAllowed(
   path: string,
 ): boolean {
   const contract = parseImplementationContract(input);
-  const pathValue = normalizePath(path, "$.path", []);
-  const normalized = pathValue?.replace(/^\.\//u, "");
+  const normalized = validateImplementationGitPathIdentity(path);
   if (normalized === undefined || contract.scope.deny.some((entry) => globRegex(entry).test(normalized))) return false;
   return implementationScopePaths(contract, operation).some((entry) => globRegex(entry).test(normalized));
 }
