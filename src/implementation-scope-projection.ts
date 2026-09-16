@@ -24,6 +24,8 @@ import {
 } from "./implementation-authorization.js";
 import {
   IMPLEMENTATION_CONTRACT_VERSION,
+  canonicalizeImplementationScopePath,
+  validateImplementationGitPathIdentity,
   type ImplementationContractVersion,
   type ImplementationRepositoryIdentity,
   type ImplementationScope,
@@ -308,14 +310,8 @@ function normalizePath(
 ): string | undefined {
   const raw = text(value, path, violations);
   if (raw === undefined) return undefined;
-  const normalized = raw.replaceAll("\\", "/").replace(/\/{2,}/gu, "/");
-  const segments = normalized.split("/");
-  if (
-    normalized.length > MAX_PATH_LENGTH ||
-    normalized.startsWith("/") ||
-    segments.some((segment) => segment === ".." || segment.length === 0) ||
-    /^[A-Za-z]:/u.test(normalized)
-  ) {
+  const normalized = canonicalizeImplementationScopePath(raw);
+  if (normalized === undefined) {
     addViolation(
       violations,
       "IMPLEMENTATION_SCOPE_PROJECTION_SCOPE_INVALID_PATH",
@@ -680,28 +676,7 @@ function globRegex(pattern: string): RegExp {
 }
 
 function safePath(value: string): string | undefined {
-  if (typeof value !== "string") return undefined;
-  // This is an authorization boundary: only trim and canonicalize path
-  // separators, which cannot change filename identity. Unicode compatibility
-  // normalization (NFKC) can collapse a distinct candidate path onto an
-  // authorized glob pattern (e.g. a full-width character onto its ASCII
-  // counterpart), so a non-canonical path is rejected fail-closed instead.
-  const normalized = value
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/\/{2,}/gu, "/");
-  const segments = normalized.split("/");
-  if (
-    normalized.length === 0 ||
-    normalized.length > MAX_PATH_LENGTH ||
-    normalized.startsWith("/") ||
-    segments.some((segment) => segment === ".." || segment.length === 0) ||
-    /^[A-Za-z]:/u.test(normalized) ||
-    normalized.normalize("NFC") !== normalized ||
-    normalized.normalize("NFKC") !== normalized
-  )
-    return undefined;
-  return normalized.replace(/^\.\//u, "");
+  return validateImplementationGitPathIdentity(value);
 }
 
 /** Return whether DENY excludes a path in the projection. */

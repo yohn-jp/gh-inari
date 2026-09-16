@@ -391,3 +391,90 @@ test("a compatibility-equivalent but byte-distinct changed path cannot inherit a
   assert.deepEqual(result.changes, []);
   assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_PATH_INVALID"));
 });
+
+test("provider paths retain exact identity and unsafe forms produce no scope decision", () => {
+  const cases = [
+    { path: "src\\changed.ts", status: "scope-violation" as const },
+    { path: " src/changed.ts", status: "unverifiable" as const },
+    { path: "src/changed.ts ", status: "unverifiable" as const },
+    { path: "src//changed.ts", status: "unverifiable" as const },
+    { path: "./src/changed.ts", status: "unverifiable" as const },
+    { path: "src/ｃhanged.ts", status: "unverifiable" as const },
+    { path: "src/../changed.ts", status: "unverifiable" as const },
+    { path: "/src/changed.ts", status: "unverifiable" as const },
+    { path: "src/changed.ts", status: "conformant" as const },
+  ];
+
+  for (const { path, status } of cases) {
+    const result = tryVerifyImplementationConformance(
+      input(authorization(), body, pullRequest({ changedFiles: collection([changedFile(path, "modified")]) })),
+    );
+    assert.equal(result.status, status, path);
+    if (status === "unverifiable") {
+      assert.deepEqual(result.changes, [], path);
+      assert.ok(
+        result.diagnostics.some(
+          (entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_PATH_INVALID" && entry.path.endsWith(".filename"),
+        ),
+        path,
+      );
+    } else {
+      assert.equal(result.changes[0]?.path, path);
+      assert.equal(result.changes[0]?.allowed, status === "conformant", path);
+      assert.equal(
+        result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_PATH_INVALID"),
+        false,
+        path,
+      );
+    }
+  }
+});
+
+test("rename old DELETE and new CREATE identities are evaluated independently", () => {
+  const oldIdentity = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({ changedFiles: collection([changedFile("docs/new.md", "renamed", "tmp\\old.txt")]) }),
+    ),
+  );
+  assert.equal(oldIdentity.status, "scope-violation");
+  assert.deepEqual(
+    oldIdentity.changes.map(({ operation, path, allowed }) => ({ operation, path, allowed })),
+    [
+      { operation: "CREATE", path: "docs/new.md", allowed: true },
+      { operation: "DELETE", path: "tmp\\old.txt", allowed: false },
+    ],
+  );
+
+  const newIdentity = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({ changedFiles: collection([changedFile("docs\\new.md", "renamed", "tmp/old.txt")]) }),
+    ),
+  );
+  assert.equal(newIdentity.status, "scope-violation");
+  assert.deepEqual(
+    newIdentity.changes.map(({ operation, path, allowed }) => ({ operation, path, allowed })),
+    [
+      { operation: "CREATE", path: "docs\\new.md", allowed: false },
+      { operation: "DELETE", path: "tmp/old.txt", allowed: true },
+    ],
+  );
+
+  const invalidOldIdentity = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({ changedFiles: collection([changedFile("docs/new.md", "renamed", "tmp//old.txt")]) }),
+    ),
+  );
+  assert.equal(invalidOldIdentity.status, "unverifiable");
+  assert.deepEqual(invalidOldIdentity.changes, []);
+  assert.ok(
+    invalidOldIdentity.diagnostics.some(
+      (entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_PATH_INVALID" && entry.path.endsWith(".previousFilename"),
+    ),
+  );
+});

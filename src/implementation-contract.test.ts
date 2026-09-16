@@ -4,6 +4,7 @@ import {
   IMPLEMENTATION_CONTRACT_SCHEMA,
   IMPLEMENTATION_KIND,
   IMPLEMENTATION_CONTRACT_VERSION,
+  canonicalizeImplementationScopePath,
   implementationContractDigest,
   implementationContractFromIssueFields,
   implementationIssueFieldsFromContract,
@@ -13,6 +14,7 @@ import {
   projectImplementationSchema,
   renderImplementationIssueBody,
   serializeImplementationContract,
+  validateImplementationGitPathIdentity,
   validateImplementationContract,
 } from "./implementation-contract.js";
 
@@ -127,6 +129,73 @@ test("READONLY, WRITE, CREATE, DELETE, and DENY remain distinct", () => {
   assert.equal(isImplementationPathAllowed(contract, "CREATE", "src/new.ts"), false);
   assert.equal(isImplementationPathAllowed(contract, "DELETE", "tmp/old.txt"), true);
   assert.equal(isImplementationPathAllowed(contract, "DELETE", "src/old.ts"), false);
+});
+
+test("authored scope paths have one canonical representation", () => {
+  assert.equal(canonicalizeImplementationScopePath("  ./src\\ａ//allowed.ts  "), "src/a/allowed.ts");
+  assert.equal(canonicalizeImplementationScopePath("src/normal.ts"), "src/normal.ts");
+  assert.equal(canonicalizeImplementationScopePath("src/../outside.ts"), undefined);
+  assert.equal(canonicalizeImplementationScopePath("/src/absolute.ts"), undefined);
+
+  const result = validateImplementationContract(
+    validContract({
+      scope: {
+        readOnly: ["  ./src\\ａ//allowed.ts  "],
+        write: ["src/normal.ts"],
+        create: [],
+        delete: [],
+        deny: [],
+      },
+    }),
+  );
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.contract?.scope, {
+    readOnly: ["src/a/allowed.ts"],
+    write: ["src/normal.ts"],
+    create: [],
+    delete: [],
+    deny: [],
+  });
+
+  const duplicate = validateImplementationContract(
+    validContract({
+      scope: {
+        readOnly: ["src/allowed.ts", " ./src\\allowed.ts "],
+        write: [],
+        create: [],
+        delete: [],
+        deny: [],
+      },
+    }),
+  );
+  assert.equal(duplicate.valid, false);
+  assert.ok(duplicate.violations.some((violation) => violation.code === "IMPLEMENTATION_SCOPE_DUPLICATE"));
+});
+
+test("scope matching never rewrites a candidate Git path identity", () => {
+  const contract = validContract({
+    scope: {
+      readOnly: ["src/**"],
+      write: ["src/allowed.ts"],
+      create: [],
+      delete: [],
+      deny: [],
+    },
+  });
+  const variants = [
+    "src\\allowed.ts",
+    " src/allowed.ts",
+    "src/allowed.ts ",
+    "src//allowed.ts",
+    "./src/allowed.ts",
+    "src/ａllowed.ts",
+    "src/../allowed.ts",
+    "/src/allowed.ts",
+  ];
+  for (const path of variants) assert.equal(isImplementationPathAllowed(contract, "WRITE", path), false, path);
+  assert.equal(isImplementationPathAllowed(contract, "WRITE", "src/allowed.ts"), true);
+  assert.equal(validateImplementationGitPathIdentity("src/allowed.ts"), "src/allowed.ts");
+  assert.equal(validateImplementationGitPathIdentity("src\\allowed.ts"), "src\\allowed.ts");
 });
 
 test("canonical serialization is stable for equivalent object-key order and changes for semantic edits", () => {
