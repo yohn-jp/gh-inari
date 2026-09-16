@@ -2575,6 +2575,13 @@ function requiredCheckNames(value: unknown, operation: string): readonly string[
  * `app_id` (a specific app, or `null` for "any app"); the legacy `contexts`
  * list carries no app binding. A `null`/absent `app_id` yields no producer,
  * which Core must treat as an unproven authority, never as a wildcard match.
+ *
+ * Every entry is collected before any binding is decided: a context backed
+ * by more than one distinct explicit app binding is unresolvable policy
+ * evidence (order in the provider array must never decide authority), and a
+ * malformed entry anywhere in `checks[]`/`contexts` invalidates the whole
+ * read rather than being silently dropped, since it could belong to a
+ * governed context.
  */
 function parseRequiredCheckBindings(
   value: unknown,
@@ -2583,27 +2590,49 @@ function parseRequiredCheckBindings(
   const record = responseRecord(value, operation);
   const checks = record.checks;
   const contexts = record.contexts;
-  const bindings = new Map<string, string | undefined>();
+  const producersByContext = new Map<string, Set<string | undefined>>();
+  const observe = (context: string, producer: string | undefined): void => {
+    const producers = producersByContext.get(context);
+    if (producers === undefined) producersByContext.set(context, new Set([producer]));
+    else producers.add(producer);
+  };
   if (checks !== undefined) {
     if (!Array.isArray(checks))
       throw new GitHubApiResponseError(operation, "Required checks are invalid.", { path: "checks" });
-    for (const entry of checks) {
-      if (!isRecord(entry) || typeof entry.context !== "string" || entry.context.length === 0) continue;
+    checks.forEach((entry, index) => {
+      if (!isRecord(entry) || typeof entry.context !== "string" || entry.context.length === 0)
+        throw new GitHubApiResponseError(operation, "A required check entry is invalid.", {
+          path: `checks[${index}]`,
+        });
       const appId = entry.app_id;
-      const producer = typeof appId === "number" && Number.isSafeInteger(appId) ? `app:${appId}` : undefined;
-      if (!bindings.has(entry.context) || producer !== undefined) bindings.set(entry.context, producer);
-    }
+      if (appId !== undefined && appId !== null && !(typeof appId === "number" && Number.isSafeInteger(appId)))
+        throw new GitHubApiResponseError(operation, "A required check app binding is invalid.", {
+          path: `checks[${index}].app_id`,
+        });
+      observe(entry.context, typeof appId === "number" ? `app:${appId}` : undefined);
+    });
   }
   if (contexts !== undefined) {
     if (!Array.isArray(contexts))
       throw new GitHubApiResponseError(operation, "Required check contexts are invalid.", { path: "contexts" });
-    for (const entry of contexts) {
-      if (typeof entry === "string" && entry.length > 0 && !bindings.has(entry)) bindings.set(entry, undefined);
-    }
+    contexts.forEach((entry, index) => {
+      if (typeof entry !== "string" || entry.length === 0)
+        throw new GitHubApiResponseError(operation, "A required check context is invalid.", {
+          path: `contexts[${index}]`,
+        });
+      if (!producersByContext.has(entry)) observe(entry, undefined);
+    });
   }
-  return [...bindings.entries()]
-    .map(([context, producer]) => ({ context, ...(producer === undefined ? {} : { producer }) }))
-    .sort((left, right) => left.context.localeCompare(right.context, "en-US"));
+  const bindings: GitHubOperationalRequiredCheckBinding[] = [];
+  for (const [context, producers] of producersByContext) {
+    const explicit = [...producers].filter((producer): producer is string => producer !== undefined);
+    if (explicit.length > 1)
+      throw new GitHubApiResponseError(operation, "Required check policy has conflicting producer bindings.", {
+        path: "checks",
+      });
+    bindings.push({ context, ...(explicit[0] === undefined ? {} : { producer: explicit[0] }) });
+  }
+  return bindings.sort((left, right) => left.context.localeCompare(right.context, "en-US"));
 }
 
 function parseBranch(value: unknown, expectedName: string, operation: string): GitHubBranch {

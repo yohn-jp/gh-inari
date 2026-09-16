@@ -741,6 +741,54 @@ test("normalizes the base branch's required-status-check policy into expected pr
   ]);
 });
 
+test("conflicting producer bindings for one context fail closed regardless of provider array order", async () => {
+  for (const checks of [
+    [
+      { context: "verify", app_id: 101 },
+      { context: "verify", app_id: 202 },
+    ],
+    [
+      { context: "verify", app_id: 202 },
+      { context: "verify", app_id: 101 },
+    ],
+  ]) {
+    const transport = operationalPullRequestTransport([], [], { checks });
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    const observed = await adapter.observePullRequest(43);
+    assert.equal(observed.requiredCheckBindings.status, "unavailable");
+    assert.equal(observed.requiredCheckBindings.items.length, 0);
+  }
+});
+
+test("duplicate identical producer bindings for one context dedupe to a single authoritative binding", async () => {
+  const transport = operationalPullRequestTransport([], [], {
+    checks: [
+      { context: "verify", app_id: 101 },
+      { context: "verify", app_id: 101 },
+    ],
+  });
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.requiredCheckBindings.status, "available");
+  assert.deepEqual(observed.requiredCheckBindings.items, [{ context: "verify", producer: "app:101" }]);
+});
+
+test("a malformed required-check policy entry fails the whole policy read closed", async () => {
+  for (const checks of [
+    [{ context: "verify", app_id: 101 }, { app_id: 202 }],
+    [{ context: "verify", app_id: "not-a-number" }],
+  ]) {
+    const transport = operationalPullRequestTransport([], [], { checks });
+    const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+    const observed = await adapter.observePullRequest(43);
+    assert.equal(observed.requiredCheckBindings.status, "unavailable");
+    assert.equal(observed.requiredCheckBindings.items.length, 0);
+  }
+});
+
 test("a missing required-status-check policy is explicitly unavailable, not an empty policy", async () => {
   const transport = new StubGhTransport([
     command(0, "gh version 2.0"),
