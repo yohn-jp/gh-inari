@@ -411,6 +411,17 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
     if (helpResult.status !== 0 || !(helpResult.stdout ?? "").includes("Usage: inari"))
       fail(`installed ${name} --help did not reach the packaged entrypoint`);
 
+    const implementationHelp = invoke(launcher, ["impl", "--help"], {
+      cwd: consumerDirectory,
+      env: environment,
+    });
+    if (
+      implementationHelp.status !== 0 ||
+      !(implementationHelp.stdout ?? "").includes("Usage: inari impl") ||
+      !(implementationHelp.stdout ?? "").includes("impl authorize")
+    )
+      fail(`installed ${name} does not expose the Implementation CLI namespace`);
+
     for (const sessionCommand of ["issue", "inspect"]) {
       const sessionHelp = invoke(launcher, ["session", sessionCommand, "--help"], {
         cwd: consumerDirectory,

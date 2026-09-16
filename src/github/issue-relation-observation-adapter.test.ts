@@ -311,3 +311,31 @@ test("observeBlockedBy rejects an invalid Issue number before reading", async ()
   await assert.rejects(() => adapter.observeBlockedBy(1.5), ContractViolationError);
   assert.equal(reader.calls.length, 0);
 });
+
+test("observeChildren reads and canonicalizes direct native sub-issues", async () => {
+  const reader = new StubReader([{ status: 200, body: [issueBody(11), issueBody(2)] }]);
+  const adapter = new GitHubIssueRelationObservationAdapter(reader, CONTEXT, SUPPORTED);
+  const observation = await adapter.observeChildren(288);
+  assert.equal(observation.kind, "present");
+  assert.deepEqual(
+    observation.references.map((reference) => reference.number),
+    [2, 11],
+  );
+  assert.deepEqual(reader.calls, [{ repositoryPath: "issues/288/sub_issues?per_page=100&page=1" }]);
+});
+
+test("observeChildren fails closed for unsupported capability and truncated evidence", async () => {
+  const unsupported = new StubReader([]);
+  const unsupportedAdapter = new GitHubIssueRelationObservationAdapter(unsupported, CONTEXT, UNSUPPORTED);
+  const unavailable = await unsupportedAdapter.observeChildren(288);
+  assert.equal(unavailable.kind, "unavailable");
+  assert.equal(unavailable.diagnostics[0]?.code, "RELATION_CAPABILITY_UNSUPPORTED");
+  assert.equal(unsupported.calls.length, 0);
+
+  const fullPage = page(100, 1);
+  const truncated = new StubReader(Array.from({ length: 10 }, () => ({ status: 200, body: fullPage })));
+  const truncatedAdapter = new GitHubIssueRelationObservationAdapter(truncated, CONTEXT, SUPPORTED);
+  const bounded = await truncatedAdapter.observeChildren(288);
+  assert.equal(bounded.kind, "unavailable");
+  assert.equal(bounded.diagnostics[0]?.code, "RELATION_RESULT_TRUNCATED");
+});

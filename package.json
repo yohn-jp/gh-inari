@@ -16,6 +16,18 @@
       "types": "./dist/contract/index.d.ts",
       "import": "./dist/contract/index.js"
     },
+    "./implementation-contract": {
+      "types": "./dist/implementation-contract.d.ts",
+      "import": "./dist/implementation-contract.js"
+    },
+    "./implementation-authorization": {
+      "types": "./dist/implementation-authorization.d.ts",
+      "import": "./dist/implementation-authorization.js"
+    },
+    "./implementation-scope-projection": {
+      "types": "./dist/implementation-scope-projection.d.ts",
+      "import": "./dist/implementation-scope-projection.js"
+    },
     "./pull-request-template": {
       "types": "./dist/pull-request-template.d.ts",
       "import": "./dist/pull-request-template.js"
@@ -95,6 +107,14 @@
     "./semantic-issue-relations": {
       "types": "./dist/semantic-issue-relations.d.ts",
       "import": "./dist/semantic-issue-relations.js"
+    },
+    "./issue-relationship": {
+      "types": "./dist/issue-relationship.d.ts",
+      "import": "./dist/issue-relationship.js"
+    },
+    "./issue-relationship-executor": {
+      "types": "./dist/issue-relationship-executor.d.ts",
+      "import": "./dist/issue-relationship-executor.js"
     },
     "./semantic-issue-relation-executor": {
       "types": "./dist/semantic-issue-relation-executor.d.ts",

@@ -14,6 +14,7 @@ import type { RepositoryContext } from "./types.js";
 import {
   GitHubIssueRelationObservationAdapter,
   type IssueBlockedByObservation,
+  type IssueChildrenObservation,
   type IssueParentObservation,
   type IssueRelationCapabilities,
   type IssueRelationApiReader,
@@ -90,6 +91,10 @@ export class GitHubIssueRelationMutationAdapter {
     return this.observation.observeBlockedBy(issueNumber);
   }
 
+  observeChildren(issueNumber: number): Promise<IssueChildrenObservation> {
+    return this.observation.observeChildren(issueNumber);
+  }
+
   /** Execute exactly one already-admitted Core relation effect. */
   async execute(effect: SemanticIssueRelationEffect, subject: IssueReference): Promise<void> {
     const normalizedSubject = this.assertReference(subject, "subject");
@@ -136,6 +141,11 @@ export class GitHubIssueRelationMutationAdapter {
     );
   }
 
+  /** Attach one child to one parent through GitHub's native sub-issue API. */
+  async attachChild(parent: IssueReference, child: IssueReference): Promise<void> {
+    await this.setParent(child, parent);
+  }
+
   /** Remove one observed native parent relation, bounded by that parent identity. */
   async clearParent(child: IssueReference, previousParent: IssueReference): Promise<void> {
     const normalizedChild = this.assertReference(child, "child");
@@ -158,6 +168,17 @@ export class GitHubIssueRelationMutationAdapter {
       { sub_issue_id: databaseIdField(childId) },
       [200],
     );
+  }
+
+  /** Detach one child from the explicitly observed parent. */
+  async detachChild(parent: IssueReference, child: IssueReference): Promise<void> {
+    await this.clearParent(child, parent);
+  }
+
+  /** Explicitly detach from the old parent and attach to the new parent. */
+  async reparentChild(child: IssueReference, previousParent: IssueReference, parent: IssueReference): Promise<void> {
+    await this.clearParent(child, previousParent);
+    await this.setParent(child, parent);
   }
 
   /** Add one native blocked-by dependency to an Issue. */

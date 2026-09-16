@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.8.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.10.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -27,7 +27,7 @@ export const RUNTIME_CAPABILITIES = [
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
 export type CommandDomain =
-  "root" | "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill";
+  "root" | "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -47,6 +47,11 @@ export type CommandId =
   | "issue.semantic.check"
   | "issue.relations.plan"
   | "issue.relations.execute"
+  | "issue.relations.inspectParent"
+  | "issue.relations.inspectChildren"
+  | "issue.relations.attach"
+  | "issue.relations.detach"
+  | "issue.relations.reparent"
   | "issue.render"
   | "issue.create"
   | "issue.explain"
@@ -80,6 +85,11 @@ export type CommandId =
   | "pr.comment"
   | "pr.review"
   | "pr.merge"
+  | "impl.plan"
+  | "impl.show"
+  | "impl.validate"
+  | "impl.authorize"
+  | "impl.inspect"
   | "branch.check"
   | "branch.semantic.check"
   | "template.list"
@@ -235,6 +245,7 @@ const PR_CREATE_OPTIONS = [
 const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHead"] as const;
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
+const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
 
 const option = (
   id: OptionId,
@@ -756,6 +767,51 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "issue.relations.inspectParent",
+    "issue",
+    "relations-inspect-parent",
+    ["issue", "relations", "inspect-parent"],
+    "Inspect the provider-authoritative parent relationship for an existing Issue.",
+    ["help", "json", "repository", "capability"],
+    "<number>",
+  ),
+  command(
+    "issue.relations.inspectChildren",
+    "issue",
+    "relations-inspect-children",
+    ["issue", "relations", "inspect-children"],
+    "Inspect provider-authoritative direct sub-issues for an existing Issue.",
+    ["help", "json", "repository", "capability"],
+    "<number>",
+  ),
+  command(
+    "issue.relations.attach",
+    "issue",
+    "relations-attach",
+    ["issue", "relations", "attach"],
+    "Attach a child Issue to a parent through the provider relationship authority.",
+    ISSUE_RELATIONS_OPTIONS,
+    "<child-number>",
+  ),
+  command(
+    "issue.relations.detach",
+    "issue",
+    "relations-detach",
+    ["issue", "relations", "detach"],
+    "Detach a child Issue from its explicitly observed parent.",
+    ISSUE_RELATIONS_OPTIONS,
+    "<child-number>",
+  ),
+  command(
+    "issue.relations.reparent",
+    "issue",
+    "relations-reparent",
+    ["issue", "relations", "reparent"],
+    "Explicitly detach a child from its old parent and attach it to a new parent.",
+    ISSUE_RELATIONS_OPTIONS,
+    "<child-number>",
+  ),
+  command(
     "issue.render",
     "issue",
     "render",
@@ -1041,6 +1097,51 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["pr", "merge"],
     "Admit, merge, reread, and verify one pull request with a bounded strategy.",
     PR_MERGE_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.plan",
+    "impl",
+    "plan",
+    ["impl", "plan"],
+    "Draft a bounded Implementation recommendation from authoritative Issue evidence without granting authority.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.show",
+    "impl",
+    "show",
+    ["impl", "show"],
+    "Show the current Implementation body, canonical contract projection, and authorization state.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.validate",
+    "impl",
+    "validate",
+    ["impl", "validate"],
+    "Validate an existing Implementation body against the canonical contract without mutation.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.authorize",
+    "impl",
+    "authorize",
+    ["impl", "authorize"],
+    "Authorize one current canonical Implementation body through the #572 Core boundary.",
+    IMPLEMENTATION_OPTIONS,
+    "<number>",
+  ),
+  command(
+    "impl.inspect",
+    "impl",
+    "inspect",
+    ["impl", "inspect"],
+    "Inspect Implementation lifecycle and provider-authoritative parent/source relationships.",
+    IMPLEMENTATION_OPTIONS,
     "<number>",
   ),
   command(
@@ -1395,7 +1496,7 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr", template
 }
 
 export function helpInvocation(
-  domain: "issue" | "pr" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill",
+  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill",
 ): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
@@ -1477,6 +1578,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
   if (
     domain === "issue" ||
     domain === "pr" ||
+    domain === "impl" ||
     domain === "branch" ||
     domain === "change" ||
     domain === "authority" ||
