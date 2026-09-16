@@ -869,6 +869,10 @@ async function actionsApi(argv) {
       head_branch: "main",
       ref: "refs/heads/main",
       path: ".github/workflows/inari-change-executor.yml",
+      // Mirrors the executor's `run-name: Inari Change ${{ inputs.correlation }}`
+      // (exposed by the real Actions API as `display_title`), which the
+      // adapter now requires as positive correlation evidence (#612).
+      display_title: `Inari Change ${correlation}`,
     };
     state.runs = [run, ...(state.runs ?? [])];
     const worker = await dispatchWorker(state, statePath, requestJson);
