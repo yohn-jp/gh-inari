@@ -26,6 +26,7 @@ import {
 import { prepareIssueArtifact, preparePullRequestArtifact } from "../artifact.js";
 import { issueContractFixture, pullRequestContractFixture } from "../contract/fixtures.js";
 import type { CanonicalContract } from "../contract/ir.js";
+import { createChangeExecutionDeadline } from "../change-execution-port.js";
 
 interface RecordedCall {
   readonly args: readonly string[];
@@ -85,6 +86,20 @@ test("reads an Actions artifact through bounded binary stdout", async () => {
 
   assert.deepEqual(await adapter.downloadActionsArtifact(21), new Uint8Array(Buffer.from("artifact")));
   assert.equal(transport.binaryStdoutRequests, 1);
+});
+
+test("clamps an Actions artifact download to the remaining Change budget", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    { exitCode: 0, stdout: "", stderr: "", stdoutBytes: new Uint8Array(Buffer.from("artifact")) },
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const deadline = createChangeExecutionDeadline(1, () => 0);
+
+  assert.deepEqual(await adapter.downloadActionsArtifact(21, deadline), new Uint8Array(Buffer.from("artifact")));
+  assert.equal(transport.calls.at(-1)?.timeoutMs, 1);
 });
 
 test("fails closed for missing and oversized binary artifact responses", async () => {
@@ -765,6 +780,101 @@ test("applies bounded, operation-class-specific timeouts to every real adapter c
   assert.equal(issueRead.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.read);
   assert.ok(transport.calls.every((call) => call.maxStdoutBytes === DEFAULT_GH_OUTPUT_LIMITS_BYTES.stdout));
   assert.ok(transport.calls.every((call) => call.maxStderrBytes === DEFAULT_GH_OUTPUT_LIMITS_BYTES.stderr));
+});
+
+test("clamps cold repository resolution, auth, and Actions I/O to one shared millisecond", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, JSON.stringify({ workflow_runs: [] })),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const deadline = createChangeExecutionDeadline(1, () => 0);
+
+  await adapter.requestActionsApi("actions/workflows/inari-change-executor.yml/runs", "GET", {}, deadline);
+
+  assert.deepEqual(
+    transport.calls.map((call) => call.timeoutMs),
+    [1, 1, 1, 1],
+  );
+});
+
+test("clamps a repository read to the remaining Change budget", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, 'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":100000157,"default_branch":"main"}'),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const deadline = createChangeExecutionDeadline(1, () => 0);
+
+  await adapter.requestRepositoryApi("", "GET", {}, deadline);
+
+  assert.equal(transport.calls.at(-1)?.timeoutMs, 1);
+});
+
+test("clamps a repository mutation to the remaining Change budget", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, 'HTTP/2 200 OK\ncontent-type: application/json\n\n{"ok":true}'),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  const deadline = createChangeExecutionDeadline(1, () => 0);
+
+  await adapter.requestRepositoryApi("issues/42", "PATCH", { title: "updated" }, deadline);
+
+  assert.equal(transport.calls.at(-1)?.timeoutMs, 1);
+});
+
+test("fails before any GitHub I/O when the Change deadline is already expired", async () => {
+  const transport = new StubGhTransport([]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+  let now = 1;
+  const deadline = createChangeExecutionDeadline(1, () => now);
+  now = 2;
+
+  await assert.rejects(
+    adapter.requestActionsApi("actions/workflows/inari-change-executor.yml/runs", "GET", {}, deadline),
+    (error: unknown) => error instanceof GitHubTimeoutError && error.details.timeoutMs === 0,
+  );
+  assert.equal(transport.calls.length, 0);
+});
+
+test("keeps a shorter custom operation timeout below the Change budget", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, 'HTTP/2 200 OK\ncontent-type: application/json\n\n{"id":100000157,"default_branch":"main"}'),
+  ]);
+  const adapter = new GitHubAdapter({
+    repository: "acme/inari",
+    transport,
+    timeoutsMs: { read: 7 },
+  });
+  const deadline = createChangeExecutionDeadline(100, () => 0);
+
+  await adapter.requestRepositoryApi("", "GET", {}, deadline);
+
+  assert.equal(transport.calls.at(-1)?.timeoutMs, 7);
+});
+
+test("preserves the configured operation-class timeout when no Change deadline is supplied", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, JSON.stringify({ workflow_runs: [] })),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  await adapter.requestActionsApi("actions/workflows/inari-change-executor.yml/runs", "GET");
+
+  assert.equal(transport.calls.at(-1)?.timeoutMs, DEFAULT_GH_TIMEOUTS_MS.mutation);
 });
 
 test("honors caller-supplied timeout overrides per operation class", async () => {
