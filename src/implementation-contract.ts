@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { removeHtmlComments } from "./artifact.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 import { type JsonSchema, type JsonSchemaDocument } from "./contract/schema.js";
 import { JSON_SCHEMA_DIALECT } from "./contract/ir.js";
@@ -1194,10 +1195,7 @@ export function parseImplementationIssueBody(body: string): ImplementationIssueB
         },
       ],
     };
-  const source = body
-    .replace(/<!--[^>]*-->\s*/gu, "")
-    .replace(/\r\n?/gu, "\n")
-    .trim();
+  const source = removeHtmlComments(body).replace(/\r\n?/gu, "\n").trim();
   const lines = source.split("\n");
   const headings = bodyHeadingMap();
   const fields: Record<string, string> = {};
