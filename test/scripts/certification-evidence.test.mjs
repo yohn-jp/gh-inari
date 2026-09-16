@@ -281,10 +281,7 @@ test("compares observed contract versions only when an expected version set is s
 function dogfoodOperations(requirements) {
   let operations = [];
   for (const requirement of requirements) {
-    operations = [
-      ...operations,
-      { operation: requirement.operation, outcome: requirement.outcomes[0] },
-    ];
+    operations = [...operations, { operation: requirement.operation, outcome: requirement.outcomes[0] }];
   }
   return operations;
 }
@@ -313,7 +310,9 @@ test("a strict passed fresh-create evidence document still requires a verified f
       SELF_DOGFOOD_OPERATION_REQUIREMENTS.filter((entry) => entry.operation !== "change.issue.fresh-preflight"),
     ),
   });
-  const result = validateCertificationEvidence(withoutFreshPreflight, { certificationKind: "self-dogfood-golden-path" });
+  const result = validateCertificationEvidence(withoutFreshPreflight, {
+    certificationKind: "self-dogfood-golden-path",
+  });
   assert.equal(result.valid, false);
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "DOGFOOD_OPERATION_MISSING"));
 });
