@@ -126,6 +126,11 @@ test("does not widen authorization and applies DENY before every operation allow
   assert.equal(isImplementationScopeProjectionPathAllowed(projection, "DELETE", "src/old.ts"), false);
   assert.equal(isImplementationScopeProjectionPathDenied(projection, "src/private/key.ts"), true);
 
+  // U+FF41 FULLWIDTH LATIN SMALL LETTER A NFKC-normalizes to ASCII "a"; this
+  // candidate path is byte-distinct from "src/index.ts" and must not inherit
+  // its authority just because NFKC would collapse the two together.
+  assert.equal(isImplementationScopeProjectionPathAllowed(projection, "WRITE", "src/ａndex.ts"), false);
+
   const attemptedOverride = tryProjectImplementationScope({ ...projectionInput(), scope: { write: ["**"] } });
   assert.equal(attemptedOverride.valid, false);
   assert.ok(

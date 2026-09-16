@@ -215,7 +215,9 @@ import {
   inspectImplementationLifecycle,
   tryAuthorizeImplementation,
   tryVerifyImplementationAuthorization,
+  validateImplementationAuthorizationRecord,
 } from "./implementation-authorization.js";
+import { tryVerifyImplementationConformance } from "./implementation-conformance.js";
 import type { IssueReference } from "./contract/issue-reference.js";
 
 const EXIT_USAGE = 1;
@@ -339,6 +341,7 @@ const VALUE_OPTIONS = new Set([
   "reviewIntent",
   "mergeStrategy",
   "retry",
+  "pullRequest",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -1824,12 +1827,12 @@ function implementationBodyProjection(body: string): Record<string, unknown> {
 function implementationInputEvidence(value: unknown): ImplementationInputEvidence {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return { authorization: value };
   const record = value as Record<string, unknown>;
+  if (record.kind === "implementation-authorization") return { authorization: value };
   const envelope =
     Object.prototype.hasOwnProperty.call(record, "authorization") ||
     Object.prototype.hasOwnProperty.call(record, "base") ||
     Object.prototype.hasOwnProperty.call(record, "supersession") ||
     Object.prototype.hasOwnProperty.call(record, "completed");
-  if (!envelope && record.kind === "implementation-authorization") return { authorization: value };
   if (!envelope) return { authorization: value };
   const authorization = record.authorization;
   const authorizationRecord =
@@ -1888,6 +1891,18 @@ async function implementationBaseEvidence(
   if (typeof branchName !== "string" || branchName.length === 0) return undefined;
   const branch = await evidence.adapter.findBranch(branchName);
   if (branch === undefined || typeof branch.sha !== "string" || branch.sha.length === 0) return undefined;
+  return { branch: branch.name, revision: branch.sha, freshness: branch.sha };
+}
+
+async function implementationAuthorizedBaseEvidence(
+  evidence: ImplementationIssueEvidence,
+  authorization: unknown,
+): Promise<unknown> {
+  const validated = validateImplementationAuthorizationRecord(authorization);
+  const branchName = validated.record?.base.branch;
+  if (!validated.valid || branchName === undefined) return undefined;
+  const branch = await evidence.adapter.findBranch(branchName);
+  if (branch === undefined || branch.sha.length === 0) return undefined;
   return { branch: branch.name, revision: branch.sha, freshness: branch.sha };
 }
 
@@ -1992,7 +2007,8 @@ async function runImplementationCommand(
     command !== "show" &&
     command !== "validate" &&
     command !== "authorize" &&
-    command !== "inspect"
+    command !== "inspect" &&
+    command !== "verify"
   )
     throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command ?? ""}".`);
   const definition = getCommandForPositionals(["impl", command]);
@@ -2013,6 +2029,43 @@ async function runImplementationCommand(
   const bodyProjection = implementationBodyProjection(evidence.body);
   const from = parsed.options.from === undefined ? undefined : await readJsonValue(parsed.options.from);
   const input = from === undefined ? {} : implementationInputEvidence(from);
+
+  if (command === "verify") {
+    const pullRequestValue = parsed.options.pullRequest;
+    if (typeof pullRequestValue !== "string" || !isPositiveInteger(pullRequestValue))
+      throw new CliError("INPUT_REQUIRED", "Use --pr <number>.", "--pr");
+    const pullRequest = await evidence.adapter.observePullRequest(Number(pullRequestValue));
+    const base = await implementationAuthorizedBaseEvidence(evidence, input.authorization);
+    const conformance = tryVerifyImplementationConformance({
+      authorization: input.authorization,
+      issue: { reference: evidence.reference, body: evidence.body },
+      repository: evidence.repository,
+      base,
+      pullRequestNumber: Number(pullRequestValue),
+      pullRequest,
+      ...(input.supersession === undefined ? {} : { supersession: input.supersession }),
+      ...(input.completed === undefined ? {} : { completed: input.completed }),
+    });
+    printImplementationResult(
+      {
+        ok: conformance.valid,
+        valid: conformance.valid,
+        status: conformance.status,
+        operation: "impl.verify",
+        kind: IMPLEMENTATION_KIND,
+        implementation: evidence.reference,
+        authorization: conformance.authorization,
+        ...(conformance.binding === undefined ? {} : { binding: conformance.binding }),
+        ...(conformance.pullRequest === undefined ? {} : { pullRequest: conformance.pullRequest }),
+        changes: conformance.changes,
+        verification: conformance.verification,
+        diagnostics: conformance.diagnostics,
+        mutation: false,
+      },
+      json,
+    );
+    return conformance.valid ? 0 : EXIT_VALIDATION;
+  }
 
   if (command === "plan") {
     const relationships = await observeImplementationRelationships(evidence, parsed.capabilities);

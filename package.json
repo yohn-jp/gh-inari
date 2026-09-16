@@ -28,6 +28,10 @@
       "types": "./dist/implementation-scope-projection.d.ts",
       "import": "./dist/implementation-scope-projection.js"
     },
+    "./implementation-conformance": {
+      "types": "./dist/implementation-conformance.d.ts",
+      "import": "./dist/implementation-conformance.js"
+    },
     "./pull-request-template": {
       "types": "./dist/pull-request-template.d.ts",
       "import": "./dist/pull-request-template.js"
