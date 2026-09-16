@@ -117,6 +117,7 @@ function pullRequest(
         url: "https://provider.invalid/check/secret-url",
       },
     ]),
+    requiredCheckBindings: collection([{ context: "verify", producer: "app:trusted" }]),
     reviews: collection([]),
     comments: collection([]),
     inlineReviewComments: collection([]),
@@ -290,6 +291,8 @@ test("missing complete check evidence is missing-verification, while unavailable
   );
 });
 
+// Mandatory regression E: a rerun within the authoritative producer group
+// resolves to the current (latest) execution.
 test("fail-to-success reruns select the current execution for one producer", () => {
   const result = tryVerifyImplementationConformance(
     input(
@@ -316,6 +319,8 @@ test("fail-to-success reruns select the current execution for one producer", () 
   assert.deepEqual(result.verification.failedChecks, []);
 });
 
+// Mandatory regression F: the same rerun selection applies symmetrically to
+// a success-to-failure transition.
 test("success-to-failure reruns select the current failure", () => {
   const result = tryVerifyImplementationConformance(
     input(
@@ -342,7 +347,7 @@ test("success-to-failure reruns select the current failure", () => {
   assert.deepEqual(result.verification.satisfiedChecks, []);
 });
 
-test("a same-named check from another producer cannot satisfy the requirement", () => {
+test("a same-named check from another producer cannot satisfy, replace, or poison the authoritative result", () => {
   const result = tryVerifyImplementationConformance(
     input(
       authorization(),
@@ -352,6 +357,87 @@ test("a same-named check from another producer cannot satisfy the requirement", 
           check("trusted", { conclusion: "failure" }),
           check("spoof", { identity: { context: "verify", producer: "app:spoof" } }),
         ]),
+      }),
+    ),
+  );
+  // The spoofed producer is excluded from selection entirely rather than
+  // creating ambiguity: the authoritative "trusted" producer's own failure
+  // is the result, not an indeterminate one.
+  assert.equal(result.status, "missing-verification");
+  assert.deepEqual(result.verification.failedChecks, ["verify"]);
+  assert.deepEqual(result.verification.unverifiableChecks, []);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
+});
+
+// Mandatory regression A: a required check with no authoritative expected
+// producer bound to it can never be satisfied by the sole observed check
+// that happens to share its name, even when no other candidate exists.
+test("regression A: a lone observed check from an unexpected producer is never satisfied", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([check("spoof-only", { identity: { context: "verify", producer: "app:999" } })]),
+        requiredCheckBindings: collection([{ context: "verify", producer: "app:101" }]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
+});
+
+// Mandatory regression B: the authoritative producer's result is selected
+// even in the presence of a same-name spoofed producer.
+test("regression B: the authoritative producer is selected despite a spoofed same-name check", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([
+          check("authoritative", { identity: { context: "verify", producer: "app:101" } }),
+          check("spoof", { identity: { context: "verify", producer: "app:999" } }),
+        ]),
+        requiredCheckBindings: collection([{ context: "verify", producer: "app:101" }]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "conformant");
+  assert.deepEqual(result.verification.satisfiedChecks, ["verify"]);
+});
+
+// Mandatory regression C: an observed same-name success with no producer
+// identity at all cannot satisfy an authoritative expected binding.
+test("regression C: a same-name check without producer identity cannot satisfy an authoritative binding", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([check("unidentified", { identity: { context: "verify" } })]),
+        requiredCheckBindings: collection([{ context: "verify", producer: "app:101" }]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
+});
+
+// Mandatory regression D: this is the exact defect from #643 — with no
+// authoritative expected producer binding at all, a single observed
+// successful same-name check must not be treated as authoritative merely
+// because it is the only match.
+test("regression D: no authoritative binding means a lone observed success is still unverifiable", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([check("only-match")]),
+        requiredCheckBindings: collection([]),
       }),
     ),
   );
@@ -374,7 +460,7 @@ test("duplicate current executions fail closed instead of using collection order
   assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
 });
 
-test("missing producer identity is ambiguous when more than one same-named execution is present", () => {
+test("a same-name check without producer identity is excluded, not ambiguous, alongside an authoritative one", () => {
   const result = tryVerifyImplementationConformance(
     input(
       authorization(),
@@ -384,8 +470,8 @@ test("missing producer identity is ambiguous when more than one same-named execu
       }),
     ),
   );
-  assert.equal(result.status, "unverifiable");
-  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
+  assert.equal(result.status, "conformant");
+  assert.deepEqual(result.verification.satisfiedChecks, ["verify"]);
 });
 
 test("Check Run precedence is explicit when a commit status collides with its context", () => {
@@ -410,6 +496,35 @@ test("Check Run precedence is explicit when a commit status collides with its co
   );
   assert.equal(result.status, "missing-verification");
   assert.deepEqual(result.verification.failedChecks, ["verify"]);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
+});
+
+// Mandatory regression G: an app-bound Check Run requirement cannot be
+// satisfied or overridden by a same-context legacy status from an unrelated
+// creator, even when the Check Run itself is otherwise absent from the
+// authoritative producer group.
+test("regression G: a same-context legacy status from an unrelated creator cannot satisfy an app-bound requirement", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([
+          {
+            id: "status",
+            name: "verify",
+            kind: "status",
+            identity: { context: "verify", producer: "creator:7" },
+            status: "success",
+            current: true,
+          },
+        ]),
+        requiredCheckBindings: collection([{ context: "verify", producer: "app:trusted" }]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
   assert.deepEqual(result.verification.satisfiedChecks, []);
 });
 
@@ -498,6 +613,7 @@ test("a targeted test is never satisfied by a same-named or successful CI check"
             id: "check-1",
             name: "verify",
             kind: "check-run",
+            identity: { context: "verify", producer: "app:trusted" },
             status: "completed",
             conclusion: "success",
           },

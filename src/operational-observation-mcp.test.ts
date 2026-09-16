@@ -83,6 +83,7 @@ class McpOperationalAdapter extends GitHubAdapter {
       assignees: [],
       url: `https://github.com/acme/inari/pull/${number}`,
       checks: collection(),
+      requiredCheckBindings: collection(),
       reviews: collection(),
       comments: collection(),
       inlineReviewComments: collection(),

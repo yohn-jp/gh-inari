@@ -19,8 +19,9 @@ import type {
   GitHubOperationalIssueEvidence,
   GitHubOperationalPagination,
   GitHubOperationalPullRequestEvidence,
-  GitHubOperationalReview,
   GitHubOperationalRepository,
+  GitHubOperationalRequiredCheckBinding,
+  GitHubOperationalReview,
 } from "./github/types.js";
 
 export const OPERATIONAL_OBSERVATION_VERSION = 1 as const;
@@ -123,6 +124,12 @@ export interface OperationalCheckIdentity {
   readonly context: string;
   readonly producer?: string;
 }
+
+/**
+ * Repository-governed expected producer binding for one required-check
+ * context, independent of any observed check evidence.
+ */
+export type OperationalRequiredCheckBinding = OperationalCheckIdentity;
 
 export interface OperationalCheck {
   readonly id: string;
@@ -231,6 +238,8 @@ export interface OperationalPullRequestObservation {
   readonly url: string;
   readonly checks: OperationalCollection<OperationalCheck>;
   readonly checksSummary: OperationalChecksSummary;
+  /** Repository-governed expected required-check producer bindings for the base branch. */
+  readonly requiredCheckBindings: OperationalCollection<OperationalRequiredCheckBinding>;
   readonly reviews: OperationalCollection<OperationalReview>;
   readonly comments: OperationalCollection<OperationalComment>;
   readonly inlineReviewComments: OperationalCollection<OperationalComment>;
@@ -335,6 +344,7 @@ const OPERATIONAL_PULL_REQUEST_KEYS = new Set([
   "mergedAt",
   "url",
   "checks",
+  "requiredCheckBindings",
   "reviews",
   "comments",
   "inlineReviewComments",
@@ -1102,6 +1112,48 @@ function normalizeCheckIdentity(
   };
 }
 
+/**
+ * Normalize one required-check binding item. Unlike `normalizeCheckIdentity`,
+ * an undefined item is a malformed collection entry, not an absent optional
+ * field, so it must raise a violation rather than being silently dropped.
+ */
+function normalizeRequiredCheckBinding(
+  value: unknown,
+  path: string,
+  violations: OperationalObservationViolation[],
+): OperationalRequiredCheckBinding | undefined {
+  if (!isRecord(value)) {
+    violation(
+      violations,
+      "OPERATIONAL_OBSERVATION_VALUE_INVALID",
+      path,
+      `Required-check binding at ${path} is invalid.`,
+    );
+    return undefined;
+  }
+  unknownProperties(value, OPERATIONAL_CHECK_IDENTITY_KEYS, path, violations);
+  const context = text(value.context, `${path}.context`, OPERATIONAL_OBSERVATION_LIMITS.actorTextLength, violations);
+  const producer =
+    value.producer === undefined || value.producer === null
+      ? undefined
+      : text(value.producer, `${path}.producer`, OPERATIONAL_OBSERVATION_LIMITS.actorTextLength, violations);
+  if (context === undefined) return undefined;
+  return {
+    context,
+    ...(producer === undefined ? {} : { producer }),
+  };
+}
+
+function compareRequiredCheckBindings(
+  left: OperationalRequiredCheckBinding,
+  right: OperationalRequiredCheckBinding,
+): number {
+  return (
+    left.context.localeCompare(right.context, "en-US") ||
+    (left.producer ?? "").localeCompare(right.producer ?? "", "en-US")
+  );
+}
+
 function normalizeCheck(
   value: unknown,
   path: string,
@@ -1425,6 +1477,15 @@ function pullRequestProjection(
     compareChecks,
   );
   const checksSummary = deriveChecksSummary(checks);
+  const requiredCheckBindings = sortCollection(
+    normalizeCollection(
+      evidence.requiredCheckBindings,
+      "$.pullRequest.requiredCheckBindings",
+      normalizeRequiredCheckBinding,
+      violations,
+    ),
+    compareRequiredCheckBindings,
+  );
   const reviews = sortCollection(
     normalizeCollection(evidence.reviews, "$.pullRequest.reviews", normalizeReview, violations),
     compareReviews,
@@ -1486,6 +1547,7 @@ function pullRequestProjection(
     url,
     checks,
     checksSummary,
+    requiredCheckBindings,
     reviews,
     comments: normalizedComments,
     inlineReviewComments,
@@ -1540,6 +1602,7 @@ export type {
   GitHubOperationalIssueEvidence,
   GitHubOperationalPagination,
   GitHubOperationalPullRequestEvidence,
-  GitHubOperationalReview,
   GitHubOperationalRepository,
+  GitHubOperationalRequiredCheckBinding,
+  GitHubOperationalReview,
 };

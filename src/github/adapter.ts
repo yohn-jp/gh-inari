@@ -41,6 +41,7 @@ import {
   type GitHubOperationalProvenance,
   type GitHubOperationalPullRequestEvidence,
   type GitHubOperationalRepository,
+  type GitHubOperationalRequiredCheckBinding,
   type GitHubOperationalReview,
   type GitHubBranch,
   type GitHubMilestone,
@@ -732,18 +733,28 @@ export class GitHubAdapter {
             "PR head SHA was not supplied by GitHub.",
           )
         : await this.readOperationalChecks(base.head.sha, deadline);
+    const requiredCheckBindings =
+      base.base.ref === undefined
+        ? unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+            "pull_request.required_check_policy",
+            "PR base ref was not supplied by GitHub.",
+          )
+        : await this.readOperationalRequiredCheckBindings(base.base.ref, deadline);
     const reviewDecisionResult =
       base.reviewDecision === undefined
         ? await this.readOperationalReviewDecision(context, pullRequestNumber, deadline)
         : { value: undefined, attempted: false };
     const checksEndpoints =
       base.head.sha === undefined ? [] : [`commits/${base.head.sha}/check-runs`, `commits/${base.head.sha}/status`];
+    const requiredCheckPolicyEndpoint =
+      base.base.ref === undefined ? [] : [`branches/${base.base.ref}/protection/required_status_checks`];
     return {
       ...base,
       ...(base.reviewDecision === undefined && reviewDecisionResult.value !== undefined
         ? { reviewDecision: reviewDecisionResult.value }
         : {}),
       checks,
+      requiredCheckBindings,
       reviews,
       comments,
       inlineReviewComments,
@@ -755,6 +766,7 @@ export class GitHubAdapter {
         reviewsEndpoint,
         filesEndpoint,
         ...checksEndpoints,
+        ...requiredCheckPolicyEndpoint,
         ...(reviewDecisionResult.attempted ? ["graphql:pullRequest.reviewDecision"] : []),
       ]),
     };
@@ -802,6 +814,59 @@ export class GitHubAdapter {
       diagnostics: [...runs.diagnostics, ...statuses.diagnostics].slice(0, 100),
     };
     return checks;
+  }
+
+  /**
+   * Read the base branch's authoritative required-status-check policy and
+   * normalize each governed context to its bounded expected producer
+   * binding. Reuses the same branch-protection endpoint already read by
+   * `getPullRequestMergePolicy`; a missing/unavailable policy is explicitly
+   * non-authoritative rather than raising, so Core can fail closed per check.
+   */
+  private async readOperationalRequiredCheckBindings(
+    baseRef: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubOperationalCollection<GitHubOperationalRequiredCheckBinding>> {
+    const operation = "pull_request.required_check_policy";
+    let response: GitHubApiResponse;
+    try {
+      response = await this.requestRepositoryApi(
+        `branches/${encodeURIComponent(baseRef)}/protection/required_status_checks`,
+        "GET",
+        {},
+        deadline,
+      );
+    } catch {
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} read failed.`,
+      );
+    }
+    if (response.status === 404)
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} endpoint was not available from GitHub.`,
+      );
+    if (response.status < 200 || response.status >= 300)
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} returned an unavailable response.`,
+      );
+    let items: readonly GitHubOperationalRequiredCheckBinding[];
+    try {
+      items = parseRequiredCheckBindings(response.body, operation);
+    } catch {
+      return unavailableOperationalCollection<GitHubOperationalRequiredCheckBinding>(
+        operation,
+        `${operation} returned malformed provider evidence.`,
+      );
+    }
+    return {
+      status: "available",
+      items,
+      pagination: { perPage: OPERATIONAL_PAGE_SIZE, pages: 1, returned: items.length, truncated: false },
+      diagnostics: [],
+    };
   }
 
   /** Read GitHub's aggregate review decision through one fixed GraphQL query. */
@@ -1866,7 +1931,7 @@ function parseOperationalPullRequest(
   operation: string,
 ): Omit<
   GitHubOperationalPullRequestEvidence,
-  "checks" | "reviews" | "comments" | "inlineReviewComments" | "changedFiles" | "provenance"
+  "checks" | "requiredCheckBindings" | "reviews" | "comments" | "inlineReviewComments" | "changedFiles" | "provenance"
 > {
   const record = responseRecord(value, operation);
   const requestedReviewers =
@@ -2502,6 +2567,43 @@ function requiredCheckNames(value: unknown, operation: string): readonly string[
     }
   }
   return [...new Set(names)].sort();
+}
+
+/**
+ * Normalize the base branch's required-status-check policy into bounded
+ * expected producer bindings. The `checks` entries carry the authoritative
+ * `app_id` (a specific app, or `null` for "any app"); the legacy `contexts`
+ * list carries no app binding. A `null`/absent `app_id` yields no producer,
+ * which Core must treat as an unproven authority, never as a wildcard match.
+ */
+function parseRequiredCheckBindings(
+  value: unknown,
+  operation: string,
+): readonly GitHubOperationalRequiredCheckBinding[] {
+  const record = responseRecord(value, operation);
+  const checks = record.checks;
+  const contexts = record.contexts;
+  const bindings = new Map<string, string | undefined>();
+  if (checks !== undefined) {
+    if (!Array.isArray(checks))
+      throw new GitHubApiResponseError(operation, "Required checks are invalid.", { path: "checks" });
+    for (const entry of checks) {
+      if (!isRecord(entry) || typeof entry.context !== "string" || entry.context.length === 0) continue;
+      const appId = entry.app_id;
+      const producer = typeof appId === "number" && Number.isSafeInteger(appId) ? `app:${appId}` : undefined;
+      if (!bindings.has(entry.context) || producer !== undefined) bindings.set(entry.context, producer);
+    }
+  }
+  if (contexts !== undefined) {
+    if (!Array.isArray(contexts))
+      throw new GitHubApiResponseError(operation, "Required check contexts are invalid.", { path: "contexts" });
+    for (const entry of contexts) {
+      if (typeof entry === "string" && entry.length > 0 && !bindings.has(entry)) bindings.set(entry, undefined);
+    }
+  }
+  return [...bindings.entries()]
+    .map(([context, producer]) => ({ context, ...(producer === undefined ? {} : { producer }) }))
+    .sort((left, right) => left.context.localeCompare(right.context, "en-US"));
 }
 
 function parseBranch(value: unknown, expectedName: string, operation: string): GitHubBranch {

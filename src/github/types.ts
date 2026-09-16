@@ -281,6 +281,16 @@ export interface GitHubOperationalCheck {
   readonly current?: boolean | "unknown";
 }
 
+/**
+ * Bounded expected required-check identity read from the base branch's
+ * repository-governed protection policy, not from observed check evidence.
+ */
+export interface GitHubOperationalRequiredCheckBinding {
+  readonly context: string;
+  /** Authoritative expected GitHub App identity, absent when the policy does not bind one. */
+  readonly producer?: string;
+}
+
 export interface GitHubOperationalChangedFile {
   readonly filename: string;
   /** Previous path supplied by GitHub for a rename. */
@@ -357,6 +367,8 @@ export interface GitHubOperationalPullRequestEvidence {
   readonly mergedAt?: string;
   readonly url: string;
   readonly checks: GitHubOperationalCollection<GitHubOperationalCheck>;
+  /** Repository-governed expected required-check producer bindings for the base branch. */
+  readonly requiredCheckBindings: GitHubOperationalCollection<GitHubOperationalRequiredCheckBinding>;
   readonly reviews: GitHubOperationalCollection<GitHubOperationalReview>;
   readonly comments: GitHubOperationalCollection<GitHubOperationalComment>;
   readonly inlineReviewComments: GitHubOperationalCollection<GitHubOperationalComment>;

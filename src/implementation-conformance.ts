@@ -640,16 +640,30 @@ function evaluateChanges(
 
 type VerificationDisposition = "satisfied" | "missing" | "failed" | "unverifiable";
 
+/**
+ * Resolve one required-check name against the independently expected
+ * producer binding from repository policy, never against the observed
+ * checks alone. A same-context check from any producer other than the
+ * authoritative expected one cannot satisfy, replace, mask, or poison the
+ * result: it is excluded from selection entirely, not treated as an
+ * ambiguity. Absence of an authoritative expected binding is itself a
+ * fail-closed "unverifiable", independent of how many same-name checks are
+ * observed — a lone observed check is never implicitly authoritative.
+ */
 function checkDisposition(
   checks: OperationalPullRequestObservation["checks"]["items"],
+  bindings: OperationalPullRequestObservation["requiredCheckBindings"]["items"],
   name: string,
 ): VerificationDisposition {
-  const matches = checks.filter((check) => check.name === name || check.identity?.context === name);
-  if (matches.length === 0) return "missing";
-  if (matches.some((check) => (check.identity?.context ?? check.name) !== name)) return "unverifiable";
-  const selection = selectCurrentOperationalChecks(matches);
-  if (selection.ambiguous) return "unverifiable";
   const context = (check: OperationalCheck): string => check.identity?.context ?? check.name;
+  const contextMatches = checks.filter((check) => context(check) === name);
+  if (contextMatches.length === 0) return "missing";
+  const binding = bindings.find((entry) => entry.context === name);
+  if (binding?.producer === undefined) return "unverifiable";
+  const producerMatches = contextMatches.filter((check) => check.identity?.producer === binding.producer);
+  if (producerMatches.length === 0) return "unverifiable";
+  const selection = selectCurrentOperationalChecks(producerMatches);
+  if (selection.ambiguous) return "unverifiable";
   const matchingCurrent = selection.current.filter((check) => context(check) === name);
   const checkRuns = matchingCurrent.filter((check) => check.kind === "check-run");
   const statuses = matchingCurrent.filter((check) => check.kind === "status");
@@ -660,9 +674,7 @@ function checkDisposition(
   if (candidates.length !== 1) return "unverifiable";
   const identityKeys = new Set(candidates.map((check) => operationalCheckIdentityKey(check)));
   if (identityKeys.size !== 1) return "unverifiable";
-  const selected = candidates[0]!;
-  if (selected.identity?.producer === undefined && matches.length > 1) return "unverifiable";
-  return checkResultDisposition(selected);
+  return checkResultDisposition(candidates[0]!);
 }
 
 function checkResultDisposition(check: OperationalCheck): VerificationDisposition {
@@ -757,8 +769,23 @@ function evaluateVerification(
     return { verification: result, missing, unverifiable: true };
   }
 
+  if (
+    observation.requiredCheckBindings.status !== "available" ||
+    observation.requiredCheckBindings.pagination.truncated ||
+    observation.requiredCheckBindings.pagination.returned !== observation.requiredCheckBindings.items.length ||
+    observation.requiredCheckBindings.diagnostics.length > 0
+  ) {
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_VERIFICATION_UNAVAILABLE",
+      "$.pullRequest.requiredCheckBindings",
+      "Required-check policy evidence is unavailable or incomplete.",
+    );
+    return { verification: result, missing, unverifiable: true };
+  }
+
   requiredChecks.forEach((name, index) => {
-    const disposition = checkDisposition(observation.checks.items, name);
+    const disposition = checkDisposition(observation.checks.items, observation.requiredCheckBindings.items, name);
     if (disposition === "satisfied") result.satisfiedChecks.push(name);
     else if (disposition === "missing") {
       result.missingChecks.push(name);

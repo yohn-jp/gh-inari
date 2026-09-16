@@ -237,6 +237,7 @@ function includedJsonCommand(value: unknown, status = 200): GhCommandResult {
 function operationalPullRequestTransport(
   checkRuns: readonly Record<string, unknown>[],
   statuses: readonly Record<string, unknown>[],
+  requiredStatusChecks: Record<string, unknown> = { contexts: [], checks: [] },
 ): StubGhTransport {
   return new StubGhTransport([
     command(0, "gh version 2.0"),
@@ -249,6 +250,7 @@ function operationalPullRequestTransport(
     includedJsonCommand([]),
     includedJsonCommand({ check_runs: checkRuns }),
     includedJsonCommand({ statuses }),
+    includedJsonCommand(requiredStatusChecks),
   ]);
 }
 
@@ -710,6 +712,7 @@ test("normalizes Check Run app identity and commit-status source identity", asyn
     [true, true],
   );
   assert.deepEqual(observed.provenance.endpoints, [
+    "branches/main/protection/required_status_checks",
     "commits/head-sha/check-runs",
     "commits/head-sha/status",
     "issues/43/comments",
@@ -718,6 +721,45 @@ test("normalizes Check Run app identity and commit-status source identity", asyn
     "pulls/43/files",
     "pulls/43/reviews",
   ]);
+});
+
+test("normalizes the base branch's required-status-check policy into expected producer bindings", async () => {
+  const transport = operationalPullRequestTransport([], [], {
+    contexts: ["legacy-context"],
+    checks: [
+      { context: "verify", app_id: 101 },
+      { context: "legacy-context", app_id: null },
+    ],
+  });
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.requiredCheckBindings.status, "available");
+  assert.deepEqual(observed.requiredCheckBindings.items, [
+    { context: "legacy-context" },
+    { context: "verify", producer: "app:101" },
+  ]);
+});
+
+test("a missing required-status-check policy is explicitly unavailable, not an empty policy", async () => {
+  const transport = new StubGhTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    jsonCommand(JSON.parse(operationalPullRequestPayload())),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand([]),
+    includedJsonCommand({ check_runs: [] }),
+    includedJsonCommand({ statuses: [] }),
+    includedJsonCommand({}, 404),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport });
+
+  const observed = await adapter.observePullRequest(43);
+  assert.equal(observed.requiredCheckBindings.status, "unavailable");
+  assert.equal(observed.requiredCheckBindings.items.length, 0);
 });
 
 test("adapter marks the newest same-producer execution current and ties unknown", async () => {
