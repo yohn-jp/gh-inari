@@ -10,9 +10,11 @@ import {
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
   CERTIFICATION_KINDS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_SCENARIOS,
 } from "../../scripts/certification-evidence.mjs";
 import {
   INARI_SUPERVISION_TIMEOUT_MS,
+  classifyFreshChangePreflight,
   parseArguments,
   projectWorkerHandoff,
   runCommand,
@@ -30,6 +32,79 @@ test("self-dogfood requires an exact disposable Issue confirmation", () => {
     parsed.options.issue,
     "the execution precondition must reject this mismatch before any provider call",
   );
+});
+
+function freshChangePreflight(issue = 239) {
+  return {
+    ok: true,
+    issue,
+    state: "DEFINED",
+    status: "absent",
+    canonicalBranch: `feat/${String(issue)}-self-dogfood`,
+    canonicalBaseBranch: "main",
+    projection: {
+      valid: true,
+      status: "absent",
+      canonicalBranch: `feat/${String(issue)}-self-dogfood`,
+      canonicalBaseBranch: "main",
+      candidates: { branches: [], pullRequests: [] },
+      change: {
+        identity: { repositoryHost: "github.com", repositoryId: "123239", rootIssue: issue },
+        state: "DEFINED",
+      },
+    },
+  };
+}
+
+test("fresh-create preflight accepts a genuinely unissued fixture", () => {
+  assert.deepEqual(classifyFreshChangePreflight(freshChangePreflight(), 239), {
+    valid: true,
+    scenario: SELF_DOGFOOD_SCENARIOS.FRESH_CREATE,
+  });
+});
+
+test("fresh-create preflight classifies prior canonical history as reconciliation/recovery", () => {
+  const historical = {
+    ok: true,
+    issue: 458,
+    state: "ABORTED",
+    status: "healthy",
+    projection: {
+      valid: true,
+      status: "healthy",
+      candidates: {
+        branches: [],
+        pullRequests: [
+          {
+            candidate: {
+              number: 566,
+              head: "feat/458-disposable-self-dogfood",
+              base: "main",
+              state: "closed",
+              merged: false,
+              rootIssue: 458,
+            },
+            classification: "canonical",
+            reason: "canonical branch and root Issue match",
+          },
+        ],
+      },
+      change: {
+        identity: { repositoryHost: "github.com", repositoryId: "123239", rootIssue: 458 },
+        state: "ABORTED",
+        projection: { branch: "feat/458-disposable-self-dogfood", pullRequest: 566 },
+      },
+    },
+  };
+  const result = classifyFreshChangePreflight(historical, 458);
+  assert.equal(result.valid, false);
+  assert.equal(result.scenario, SELF_DOGFOOD_SCENARIOS.RECONCILIATION_RECOVERY);
+  assert.match(result.reason, /history/u);
+});
+
+test("fresh-create and reconciliation/recovery are distinct certification scenarios", () => {
+  assert.notEqual(SELF_DOGFOOD_SCENARIOS.FRESH_CREATE, SELF_DOGFOOD_SCENARIOS.RECONCILIATION_RECOVERY);
+  assert.equal(classifyFreshChangePreflight(freshChangePreflight(), 239).scenario, "fresh-create");
 });
 
 test("self-dogfood derives the installed inari supervision timeout from the canonical execution deadline, not a duplicated magic constant", () => {
@@ -255,14 +330,19 @@ const readyStateFile = process.env.FAKE_INARI_READY_STATE;
 const readyCount = Number(fs.existsSync(readyStateFile) ? fs.readFileSync(readyStateFile, "utf8") : "0");
 const ready = args.includes("ready");
 if (ready) fs.writeFileSync(readyStateFile, String(readyCount + 1));
+const showStateFile = process.env.FAKE_INARI_SHOW_STATE;
+const showCount = Number(fs.existsSync(showStateFile) ? fs.readFileSync(showStateFile, "utf8") : "0");
+const show = args.includes("show");
+if (show) fs.writeFileSync(showStateFile, String(showCount + 1));
 const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1, contractVersions: { goldenPath: "1", statusRecovery: "1" } };
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
 else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
+else if (show && showCount === 0) output = ${JSON.stringify(freshChangePreflight())};
 else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
 else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
-else if (args.includes("show")) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" } };
+else if (show) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" } };
 else if (ready) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: readyCount === 0 ? "verified" : "returned-existing" } };
 else output = { ok: false };
 console.log(JSON.stringify(output));
@@ -313,6 +393,7 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({
           INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "runtime-private-key",
           FAKE_INARI_STATE: stateFile,
           FAKE_INARI_READY_STATE: path.join(root, "provider-ready-state"),
+          FAKE_INARI_SHOW_STATE: path.join(root, "provider-show-state"),
         },
       },
     );
@@ -323,6 +404,7 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({
     );
     const evidence = JSON.parse(fs.readFileSync(outputFile, "utf8"));
     assert.equal(evidence.result, "passed");
+    assert.equal(evidence.scenario, SELF_DOGFOOD_SCENARIOS.FRESH_CREATE);
     assert.deepEqual(evidence.contractVersions, { goldenPath: "1", statusRecovery: "1", skill: "1.1.0" });
     assert.equal(evidence.change.pullRequest, 9239);
     assert.deepEqual(
@@ -358,11 +440,16 @@ const issue = args.includes("issue") && args.includes("change");
 const issueCount = Number(fs.existsSync(issueStateFile) ? fs.readFileSync(issueStateFile, "utf8") : "0");
 if (issue) fs.writeFileSync(issueStateFile, String(issueCount + 1));
 const ready = args.includes("ready");
+const showStateFile = process.env.FAKE_INARI_SHOW_STATE;
+const showCount = Number(fs.existsSync(showStateFile) ? fs.readFileSync(showStateFile, "utf8") : "0");
+const show = args.includes("show");
+if (show) fs.writeFileSync(showStateFile, String(showCount + 1));
 const common = { branch: "feat/239-self-dogfood", canonicalBaseBranch: "main", pullRequest: 9239, version: 1, contractVersions: { goldenPath: "1", statusRecovery: "1" } };
 let output;
 if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: "0.11.0" };
 else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
+else if (show && showCount === 0) output = ${JSON.stringify(freshChangePreflight())};
 else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
 else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
 else if (ready) {
@@ -439,6 +526,7 @@ fs.writeFileSync(${JSON.stringify(workerObservation)}, JSON.stringify({ token: p
           INARI_SELF_DOGFOOD: "1",
           GH_TOKEN: "issuer-secret",
           FAKE_INARI_ISSUE_STATE: issueStateFile,
+          FAKE_INARI_SHOW_STATE: path.join(root, "provider-show-state"),
         },
       },
     );

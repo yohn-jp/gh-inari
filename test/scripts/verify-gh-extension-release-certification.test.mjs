@@ -42,6 +42,7 @@ function dogfoodEvidence(overrides = {}) {
     contractVersions: CONTRACT_VERSIONS,
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),

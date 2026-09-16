@@ -28,6 +28,7 @@ import {
   MAX_CERTIFICATION_STRING_LENGTH,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
   SELF_DOGFOOD_RECOVERY_OPERATION,
+  SELF_DOGFOOD_SCENARIOS,
   validateCertificationEvidence,
   type CertificationChangeIdentity,
   type CertificationContractVersions,
@@ -189,6 +190,14 @@ function verifySelfDogfoodIdentityValue(
   diagnostics: { code: string; message: string }[],
 ): boolean {
   let valid = true;
+  if (dogfood.scenario !== SELF_DOGFOOD_SCENARIOS.FRESH_CREATE) {
+    appendCertificationDiagnostic(
+      diagnostics,
+      "DOGFOOD_SCENARIO_INVALID",
+      "Self-dogfood evidence is not a fresh-create certification scenario.",
+    );
+    valid = false;
+  }
   if (dogfood.repository.owner !== expectedRepositoryOwner || dogfood.repository.name !== expectedRepositoryName) {
     appendCertificationDiagnostic(
       diagnostics,

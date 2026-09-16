@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       disposable_issue:
-        description: "Existing governed Issue containing the exact inari:self-dogfood:v1 marker"
+        description: "Governed fresh fixture Issue with the exact inari:self-dogfood:v1 marker and no Change history"
         required: true
         type: string
       confirm_disposable:
@@ -185,6 +185,7 @@ jobs:
           args=(
             --inari "$DOGFOOD_INSTALLED_EXECUTABLE"
             --repository "$GITHUB_REPOSITORY"
+            --scenario fresh-create
             --issue "$DOGFOOD_ISSUE"
             --confirm-disposable "$DOGFOOD_CONFIRMATION"
             --worker-cwd "$DOGFOOD_WORKER_CWD"

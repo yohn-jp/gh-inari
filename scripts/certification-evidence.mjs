@@ -20,6 +20,10 @@ export const SELF_DOGFOOD_OUTCOMES = Object.freeze({
   RETURNED_EXISTING: "returned-existing",
   SUCCESS: "success",
 });
+export const SELF_DOGFOOD_SCENARIOS = Object.freeze({
+  FRESH_CREATE: "fresh-create",
+  RECONCILIATION_RECOVERY: "reconciliation-recovery",
+});
 export const SELF_DOGFOOD_OPERATION_REQUIREMENTS = Object.freeze([
   Object.freeze({ operation: "preflight.opt-in", outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]) }),
   Object.freeze({
@@ -29,6 +33,10 @@ export const SELF_DOGFOOD_OPERATION_REQUIREMENTS = Object.freeze([
   Object.freeze({ operation: "skill.golden-path", outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]) }),
   Object.freeze({
     operation: "disposable-issue.governance-check",
+    outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
+  }),
+  Object.freeze({
+    operation: "change.issue.fresh-preflight",
     outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
   }),
   Object.freeze({ operation: "change.issue.first", outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]) }),
@@ -54,13 +62,14 @@ export const SELF_DOGFOOD_OPERATIONS = Object.freeze({
   EXECUTABLE: SELF_DOGFOOD_OPERATION_REQUIREMENTS[1].operation,
   SKILL: SELF_DOGFOOD_OPERATION_REQUIREMENTS[2].operation,
   GOVERNANCE: SELF_DOGFOOD_OPERATION_REQUIREMENTS[3].operation,
-  FIRST_ISSUANCE: SELF_DOGFOOD_OPERATION_REQUIREMENTS[4].operation,
-  RETURN_EXISTING: SELF_DOGFOOD_OPERATION_REQUIREMENTS[5].operation,
-  HANDOFF: SELF_DOGFOOD_OPERATION_REQUIREMENTS[6].operation,
-  WORKER: SELF_DOGFOOD_OPERATION_REQUIREMENTS[7].operation,
-  FIRST_READY: SELF_DOGFOOD_OPERATION_REQUIREMENTS[8].operation,
-  REREAD: SELF_DOGFOOD_OPERATION_REQUIREMENTS[9].operation,
-  READY_RETRY: SELF_DOGFOOD_OPERATION_REQUIREMENTS[10].operation,
+  FRESH_PREFLIGHT: SELF_DOGFOOD_OPERATION_REQUIREMENTS[4].operation,
+  FIRST_ISSUANCE: SELF_DOGFOOD_OPERATION_REQUIREMENTS[5].operation,
+  RETURN_EXISTING: SELF_DOGFOOD_OPERATION_REQUIREMENTS[6].operation,
+  HANDOFF: SELF_DOGFOOD_OPERATION_REQUIREMENTS[7].operation,
+  WORKER: SELF_DOGFOOD_OPERATION_REQUIREMENTS[8].operation,
+  FIRST_READY: SELF_DOGFOOD_OPERATION_REQUIREMENTS[9].operation,
+  REREAD: SELF_DOGFOOD_OPERATION_REQUIREMENTS[10].operation,
+  READY_RETRY: SELF_DOGFOOD_OPERATION_REQUIREMENTS[11].operation,
   ABORT: SELF_DOGFOOD_RECOVERY_OPERATION.operation,
 });
 
@@ -68,6 +77,7 @@ const [PACKED_CERTIFICATION_KIND, SELF_DOGFOOD_CERTIFICATION_KIND] = CERTIFICATI
 const [CERTIFICATION_RESULT_PASSED] = CERTIFICATION_RESULTS;
 const CERTIFICATION_KIND_SET = new Set(CERTIFICATION_KINDS);
 const CERTIFICATION_RESULT_SET = new Set(CERTIFICATION_RESULTS);
+const SELF_DOGFOOD_SCENARIO_SET = new Set(Object.values(SELF_DOGFOOD_SCENARIOS));
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const TARBALL_SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
@@ -100,7 +110,15 @@ const COMMON_KEYS = new Set([
   "diagnostics",
 ]);
 const PACKED_KEYS = new Set([...COMMON_KEYS, "package"]);
-const DOGFOOD_KEYS = new Set([...COMMON_KEYS, "repository", "rootIssue", "change", "operations", "finalState"]);
+const DOGFOOD_KEYS = new Set([
+  ...COMMON_KEYS,
+  "scenario",
+  "repository",
+  "rootIssue",
+  "change",
+  "operations",
+  "finalState",
+]);
 const CERTIFICATION_DIAGNOSTIC_KEYS = new Set(["code", "message", "details", "diagnostics", "evidence"]);
 const STRUCTURED_DETAIL_KEYS = new Set([
   "operation",
@@ -1159,6 +1177,13 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
     return false;
   }
   const repositoryValid = validateRepository(value.repository, errors);
+  const scenarioValid = typeof value.scenario === "string" && SELF_DOGFOOD_SCENARIO_SET.has(value.scenario);
+  if (!scenarioValid)
+    addValidationError(
+      errors,
+      "DOGFOOD_SCENARIO_INVALID",
+      "$.scenario: must identify a supported self-dogfood scenario",
+    );
   const rootIssueValid = requirePositiveInteger(value.rootIssue, "$.rootIssue", errors, "DOGFOOD_IDENTITY_INVALID");
   const changeValid = validateChangeIdentity(value.change, value.rootIssue, errors, { allowUnavailable: !strict });
   const operationsValid = validateOperationEntries(value.operations, errors, {
@@ -1166,7 +1191,7 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
     finalStatus: value.finalState?.status,
   });
   const finalStateValid = validateFinalState(value.finalState, errors, { allowUnavailable: !strict });
-  return repositoryValid && rootIssueValid && changeValid && operationsValid && finalStateValid;
+  return scenarioValid && repositoryValid && rootIssueValid && changeValid && operationsValid && finalStateValid;
 }
 
 function validateSharedEnvelope(value, { certificationKind, expectedContractVersions } = {}) {
@@ -1349,6 +1374,7 @@ export function canonicalizeCertificationEvidence(value, options) {
     };
   } else {
     common.repository = { owner: value.repository.owner, name: value.repository.name };
+    common.scenario = value.scenario;
     common.rootIssue = value.rootIssue;
     common.change = {
       issue: value.change.issue,

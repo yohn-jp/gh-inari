@@ -48,6 +48,7 @@ function dogfoodEvidence(overrides: Record<string, unknown> = {}): Record<string
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -108,6 +109,14 @@ test("binds self-dogfood evidence to the expected release repository", () => {
   );
   assert.equal(result.passed, false);
   assert.equal(result.diagnostics[0]?.code, "REPOSITORY_MISMATCH");
+});
+
+test("does not accept reconciliation/recovery evidence as fresh-create certification", () => {
+  const result = verifyReleaseCertification(
+    input({ dogfoodEvidence: dogfoodEvidence({ scenario: "reconciliation-recovery" }) }),
+  );
+  assert.equal(result.passed, false);
+  assert.equal(result.diagnostics[0]?.code, "DOGFOOD_SCENARIO_INVALID");
 });
 
 test("binds the canonical Change identity to the dogfood root Issue", () => {
@@ -208,7 +217,7 @@ test("requires the bounded idempotency and handoff operation proofs", () => {
 
   const wrongOutcome = dogfoodEvidence();
   (wrongOutcome.operations as Array<Record<string, string>>)[5] = {
-    operation: SELF_DOGFOOD_OPERATION_REQUIREMENTS[5].operation,
+    operation: SELF_DOGFOOD_OPERATION_REQUIREMENTS[6].operation,
     outcome: "verified",
   };
   const wrongOutcomeResult = verifyReleaseCertification(input({ dogfoodEvidence: wrongOutcome }));
