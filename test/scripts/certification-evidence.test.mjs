@@ -12,6 +12,9 @@ import {
   projectStructuredCommandError,
   readCertificationEvidence,
   sanitizeCertificationText,
+  SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_SCENARIOS,
   serializeCertificationEvidence,
   sha256Tarball,
   validateCertificationEvidence,
@@ -273,6 +276,71 @@ test("compares observed contract versions only when an expected version set is s
   });
   assert.equal(validateCertificationEvidence(evidence).valid, true);
   assert.equal(validateCertificationEvidence(evidence, { contractVersions }).valid, false);
+});
+
+function dogfoodOperations(requirements) {
+  let operations = [];
+  for (const requirement of requirements) {
+    operations = [
+      ...operations,
+      { operation: requirement.operation, outcome: requirement.outcomes[0] },
+    ];
+  }
+  return operations;
+}
+
+function dogfoodEvidence(overrides = {}) {
+  return {
+    schemaVersion: CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
+    certificationKind: "self-dogfood-golden-path",
+    result: "passed",
+    sourceCommitSha,
+    contractVersions: { ...contractVersions },
+    diagnostics: [],
+    repository: { owner: "yohn-jp", name: "gh-inari" },
+    scenario: SELF_DOGFOOD_SCENARIOS.FRESH_CREATE,
+    rootIssue: 614,
+    change: { issue: 614, branch: "chore/614-isolate-fresh-self-dogfood-fixtures", pullRequest: 622 },
+    operations: dogfoodOperations(SELF_DOGFOOD_OPERATION_REQUIREMENTS),
+    finalState: { status: "REVIEW", recovery: { state: "NONE", action: null } },
+    ...overrides,
+  };
+}
+
+test("a strict passed fresh-create evidence document still requires a verified fresh preflight", () => {
+  const withoutFreshPreflight = dogfoodEvidence({
+    operations: dogfoodOperations(
+      SELF_DOGFOOD_OPERATION_REQUIREMENTS.filter((entry) => entry.operation !== "change.issue.fresh-preflight"),
+    ),
+  });
+  const result = validateCertificationEvidence(withoutFreshPreflight, { certificationKind: "self-dogfood-golden-path" });
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "DOGFOOD_OPERATION_MISSING"));
+});
+
+test("a strict passed reconciliation/recovery evidence document does not require or accept a fresh preflight claim", () => {
+  const reconciliationEvidence = dogfoodEvidence({
+    scenario: SELF_DOGFOOD_SCENARIOS.RECONCILIATION_RECOVERY,
+    operations: dogfoodOperations(SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS),
+  });
+  const result = validateCertificationEvidence(reconciliationEvidence, {
+    certificationKind: "self-dogfood-golden-path",
+  });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.valid, true);
+
+  const claimingFreshPreflight = dogfoodEvidence({
+    scenario: SELF_DOGFOOD_SCENARIOS.RECONCILIATION_RECOVERY,
+    operations: [
+      ...dogfoodOperations(SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS),
+      { operation: "change.issue.fresh-preflight", outcome: "verified" },
+    ],
+  });
+  const contradictoryResult = validateCertificationEvidence(claimingFreshPreflight, {
+    certificationKind: "self-dogfood-golden-path",
+  });
+  assert.equal(contradictoryResult.valid, false);
+  assert.ok(contradictoryResult.diagnostics.some((diagnostic) => diagnostic.code === "DOGFOOD_OPERATION_MISSING"));
 });
 
 test("computes and round-trips an exact tarball digest", () => {

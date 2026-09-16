@@ -16,6 +16,10 @@ export const SELF_DOGFOOD_OPERATION_REQUIREMENTS: readonly {
   readonly operation: string;
   readonly outcomes: readonly string[];
 }[];
+export const SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS: readonly {
+  readonly operation: string;
+  readonly outcomes: readonly string[];
+}[];
 export const SELF_DOGFOOD_RECOVERY_OPERATION: {
   readonly operation: string;
   readonly outcomes: readonly string[];

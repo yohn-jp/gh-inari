@@ -6,6 +6,7 @@ import {
   CERTIFICATION_KINDS,
   CERTIFICATION_RESULTS,
   SELF_DOGFOOD_OPERATION_REQUIREMENTS,
+  SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS,
   SELF_DOGFOOD_RECOVERY_OPERATION,
 } from "../scripts/certification-evidence.mjs";
 import {
@@ -24,6 +25,15 @@ function dogfoodOperations(): ReleaseCertificationOperationEvidence[] {
   for (const requirement of SELF_DOGFOOD_OPERATION_REQUIREMENTS)
     operations = [...appendSelfDogfoodOperation(operations, requirement.operation, requirement.outcomes[0])];
   return operations;
+}
+
+function reconciliationRecoveryOperations(): ReleaseCertificationOperationEvidence[] {
+  return SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS.map(
+    (requirement: { operation: string; outcomes: readonly string[] }) => ({
+      operation: requirement.operation,
+      outcome: requirement.outcomes[0],
+    }),
+  );
 }
 
 function packedEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -113,7 +123,12 @@ test("binds self-dogfood evidence to the expected release repository", () => {
 
 test("does not accept reconciliation/recovery evidence as fresh-create certification", () => {
   const result = verifyReleaseCertification(
-    input({ dogfoodEvidence: dogfoodEvidence({ scenario: "reconciliation-recovery" }) }),
+    input({
+      dogfoodEvidence: dogfoodEvidence({
+        scenario: "reconciliation-recovery",
+        operations: reconciliationRecoveryOperations(),
+      }),
+    }),
   );
   assert.equal(result.passed, false);
   assert.equal(result.diagnostics[0]?.code, "DOGFOOD_SCENARIO_INVALID");

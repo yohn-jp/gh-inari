@@ -53,6 +53,17 @@ export const SELF_DOGFOOD_OPERATION_REQUIREMENTS = Object.freeze([
     outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED, SELF_DOGFOOD_OUTCOMES.RETURNED_EXISTING]),
   }),
 ]);
+/**
+ * The reconciliation/recovery scenario is a fail-closed classification: it is
+ * only ever produced when canonical Change history is observed on what was
+ * expected to be a fresh fixture, before any fresh-create-only operation
+ * (fresh-preflight, issuance, handoff, worker, ready) can run. Its own
+ * required sequence therefore covers only the shared preflight lane and must
+ * never claim a fresh-create-specific step.
+ */
+export const SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS = Object.freeze(
+  SELF_DOGFOOD_OPERATION_REQUIREMENTS.slice(0, 4),
+);
 export const SELF_DOGFOOD_RECOVERY_OPERATION = Object.freeze({
   operation: "change.abort.recovery",
   outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
@@ -1039,7 +1050,13 @@ function validateChangeIdentity(value, rootIssue, errors, { allowUnavailable = f
   return issueValid && branchValid && pullRequestValid;
 }
 
-function validateOperationEntries(value, errors, { strictSequence = false, finalStatus } = {}) {
+function requiredOperationSequence(scenario) {
+  return scenario === SELF_DOGFOOD_SCENARIOS.RECONCILIATION_RECOVERY
+    ? SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS
+    : SELF_DOGFOOD_OPERATION_REQUIREMENTS;
+}
+
+function validateOperationEntries(value, errors, { strictSequence = false, finalStatus, scenario } = {}) {
   if (!Array.isArray(value)) {
     addValidationError(errors, "DOGFOOD_IDENTITY_INVALID", "$.operations: must be an array");
     return false;
@@ -1084,7 +1101,7 @@ function validateOperationEntries(value, errors, { strictSequence = false, final
     }
   }
   if (strictSequence) {
-    const required = SELF_DOGFOOD_OPERATION_REQUIREMENTS.map((entry) => entry.operation);
+    const required = requiredOperationSequence(scenario).map((entry) => entry.operation);
     const expected = finalStatus === "ABORTED" ? [...required, SELF_DOGFOOD_RECOVERY_OPERATION.operation] : required;
     if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) {
       addValidationError(
@@ -1189,6 +1206,7 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
   const operationsValid = validateOperationEntries(value.operations, errors, {
     strictSequence: strict,
     finalStatus: value.finalState?.status,
+    scenario: value.scenario,
   });
   const finalStateValid = validateFinalState(value.finalState, errors, { allowUnavailable: !strict });
   return scenarioValid && repositoryValid && rootIssueValid && changeValid && operationsValid && finalStateValid;
@@ -1274,6 +1292,10 @@ export function validateSelfDogfoodEvidence(value) {
  * Append one coordinator-observed operation through the canonical operation
  * requirements.  The coordinator owns when to invoke an operation; this
  * authority owns whether its name, outcome, and position are admissible.
+ * This positional check always follows the fresh-create sequence: the live
+ * coordinator (scripts/self-dogfood.mjs) never appends operations for the
+ * reconciliation-recovery scenario, since it fails closed at preflight
+ * before any operation past the shared preflight lane can run.
  */
 export function appendSelfDogfoodOperation(operations, operation, operationOutcome) {
   const errors = createValidationErrors();
