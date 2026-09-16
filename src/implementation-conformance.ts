@@ -23,8 +23,11 @@ import {
   type ImplementationScopeProjectionViolationCode,
 } from "./implementation-scope-projection.js";
 import {
+  operationalCheckIdentityKey,
+  selectCurrentOperationalChecks,
   tryObserveOperationalPullRequest,
   type OperationalChangedFile,
+  type OperationalCheck,
   type OperationalPullRequestObservation,
 } from "./operational-observation.js";
 import {
@@ -641,39 +644,54 @@ function checkDisposition(
   checks: OperationalPullRequestObservation["checks"]["items"],
   name: string,
 ): VerificationDisposition {
-  const matches = checks.filter((check) => check.name === name);
+  const matches = checks.filter((check) => check.name === name || check.identity?.context === name);
   if (matches.length === 0) return "missing";
-  const dispositions = matches.map((check): VerificationDisposition => {
-    const status = check.status.toLowerCase();
-    const conclusion = check.conclusion?.toLowerCase();
-    if (
-      status === "success" ||
-      (status === "completed" && conclusion === "success") ||
-      (status === "completed" && conclusion === undefined && check.kind === "status")
-    )
-      return "satisfied";
-    if (
-      status === "failure" ||
-      status === "error" ||
-      conclusion === "failure" ||
-      conclusion === "timed_out" ||
-      conclusion === "cancelled" ||
-      conclusion === "startup_failure"
-    )
-      return "failed";
-    if (
-      status === "queued" ||
-      status === "in_progress" ||
-      status === "requested" ||
-      status === "waiting" ||
-      status === "pending"
-    )
-      return "failed";
-    return "unverifiable";
-  });
-  if (dispositions.some((entry) => entry === "unverifiable")) return "unverifiable";
-  if (dispositions.some((entry) => entry === "failed")) return "failed";
-  return "satisfied";
+  if (matches.some((check) => (check.identity?.context ?? check.name) !== name)) return "unverifiable";
+  const selection = selectCurrentOperationalChecks(matches);
+  if (selection.ambiguous) return "unverifiable";
+  const context = (check: OperationalCheck): string => check.identity?.context ?? check.name;
+  const matchingCurrent = selection.current.filter((check) => context(check) === name);
+  const checkRuns = matchingCurrent.filter((check) => check.kind === "check-run");
+  const statuses = matchingCurrent.filter((check) => check.kind === "status");
+  // GitHub Check Runs are the authoritative source when the same context is
+  // also represented by a legacy commit status. A status cannot replace a
+  // present check-run, including when the check-run is unsuccessful.
+  const candidates = checkRuns.length > 0 ? checkRuns : statuses;
+  if (candidates.length !== 1) return "unverifiable";
+  const identityKeys = new Set(candidates.map((check) => operationalCheckIdentityKey(check)));
+  if (identityKeys.size !== 1) return "unverifiable";
+  const selected = candidates[0]!;
+  if (selected.identity?.producer === undefined && matches.length > 1) return "unverifiable";
+  return checkResultDisposition(selected);
+}
+
+function checkResultDisposition(check: OperationalCheck): VerificationDisposition {
+  const status = check.status.toLowerCase();
+  const conclusion = check.conclusion?.toLowerCase();
+  if (
+    status === "success" ||
+    (status === "completed" && conclusion === "success") ||
+    (status === "completed" && conclusion === undefined && check.kind === "status")
+  )
+    return "satisfied";
+  if (
+    status === "failure" ||
+    status === "error" ||
+    conclusion === "failure" ||
+    conclusion === "timed_out" ||
+    conclusion === "cancelled" ||
+    conclusion === "startup_failure"
+  )
+    return "failed";
+  if (
+    status === "queued" ||
+    status === "in_progress" ||
+    status === "requested" ||
+    status === "waiting" ||
+    status === "pending"
+  )
+    return "failed";
+  return "unverifiable";
 }
 
 function evaluateVerification(

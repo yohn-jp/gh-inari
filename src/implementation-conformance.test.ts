@@ -15,6 +15,7 @@ import {
 } from "./implementation-conformance.js";
 import type {
   GitHubOperationalChangedFile,
+  GitHubOperationalCheck,
   GitHubOperationalCollection,
   GitHubOperationalPullRequestEvidence,
 } from "./github/types.js";
@@ -106,8 +107,12 @@ function pullRequest(
         id: "check-1",
         name: "verify",
         kind: "check-run",
+        identity: { context: "verify", producer: "app:trusted" },
         status: "completed",
         conclusion: "success",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:01Z",
+        current: true,
         description: "provider-secret-description-must-not-be-output",
         url: "https://provider.invalid/check/secret-url",
       },
@@ -138,6 +143,21 @@ function input(
 
 function changedFile(filename: string, status: string, previousFilename?: string): GitHubOperationalChangedFile {
   return { filename, status, ...(previousFilename === undefined ? {} : { previousFilename }) };
+}
+
+function check(id: string, overrides: Partial<GitHubOperationalCheck> = {}): GitHubOperationalCheck {
+  return {
+    id,
+    name: "verify",
+    kind: "check-run",
+    identity: { context: "verify", producer: "app:trusted" },
+    status: "completed",
+    conclusion: "success",
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:01Z",
+    current: true,
+    ...overrides,
+  };
 }
 
 test("successful conformance is deterministic and evaluates WRITE, CREATE, and DELETE independently", () => {
@@ -268,6 +288,129 @@ test("missing complete check evidence is missing-verification, while unavailable
   assert.ok(
     unavailable.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_VERIFICATION_UNAVAILABLE"),
   );
+});
+
+test("fail-to-success reruns select the current execution for one producer", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([
+          check("old", {
+            conclusion: "failure",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:01Z",
+            current: false,
+          }),
+          check("new", {
+            createdAt: "2026-01-01T00:01:00Z",
+            updatedAt: "2026-01-01T00:01:01Z",
+          }),
+        ]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "conformant");
+  assert.deepEqual(result.verification.satisfiedChecks, ["verify"]);
+  assert.deepEqual(result.verification.failedChecks, []);
+});
+
+test("success-to-failure reruns select the current failure", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([
+          check("old", {
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:01Z",
+            current: false,
+          }),
+          check("new", {
+            conclusion: "failure",
+            createdAt: "2026-01-01T00:01:00Z",
+            updatedAt: "2026-01-01T00:01:01Z",
+          }),
+        ]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "missing-verification");
+  assert.deepEqual(result.verification.failedChecks, ["verify"]);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
+});
+
+test("a same-named check from another producer cannot satisfy the requirement", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([
+          check("trusted", { conclusion: "failure" }),
+          check("spoof", { identity: { context: "verify", producer: "app:spoof" } }),
+        ]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
+});
+
+test("duplicate current executions fail closed instead of using collection order", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([check("current-a"), check("current-b", { conclusion: "failure" })]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
+});
+
+test("missing producer identity is ambiguous when more than one same-named execution is present", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([check("identified"), check("unidentified", { identity: { context: "verify" } })]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableChecks, ["verify"]);
+});
+
+test("Check Run precedence is explicit when a commit status collides with its context", () => {
+  const result = tryVerifyImplementationConformance(
+    input(
+      authorization(),
+      body,
+      pullRequest({
+        checks: collection([
+          check("check-run", { conclusion: "failure" }),
+          {
+            id: "status",
+            name: "verify",
+            kind: "status",
+            identity: { context: "verify", producer: "creator:7" },
+            status: "success",
+            current: true,
+          },
+        ]),
+      }),
+    ),
+  );
+  assert.equal(result.status, "missing-verification");
+  assert.deepEqual(result.verification.failedChecks, ["verify"]);
+  assert.deepEqual(result.verification.satisfiedChecks, []);
 });
 
 test("repository, base, branch, and head identity mismatches fail closed", () => {

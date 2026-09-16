@@ -33,6 +33,7 @@ import {
   type GitHubOperationalActor,
   type GitHubOperationalChangedFile,
   type GitHubOperationalCheck,
+  type GitHubOperationalCheckIdentity,
   type GitHubOperationalCollection,
   type GitHubOperationalComment,
   type GitHubOperationalIssueEvidence,
@@ -793,7 +794,7 @@ export class GitHubAdapter {
       (entry, path) => parseOperationalCheck(entry, path, "status"),
       deadline,
     );
-    const items = [...runs.items, ...statuses.items].sort(compareOperationalChecks);
+    const items = annotateCurrentOperationalChecks([...runs.items, ...statuses.items]).sort(compareOperationalChecks);
     const checks: GitHubOperationalCollection<GitHubOperationalCheck> = {
       status: runs.status === "available" && statuses.status === "available" ? "available" : "unavailable",
       items,
@@ -2019,6 +2020,39 @@ function parseOperationalReview(value: unknown, path: string): GitHubOperational
   };
 }
 
+function operationalCheckIdentity(
+  record: Record<string, unknown>,
+  kind: "check-run" | "status",
+  path: string,
+  context: string,
+): GitHubOperationalCheckIdentity {
+  if (kind === "check-run") {
+    if (record.app === undefined || record.app === null) return { context };
+    if (!isRecord(record.app))
+      throw new GitHubApiResponseError("operational.check-run", `GitHub response field ${path}.app is invalid.`, {
+        path: `${path}.app`,
+      });
+    const appId = optionalProviderNumber(record.app.id, `${path}.app.id`, "operational.check-run");
+    const appSlug = optionalProviderText(record.app.slug, `${path}.app.slug`, "operational.check-run", 256);
+    const producer = appId === undefined ? (appSlug === undefined ? undefined : `app:slug:${appSlug}`) : `app:${appId}`;
+    return { context, ...(producer === undefined ? {} : { producer }) };
+  }
+  if (record.creator === undefined || record.creator === null) return { context };
+  if (!isRecord(record.creator))
+    throw new GitHubApiResponseError("operational.status", `GitHub response field ${path}.creator is invalid.`, {
+      path: `${path}.creator`,
+    });
+  const creatorId = optionalProviderNumber(record.creator.id, `${path}.creator.id`, "operational.status");
+  const creatorLogin = optionalProviderText(record.creator.login, `${path}.creator.login`, "operational.status", 512);
+  const producer =
+    creatorId === undefined
+      ? creatorLogin === undefined
+        ? undefined
+        : `creator:login:${creatorLogin}`
+      : `creator:${creatorId}`;
+  return { context, ...(producer === undefined ? {} : { producer }) };
+}
+
 function parseOperationalCheck(value: unknown, path: string, kind: "check-run" | "status"): GitHubOperationalCheck {
   const record = responseRecord(value, `operational.${kind}`);
   const rawId = record.id ?? record.context;
@@ -2026,7 +2060,9 @@ function parseOperationalCheck(value: unknown, path: string, kind: "check-run" |
     typeof rawId === "number"
       ? String(responseNumber(rawId, `${path}.id`, `operational.${kind}`))
       : providerText(rawId, `${path}.id`, `operational.${kind}`, 128);
+  const context = providerText(record.context ?? record.name, `${path}.context`, `operational.${kind}`, 512);
   const name = providerText(record.name ?? record.context, `${path}.name`, `operational.${kind}`, 512);
+  const identity = operationalCheckIdentity(record, kind, path, context);
   const status = providerText(record.status ?? record.state, `${path}.status`, `operational.${kind}`, 64);
   const conclusion =
     record.conclusion === undefined
@@ -2042,16 +2078,21 @@ function parseOperationalCheck(value: unknown, path: string, kind: "check-run" |
     `operational.${kind}`,
     2_048,
   );
+  const createdAt = optionalProviderText(record.created_at, `${path}.created_at`, `operational.${kind}`, 128);
+  const updatedAt = optionalProviderText(record.updated_at, `${path}.updated_at`, `operational.${kind}`, 128);
   const startedAt = optionalProviderText(record.started_at, `${path}.started_at`, `operational.${kind}`, 128);
   const completedAt = optionalProviderText(record.completed_at, `${path}.completed_at`, `operational.${kind}`, 128);
   return {
     id,
     name,
     kind,
+    identity,
     status,
     ...(conclusion === undefined ? {} : { conclusion }),
     ...(description === undefined ? {} : { description }),
     ...(url === undefined ? {} : { url }),
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(startedAt === undefined ? {} : { startedAt }),
     ...(completedAt === undefined ? {} : { completedAt }),
   };
@@ -2152,8 +2193,54 @@ function combineOperationalPagination(
   };
 }
 
+function operationalCheckIdentityKey(check: GitHubOperationalCheck): string {
+  return [check.kind, check.identity?.context ?? check.name, check.identity?.producer ?? "producer:unknown"].join(
+    "\u001f",
+  );
+}
+
+function operationalCheckOrder(check: GitHubOperationalCheck): number | undefined {
+  const timestamp = check.updatedAt ?? check.completedAt ?? check.startedAt ?? check.createdAt;
+  if (timestamp === undefined) return undefined;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Mark the provider-selected current execution for every normalized identity. */
+function annotateCurrentOperationalChecks(items: readonly GitHubOperationalCheck[]): GitHubOperationalCheck[] {
+  const groups = new Map<string, number[]>();
+  items.forEach((check, index) => {
+    const key = operationalCheckIdentityKey(check);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [index]);
+    else group.push(index);
+  });
+  const current = new Map<number, boolean | "unknown">();
+  for (const indexes of groups.values()) {
+    if (indexes.length === 1) {
+      current.set(indexes[0]!, true);
+      continue;
+    }
+    const ordered = indexes.map((index) => operationalCheckOrder(items[index]!));
+    if (ordered.some((value) => value === undefined)) {
+      indexes.forEach((index) => current.set(index, "unknown"));
+      continue;
+    }
+    const maximum = Math.max(...(ordered as number[]));
+    const winners = indexes.filter((_, index) => ordered[index] === maximum);
+    if (winners.length !== 1) {
+      indexes.forEach((index) => current.set(index, "unknown"));
+      continue;
+    }
+    indexes.forEach((index) => current.set(index, index === winners[0]));
+  }
+  return items.map((check, index) => ({ ...check, current: current.get(index) ?? "unknown" }));
+}
+
 function compareOperationalChecks(left: GitHubOperationalCheck, right: GitHubOperationalCheck): number {
   return (
+    (left.identity?.context ?? left.name).localeCompare(right.identity?.context ?? right.name, "en-US") ||
+    (left.identity?.producer ?? "").localeCompare(right.identity?.producer ?? "", "en-US") ||
     left.name.localeCompare(right.name, "en-US") ||
     left.kind.localeCompare(right.kind, "en-US") ||
     left.id.localeCompare(right.id, "en-US")

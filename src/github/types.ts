@@ -256,16 +256,29 @@ export interface GitHubOperationalReview {
   readonly url?: string;
 }
 
+/** Bounded provider-neutral identity for one GitHub check context. */
+export interface GitHubOperationalCheckIdentity {
+  /** The provider context represented by the check, not an arbitrary payload. */
+  readonly context: string;
+  /** Stable provider producer key when GitHub supplied one. */
+  readonly producer?: string;
+}
+
 export interface GitHubOperationalCheck {
   readonly id: string;
   readonly name: string;
   readonly kind: "check-run" | "status";
+  readonly identity?: GitHubOperationalCheckIdentity;
   readonly status: string;
   readonly conclusion?: string | null;
   readonly description?: string | null;
   readonly url?: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
   readonly startedAt?: string;
   readonly completedAt?: string;
+  /** Adapter-selected current execution; unknown is an explicit fail-closed result. */
+  readonly current?: boolean | "unknown";
 }
 
 export interface GitHubOperationalChangedFile {
