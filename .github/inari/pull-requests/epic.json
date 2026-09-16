@@ -9,7 +9,7 @@
       "kind": "input",
       "type": "string",
       "label": "Epic integration PR",
-      "placeholder": "Epic PRs use an `epic/<issue-number>-<slug>` head branch, for example\n`epic/890-runtime-certification`. This is an integration/routing object, not\nan implementation leaf.",
+      "placeholder": "Epic PRs use an `epic/<issue-number>-<slug>` head branch, for example\n`epic/890-runtime-certification`. This is an integration/routing object, not\nan implementation leaf or one-session authorization contract.",
       "headingLevel": 1
     },
     {
@@ -17,7 +17,7 @@
       "kind": "input",
       "type": "string",
       "label": "Parent Epic / tracking Issue",
-      "placeholder": "<!-- The tracking Epic Issue this integration branch belongs to. -->",
+      "placeholder": "<!-- The tracking Epic Issue this integration branch belongs to. Use the provider's native parent/sub-issue relationship for child Issues where supported; prose Parent: is compatibility-only. -->",
       "headingLevel": 2
     },
     {
@@ -33,7 +33,7 @@
       "kind": "input",
       "type": "string",
       "label": "Child Issue/PR inventory",
-      "placeholder": "<!-- Enumerate child Issues and their PRs targeting this Epic branch. -->",
+      "placeholder": "<!-- Enumerate child Issues and their PRs targeting this Epic branch. Record native hierarchy such as Epic -> Architecture/Bug/Feature -> Implementation where applicable. -->",
       "headingLevel": 2
     },
     {
@@ -65,7 +65,7 @@
       "kind": "input",
       "type": "string",
       "label": "Implementation boundary",
-      "placeholder": "Implementation belongs to child leaves, not this Epic PR.",
+      "placeholder": "Implementation belongs to child Issue leaves, not this Epic PR. Each Implementation owns one authorized session; do not put its path scope or authorization here.",
       "headingLevel": 2
     }
   ]

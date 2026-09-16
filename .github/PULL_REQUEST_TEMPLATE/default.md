@@ -8,9 +8,11 @@
 
 Closes #
 
+<!-- Link the governing Issue. When this PR executes an Implementation, link that Implementation as required by repository policy; the PR does not replace its contract. -->
+
 ## Changes
 
-<!-- Material implementation and behavioral changes. -->
+<!-- Material delivered and behavioral changes. Session scope and authorization belong in the governing Implementation. -->
 
 ## Validation
 

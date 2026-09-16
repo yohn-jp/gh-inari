@@ -3,7 +3,7 @@
   "kind": "issue",
   "id": "research",
   "name": "Research",
-  "description": "Pre-implementation research or technical validation",
+  "description": "Problem or decision record for pre-implementation research or technical validation; it is not an Implementation contract",
   "title": "docs: research ",
   "sections": [
     {
@@ -56,7 +56,7 @@
       "kind": "input",
       "type": "string",
       "label": "Acceptance criteria",
-      "description": "Evidence required before the research is complete",
+      "description": "Evidence required before the research is complete; execution planning belongs in a later Implementation",
       "required": true,
       "element": "textarea",
       "defaultValue": "- [ ] "

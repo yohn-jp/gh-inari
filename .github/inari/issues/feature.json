@@ -3,7 +3,7 @@
   "kind": "issue",
   "id": "feature",
   "name": "Feature",
-  "description": "New capability or extension to an existing capability",
+  "description": "Request record for a new capability or extension; keep session-specific execution detail in an Implementation",
   "title": "feat: ",
   "labels": ["enhancement"],
   "sections": [
@@ -39,7 +39,7 @@
       "kind": "input",
       "type": "string",
       "label": "Acceptance criteria",
-      "description": "Verifiable completion criteria",
+      "description": "Verifiable capability outcomes; session-specific implementation evidence belongs in an Implementation",
       "required": true,
       "element": "textarea",
       "defaultValue": "- [ ] "
@@ -58,7 +58,7 @@
       "kind": "input",
       "type": "string",
       "label": "Constraints",
-      "description": "Compatibility, performance, security, or implementation constraints when material",
+      "description": "Compatibility, performance, security, or product constraints when material; session-specific scope and execution detail belong in an Implementation",
       "required": false,
       "element": "textarea"
     }

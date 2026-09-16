@@ -37,6 +37,48 @@ searching, commenting, or other operations Inari does not govern). Inari
 itself falls through to real `gh` for any command it does not own, so it is
 always safe to prefer `inari` first.
 
+## Issue versus Implementation
+
+An ordinary Issue is a problem, request, or decision record. Keep ordinary
+Issue authoring lightweight; do not require session path scopes, branch/base
+binding, targeted checks, postconditions, or authorization before the Issue is
+ready to exist.
+
+When a concrete implementation session is being prepared, create a separate
+Implementation Issue with the governed template:
+
+```bash
+inari issue create --template implementation
+```
+
+The Implementation owns the one-session objective, selected design, explicit
+scope, constraints, verification, and execution dependencies. Use the
+normative [Issue and Implementation governance contract](../../docs/IMPLEMENTATION_CONTRACT.md)
+for the lifecycle and relationship rules.
+
+The current `impl` namespace has exactly these operations:
+
+```text
+inari impl plan <number>
+inari impl show <number>
+inari impl validate <number>
+inari impl authorize <number>
+inari impl inspect <number>
+```
+
+`plan` is a non-authoritative preview, `show` and `inspect` project current
+state, `validate` is non-mutating validation, and `authorize` produces the
+existing Core authorization evidence without a GitHub mutation. Each command
+uses the current metadata options `--repository <repository>`, `--from
+<path>`, and repeatable `--capability <id>` (with global `--help` and `--json`
+controls). There is no `impl create`, `impl edit`, `impl start`, `impl complete`,
+or `impl ready` command.
+
+Where GitHub supports native parent/sub-issue relationships, use that provider
+relationship as canonical for the Issue hierarchy. A prose `Parent:` or
+`Parent Epic:` line is compatibility guidance for older artifacts only; it
+does not authorize or trigger historical reparenting.
+
 ## How to proceed
 
 Do not guess the workflow steps or flags here. Ask Inari directly:
