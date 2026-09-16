@@ -818,6 +818,92 @@ test("retries one transient result artifact download failure before accepting su
   assert.equal(downloads, 2);
 });
 
+test("#632 retains established run and artifact evidence across a transient run-list read", async () => {
+  const api = new FakeActionsApi();
+  let runListReads = 0;
+  let artifactListReads = 0;
+  let downloads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      runListReads += 1;
+      if (runListReads === 1)
+        return { workflow_runs: [runFixture(api.baselineRunId, unrelatedCorrelation, "completed", "success")] };
+      if (runListReads === 2)
+        return { workflow_runs: [runFixture(api.resultRunId, correlation, "completed", "success")] };
+      if (runListReads === 3) throw new Error("transient run-list read failure");
+      return { workflow_runs: [runFixture(api.resultRunId, correlation, "completed", "success")] };
+    }
+    if (path === `actions/runs/${api.resultRunId}`) {
+      return runFixture(api.resultRunId, correlation, "completed", "success");
+    }
+    if (path.startsWith("actions/artifacts?")) {
+      artifactListReads += 1;
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    if (path === `actions/artifacts/${api.resultArtifactId}`) {
+      return artifactFixture(api.resultArtifactId, api.resultRunId);
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+  api.downloadActionsArtifact = async (artifactId) => {
+    assert.equal(artifactId, api.resultArtifactId);
+    downloads += 1;
+    if (downloads === 1) throw new Error("transient artifact download failure");
+    return archive(api.archiveValue);
+  };
+
+  const result = await executor(api, process.cwd(), 4).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.equal(artifactListReads, 1);
+  assert.equal(downloads, 2);
+  assert.ok(api.calls.some((call) => call.path === `actions/runs/${api.resultRunId}`));
+  assert.ok(api.calls.some((call) => call.path === `actions/artifacts/${api.resultArtifactId}`));
+  assert.doesNotMatch(JSON.stringify(api.calls), /secret|token|private/iu);
+});
+
+test("#632 rejects a wrong exact-run observation after positive correlation instead of accepting its artifact", async () => {
+  const api = new FakeActionsApi();
+  let runListReads = 0;
+  let downloads = 0;
+  api.requestActionsApi = async (path, method, fields = {}) => {
+    api.calls.push({ path, method, fields });
+    if (method === "POST") return undefined;
+    if (path.startsWith("actions/workflows/")) {
+      runListReads += 1;
+      if (runListReads === 1)
+        return { workflow_runs: [runFixture(api.baselineRunId, unrelatedCorrelation, "completed", "success")] };
+      if (runListReads === 2)
+        return { workflow_runs: [runFixture(api.resultRunId, correlation, "completed", "success")] };
+      throw new Error("transient run-list read failure");
+    }
+    if (path === `actions/runs/${api.resultRunId}`) {
+      return runFixture(api.resultRunId, unrelatedCorrelation, "completed", "success");
+    }
+    if (path.startsWith("actions/artifacts?")) {
+      return { artifacts: [artifactFixture(api.resultArtifactId, api.resultRunId)] };
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+  api.downloadActionsArtifact = async () => {
+    downloads += 1;
+    throw new Error("transient artifact download failure");
+  };
+
+  await assert.rejects(
+    executor(api, process.cwd(), 4).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_CORRELATION_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "wrong-run", stage: "correlation" }),
+  );
+  assert.equal(downloads, 1);
+  assert.doesNotMatch(JSON.stringify(api.calls), /secret|token|private/iu);
+});
+
 test("preserves the bounded result-timeout failure when no executor run becomes observable", async () => {
   const api = new FakeActionsApi();
   api.runState = "pending";

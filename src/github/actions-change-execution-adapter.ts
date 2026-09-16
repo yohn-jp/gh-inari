@@ -228,8 +228,16 @@ function workflowRunsPath(page: number): string {
   return `actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/runs?event=workflow_dispatch&branch=${INARI_CHANGE_EXECUTOR_BRANCH}&per_page=${ACTIONS_PAGE_SIZE}&page=${page}`;
 }
 
+function workflowRunPath(runId: number): string {
+  return `actions/runs/${runId}`;
+}
+
 function artifactsPath(name: string, page: number): string {
   return `actions/artifacts?name=${encodeURIComponent(name)}&per_page=${ACTIONS_PAGE_SIZE}&page=${page}`;
+}
+
+function artifactPath(artifactId: number): string {
+  return `actions/artifacts/${artifactId}`;
 }
 
 function dispatchPath(): string {
@@ -303,38 +311,81 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
   });
 }
 
+function parseRun(value: unknown): WorkflowRun {
+  const item = record(value, "run-read");
+  const id = positiveInteger(item.id, "run-read");
+  const status = item.status;
+  if (status !== "queued" && status !== "in_progress" && status !== "completed") {
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
+  }
+  if (item.conclusion !== null && typeof item.conclusion !== "string") {
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
+  }
+  const path = item.path === undefined ? undefined : boundedText(item.path, 512, "run-read");
+  if (path !== undefined && path !== `.github/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}`) {
+    throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-workflow", undefined, "correlation");
+  }
+  if (item.ref !== undefined && item.ref !== INARI_CHANGE_EXECUTOR_REF) {
+    throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-ref", undefined, "correlation");
+  }
+  return {
+    id,
+    status,
+    conclusion: item.conclusion as string | null,
+    event: boundedText(item.event, 64, "run-read"),
+    headBranch: boundedText(item.head_branch, 255, "run-read"),
+    displayTitle: boundedText(item.display_title, 512, "run-read"),
+    ...(path === undefined ? {} : { path }),
+  };
+}
+
 function parseRuns(value: unknown): readonly WorkflowRun[] {
   const payload = record(value, "run-read");
   if (!Array.isArray(payload.workflow_runs) || payload.workflow_runs.length > ACTIONS_PAGE_SIZE) {
     throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
   }
-  return payload.workflow_runs.map((candidate) => {
-    const item = record(candidate, "run-read");
-    const id = positiveInteger(item.id, "run-read");
-    const status = item.status;
-    if (status !== "queued" && status !== "in_progress" && status !== "completed") {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
-    }
-    if (item.conclusion !== null && typeof item.conclusion !== "string") {
-      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
-    }
-    const path = item.path === undefined ? undefined : boundedText(item.path, 512, "run-read");
-    if (path !== undefined && path !== `.github/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}`) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-workflow", undefined, "correlation");
-    }
-    if (item.ref !== undefined && item.ref !== INARI_CHANGE_EXECUTOR_REF) {
-      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.runs", "wrong-ref", undefined, "correlation");
-    }
-    return {
-      id,
-      status,
-      conclusion: item.conclusion as string | null,
-      event: boundedText(item.event, 64, "run-read"),
-      headBranch: boundedText(item.head_branch, 255, "run-read"),
-      displayTitle: boundedText(item.display_title, 512, "run-read"),
-      ...(path === undefined ? {} : { path }),
-    };
-  });
+  return payload.workflow_runs.map((candidate) => parseRun(candidate));
+}
+
+function parseArtifact(value: unknown, expectedName: string, expectedRepositoryId: string): WorkflowArtifact {
+  const item = record(value, "artifact-read");
+  if (item.name !== expectedName) {
+    throw remoteError(
+      "CHANGE_REMOTE_CORRELATION_FAILED",
+      "actions.artifacts",
+      "wrong-artifact",
+      undefined,
+      "correlation",
+    );
+  }
+  const workflowRun = record(item.workflow_run, "artifact-read");
+  const repositoryId =
+    workflowRun.repository_id === undefined ? undefined : positiveInteger(workflowRun.repository_id, "artifact-read");
+  if (repositoryId !== undefined && String(repositoryId) !== expectedRepositoryId) {
+    throw remoteError(
+      "CHANGE_REMOTE_CORRELATION_FAILED",
+      "actions.artifacts",
+      "wrong-repository",
+      undefined,
+      "correlation",
+    );
+  }
+  if (typeof item.expired !== "boolean") {
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.artifacts",
+      "invalid-metadata",
+      undefined,
+      "artifact-read",
+    );
+  }
+  return {
+    id: positiveInteger(item.id, "artifact-read"),
+    name: boundedText(item.name, 255, "artifact-read"),
+    expired: item.expired,
+    workflowRunId: positiveInteger(workflowRun.id, "artifact-read"),
+    ...(repositoryId === undefined ? {} : { repositoryId }),
+  };
 }
 
 function parseArtifacts(
@@ -357,39 +408,7 @@ function parseArtifacts(
       const item = record(candidate, "artifact-read");
       return item.name === expectedName;
     })
-    .map((candidate) => {
-      const item = record(candidate, "artifact-read");
-      const workflowRun = record(item.workflow_run, "artifact-read");
-      const repositoryId =
-        workflowRun.repository_id === undefined
-          ? undefined
-          : positiveInteger(workflowRun.repository_id, "artifact-read");
-      if (repositoryId !== undefined && String(repositoryId) !== expectedRepositoryId) {
-        throw remoteError(
-          "CHANGE_REMOTE_CORRELATION_FAILED",
-          "actions.artifacts",
-          "wrong-repository",
-          undefined,
-          "correlation",
-        );
-      }
-      if (typeof item.expired !== "boolean") {
-        throw remoteError(
-          "CHANGE_REMOTE_RESULT_INVALID",
-          "actions.artifacts",
-          "invalid-metadata",
-          undefined,
-          "artifact-read",
-        );
-      }
-      return {
-        id: positiveInteger(item.id, "artifact-read"),
-        name: boundedText(item.name, 255, "artifact-read"),
-        expired: item.expired,
-        workflowRunId: positiveInteger(workflowRun.id, "artifact-read"),
-        ...(repositoryId === undefined ? {} : { repositoryId }),
-      };
-    });
+    .map((candidate) => parseArtifact(candidate, expectedName, expectedRepositoryId));
 }
 
 function resultFromArchive(archive: Uint8Array, operation: ChangeMutation): ActionResultEnvelope {
@@ -817,6 +836,60 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     );
   }
 
+  private async readExactRun(
+    operation: string,
+    runId: number,
+    correlation: string,
+    deadline: ChangeExecutionDeadline,
+  ): Promise<WorkflowRun> {
+    return this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        let value: unknown;
+        try {
+          value = await this.#api.requestActionsApi(workflowRunPath(runId), "GET", {}, deadline);
+        } catch (error: unknown) {
+          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "run-read");
+        }
+        const run = parseRun(value);
+        if (run.id !== runId || !isCorrelatedRun(run, correlation)) {
+          throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "wrong-run", undefined, "correlation");
+        }
+        return run;
+      },
+      "run-read",
+    );
+  }
+
+  private async readExactArtifact(
+    operation: string,
+    artifactId: number,
+    artifactName: string,
+    repositoryId: string,
+    runId: number,
+    deadline: ChangeExecutionDeadline,
+  ): Promise<WorkflowArtifact> {
+    return this.withinDeadline(
+      operation,
+      deadline,
+      async () => {
+        let value: unknown;
+        try {
+          value = await this.#api.requestActionsApi(artifactPath(artifactId), "GET", {}, deadline);
+        } catch (error: unknown) {
+          throw normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "artifact-read");
+        }
+        const artifact = parseArtifact(value, artifactName, repositoryId);
+        if (artifact.id !== artifactId || artifact.workflowRunId !== runId) {
+          throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "wrong-artifact", undefined, "correlation");
+        }
+        return artifact;
+      },
+      "artifact-read",
+    );
+  }
+
   private async waitForResult(
     operation: string,
     correlation: string,
@@ -832,30 +905,124 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     // count can be exhausted well before real time runs out. maxPollAttempts
     // remains only as a sanity ceiling against a runaway loop, not as the
     // primary budget.
+    let correlatedRun: WorkflowRun | undefined;
+    let correlatedArtifact: WorkflowArtifact | undefined;
     let observationStage: ActionsTransportFailureStage = "run-read";
     for (let attempt = 0; deadline.remainingMs() > 0 && attempt < this.#maxPollAttempts; attempt += 1) {
       const timeRemaining = () => deadline.remainingMs() > 0;
-      let runs: readonly WorkflowRun[];
+      let runs: readonly WorkflowRun[] | undefined;
+      let runReadFailed = false;
+      let runRecoveredByExactObservation = false;
+      let runListConfirmedCorrelation = false;
       observationStage = "run-read";
       try {
         runs = await this.readRuns(operation, deadline, correlation);
       } catch (error: unknown) {
         if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
+        runReadFailed = true;
+      }
+
+      if (runs !== undefined) {
+        const correlatedRuns = runs.filter((candidate) => isCorrelatedRun(candidate, correlation));
+        if (correlatedRuns.length > 1) {
+          throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "ambiguous-run", undefined, "correlation");
+        }
+        const observedRun = correlatedRuns[0];
+        if (observedRun !== undefined) {
+          runListConfirmedCorrelation = true;
+          if (correlatedRun !== undefined && correlatedRun.id !== observedRun.id) {
+            throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "ambiguous-run", undefined, "correlation");
+          }
+          correlatedRun = observedRun;
+        }
+      }
+
+      // Once the run-name match has established a request/run pair, a later
+      // list failure or omission cannot erase that identity. Observe the
+      // exact run by its established ID under the same deadline before
+      // deciding whether to retry.
+      if (correlatedRun !== undefined && (runReadFailed || !runListConfirmedCorrelation)) {
+        try {
+          correlatedRun = await this.readExactRun(operation, correlatedRun.id, correlation, deadline);
+          runRecoveredByExactObservation = true;
+        } catch (error: unknown) {
+          if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
+          await this.#sleep(this.#pollIntervalMs);
+          continue;
+        }
+      }
+
+      // A transient list failure before any positive run evidence remains
+      // fail-closed: an artifact name or candidate count cannot establish the
+      // request identity by itself.
+      if (runs === undefined && correlatedRun === undefined) {
         await this.#sleep(this.#pollIntervalMs);
         continue;
       }
       // The run-name correlation is the only identity evidence used below.
       // Candidate count, "new since baseline", and observation order never
       // decide which run belongs to this request.
-      const correlatedRun = runs.find((candidate) => isCorrelatedRun(candidate, correlation));
       let artifacts: readonly WorkflowArtifact[];
+      let artifact: WorkflowArtifact | undefined;
       observationStage = "artifact-read";
-      try {
-        artifacts = await this.readArtifacts(operation, artifactName, repositoryId, deadline);
-      } catch (error: unknown) {
-        if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
-        await this.#sleep(this.#pollIntervalMs);
-        continue;
+      if (runRecoveredByExactObservation && correlatedArtifact !== undefined && correlatedRun !== undefined) {
+        try {
+          artifact = await this.readExactArtifact(
+            operation,
+            correlatedArtifact.id,
+            artifactName,
+            repositoryId,
+            correlatedRun.id,
+            deadline,
+          );
+        } catch (error: unknown) {
+          if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
+          await this.#sleep(this.#pollIntervalMs);
+          continue;
+        }
+        artifacts = [artifact];
+      } else {
+        try {
+          artifacts = await this.readArtifacts(operation, artifactName, repositoryId, deadline);
+        } catch (error: unknown) {
+          if (correlatedArtifact === undefined || correlatedRun === undefined) {
+            if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
+            await this.#sleep(this.#pollIntervalMs);
+            continue;
+          }
+          try {
+            artifact = await this.readExactArtifact(
+              operation,
+              correlatedArtifact.id,
+              artifactName,
+              repositoryId,
+              correlatedRun.id,
+              deadline,
+            );
+            artifacts = [artifact];
+          } catch (exactError: unknown) {
+            if (!isRetryablePollTransportError(exactError) || !timeRemaining()) throw exactError;
+            await this.#sleep(this.#pollIntervalMs);
+            continue;
+          }
+        }
+      }
+      if (artifacts.length === 0 && correlatedArtifact !== undefined && correlatedRun !== undefined) {
+        try {
+          artifact = await this.readExactArtifact(
+            operation,
+            correlatedArtifact.id,
+            artifactName,
+            repositoryId,
+            correlatedRun.id,
+            deadline,
+          );
+          artifacts = [artifact];
+        } catch (error: unknown) {
+          if (!isRetryablePollTransportError(error) || !timeRemaining()) throw error;
+          await this.#sleep(this.#pollIntervalMs);
+          continue;
+        }
       }
       if (artifacts.length > 1) {
         throw remoteError(
@@ -866,9 +1033,21 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
           "correlation",
         );
       }
-      const artifact = artifacts[0];
+      artifact ??= artifacts[0];
       if (artifact !== undefined && artifact.expired) {
         throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", operation, "expired-artifact", undefined, "correlation");
+      }
+      if (artifact !== undefined && correlatedRun !== undefined && artifact.workflowRunId === correlatedRun.id) {
+        if (correlatedArtifact !== undefined && correlatedArtifact.id !== artifact.id) {
+          throw remoteError(
+            "CHANGE_REMOTE_CORRELATION_FAILED",
+            operation,
+            "ambiguous-artifact",
+            undefined,
+            "correlation",
+          );
+        }
+        correlatedArtifact = artifact;
       }
       const run =
         artifact !== undefined && correlatedRun !== undefined && correlatedRun.id === artifact.workflowRunId
