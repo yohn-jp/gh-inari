@@ -132,7 +132,7 @@ test("READONLY, WRITE, CREATE, DELETE, and DENY remain distinct", () => {
 });
 
 test("authored scope paths have one canonical representation", () => {
-  assert.equal(canonicalizeImplementationScopePath("  ./src\\ａ//allowed.ts  "), "src/a/allowed.ts");
+  assert.equal(canonicalizeImplementationScopePath("  ./src\\ａ//allowed.ts  "), "./src/a/allowed.ts");
   assert.equal(canonicalizeImplementationScopePath("src/normal.ts"), "src/normal.ts");
   assert.equal(canonicalizeImplementationScopePath("src/../outside.ts"), undefined);
   assert.equal(canonicalizeImplementationScopePath("/src/absolute.ts"), undefined);
@@ -150,7 +150,7 @@ test("authored scope paths have one canonical representation", () => {
   );
   assert.equal(result.valid, true);
   assert.deepEqual(result.contract?.scope, {
-    readOnly: ["src/a/allowed.ts"],
+    readOnly: ["./src/a/allowed.ts"],
     write: ["src/normal.ts"],
     create: [],
     delete: [],
@@ -160,7 +160,7 @@ test("authored scope paths have one canonical representation", () => {
   const duplicate = validateImplementationContract(
     validContract({
       scope: {
-        readOnly: ["src/allowed.ts", " ./src\\allowed.ts "],
+        readOnly: ["src/allowed.ts", " src\\allowed.ts "],
         write: [],
         create: [],
         delete: [],
@@ -170,6 +170,28 @@ test("authored scope paths have one canonical representation", () => {
   );
   assert.equal(duplicate.valid, false);
   assert.ok(duplicate.violations.some((violation) => violation.code === "IMPLEMENTATION_SCOPE_DUPLICATE"));
+});
+
+test("a pre-existing canonical scope containing a leading ./ is preserved across #641", () => {
+  const contract = validContract({
+    scope: {
+      readOnly: ["./src/**"],
+      write: [],
+      create: [],
+      delete: [],
+      deny: [],
+    },
+  });
+  const result = validateImplementationContract(contract);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.contract?.scope.readOnly, ["./src/**"]);
+
+  const rendered = renderImplementationIssueBody(result.contract);
+  const reparsed = parseImplementationIssueBody(rendered);
+  assert.equal(reparsed.valid, true);
+  assert.deepEqual(reparsed.contract?.scope.readOnly, ["./src/**"]);
+
+  assert.equal(implementationContractDigest(result.contract), implementationContractDigest(reparsed.contract));
 });
 
 test("scope matching never rewrites a candidate Git path identity", () => {

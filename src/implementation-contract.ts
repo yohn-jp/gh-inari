@@ -265,8 +265,7 @@ export function canonicalizeImplementationScopePath(value: unknown): string | un
     .replace(/\r\n?/gu, "\n")
     .trim()
     .replaceAll("\\", "/")
-    .replace(/\/{2,}/gu, "/")
-    .replace(/^(?:\.\/)+/u, "");
+    .replace(/\/{2,}/gu, "/");
   const segments = normalized.split("/");
   if (
     normalized.length === 0 ||

@@ -145,9 +145,9 @@ test("projection scope validation reuses the authored path canonicalization rule
   const normalized = validateImplementationScopeProjection({
     ...projection,
     scope: {
-      readOnly: [" ./src\\** "],
+      readOnly: [" src\\** "],
       write: ["src\\**"],
-      create: ["./docs//**"],
+      create: ["docs//**"],
       delete: [" tmp//** "],
       deny: ["src\\private//**"],
     },
