@@ -158,7 +158,7 @@ class OperationalTransport implements GhTransport {
       ]);
     if (path.startsWith("pulls/8/files"))
       return included([
-        { filename: "z.ts", status: "modified", additions: 2, deletions: 1 },
+        { filename: "z.ts", status: "renamed", previous_filename: "old-z.ts", additions: 2, deletions: 1 },
         { filename: "a.ts", status: "added", additions: 4, deletions: 0 },
       ]);
     if (path.startsWith("commits/head-sha/check-runs"))
@@ -236,6 +236,7 @@ test("GitHub adapter normalizes PR runtime evidence without raw API shapes", asy
     observed.changedFiles.items.map((file) => file.filename),
     ["a.ts", "z.ts"],
   );
+  assert.equal(observed.changedFiles.items[1]?.previousFilename, "old-z.ts");
   assert.equal(observed.inlineReviewComments.items[0]?.path, "src/a.ts");
   assert.equal(observed.inlineReviewComments.items[0]?.body, "inline\nfeedback\r\nhere");
   assert.equal(observed.reviews.items[0]?.body, "Approved.\n\nLooks good\toverall.");

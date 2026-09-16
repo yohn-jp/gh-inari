@@ -131,6 +131,8 @@ export interface OperationalCheck {
 
 export interface OperationalChangedFile {
   readonly filename: string;
+  /** Previous path supplied by the provider for a rename. */
+  readonly previousFilename?: string;
   readonly status?: string;
   readonly additions?: number;
   readonly deletions?: number;
@@ -990,6 +992,13 @@ function normalizeFile(
     return undefined;
   }
   const filename = text(value.filename, `${path}.filename`, OPERATIONAL_OBSERVATION_LIMITS.refLength, violations);
+  const previousFilename = text(
+    value.previousFilename,
+    `${path}.previousFilename`,
+    OPERATIONAL_OBSERVATION_LIMITS.refLength,
+    violations,
+    false,
+  );
   const status = text(value.status, `${path}.status`, 64, violations, false);
   const additions =
     value.additions === undefined ? undefined : nonNegativeNumber(value.additions, `${path}.additions`, violations);
@@ -1010,6 +1019,7 @@ function normalizeFile(
   if (filename === undefined) return undefined;
   return {
     filename,
+    ...(previousFilename === undefined ? {} : { previousFilename }),
     ...(status === undefined ? {} : { status: status.toLowerCase() }),
     ...(additions === undefined ? {} : { additions }),
     ...(deletions === undefined ? {} : { deletions }),

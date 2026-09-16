@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.10.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.11.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -90,6 +90,7 @@ export type CommandId =
   | "impl.validate"
   | "impl.authorize"
   | "impl.inspect"
+  | "impl.verify"
   | "branch.check"
   | "branch.semantic.check"
   | "template.list"
@@ -157,7 +158,8 @@ export type OptionId =
   | "expectedBase"
   | "reviewIntent"
   | "mergeStrategy"
-  | "retry";
+  | "retry"
+  | "pullRequest";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -246,6 +248,7 @@ const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHe
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
 const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
+const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest"] as const;
 
 const option = (
   id: OptionId,
@@ -610,6 +613,15 @@ export const COMMAND_OPTIONS = {
     "required",
     "Review retry semantics: reject-duplicate or allow-duplicate.",
     "mode",
+  ),
+  pullRequest: option(
+    "pullRequest",
+    "pull-request",
+    ["--pr"],
+    "string",
+    "required",
+    "Pull-request number whose authoritative diff and verification evidence is checked.",
+    "number",
   ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
@@ -1145,6 +1157,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "impl.verify",
+    "impl",
+    "verify",
+    ["impl", "verify"],
+    "Verify a pull request and its authoritative diff against one current authorized Implementation.",
+    IMPLEMENTATION_VERIFY_OPTIONS,
+    "<number>",
+  ),
+  command(
     "branch.check",
     "branch",
     "check",
@@ -1615,7 +1636,8 @@ export function commandUsage(entry: CommandDefinition): string {
         ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from") ||
         (entry.id === "pr.sync" && id === "from") ||
         (entry.id === "authority.bootstrap" &&
-          (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability"));
+          (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability")) ||
+        (entry.id === "impl.verify" && (id === "from" || id === "pullRequest"));
       const syntax =
         entry.id === "authority.register" && id === "from"
           ? "--from <authority.json>"

@@ -270,6 +270,8 @@ export interface GitHubOperationalCheck {
 
 export interface GitHubOperationalChangedFile {
   readonly filename: string;
+  /** Previous path supplied by GitHub for a rename. */
+  readonly previousFilename?: string;
   readonly status?: string;
   readonly additions?: number;
   readonly deletions?: number;

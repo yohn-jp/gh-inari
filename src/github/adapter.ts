@@ -1946,6 +1946,12 @@ function parseOperationalCheck(value: unknown, path: string, kind: "check-run" |
 
 function parseOperationalChangedFile(value: unknown, path: string): GitHubOperationalChangedFile {
   const record = responseRecord(value, "operational.file");
+  const previousFilename = optionalProviderText(
+    record.previous_filename,
+    `${path}.previous_filename`,
+    "operational.file",
+    512,
+  );
   const additions = optionalProviderNumber(record.additions, `${path}.additions`, "operational.file");
   const deletions = optionalProviderNumber(record.deletions, `${path}.deletions`, "operational.file");
   const changes = optionalProviderNumber(record.changes, `${path}.changes`, "operational.file");
@@ -1956,6 +1962,7 @@ function parseOperationalChangedFile(value: unknown, path: string): GitHubOperat
   const contentsUrl = optionalProviderText(record.contents_url, `${path}.contents_url`, "operational.file", 2_048);
   return {
     filename: providerText(record.filename, `${path}.filename`, "operational.file", 512),
+    ...(previousFilename === undefined ? {} : { previousFilename }),
     ...(status === undefined ? {} : { status }),
     ...(additions === undefined ? {} : { additions }),
     ...(deletions === undefined ? {} : { deletions }),

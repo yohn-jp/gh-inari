@@ -14,6 +14,8 @@ import {
   type GitHubApiResponse,
   type GitHubBranch,
   type GitHubIssue,
+  type GitHubOperationalCollection,
+  type GitHubOperationalPullRequestEvidence,
   type RepositoryContext,
 } from "./github/index.js";
 
@@ -107,6 +109,15 @@ function issue(body: string): GitHubIssue {
   };
 }
 
+function collection<T>(items: readonly T[]): GitHubOperationalCollection<T> {
+  return {
+    status: "available",
+    items,
+    pagination: { perPage: 100, pages: 1, returned: items.length, truncated: false },
+    diagnostics: [],
+  };
+}
+
 class ImplementationCliAdapter extends GitHubAdapter {
   readonly relationCalls: string[] = [];
   readonly currentIssue: GitHubIssue;
@@ -130,6 +141,36 @@ class ImplementationCliAdapter extends GitHubAdapter {
 
   override async findBranch(): Promise<GitHubBranch | undefined> {
     return this.currentBranch;
+  }
+
+  override async observePullRequest(pullRequestNumber: number): Promise<GitHubOperationalPullRequestEvidence> {
+    return {
+      repository: {
+        host: CONTEXT.hostname,
+        nameWithOwner: CONTEXT.nameWithOwner,
+        repositoryId: CONTEXT.repositoryId,
+      },
+      number: pullRequestNumber,
+      title: "Implementation PR",
+      body: "PR body is not conformance authority.",
+      state: "open",
+      author: null,
+      head: { ref: "feat/573-impl-cli", sha: "b".repeat(40) },
+      base: { ref: BRANCH.name, sha: BRANCH.sha },
+      draft: false,
+      labels: [],
+      assignees: [],
+      url: `https://github.com/${CONTEXT.nameWithOwner}/pull/${pullRequestNumber}`,
+      checks: collection([
+        { id: "verify", name: "pnpm run verify", kind: "check-run", status: "completed", conclusion: "success" },
+        { id: "test", name: "pnpm test", kind: "check-run", status: "completed", conclusion: "success" },
+      ]),
+      reviews: collection([]),
+      comments: collection([]),
+      inlineReviewComments: collection([]),
+      changedFiles: collection([{ filename: "src/cli-core.ts", status: "modified" }]),
+      provenance: { provider: "github", endpoints: [`pulls/${pullRequestNumber}`] },
+    };
   }
 
   override async requestRepositoryApi(repositoryPath: string): Promise<GitHubApiResponse> {
@@ -190,7 +231,7 @@ test("impl is discoverable and plan keeps inferred recommendations unauthorized"
   const help = JSON.parse(helpLines.at(-1) ?? "{}") as { commands: readonly { id: string }[] };
   assert.deepEqual(
     help.commands.map((entry) => entry.id),
-    ["impl.plan", "impl.show", "impl.validate", "impl.authorize", "impl.inspect"],
+    ["impl.plan", "impl.show", "impl.validate", "impl.authorize", "impl.inspect", "impl.verify"],
   );
 
   const adapter = new ImplementationCliAdapter("A source Issue with a checklist.\n\n- [ ] Keep scope explicit");
@@ -246,6 +287,34 @@ test("impl inspect uses provider relationship authority and detects stale base e
       Record<string, unknown>
     >;
     assert.ok(violations.some((entry) => entry.code === "IMPLEMENTATION_AUTHORIZATION_BASE_REVISION_MISMATCH"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("impl verify rereads the Implementation and checks the normalized PR evidence", async () => {
+  const adapter = new ImplementationCliAdapter(implementationBody());
+  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
+  assert.equal(authorized.exitCode, 0);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-cli-"));
+  try {
+    const authorizationPath = path.join(directory, "authorization.json");
+    await writeFile(
+      authorizationPath,
+      JSON.stringify(
+        authorized.output.authorization && (authorized.output.authorization as Record<string, unknown>).record,
+      ),
+      "utf8",
+    );
+    const verified = await invoke(
+      ["impl", "verify", "42", "--from", authorizationPath, "--pr", "90", "--json"],
+      adapter,
+    );
+    assert.equal(verified.exitCode, 0);
+    assert.equal(verified.output.operation, "impl.verify");
+    assert.equal(verified.output.status, "conformant");
+    assert.equal(verified.output.valid, true);
+    assert.equal(JSON.stringify(verified.output).includes("PR body is not conformance authority."), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
