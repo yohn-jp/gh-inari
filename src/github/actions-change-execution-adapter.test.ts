@@ -8,6 +8,7 @@ import {
   ChangeExecutionPortError,
   changeMutationRequest,
   changeReadRequest,
+  type ChangeExecutionDeadline,
 } from "../change-execution-port.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
@@ -152,10 +153,12 @@ function branchPolicySource(pattern: string): string {
 
 class FakeActionsApi implements GitHubActionsRemoteApi {
   readonly calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
+  readonly deadlines: Array<ChangeExecutionDeadline | undefined> = [];
   readonly baselineRunId = 10;
   readonly resultRunId = 11;
   readonly resultArtifactId = 21;
   readonly result = projection();
+  artifactDownloads = 0;
   runState: "pending" | "success" | "failure" = "success";
   artifactMode: "valid" | "malformed" | "stale" | "ambiguous" | "missing" = "valid";
   archiveValue: unknown = { projection: this.result };
@@ -165,7 +168,8 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   governanceUnavailable = false;
   private runReads = 0;
 
-  async getRepositoryContext(): Promise<RepositoryContext> {
+  async getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
+    this.deadlines.push(deadline);
     return repository;
   }
 
@@ -194,7 +198,9 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
     path: string,
     method: "GET" | "POST",
     fields: Readonly<Record<string, string>> = {},
+    deadline?: ChangeExecutionDeadline,
   ): Promise<unknown> {
+    this.deadlines.push(deadline);
     this.calls.push({ path, method, fields });
     if (method === "POST") return undefined;
     if (path.startsWith("actions/workflows/")) {
@@ -295,7 +301,9 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
     throw new Error(`unexpected repository path ${path}`);
   }
 
-  async downloadActionsArtifact(artifactId: number): Promise<Uint8Array> {
+  async downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array> {
+    this.deadlines.push(deadline);
+    this.artifactDownloads += 1;
     assert.equal(artifactId, this.resultArtifactId);
     if (this.artifactMode === "malformed") return new Uint8Array(Buffer.from("not-a-zip"));
     return archive(this.archiveValue);
@@ -358,6 +366,37 @@ test("issue, ready, and abort dispatch the same semantic request through the tru
     assert.equal(dispatch.fields["inputs[correlation]"], correlation);
     assert.doesNotMatch(JSON.stringify(dispatch.fields["inputs[request]"]), /workflow|token|privateKey|effect/iu);
   }
+});
+
+test("passes one canonical deadline through repository context, Actions requests, and artifact download", async () => {
+  const api = new FakeActionsApi();
+
+  const result = await executor(api).execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: api.result });
+  assert.ok(api.deadlines.length > 0);
+  const deadline = api.deadlines[0];
+  assert.ok(deadline);
+  assert.ok(api.deadlines.every((candidate) => candidate === deadline));
+  assert.ok(api.calls.some((call) => call.method === "POST"));
+  assert.equal(api.artifactDownloads, 1);
+});
+
+test("normalizes an expired execution deadline into the bounded Change failure model", async () => {
+  const api = new FakeActionsApi();
+  let clockReads = 0;
+  const now = () => (clockReads++ === 0 ? 0 : 1);
+
+  await assert.rejects(
+    executor(api, process.cwd(), 2, { maxWaitMs: 1, now }).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_RUN_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({ operation: "change.issue", reason: "result-timeout", stage: "repository-context" }),
+  );
+  assert.equal(api.deadlines.length, 0);
+  assert.equal(api.calls.length, 0);
 });
 
 test("caller-produced signed provenance crosses the bounded Actions request unchanged", async () => {

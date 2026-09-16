@@ -57,6 +57,7 @@ import {
   type ValidatedSemanticPullRequestArtifact,
   type ValidatedSemanticIssueArtifact,
 } from "./types.js";
+import type { ChangeExecutionDeadline } from "../change-execution-port.js";
 
 const DEFAULT_HOSTNAME = "github.com";
 const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
@@ -116,6 +117,19 @@ function operationClass(operation: string): GhOperationClass {
     throw new Error(`No timeout class registered for gh operation "${operation}".`);
   }
   return operationClassValue;
+}
+
+function effectiveTimeoutMs(
+  configuredTimeoutMs: number,
+  operation: string,
+  deadline: ChangeExecutionDeadline | undefined,
+): number {
+  if (deadline === undefined) return configuredTimeoutMs;
+  const remainingMs = deadline.remainingMs();
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    throw new GitHubTimeoutError(operation, 0);
+  }
+  return Math.max(1, Math.floor(Math.min(configuredTimeoutMs, remainingMs)));
 }
 
 function repositoryApiOperation(repositoryPath: string, method: "GET" | "POST" | "PATCH" | "DELETE"): string {
@@ -203,8 +217,12 @@ export class GitHubAdapter {
   private readonly executable: string;
   private readonly timeoutsMs: Readonly<Record<GhOperationClass, number>>;
   private readonly outputLimitsBytes: Readonly<GhTransportOutputLimits>;
+  /** No-deadline coalescing only; a deadline-bound caller never joins these. */
   private availablePromise: Promise<void> | undefined;
   private contextPromise: Promise<RepositoryContext> | undefined;
+  /** Completed evidence: reusable by every caller without any further wait. */
+  private ghAvailable = false;
+  private contextValue: RepositoryContext | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
   private readonly authenticationPromises = new Map<string | undefined, Promise<void>>();
 
@@ -221,17 +239,18 @@ export class GitHubAdapter {
     });
   }
 
-  async checkAuthentication(): Promise<void> {
-    await this.ensureGhAvailable();
-    await this.ensureAuthenticated(this.repositoryHostOverride());
+  async checkAuthentication(deadline?: ChangeExecutionDeadline): Promise<void> {
+    await this.ensureGhAvailable(deadline);
+    await this.ensureAuthenticated(this.repositoryHostOverride(), deadline);
   }
 
   /** Read the login attached to the caller's existing gh session. */
-  async getAuthenticatedUser(): Promise<string> {
-    const context = await this.resolveRepositoryContext();
+  async getAuthenticatedUser(deadline?: ChangeExecutionDeadline): Promise<string> {
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       ["api", "user", "--hostname", context.hostname, "--method", "GET"],
       "auth.identity",
+      deadline,
     );
     const record = responseRecord(result, "auth.identity");
     const login = responseString(record.login, "login", "auth.identity");
@@ -241,19 +260,25 @@ export class GitHubAdapter {
     return login;
   }
 
-  async resolveRepositoryContext(): Promise<RepositoryContext> {
-    if (this.contextPromise === undefined) {
-      const pending = this.resolveRepositoryContextOnce();
-      this.contextPromise = pending;
-      pending.catch(() => {
-        if (this.contextPromise === pending) this.contextPromise = undefined;
-      });
+  async resolveRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
+    if (this.contextValue !== undefined) return this.contextValue;
+    if (deadline === undefined) {
+      if (this.contextPromise === undefined) {
+        const pending = this.resolveRepositoryContextOnce(undefined);
+        this.contextPromise = pending;
+        pending.catch(() => {
+          if (this.contextPromise === pending) this.contextPromise = undefined;
+        });
+      }
+      return this.contextPromise;
     }
-    return this.contextPromise;
+    // A deadline-bound caller with no completed context must never join an
+    // in-flight resolution started by another (possibly unbounded) caller.
+    return this.resolveRepositoryContextOnce(deadline);
   }
 
-  async getRepositoryContext(): Promise<RepositoryContext> {
-    return this.resolveRepositoryContext();
+  async getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
+    return this.resolveRepositoryContext(deadline);
   }
 
   /**
@@ -265,12 +290,13 @@ export class GitHubAdapter {
     actionsPath: string,
     method: "GET" | "POST",
     fields: Readonly<Record<string, string>> = {},
+    deadline?: ChangeExecutionDeadline,
   ): Promise<unknown> {
     assertActionsApiPath(actionsPath);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/${actionsPath}`, method);
     for (const [name, value] of Object.entries(fields)) appendRawField(args, name, value);
-    return this.runApi(args, "actions.request");
+    return this.runApi(args, "actions.request", deadline);
   }
 
   /** Read the bounded repository API surface needed by Change projection. */
@@ -278,9 +304,17 @@ export class GitHubAdapter {
     repositoryPath: string,
     method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
     fields: Readonly<Record<string, GitHubApiFieldValue>> = {},
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubApiResponse> {
-    const context = await this.resolveRepositoryContext();
-    return this.requestRepositoryApiAt(context.nameWithOwner, context.hostname, repositoryPath, method, fields);
+    const context = await this.resolveRepositoryContext(deadline);
+    return this.requestRepositoryApiAt(
+      context.nameWithOwner,
+      context.hostname,
+      repositoryPath,
+      method,
+      fields,
+      deadline,
+    );
   }
 
   private async requestRepositoryApiAt(
@@ -289,6 +323,7 @@ export class GitHubAdapter {
     repositoryPath: string,
     method: "GET" | "POST" | "PATCH" | "DELETE",
     fields: Readonly<Record<string, GitHubApiFieldValue>>,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubApiResponse> {
     assertRepositoryApiPath(repositoryPath);
     const operation = repositoryApiOperation(repositoryPath, method);
@@ -302,7 +337,7 @@ export class GitHubAdapter {
       "--include",
     ];
     for (const [name, value] of Object.entries(fields)) appendRepositoryApiField(args, name, value);
-    const result = await this.runCommand(args, operation);
+    const result = await this.runCommand(args, operation, {}, deadline);
     const response = parseIncludedApiResponse(result.stdout, operation);
     if (response !== undefined) {
       if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
@@ -315,11 +350,11 @@ export class GitHubAdapter {
   }
 
   /** Download one bounded Actions artifact archive through the caller's gh session. */
-  async downloadActionsArtifact(artifactId: number): Promise<Uint8Array> {
+  async downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array> {
     if (!Number.isSafeInteger(artifactId) || artifactId < 1) {
       throw new ContractViolationError("Actions artifact ID must be a positive integer.", "artifactId");
     }
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runCommand(
       [
         "api",
@@ -331,6 +366,7 @@ export class GitHubAdapter {
       ],
       "actions.artifact.download",
       { binaryStdout: true },
+      deadline,
     );
     if (result.exitCode !== 0) {
       throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
@@ -342,11 +378,12 @@ export class GitHubAdapter {
   }
 
   /** Read the target repository metadata used to select the trusted governance ref. */
-  async getRepositoryDefaultBranch(): Promise<string> {
-    const context = await this.resolveRepositoryContext();
+  async getRepositoryDefaultBranch(deadline?: ChangeExecutionDeadline): Promise<string> {
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(context, `repos/${context.nameWithOwner}`, "GET"),
       "repository.default_branch",
+      deadline,
     );
     const record = responseRecord(result, "repository.default_branch");
     const ref = responseString(record.default_branch, "default_branch", "repository.default_branch");
@@ -355,9 +392,9 @@ export class GitHubAdapter {
   }
 
   /** Read the complete Git tree for a trusted repository ref. Truncation is invalid for governance. */
-  async getRepositoryTree(ref: string): Promise<RepositoryTree> {
+  async getRepositoryTree(ref: string, deadline?: ChangeExecutionDeadline): Promise<RepositoryTree> {
     assertRepositoryRef(ref);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(
         context,
@@ -365,17 +402,19 @@ export class GitHubAdapter {
         "GET",
       ),
       "repository.governance.tree",
+      deadline,
     );
     return parseRepositoryTree(result, "repository.governance.tree");
   }
 
   /** Read and decode one blob selected from the trusted repository tree. */
-  async getRepositoryBlob(sha: string): Promise<string> {
+  async getRepositoryBlob(sha: string, deadline?: ChangeExecutionDeadline): Promise<string> {
     if (sha.trim().length === 0) throw new ContractViolationError("Repository blob SHA must not be empty.", "sha");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(context, `repos/${context.nameWithOwner}/git/blobs/${encodeURIComponent(sha)}`, "GET"),
       "repository.governance.blob",
+      deadline,
     );
     const record = responseRecord(result, "repository.governance.blob");
     const returnedSha = responseString(record.sha, "sha", "repository.governance.blob");
@@ -416,38 +455,43 @@ export class GitHubAdapter {
     }
   }
 
-  async getIssue(issueNumber: number): Promise<GitHubIssue> {
+  async getIssue(issueNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubIssue> {
     assertIssueNumber(issueNumber, "issue_number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "GET"),
       "issue.read",
+      deadline,
     );
     return parseIssue(result, "issue.read", context.repositoryId, context.hostname);
   }
 
-  async readIssue(issueNumber: number): Promise<GitHubIssue> {
-    return this.getIssue(issueNumber);
+  async readIssue(issueNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubIssue> {
+    return this.getIssue(issueNumber, deadline);
   }
 
-  async getPullRequest(pullRequestNumber: number): Promise<GitHubPullRequest> {
+  async getPullRequest(pullRequestNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubPullRequest> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`, "GET"),
       "pull_request.read",
+      deadline,
     );
     return parsePullRequest(result, "pull_request.read");
   }
 
-  async readPullRequest(pullRequestNumber: number): Promise<GitHubPullRequest> {
-    return this.getPullRequest(pullRequestNumber);
+  async readPullRequest(pullRequestNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubPullRequest> {
+    return this.getPullRequest(pullRequestNumber, deadline);
   }
 
   /** Read bounded top-level conversation comments for one pull request. */
-  async listPullRequestComments(pullRequestNumber: number): Promise<readonly GitHubPullRequestComment[]> {
+  async listPullRequestComments(
+    pullRequestNumber: number,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<readonly GitHubPullRequestComment[]> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(
         context,
@@ -455,15 +499,20 @@ export class GitHubAdapter {
         "GET",
       ),
       "pull_request.comment.read",
+      deadline,
     );
     return parsePullRequestComments(result, "pull_request.comment.read");
   }
 
   /** Create one bounded top-level conversation comment; Core owns admission. */
-  async createPullRequestComment(pullRequestNumber: number, body: string): Promise<GitHubPullRequestComment> {
+  async createPullRequestComment(
+    pullRequestNumber: number,
+    body: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubPullRequestComment> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     assertMutationBody(body, "body");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const args = this.apiArguments(
       context,
       `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments`,
@@ -471,15 +520,18 @@ export class GitHubAdapter {
     );
     appendRawField(args, "body", body);
     return parsePullRequestComment(
-      await this.runApi(args, "pull_request.comment.mutate"),
+      await this.runApi(args, "pull_request.comment.mutate", deadline),
       "pull_request.comment.mutate",
     );
   }
 
   /** Read bounded reviews; provider event names are normalized by this adapter. */
-  async listPullRequestReviews(pullRequestNumber: number): Promise<readonly GitHubPullRequestReview[]> {
+  async listPullRequestReviews(
+    pullRequestNumber: number,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<readonly GitHubPullRequestReview[]> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       this.apiArguments(
         context,
@@ -487,6 +539,7 @@ export class GitHubAdapter {
         "GET",
       ),
       "pull_request.review.read",
+      deadline,
     );
     return parsePullRequestReviews(result, "pull_request.review.read");
   }
@@ -497,11 +550,12 @@ export class GitHubAdapter {
     intent: "approve" | "request-changes" | "comment-only",
     body: string,
     expectedHead?: string,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubPullRequestReview> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     assertMutationBody(body, "body", true);
     const event = intent === "approve" ? "APPROVE" : intent === "request-changes" ? "REQUEST_CHANGES" : "COMMENT";
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const args = this.apiArguments(
       context,
       `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews`,
@@ -510,7 +564,10 @@ export class GitHubAdapter {
     appendRawField(args, "event", event);
     appendRawField(args, "body", body);
     if (expectedHead !== undefined) appendRawField(args, "commit_id", expectedHead);
-    return parsePullRequestReview(await this.runApi(args, "pull_request.review.mutate"), "pull_request.review.mutate");
+    return parsePullRequestReview(
+      await this.runApi(args, "pull_request.review.mutate", deadline),
+      "pull_request.review.mutate",
+    );
   }
 
   /** Execute the fixed provider merge endpoint for one Core-admitted strategy. */
@@ -518,15 +575,16 @@ export class GitHubAdapter {
     pullRequestNumber: number,
     strategy: "merge" | "squash" | "rebase",
     expectedHead?: string,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubPullRequestMergeResponse> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     if (strategy !== "merge" && strategy !== "squash" && strategy !== "rebase")
       throw new ContractViolationError("Merge strategy is invalid.", "strategy");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/merge`, "PUT");
     appendRawField(args, "merge_method", strategy);
     if (expectedHead !== undefined) appendRawField(args, "sha", expectedHead);
-    const record = responseRecord(await this.runApi(args, "pull_request.merge"), "pull_request.merge");
+    const record = responseRecord(await this.runApi(args, "pull_request.merge", deadline), "pull_request.merge");
     const merged = responseBoolean(record.merged, "merged", "pull_request.merge");
     const sha = record.sha === undefined ? undefined : responseString(record.sha, "sha", "pull_request.merge");
     return { merged, ...(sha === undefined ? {} : { sha }) };
@@ -537,13 +595,17 @@ export class GitHubAdapter {
    * evidence. A missing protection endpoint is explicitly non-authoritative;
    * other malformed or failed responses remain errors so merge fails closed.
    */
-  async getPullRequestMergePolicy(pullRequest: GitHubPullRequest): Promise<GitHubPullRequestMergePolicyEvidence> {
+  async getPullRequestMergePolicy(
+    pullRequest: GitHubPullRequest,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubPullRequestMergePolicyEvidence> {
     assertIssueNumber(pullRequest.number, "pull_request.number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const repository = responseRecord(
       await this.runApi(
         this.apiArguments(context, `repos/${context.nameWithOwner}`, "GET"),
         "pull_request.policy.read",
+        deadline,
       ),
       "pull_request.policy.read",
     );
@@ -552,14 +614,18 @@ export class GitHubAdapter {
       this.requestRepositoryApi(
         `branches/${encodeURIComponent(pullRequest.base)}/protection/required_status_checks`,
         "GET",
+        {},
+        deadline,
       ),
       this.requestRepositoryApi(
         `branches/${encodeURIComponent(pullRequest.base)}/protection/required_pull_request_reviews`,
         "GET",
+        {},
+        deadline,
       ),
     ]);
-    const checks = await mergeChecksEvidence(this, pullRequest, requiredChecks);
-    const reviews = await mergeReviewsEvidence(this, pullRequest, requiredReviews);
+    const checks = await mergeChecksEvidence(this, pullRequest, requiredChecks, deadline);
+    const reviews = await mergeReviewsEvidence(this, pullRequest, requiredReviews, deadline);
     return {
       ...(allowedStrategies === undefined ? {} : { allowedStrategies }),
       ...(checks === undefined ? {} : { checks }),
@@ -571,13 +637,14 @@ export class GitHubAdapter {
    * Read and normalize the fixed Issue Operational Observation surface.
    * Semantic template parsing is intentionally not part of this adapter.
    */
-  async observeIssue(issueNumber: number): Promise<GitHubOperationalIssueEvidence> {
+  async observeIssue(issueNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubOperationalIssueEvidence> {
     assertIssueNumber(issueNumber, "issue_number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const baseEndpoint = `issues/${issueNumber}`;
     const result = await this.runApi(
       this.apiArguments(context, `repos/${context.nameWithOwner}/${baseEndpoint}`, "GET"),
       "issue.observe",
+      deadline,
     );
     const base = parseOperationalIssue(result, context, "issue.observe");
     const commentsEndpoint = `issues/${issueNumber}/comments`;
@@ -586,6 +653,7 @@ export class GitHubAdapter {
       "issue.comments",
       (body) => arrayResponse(body, "comments"),
       (entry, path) => parseOperationalComment(entry, path, "conversation"),
+      deadline,
     );
     return {
       ...base,
@@ -595,8 +663,11 @@ export class GitHubAdapter {
   }
 
   /** Compatibility spelling for callers that describe this as a read. */
-  async readOperationalIssue(issueNumber: number): Promise<GitHubOperationalIssueEvidence> {
-    return this.observeIssue(issueNumber);
+  async readOperationalIssue(
+    issueNumber: number,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubOperationalIssueEvidence> {
+    return this.observeIssue(issueNumber, deadline);
   }
 
   /**
@@ -604,13 +675,17 @@ export class GitHubAdapter {
    * expensive collection is bounded and reports its own availability and
    * continuation state.
    */
-  async observePullRequest(pullRequestNumber: number): Promise<GitHubOperationalPullRequestEvidence> {
+  async observePullRequest(
+    pullRequestNumber: number,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubOperationalPullRequestEvidence> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const baseEndpoint = `pulls/${pullRequestNumber}`;
     const result = await this.runApi(
       this.apiArguments(context, `repos/${context.nameWithOwner}/${baseEndpoint}`, "GET"),
       "pull_request.observe",
+      deadline,
     );
     const base = parseOperationalPullRequest(result, context, "pull_request.observe");
     const commentsEndpoint = `issues/${pullRequestNumber}/comments`;
@@ -622,24 +697,28 @@ export class GitHubAdapter {
       "pull_request.comments",
       (body) => arrayResponse(body, "comments"),
       (entry, path) => parseOperationalComment(entry, path, "conversation"),
+      deadline,
     );
     const inlineReviewComments = await this.readOperationalCollection(
       inlineCommentsEndpoint,
       "pull_request.inline_comments",
       (body) => arrayResponse(body, "inline comments"),
       (entry, path) => parseOperationalComment(entry, path, "inline"),
+      deadline,
     );
     const reviews = await this.readOperationalCollection(
       reviewsEndpoint,
       "pull_request.reviews",
       (body) => arrayResponse(body, "reviews"),
       (entry, path) => parseOperationalReview(entry, path),
+      deadline,
     );
     const changedFiles = await this.readOperationalCollection(
       filesEndpoint,
       "pull_request.files",
       (body) => arrayResponse(body, "changed files"),
       (entry, path) => parseOperationalChangedFile(entry, path),
+      deadline,
     );
     const deterministicChangedFiles: GitHubOperationalCollection<GitHubOperationalChangedFile> = {
       ...changedFiles,
@@ -651,10 +730,10 @@ export class GitHubAdapter {
             "pull_request.checks",
             "PR head SHA was not supplied by GitHub.",
           )
-        : await this.readOperationalChecks(base.head.sha);
+        : await this.readOperationalChecks(base.head.sha, deadline);
     const reviewDecisionResult =
       base.reviewDecision === undefined
-        ? await this.readOperationalReviewDecision(context, pullRequestNumber)
+        ? await this.readOperationalReviewDecision(context, pullRequestNumber, deadline)
         : { value: undefined, attempted: false };
     const checksEndpoints =
       base.head.sha === undefined ? [] : [`commits/${base.head.sha}/check-runs`, `commits/${base.head.sha}/status`];
@@ -681,11 +760,17 @@ export class GitHubAdapter {
   }
 
   /** Compatibility spelling for callers that describe this as a read. */
-  async readOperationalPullRequest(pullRequestNumber: number): Promise<GitHubOperationalPullRequestEvidence> {
-    return this.observePullRequest(pullRequestNumber);
+  async readOperationalPullRequest(
+    pullRequestNumber: number,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubOperationalPullRequestEvidence> {
+    return this.observePullRequest(pullRequestNumber, deadline);
   }
 
-  private async readOperationalChecks(headSha: string): Promise<GitHubOperationalCollection<GitHubOperationalCheck>> {
+  private async readOperationalChecks(
+    headSha: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubOperationalCollection<GitHubOperationalCheck>> {
     const runs = await this.readOperationalCollection(
       `commits/${encodeURIComponent(headSha)}/check-runs`,
       "pull_request.check_runs",
@@ -695,6 +780,7 @@ export class GitHubAdapter {
         return arrayResponse(body.check_runs, "check runs");
       },
       (entry, path) => parseOperationalCheck(entry, path, "check-run"),
+      deadline,
     );
     const statuses = await this.readOperationalCollection(
       `commits/${encodeURIComponent(headSha)}/status`,
@@ -705,6 +791,7 @@ export class GitHubAdapter {
         return arrayResponse(body.statuses, "statuses");
       },
       (entry, path) => parseOperationalCheck(entry, path, "status"),
+      deadline,
     );
     const items = [...runs.items, ...statuses.items].sort(compareOperationalChecks);
     const checks: GitHubOperationalCollection<GitHubOperationalCheck> = {
@@ -720,6 +807,7 @@ export class GitHubAdapter {
   private async readOperationalReviewDecision(
     context: RepositoryContext,
     pullRequestNumber: number,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<{ readonly value?: string; readonly attempted: boolean }> {
     const query =
       "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}";
@@ -741,6 +829,8 @@ export class GitHubAdapter {
           `number=${pullRequestNumber}`,
         ],
         "pull_request.review_decision",
+        {},
+        deadline,
       );
     } catch {
       return { attempted: true };
@@ -769,6 +859,7 @@ export class GitHubAdapter {
     operation: string,
     pageBody: (body: unknown) => readonly unknown[],
     parseItem: (value: unknown, path: string) => T,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubOperationalCollection<T>> {
     const items: T[] = [];
     let nextPage: number | undefined = 1;
@@ -778,7 +869,7 @@ export class GitHubAdapter {
       const pageEndpoint = `${endpoint}${endpoint.includes("?") ? "&" : "?"}per_page=${OPERATIONAL_PAGE_SIZE}&page=${requestedPage}`;
       let response: GitHubApiResponse;
       try {
-        response = await this.requestRepositoryApi(pageEndpoint, "GET");
+        response = await this.requestRepositoryApi(pageEndpoint, "GET", {}, deadline);
       } catch {
         return operationalCollectionFailure(operation, items, pages, requestedPage, `${operation} read failed.`);
       }
@@ -887,14 +978,18 @@ export class GitHubAdapter {
    * This is an adapter-owned observation primitive for plan preconditions;
    * callers do not construct GitHub API paths or parse provider responses.
    */
-  async listPullRequests(head: string, base: string): Promise<readonly GitHubPullRequest[]> {
+  async listPullRequests(
+    head: string,
+    base: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<readonly GitHubPullRequest[]> {
     assertPullRequestRef(head, "head");
     assertPullRequestRef(base, "base");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const query =
       `pulls?head=${encodeURIComponent(`${context.owner}:${head}`)}` +
       `&base=${encodeURIComponent(base)}&state=all&per_page=${MAX_PULL_REQUEST_LIST_ITEMS}`;
-    const response = await this.requestRepositoryApi(query, "GET");
+    const response = await this.requestRepositoryApi(query, "GET", {}, deadline);
     if (response.status === 404) return [];
     if (response.status < 200 || response.status >= 300) {
       throw new GitHubApiError("pull_request.list", "GitHub pull request target lookup failed.");
@@ -908,9 +1003,14 @@ export class GitHubAdapter {
   }
 
   /** Read one explicit branch ref; a missing ref is represented as undefined. */
-  async findBranch(branch: string): Promise<GitHubBranch | undefined> {
+  async findBranch(branch: string, deadline?: ChangeExecutionDeadline): Promise<GitHubBranch | undefined> {
     assertPullRequestRef(branch, "branch");
-    const response = await this.requestRepositoryApi(`git/ref/heads/${encodeURIComponent(branch)}`, "GET");
+    const response = await this.requestRepositoryApi(
+      `git/ref/heads/${encodeURIComponent(branch)}`,
+      "GET",
+      {},
+      deadline,
+    );
     if (response.status === 404) return undefined;
     if (response.status < 200 || response.status >= 300) {
       throw new GitHubApiError("branch.read", "GitHub branch ref lookup failed.");
@@ -919,66 +1019,79 @@ export class GitHubAdapter {
   }
 
   /** Create exactly the branch and source refs supplied by a trusted Core plan. */
-  async createBranch(branch: string, source: string): Promise<GitHubBranch> {
+  async createBranch(branch: string, source: string, deadline?: ChangeExecutionDeadline): Promise<GitHubBranch> {
     assertPullRequestRef(branch, "branch");
     assertPullRequestRef(source, "source");
-    const base = await this.findBranch(source);
+    const base = await this.findBranch(source, deadline);
     if (base === undefined) throw new GitHubApiError("branch.create", "GitHub branch source ref was not found.");
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/git/refs`, "POST");
     appendRawField(args, "ref", `refs/heads/${branch}`);
     appendRawField(args, "sha", base.sha);
-    const result = await this.runApi(args, "branch.create");
+    const result = await this.runApi(args, "branch.create", deadline);
     return parseBranch(result, branch, "branch.create");
   }
 
-  async createIssue(artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue> {
+  async createIssue(
+    artifact: ValidatedRenderedIssueArtifact,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubIssue> {
     assertValidatedRenderedIssueArtifact(artifact);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues`, "POST");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
     appendRawFields(args, "labels[]", artifact.labels);
     appendRawFields(args, "assignees[]", artifact.assignees);
-    const result = await this.runApi(args, "issue.create");
+    const result = await this.runApi(args, "issue.create", deadline);
     return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
   }
 
   /** Apply a Core-projected v2 Semantic Issue through the trusted adapter seam. */
-  async createSemanticIssue(artifact: ValidatedSemanticIssueArtifact): Promise<GitHubIssue> {
+  async createSemanticIssue(
+    artifact: ValidatedSemanticIssueArtifact,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubIssue> {
     assertTrustedSemanticIssueArtifact(artifact);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     assertArtifactContractRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues`, "POST");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
     appendRawFields(args, "labels[]", artifact.labels);
     appendRawFields(args, "assignees[]", artifact.assignees);
-    const result = await this.runApi(args, "issue.create");
+    const result = await this.runApi(args, "issue.create", deadline);
     return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
   }
 
-  async updateIssue(issueNumber: number, artifact: ValidatedRenderedIssueArtifact): Promise<GitHubIssue> {
+  async updateIssue(
+    issueNumber: number,
+    artifact: ValidatedRenderedIssueArtifact,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubIssue> {
     assertIssueNumber(issueNumber, "issue_number");
     assertValidatedRenderedIssueArtifact(artifact);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
     // GitHub's issues API also accepts pull request numbers; read first so a
     // pull request is never silently overwritten with Issue Form content.
-    await this.getIssue(issueNumber);
+    await this.getIssue(issueNumber, deadline);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "PATCH");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
     appendRawFields(args, "labels[]", artifact.labels);
     appendRawFields(args, "assignees[]", artifact.assignees);
-    const result = await this.runApi(args, "issue.update");
+    const result = await this.runApi(args, "issue.update", deadline);
     return parseIssue(result, "issue.update", context.repositoryId, context.hostname);
   }
 
-  async createPullRequest(artifact: ValidatedRenderedPullRequestArtifact): Promise<GitHubPullRequest> {
+  async createPullRequest(
+    artifact: ValidatedRenderedPullRequestArtifact,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubPullRequest> {
     assertValidatedRenderedPullRequestArtifact(artifact);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
     appendRawField(args, "title", artifact.title);
@@ -987,14 +1100,17 @@ export class GitHubAdapter {
     appendRawField(args, "base", artifact.base);
     appendBooleanField(args, "draft", artifact.draft);
     appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
-    const result = await this.runApi(args, "pull_request.create");
+    const result = await this.runApi(args, "pull_request.create", deadline);
     return parsePullRequest(result, "pull_request.create");
   }
 
   /** Apply a Core-projected v2 Semantic PR through the existing GitHub seam. */
-  async createSemanticPullRequest(artifact: ValidatedSemanticPullRequestArtifact): Promise<GitHubPullRequest> {
+  async createSemanticPullRequest(
+    artifact: ValidatedSemanticPullRequestArtifact,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubPullRequest> {
     assertTrustedSemanticPullRequestArtifact(artifact);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     assertArtifactContractRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
     appendRawField(args, "title", artifact.title);
@@ -1003,7 +1119,7 @@ export class GitHubAdapter {
     appendRawField(args, "base", artifact.base);
     appendBooleanField(args, "draft", artifact.draft);
     appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
-    const result = await this.runApi(args, "pull_request.create");
+    const result = await this.runApi(args, "pull_request.create", deadline);
     const pullRequest = parsePullRequest(result, "pull_request.create");
 
     // The pull-request create endpoint does not accept labels or assignees.
@@ -1017,7 +1133,7 @@ export class GitHubAdapter {
       );
       appendRawFields(metadataArgs, "labels[]", artifact.labels);
       appendRawFields(metadataArgs, "assignees[]", artifact.assignees);
-      await this.runApi(metadataArgs, "pull_request.update");
+      await this.runApi(metadataArgs, "pull_request.update", deadline);
     }
     return pullRequest;
   }
@@ -1025,40 +1141,46 @@ export class GitHubAdapter {
   async updatePullRequest(
     pullRequestNumber: number,
     artifact: ValidatedRenderedPullRequestArtifact,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubPullRequest> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     assertValidatedRenderedPullRequestArtifact(artifact);
-    const context = await this.resolveRepositoryContext();
+    const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
     const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`, "PATCH");
     appendRawField(args, "title", artifact.title);
     appendRawField(args, "body", artifact.body);
     appendRawField(args, "base", artifact.base);
     appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
-    const result = await this.runApi(args, "pull_request.update");
+    const result = await this.runApi(args, "pull_request.update", deadline);
     return parsePullRequest(result, "pull_request.update");
   }
 
-  private async resolveRepositoryContextOnce(): Promise<RepositoryContext> {
-    await this.ensureGhAvailable();
+  private async resolveRepositoryContextOnce(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
+    await this.ensureGhAvailable(deadline);
     const override = this.repositoryOverride();
-    if (override !== undefined) {
-      await this.ensureAuthenticated(override.hostname);
-      return this.resolveRepositoryView(`${override.hostname}/${override.nameWithOwner}`, override.hostname);
-    }
-
-    await this.ensureAuthenticated(this.normalizedHostname());
-    return this.resolveRepositoryView(undefined, this.normalizedHostname() ?? DEFAULT_HOSTNAME);
+    const hostname = override?.hostname ?? this.normalizedHostname();
+    await this.ensureAuthenticated(hostname, deadline);
+    const repositoryArgument = override === undefined ? undefined : `${override.hostname}/${override.nameWithOwner}`;
+    const context = await this.resolveRepositoryView(repositoryArgument, hostname ?? DEFAULT_HOSTNAME, deadline);
+    this.contextValue = context;
+    return context;
   }
 
   /** Resolve the host-scoped REST repository database identity for both local and explicit targets. */
   private async resolveRepositoryView(
     repositoryArgument: string | undefined,
     fallbackHostname: string,
+    deadline?: ChangeExecutionDeadline,
   ): Promise<RepositoryContext> {
     let metadata: RepositoryContext;
     if (repositoryArgument === undefined) {
-      const result = await this.runCommand(["repo", "view", "--json", "nameWithOwner,url"], "repository.resolve");
+      const result = await this.runCommand(
+        ["repo", "view", "--json", "nameWithOwner,url"],
+        "repository.resolve",
+        {},
+        deadline,
+      );
       if (result.exitCode !== 0) {
         if (UNAUTHENTICATED_MESSAGE_PATTERN.test(result.stderr)) {
           throw new GhUnauthenticatedError(fallbackHostname, summarize(result.stderr));
@@ -1096,6 +1218,8 @@ export class GitHubAdapter {
     const identityResult = await this.runCommand(
       ["api", `repos/${metadata.nameWithOwner}`, "--hostname", metadata.hostname, "--method", "GET", "--jq", ".id"],
       "repository.resolve",
+      {},
+      deadline,
     );
     if (identityResult.exitCode !== 0) {
       if (UNAUTHENTICATED_MESSAGE_PATTERN.test(identityResult.stderr)) {
@@ -1138,51 +1262,70 @@ export class GitHubAdapter {
     return value;
   }
 
-  private async ensureGhAvailable(): Promise<void> {
-    if (this.availablePromise === undefined) {
-      const pending = this.ensureGhAvailableOnce();
-      this.availablePromise = pending;
-      pending.catch(() => {
-        if (this.availablePromise === pending) this.availablePromise = undefined;
-      });
+  private async ensureGhAvailable(deadline?: ChangeExecutionDeadline): Promise<void> {
+    if (this.ghAvailable) return;
+    if (deadline === undefined) {
+      if (this.availablePromise === undefined) {
+        const pending = this.ensureGhAvailableOnce(undefined);
+        this.availablePromise = pending;
+        pending.catch(() => {
+          if (this.availablePromise === pending) this.availablePromise = undefined;
+        });
+      }
+      return this.availablePromise;
     }
-    return this.availablePromise;
+    // A deadline-bound caller with no completed availability evidence must
+    // never join an in-flight check started by another (possibly unbounded) caller.
+    return this.ensureGhAvailableOnce(deadline);
   }
 
-  private async ensureGhAvailableOnce(): Promise<void> {
-    const result = await this.runCommand(["--version"], "gh.version");
+  private async ensureGhAvailableOnce(deadline?: ChangeExecutionDeadline): Promise<void> {
+    const result = await this.runCommand(["--version"], "gh.version", {}, deadline);
     if (result.exitCode !== 0) {
       throw new GhNotInstalledError(this.executable);
     }
+    this.ghAvailable = true;
   }
 
-  private async ensureAuthenticated(hostname: string | undefined): Promise<void> {
+  private async ensureAuthenticated(hostname: string | undefined, deadline?: ChangeExecutionDeadline): Promise<void> {
     if (this.authenticatedHostnames.has(hostname)) return;
-    let pending = this.authenticationPromises.get(hostname);
-    if (pending === undefined) {
-      pending = this.ensureAuthenticatedOnce(hostname);
-      this.authenticationPromises.set(hostname, pending);
-      pending
-        .catch(() => undefined)
-        .finally(() => {
-          this.authenticationPromises.delete(hostname);
-        });
+    if (deadline === undefined) {
+      let pending = this.authenticationPromises.get(hostname);
+      if (pending === undefined) {
+        pending = this.ensureAuthenticatedOnce(hostname, undefined);
+        this.authenticationPromises.set(hostname, pending);
+        pending
+          .catch(() => undefined)
+          .finally(() => {
+            this.authenticationPromises.delete(hostname);
+          });
+      }
+      return pending;
     }
-    return pending;
+    // A deadline-bound caller for a not-yet-authenticated host must never join
+    // an in-flight promise keyed only by hostname from another caller.
+    return this.ensureAuthenticatedOnce(hostname, deadline);
   }
 
-  private async ensureAuthenticatedOnce(hostname: string | undefined): Promise<void> {
+  private async ensureAuthenticatedOnce(
+    hostname: string | undefined,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<void> {
     const args = ["auth", "status"];
     if (hostname !== undefined) args.push("--hostname", hostname);
-    const result = await this.runCommand(args, "auth.status");
+    const result = await this.runCommand(args, "auth.status", {}, deadline);
     if (result.exitCode !== 0) {
       throw new GhUnauthenticatedError(hostname, summarize(result.stderr));
     }
     this.authenticatedHostnames.add(hostname);
   }
 
-  private async runApi(args: readonly string[], operation: string): Promise<unknown> {
-    const result = await this.runCommand(args, operation);
+  private async runApi(
+    args: readonly string[],
+    operation: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<unknown> {
+    const result = await this.runCommand(args, operation, {}, deadline);
     if (result.exitCode !== 0) {
       throw new GitHubApiError(operation, `GitHub API request failed during ${operation}.`, {
         exitCode: result.exitCode,
@@ -1196,8 +1339,9 @@ export class GitHubAdapter {
     args: readonly string[],
     operation: string,
     transportOptions: Pick<GhTransportOptions, "binaryStdout"> = {},
+    deadline?: ChangeExecutionDeadline,
   ): Promise<GhCommandResult> {
-    const timeoutMs = this.timeoutsMs[operationClass(operation)];
+    const timeoutMs = effectiveTimeoutMs(this.timeoutsMs[operationClass(operation)], operation, deadline);
     try {
       return await this.transport.run(args, {
         cwd: this.cwd,
@@ -2190,6 +2334,7 @@ async function mergeChecksEvidence(
   adapter: GitHubAdapter,
   pullRequest: GitHubPullRequest,
   requiredResponse: GitHubApiResponse,
+  deadline?: ChangeExecutionDeadline,
 ): Promise<GitHubPullRequestMergePolicyEvidence["checks"]> {
   if (requiredResponse.status === 404) return undefined;
   if (requiredResponse.status < 200 || requiredResponse.status >= 300)
@@ -2198,6 +2343,8 @@ async function mergeChecksEvidence(
   const statusResponse = await adapter.requestRepositoryApi(
     `commits/${encodeURIComponent(pullRequest.headSha ?? pullRequest.head)}/status`,
     "GET",
+    {},
+    deadline,
   );
   if (statusResponse.status < 200 || statusResponse.status >= 300)
     throw new GitHubApiError("pull_request.policy.read", "GitHub pull-request status evidence could not be read.");
@@ -2221,6 +2368,7 @@ async function mergeReviewsEvidence(
   adapter: GitHubAdapter,
   pullRequest: GitHubPullRequest,
   requiredResponse: GitHubApiResponse,
+  deadline?: ChangeExecutionDeadline,
 ): Promise<GitHubPullRequestMergePolicyEvidence["reviews"]> {
   if (requiredResponse.status === 404) return undefined;
   if (requiredResponse.status < 200 || requiredResponse.status >= 300)
@@ -2235,7 +2383,7 @@ async function mergeReviewsEvidence(
     });
   const requiredApprovals = record.required_approving_review_count;
   if (requiredApprovals === 0) return { authoritative: true, satisfied: true, requiredApprovals, approvals: 0 };
-  const reviews = await adapter.listPullRequestReviews(pullRequest.number);
+  const reviews = await adapter.listPullRequestReviews(pullRequest.number, deadline);
   const approvedAuthors = new Set<string>();
   for (const review of reviews) {
     if (review.commitId !== (pullRequest.headSha ?? pullRequest.head) || review.state !== "approved") continue;
