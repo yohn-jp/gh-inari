@@ -244,6 +244,7 @@ export async function runWorkflowCertification({
   currentSourceSha,
   dogfoodEvidenceRetriever = retrieveSelfDogfoodEvidence,
   workflowRunResolver = resolveSelfDogfoodWorkflowRun,
+  candidateEvidenceRetriever = retrieveSelfDogfoodEvidence,
   fetchImpl = globalThis.fetch,
   now = Date.now(),
 } = {}) {
@@ -260,6 +261,8 @@ export async function runWorkflowCertification({
       repositoryName: context.repositoryName,
       environment,
       fetchImpl,
+      now,
+      candidateEvidenceRetriever,
     });
     const dogfoodEvidence = await dogfoodEvidenceRetriever({
       sourceSha: context.sourceSha,

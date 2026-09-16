@@ -7,6 +7,7 @@ import {
   isCertificationWorkflowRunAttempt,
   isCertificationWorkflowRunId,
   selfDogfoodArtifactName,
+  SELF_DOGFOOD_SCENARIOS,
   sha256Tarball,
   validateSelfDogfoodEvidence,
 } from "./certification-evidence.mjs";
@@ -185,6 +186,8 @@ export function verifySelfDogfoodRun(input) {
     throw new Error("workflow tarball digest does not match the recorded digest");
 
   if (input.evidence.result === "passed") {
+    if (input.evidence.scenario !== SELF_DOGFOOD_SCENARIOS.FRESH_CREATE)
+      throw new Error("passed self-dogfood evidence must identify the fresh-create scenario");
     if (input.workerObservation === undefined) throw new Error("passed evidence is missing worker observation");
     validateWorkerObservation(input.workerObservation, input.sourceCommitSha, input.issue);
   }
@@ -195,6 +198,7 @@ export function verifySelfDogfoodRun(input) {
     certificationKind: CERTIFICATION_KIND,
     result: input.evidence.result,
     sourceCommitSha: input.sourceCommitSha,
+    scenario: input.evidence.scenario,
     repository,
     rootIssue: input.issue,
     artifact: {
@@ -220,6 +224,7 @@ function renderSummary(metadata) {
     "",
     `- Result: \`${boundedText(metadata.result)}\``,
     `- Source SHA: \`${boundedText(metadata.sourceCommitSha)}\``,
+    `- Scenario: \`${boundedText(metadata.scenario)}\``,
     `- Repository: \`${boundedText(metadata.repository.owner)}/${boundedText(metadata.repository.name)}\``,
     `- Root Issue: #${String(metadata.rootIssue)}`,
     `- Change: branch \`${boundedText(change.branch)}\`, PR #${String(change.pullRequest)}`,

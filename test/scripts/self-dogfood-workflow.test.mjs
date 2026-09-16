@@ -42,6 +42,7 @@ function evidence() {
     contractVersions: { goldenPath: "1", statusRecovery: "1", skill: "1.3.0" },
     repository: { owner: "yohn-jp", name: "gh-inari" },
     workflow: { runId: "12345", runAttempt: "1" },
+    scenario: "fresh-create",
     rootIssue: 239,
     change: { issue: 239, branch: "feat/239-self-dogfood", pullRequest: 9239 },
     operations: appendSelfDogfoodOperation(
@@ -115,7 +116,10 @@ test("workflow verifier binds passed evidence to the exact installed tarball and
     });
     assert.equal(result.passed, true);
     assert.equal(result.metadata.artifact.name, `self-dogfood-golden-path-${sourceCommitSha}-12345-1`);
+    assert.equal(result.metadata.scenario, "fresh-create");
+    assert.equal(result.metadata.artifact.name, `self-dogfood-golden-path-${sourceCommitSha}-12345-1`);
     assert.equal(result.metadata.residualChange.status, "none");
+    assert.match(result.summary, /Scenario: `fresh-create`/u);
     assert.match(result.summary, /Residual disposable Change: none/u);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

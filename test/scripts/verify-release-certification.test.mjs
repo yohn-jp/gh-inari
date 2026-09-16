@@ -85,6 +85,7 @@ function dogfoodEvidence(overrides = {}) {
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
     workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -170,71 +171,79 @@ test("rejects missing or invalid workflow context", () => {
   );
 });
 
-test("resolves the latest successful self-dogfood run for the exact source SHA", async () => {
+test("resolves a retained passing attempt without letting a failed rerun replace it", async () => {
   const requests = [];
+  const candidateAttempts = [];
+  const artifact = (runId, runAttempt, createdAt) => ({
+    id: Number(runId) * 10 + Number(runAttempt),
+    name: selfDogfoodArtifactName(SOURCE_SHA, runId, runAttempt),
+    expired: false,
+    created_at: createdAt,
+    expires_at: "2026-03-01T00:00:00Z",
+    workflow_run: { id: Number(runId), run_attempt: Number(runAttempt), head_sha: SOURCE_SHA },
+  });
   const resolved = await resolveSelfDogfoodWorkflowRun({
     sourceSha: SOURCE_SHA,
     environment: { GITHUB_API_URL: "https://api.example.test", GITHUB_TOKEN: "bounded-token" },
     fetchImpl: async (url, init) => {
       requests.push({ url, init });
       return jsonResponse({
-        workflow_runs: [
-          {
-            id: 4101,
-            run_attempt: 1,
-            head_sha: SOURCE_SHA,
-            conclusion: "success",
-            created_at: "2025-12-31T00:00:00Z",
-          },
-          {
-            id: 4103,
-            run_attempt: 1,
-            head_sha: SOURCE_SHA,
-            conclusion: "failure",
-            created_at: "2025-12-31T00:02:00Z",
-          },
-          {
-            id: 4102,
-            run_attempt: 2,
-            head_sha: SOURCE_SHA,
-            conclusion: "success",
-            created_at: "2025-12-31T00:01:00Z",
-          },
+        artifacts: [
+          artifact("4101", "1", "2025-12-31T00:00:00Z"),
+          artifact("4101", "2", "2025-12-31T00:02:00Z"),
+          artifact("4102", "1", "2025-12-31T00:01:00Z"),
         ],
       });
     },
+    now: Date.parse("2026-01-01T00:00:00Z"),
+    candidateEvidenceRetriever: async ({ workflowRunId, workflowRunAttempt }) => {
+      candidateAttempts.push({ workflowRunId, workflowRunAttempt });
+      return dogfoodEvidence({
+        result: workflowRunId === "4101" && workflowRunAttempt === "1" ? "passed" : "blocked",
+        workflow: { runId: workflowRunId, runAttempt: workflowRunAttempt },
+      });
+    },
   });
-  assert.deepEqual(resolved, { workflowRunId: "4102", workflowRunAttempt: "2" });
+  assert.deepEqual(resolved, { workflowRunId: "4101", workflowRunAttempt: "1" });
+  assert.deepEqual(candidateAttempts, [
+    { workflowRunId: "4101", workflowRunAttempt: "2" },
+    { workflowRunId: "4102", workflowRunAttempt: "1" },
+    { workflowRunId: "4101", workflowRunAttempt: "1" },
+  ]);
   assert.equal(requests.length, 1);
-  assert.match(
-    requests[0].url,
-    new RegExp(
-      `repos/yohn-jp/gh-inari/actions/workflows/self-dogfood-certification\.yml/runs\\?head_sha=${SOURCE_SHA}&per_page=100$`,
-    ),
-  );
+  assert.match(requests[0].url, /repos\/yohn-jp\/gh-inari\/actions\/artifacts\?per_page=100$/u);
   assert.equal(requests[0].init.headers.authorization, "Bearer bounded-token");
 });
 
-test("fails closed when the self-dogfood workflow run response has no usable success", async () => {
+test("fails closed when retained self-dogfood artifacts have no passing evidence", async () => {
   const base = {
     sourceSha: SOURCE_SHA,
     environment: { GITHUB_API_URL: "https://api.example.test" },
+    now: Date.parse("2026-01-01T00:00:00Z"),
   };
   await assert.rejects(
-    resolveSelfDogfoodWorkflowRun({ ...base, fetchImpl: async () => jsonResponse({ workflow_runs: [] }) }),
-    /no successful self-dogfood workflow run/u,
+    resolveSelfDogfoodWorkflowRun({ ...base, fetchImpl: async () => jsonResponse({ artifacts: [] }) }),
+    /no retained self-dogfood artifact/u,
   );
   await assert.rejects(
     resolveSelfDogfoodWorkflowRun({
       ...base,
       fetchImpl: async () =>
         jsonResponse({
-          workflow_runs: [
-            { id: 4101, run_attempt: 1, head_sha: SOURCE_SHA, conclusion: "success" },
+          artifacts: [
+            {
+              id: 4101,
+              name: selfDogfoodArtifactName(SOURCE_SHA, DOGFOOD_RUN_ID, DOGFOOD_RUN_ATTEMPT),
+              expired: false,
+              created_at: "2025-12-31T00:00:00Z",
+              expires_at: "2026-03-01T00:00:00Z",
+              workflow_run: { id: Number(DOGFOOD_RUN_ID), run_attempt: 1, head_sha: SOURCE_SHA },
+            },
           ],
         }),
+      candidateEvidenceRetriever: async () => dogfoodEvidence({ result: "blocked" }),
     }),
-    /created_at is invalid/u,
+    /no retained passing self-dogfood artifact/u,
   );
 });
 

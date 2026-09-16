@@ -45,6 +45,7 @@ function dogfoodEvidence(overrides = {}) {
     diagnostics: [],
     repository: { owner: "yohn-jp", name: "gh-inari" },
     workflow: { runId: DOGFOOD_RUN_ID, runAttempt: DOGFOOD_RUN_ATTEMPT },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: dogfoodOperations(),
@@ -256,20 +257,27 @@ test("reuses the exact-source dogfood retrieval seam and certifies the complete 
     const result = await runWorkflowCertification({
       environment: environment(directory, crypto.createHash("sha256").update(manifest).digest("hex")),
       currentSourceSha: SOURCE_SHA,
+      now: Date.parse("2026-01-01T00:00:00Z"),
       fetchImpl: async (url, init) => {
         requests.push({ url, init });
         return jsonResponse({
-          workflow_runs: [
+          artifacts: [
             {
-              id: Number(DOGFOOD_RUN_ID),
-              run_attempt: Number(DOGFOOD_RUN_ATTEMPT),
-              head_sha: SOURCE_SHA,
-              conclusion: "success",
+              id: 41011,
+              name: `self-dogfood-golden-path-${SOURCE_SHA}-${DOGFOOD_RUN_ID}-${DOGFOOD_RUN_ATTEMPT}`,
+              expired: false,
               created_at: "2026-01-01T00:00:00Z",
+              expires_at: "2026-03-01T00:00:00Z",
+              workflow_run: {
+                id: Number(DOGFOOD_RUN_ID),
+                run_attempt: Number(DOGFOOD_RUN_ATTEMPT),
+                head_sha: SOURCE_SHA,
+              },
             },
           ],
         });
       },
+      candidateEvidenceRetriever: async () => dogfoodEvidence(),
       dogfoodEvidenceRetriever: async (input) => {
         retrievalInput = input;
         return dogfoodEvidence();
@@ -284,7 +292,7 @@ test("reuses the exact-source dogfood retrieval seam and certifies the complete 
       { workflowRunId: DOGFOOD_RUN_ID, workflowRunAttempt: DOGFOOD_RUN_ATTEMPT },
     );
     assert.equal(requests.length, 1);
-    assert.match(requests[0].url, /actions\/workflows\/self-dogfood-certification\.yml\/runs\?head_sha=/u);
+    assert.match(requests[0].url, /actions\/artifacts\?per_page=100$/u);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

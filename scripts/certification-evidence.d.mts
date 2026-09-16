@@ -16,6 +16,10 @@ export const SELF_DOGFOOD_OPERATION_REQUIREMENTS: readonly {
   readonly operation: string;
   readonly outcomes: readonly string[];
 }[];
+export const SELF_DOGFOOD_RECONCILIATION_RECOVERY_OPERATION_REQUIREMENTS: readonly {
+  readonly operation: string;
+  readonly outcomes: readonly string[];
+}[];
 export const SELF_DOGFOOD_RECOVERY_OPERATION: {
   readonly operation: string;
   readonly outcomes: readonly string[];
@@ -25,11 +29,16 @@ export const SELF_DOGFOOD_OUTCOMES: {
   readonly RETURNED_EXISTING: "returned-existing";
   readonly SUCCESS: "success";
 };
+export const SELF_DOGFOOD_SCENARIOS: {
+  readonly FRESH_CREATE: "fresh-create";
+  readonly RECONCILIATION_RECOVERY: "reconciliation-recovery";
+};
 export const SELF_DOGFOOD_OPERATIONS: {
   readonly OPT_IN: string;
   readonly EXECUTABLE: string;
   readonly SKILL: string;
   readonly GOVERNANCE: string;
+  readonly FRESH_PREFLIGHT: string;
   readonly FIRST_ISSUANCE: string;
   readonly RETURN_EXISTING: string;
   readonly HANDOFF: string;
@@ -83,6 +92,7 @@ export type CertificationDiagnosticCode =
   | "REPOSITORY_MISMATCH"
   | "CERTIFICATION_RUN_MISMATCH"
   | "DOGFOOD_IDENTITY_INVALID"
+  | "DOGFOOD_SCENARIO_INVALID"
   | "DOGFOOD_OPERATION_MISSING"
   | "DOGFOOD_OPERATION_OUTCOME_INVALID"
   | "DOGFOOD_FINAL_STATE_INVALID";
@@ -142,6 +152,7 @@ export interface SelfDogfoodCertificationEvidence extends CertificationEnvelopeB
   readonly certificationKind: "self-dogfood-golden-path";
   readonly repository: CertificationRepositoryIdentity;
   readonly workflow: CertificationWorkflowIdentity;
+  readonly scenario: "fresh-create" | "reconciliation-recovery";
   readonly rootIssue: number;
   readonly change: CertificationChangeIdentity;
   readonly operations: readonly CertificationOperationEvidence[];

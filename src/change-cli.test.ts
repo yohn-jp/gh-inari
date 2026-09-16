@@ -563,7 +563,7 @@ test("caller transport authentication failure is distinct from an unconfigured e
   assert.deepEqual(authResult.output?.error, {
     code: "CHANGE_REMOTE_TRANSPORT_FAILED",
     message: "The GitHub Actions Change transport failed.",
-    details: { operation: "change.issue", reason: "authentication" },
+    details: { operation: "change.issue", reason: "authentication", stage: "run-read" },
   });
 
   const unavailableResult = await capture(

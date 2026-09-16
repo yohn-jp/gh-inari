@@ -29,6 +29,7 @@ import {
   serializeCertificationEvidence,
   SELF_DOGFOOD_OPERATIONS as CERTIFICATION_SELF_DOGFOOD_OPERATIONS,
   SELF_DOGFOOD_OUTCOMES as CERTIFICATION_SELF_DOGFOOD_OUTCOMES,
+  SELF_DOGFOOD_SCENARIOS,
   validateDisposableGovernedIssue,
   validateSelfDogfoodEvidence,
   writeCertificationEvidence,
@@ -127,6 +128,7 @@ export function parseArguments(argv) {
   const options = {
     inari: process.env.INARI_BIN ?? "inari",
     repository: undefined,
+    scenario: SELF_DOGFOOD_SCENARIOS.FRESH_CREATE,
     issue: undefined,
     confirmDisposable: undefined,
     workerCommand: undefined,
@@ -153,6 +155,14 @@ export function parseArguments(argv) {
     }
     if (token === "--repository") {
       options.repository = parseRepository(requireValue(argv, index, token));
+      index += 1;
+      continue;
+    }
+    if (token === "--scenario") {
+      const scenario = requireValue(argv, index, token);
+      if (!Object.values(SELF_DOGFOOD_SCENARIOS).includes(scenario))
+        throw new Error("--scenario must be fresh-create or reconciliation-recovery");
+      options.scenario = scenario;
       index += 1;
       continue;
     }
@@ -203,7 +213,7 @@ export function parseArguments(argv) {
 function usage() {
   return [
     "Usage:",
-    "  INARI_SELF_DOGFOOD=1 node scripts/self-dogfood.mjs --repository owner/name --issue N",
+    "  INARI_SELF_DOGFOOD=1 node scripts/self-dogfood.mjs --repository owner/name --scenario fresh-create --issue N",
     '    --confirm-disposable N --worker-cwd /path/to/clone --worker-command \'["command","arg"]\'',
     "",
     "The Issue number must be explicitly confirmed as disposable. The worker is",
@@ -311,6 +321,49 @@ function outcome(value) {
 
 function publicStatus(value) {
   return outputField(value, ["state"], ["status"], ["projection", "change", "state"], ["projection", "status"]);
+}
+
+/**
+ * Classify the canonical read projection used before fresh issuance. A fresh
+ * fixture is accepted only when Core reports absence and both canonical
+ * candidate collections are explicitly empty. Any observed identity is
+ * classified as reconciliation/recovery evidence and cannot enter the fresh
+ * creation path.
+ */
+export function classifyFreshChangePreflight(value, issue) {
+  const projection = value?.projection;
+  const candidates = projection?.candidates;
+  const change = projection?.change;
+  const branches = candidates?.branches;
+  const pullRequests = candidates?.pullRequests;
+  const fresh =
+    value?.ok === true &&
+    value.issue === issue &&
+    value.status === "absent" &&
+    value.state === "DEFINED" &&
+    projection?.valid === true &&
+    projection.status === "absent" &&
+    Array.isArray(branches) &&
+    branches.length === 0 &&
+    Array.isArray(pullRequests) &&
+    pullRequests.length === 0 &&
+    change?.identity?.rootIssue === issue &&
+    change.state === "DEFINED" &&
+    change.projection === undefined;
+  if (fresh) return { valid: true, scenario: SELF_DOGFOOD_SCENARIOS.FRESH_CREATE };
+
+  const historyObserved =
+    projection?.status !== "absent" ||
+    (Array.isArray(branches) && branches.length > 0) ||
+    (Array.isArray(pullRequests) && pullRequests.length > 0) ||
+    change?.projection !== undefined;
+  return {
+    valid: false,
+    ...(historyObserved ? { scenario: SELF_DOGFOOD_SCENARIOS.RECONCILIATION_RECOVERY } : {}),
+    reason: historyObserved
+      ? "canonical Change history was observed; this fixture is reconciliation/recovery evidence"
+      : "canonical Change absence was not proven by the read projection",
+  };
 }
 
 function authoritativeRecovery(value) {
@@ -472,6 +525,7 @@ function initialEvidence(options, sha) {
       runId: process.env.GITHUB_RUN_ID ?? "",
       runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? "",
     },
+    scenario: options.scenario,
     rootIssue: options.issue,
     change: { issue: options.issue, branch: "unresolved", pullRequest: 0 },
     operations: [],
@@ -511,6 +565,8 @@ function assertPreconditions(options, evidence) {
   if (process.env.INARI_SELF_DOGFOOD !== "1") throw new Error("set INARI_SELF_DOGFOOD=1 to opt into live dogfood");
   if (options.issue === undefined || options.confirmDisposable !== options.issue)
     throw new Error("--confirm-disposable must exactly match the disposable root Issue");
+  if (options.scenario !== SELF_DOGFOOD_SCENARIOS.FRESH_CREATE)
+    throw new Error("reconciliation/recovery certification is a separate scenario from fresh-create");
   if (options.workerCommand === undefined || options.workerCwd === undefined)
     throw new Error("--worker-cwd and --worker-command are required for implementation handoff");
   if (!fs.existsSync(options.workerCwd) || !fs.statSync(options.workerCwd).isDirectory())
@@ -589,6 +645,17 @@ async function runDogfood(options) {
     ]);
     if (!validateDisposableGovernedIssue(issueCheck).valid) throw new Error("disposable Issue marker is invalid");
     recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.GOVERNANCE, SELF_DOGFOOD_OUTCOMES.VERIFIED);
+
+    const freshPreflight = invoke([
+      "change",
+      "show",
+      String(options.issue),
+      "--repository",
+      `${options.repository.owner}/${options.repository.name}`,
+    ]);
+    if (!classifyFreshChangePreflight(freshPreflight, options.issue).valid)
+      throw new Error("fresh fixture preflight did not prove absence of canonical Change history");
+    recordOperation(evidence, SELF_DOGFOOD_OPERATIONS.FRESH_PREFLIGHT, SELF_DOGFOOD_OUTCOMES.VERIFIED);
 
     const firstIssue = invoke([
       "change",
