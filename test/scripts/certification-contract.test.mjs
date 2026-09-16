@@ -47,6 +47,7 @@ function dogfoodEvidence() {
     sourceCommitSha: SOURCE_SHA,
     contractVersions: { ...RELEASE_CERTIFICATION_CONTRACT_VERSIONS },
     repository: { owner: "yohn-jp", name: "gh-inari" },
+    scenario: "fresh-create",
     rootIssue: 405,
     change: { issue: 405, branch: "feat/405-certification", pullRequest: 999 },
     operations: completeOperations(),
@@ -91,7 +92,7 @@ test("canonical operation and version drift is rejected before release compositi
   const packed = roundTrip(packedEvidence());
   const dogfood = roundTrip(dogfoodEvidence());
   const driftedOperations = dogfood.operations.map((entry, index) =>
-    index === 5 ? { ...entry, outcome: "verified" } : entry,
+    index === 6 ? { ...entry, outcome: "verified" } : entry,
   );
   const driftedDogfood = { ...dogfood, operations: driftedOperations };
 
