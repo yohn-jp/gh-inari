@@ -894,6 +894,25 @@ async function actionsApi(argv) {
     );
     return;
   }
+  const exactRunMatch = /^actions\/runs\/(\d+)$/u.exec(relativeEndpoint);
+  if (exactRunMatch !== null && method === "GET") {
+    const runId = Number(exactRunMatch[1]);
+    const run = (Array.isArray(state.runs) ? state.runs : []).find((candidate) => candidate.id === runId);
+    if (run === undefined) throw new Error("Actions run not found");
+    process.stdout.write(`${JSON.stringify(run)}\n`);
+    return;
+  }
+  const exactArtifactMatch = /^actions\/artifacts\/(\d+)$/u.exec(relativeEndpoint);
+  if (exactArtifactMatch !== null && method === "GET") {
+    const artifactId = Number(exactArtifactMatch[1]);
+    const entry = Object.entries(state.artifacts ?? {}).find(([, candidate]) => candidate.id === artifactId);
+    if (entry === undefined) throw new Error("Actions artifact not found");
+    const [correlation, artifact] = entry;
+    process.stdout.write(
+      `${JSON.stringify({ id: artifact.id, name: `inari-change-result-${correlation}`, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } })}\n`,
+    );
+    return;
+  }
   const artifactMatch = /^repos\/yohn-jp\/gh-inari\/actions\/artifacts\/(\d+)\/zip$/u.exec(endpoint);
   if (artifactMatch !== null && method === "GET") {
     const artifact = Object.values(state.artifacts ?? {}).find(
@@ -925,7 +944,8 @@ async function api(argv) {
     endpoint.startsWith("actions/") ||
     endpoint.includes("/actions/workflows/") ||
     endpoint.includes("/actions/artifacts?") ||
-    endpoint.includes("/actions/artifacts/")
+    endpoint.includes("/actions/artifacts/") ||
+    endpoint.includes("/actions/runs/")
   ) {
     await actionsApi(argv);
     return;
