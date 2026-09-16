@@ -675,13 +675,13 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         }
         return result;
       }
-      // Only the positively correlated run may report a missing result
-      // artifact for this request. An unrelated completed run — regardless
-      // of how many other candidates are or are not visible — must never be
-      // interpreted as this request's target.
-      if (correlatedRun !== undefined && correlatedRun.status === "completed" && artifact === undefined) {
-        throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "missing-result-artifact");
-      }
+      // The positively correlated run reaching `completed` does not mean its
+      // result artifact is visible yet (#613): GitHub Actions run completion
+      // and artifact-listing convergence are not atomic. Absence here is an
+      // observation state, not proof of failure, so this falls through to
+      // keep polling for the exact correlated artifact — bounded only by the
+      // same canonical deadline that governs every other observation above,
+      // never by a second timeout/attempt authority of its own.
       if (timeRemaining()) await this.#sleep(this.#pollIntervalMs);
     }
     throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout");
