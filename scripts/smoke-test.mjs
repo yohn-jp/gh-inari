@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   appendCertificationDiagnostic,
@@ -28,6 +29,15 @@ export const CERTIFICATION_ENTRY_COMMANDS = Object.freeze([
   Object.freeze({ name: "canonical preflight", args: ["--diagnose", "--json"] }),
   Object.freeze({ name: "Skill discovery", args: ["skill", "--json"] }),
 ]);
+export const MAX_SECURITY_SMOKE_OUTPUT_BYTES = 64 * 1024;
+export const EXPECTED_FORGED_REQUESTER_REJECTION = Object.freeze({
+  ok: false,
+  error: Object.freeze({
+    code: "CHANGE_ACTIONS_RUNTIME_INVALID",
+    message: "Trusted Change execution failed closed.",
+    details: Object.freeze({ stage: "trusted-execution" }),
+  }),
+});
 
 function isPathInside(directory, candidate) {
   const relativePath = path.relative(path.resolve(directory), path.resolve(candidate));
@@ -55,6 +65,34 @@ function run(command, args, options = {}) {
 
 function invoke(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", timeout: 10_000, ...options });
+}
+
+/**
+ * Assert the outer certification contract for the forged-requester negative
+ * exercise. The worker's non-zero status is expected only with this exact,
+ * bounded sanitized result; any other failure remains a smoke failure.
+ */
+export function validateForgedRequesterSecuritySmoke(result) {
+  if (result?.error !== undefined) fail("forged-requester security smoke failed to start");
+  if (result?.status !== 1) {
+    if (result?.status === 0) fail("forged-requester security smoke unexpectedly accepted the request");
+    fail(`forged-requester security smoke did not complete (status ${String(result?.status)})`);
+  }
+  const output = typeof result?.stdout === "string" ? result.stdout : "";
+  if (Buffer.byteLength(output, "utf8") > MAX_SECURITY_SMOKE_OUTPUT_BYTES)
+    fail("forged-requester security smoke exceeded its bounded output contract");
+  let observed;
+  try {
+    observed = JSON.parse(output.trim());
+  } catch {
+    fail("forged-requester security smoke did not emit a bounded JSON result");
+  }
+  if (!isDeepStrictEqual(observed, EXPECTED_FORGED_REQUESTER_REJECTION)) {
+    const code = observed?.error?.code ?? "missing";
+    const stage = observed?.error?.details?.stage ?? "missing";
+    fail(`forged-requester security smoke observed an unexpected rejection (${String(code)}/${String(stage)})`);
+  }
+  return observed;
 }
 
 function jsonOutput(result, label, expectedStatus = 0) {
@@ -498,6 +536,32 @@ function installControlledGh(certificationRoot) {
   return executable;
 }
 
+function certifyForgedRequesterSecuritySmoke(consumerDirectory, installedPackageDirectory, environment, issue) {
+  const worker = path.join(installedPackageDirectory, "dist", "github", "actions-change-executor.js");
+  const forgedRequest = {
+    version: 1,
+    operation: "issue",
+    issue,
+    requester: "github:forged-requester",
+  };
+  const result = invoke(process.execPath, [worker], {
+    cwd: consumerDirectory,
+    env: {
+      ...environment,
+      GITHUB_ACTIONS: "true",
+      GITHUB_ACTOR: "trusted-runtime",
+      GITHUB_EVENT_NAME: "workflow_dispatch",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_WORKFLOW_REF: "yohn-jp/gh-inari/.github/workflows/inari-change-executor.yml@refs/heads/main",
+      INARI_CHANGE_REQUEST: JSON.stringify(forgedRequest),
+    },
+    maxBuffer: MAX_SECURITY_SMOKE_OUTPUT_BYTES,
+  });
+  const observed = validateForgedRequesterSecuritySmoke(result);
+  console.log(`security smoke passed: trusted executor rejected forged requester (${JSON.stringify(observed)})`);
+  return observed;
+}
+
 function createGoldenPathInputs(certificationRoot) {
   const directory = path.join(certificationRoot, "golden-path-input");
   fs.mkdirSync(directory);
@@ -937,6 +1001,7 @@ function main() {
     );
 
     certifyEntryBoundary(consumerDirectory, installedEnvironment);
+    certifyForgedRequesterSecuritySmoke(consumerDirectory, installedPackageDirectory, installedEnvironment, 415);
     console.log("executing the complete Golden Path through the installed package and controlled Actions provider...");
     const goldenPathVersions = certifyCompleteGoldenPath(
       consumerDirectory,
