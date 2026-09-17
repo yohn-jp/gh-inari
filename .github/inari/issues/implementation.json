@@ -3,7 +3,7 @@
   "kind": "issue",
   "id": "implementation",
   "name": "Implementation",
-  "description": "One-session execution contract for work derived from one or more source Issues; explicit authorization is required before implementation",
+  "description": "One-session execution contract for work derived from one or more source Issues",
   "title": "impl: ",
   "labels": ["implementation"],
   "sections": [
@@ -12,7 +12,7 @@
       "kind": "input",
       "type": "string",
       "label": "Repository identity",
-      "description": "JSON object containing repositoryHost, repositoryId, and optional owner/name repository locator for this contract",
+      "description": "JSON object containing repositoryHost, repositoryId, and optional owner/name repository locator",
       "required": true,
       "element": "textarea"
     },
@@ -21,7 +21,7 @@
       "kind": "input",
       "type": "string",
       "label": "Source Issues",
-      "description": "One canonical IssueReference JSON object per line; attach this Issue under its immediate source through native parent/sub-issue relationships where supported",
+      "description": "One canonical IssueReference JSON object per line",
       "required": true,
       "element": "textarea"
     },
@@ -129,7 +129,7 @@
       "kind": "input",
       "type": "string",
       "label": "Prohibited operations",
-      "description": "Operations outside the session contract; one per line. Authorization does not expand this boundary",
+      "description": "Operations outside the session contract; one per line",
       "required": false,
       "element": "textarea"
     },
@@ -147,7 +147,7 @@
       "kind": "input",
       "type": "string",
       "label": "Prerequisites",
-      "description": "Dependencies or conditions required before authorization or implementation",
+      "description": "Dependencies or conditions required before implementation",
       "required": false,
       "element": "textarea"
     },
@@ -201,7 +201,7 @@
       "kind": "input",
       "type": "string",
       "label": "Base revision",
-      "description": "Known base commit revision; authorization requires a fixed revision",
+      "description": "Known base commit revision; leave empty when it cannot yet be known",
       "required": false,
       "element": "input"
     },
@@ -210,7 +210,7 @@
       "kind": "input",
       "type": "string",
       "label": "Base freshness",
-      "description": "Provider or workflow freshness evidence used when authorization checks the base",
+      "description": "Provider or workflow freshness input, when known",
       "required": false,
       "element": "textarea"
     },
@@ -228,7 +228,7 @@
       "kind": "input",
       "type": "string",
       "label": "Execution dependencies",
-      "description": "One canonical IssueReference JSON object per line when execution depends on other Issues; provider parent/sub-issue state remains the relationship authority",
+      "description": "One canonical IssueReference JSON object per line when execution depends on other Issues",
       "required": false,
       "element": "textarea"
     }

@@ -3,7 +3,7 @@
   "kind": "issue",
   "id": "bug",
   "name": "Bug",
-  "description": "Problem record for a reproducible defect; keep session-specific execution detail in an Implementation",
+  "description": "Reproducible defect",
   "title": "fix: ",
   "labels": ["bug"],
   "sections": [
@@ -48,7 +48,7 @@
       "kind": "input",
       "type": "string",
       "label": "Acceptance criteria",
-      "description": "Completion criteria, including regression proof where applicable; session-specific implementation evidence belongs in an Implementation",
+      "description": "Completion criteria, including regression proof where applicable",
       "required": true,
       "element": "textarea",
       "defaultValue": "- [ ] "

@@ -3,7 +3,7 @@
   "kind": "issue",
   "id": "architecture",
   "name": "Architecture",
-  "description": "Problem, request, or decision record for boundaries, contracts, or architecture; keep session-specific execution detail in an Implementation",
+  "description": "Change to boundaries, contracts, or architectural decisions",
   "title": "refactor: ",
   "sections": [
     {
@@ -65,7 +65,7 @@
       "kind": "input",
       "type": "string",
       "label": "Migration",
-      "description": "Rollout, migration, or compatibility plan for this decision when needed; do not use it as a one-session execution plan",
+      "description": "Rollout, migration, or compatibility plan when needed",
       "required": false,
       "element": "textarea"
     },
@@ -74,7 +74,7 @@
       "kind": "input",
       "type": "string",
       "label": "Acceptance criteria",
-      "description": "Verifiable decision and contract outcomes; session-specific implementation evidence belongs in a linked Implementation",
+      "description": "Verifiable design and implementation completion criteria",
       "required": true,
       "element": "textarea",
       "defaultValue": "- [ ] "

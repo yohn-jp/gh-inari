@@ -4,11 +4,11 @@
 
 Epic PRs use an `epic/<issue-number>-<slug>` head branch, for example
 `epic/890-runtime-certification`. This is an integration/routing object, not
-an implementation leaf or one-session authorization contract.
+an implementation leaf.
 
 ## Parent Epic / tracking Issue
 
-<!-- The tracking Epic Issue this integration branch belongs to. Use the provider's native parent/sub-issue relationship for child Issues where supported; prose Parent: is compatibility-only. -->
+<!-- The tracking Epic Issue this integration branch belongs to. -->
 
 ## Integration objective / exit criteria
 
@@ -16,7 +16,7 @@ an implementation leaf or one-session authorization contract.
 
 ## Child Issue/PR inventory
 
-<!-- Enumerate child Issues and their PRs targeting this Epic branch. Record native hierarchy such as Epic -> Architecture/Bug/Feature -> Implementation where applicable. -->
+<!-- Enumerate child Issues and their PRs targeting this Epic branch. -->
 
 ## Dependency / ordering notes
 
@@ -32,4 +32,4 @@ None. <!-- If not None, describe cross-child dependencies or required order. -->
 
 ## Implementation boundary
 
-Implementation belongs to child Issue leaves, not this Epic PR. Each Implementation owns one authorized session; do not put its path scope or authorization here.
+Implementation belongs to child leaves, not this Epic PR.

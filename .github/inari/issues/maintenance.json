@@ -3,7 +3,7 @@
   "kind": "issue",
   "id": "maintenance",
   "name": "Maintenance",
-  "description": "Request record for maintenance, dependency updates, or development infrastructure; keep session-specific execution detail in an Implementation",
+  "description": "Maintenance, dependency updates, or development infrastructure",
   "title": "chore: ",
   "sections": [
     {
@@ -29,7 +29,7 @@
       "kind": "input",
       "type": "string",
       "label": "Acceptance criteria",
-      "description": "Verifiable maintenance outcomes; session-specific implementation evidence belongs in an Implementation",
+      "description": "Verifiable completion criteria",
       "required": true,
       "element": "textarea",
       "defaultValue": "- [ ] "
@@ -39,7 +39,7 @@
       "kind": "input",
       "type": "string",
       "label": "Constraints",
-      "description": "Rollback, compatibility, or operational constraints when material; session-specific scope and execution detail belong in an Implementation",
+      "description": "Rollback, compatibility, or operational constraints when material",
       "required": false,
       "element": "textarea"
     }

@@ -17,7 +17,7 @@
       "kind": "input",
       "type": "string",
       "label": "Linked issue",
-      "placeholder": "Closes #\n\n<!-- Link the governing Issue. When this PR executes an Implementation, link that Implementation as required by repository policy; the PR does not replace its contract. -->",
+      "placeholder": "Closes #",
       "headingLevel": 2
     },
     {
@@ -25,7 +25,7 @@
       "kind": "input",
       "type": "string",
       "label": "Changes",
-      "placeholder": "<!-- Material delivered and behavioral changes. Session scope and authorization belong in the governing Implementation. -->",
+      "placeholder": "<!-- Material implementation and behavioral changes. -->",
       "headingLevel": 2
     },
     {
