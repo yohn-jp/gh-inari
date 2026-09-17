@@ -148,6 +148,54 @@ test("targeted tests may be empty", () => {
   assert.deepEqual(result.evidence?.targetedTests, []);
 });
 
+test("targeted-test command identity is preserved verbatim: no trim, NFKC, or newline normalization", () => {
+  const paddedCommand = "  pnpm test  ";
+  const padded = tryParseImplementationExecutionEvidence({
+    ...valid(),
+    targetedTests: [{ command: paddedCommand, result: "satisfied" }],
+  });
+  assert.equal(padded.valid, true);
+  assert.equal(padded.evidence?.targetedTests[0]?.command, paddedCommand);
+
+  // NFKC would fold the fullwidth digit "１" (U+FF11) to ASCII "1"; the
+  // evidence must keep the runtime's exact byte sequence instead.
+  const fullwidthCommand = "pnpm test --shard=１/2";
+  const fullwidth = tryParseImplementationExecutionEvidence({
+    ...valid(),
+    targetedTests: [{ command: fullwidthCommand, result: "satisfied" }],
+  });
+  assert.equal(fullwidth.valid, true);
+  assert.equal(fullwidth.evidence?.targetedTests[0]?.command, fullwidthCommand);
+  assert.notEqual(fullwidth.evidence?.targetedTests[0]?.command, "pnpm test --shard=1/2");
+
+  // Trimming/padding differences must remain distinct commands rather than
+  // collapsing onto the same authorized identity.
+  const distinct = tryParseImplementationExecutionEvidence({
+    ...valid(),
+    targetedTests: [
+      { command: "pnpm test", result: "satisfied" },
+      { command: " pnpm test", result: "failed" },
+    ],
+  });
+  assert.equal(distinct.valid, true);
+  assert.deepEqual(
+    distinct.evidence?.targetedTests.map((entry) => entry.command),
+    ["pnpm test", " pnpm test"],
+  );
+});
+
+test("a bare CR or LF inside a targeted-test command is rejected, not silently collapsed to LF", () => {
+  const crlf = tryParseImplementationExecutionEvidence({
+    ...valid(),
+    targetedTests: [{ command: "pnpm test\r\nrm -rf /", result: "satisfied" }],
+  });
+  assert.equal(crlf.valid, false);
+  assert.equal(
+    crlf.violations.some((violation) => violation.path === "$.targetedTests[0].command"),
+    true,
+  );
+});
+
 test("the throwing entry point mirrors the non-throwing result", () => {
   const evidence = parseImplementationExecutionEvidence(valid());
   assert.equal(evidence.branch, "feat/642-evidence");

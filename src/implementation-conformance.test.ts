@@ -205,6 +205,18 @@ function build(contractValue: Record<string, unknown>): {
   };
 }
 
+function noVerificationContract(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return contract({
+    verification: {
+      acceptanceCriteria: ["Every changed path is checked."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: ["The result is deterministic."],
+    },
+    ...overrides,
+  });
+}
+
 function evidence(
   record: ImplementationAuthorizationRecord,
   overrides: Record<string, unknown> = {},
@@ -915,6 +927,39 @@ test("execution evidence: malformed evidence leaves targeted tests unverifiable"
   assert.equal(result.status, "unverifiable");
   assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
   assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID"));
+});
+
+test("execution evidence: unusable supplied evidence forces unverifiable even when the contract requires no targeted tests or checks", () => {
+  const { body: testBody, authorization: record } = build(noVerificationContract());
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, { governedBodyDigest: "a".repeat(64) }),
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.verification.unverifiableTests, []);
+  assert.deepEqual(result.verification.unverifiableChecks, []);
+  assert.ok(
+    result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH"),
+  );
+});
+
+test("execution evidence: malformed supplied evidence forces unverifiable even when the contract requires no targeted tests or checks", () => {
+  const { body: testBody, authorization: record } = build(noVerificationContract());
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: { foo: "bar" },
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID"));
+});
+
+test("execution evidence: absent evidence stays conformant when the contract requires no targeted tests or checks", () => {
+  const { body: testBody, authorization: record } = build(noVerificationContract());
+  const result = tryVerifyImplementationConformance(input(record, testBody, pullRequest()));
+  assert.equal(result.status, "conformant");
+  assert.equal(result.valid, true);
 });
 
 test("execution evidence: Implementation reference mismatch is unverifiable", () => {

@@ -463,6 +463,9 @@ test("impl verify --execution-evidence fails closed through the existing CLI err
     assert.notEqual(verified.exitCode, 0);
     const error = verified.output.error as Record<string, unknown> | undefined;
     assert.equal(error?.code, "INPUT_READ_FAILED");
+    const serialized = JSON.stringify(verified.output);
+    assert.equal(serialized.includes(missingEvidencePath), false);
+    assert.equal(serialized.includes(directory), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

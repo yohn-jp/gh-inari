@@ -858,11 +858,16 @@ function evaluateVerification(
     unverifiableChecks: [] as string[],
     unverifiableTests: [] as string[],
   };
+  // Evidence the caller supplied but that failed to bind (malformed, stale,
+  // or mismatched) must never be silently ignored just because this
+  // contract happens to require no targeted tests or checks: an unusable
+  // supplied evidence value always forces the result unverifiable.
+  const suppliedEvidenceUnusable = executionEvidence.present && !executionEvidence.usable;
   if (requiredChecks.length === 0 && requiredTests.length === 0)
-    return { verification: result, missing: false, unverifiable: false };
+    return { verification: result, missing: false, unverifiable: suppliedEvidenceUnusable };
 
   let missing = false;
-  let unverifiable = false;
+  let unverifiable = suppliedEvidenceUnusable;
 
   // Targeted tests name a test-execution command, not a repository check.
   // The Operational Observation boundary carries no authoritative

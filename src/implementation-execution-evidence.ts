@@ -161,6 +161,34 @@ function text(
   return normalized;
 }
 
+/**
+ * A targeted-test command is an exact invocation identity produced by the
+ * execution runtime, not authored prose. Trim/NFKC/newline canonicalization
+ * would let two distinct invocation strings collapse onto the same identity
+ * (or a byte-identical one drift apart), silently widening or narrowing
+ * which authorized command the evidence satisfies. Only the same control-
+ * character and non-empty checks apply; the value is otherwise verbatim.
+ */
+function commandText(
+  value: unknown,
+  path: string,
+  violations: ImplementationExecutionEvidenceViolation[],
+): string | undefined {
+  if (typeof value !== "string") {
+    addViolation(violations, "IMPLEMENTATION_EXECUTION_EVIDENCE_INVALID", path, "Value must be a string.");
+    return undefined;
+  }
+  if (value.length === 0) {
+    addViolation(violations, "IMPLEMENTATION_EXECUTION_EVIDENCE_INVALID", path, "Value must not be empty.");
+    return undefined;
+  }
+  if (!SAFE_TEXT.test(value)) {
+    addViolation(violations, "IMPLEMENTATION_EXECUTION_EVIDENCE_INVALID", path, "Value contains a control character.");
+    return undefined;
+  }
+  return value;
+}
+
 function normalizeRepository(
   value: unknown,
   path: string,
@@ -257,7 +285,7 @@ function normalizeTargetedTests(
       return;
     }
     unknownProperties(entry, TEST_KEYS, `${path}[${index}]`, violations);
-    const command = text(entry.command, `${path}[${index}].command`, violations);
+    const command = commandText(entry.command, `${path}[${index}].command`, violations);
     const result = entry.result;
     if (result !== "satisfied" && result !== "failed") {
       addViolation(

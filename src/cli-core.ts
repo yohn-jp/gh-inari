@@ -3774,7 +3774,14 @@ async function readJsonValue(value: string | boolean | undefined, optionFlag = "
       }
     } catch (cause: unknown) {
       if (cause instanceof CliError) throw cause;
-      const error = new CliError("INPUT_READ_FAILED", `Cannot read input file "${value}".`, optionFlag);
+      // Execution-evidence input is post-authorization runtime evidence, not
+      // an authored path the caller chose to disclose; the file path itself
+      // must never surface in error output.
+      const message =
+        optionFlag === "--execution-evidence"
+          ? "Cannot read the execution-evidence input file."
+          : `Cannot read input file "${value}".`;
+      const error = new CliError("INPUT_READ_FAILED", message, optionFlag);
       if (cause instanceof Error) error.cause = cause;
       throw error;
     }
