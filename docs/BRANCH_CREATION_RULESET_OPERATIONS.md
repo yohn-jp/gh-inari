@@ -86,9 +86,12 @@ For each stage, an authorized repository administrator:
    the GitHub REST Rulesets API (`POST`/`PUT
 /repos/{owner}/{repo}/rulesets`) or the equivalent repository settings UI,
    using the generated payload as the exact request body.
-3. Confirms the live Ruleset matches the generated payload
-   (`validateChangeBranchCreationRuleset` in `src/branch-creation-ruleset.ts`
-   can check a fetched payload against the required invariants).
+3. Confirms the live Ruleset matches the generated payload by fetching it and
+   calling `validateChangeBranchCreationRuleset(fetched, issuerAppId)` from
+   `src/branch-creation-ruleset.ts` — the same `--issuer-app-id` used to
+   generate the payload. `expectedIssuerAppId` is mandatory: a fetched
+   Ruleset that happens to bypass some other Integration, but is otherwise
+   shaped correctly, must never be read as issuer-only.
 
 This is a repository-administration action. It is intentionally **not**
 routed through the Inari issuer App, an Agent Session, or any other
@@ -96,12 +99,14 @@ delegated capability: `AGENT_CAPABILITY_AUTHORIZATION.md` §11.6 lists
 "Ruleset modification" as non-delegable by ordinary implementation Runtime
 Authorities.
 
-**Do not advance to `active` before #449/#588 exact-source self-dogfood
-certification succeeds against current `main`.** `active` is the only stage
-that can block a live `change issue` branch creation if the issuer identity,
-namespace, or bypass configuration is wrong; `evaluate` first, and only that
-certification evidence, establish that the issuer path is safe to enforce
-against.
+**Do not advance to `evaluate` or `active` before #449/#588 exact-source
+self-dogfood certification succeeds against current `main`.** Only
+`disabled` (define the Ruleset without observing or blocking anything) may
+proceed ahead of that certification. `evaluate` already starts recording
+what the live Ruleset would block, and `active` blocks a live `change issue`
+branch creation if the issuer identity, namespace, or bypass configuration
+is wrong; that certification evidence is what establishes the issuer path is
+safe to observe against, let alone enforce.
 
 ## Rollback / recovery
 
@@ -136,7 +141,7 @@ To roll back:
 2. `PUT` it to the existing Ruleset's update endpoint (or toggle enforcement
    to "Disabled" in the UI).
 3. Confirm the live payload is `disabled` and still passes
-   `validateChangeBranchCreationRuleset`.
+   `validateChangeBranchCreationRuleset(fetched, issuerAppId)`.
 
 Recovery afterward re-enters the staged rollout above from `disabled`; it is
 not a new definition.

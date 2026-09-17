@@ -71,7 +71,7 @@ test("validateChangeBranchCreationRuleset accepts a freshly built payload at eve
 test("validateChangeBranchCreationRuleset rejects a rule type beyond creation", () => {
   const ruleset = buildChangeBranchCreationRuleset({ enforcement: "active", issuerApp });
   const widened = { ...ruleset, rules: [{ type: "creation" }, { type: "pull_request" }] };
-  const result = validateChangeBranchCreationRuleset(widened);
+  const result = validateChangeBranchCreationRuleset(widened, issuerApp.appId);
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((message) => message.includes("creation")));
 });
@@ -82,7 +82,7 @@ test("validateChangeBranchCreationRuleset rejects more than one bypass actor", (
     ...ruleset,
     bypass_actors: [...ruleset.bypass_actors, { actor_type: "OrganizationAdmin", bypass_mode: "always" }],
   };
-  const result = validateChangeBranchCreationRuleset(widened);
+  const result = validateChangeBranchCreationRuleset(widened, issuerApp.appId);
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((message) => message.includes("bypass_actors")));
 });
@@ -93,7 +93,7 @@ test("validateChangeBranchCreationRuleset rejects a namespace broader than the c
     ...ruleset,
     conditions: { ref_name: { include: ["refs/heads/**"], exclude: ruleset.conditions.ref_name.exclude } },
   };
-  const result = validateChangeBranchCreationRuleset(widened);
+  const result = validateChangeBranchCreationRuleset(widened, issuerApp.appId);
   assert.equal(result.valid, false);
 });
 
@@ -102,6 +102,29 @@ test("validateChangeBranchCreationRuleset rejects an unexpected issuer App ID", 
   const result = validateChangeBranchCreationRuleset(ruleset, "999999");
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((message) => message.includes("999999")));
+});
+
+test("validateChangeBranchCreationRuleset requires expectedIssuerAppId and rejects a different Integration App ID", () => {
+  assert.throws(
+    () =>
+      validateChangeBranchCreationRuleset(
+        buildChangeBranchCreationRuleset({ enforcement: "active", issuerApp }),
+        undefined as never,
+      ),
+    TypeError,
+  );
+
+  // A structurally valid Ruleset (creation-only, correct namespace, exactly
+  // one Integration bypass actor) that happens to bypass some OTHER App must
+  // never validate as issuer-only merely because the shape is otherwise
+  // correct: #223 requires the bypass actor to be specifically inari-issuer.
+  const otherAppRuleset = buildChangeBranchCreationRuleset({
+    enforcement: "active",
+    issuerApp: { ...issuerApp, appId: "999999" },
+  });
+  const result = validateChangeBranchCreationRuleset(otherAppRuleset, issuerApp.appId);
+  assert.equal(result.valid, false);
+  assert.ok(result.violations.some((message) => message.includes(issuerApp.appId)));
 });
 
 test("planRulesetRolloutStage advances one stage at a time and is idempotent at active", () => {

@@ -141,16 +141,23 @@ function sameStringSet(actual: unknown, expected: readonly string[]): boolean {
  * Validate an arbitrary object against the exact invariants #223 requires:
  * scoped to the governed namespace, `creation` only (so ordinary pushes to
  * an already-issued branch are unaffected), exactly one bypass actor and it
- * is the issuer App, and a supported staged enforcement value.
+ * is specifically the issuer App identified by `expectedIssuerAppId`, and a
+ * supported staged enforcement value.
  *
- * When `expectedIssuerAppId` is supplied, the bypass actor must match it
- * exactly; otherwise any single `Integration` bypass actor is accepted as
- * "issuer-only", since the exact App ID is deployment configuration.
+ * `expectedIssuerAppId` is mandatory: without binding to a specific App ID,
+ * a live Ruleset that bypasses some other Integration would validate as
+ * `valid`, which defeats the #223 requirement that only the `inari-issuer`
+ * Principal bypasses creation. Callers that only need a structural check
+ * unrelated to any live payload still pass the issuer App ID they built the
+ * candidate payload with.
  */
 export function validateChangeBranchCreationRuleset(
   raw: unknown,
-  expectedIssuerAppId?: string,
+  expectedIssuerAppId: string,
 ): RulesetValidationResult {
+  if (typeof expectedIssuerAppId !== "string" || !DECIMAL_ID.test(expectedIssuerAppId)) {
+    throw new TypeError("expectedIssuerAppId must be a decimal App ID string.");
+  }
   const violations: string[] = [];
   if (typeof raw !== "object" || raw === null) {
     return { valid: false, violations: ["Ruleset payload must be an object."] };
@@ -189,7 +196,7 @@ export function validateChangeBranchCreationRuleset(
     if (actor.bypass_mode !== "always") violations.push('bypass_actors[0].bypass_mode must be "always".');
     if (typeof actor.actor_id !== "number" || !Number.isInteger(actor.actor_id) || actor.actor_id <= 0) {
       violations.push("bypass_actors[0].actor_id must be a positive integer App ID.");
-    } else if (expectedIssuerAppId !== undefined && String(actor.actor_id) !== expectedIssuerAppId) {
+    } else if (String(actor.actor_id) !== expectedIssuerAppId) {
       violations.push(`bypass_actors[0].actor_id must equal the issuer App ID ${expectedIssuerAppId}.`);
     }
   }
