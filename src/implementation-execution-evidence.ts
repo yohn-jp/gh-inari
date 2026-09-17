@@ -139,7 +139,7 @@ function unknownProperties(
   }
 }
 
-/** Canonicalization mirrors the text primitive already used by authorization/contract parsing. */
+/** Canonicalization retained only for repository identities that intentionally share authorization semantics. */
 function text(
   value: unknown,
   path: string,
@@ -162,14 +162,13 @@ function text(
 }
 
 /**
- * A targeted-test command is an exact invocation identity produced by the
- * execution runtime, not authored prose. Trim/NFKC/newline canonicalization
- * would let two distinct invocation strings collapse onto the same identity
- * (or a byte-identical one drift apart), silently widening or narrowing
- * which authorized command the evidence satisfies. Only the same control-
- * character and non-empty checks apply; the value is otherwise verbatim.
+ * Runtime/provider evidence identities are exact values, not authored prose.
+ * Trimming, Unicode compatibility normalization, or newline rewriting would
+ * silently collapse distinct evidence before authorization/PR binding. Keep
+ * the original string byte-for-byte while enforcing only the shared safety
+ * and non-empty boundary; field-specific syntax checks remain separate.
  */
-function commandText(
+function identityText(
   value: unknown,
   path: string,
   violations: ImplementationExecutionEvidenceViolation[],
@@ -240,9 +239,9 @@ function normalizeBase(
     return undefined;
   }
   unknownProperties(value, BASE_KEYS, path, violations);
-  const branch = text(value.branch, `${path}.branch`, violations);
-  const revision = text(value.revision, `${path}.revision`, violations);
-  const freshness = text(value.freshness, `${path}.freshness`, violations);
+  const branch = identityText(value.branch, `${path}.branch`, violations);
+  const revision = identityText(value.revision, `${path}.revision`, violations);
+  const freshness = identityText(value.freshness, `${path}.freshness`, violations);
   if (branch !== undefined && !BRANCH_PATTERN.test(branch))
     addViolation(violations, "IMPLEMENTATION_EXECUTION_EVIDENCE_INVALID", `${path}.branch`, "Base branch is invalid.");
   if (branch === undefined || revision === undefined || freshness === undefined) return undefined;
@@ -285,7 +284,7 @@ function normalizeTargetedTests(
       return;
     }
     unknownProperties(entry, TEST_KEYS, `${path}[${index}]`, violations);
-    const command = commandText(entry.command, `${path}[${index}].command`, violations);
+    const command = identityText(entry.command, `${path}[${index}].command`, violations);
     const result = entry.result;
     if (result !== "satisfied" && result !== "failed") {
       addViolation(
@@ -347,7 +346,7 @@ export function tryParseImplementationExecutionEvidence(input: unknown): Impleme
       "Implementation reference is invalid.",
     );
   const repository = normalizeRepository(input.repository, "$.repository", violations);
-  const governedBodyDigest = text(input.governedBodyDigest, "$.governedBodyDigest", violations);
+  const governedBodyDigest = identityText(input.governedBodyDigest, "$.governedBodyDigest", violations);
   if (governedBodyDigest !== undefined && !SHA256_PATTERN.test(governedBodyDigest))
     addViolation(
       violations,
@@ -356,10 +355,10 @@ export function tryParseImplementationExecutionEvidence(input: unknown): Impleme
       "Body digest must be lowercase SHA-256 hex.",
     );
   const base = normalizeBase(input.base, "$.base", violations);
-  const branch = text(input.branch, "$.branch", violations);
+  const branch = identityText(input.branch, "$.branch", violations);
   if (branch !== undefined && !BRANCH_PATTERN.test(branch))
     addViolation(violations, "IMPLEMENTATION_EXECUTION_EVIDENCE_INVALID", "$.branch", "Branch is invalid.");
-  const headRevision = text(input.headRevision, "$.headRevision", violations);
+  const headRevision = identityText(input.headRevision, "$.headRevision", violations);
   const targetedTests = normalizeTargetedTests(input.targetedTests, "$.targetedTests", violations);
   if (
     violations.length > 0 ||
