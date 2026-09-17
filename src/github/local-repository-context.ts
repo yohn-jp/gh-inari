@@ -45,7 +45,14 @@ function isValidRepositorySegment(value: string): boolean {
   return /^[A-Za-z0-9_.-]+$/u.test(value);
 }
 
-function buildRepositoryContext(hostname: string, owner: string, name: string, url?: string): RepositoryContext {
+/**
+ * Never accepts a caller-supplied `url`: an explicit override or a local Git
+ * remote can carry HTTPS userinfo credentials (`https://token:secret@host/...`),
+ * and echoing that text into `RepositoryContext.url` would leak it into any
+ * consumer that logs or serializes the context. The URL is always
+ * canonically derived from the validated, credential-free identity fields.
+ */
+function buildRepositoryContext(hostname: string, owner: string, name: string): RepositoryContext {
   const normalizedHostname = hostname.trim().toLowerCase();
   if (!isValidHostname(normalizedHostname)) {
     throw new RepositoryContextResolutionError("invalid-hostname", `Hostname "${hostname}" is invalid.`);
@@ -63,7 +70,7 @@ function buildRepositoryContext(hostname: string, owner: string, name: string, u
     owner,
     name,
     nameWithOwner,
-    url: url ?? `https://${normalizedHostname}/${nameWithOwner}`,
+    url: `https://${normalizedHostname}/${nameWithOwner}`,
   });
 }
 
@@ -80,7 +87,7 @@ export function parseRepositoryLocator(value: string, fallbackHostname: string):
 
   const urlMatch = parseGitRemoteUrl(trimmed);
   if (urlMatch !== undefined) {
-    return buildRepositoryContext(urlMatch.hostname, urlMatch.owner, urlMatch.name, trimmed);
+    return buildRepositoryContext(urlMatch.hostname, urlMatch.owner, urlMatch.name);
   }
 
   const parts = trimmed.split("/");
@@ -178,10 +185,11 @@ export function resolveLocalRepositoryContext(options: ResolveLocalRepositoryCon
   }
   const parsed = parseGitRemoteUrl(remoteUrl);
   if (parsed === undefined) {
+    // Never interpolate the raw remote URL: it may carry HTTPS userinfo credentials.
     throw new RepositoryContextResolutionError(
       "remote-unparseable",
-      `Local Git remote "${remoteName}" (${remoteUrl}) is not a recognizable GitHub repository URL.`,
+      `Local Git remote "${remoteName}" is not a recognizable GitHub repository URL.`,
     );
   }
-  return buildRepositoryContext(parsed.hostname, parsed.owner, parsed.name, remoteUrl);
+  return buildRepositoryContext(parsed.hostname, parsed.owner, parsed.name);
 }

@@ -73,6 +73,14 @@ export class GitHubHttpMalformedResponseError extends GitHubHttpTransportError {
   }
 }
 
+/** Internal-only marker: a bounded body read was cancelled by the request deadline. Never thrown across the public API. */
+class BoundedReadAbortedError extends Error {
+  constructor() {
+    super("GitHub HTTP bounded body read was aborted.");
+    this.name = "BoundedReadAbortedError";
+  }
+}
+
 /** Derive the REST API base URL for a GitHub host; github.com uses the dedicated API host. */
 export function githubRestBaseUrl(hostname: string): string {
   const normalized = normalizedHostname(hostname);
@@ -158,21 +166,45 @@ function boundedRequestSignal(timeoutMs: number): {
   };
 }
 
-async function readBoundedBytes(response: Response, maxResponseBytes: number): Promise<Uint8Array | undefined> {
+/**
+ * `signal` keeps the same request deadline active through body consumption:
+ * headers can arrive well within the bound while the body then stalls
+ * indefinitely, and a provider that does that must still fail closed instead
+ * of hanging forever. `reader.cancel()` (rather than relying on the fetch
+ * implementation to propagate the abort into an already-open body stream)
+ * guarantees the pending `read()` settles even against a fake/mocked
+ * transport in tests.
+ */
+async function readBoundedBytes(
+  response: Response,
+  maxResponseBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array | undefined> {
   if (response.status === 204 || response.body === null) return undefined;
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
+  const onAbort = (): void => {
+    reader.cancel(new Error("GitHub HTTP response body read aborted.")).catch(() => {});
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
   try {
     for (;;) {
       const next = await reader.read();
+      if (signal.aborted) throw new BoundedReadAbortedError();
       if (next.done) break;
       size += next.value.byteLength;
       if (size > maxResponseBytes) throw new GitHubHttpResponseLimitError(maxResponseBytes);
       chunks.push(next.value);
     }
   } finally {
-    reader.releaseLock();
+    signal.removeEventListener("abort", onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // The stream may already be errored/cancelled; the lock is released either way.
+    }
   }
   if (chunks.length === 0) return undefined;
   const bytes = new Uint8Array(size);
@@ -246,15 +278,16 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     const path = boundedPath(request.path);
     const url =
       path.length === 0 ? githubRestBaseUrl(request.hostname) : `${githubRestBaseUrl(request.hostname)}/${path}`;
-    const response = await this.execute(url, request.method, request.body);
-    const bytes = await this.readBody(response);
+    const { response, bytes } = await this.execute(url, request.method, request.body);
     return { status: response.status, body: decodeJsonBody(bytes) };
   }
 
   async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubChangeEffectResponse> {
     const url = githubGraphqlUrl(request.hostname);
-    const response = await this.execute(url, "POST", { query: request.query, variables: request.variables ?? {} });
-    const bytes = await this.readBody(response);
+    const { response, bytes } = await this.execute(url, "POST", {
+      query: request.query,
+      variables: request.variables ?? {},
+    });
     return { status: response.status, body: decodeJsonBody(bytes) };
   }
 
@@ -267,8 +300,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   }): Promise<GitHubHttpBinaryResponse> {
     const path = boundedPath(request.path);
     const url = `${githubRestBaseUrl(request.hostname)}/${path}`;
-    const response = await this.execute(url, request.method, undefined, request.accept);
-    const bytes = await this.readBody(response);
+    const { response, bytes } = await this.execute(url, request.method, undefined, request.accept);
     const contentType = response.headers.get("content-type");
     return {
       status: response.status,
@@ -277,16 +309,23 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     };
   }
 
+  /**
+   * Runs the fetch and the bounded body read under the same deadline/signal:
+   * a provider that returns headers promptly and then stalls the body must
+   * still fail closed within `requestTimeoutMs`, not hang until the process
+   * is killed.
+   */
   private async execute(
     url: string,
     method: GitHubChangeEffectHttpMethod,
     body: unknown,
     accept?: string,
-  ): Promise<Response> {
+  ): Promise<{ readonly response: Response; readonly bytes: Uint8Array | undefined }> {
     const bounded = boundedRequestSignal(this.#requestTimeoutMs);
     try {
+      let response: Response;
       try {
-        return await this.#fetch(url, {
+        response = await this.#fetch(url, {
           method,
           headers: {
             Accept: accept ?? "application/vnd.github+json",
@@ -301,17 +340,19 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
         if (bounded.timedOut) throw new GitHubHttpTimeoutError(this.#requestTimeoutMs);
         throw this.safeTransportFailure(error);
       }
+      let bytes: Uint8Array | undefined;
+      try {
+        bytes = await readBoundedBytes(response, this.#maxResponseBytes, bounded.signal);
+      } catch (error: unknown) {
+        if (bounded.timedOut || error instanceof BoundedReadAbortedError) {
+          throw new GitHubHttpTimeoutError(this.#requestTimeoutMs);
+        }
+        if (error instanceof GitHubHttpResponseLimitError) throw error;
+        throw new GitHubHttpMalformedResponseError();
+      }
+      return { response, bytes };
     } finally {
       bounded.clear();
-    }
-  }
-
-  private async readBody(response: Response): Promise<Uint8Array | undefined> {
-    try {
-      return await readBoundedBytes(response, this.#maxResponseBytes);
-    } catch (error: unknown) {
-      if (error instanceof GitHubHttpResponseLimitError) throw error;
-      throw new GitHubHttpMalformedResponseError();
     }
   }
 

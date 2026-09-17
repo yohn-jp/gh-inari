@@ -122,6 +122,25 @@ test("a request exceeding the bounded timeout rejects with GitHubHttpTimeoutErro
   );
 });
 
+test("headers arriving but the body never completing still rejects with GitHubHttpTimeoutError", async () => {
+  const transport = new GitHubNativeHttpTransport({
+    token: TOKEN,
+    requestTimeoutMs: 20,
+    fetch: async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start() {
+          // Deliberately never enqueue a chunk or close: the body stalls forever.
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  await assert.rejects(
+    transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari" }),
+    (error: unknown) => error instanceof GitHubHttpTimeoutError && error.timeoutMs === 20,
+  );
+});
+
 test("a response exceeding the bounded byte limit rejects with GitHubHttpResponseLimitError", async () => {
   const transport = new GitHubNativeHttpTransport({
     token: TOKEN,

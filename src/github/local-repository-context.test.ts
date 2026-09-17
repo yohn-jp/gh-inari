@@ -119,6 +119,37 @@ test("resolveLocalRepositoryContext fails closed when the remote URL is not a Gi
   );
 });
 
+test("a credential-bearing https override never leaks the credential into the resolved context", () => {
+  const context = parseRepositoryLocator("https://x-access-token:super-secret@github.com/acme/inari.git", "github.com");
+  assert.equal(context.hostname, "github.com");
+  assert.equal(context.nameWithOwner, "acme/inari");
+  assert.equal(context.url, "https://github.com/acme/inari");
+  assert.ok(!context.url.includes("super-secret"));
+});
+
+test("resolveLocalRepositoryContext canonicalizes a credential-bearing https remote and never leaks the credential", () => {
+  const context = resolveLocalRepositoryContext({
+    git: () => "https://x-access-token:super-secret@github.com/acme/inari.git\n",
+  });
+  assert.equal(context.hostname, "github.com");
+  assert.equal(context.nameWithOwner, "acme/inari");
+  assert.equal(context.url, "https://github.com/acme/inari");
+  assert.ok(!context.url.includes("super-secret"));
+});
+
+test("an unparseable credential-bearing remote never leaks the credential into the thrown error", () => {
+  assert.throws(
+    () =>
+      resolveLocalRepositoryContext({ git: () => "https://x-access-token:super-secret@github.com/only-one-segment\n" }),
+    (error: unknown) => {
+      assert.ok(error instanceof RepositoryContextResolutionError);
+      assert.equal(error.reason, "remote-unparseable");
+      assert.ok(!error.message.includes("super-secret"));
+      return true;
+    },
+  );
+});
+
 test("resolveLocalRepositoryContext never invokes `gh`", () => {
   let sawGit = false;
   resolveLocalRepositoryContext({
