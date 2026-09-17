@@ -331,7 +331,7 @@ The initial architecture governs branch birth, not every branch update.
 
 Canonical remote branch creation is issuer-controlled.
 
-Where GitHub Rulesets can enforce `Restrict creations`, the issuer identity should be the allowed or bypass actor for the governed namespace.
+Where GitHub Rulesets can enforce `Restrict creations`, the issuer identity should be the allowed or bypass actor for the governed namespace. `src/branch-creation-ruleset.ts` and [`BRANCH_CREATION_RULESET_OPERATIONS.md`](./BRANCH_CREATION_RULESET_OPERATIONS.md) own the exact Ruleset definition, staged rollout, and rollback/recovery procedure for #223.
 
 ```text
 caller creates arbitrary new remote branch -> denied
