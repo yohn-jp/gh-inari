@@ -150,7 +150,7 @@ The exact contract usage and option applicability are:
 - `impl validate <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl authorize <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl inspect <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
-- `impl verify <number> [--repository <repository>] --from <path> [--capability <id> ...] --pr <number>`
+- `impl verify <number> [--repository <repository>] --from <path> [--capability <id> ...] --pr <number> [--execution-evidence <path>]`
 
 <!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->
 

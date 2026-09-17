@@ -335,3 +335,135 @@ test("impl verify rereads the Implementation and checks the normalized PR eviden
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("impl verify --execution-evidence reaches conformant when authorization, PR, and targeted-test evidence match", async () => {
+  const adapter = new ImplementationCliAdapter(implementationBody());
+  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
+  assert.equal(authorized.exitCode, 0);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-evidence-cli-"));
+  try {
+    const record = (authorized.output.authorization as Record<string, unknown>).record as Record<string, unknown>;
+    const authorizationPath = path.join(directory, "authorization.json");
+    await writeFile(authorizationPath, JSON.stringify(record), "utf8");
+    const evidencePath = path.join(directory, "evidence.json");
+    await writeFile(
+      evidencePath,
+      JSON.stringify({
+        version: 1,
+        kind: "implementation-execution-evidence",
+        implementation: record.implementation,
+        repository: record.repository,
+        governedBodyDigest: record.governedBodyDigest,
+        base: record.base,
+        branch: "feat/573-impl-cli",
+        headRevision: "b".repeat(40),
+        targetedTests: [{ command: "pnpm test", result: "satisfied" }],
+      }),
+      "utf8",
+    );
+    const verified = await invoke(
+      [
+        "impl",
+        "verify",
+        "42",
+        "--from",
+        authorizationPath,
+        "--pr",
+        "90",
+        "--execution-evidence",
+        evidencePath,
+        "--json",
+      ],
+      adapter,
+    );
+    assert.equal(verified.output.status, "conformant");
+    assert.equal(verified.output.valid, true);
+    assert.equal(verified.exitCode, 0);
+    const verification = verified.output.verification as Record<string, unknown>;
+    assert.deepEqual(verification.satisfiedTests, ["pnpm test"]);
+    assert.deepEqual(verification.satisfiedChecks, ["pnpm run verify"]);
+    const serialized = JSON.stringify(verified.output);
+    assert.equal(serialized.includes("PR body is not conformance authority."), false);
+    assert.equal(serialized.includes(evidencePath), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("impl verify --execution-evidence fails closed on a malformed evidence file without leaking its path or contents", async () => {
+  const adapter = new ImplementationCliAdapter(implementationBody());
+  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
+  assert.equal(authorized.exitCode, 0);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-malformed-cli-"));
+  try {
+    const authorizationPath = path.join(directory, "authorization.json");
+    await writeFile(
+      authorizationPath,
+      JSON.stringify((authorized.output.authorization as Record<string, unknown>).record),
+      "utf8",
+    );
+    const evidencePath = path.join(directory, "evidence.json");
+    const secretMarker = "provider-secret-should-not-leak";
+    await writeFile(evidencePath, JSON.stringify({ not: "valid execution evidence", marker: secretMarker }), "utf8");
+    const verified = await invoke(
+      [
+        "impl",
+        "verify",
+        "42",
+        "--from",
+        authorizationPath,
+        "--pr",
+        "90",
+        "--execution-evidence",
+        evidencePath,
+        "--json",
+      ],
+      adapter,
+    );
+    assert.equal(verified.output.valid, false);
+    assert.equal(verified.output.status, "unverifiable");
+    const verification = verified.output.verification as Record<string, unknown>;
+    assert.deepEqual(verification.unverifiableTests, ["pnpm test"]);
+    const serialized = JSON.stringify(verified.output);
+    assert.equal(serialized.includes(evidencePath), false);
+    assert.equal(serialized.includes(secretMarker), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("impl verify --execution-evidence fails closed through the existing CLI error convention when the file is unreadable", async () => {
+  const adapter = new ImplementationCliAdapter(implementationBody());
+  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
+  assert.equal(authorized.exitCode, 0);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-missing-evidence-cli-"));
+  try {
+    const authorizationPath = path.join(directory, "authorization.json");
+    await writeFile(
+      authorizationPath,
+      JSON.stringify((authorized.output.authorization as Record<string, unknown>).record),
+      "utf8",
+    );
+    const missingEvidencePath = path.join(directory, "missing-evidence.json");
+    const verified = await invoke(
+      [
+        "impl",
+        "verify",
+        "42",
+        "--from",
+        authorizationPath,
+        "--pr",
+        "90",
+        "--execution-evidence",
+        missingEvidencePath,
+        "--json",
+      ],
+      adapter,
+    );
+    assert.notEqual(verified.exitCode, 0);
+    const error = verified.output.error as Record<string, unknown> | undefined;
+    assert.equal(error?.code, "INPUT_READ_FAILED");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

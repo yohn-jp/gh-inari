@@ -159,7 +159,8 @@ export type OptionId =
   | "reviewIntent"
   | "mergeStrategy"
   | "retry"
-  | "pullRequest";
+  | "pullRequest"
+  | "executionEvidence";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -248,7 +249,7 @@ const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHe
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
 const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
-const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest"] as const;
+const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest", "executionEvidence"] as const;
 
 const option = (
   id: OptionId,
@@ -622,6 +623,15 @@ export const COMMAND_OPTIONS = {
     "required",
     "Pull-request number whose authoritative diff and verification evidence is checked.",
     "number",
+  ),
+  executionEvidence: option(
+    "executionEvidence",
+    "execution-evidence",
+    ["--execution-evidence"],
+    "string",
+    "required",
+    "JSON file with immutable post-authorization execution evidence (implementation branch and targeted-test results); never mutates GitHub.",
+    "path",
   ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 

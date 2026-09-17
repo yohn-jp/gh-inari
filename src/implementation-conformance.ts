@@ -23,6 +23,11 @@ import {
   type ImplementationScopeProjectionViolationCode,
 } from "./implementation-scope-projection.js";
 import {
+  tryParseImplementationExecutionEvidence,
+  type ImplementationExecutionEvidence,
+} from "./implementation-execution-evidence.js";
+import { issueReferenceKey } from "./contract/issue-reference.js";
+import {
   operationalCheckIdentityKey,
   selectCurrentOperationalChecks,
   tryObserveOperationalPullRequest,
@@ -70,6 +75,8 @@ export interface ImplementationConformanceInput {
   readonly pullRequest: unknown;
   readonly supersession?: unknown;
   readonly completed?: boolean;
+  /** Immutable post-authorization execution evidence; validated only after authorization is current. */
+  readonly executionEvidence?: unknown;
 }
 
 export type ImplementationConformanceChangeOperation = "WRITE" | "CREATE" | "DELETE";
@@ -149,7 +156,10 @@ export type ImplementationConformanceDiagnosticCode =
   | "IMPLEMENTATION_CONFORMANCE_CHECK_UNVERIFIABLE"
   | "IMPLEMENTATION_CONFORMANCE_TEST_MISSING"
   | "IMPLEMENTATION_CONFORMANCE_TEST_FAILED"
-  | "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE";
+  | "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE"
+  | "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID"
+  | "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH"
+  | "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_STALE";
 
 export interface ImplementationConformanceDiagnostic {
   readonly code: ImplementationConformanceDiagnosticCode;
@@ -190,6 +200,7 @@ const INPUT_KEYS = new Set([
   "pullRequest",
   "supersession",
   "completed",
+  "executionEvidence",
 ]);
 const ISSUE_KEYS = new Set(["reference", "body"]);
 
@@ -403,11 +414,119 @@ function pullRequestIdentity(
   };
 }
 
+interface ImplementationExecutionEvidenceResolution {
+  /** Whether the caller supplied an executionEvidence value at all. */
+  readonly present: boolean;
+  /** Whether the supplied evidence is structurally valid and exactly bound to this authorization/base/PR head. */
+  readonly usable: boolean;
+  readonly evidence?: ImplementationExecutionEvidence;
+}
+
+/**
+ * Parse and bind post-authorization execution evidence.  Evidence is never
+ * trusted on its own: it must be exactly bound to the current authorization's
+ * Implementation reference, repository, governed body digest, and base
+ * evidence, and its `headRevision` must equal the current PR head SHA.  Any
+ * mismatch, staleness, or malformed shape makes the evidence unusable; it
+ * never partially grants targeted-test or branch authority.
+ */
+function resolveExecutionEvidence(
+  value: RecordValue | undefined,
+  authorization: ImplementationAuthorizationRecord,
+  contract: ImplementationContract,
+  observation: OperationalPullRequestObservation,
+  diagnostics: ImplementationConformanceDiagnostic[],
+): ImplementationExecutionEvidenceResolution {
+  if (value === undefined || !hasOwn(value, "executionEvidence") || value.executionEvidence === undefined)
+    return { present: false, usable: false };
+  const parsed = tryParseImplementationExecutionEvidence(value.executionEvidence);
+  if (!parsed.valid || parsed.evidence === undefined) {
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID",
+      "$.executionEvidence",
+      "Execution evidence is malformed.",
+    );
+    return { present: true, usable: false };
+  }
+  const evidence = parsed.evidence;
+  let usable = true;
+  if (issueReferenceKey(evidence.implementation) !== issueReferenceKey(authorization.implementation)) {
+    usable = false;
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH",
+      "$.executionEvidence.implementation",
+      "Execution evidence Implementation reference does not match the authorization.",
+    );
+  }
+  if (
+    evidence.repository.repositoryHost !== authorization.repository.repositoryHost ||
+    evidence.repository.repositoryId !== authorization.repository.repositoryId
+  ) {
+    usable = false;
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH",
+      "$.executionEvidence.repository",
+      "Execution evidence repository identity does not match the authorization.",
+    );
+  }
+  if (evidence.governedBodyDigest !== authorization.governedBodyDigest) {
+    usable = false;
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH",
+      "$.executionEvidence.governedBodyDigest",
+      "Execution evidence governed body digest does not match the authorization.",
+    );
+  }
+  if (
+    evidence.base.branch !== authorization.base.branch ||
+    evidence.base.revision !== authorization.base.revision ||
+    evidence.base.freshness !== authorization.base.freshness
+  ) {
+    usable = false;
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH",
+      "$.executionEvidence.base",
+      "Execution evidence base evidence does not match the authorization.",
+    );
+  }
+  if (observation.head.sha === "unknown" || evidence.headRevision !== observation.head.sha) {
+    usable = false;
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_STALE",
+      "$.executionEvidence.headRevision",
+      "Execution evidence head revision does not match the current pull-request head.",
+    );
+  }
+  if (usable) {
+    const authorizedCommands = new Set(contract.verification.targetedTests);
+    for (const record of evidence.targetedTests) {
+      if (!authorizedCommands.has(record.command)) {
+        usable = false;
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID",
+          "$.executionEvidence.targetedTests",
+          "Execution evidence contains a targeted-test command outside the authorized contract.",
+        );
+        break;
+      }
+    }
+  }
+  return { present: true, usable, ...(usable ? { evidence } : {}) };
+}
+
 function checkBinding(
   authorization: ImplementationAuthorizationRecord,
   contract: ImplementationContract,
   expectedPullRequestNumber: unknown,
   observation: OperationalPullRequestObservation,
+  executionEvidence: ImplementationExecutionEvidenceResolution,
   diagnostics: ImplementationConformanceDiagnostic[],
 ): ImplementationConformanceBinding {
   let pullRequest: ImplementationConformanceBinding["pullRequest"] = "matched";
@@ -481,7 +600,13 @@ function checkBinding(
   }
 
   let branch: ImplementationConformanceBinding["branch"] = "matched";
-  const expectedBranch = contract.execution.branch;
+  const contractBranch = contract.execution.branch;
+  const evidenceBranch = executionEvidence.usable ? executionEvidence.evidence?.branch : undefined;
+  // Evidence may never override a pre-bound contract branch: when both are
+  // present all three (contract, evidence, PR head) must agree. When the
+  // contract has no pre-bound branch, valid evidence is the only source of
+  // the expected branch and is therefore mandatory.
+  const expectedBranch = contractBranch ?? evidenceBranch;
   if (expectedBranch === undefined || observation.head.branch === "unknown") {
     branch = "unverifiable";
     diagnostic(
@@ -490,7 +615,10 @@ function checkBinding(
       "$.pullRequest.head.ref",
       "The intended implementation branch is unavailable.",
     );
-  } else if (observation.head.branch !== expectedBranch) {
+  } else if (
+    observation.head.branch !== expectedBranch ||
+    (contractBranch !== undefined && evidenceBranch !== undefined && contractBranch !== evidenceBranch)
+  ) {
     branch = "mismatch";
     diagnostic(
       diagnostics,
@@ -709,6 +837,7 @@ function checkResultDisposition(check: OperationalCheck): VerificationDispositio
 function evaluateVerification(
   contract: ImplementationContract,
   observation: OperationalPullRequestObservation,
+  executionEvidence: ImplementationExecutionEvidenceResolution,
   diagnostics: ImplementationConformanceDiagnostic[],
 ): {
   readonly verification: ImplementationConformanceVerification;
@@ -740,17 +869,49 @@ function evaluateVerification(
   // test-execution evidence (only provider check/status results), so a
   // targeted test can never be resolved by matching its name against check
   // items — that would accept an unrelated check that happens to share a
-  // name. Report it as unverifiable instead of treating absence as failure.
-  requiredTests.forEach((name, index) => {
-    result.unverifiableTests.push(name);
-    unverifiable = true;
-    diagnostic(
-      diagnostics,
-      "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE",
-      `$.verification.targetedTests[${index}]`,
-      "Targeted-test evidence is not available from provider check evidence.",
-    );
-  });
+  // name. Resolution comes exclusively from bounded post-authorization
+  // execution evidence; absent/unusable evidence reports unverifiable
+  // instead of treating absence as failure.
+  if (requiredTests.length > 0) {
+    if (!executionEvidence.usable || executionEvidence.evidence === undefined) {
+      requiredTests.forEach((name, index) => {
+        result.unverifiableTests.push(name);
+        unverifiable = true;
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE",
+          `$.verification.targetedTests[${index}]`,
+          "Targeted-test execution evidence is not available or could not be verified.",
+        );
+      });
+    } else {
+      const evidence = executionEvidence.evidence;
+      requiredTests.forEach((name, index) => {
+        const record = evidence.targetedTests.find((entry) => entry.command === name);
+        if (record === undefined) {
+          result.missingTests.push(name);
+          missing = true;
+          diagnostic(
+            diagnostics,
+            "IMPLEMENTATION_CONFORMANCE_TEST_MISSING",
+            `$.verification.targetedTests[${index}]`,
+            "Required targeted-test execution evidence is missing.",
+          );
+        } else if (record.result === "satisfied") {
+          result.satisfiedTests.push(name);
+        } else {
+          result.failedTests.push(name);
+          missing = true;
+          diagnostic(
+            diagnostics,
+            "IMPLEMENTATION_CONFORMANCE_TEST_FAILED",
+            `$.verification.targetedTests[${index}]`,
+            "Required targeted-test execution evidence is not successful.",
+          );
+        }
+      });
+    }
+  }
 
   if (requiredChecks.length === 0) return { verification: result, missing, unverifiable };
 
@@ -859,11 +1020,19 @@ export function tryVerifyImplementationConformance(input: unknown): Implementati
     return baseResult("unverifiable", authorization, inputDiagnostics);
   }
   const observation = providerResult.observation;
+  const executionEvidence = resolveExecutionEvidence(
+    value,
+    authorizationVerification.authorization,
+    authorizationVerification.contract,
+    observation,
+    inputDiagnostics,
+  );
   const binding = checkBinding(
     authorizationVerification.authorization,
     authorizationVerification.contract,
     value?.pullRequestNumber,
     observation,
+    executionEvidence,
     inputDiagnostics,
   );
   const pullRequest = pullRequestIdentity(observation);
@@ -889,7 +1058,12 @@ export function tryVerifyImplementationConformance(input: unknown): Implementati
   }
 
   const changeResult = evaluateChanges(projectionResult.projection, observation, inputDiagnostics);
-  const verificationResult = evaluateVerification(authorizationVerification.contract, observation, inputDiagnostics);
+  const verificationResult = evaluateVerification(
+    authorizationVerification.contract,
+    observation,
+    executionEvidence,
+    inputDiagnostics,
+  );
   const hasScopeViolation = changeResult.changes.some((change) => !change.allowed || change.denied);
   const status = hasScopeViolation
     ? "scope-violation"
