@@ -157,8 +157,6 @@ test("targeted-test command identity is preserved verbatim: no trim, NFKC, or ne
   assert.equal(padded.valid, true);
   assert.equal(padded.evidence?.targetedTests[0]?.command, paddedCommand);
 
-  // NFKC would fold the fullwidth digit "１" (U+FF11) to ASCII "1"; the
-  // evidence must keep the runtime's exact byte sequence instead.
   const fullwidthCommand = "pnpm test --shard=１/2";
   const fullwidth = tryParseImplementationExecutionEvidence({
     ...valid(),
@@ -168,8 +166,6 @@ test("targeted-test command identity is preserved verbatim: no trim, NFKC, or ne
   assert.equal(fullwidth.evidence?.targetedTests[0]?.command, fullwidthCommand);
   assert.notEqual(fullwidth.evidence?.targetedTests[0]?.command, "pnpm test --shard=1/2");
 
-  // Trimming/padding differences must remain distinct commands rather than
-  // collapsing onto the same authorized identity.
   const distinct = tryParseImplementationExecutionEvidence({
     ...valid(),
     targetedTests: [
@@ -194,6 +190,36 @@ test("a bare CR or LF inside a targeted-test command is rejected, not silently c
     crlf.violations.some((violation) => violation.path === "$.targetedTests[0].command"),
     true,
   );
+});
+
+test("execution binding fields do not accept normalization-dependent structural identities", () => {
+  assert.equal(
+    tryParseImplementationExecutionEvidence({ ...valid(), governedBodyDigest: ` ${DIGEST}` }).valid,
+    false,
+  );
+  assert.equal(
+    tryParseImplementationExecutionEvidence({ ...valid(), branch: "feat/６７０-evidence" }).valid,
+    false,
+  );
+  assert.equal(
+    tryParseImplementationExecutionEvidence({ ...valid(), base: { ...BASE, branch: "ｍain" } }).valid,
+    false,
+  );
+});
+
+test("opaque execution binding identities preserve exact whitespace instead of trimming", () => {
+  const revision = ` ${BASE.revision}`;
+  const freshness = `${BASE.freshness} `;
+  const headRevision = ` ${"c".repeat(40)} `;
+  const result = tryParseImplementationExecutionEvidence({
+    ...valid(),
+    base: { ...BASE, revision, freshness },
+    headRevision,
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.evidence?.base.revision, revision);
+  assert.equal(result.evidence?.base.freshness, freshness);
+  assert.equal(result.evidence?.headRevision, headRevision);
 });
 
 test("the throwing entry point mirrors the non-throwing result", () => {
