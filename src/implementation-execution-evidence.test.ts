@@ -157,6 +157,8 @@ test("targeted-test command identity is preserved verbatim: no trim, NFKC, or ne
   assert.equal(padded.valid, true);
   assert.equal(padded.evidence?.targetedTests[0]?.command, paddedCommand);
 
+  // NFKC would fold the fullwidth digit "１" (U+FF11) to ASCII "1"; the
+  // evidence must keep the runtime's exact byte sequence instead.
   const fullwidthCommand = "pnpm test --shard=１/2";
   const fullwidth = tryParseImplementationExecutionEvidence({
     ...valid(),
@@ -166,6 +168,8 @@ test("targeted-test command identity is preserved verbatim: no trim, NFKC, or ne
   assert.equal(fullwidth.evidence?.targetedTests[0]?.command, fullwidthCommand);
   assert.notEqual(fullwidth.evidence?.targetedTests[0]?.command, "pnpm test --shard=1/2");
 
+  // Trimming/padding differences must remain distinct commands rather than
+  // collapsing onto the same authorized identity.
   const distinct = tryParseImplementationExecutionEvidence({
     ...valid(),
     targetedTests: [
