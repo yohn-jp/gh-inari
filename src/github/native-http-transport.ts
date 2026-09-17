@@ -1,0 +1,324 @@
+/**
+ * Native bounded GitHub HTTP transport foundation (#662).
+ *
+ * This module owns provider I/O only: base URL/host selection, REST
+ * requests, GraphQL requests, binary response handling, request deadlines,
+ * bounded response sizes, headers, status projection, and secret-safe
+ * failures. It never executes `gh` or reads gh config, and it never decides
+ * whether a caller is authorized -- authority remains with the credential
+ * and capability layers above it (`user-credential.ts`,
+ * `app-installation-credential-broker.ts`).
+ *
+ * `GitHubAppApiTransport` remains the separate, capability-restricted
+ * transport used by trusted GitHub App credentials; this class exists so a
+ * standalone user-token caller gets the same bounded REST/GraphQL/binary
+ * discipline without being handed App-specific capability ownership.
+ */
+
+import type {
+  GitHubChangeEffectHttpMethod,
+  GitHubChangeEffectRequest,
+  GitHubChangeEffectResponse,
+  GitHubChangeEffectTransport,
+} from "./change-effect-adapter.js";
+
+const DEFAULT_HOSTNAME = "github.com";
+const MAX_HOSTNAME_LENGTH = 255;
+const MAX_PATH_LENGTH = 4_096;
+const MAX_TOKEN_LENGTH = 4_096;
+/** Default bounded deadline for every provider request. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+/** Compile-time hard ceiling. No runtime configuration may exceed this bound. */
+const MAX_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
+const MAX_MAX_RESPONSE_BYTES = 64 * 1_048_576;
+
+export type GitHubHttpFailureReason = "timeout" | "transport" | "response-limit" | "malformed-response";
+
+export class GitHubHttpTransportError extends Error {
+  readonly code = "GITHUB_HTTP_TRANSPORT_FAILED" as const;
+  readonly reason: GitHubHttpFailureReason;
+
+  constructor(reason: GitHubHttpFailureReason, message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "GitHubHttpTransportError";
+    this.reason = reason;
+  }
+}
+
+export class GitHubHttpTimeoutError extends GitHubHttpTransportError {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super("timeout", `GitHub HTTP request exceeded its bounded timeout of ${timeoutMs}ms.`);
+    this.name = "GitHubHttpTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export class GitHubHttpResponseLimitError extends GitHubHttpTransportError {
+  readonly limitBytes: number;
+
+  constructor(limitBytes: number) {
+    super("response-limit", `GitHub HTTP response exceeded its bounded limit of ${limitBytes} bytes.`);
+    this.name = "GitHubHttpResponseLimitError";
+    this.limitBytes = limitBytes;
+  }
+}
+
+export class GitHubHttpMalformedResponseError extends GitHubHttpTransportError {
+  constructor() {
+    super("malformed-response", "GitHub HTTP response body could not be decoded.");
+    this.name = "GitHubHttpMalformedResponseError";
+  }
+}
+
+/** Derive the REST API base URL for a GitHub host; github.com uses the dedicated API host. */
+export function githubRestBaseUrl(hostname: string): string {
+  const normalized = normalizedHostname(hostname);
+  return normalized === DEFAULT_HOSTNAME ? "https://api.github.com" : `https://${normalized}/api/v3`;
+}
+
+/** Derive the GraphQL endpoint URL for a GitHub host. */
+export function githubGraphqlUrl(hostname: string): string {
+  const normalized = normalizedHostname(hostname);
+  return normalized === DEFAULT_HOSTNAME ? "https://api.github.com/graphql" : `https://${normalized}/api/graphql`;
+}
+
+function normalizedHostname(hostname: string): string {
+  if (
+    typeof hostname !== "string" ||
+    hostname.length === 0 ||
+    hostname.length > MAX_HOSTNAME_LENGTH ||
+    /[\u0000-\u001F\u007F\s/]/u.test(hostname)
+  ) {
+    throw new GitHubHttpTransportError("transport", "GitHub hostname is invalid.");
+  }
+  return hostname.toLowerCase();
+}
+
+function boundedPath(path: string): string {
+  if (typeof path !== "string" || path.length > MAX_PATH_LENGTH || /[\u0000-\u001F\u007F]/u.test(path)) {
+    throw new GitHubHttpTransportError("transport", "GitHub request path is invalid.");
+  }
+  return path;
+}
+
+function normalizedRequestTimeoutMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_REQUEST_TIMEOUT_MS) {
+    throw new RangeError(`requestTimeoutMs must be a finite integer in (0, ${MAX_REQUEST_TIMEOUT_MS}], got ${value}.`);
+  }
+  return value;
+}
+
+function normalizedMaxResponseBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_RESPONSE_BYTES;
+  if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_MAX_RESPONSE_BYTES) {
+    throw new RangeError(`maxResponseBytes must be a finite integer in (0, ${MAX_MAX_RESPONSE_BYTES}], got ${value}.`);
+  }
+  return value;
+}
+
+function boundedToken(value: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_TOKEN_LENGTH ||
+    /[\u0000\u007F]/u.test(value)
+  ) {
+    throw new Error("GitHub HTTP transport token is invalid.");
+  }
+  return value;
+}
+
+/**
+ * A ref'd (not `AbortSignal.timeout`'s unref'd) deadline: this deliberately
+ * keeps the event loop alive until the bounded request settles one way or
+ * the other, so a hung provider request fails closed instead of the runtime
+ * exiting first. Always call `clear()` once the request settles.
+ */
+function boundedRequestSignal(timeoutMs: number): {
+  readonly signal: AbortSignal;
+  readonly clear: () => void;
+  timedOut: boolean;
+} {
+  const controller = new AbortController();
+  const state = { timedOut: false };
+  const timer = setTimeout(() => {
+    state.timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timer),
+    get timedOut() {
+      return state.timedOut;
+    },
+  };
+}
+
+async function readBoundedBytes(response: Response, maxResponseBytes: number): Promise<Uint8Array | undefined> {
+  if (response.status === 204 || response.body === null) return undefined;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > maxResponseBytes) throw new GitHubHttpResponseLimitError(maxResponseBytes);
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (chunks.length === 0) return undefined;
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function decodeJsonBody(bytes: Uint8Array | undefined): unknown {
+  if (bytes === undefined) return undefined;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new GitHubHttpMalformedResponseError();
+  }
+  if (text.trim().length === 0) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new GitHubHttpMalformedResponseError();
+  }
+}
+
+export interface GitHubHttpBinaryResponse {
+  readonly status: number;
+  readonly bytes?: Uint8Array;
+  readonly contentType?: string;
+}
+
+export interface GitHubHttpGraphqlRequest {
+  readonly hostname: string;
+  readonly query: string;
+  readonly variables?: Readonly<Record<string, unknown>>;
+}
+
+export interface GitHubNativeHttpTransportOptions {
+  /** Trusted-only constructor input; never returned or logged by this class. */
+  readonly token: string;
+  readonly fetch?: typeof globalThis.fetch;
+  /** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 10s. */
+  readonly requestTimeoutMs?: number;
+  /** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 1MiB. */
+  readonly maxResponseBytes?: number;
+}
+
+/**
+ * Standalone, host-flexible GitHub HTTP transport for explicitly injected or
+ * environment-resolved user credentials. Implements the same
+ * `GitHubChangeEffectTransport` request shape the trusted App transport
+ * uses, so REST, GraphQL, and binary I/O share one host/auth/error
+ * discipline and a caller written against one is portable to the other.
+ */
+export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
+  readonly #token: string;
+  readonly #fetch: typeof globalThis.fetch;
+  readonly #requestTimeoutMs: number;
+  readonly #maxResponseBytes: number;
+
+  constructor(options: GitHubNativeHttpTransportOptions) {
+    this.#token = boundedToken(options.token);
+    this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
+    this.#maxResponseBytes = normalizedMaxResponseBytes(options.maxResponseBytes);
+  }
+
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+    const path = boundedPath(request.path);
+    const url =
+      path.length === 0 ? githubRestBaseUrl(request.hostname) : `${githubRestBaseUrl(request.hostname)}/${path}`;
+    const response = await this.execute(url, request.method, request.body);
+    const bytes = await this.readBody(response);
+    return { status: response.status, body: decodeJsonBody(bytes) };
+  }
+
+  async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubChangeEffectResponse> {
+    const url = githubGraphqlUrl(request.hostname);
+    const response = await this.execute(url, "POST", { query: request.query, variables: request.variables ?? {} });
+    const bytes = await this.readBody(response);
+    return { status: response.status, body: decodeJsonBody(bytes) };
+  }
+
+  /** Bounded binary read (for example an Actions artifact archive); never JSON-decoded. */
+  async requestBinary(request: {
+    readonly hostname: string;
+    readonly method: "GET";
+    readonly path: string;
+    readonly accept?: string;
+  }): Promise<GitHubHttpBinaryResponse> {
+    const path = boundedPath(request.path);
+    const url = `${githubRestBaseUrl(request.hostname)}/${path}`;
+    const response = await this.execute(url, request.method, undefined, request.accept);
+    const bytes = await this.readBody(response);
+    const contentType = response.headers.get("content-type");
+    return {
+      status: response.status,
+      ...(bytes === undefined ? {} : { bytes }),
+      ...(contentType === null ? {} : { contentType }),
+    };
+  }
+
+  private async execute(
+    url: string,
+    method: GitHubChangeEffectHttpMethod,
+    body: unknown,
+    accept?: string,
+  ): Promise<Response> {
+    const bounded = boundedRequestSignal(this.#requestTimeoutMs);
+    try {
+      try {
+        return await this.#fetch(url, {
+          method,
+          headers: {
+            Accept: accept ?? "application/vnd.github+json",
+            Authorization: `Bearer ${this.#token}`,
+            "X-GitHub-Api-Version": "2022-11-28",
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: bounded.signal,
+        });
+      } catch (error: unknown) {
+        if (bounded.timedOut) throw new GitHubHttpTimeoutError(this.#requestTimeoutMs);
+        throw this.safeTransportFailure(error);
+      }
+    } finally {
+      bounded.clear();
+    }
+  }
+
+  private async readBody(response: Response): Promise<Uint8Array | undefined> {
+    try {
+      return await readBoundedBytes(response, this.#maxResponseBytes);
+    } catch (error: unknown) {
+      if (error instanceof GitHubHttpResponseLimitError) throw error;
+      throw new GitHubHttpMalformedResponseError();
+    }
+  }
+
+  /** Never includes the bearer token in the thrown error's message. */
+  private safeTransportFailure(cause: unknown): GitHubHttpTransportError {
+    const message = cause instanceof Error ? cause.message : "GitHub HTTP request failed.";
+    const safeMessage = message.includes(this.#token) ? "GitHub HTTP request failed." : message;
+    return new GitHubHttpTransportError("transport", `GitHub HTTP transport failed: ${safeMessage}`, cause);
+  }
+}
