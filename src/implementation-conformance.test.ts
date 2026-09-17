@@ -8,6 +8,10 @@ import {
 } from "./implementation-contract.js";
 import { authorizeImplementation, type ImplementationAuthorizationRecord } from "./implementation-authorization.js";
 import {
+  IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
+  IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
+} from "./implementation-execution-evidence.js";
+import {
   IMPLEMENTATION_CONFORMANCE_KIND,
   IMPLEMENTATION_CONFORMANCE_VERSION,
   tryVerifyImplementationConformance,
@@ -157,6 +161,76 @@ function check(id: string, overrides: Partial<GitHubOperationalCheck> = {}): Git
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:01Z",
     current: true,
+    ...overrides,
+  };
+}
+
+function withTargetedTests(commands: readonly string[]): Record<string, unknown> {
+  return contract({
+    verification: {
+      acceptanceCriteria: ["Every changed path is checked."],
+      targetedTests: commands,
+      requiredChecks: ["verify"],
+      postconditions: ["The result is deterministic."],
+    },
+  });
+}
+
+function branchAbsentContract(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return contract({
+    verification: {
+      acceptanceCriteria: ["Every changed path is checked."],
+      targetedTests: [],
+      requiredChecks: ["verify"],
+      postconditions: ["The result is deterministic."],
+    },
+    execution: {
+      baseBranch: base.branch,
+      baseRevision: base.revision,
+      baseFreshness: base.freshness,
+      dependencies: [{ ...repository, number: 568 }],
+    },
+    ...overrides,
+  });
+}
+
+function build(contractValue: Record<string, unknown>): {
+  readonly body: string;
+  readonly authorization: ImplementationAuthorizationRecord;
+} {
+  const testBody = renderImplementationIssueBody(parseImplementationContract(contractValue));
+  return {
+    body: testBody,
+    authorization: authorizeImplementation({ implementation, body: testBody, repository, base }),
+  };
+}
+
+function noVerificationContract(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return contract({
+    verification: {
+      acceptanceCriteria: ["Every changed path is checked."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: ["The result is deterministic."],
+    },
+    ...overrides,
+  });
+}
+
+function evidence(
+  record: ImplementationAuthorizationRecord,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
+    kind: IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
+    implementation: record.implementation,
+    repository: record.repository,
+    governedBodyDigest: record.governedBodyDigest,
+    base: record.base,
+    branch: "feat/575-implementation-pr-conformance",
+    headRevision: "head-revision",
+    targetedTests: [],
     ...overrides,
   };
 }
@@ -736,4 +810,279 @@ test("rename old DELETE and new CREATE identities are evaluated independently", 
       (entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_PATH_INVALID" && entry.path.endsWith(".previousFilename"),
     ),
   );
+});
+
+test("execution evidence: contract branch absent, matching evidence branch, matching PR branch -> matched and conformant", () => {
+  const { body: testBody, authorization: record } = build(branchAbsentContract());
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record),
+  });
+  assert.equal(result.status, "conformant");
+  assert.equal(result.binding?.branch, "matched");
+});
+
+test("execution evidence: pre-bound contract branch with matching evidence -> matched", () => {
+  const record = authorization();
+  const result = tryVerifyImplementationConformance({
+    ...input(record, body, pullRequest()),
+    executionEvidence: evidence(record),
+  });
+  assert.equal(result.status, "conformant");
+  assert.equal(result.binding?.branch, "matched");
+});
+
+test("execution evidence: contract branch vs evidence branch mismatch fails closed regardless of the PR", () => {
+  const record = authorization();
+  const result = tryVerifyImplementationConformance({
+    ...input(record, body, pullRequest()),
+    executionEvidence: evidence(record, { branch: "some-other-branch" }),
+  });
+  assert.equal(result.binding?.branch, "mismatch");
+  assert.equal(result.status, "unverifiable");
+});
+
+test("execution evidence: contract branch absent, evidence branch vs PR branch mismatch fails closed", () => {
+  const { body: testBody, authorization: record } = build(branchAbsentContract());
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest({ head: { ref: "different-branch", sha: "head-revision" } })),
+    executionEvidence: evidence(record),
+  });
+  assert.equal(result.binding?.branch, "mismatch");
+  assert.equal(result.status, "unverifiable");
+});
+
+test("authorized body drift makes authorization stale; execution evidence grants nothing", () => {
+  const changedBody = renderImplementationIssueBody(
+    parseImplementationContract(contract({ objective: "A different authorized objective." })),
+  );
+  const record = authorization();
+  const result = tryVerifyImplementationConformance({
+    ...input(record, changedBody, pullRequest({ changedFiles: collection([changedFile("outside.ts", "modified")]) })),
+    executionEvidence: evidence(record),
+  });
+  assert.equal(result.status, "stale-invalid-authorization");
+  assert.deepEqual(result.verification.satisfiedTests, []);
+  assert.deepEqual(result.verification.unverifiableTests, []);
+});
+
+test("execution evidence: stale headRevision makes targeted tests unverifiable", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, {
+      headRevision: "a-different-sha",
+      targetedTests: [{ command: "pnpm test", result: "satisfied" }],
+    }),
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+  assert.deepEqual(result.verification.satisfiedTests, []);
+  assert.equal(result.binding?.branch, "matched");
+});
+
+test("execution evidence: a satisfied targeted test enters satisfiedTests and conformance is admitted", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, { targetedTests: [{ command: "pnpm test", result: "satisfied" }] }),
+  });
+  assert.equal(result.status, "conformant");
+  assert.deepEqual(result.verification.satisfiedTests, ["pnpm test"]);
+});
+
+test("execution evidence: a failed targeted test enters failedTests and blocks conformance", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, { targetedTests: [{ command: "pnpm test", result: "failed" }] }),
+  });
+  assert.equal(result.status, "missing-verification");
+  assert.deepEqual(result.verification.failedTests, ["pnpm test"]);
+});
+
+test("execution evidence: a required targeted test absent from otherwise-valid evidence enters missingTests", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, { targetedTests: [] }),
+  });
+  assert.equal(result.status, "missing-verification");
+  assert.deepEqual(result.verification.missingTests, ["pnpm test"]);
+});
+
+test("execution evidence: required but absent evidence leaves targeted tests unverifiable", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance(input(record, testBody, pullRequest()));
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+});
+
+test("execution evidence: malformed evidence leaves targeted tests unverifiable", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: { foo: "bar" },
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID"));
+});
+
+test("execution evidence: unusable supplied evidence forces unverifiable even when the contract requires no targeted tests or checks", () => {
+  const { body: testBody, authorization: record } = build(noVerificationContract());
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, { governedBodyDigest: "a".repeat(64) }),
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.equal(result.valid, false);
+  assert.deepEqual(result.verification.unverifiableTests, []);
+  assert.deepEqual(result.verification.unverifiableChecks, []);
+  assert.ok(
+    result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH"),
+  );
+});
+
+test("execution evidence: malformed supplied evidence forces unverifiable even when the contract requires no targeted tests or checks", () => {
+  const { body: testBody, authorization: record } = build(noVerificationContract());
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: { foo: "bar" },
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID"));
+});
+
+test("execution evidence: absent evidence stays conformant when the contract requires no targeted tests or checks", () => {
+  const { body: testBody, authorization: record } = build(noVerificationContract());
+  const result = tryVerifyImplementationConformance(input(record, testBody, pullRequest()));
+  assert.equal(result.status, "conformant");
+  assert.equal(result.valid, true);
+});
+
+test("execution evidence: Implementation reference mismatch is unverifiable", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, {
+      implementation: { ...implementation, number: 999 },
+      targetedTests: [{ command: "pnpm test", result: "satisfied" }],
+    }),
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+  assert.ok(
+    result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_MISMATCH"),
+  );
+});
+
+test("execution evidence: repository, governed body digest, and base mismatches are each unverifiable", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const satisfiedOverride = { targetedTests: [{ command: "pnpm test", result: "satisfied" }] };
+  const cases: readonly Record<string, unknown>[] = [
+    { repository: { ...repository, repositoryId: "999" }, ...satisfiedOverride },
+    { governedBodyDigest: "a".repeat(64), ...satisfiedOverride },
+    { base: { branch: "main", revision: "other-revision", freshness: "other-revision" }, ...satisfiedOverride },
+  ];
+  for (const overrides of cases) {
+    const result = tryVerifyImplementationConformance({
+      ...input(record, testBody, pullRequest()),
+      executionEvidence: evidence(record, overrides),
+    });
+    assert.equal(result.status, "unverifiable");
+    assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+  }
+});
+
+test("execution evidence: a duplicate targeted-test command invalidates the whole evidence", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, {
+      targetedTests: [
+        { command: "pnpm test", result: "satisfied" },
+        { command: "pnpm test", result: "failed" },
+      ],
+    }),
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+});
+
+test("execution evidence: an unauthorized targeted-test command invalidates the whole evidence", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, {
+      targetedTests: [
+        { command: "pnpm test", result: "satisfied" },
+        { command: "an-unauthorized-command", result: "satisfied" },
+      ],
+    }),
+  });
+  assert.equal(result.status, "unverifiable");
+  assert.deepEqual(result.verification.unverifiableTests, ["pnpm test"]);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CONFORMANCE_EXECUTION_EVIDENCE_INVALID"));
+});
+
+test("execution evidence: exact identical replay is deterministic and idempotent", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const conformanceInput = {
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidence(record, { targetedTests: [{ command: "pnpm test", result: "satisfied" }] }),
+  };
+  const first = tryVerifyImplementationConformance(conformanceInput);
+  const second = tryVerifyImplementationConformance(conformanceInput);
+  assert.deepEqual(first, second);
+  assert.equal(first.status, "conformant");
+});
+
+test("execution evidence: the same evidence replayed against a different PR head revision fails closed", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test"]));
+  const evidenceValue = evidence(record, { targetedTests: [{ command: "pnpm test", result: "satisfied" }] });
+  const admitted = tryVerifyImplementationConformance({
+    ...input(record, testBody, pullRequest()),
+    executionEvidence: evidenceValue,
+  });
+  assert.equal(admitted.status, "conformant");
+  const replayed = tryVerifyImplementationConformance({
+    ...input(
+      record,
+      testBody,
+      pullRequest({ head: { ref: "feat/575-implementation-pr-conformance", sha: "a-new-sha" } }),
+    ),
+    executionEvidence: evidenceValue,
+  });
+  assert.equal(replayed.status, "unverifiable");
+  assert.deepEqual(replayed.verification.unverifiableTests, ["pnpm test"]);
+});
+
+test("execution evidence: a successful same-named check with valid failed evidence still fails the targeted test", () => {
+  const { body: testBody, authorization: record } = build(withTargetedTests(["pnpm test -- src/foo.test.ts"]));
+  const result = tryVerifyImplementationConformance({
+    ...input(
+      record,
+      testBody,
+      pullRequest({
+        checks: collection([
+          check("check-1"),
+          {
+            id: "check-2",
+            name: "pnpm test -- src/foo.test.ts",
+            kind: "check-run",
+            status: "completed",
+            conclusion: "success",
+          },
+        ]),
+      }),
+    ),
+    executionEvidence: evidence(record, {
+      targetedTests: [{ command: "pnpm test -- src/foo.test.ts", result: "failed" }],
+    }),
+  });
+  assert.equal(result.status, "missing-verification");
+  assert.deepEqual(result.verification.failedTests, ["pnpm test -- src/foo.test.ts"]);
+  assert.deepEqual(result.verification.satisfiedTests, []);
 });

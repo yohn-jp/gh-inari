@@ -82,6 +82,23 @@ test("pr sync exposes only its complete --from input mode", () => {
   assert.deepEqual(command.optionIds, ["help", "json", "template", "repository", "policy", "from", "dryRun"]);
 });
 
+test("impl verify exposes --execution-evidence alongside its authorization and pull-request inputs", () => {
+  const command = getCommandForPositionals(["impl", "verify"]);
+  assert.ok(command);
+  assert.deepEqual(command.optionIds, [
+    "help",
+    "json",
+    "repository",
+    "from",
+    "capability",
+    "pullRequest",
+    "executionEvidence",
+  ]);
+  const option = getOption("executionEvidence");
+  assert.deepEqual(option.aliases, ["--execution-evidence"]);
+  assert.equal(option.arity, "required");
+});
+
 test("every owned command keeps routing, usage, discovery, and Skill references on one authority", () => {
   const projection = projectCommandContract();
   for (const command of INARI_COMMANDS) {

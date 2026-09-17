@@ -2034,6 +2034,10 @@ async function runImplementationCommand(
     const pullRequestValue = parsed.options.pullRequest;
     if (typeof pullRequestValue !== "string" || !isPositiveInteger(pullRequestValue))
       throw new CliError("INPUT_REQUIRED", "Use --pr <number>.", "--pr");
+    const executionEvidence =
+      parsed.options.executionEvidence === undefined
+        ? undefined
+        : await readJsonValue(parsed.options.executionEvidence, "--execution-evidence");
     const pullRequest = await evidence.adapter.observePullRequest(Number(pullRequestValue));
     const base = await implementationAuthorizedBaseEvidence(evidence, input.authorization);
     const conformance = tryVerifyImplementationConformance({
@@ -2045,6 +2049,7 @@ async function runImplementationCommand(
       pullRequest,
       ...(input.supersession === undefined ? {} : { supersession: input.supersession }),
       ...(input.completed === undefined ? {} : { completed: input.completed }),
+      ...(executionEvidence === undefined ? {} : { executionEvidence }),
     });
     printImplementationResult(
       {
@@ -3750,9 +3755,9 @@ async function readInputDocument(
 }
 
 /** Read one bounded JSON value without adapting its shape for Core. */
-async function readJsonValue(value: string | boolean | undefined): Promise<unknown> {
+async function readJsonValue(value: string | boolean | undefined, optionFlag = "--from"): Promise<unknown> {
   if (typeof value !== "string" || value.length === 0)
-    throw new CliError("INPUT_REQUIRED", "Use --from <file.json>.", "--from");
+    throw new CliError("INPUT_REQUIRED", `Use ${optionFlag} <file.json>.`, optionFlag);
   let source: string;
   if (value === "-") source = await readStdin();
   else {
@@ -3769,7 +3774,14 @@ async function readJsonValue(value: string | boolean | undefined): Promise<unkno
       }
     } catch (cause: unknown) {
       if (cause instanceof CliError) throw cause;
-      const error = new CliError("INPUT_READ_FAILED", `Cannot read input file "${value}".`, "--from");
+      // Execution-evidence input is post-authorization runtime evidence, not
+      // an authored path the caller chose to disclose; the file path itself
+      // must never surface in error output.
+      const message =
+        optionFlag === "--execution-evidence"
+          ? "Cannot read the execution-evidence input file."
+          : `Cannot read input file "${value}".`;
+      const error = new CliError("INPUT_READ_FAILED", message, optionFlag);
       if (cause instanceof Error) error.cause = cause;
       throw error;
     }
@@ -3778,7 +3790,7 @@ async function readJsonValue(value: string | boolean | undefined): Promise<unkno
   try {
     parsed = JSON.parse(source) as unknown;
   } catch (cause: unknown) {
-    const error = new CliError("INPUT_INVALID_JSON", "Input file must contain valid JSON.", "--from");
+    const error = new CliError("INPUT_INVALID_JSON", "Input file must contain valid JSON.", optionFlag);
     if (cause instanceof Error) error.cause = cause;
     throw error;
   }
