@@ -1,0 +1,208 @@
+/**
+ * Native repository-context resolution (#662).
+ *
+ * Replaces `gh repo view` for current-checkout inference. Repository
+ * selection is either explicit (`--repository owner/name`,
+ * `host/owner/name`, or a repository URL) or derived from local repository
+ * evidence -- the configured Git remote -- never from a `gh` subprocess.
+ * Absence or ambiguity fails deterministically instead of guessing.
+ *
+ * This module resolves identity fields only (`hostname`/`owner`/`name`); it
+ * does not mint a `repositoryId`, which requires an authenticated provider
+ * round trip and belongs to the credential/transport layer that consumes
+ * this context (see `resolveGitHubRepository` in
+ * `app-installation-credential-broker.ts`, which accepts any
+ * `GitHubChangeEffectTransport`, including `GitHubNativeHttpTransport`).
+ */
+
+import { execFileSync } from "node:child_process";
+import type { RepositoryContext } from "./types.js";
+
+const DEFAULT_REMOTE_NAME = "origin";
+const DEFAULT_GIT_TIMEOUT_MS = 10_000;
+const MAX_GIT_OUTPUT_BYTES = 1_048_576;
+
+export type RepositoryContextFailureReason =
+  "invalid-override" | "invalid-hostname" | "remote-missing" | "remote-unparseable";
+
+export class RepositoryContextResolutionError extends Error {
+  readonly code = "GITHUB_REPOSITORY_CONTEXT_UNRESOLVED" as const;
+  readonly reason: RepositoryContextFailureReason;
+
+  constructor(reason: RepositoryContextFailureReason, message: string) {
+    super(message);
+    this.name = "RepositoryContextResolutionError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Deliberately stricter than "no whitespace/slash": a hostname containing
+ * `@` or `:` (HTTPS userinfo, a port, or scp-style syntax) is rejected here
+ * rather than accepted as a literal hostname, so a malformed
+ * `host/owner/name` locator built from a credential-bearing URL fails at
+ * this check instead of laundering the credential into `RepositoryContext`.
+ */
+function isValidHostname(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/u.test(value)
+  );
+}
+
+function isValidRepositorySegment(value: string): boolean {
+  if (value === "." || value === "..") return false;
+  return /^[A-Za-z0-9_.-]+$/u.test(value);
+}
+
+/**
+ * Never accepts a caller-supplied `url`: an explicit override or a local Git
+ * remote can carry HTTPS userinfo credentials (`https://token:secret@host/...`),
+ * and echoing that text into `RepositoryContext.url` would leak it into any
+ * consumer that logs or serializes the context. The URL is always
+ * canonically derived from the validated, credential-free identity fields.
+ */
+function buildRepositoryContext(hostname: string, owner: string, name: string): RepositoryContext {
+  const normalizedHostname = hostname.trim().toLowerCase();
+  // Never interpolate `hostname`/`owner`/`name` into a thrown message: any of
+  // them may hold a credential fragment from a malformed locator or remote.
+  if (!isValidHostname(normalizedHostname)) {
+    throw new RepositoryContextResolutionError("invalid-hostname", "Repository hostname is invalid.");
+  }
+  if (!isValidRepositorySegment(owner) || !isValidRepositorySegment(name)) {
+    throw new RepositoryContextResolutionError(
+      "invalid-override",
+      "Repository identity contains an invalid owner or name segment.",
+    );
+  }
+  const nameWithOwner = `${owner}/${name}`;
+  return Object.freeze({
+    hostname: normalizedHostname,
+    host: normalizedHostname,
+    owner,
+    name,
+    nameWithOwner,
+    url: `https://${normalizedHostname}/${nameWithOwner}`,
+  });
+}
+
+/**
+ * Parse an explicit `--repository` locator: `owner/name`, `host/owner/name`,
+ * or a full repository URL (`https://host/owner/name[.git]`,
+ * `git@host:owner/name[.git]`, `ssh://git@host/owner/name[.git]`).
+ */
+export function parseRepositoryLocator(value: string, fallbackHostname: string): RepositoryContext {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new RepositoryContextResolutionError("invalid-override", "Repository override must not be empty.");
+  }
+
+  const urlMatch = parseGitRemoteUrl(trimmed);
+  if (urlMatch !== undefined) {
+    return buildRepositoryContext(urlMatch.hostname, urlMatch.owner, urlMatch.name);
+  }
+
+  const parts = trimmed.split("/");
+  if (parts.length === 2) return buildRepositoryContext(fallbackHostname, parts[0] ?? "", parts[1] ?? "");
+  if (parts.length === 3) return buildRepositoryContext(parts[0] ?? "", parts[1] ?? "", parts[2] ?? "");
+  // Never interpolate the raw locator: a malformed URL-shaped override may carry a credential.
+  throw new RepositoryContextResolutionError(
+    "invalid-override",
+    "Repository override must be owner/name, host/owner/name, or a GitHub repository URL.",
+  );
+}
+
+interface ParsedGitRemote {
+  readonly hostname: string;
+  readonly owner: string;
+  readonly name: string;
+}
+
+/** Parses any host, not only github.com, so Enterprise remotes resolve the same way. */
+function parseGitRemoteUrl(value: string): ParsedGitRemote | undefined {
+  const httpsMatch = /^(?:https?):\/\/(?:[^@/]+@)?([^/]+)\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/u.exec(value);
+  if (httpsMatch?.[1] !== undefined && httpsMatch[2] !== undefined && httpsMatch[3] !== undefined) {
+    return { hostname: httpsMatch[1], owner: httpsMatch[2], name: httpsMatch[3] };
+  }
+  const scpMatch = /^[^@\s/]+@([^:/\s]+):([^/]+)\/([^/]+?)(?:\.git)?$/u.exec(value);
+  if (scpMatch?.[1] !== undefined && scpMatch[2] !== undefined && scpMatch[3] !== undefined) {
+    return { hostname: scpMatch[1], owner: scpMatch[2], name: scpMatch[3] };
+  }
+  const sshMatch = /^ssh:\/\/[^@\s/]+@([^/]+)\/([^/]+)\/([^/]+?)(?:\.git)?$/u.exec(value);
+  if (sshMatch?.[1] !== undefined && sshMatch[2] !== undefined && sshMatch[3] !== undefined) {
+    return { hostname: sshMatch[1], owner: sshMatch[2], name: sshMatch[3] };
+  }
+  return undefined;
+}
+
+export type GitCommandRunner = (args: readonly string[]) => string;
+
+function defaultGitCommandRunner(cwd: string | undefined): GitCommandRunner {
+  return (args: readonly string[]) => {
+    try {
+      return execFileSync("git", [...args], {
+        cwd,
+        encoding: "utf8",
+        timeout: DEFAULT_GIT_TIMEOUT_MS,
+        maxBuffer: MAX_GIT_OUTPUT_BYTES,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      // Never interpolate the underlying git error: some git failure messages
+      // echo the command line, which can carry a credential-bearing remote URL.
+      throw new RepositoryContextResolutionError("remote-missing", "Unable to read the local Git remote.");
+    }
+  };
+}
+
+export interface ResolveLocalRepositoryContextOptions {
+  /** Explicit `owner/name`, `host/owner/name`, or repository URL override. */
+  readonly repository?: string;
+  /** Fallback hostname applied to an `owner/name` override or local-remote inference. */
+  readonly hostname?: string;
+  readonly cwd?: string;
+  readonly remoteName?: string;
+  /** Test/injection seam; defaults to invoking the local `git` binary. */
+  readonly git?: GitCommandRunner;
+}
+
+const DEFAULT_HOSTNAME = "github.com";
+
+/**
+ * Resolve repository identity from an explicit override, or -- absent one --
+ * from the configured local Git remote. Never shells out to `gh`. Absence or
+ * an unparseable remote fails closed with `RepositoryContextResolutionError`
+ * rather than guessing.
+ */
+export function resolveLocalRepositoryContext(options: ResolveLocalRepositoryContextOptions = {}): RepositoryContext {
+  const fallbackHostname = options.hostname ?? DEFAULT_HOSTNAME;
+  if (options.repository !== undefined) {
+    return parseRepositoryLocator(options.repository, fallbackHostname);
+  }
+
+  const git = options.git ?? defaultGitCommandRunner(options.cwd);
+  const remoteName = options.remoteName ?? DEFAULT_REMOTE_NAME;
+  let rawRemoteUrl: string;
+  try {
+    rawRemoteUrl = git(["remote", "get-url", remoteName]);
+  } catch (error: unknown) {
+    if (error instanceof RepositoryContextResolutionError) throw error;
+    // Never interpolate the underlying git error: some git failure messages
+    // echo the command line, which can carry a credential-bearing remote URL.
+    throw new RepositoryContextResolutionError("remote-missing", "Unable to read the local Git remote.");
+  }
+  const remoteUrl = rawRemoteUrl.trim();
+  if (remoteUrl.length === 0) {
+    throw new RepositoryContextResolutionError("remote-missing", "The configured local Git remote has no URL.");
+  }
+  const parsed = parseGitRemoteUrl(remoteUrl);
+  if (parsed === undefined) {
+    // Never interpolate the raw remote URL: it may carry HTTPS userinfo credentials.
+    throw new RepositoryContextResolutionError(
+      "remote-unparseable",
+      `Local Git remote "${remoteName}" is not a recognizable GitHub repository URL.`,
+    );
+  }
+  return buildRepositoryContext(parsed.hostname, parsed.owner, parsed.name);
+}

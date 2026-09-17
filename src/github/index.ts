@@ -28,3 +28,7 @@ export * from "./issue-relation-mutation-adapter.js";
 export * from "./effect-authorizer.js";
 export * from "./transport.js";
 export * from "./types.js";
+export * from "./native-http-transport.js";
+export * from "./user-credential.js";
+export * from "./user-identity.js";
+export * from "./local-repository-context.js";
