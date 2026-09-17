@@ -36,8 +36,19 @@ export class RepositoryContextResolutionError extends Error {
   }
 }
 
+/**
+ * Deliberately stricter than "no whitespace/slash": a hostname containing
+ * `@` or `:` (HTTPS userinfo, a port, or scp-style syntax) is rejected here
+ * rather than accepted as a literal hostname, so a malformed
+ * `host/owner/name` locator built from a credential-bearing URL fails at
+ * this check instead of laundering the credential into `RepositoryContext`.
+ */
 function isValidHostname(value: string): boolean {
-  return value.length > 0 && value.length <= 255 && !/[\s/]/u.test(value);
+  return (
+    value.length > 0 &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/u.test(value)
+  );
 }
 
 function isValidRepositorySegment(value: string): boolean {
@@ -54,13 +65,15 @@ function isValidRepositorySegment(value: string): boolean {
  */
 function buildRepositoryContext(hostname: string, owner: string, name: string): RepositoryContext {
   const normalizedHostname = hostname.trim().toLowerCase();
+  // Never interpolate `hostname`/`owner`/`name` into a thrown message: any of
+  // them may hold a credential fragment from a malformed locator or remote.
   if (!isValidHostname(normalizedHostname)) {
-    throw new RepositoryContextResolutionError("invalid-hostname", `Hostname "${hostname}" is invalid.`);
+    throw new RepositoryContextResolutionError("invalid-hostname", "Repository hostname is invalid.");
   }
   if (!isValidRepositorySegment(owner) || !isValidRepositorySegment(name)) {
     throw new RepositoryContextResolutionError(
       "invalid-override",
-      `Repository identity "${owner}/${name}" contains an invalid owner or name segment.`,
+      "Repository identity contains an invalid owner or name segment.",
     );
   }
   const nameWithOwner = `${owner}/${name}`;
@@ -93,9 +106,10 @@ export function parseRepositoryLocator(value: string, fallbackHostname: string):
   const parts = trimmed.split("/");
   if (parts.length === 2) return buildRepositoryContext(fallbackHostname, parts[0] ?? "", parts[1] ?? "");
   if (parts.length === 3) return buildRepositoryContext(parts[0] ?? "", parts[1] ?? "", parts[2] ?? "");
+  // Never interpolate the raw locator: a malformed URL-shaped override may carry a credential.
   throw new RepositoryContextResolutionError(
     "invalid-override",
-    `Repository override "${value}" must be owner/name, host/owner/name, or a GitHub repository URL.`,
+    "Repository override must be owner/name, host/owner/name, or a GitHub repository URL.",
   );
 }
 
@@ -134,9 +148,10 @@ function defaultGitCommandRunner(cwd: string | undefined): GitCommandRunner {
         maxBuffer: MAX_GIT_OUTPUT_BYTES,
         stdio: ["ignore", "pipe", "pipe"],
       });
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "git invocation failed.";
-      throw new RepositoryContextResolutionError("remote-missing", `Unable to read the local Git remote: ${message}`);
+    } catch {
+      // Never interpolate the underlying git error: some git failure messages
+      // echo the command line, which can carry a credential-bearing remote URL.
+      throw new RepositoryContextResolutionError("remote-missing", "Unable to read the local Git remote.");
     }
   };
 }
@@ -173,15 +188,13 @@ export function resolveLocalRepositoryContext(options: ResolveLocalRepositoryCon
     rawRemoteUrl = git(["remote", "get-url", remoteName]);
   } catch (error: unknown) {
     if (error instanceof RepositoryContextResolutionError) throw error;
-    const message = error instanceof Error ? error.message : "git invocation failed.";
-    throw new RepositoryContextResolutionError("remote-missing", `Unable to read the local Git remote: ${message}`);
+    // Never interpolate the underlying git error: some git failure messages
+    // echo the command line, which can carry a credential-bearing remote URL.
+    throw new RepositoryContextResolutionError("remote-missing", "Unable to read the local Git remote.");
   }
   const remoteUrl = rawRemoteUrl.trim();
   if (remoteUrl.length === 0) {
-    throw new RepositoryContextResolutionError(
-      "remote-missing",
-      `Local Git remote "${remoteName}" has no configured URL.`,
-    );
+    throw new RepositoryContextResolutionError("remote-missing", "The configured local Git remote has no URL.");
   }
   const parsed = parseGitRemoteUrl(remoteUrl);
   if (parsed === undefined) {

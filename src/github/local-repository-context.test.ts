@@ -150,6 +150,30 @@ test("an unparseable credential-bearing remote never leaks the credential into t
   );
 });
 
+test("a malformed credential-bearing explicit --repository override never leaks the credential into the thrown error", () => {
+  assert.throws(
+    () => parseRepositoryLocator("https://x-access-token:super-secret@github.com/only-one-segment", "github.com"),
+    (error: unknown) => {
+      assert.ok(error instanceof RepositoryContextResolutionError);
+      assert.equal(error.reason, "invalid-override");
+      assert.ok(!error.message.includes("super-secret"));
+      return true;
+    },
+  );
+});
+
+test("a schemeless credential-bearing locator is rejected as an invalid hostname without leaking the credential", () => {
+  assert.throws(
+    () => parseRepositoryLocator("x-access-token:super-secret@github.com/acme/inari", "github.com"),
+    (error: unknown) => {
+      assert.ok(error instanceof RepositoryContextResolutionError);
+      assert.equal(error.reason, "invalid-hostname");
+      assert.ok(!error.message.includes("super-secret"));
+      return true;
+    },
+  );
+});
+
 test("resolveLocalRepositoryContext never invokes `gh`", () => {
   let sawGit = false;
   resolveLocalRepositoryContext({
