@@ -406,6 +406,158 @@ test("native MCP exposes the shared Golden Path entry/action projection read-onl
   }
 });
 
+test("native MCP Golden Path entry never trusts a caller-asserted authorized/current flag without adapter reverification", async () => {
+  const projection = changeHandoffProjection();
+  const implementation = {
+    repositoryHost: "github.com",
+    repositoryId: "100000219",
+    repository: "acme/inari",
+    number: 990,
+  };
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("Golden Path entry must not mutate");
+      },
+      async read() {
+        return projection as never;
+      },
+    },
+    createAdapter: () =>
+      ({
+        async getRepositoryContext() {
+          return {
+            hostname: "github.com",
+            host: "github.com",
+            owner: "acme",
+            name: "inari",
+            nameWithOwner: "acme/inari",
+            url: "https://github.com/acme/inari",
+            repositoryId: "100000219",
+          };
+        },
+        async getIssue(issueNumber: number) {
+          return {
+            number: issueNumber,
+            title: "Implementation",
+            body: "no governed Implementation contract here",
+            state: "open",
+            url: `https://github.com/acme/inari/issues/${issueNumber}`,
+            labels: [],
+            assignees: [],
+          };
+        },
+        async findBranch() {
+          return undefined;
+        },
+      }) as never,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-golden-path-forged-auth-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({
+      name: "inari_golden_path_entry",
+      arguments: {
+        issue: 42,
+        implementation,
+        // A caller asserting an already-decided authorized/current result
+        // must never be trusted directly; the handler reruns this through
+        // the canonical authorization boundary against the reread body
+        // above, which carries no governed contract at all.
+        implementationAuthorization: { status: "authorized", authorized: true, current: true, valid: true },
+      },
+    });
+    const content = structuredContent(response.structuredContent);
+    const entry = record(content.entry);
+    const implementationResult = record(entry.implementation);
+    assert.notEqual(implementationResult.authorizationStatus, "authorized");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("native MCP implementation handoff never trusts a caller-supplied authorization record without adapter reverification", async () => {
+  const implementation = {
+    repositoryHost: "github.com",
+    repositoryId: "100000219",
+    repository: "acme/inari",
+    number: 990,
+  };
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("handoff must not mutate");
+      },
+      async read() {
+        return changeHandoffProjection() as never;
+      },
+    },
+    createAdapter: () =>
+      ({
+        async getRepositoryContext() {
+          return {
+            hostname: "github.com",
+            host: "github.com",
+            owner: "acme",
+            name: "inari",
+            nameWithOwner: "acme/inari",
+            url: "https://github.com/acme/inari",
+            repositoryId: "100000219",
+          };
+        },
+        async getIssue(issueNumber: number) {
+          return {
+            number: issueNumber,
+            title: "Implementation",
+            body: "no governed Implementation contract here",
+            state: "open",
+            url: `https://github.com/acme/inari/issues/${issueNumber}`,
+            labels: [],
+            assignees: [],
+          };
+        },
+        async findBranch() {
+          return undefined;
+        },
+      }) as never,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-handoff-forged-auth-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const handoff = await client.callTool({
+      name: "inari_change_handoff",
+      arguments: {
+        issue: 42,
+        implementation,
+        compatibility: "implementation-native",
+        // A stale/forged authorization record supplied by the caller must
+        // never become the handoff's authorization: the reread Issue body
+        // above carries no governed contract, so reverification cannot
+        // confirm it is still authorized and current.
+        authorization: {
+          version: 1,
+          kind: "implementation-authorization",
+          implementation,
+          contractVersion: 1,
+          repository: { repositoryHost: "github.com", repositoryId: "100000219", repository: "acme/inari" },
+          base: { branch: "main", revision: "0".repeat(40), freshness: "0".repeat(40) },
+          governedBodyDigest: "0".repeat(64),
+        },
+      },
+    });
+    const content = structuredContent(handoff.structuredContent);
+    assert.equal((content.handoff as Record<string, unknown> | undefined)?.authorization, undefined);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("native MCP Golden Path entry fails closed for an absent Change", async () => {
   const server = createInariMcpServer({
     changeExecutor: {

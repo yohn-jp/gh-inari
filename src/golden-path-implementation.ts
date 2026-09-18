@@ -135,6 +135,7 @@ const AUTHORIZATION_STATUSES = new Set<ImplementationLifecycleStatus>([
   "invalidated",
   "superseded",
   "completed",
+  "aborted",
 ]);
 function isRecord(value: unknown): value is RecordValue {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -263,10 +264,13 @@ function authorizationView(
       ),
     );
   }
-  const authorized =
-    wrapper.authorized === true || (record !== undefined && wrapper.kind === IMPLEMENTATION_AUTHORIZATION_KIND);
-  const current =
-    wrapper.current === true || (record !== undefined && wrapper.kind === IMPLEMENTATION_AUTHORIZATION_KIND);
+  // A raw ImplementationAuthorizationRecord is immutable evidence of a past
+  // authorization; it never proves current authority by itself. Only an
+  // explicit boolean from an already-canonical lifecycle/authorization
+  // result (never a caller-forged wrapper around a bare record) may assert
+  // authorized/current.
+  const authorized = wrapper.authorized === true;
+  const current = wrapper.current === true;
   if (wrapper.authorized !== undefined && typeof wrapper.authorized !== "boolean")
     diagnostics.push(
       diagnostic(
@@ -288,8 +292,10 @@ function authorizationView(
     : undefined;
   if (wrapperImplementation !== undefined && wrapperImplementation.reference === undefined)
     diagnostics.push(...wrapperImplementation.diagnostics);
+  // A bare record's status is never inferred as "authorized"; currentness
+  // is proven only by an explicit canonical status/authorized/current triad.
   return {
-    status: (status as ImplementationLifecycleStatus | undefined) ?? (record === undefined ? undefined : "authorized"),
+    status: status as ImplementationLifecycleStatus | undefined,
     authorized,
     current,
     implementation: record?.implementation ?? wrapperImplementation?.reference,
@@ -308,6 +314,7 @@ interface ReadinessView {
 
 function readinessView(value: unknown, diagnostics: GoldenPathImplementationDiagnostic[]): ReadinessView | undefined {
   if (value === undefined) return undefined;
+  const startingDiagnosticCount = diagnostics.length;
   if (!isRecord(value)) {
     diagnostics.push(
       diagnostic(
@@ -347,15 +354,58 @@ function readinessView(value: unknown, diagnostics: GoldenPathImplementationDiag
         "Readiness admission must agree with its classification.",
       ),
     );
+  // Closed-world shape check: an abbreviated lookalike (only kind/version/
+  // classification/admitted) must never pass as a canonical admission
+  // result, so every remaining authority field is required here too.
+  if (!Array.isArray(value.evidence))
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_READINESS_INVALID",
+        "$.readiness.evidence",
+        "Implementation readiness dependency evidence is required.",
+      ),
+    );
+  if (
+    !Array.isArray(value.unverifiedPrerequisites) ||
+    value.unverifiedPrerequisites.some((entry) => typeof entry !== "string")
+  )
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_READINESS_INVALID",
+        "$.readiness.unverifiedPrerequisites",
+        "Implementation readiness unverified prerequisites are required.",
+      ),
+    );
+  if (!Array.isArray(value.diagnostics))
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_READINESS_INVALID",
+        "$.readiness.diagnostics",
+        "Implementation readiness diagnostics are required.",
+      ),
+    );
+  if (typeof value.valid !== "boolean")
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_READINESS_INVALID",
+        "$.readiness.valid",
+        "Implementation readiness validity is required.",
+      ),
+    );
   const referenceResult =
     value.implementation === undefined ? undefined : referenceValue(value.implementation, "$.readiness.implementation");
   if (referenceResult !== undefined && referenceResult.reference === undefined)
     diagnostics.push(...referenceResult.diagnostics);
   const reference = referenceResult?.reference;
+  // A structurally invalid (e.g. abbreviated/forged) readiness result must
+  // never expose a usable classification/admission to the composer; it
+  // degrades to unclassified rather than silently keeping a caller-favorable
+  // reading of a shape that failed validation.
+  const shapeValid = diagnostics.length === startingDiagnosticCount;
   return {
-    classification: classification as ImplementationReadinessClassification,
-    admitted: value.admitted === true,
-    valid: value.valid === true,
+    classification: shapeValid ? (classification as ImplementationReadinessClassification) : undefined,
+    admitted: shapeValid && value.admitted === true,
+    valid: shapeValid && value.valid === true,
     implementation: reference,
   };
 }
@@ -370,6 +420,7 @@ function conformanceView(
   diagnostics: GoldenPathImplementationDiagnostic[],
 ): ConformanceView | undefined {
   if (value === undefined) return undefined;
+  const startingDiagnosticCount = diagnostics.length;
   if (!isRecord(value)) {
     diagnostics.push(
       diagnostic(
@@ -404,7 +455,69 @@ function conformanceView(
         "Implementation conformance validity is required.",
       ),
     );
-  return { status: value.status as ImplementationConformanceStatus, valid: value.valid === true };
+  // Closed-world shape check: an abbreviated lookalike (only kind/version/
+  // status/valid) must never pass as a canonical verification result, so
+  // every remaining authority field is required here too.
+  const authorization = value.authorization;
+  if (
+    !isRecord(authorization) ||
+    typeof authorization.authorized !== "boolean" ||
+    typeof authorization.current !== "boolean" ||
+    !Array.isArray(authorization.violations)
+  )
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.conformance.authorization",
+        "Implementation conformance authorization summary is required.",
+      ),
+    );
+  if (!Array.isArray(value.changes))
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.conformance.changes",
+        "Implementation conformance changes are required.",
+      ),
+    );
+  const verification = value.verification;
+  const verificationKeys = [
+    "requiredChecks",
+    "requiredTests",
+    "satisfiedChecks",
+    "satisfiedTests",
+    "missingChecks",
+    "missingTests",
+    "failedChecks",
+    "failedTests",
+    "unverifiableChecks",
+    "unverifiableTests",
+  ] as const;
+  if (!isRecord(verification) || verificationKeys.some((key) => !Array.isArray(verification[key])))
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.conformance.verification",
+        "Implementation conformance verification evidence is required.",
+      ),
+    );
+  if (!Array.isArray(value.diagnostics))
+    diagnostics.push(
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.conformance.diagnostics",
+        "Implementation conformance diagnostics are required.",
+      ),
+    );
+  // A structurally invalid (e.g. abbreviated/forged) conformance result must
+  // never expose a usable status to the composer; it degrades to
+  // unclassified rather than silently keeping a caller-favorable "conformant"
+  // reading of a shape that failed validation.
+  const shapeValid = diagnostics.length === startingDiagnosticCount;
+  return {
+    status: shapeValid ? (value.status as ImplementationConformanceStatus) : undefined,
+    valid: shapeValid && value.valid === true,
+  };
 }
 
 interface ChangeView {
@@ -489,6 +602,10 @@ function implementationStatus(
   change: ChangeView,
   complete: boolean | undefined,
 ): GoldenPathImplementationStatus {
+  // An authoritative aborted lifecycle is terminal evidence; it is checked
+  // first so it can never be reinterpreted as blocked or re-enter
+  // authorized/active/ready state.
+  if (authorization?.status === "aborted") return "terminal";
   if (readiness?.classification === "BLOCKED" || readiness?.classification === "INVALID") return "blocked";
   if (authorization?.status === "invalidated" || authorization?.status === "superseded") return "blocked";
   if (

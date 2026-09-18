@@ -73,6 +73,10 @@ import type {
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { tryProjectImplementationFrontier } from "../implementation-frontier.js";
+import {
+  tryVerifyImplementationAuthorization,
+  validateImplementationAuthorizationRecord,
+} from "../implementation-authorization.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
 import { projectOperationalSemanticOverlay } from "../reconciliation.js";
 import type { McpSessionAppBridge } from "./session-app-bridge.js";
@@ -247,7 +251,16 @@ export const issueRelationsPlanInputSchema = z.strictObject({
 });
 export type IssueRelationsPlanInput = z.infer<typeof issueRelationsPlanInputSchema>;
 
-/** Input schema for the read-only canonical implementation handoff. */
+/**
+ * Input schema for the read-only canonical implementation handoff.
+ *
+ * `authorization` identifies an authorization record the caller wants
+ * re-verified; it is never accepted as an already-current authorization by
+ * itself. The handler always reruns it through the canonical Implementation
+ * authorization boundary against a fresh Issue/base reread, and only an
+ * authorization that boundary confirms is still authorized and current can
+ * become the handoff's authorization.
+ */
 export const implementationHandoffInputSchema = z.strictObject({
   repository: repositorySchema.optional(),
   issue: artifactNumberSchema,
@@ -270,7 +283,18 @@ export type SessionAuthorizedChangeInput = z.infer<typeof sessionAuthorizedChang
 /** Compatibility name for callers that prefix the handoff with Change. */
 export const changeImplementationHandoffInputSchema = implementationHandoffInputSchema;
 
-/** Input schema for the read-only Golden Path entry/action projection. */
+/**
+ * Input schema for the read-only Golden Path entry/action projection.
+ *
+ * `implementationAuthorization`/`implementationReadiness` identify evidence
+ * the caller wants re-verified (e.g. a previously issued authorization
+ * record); they are never accepted as an already-decided authorized/current
+ * assertion. The handler always reruns them through the canonical
+ * Implementation authorization boundary against a fresh Issue/base reread
+ * before composing Golden Path state. Caller-supplied conformance is not
+ * accepted at all: this read-only surface has no verified PR/check evidence
+ * boundary to re-derive it from.
+ */
 export const goldenPathEntryInputSchema = z.strictObject({
   repository: repositorySchema.optional(),
   issue: artifactNumberSchema,
@@ -278,7 +302,6 @@ export const goldenPathEntryInputSchema = z.strictObject({
   implementation: z.unknown().optional(),
   implementationAuthorization: z.unknown().optional(),
   implementationReadiness: z.unknown().optional(),
-  implementationConformance: z.unknown().optional(),
   compatibility: z.enum(["implementation-native", "historical-issue-root"]).optional(),
 });
 export type GoldenPathEntryInput = z.infer<typeof goldenPathEntryInputSchema>;
@@ -569,6 +592,67 @@ function changeExecutorFor(
   return createActionsChangeExecutionAdapter(options);
 }
 
+function implementationReferenceNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 1 ? value : undefined;
+  if (!isRecord(value)) return undefined;
+  const candidate = isRecord(value.reference) ? value.reference : value;
+  const number = candidate.number;
+  return typeof number === "number" && Number.isSafeInteger(number) && number >= 1 ? number : undefined;
+}
+
+/**
+ * Reread the Implementation Issue and rerun caller-supplied authorization
+ * (and optional readiness) evidence through the canonical Implementation
+ * authorization boundary. A caller can never assert `authorized`/`current`/
+ * `status` directly: only what this reverification derives from the fresh
+ * Issue body and base evidence is trustworthy Golden Path composition input.
+ */
+async function resolveVerifiedImplementationAuthorization(
+  implementationValue: unknown,
+  authorizationInput: unknown,
+  readinessInput: unknown,
+  requestRepository: string | undefined,
+  dependencies: NativeChangeDependencies,
+): Promise<unknown> {
+  if (authorizationInput === undefined) return undefined;
+  const number = implementationReferenceNumber(implementationValue);
+  if (number === undefined) return undefined;
+  try {
+    const adapter = adapterFor(requestRepository, dependencies);
+    const context = await adapter.getRepositoryContext();
+    const issue = await adapter.getIssue(number);
+    const repositoryId = issue.repositoryId ?? context.repositoryId;
+    if (repositoryId === undefined) return undefined;
+    const repository = {
+      repositoryHost: (issue.repositoryHost ?? context.hostname).toLocaleLowerCase("en-US"),
+      repositoryId,
+      repository: context.nameWithOwner.toLocaleLowerCase("en-US"),
+    };
+    const reference = { repositoryHost: repository.repositoryHost, repositoryId: repository.repositoryId, number };
+    const recordCandidate =
+      isRecord(authorizationInput) && isRecord(authorizationInput.record)
+        ? authorizationInput.record
+        : authorizationInput;
+    const validatedRecord = validateImplementationAuthorizationRecord(recordCandidate);
+    let base: { readonly branch: string; readonly revision: string; readonly freshness: string } | undefined;
+    const branchName = validatedRecord.record?.base.branch;
+    if (branchName !== undefined) {
+      const branch = await adapter.findBranch(branchName);
+      if (branch !== undefined && branch.sha.length > 0)
+        base = { branch: branch.name, revision: branch.sha, freshness: branch.sha };
+    }
+    return tryVerifyImplementationAuthorization({
+      authorization: authorizationInput,
+      issue: { reference, body: issue.body ?? "" },
+      repository,
+      ...(base === undefined ? {} : { base }),
+      ...(readinessInput === undefined ? {} : { readiness: readinessInput }),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve the repository Canon through the existing repository/Core boundary. */
 export async function resolveSemanticPullRequestContract(
   input: SemanticPullRequestContractInput,
@@ -785,11 +869,29 @@ async function handleImplementationHandoff(
         repositoryNameWithOwner = undefined;
       }
     }
+    // The caller may identify which authorization to hand off, but it never
+    // chooses or asserts the authorization record that becomes handoff
+    // authority: only an authorization this reverification confirms is
+    // still authorized and current against a fresh Issue/base reread can
+    // become the handoff's authorization.
+    const verifiedAuthorization = await resolveVerifiedImplementationAuthorization(
+      input.implementation,
+      input.authorization,
+      undefined,
+      input.repository,
+      dependencies,
+    );
+    const currentAuthorizationRecord =
+      isRecord(verifiedAuthorization) &&
+      verifiedAuthorization.authorized === true &&
+      verifiedAuthorization.current === true
+        ? verifiedAuthorization.authorization
+        : undefined;
     return result(
       projectChangeHandoffResult(input.issue, projection, {
         repositoryNameWithOwner,
         ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
-        ...(input.authorization === undefined ? {} : { authorization: input.authorization }),
+        ...(currentAuthorizationRecord === undefined ? {} : { authorization: currentAuthorizationRecord }),
         ...(input.sourceIssues === undefined ? {} : { sourceIssues: input.sourceIssues }),
         ...(input.compatibility === undefined ? {} : { compatibility: input.compatibility }),
       }),
@@ -822,20 +924,23 @@ async function handleGoldenPathEntry(
   try {
     const executor = changeExecutorFor(input.repository, dependencies);
     const projection = await readChangeProjection(executor, changeReadRequest(input.issue));
+    // Caller-supplied authorization/readiness evidence is never composed
+    // directly: it is rerun through the canonical Implementation
+    // authorization boundary against a fresh Issue/base reread first, so a
+    // caller can never assert `authorized`/`current`/`status` by itself.
+    const verifiedAuthorization = await resolveVerifiedImplementationAuthorization(
+      input.implementation,
+      input.implementationAuthorization,
+      input.implementationReadiness,
+      input.repository,
+      dependencies,
+    );
     const entry = tryProjectGoldenPathEntry({
       projection,
       requireGovernedIssue: false,
       ...(input.sourceIssue === undefined ? {} : { sourceIssue: input.sourceIssue }),
       ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
-      ...(input.implementationAuthorization === undefined
-        ? {}
-        : { implementationAuthorization: input.implementationAuthorization }),
-      ...(input.implementationReadiness === undefined
-        ? {}
-        : { implementationReadiness: input.implementationReadiness }),
-      ...(input.implementationConformance === undefined
-        ? {}
-        : { implementationConformance: input.implementationConformance }),
+      ...(verifiedAuthorization === undefined ? {} : { implementationAuthorization: verifiedAuthorization }),
       ...(input.compatibility === undefined ? {} : { compatibility: input.compatibility }),
     });
     return result(
