@@ -33,6 +33,7 @@ import {
 import {
   ChangeProvenanceRecordError,
   createChangeProvenanceRecord,
+  createLocalChangeProvenanceRecord,
   renderChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
   type SignedChangeProvenanceRecord,
@@ -531,6 +532,52 @@ export async function createDelegatorSignedChangeProvenanceRecord(
     );
   }
   return record;
+}
+
+/**
+ * Create the caller-owned provenance record for one fresh `change.issue`
+ * using only locally provisioned Delegator signing material.
+ *
+ * Unlike `createDelegatorSignedChangeProvenanceRecord`, this signer performs
+ * no GitHub-authenticated Canon read: it never accepts or constructs a
+ * `DelegatorSourceReader`, and it never constructs, asserts, or implies a
+ * `Delegator` record -- signing needs only the local key id and private key,
+ * not a self-declared trust/capability-ceiling/activation envelope. Canonical
+ * Delegator trust/admissibility is resolved and enforced exclusively inside
+ * trusted execution (the App-scoped read capability) before any effect.
+ */
+export async function createLocalDelegatorSignedChangeProvenanceRecord(
+  rootIssue: number,
+  options: DelegatorChangeProvenanceSignerOptions,
+): Promise<SignedChangeProvenanceRecord> {
+  if (!Number.isSafeInteger(rootIssue) || rootIssue < 1) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_INVALID",
+      "Root Issue must be a positive safe integer.",
+    );
+  }
+  if (
+    !isAuthorityId(options.authorityId) ||
+    (options.privateKey === undefined && options.privateKeyPath === undefined)
+  ) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer configuration must provide an authority ID and private key.",
+    );
+  }
+  const runtimeKey = privateKeyFromOptions(options);
+  if (runtimeKey === undefined) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer private key is missing, malformed, or not Ed25519 PKCS#8.",
+    );
+  }
+  return createLocalChangeProvenanceRecord({
+    rootIssue,
+    authorityId: options.authorityId,
+    runtimeKey,
+    now: options.now,
+  });
 }
 
 /**

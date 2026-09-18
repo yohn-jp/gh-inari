@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
+import {
+  createSessionCredentialBundle,
+  persistSessionCredentialBundle,
+  type SessionIssuanceRequestDocument,
+} from "./agent-authority/session-bundle.js";
 import {
   AGENT_INVOCATION_CONTRACT,
   COMMAND_CONTRACT_ID,
@@ -94,6 +101,47 @@ function runtimeSignerDependencies(overrides: Parameters<typeof runCli>[1] = {})
     environment: runtimeSignerEnvironment,
     createAdapter: () => runtimeTrustAdapter(),
     ...overrides,
+  };
+}
+
+/** A Direct App Session credential bundle; unrelated to the caller-side Delegator signer under test. */
+async function createDirectAppBundleFile(dir: string): Promise<string> {
+  const sessionKey = generateRuntimeAuthorityKeyPair();
+  const request: SessionIssuanceRequestDocument = {
+    version: 1,
+    kind: "inari-session-issuance-request",
+    runtimeAuthority: createRuntimeAuthorityRecord({
+      id: "session-issuer",
+      key: sessionKey,
+      notBefore: "2020-01-01T00:00:00Z",
+      maxSessionTtlSeconds: 3600,
+      capabilityCeiling: ["change.implement"],
+    }),
+    repository: { id: identity.repositoryId, name: "acme/inari" },
+    task: { kind: "issue", number: identity.rootIssue },
+    capabilities: [{ kind: "change.implement", issue: identity.rootIssue }],
+    ttlSeconds: 1800,
+  } as SessionIssuanceRequestDocument;
+  const created = createSessionCredentialBundle({
+    request,
+    runtimeKey: sessionKey,
+    now: new Date("2026-06-01T00:00:00Z"),
+  });
+  const filePath = path.join(dir, "bundle.json");
+  persistSessionCredentialBundle(filePath, created.bundle);
+  return filePath;
+}
+
+function installFakeFetch(handler: (url: URL, body: unknown) => { status: number; body: unknown }): () => void {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    const body: unknown = init?.body === undefined ? undefined : JSON.parse(String(init.body));
+    const { status, body: responseBody } = handler(url, body);
+    return new Response(JSON.stringify(responseBody), { status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = original;
   };
 }
 
@@ -467,6 +515,73 @@ test("fresh change issue fails before dispatch when the Runtime signer is not co
     message: "Runtime signer configuration must provide an authority ID and private key.",
     diagnostics: [],
   });
+});
+
+test("Direct App Session selection for change issue signs locally, never constructs a GitHubAdapter, and ignores poisoned ambient GitHub credentials", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".change-issue-direct-app-"));
+  try {
+    const bundlePath = await createDirectAppBundleFile(dir);
+    let executeRequest: Record<string, unknown> | undefined;
+    const restore = installFakeFetch((url, body) => {
+      assert.equal(url.pathname, "/v1/execute");
+      const envelope = body as { operation: string; request: Record<string, unknown> };
+      assert.equal(envelope.operation, "change.issue");
+      executeRequest = envelope.request;
+      return {
+        status: 200,
+        body: {
+          version: 1,
+          ok: true,
+          operation: "change.issue",
+          requestId: "r1",
+          result: { version: 1, status: "succeeded", execution: { projection: projection() } },
+        },
+      };
+    });
+    try {
+      const result = await capture(
+        [
+          "change",
+          "issue",
+          String(identity.rootIssue),
+          "--session-credential",
+          bundlePath,
+          "--app-endpoint",
+          "https://app.example.com",
+          "--json",
+        ],
+        {
+          environment: {
+            ...runtimeSignerEnvironment,
+            // Poison ambient GitHub user credentials must never be read or
+            // promoted into authority on the Direct App Session path.
+            GH_TOKEN: "poison-gh-token",
+            GITHUB_TOKEN: "poison-github-token",
+            GH_ENTERPRISE_TOKEN: "poison-gh-enterprise-token",
+            GITHUB_ENTERPRISE_TOKEN: "poison-github-enterprise-token",
+          },
+          createAdapter: () => {
+            throw new Error("GitHubAdapter must not be constructed on the Direct App Session path");
+          },
+        },
+      );
+
+      assert.equal(result.exitCode, 0, JSON.stringify(result.output));
+      assert.ok(executeRequest !== undefined);
+      const signedProvenanceRecord = executeRequest.signedProvenanceRecord;
+      assert.equal(typeof signedProvenanceRecord, "object");
+      assert.deepEqual(verifyChangeProvenanceRecord(signedProvenanceRecord, runtimeSignerAuthority), {
+        version: 1,
+        rootIssue: identity.rootIssue,
+        operation: "change.issue",
+      });
+      assert.doesNotMatch(JSON.stringify(executeRequest), /poison-/u);
+    } finally {
+      restore();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("CLI preserves the bounded trusted Actions diagnostic stage", async () => {

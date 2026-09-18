@@ -136,6 +136,7 @@ import {
   checkDelegatorRotationOrder,
   createDelegatorRecord,
   createDelegatorSignedChangeProvenanceRecord,
+  createLocalDelegatorSignedChangeProvenanceRecord,
   deriveDelegatorIdentity,
   verifyDelegatorReadiness,
   type DelegatorPublicKeyInput,
@@ -1661,23 +1662,37 @@ async function runChangeCommand(
   }
 
   const issue = Number(rest[0]);
-  const runtimeTrustAdapter =
-    definition.operation === "issue" ? createAdapter(dependencies, root, parsed.options.repository) : undefined;
-  const signedProvenanceRecord =
-    runtimeTrustAdapter === undefined
-      ? undefined
-      : await createDelegatorSignedChangeProvenanceRecord(runtimeTrustAdapter, issue, {
-          authorityId: (dependencies.environment ?? process.env).INARI_RUNTIME_AUTHORITY_ID,
-          privateKey: (dependencies.environment ?? process.env).INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
-        });
+  const sessionCredential = parsed.options.sessionCredential;
+  const appEndpoint = parsed.options.appEndpoint;
+  rejectPartialSessionTransportOptions(sessionCredential, appEndpoint);
+  const usesDirectAppTransport = typeof sessionCredential === "string" && typeof appEndpoint === "string";
+
+  let runtimeTrustAdapter: GitHubAdapter | undefined;
+  let signedProvenanceRecord: Awaited<ReturnType<typeof createDelegatorSignedChangeProvenanceRecord>> | undefined;
+  if (definition.operation === "issue") {
+    const environment = dependencies.environment ?? process.env;
+    if (usesDirectAppTransport) {
+      // Direct App Session selection: canonical Delegator trust is resolved
+      // and verified inside trusted execution (App-scoped read capability)
+      // before any effect. Caller-side signing here uses only local
+      // Delegator signing material and never reads GitHub.
+      signedProvenanceRecord = await createLocalDelegatorSignedChangeProvenanceRecord(issue, {
+        authorityId: environment.INARI_RUNTIME_AUTHORITY_ID,
+        privateKey: environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
+      });
+    } else {
+      runtimeTrustAdapter = createAdapter(dependencies, root, parsed.options.repository);
+      signedProvenanceRecord = await createDelegatorSignedChangeProvenanceRecord(runtimeTrustAdapter, issue, {
+        authorityId: environment.INARI_RUNTIME_AUTHORITY_ID,
+        privateKey: environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
+      });
+    }
+  }
   const executor = createChangeExecutor(
     dependencies,
     root,
     parsed.options.repository,
-    {
-      sessionCredential: parsed.options.sessionCredential,
-      appEndpoint: parsed.options.appEndpoint,
-    },
+    { sessionCredential, appEndpoint },
     runtimeTrustAdapter,
   );
   const result =
