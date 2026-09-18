@@ -1012,7 +1012,6 @@ const PUBLIC_GOLDEN_PATH_STATUS_NATIVE_IMPLEMENTATION_KEYS = Object.freeze([
   "repositoryHost",
   "repositoryId",
   "number",
-  "complete",
 ] as const);
 
 function publicGoldenPathStatusAuthorityDiagnostics(input: Record<string, unknown>): readonly unknown[] {
