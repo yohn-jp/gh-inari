@@ -1415,13 +1415,12 @@ function rejectPartialSessionTransportOptions(
   );
 }
 
-/** Selects the direct App transport when both Session options are supplied; otherwise the existing Actions/gh path. */
+/** Selects the direct App transport when both Session options are supplied; otherwise the native Actions path. */
 function createChangeExecutor(
   dependencies: CliDependencies,
   root: string,
   repository: string | boolean | undefined,
   sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean } = {},
-  adapter?: GitHubAdapter,
 ): ChangeExecutionPort {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
   rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
@@ -1433,16 +1432,7 @@ function createChangeExecutor(
   const factory =
     dependencies.createChangeExecutor ??
     ((options: ChangeExecutionPortOptions) => {
-      const transportAdapter =
-        adapter ??
-        (dependencies.createAdapter ?? ((adapterOptions) => new GitHubAdapter(adapterOptions)))({
-          cwd: options.cwd,
-          ...(options.repository === undefined ? {} : { repository: options.repository }),
-        });
-      return createActionsChangeExecutionAdapter({
-        ...options,
-        api: transportAdapter,
-      });
+      return createActionsChangeExecutionAdapter(options);
     });
   return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
 }
@@ -1688,13 +1678,10 @@ async function runChangeCommand(
       });
     }
   }
-  const executor = createChangeExecutor(
-    dependencies,
-    root,
-    parsed.options.repository,
-    { sessionCredential, appEndpoint },
-    runtimeTrustAdapter,
-  );
+  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
+    sessionCredential,
+    appEndpoint,
+  });
   const result =
     definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeProjection(executor, changeReadRequest(issue)) }

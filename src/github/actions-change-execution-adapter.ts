@@ -6,6 +6,11 @@ import {
   type ChangeEffectFailureClassification,
   type ChangeProjectionResult,
 } from "../change.js";
+import type {
+  GitHubChangeEffectJsonObject,
+  GitHubChangeEffectJsonValue,
+  GitHubChangeEffectRepository,
+} from "./change-effect-adapter.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   ChangeExecutionPortError,
@@ -25,13 +30,16 @@ import {
   type ChangeReadRequest,
 } from "../change-execution-port.js";
 import { normalizeTrustedFailureDiagnostics } from "../change-failure-diagnostics.js";
-import { GitHubAdapter } from "./adapter.js";
+import { resolveGitHubRepository } from "./app-installation-credential-broker.js";
 import { isRepositoryEvidenceFailureReason, isTrustedActionsFailureStage } from "./actions-change-executor.js";
 import type { TrustedActionsFailureDiagnostic } from "./actions-change-executor.js";
 import { isChangeTrustedExecutorErrorCode } from "../change-trusted-executor.js";
 import { isGitHubAdapterError } from "./errors.js";
 import { createGitHubChangeReadAdapter, type GitHubChangeProjectionApi } from "./change-state-projector.js";
-import type { RepositoryContext } from "./types.js";
+import { GitHubNativeHttpTransport } from "./native-http-transport.js";
+import { resolveGitHubUserCredential, GitHubUserCredentialError } from "./user-credential.js";
+import { resolveLocalRepositoryContext } from "./local-repository-context.js";
+import type { RepositoryContext, RepositoryTree } from "./types.js";
 
 /** The only workflow and ref selected by the CLI transport. */
 export const INARI_CHANGE_EXECUTOR_WORKFLOW = "inari-change-executor.yml" as const;
@@ -58,6 +66,7 @@ export const ACTIONS_TRANSPORT_FAILURE_STAGES = Object.freeze([
   "repository-context",
   "dispatch",
   "run-read",
+  "jobs-read",
   "artifact-read",
   "artifact-download",
   "result-decode",
@@ -74,11 +83,22 @@ export interface ActionsChangeExecutionAdapterApi {
     deadline?: ChangeExecutionDeadline,
   ): Promise<unknown>;
   downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array>;
+  /** Optional bounded inspection of the positively correlated run's jobs. */
+  readonly inspectActionsJobs?: (runId: number, deadline?: ChangeExecutionDeadline) => Promise<void>;
 }
 
 export interface ActionsChangeExecutionAdapterOptions extends ChangeExecutionPortOptions {
-  /** Injectable Actions transport abstraction; the default is the normal gh session. */
+  /** Injectable Actions transport abstraction; the default is bounded native GitHub HTTP. */
   readonly api?: ActionsChangeExecutionAdapterApi;
+  /** Optional standalone Actions credential, kept inside the transport boundary. */
+  readonly token?: string;
+  /** Optional environment seam for deterministic native credential resolution. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Optional REST API base; defaults to GITHUB_API_URL when present. */
+  readonly apiUrl?: string;
+  /** Injectable fetch implementation for deterministic native transport tests. */
+  readonly fetch?: typeof globalThis.fetch;
+  readonly requestTimeoutMs?: number;
   /** Optional shared GitHub read composition when the transport has no read API. */
   readonly readApi?: GitHubChangeProjectionApi;
   /** Shared Core-facing read adapter; Actions itself never projects Change state. */
@@ -218,6 +238,9 @@ function normalizeTransportError(
   stage: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   if (error instanceof ChangeExecutionPortError) return error;
+  if (error instanceof GitHubUserCredentialError) {
+    return remoteError(code, operation, "authentication", undefined, stage);
+  }
   if (isGitHubAdapterError(error) && error.category === "authentication") {
     return remoteError(code, operation, "authentication", undefined, stage);
   }
@@ -345,6 +368,27 @@ function parseRuns(value: unknown): readonly WorkflowRun[] {
     throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.runs", "invalid-metadata", undefined, "run-read");
   }
   return payload.workflow_runs.map((candidate) => parseRun(candidate));
+}
+
+function parseJobs(value: unknown, expectedRunId: number): void {
+  const payload = record(value, "jobs-read");
+  if (!Array.isArray(payload.jobs) || payload.jobs.length > ACTIONS_PAGE_SIZE) {
+    throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.jobs", "invalid-metadata", undefined, "jobs-read");
+  }
+  for (const candidate of payload.jobs) {
+    const job = record(candidate, "jobs-read");
+    const runId = positiveInteger(job.run_id, "jobs-read");
+    if (runId !== expectedRunId) {
+      throw remoteError("CHANGE_REMOTE_CORRELATION_FAILED", "actions.jobs", "wrong-run", undefined, "correlation");
+    }
+    positiveInteger(job.id, "jobs-read");
+    if (job.status !== "queued" && job.status !== "in_progress" && job.status !== "completed") {
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.jobs", "invalid-metadata", undefined, "jobs-read");
+    }
+    if (job.conclusion !== null && typeof job.conclusion !== "string") {
+      throw remoteError("CHANGE_REMOTE_RESULT_INVALID", "actions.jobs", "invalid-metadata", undefined, "jobs-read");
+    }
+  }
 }
 
 function parseArtifact(value: unknown, expectedName: string, expectedRepositoryId: string): WorkflowArtifact {
@@ -648,6 +692,325 @@ function isRetryablePollTransportError(error: unknown): error is ChangeExecution
   );
 }
 
+const NATIVE_ACTIONS_MAX_RESPONSE_BYTES = 1_048_576;
+const NATIVE_ACTIONS_DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
+class NativeActionsApiError extends Error {
+  readonly reason: "authentication" | "response" | "timeout";
+
+  constructor(reason: "authentication" | "response" | "timeout") {
+    super(
+      reason === "authentication"
+        ? "GitHub Actions authentication failed."
+        : reason === "timeout"
+          ? "GitHub Actions request exceeded its bounded deadline."
+          : "GitHub Actions API request failed.",
+    );
+    this.name = "NativeActionsApiError";
+    this.reason = reason;
+  }
+}
+
+function assertActionsApiPath(value: string): void {
+  if (
+    value.length === 0 ||
+    value.length > 2_048 ||
+    value.startsWith("/") ||
+    value.includes("\u0000") ||
+    value.includes("..") ||
+    !/^actions\//u.test(value)
+  ) {
+    throw new NativeActionsApiError("response");
+  }
+}
+
+function assertRepositoryApiPath(value: string): void {
+  if (
+    value.length > 2_048 ||
+    value.startsWith("/") ||
+    value.includes("\u0000") ||
+    value.includes("..") ||
+    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|git\/|branches\/|commits\/)/u.test(value))
+  ) {
+    throw new NativeActionsApiError("response");
+  }
+}
+
+function nativeRecord(value: unknown, operation: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new NativeActionsApiError("response");
+  }
+  return value as Record<string, unknown>;
+}
+
+function nativeText(value: unknown, maximum: number, operation: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maximum ||
+    /[\u0000-\u001F\u007F]/u.test(value)
+  ) {
+    throw new NativeActionsApiError("response");
+  }
+  return value;
+}
+
+function nativeActionsBody(fields: Readonly<Record<string, string>>): GitHubChangeEffectJsonObject {
+  const body: Record<string, GitHubChangeEffectJsonValue> = {};
+  let inputs: Record<string, GitHubChangeEffectJsonValue> | undefined;
+  for (const [name, value] of Object.entries(fields)) {
+    const input = /^inputs\[([^\]]+)\]$/u.exec(name)?.[1];
+    if (input !== undefined) {
+      inputs ??= {};
+      inputs[input] = value;
+    } else {
+      body[name] = value;
+    }
+  }
+  if (inputs !== undefined) body.inputs = inputs;
+  return body;
+}
+
+function nativeRepositoryResponseStatus(status: number): void {
+  if (status === 401) throw new NativeActionsApiError("authentication");
+  if (status < 200 || status >= 300) throw new NativeActionsApiError("response");
+}
+
+function nativeTree(value: unknown): RepositoryTree {
+  const payload = nativeRecord(value, "repository.governance.tree");
+  if (payload.truncated !== false || !Array.isArray(payload.tree)) {
+    throw new NativeActionsApiError("response");
+  }
+  const sha = nativeText(payload.sha, 128, "repository.governance.tree");
+  const entries = payload.tree.map((candidate) => {
+    const entry = nativeRecord(candidate, "repository.governance.tree");
+    const path = nativeText(entry.path, 4_096, "repository.governance.tree");
+    const entrySha = nativeText(entry.sha, 128, "repository.governance.tree");
+    if (entry.type !== "blob" && entry.type !== "tree") throw new NativeActionsApiError("response");
+    return { path, type: entry.type, sha: entrySha } as const;
+  });
+  return { sha, entries };
+}
+
+/**
+ * Native Actions provider API. It owns only bounded provider I/O and
+ * repository identity resolution; the Actions adapter remains responsible for
+ * correlation, polling, artifact framing, and Change semantics.
+ */
+export interface ActionsChangeExecutionNativeHttpApiOptions {
+  readonly cwd: string;
+  readonly repository?: string;
+  readonly token?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly apiUrl?: string;
+  readonly fetch?: typeof globalThis.fetch;
+  readonly requestTimeoutMs?: number;
+}
+
+export class ActionsChangeExecutionNativeHttpApi
+  implements ActionsChangeExecutionAdapterApi, GitHubChangeProjectionApi
+{
+  readonly #cwd: string;
+  readonly #repository: string | undefined;
+  readonly #token: string | undefined;
+  readonly #apiUrl: string | undefined;
+  readonly #env: Readonly<Record<string, string | undefined>> | undefined;
+  readonly #fetch: typeof globalThis.fetch | undefined;
+  readonly #requestTimeoutMs: number;
+  #credential: string | undefined;
+  #contextValue: RepositoryContext | undefined;
+  #contextPromise: Promise<RepositoryContext> | undefined;
+
+  constructor(options: ActionsChangeExecutionNativeHttpApiOptions) {
+    this.#cwd = options.cwd;
+    this.#repository = options.repository;
+    this.#token = options.token;
+    this.#apiUrl = options.apiUrl ?? options.env?.GITHUB_API_URL ?? process.env.GITHUB_API_URL;
+    this.#env = options.env;
+    this.#fetch = options.fetch;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? NATIVE_ACTIONS_DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+
+  async getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
+    if (this.#contextValue !== undefined) return this.#contextValue;
+    if (deadline === undefined) {
+      if (this.#contextPromise === undefined) {
+        const pending = this.resolveRepositoryContext(undefined);
+        this.#contextPromise = pending;
+        pending.catch(() => {
+          if (this.#contextPromise === pending) this.#contextPromise = undefined;
+        });
+      }
+      return this.#contextPromise;
+    }
+    return this.resolveRepositoryContext(deadline);
+  }
+
+  async requestActionsApi(
+    actionsPath: string,
+    method: "GET" | "POST",
+    fields: Readonly<Record<string, string>> = {},
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<unknown> {
+    assertActionsApiPath(actionsPath);
+    const context = await this.getRepositoryContext(deadline);
+    const response = await this.request(
+      context,
+      method,
+      `actions/${actionsPath.slice("actions/".length)}`,
+      method === "POST" ? nativeActionsBody(fields) : undefined,
+      deadline,
+    );
+    nativeRepositoryResponseStatus(response.status);
+    return response.body;
+  }
+
+  async inspectActionsJobs(runId: number, deadline?: ChangeExecutionDeadline): Promise<void> {
+    if (!Number.isSafeInteger(runId) || runId < 1) throw new NativeActionsApiError("response");
+    for (let page = 1; page <= MAX_ACTION_RUN_PAGES; page += 1) {
+      const value = await this.requestActionsApi(
+        `actions/runs/${runId}/jobs?per_page=${ACTIONS_PAGE_SIZE}&page=${page}`,
+        "GET",
+        {},
+        deadline,
+      );
+      parseJobs(value, runId);
+      const entries = nativeRecord(value, "jobs-read").jobs;
+      if (!Array.isArray(entries) || entries.length < ACTIONS_PAGE_SIZE) return;
+      if (deadline !== undefined && deadline.remainingMs() <= 0) throw new NativeActionsApiError("timeout");
+    }
+  }
+
+  async downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(artifactId) || artifactId < 1) throw new NativeActionsApiError("response");
+    const context = await this.getRepositoryContext(deadline);
+    const transport = this.transport(deadline);
+    const response = await transport.requestBinary({
+      hostname: context.hostname,
+      method: "GET",
+      path: `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
+      accept: "application/zip",
+    });
+    nativeRepositoryResponseStatus(response.status);
+    if (response.bytes === undefined) throw new NativeActionsApiError("response");
+    return response.bytes;
+  }
+
+  async getRepositoryDefaultBranch(deadline?: ChangeExecutionDeadline): Promise<string> {
+    const response = await this.requestRepositoryApi("", "GET", deadline);
+    nativeRepositoryResponseStatus(response.status);
+    return nativeText(
+      nativeRecord(response.body, "repository.default_branch").default_branch,
+      255,
+      "repository.default_branch",
+    );
+  }
+
+  async getRepositoryTree(ref: string, deadline?: ChangeExecutionDeadline): Promise<RepositoryTree> {
+    const response = await this.requestRepositoryApi(
+      `git/trees/${encodeURIComponent(nativeText(ref, 255, "repository.governance.tree"))}?recursive=1`,
+      "GET",
+      deadline,
+    );
+    nativeRepositoryResponseStatus(response.status);
+    return nativeTree(response.body);
+  }
+
+  async getRepositoryBlob(sha: string, deadline?: ChangeExecutionDeadline): Promise<string> {
+    const response = await this.requestRepositoryApi(
+      `git/blobs/${encodeURIComponent(nativeText(sha, 128, "repository.governance.blob"))}`,
+      "GET",
+      deadline,
+    );
+    nativeRepositoryResponseStatus(response.status);
+    const body = nativeRecord(response.body, "repository.governance.blob");
+    if (body.encoding !== "base64") throw new NativeActionsApiError("response");
+    const content = nativeText(body.content, NATIVE_ACTIONS_MAX_RESPONSE_BYTES, "repository.governance.blob");
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(content.replace(/\s+/gu, ""), "base64"));
+    } catch {
+      throw new NativeActionsApiError("response");
+    }
+  }
+
+  async requestRepositoryApi(
+    repositoryPath: string,
+    method: "GET" = "GET",
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<{ readonly status: number; readonly body: unknown }> {
+    assertRepositoryApiPath(repositoryPath);
+    const context = await this.getRepositoryContext(deadline);
+    const response = await this.request(
+      context,
+      method,
+      repositoryPath === "" ? `repos/${context.nameWithOwner}` : `repos/${context.nameWithOwner}/${repositoryPath}`,
+      undefined,
+      deadline,
+    );
+    if (response.status !== 404) nativeRepositoryResponseStatus(response.status);
+    return { status: response.status, body: response.body };
+  }
+
+  private async resolveRepositoryContext(deadline: ChangeExecutionDeadline | undefined): Promise<RepositoryContext> {
+    const context = resolveLocalRepositoryContext({ cwd: this.#cwd, repository: this.#repository });
+    const credential = resolveGitHubUserCredential({
+      hostname: context.hostname,
+      ...(this.#token === undefined ? {} : { token: this.#token }),
+      ...(this.#env === undefined ? {} : { env: this.#env }),
+    });
+    this.#credential = credential.token;
+    const resolved = await resolveGitHubRepository(
+      {
+        hostname: context.hostname,
+        owner: context.owner,
+        name: context.name,
+      } satisfies GitHubChangeEffectRepository,
+      this.transport(deadline),
+    );
+    const complete = Object.freeze({ ...context, repositoryId: resolved.target.repositoryId });
+    this.#contextValue = complete;
+    return complete;
+  }
+
+  private transport(deadline?: ChangeExecutionDeadline): GitHubNativeHttpTransport {
+    const remaining = deadline?.remainingMs();
+    if (remaining !== undefined && remaining <= 0) throw new NativeActionsApiError("timeout");
+    const timeout =
+      remaining === undefined
+        ? this.#requestTimeoutMs
+        : Math.max(1, Math.min(this.#requestTimeoutMs, Math.floor(remaining)));
+    const credential =
+      this.#credential ??
+      resolveGitHubUserCredential({
+        ...(this.#token === undefined ? {} : { token: this.#token }),
+        ...(this.#env === undefined ? {} : { env: this.#env }),
+      }).token;
+    this.#credential = credential;
+    return new GitHubNativeHttpTransport({
+      token: credential,
+      ...(this.#apiUrl === undefined ? {} : { apiUrl: this.#apiUrl }),
+      fetch: this.#fetch,
+      requestTimeoutMs: timeout,
+      maxResponseBytes: NATIVE_ACTIONS_MAX_RESPONSE_BYTES,
+    });
+  }
+
+  private async request(
+    context: RepositoryContext,
+    method: "GET" | "POST",
+    path: string,
+    body: GitHubChangeEffectJsonObject | undefined,
+    deadline?: ChangeExecutionDeadline,
+  ) {
+    return this.transport(deadline).request({
+      hostname: context.hostname,
+      method,
+      path,
+      ...(body === undefined ? {} : { body }),
+    });
+  }
+}
+
 /**
  * Bounded GitHub Actions transport for the transport-neutral Change port.
  *
@@ -667,7 +1030,17 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #randomUUID: () => string;
 
   constructor(options: ActionsChangeExecutionAdapterOptions) {
-    const api = options.api ?? new GitHubAdapter({ cwd: options.cwd, repository: options.repository });
+    const api =
+      options.api ??
+      new ActionsChangeExecutionNativeHttpApi({
+        cwd: options.cwd,
+        ...(options.repository === undefined ? {} : { repository: options.repository }),
+        ...(options.token === undefined ? {} : { token: options.token }),
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
+        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+        ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
+      });
     const projectionApi = options.readApi ?? projectionApiFromTransport(api);
     const read =
       options.read ??
@@ -964,6 +1337,22 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       // decide which run belongs to this request.
       let artifacts: readonly WorkflowArtifact[];
       let artifact: WorkflowArtifact | undefined;
+      if (correlatedRun !== undefined && this.#api.inspectActionsJobs !== undefined) {
+        observationStage = "jobs-read";
+        try {
+          await this.withinDeadline(
+            operation,
+            deadline,
+            () => this.#api.inspectActionsJobs?.(correlatedRun!.id, deadline) ?? Promise.resolve(),
+            "jobs-read",
+          );
+        } catch (error: unknown) {
+          const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "jobs-read");
+          if (!isRetryablePollTransportError(normalized) || !timeRemaining()) throw normalized;
+          await this.#sleep(this.#pollIntervalMs);
+          continue;
+        }
+      }
       observationStage = "artifact-read";
       if (runRecoveredByExactObservation && correlatedArtifact !== undefined && correlatedRun !== undefined) {
         try {

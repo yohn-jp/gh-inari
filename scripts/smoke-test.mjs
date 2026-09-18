@@ -3,7 +3,7 @@
 // Every product invocation below starts from the installed package in a fresh
 // consumer tree; the checkout is used only to produce the tarball and read its
 // expected package metadata.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -547,6 +547,42 @@ function installControlledGh(certificationRoot) {
   return executable;
 }
 
+async function startControlledProvider(controlledGh, environment) {
+  const child = spawn(process.execPath, [controlledGh, "--server"], {
+    cwd: repoRoot,
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+  return await new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const failStart = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    child.once("error", failStart);
+    child.once("exit", (status) => {
+      if (!settled) failStart(new Error(`controlled provider exited before binding (status ${String(status)})`));
+    });
+    child.stdout.on("data", (chunk) => {
+      if (settled) return;
+      output += chunk.toString("utf8");
+      const line = output.split(/\r?\n/u, 1)[0]?.trim() ?? "";
+      if (line.length === 0) return;
+      try {
+        const url = new URL(line);
+        if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") throw new Error("invalid provider URL");
+        settled = true;
+        resolve({ child, url: line });
+      } catch (error) {
+        failStart(error instanceof Error ? error : new Error("invalid provider URL"));
+      }
+    });
+  });
+}
+
 function certifyForgedRequesterSecuritySmoke(consumerDirectory, installedPackageDirectory, environment, issue) {
   const worker = path.join(installedPackageDirectory, "dist", "github", "actions-change-executor.js");
   const forgedRequest = {
@@ -615,7 +651,7 @@ function createProviderState(statePath, workflowSha, issueBody) {
         branches: { main: "0123456789abcdef0123456789abcdef01234567" },
         pulls: {},
         runs: [],
-        artifacts: {},
+        artifacts: [],
         nextRunId: 1000,
         nextArtifactId: 2000,
         failDeleteOnce: { 416: true },
@@ -926,7 +962,7 @@ function certifyNpxFallback(rootDirectory, tarballPath, externalExecutables) {
     fail("npx packed execution modified the fresh consumer package.json");
 }
 
-function main() {
+async function main() {
   const { tarball, evidence } = parseArgs(process.argv.slice(2));
   let tarballPath;
   let ownsTarball = false;
@@ -941,6 +977,7 @@ function main() {
   }
 
   const certificationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gh-inari-golden-path-"));
+  let controlledProvider;
   try {
     const { consumerDirectory, packageFile, packageContents } = createConsumer(certificationRoot, "consumer");
     const npmExecutable = executablePath("npm");
@@ -988,7 +1025,7 @@ function main() {
     const statePath = path.join(certificationRoot, "provider-state.json");
     createProviderState(statePath, workflowSha, renderedIssue.body);
     const controlledGh = installControlledGh(certificationRoot);
-    const installedEnvironment = {
+    const providerEnvironment = {
       ...environment,
       INARI_PACKED_ENTRY: path.join(installedPackageDirectory, "dist", "index.js"),
       INARI_PACKED_PACKAGE_ROOT: installedPackageDirectory,
@@ -1000,6 +1037,8 @@ function main() {
       INARI_CALLER_RUNTIME_AUTHORITY_PRIVATE_KEY: governedConsumer.callerRuntimePrivateKeyPem,
       PATH: boundedPath(binDirectory, externalExecutables, [controlledGh]),
     };
+    controlledProvider = await startControlledProvider(controlledGh, providerEnvironment);
+    const installedEnvironment = { ...providerEnvironment, GITHUB_API_URL: controlledProvider.url };
     const launcherChecks = checkInstalledLaunchers(
       consumerDirectory,
       installedPackageDirectory,
@@ -1043,6 +1082,12 @@ function main() {
     }
     throw error;
   } finally {
+    if (controlledProvider !== undefined) {
+      if (controlledProvider.child.exitCode === null) {
+        controlledProvider.child.kill("SIGTERM");
+        await new Promise((resolve) => controlledProvider.child.once("exit", resolve));
+      }
+    }
     if (process.env.INARI_KEEP_CERTIFICATION_ROOT !== "1")
       fs.rmSync(certificationRoot, { recursive: true, force: true });
     if (ownsTarball && tarballPath !== undefined) fs.rmSync(tarballPath, { force: true });
@@ -1051,10 +1096,8 @@ function main() {
 
 const invokedPath = process.argv[1] === undefined ? undefined : path.resolve(process.argv[1]);
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  try {
-    main();
-  } catch (error) {
+  main().catch((error) => {
     console.error(`packed certification failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
-  }
+  });
 }

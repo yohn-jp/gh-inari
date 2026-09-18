@@ -432,6 +432,10 @@ function createProviderServer(state, statePath, consumerRoot) {
         sendJson(response, 200, { data: { updateRefs: { clientMutationId: null } } });
         return;
       }
+      if (parts[0] === "actions") {
+        await actionsHttpApi(request, response, parsed, parts, state, statePath);
+        return;
+      }
 
       const resource = parts;
       if (request.method === "GET" && resource.length === 0) {
@@ -672,6 +676,21 @@ function createProviderServer(state, statePath, consumerRoot) {
   return server;
 }
 
+async function serveProvider() {
+  const statePath = requireEnvironment("INARI_PACKED_PROVIDER_STATE");
+  const consumerRoot = requireEnvironment("INARI_PACKED_CONSUMER_ROOT");
+  const state = readJson(statePath, undefined);
+  if (!isRecord(state)) throw new Error("provider state is invalid");
+  const server = createProviderServer(state, statePath, consumerRoot);
+  await new Promise((resolve, reject) => {
+    server.listen(0, "127.0.0.1", (error) => (error === undefined ? resolve() : reject(error)));
+  });
+  const address = server.address();
+  if (!isRecord(address) || typeof address.port !== "number") throw new Error("controlled provider did not bind");
+  process.stdout.write(`http://127.0.0.1:${address.port}\n`);
+  await new Promise(() => {});
+}
+
 function parseWorkerOutput(stdout) {
   const lines = stdout
     .trim()
@@ -835,6 +854,152 @@ function singleEntryZip(name, content) {
   return Buffer.concat([local, compressed, central, end]);
 }
 
+async function dispatchActionsRun(state, statePath, requestJson, correlation) {
+  const runId = state.nextRunId ?? 1000;
+  const artifactId = state.nextArtifactId ?? 2000;
+  state.nextRunId = runId + 1;
+  state.nextArtifactId = artifactId + 1;
+  const run = {
+    id: runId,
+    status: "completed",
+    conclusion: "failure",
+    event: "workflow_dispatch",
+    head_branch: "main",
+    ref: "refs/heads/main",
+    path: ".github/workflows/inari-change-executor.yml",
+    // Mirrors the executor's `run-name: Inari Change ${{ inputs.correlation }}`
+    // (exposed by the real Actions API as `display_title`), which the
+    // adapter now requires as positive correlation evidence (#612).
+    display_title: `Inari Change ${correlation}`,
+  };
+  state.runs = [run, ...(state.runs ?? [])];
+  const worker = await dispatchWorker(state, statePath, requestJson);
+  const archive = singleEntryZip("result.json", JSON.stringify(worker.result));
+  run.conclusion = worker.success ? "success" : "failure";
+  run.jobs = [
+    {
+      id: runId,
+      run_id: runId,
+      status: "completed",
+      conclusion: run.conclusion,
+    },
+  ];
+  state.artifacts = [
+    ...(Array.isArray(state.artifacts) ? state.artifacts : []),
+    { correlation, id: artifactId, runId, bytes: archive.toString("base64") },
+  ];
+  stateChanged(statePath, state);
+}
+
+async function actionsHttpApi(request, response, parsed, parts, state, statePath) {
+  const method = request.method ?? "GET";
+  if (
+    method === "GET" &&
+    parts.length === 4 &&
+    parts[1] === "workflows" &&
+    parts[2] === "inari-change-executor.yml" &&
+    parts[3] === "runs"
+  ) {
+    const page = Number(parsed.searchParams.get("page"));
+    const runs = Array.isArray(state.runs) ? state.runs : [];
+    sendJson(response, 200, { workflow_runs: runs.slice((page - 1) * 100, page * 100) });
+    return;
+  }
+  if (
+    method === "POST" &&
+    parts.length === 4 &&
+    parts[1] === "workflows" &&
+    parts[2] === "inari-change-executor.yml" &&
+    parts[3] === "dispatches"
+  ) {
+    const input = await jsonRequest(request);
+    const requestJson =
+      isRecord(input?.inputs) && typeof input.inputs.request === "string" ? input.inputs.request : undefined;
+    const correlation =
+      isRecord(input?.inputs) && typeof input.inputs.correlation === "string" ? input.inputs.correlation : undefined;
+    if (input?.ref !== "refs/heads/main" || requestJson === undefined || correlation === undefined) {
+      sendJson(response, 422, { message: "Actions dispatch fields are incomplete" });
+      return;
+    }
+    await dispatchActionsRun(state, statePath, requestJson, correlation);
+    sendNoContent(response);
+    return;
+  }
+  if (method === "GET" && parts.length === 4 && parts[1] === "runs" && parts[3] === "jobs") {
+    const runId = Number(parts[2]);
+    const run = (Array.isArray(state.runs) ? state.runs : []).find((candidate) => candidate.id === runId);
+    if (run === undefined) {
+      sendJson(response, 404, { message: "Actions run not found" });
+      return;
+    }
+    const page = Number(parsed.searchParams.get("page"));
+    const jobs = Array.isArray(run.jobs) ? run.jobs : [];
+    sendJson(response, 200, { total_count: jobs.length, jobs: jobs.slice((page - 1) * 100, page * 100) });
+    return;
+  }
+  if (method === "GET" && parts.length === 2 && parts[1] === "artifacts") {
+    const name = parsed.searchParams.get("name");
+    const page = Number(parsed.searchParams.get("page"));
+    const correlation = name === null ? undefined : name.replace("inari-change-result-", "");
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.correlation === correlation,
+    );
+    sendJson(response, 200, {
+      artifacts:
+        artifact === undefined || page !== 1
+          ? []
+          : [
+              {
+                id: artifact.id,
+                name,
+                expired: false,
+                workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) },
+              },
+            ],
+    });
+    return;
+  }
+  if (method === "GET" && parts.length === 3 && parts[1] === "runs") {
+    const runId = Number(parts[2]);
+    const run = (Array.isArray(state.runs) ? state.runs : []).find((candidate) => candidate.id === runId);
+    if (run === undefined) sendJson(response, 404, { message: "Actions run not found" });
+    else sendJson(response, 200, run);
+    return;
+  }
+  if (method === "GET" && parts.length === 3 && parts[1] === "artifacts") {
+    const artifactId = Number(parts[2]);
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.id === artifactId,
+    );
+    if (artifact === undefined) {
+      sendJson(response, 404, { message: "Actions artifact not found" });
+      return;
+    }
+    sendJson(response, 200, {
+      id: artifact.id,
+      name: `inari-change-result-${artifact.correlation}`,
+      expired: false,
+      workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) },
+    });
+    return;
+  }
+  if (method === "GET" && parts.length === 4 && parts[1] === "artifacts" && parts[3] === "zip") {
+    const artifactId = Number(parts[2]);
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.id === artifactId,
+    );
+    if (artifact === undefined) {
+      sendJson(response, 404, { message: "Actions artifact not found" });
+      return;
+    }
+    const bytes = Buffer.from(artifact.bytes, "base64");
+    response.writeHead(200, { "content-type": "application/zip", "content-length": bytes.byteLength });
+    response.end(bytes);
+    return;
+  }
+  sendJson(response, 404, { message: "unsupported Actions API endpoint" });
+}
+
 async function actionsApi(argv) {
   const statePath = requireEnvironment("INARI_PACKED_PROVIDER_STATE");
   const state = readJson(statePath, undefined);
@@ -859,36 +1024,17 @@ async function actionsApi(argv) {
     const correlation = fields["inputs[correlation]"];
     if (requestJson === undefined || correlation === undefined)
       throw new Error("Actions dispatch fields are incomplete");
-    const runId = state.nextRunId ?? 1000;
-    const artifactId = state.nextArtifactId ?? 2000;
-    state.nextRunId = runId + 1;
-    state.nextArtifactId = artifactId + 1;
-    const run = {
-      id: runId,
-      status: "completed",
-      conclusion: "failure",
-      event: "workflow_dispatch",
-      head_branch: "main",
-      ref: "refs/heads/main",
-      path: ".github/workflows/inari-change-executor.yml",
-      // Mirrors the executor's `run-name: Inari Change ${{ inputs.correlation }}`
-      // (exposed by the real Actions API as `display_title`), which the
-      // adapter now requires as positive correlation evidence (#612).
-      display_title: `Inari Change ${correlation}`,
-    };
-    state.runs = [run, ...(state.runs ?? [])];
-    const worker = await dispatchWorker(state, statePath, requestJson);
-    const archive = singleEntryZip("result.json", JSON.stringify(worker.result));
-    run.conclusion = worker.success ? "success" : "failure";
-    state.artifacts[correlation] = { id: artifactId, runId, bytes: archive.toString("base64") };
-    stateChanged(statePath, state);
+    await dispatchActionsRun(state, statePath, requestJson, correlation);
     return;
   }
   if (relativeEndpoint.startsWith("actions/artifacts?name=") && method === "GET") {
     const requestUrl = new URL(`https://provider.invalid/${relativeEndpoint}`);
     const name = requestUrl.searchParams.get("name");
     const page = Number(requestUrl.searchParams.get("page"));
-    const artifact = name === null ? undefined : state.artifacts?.[name.replace("inari-change-result-", "")];
+    const correlation = name === null ? undefined : name.replace("inari-change-result-", "");
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.correlation === correlation,
+    );
     process.stdout.write(
       `${JSON.stringify({ artifacts: artifact === undefined || page !== 1 ? [] : [{ id: artifact.id, name, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } }] })}\n`,
     );
@@ -905,17 +1051,18 @@ async function actionsApi(argv) {
   const exactArtifactMatch = /^actions\/artifacts\/(\d+)$/u.exec(relativeEndpoint);
   if (exactArtifactMatch !== null && method === "GET") {
     const artifactId = Number(exactArtifactMatch[1]);
-    const entry = Object.entries(state.artifacts ?? {}).find(([, candidate]) => candidate.id === artifactId);
-    if (entry === undefined) throw new Error("Actions artifact not found");
-    const [correlation, artifact] = entry;
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.id === artifactId,
+    );
+    if (artifact === undefined) throw new Error("Actions artifact not found");
     process.stdout.write(
-      `${JSON.stringify({ id: artifact.id, name: `inari-change-result-${correlation}`, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } })}\n`,
+      `${JSON.stringify({ id: artifact.id, name: `inari-change-result-${artifact.correlation}`, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } })}\n`,
     );
     return;
   }
   const artifactMatch = /^repos\/yohn-jp\/gh-inari\/actions\/artifacts\/(\d+)\/zip$/u.exec(endpoint);
   if (artifactMatch !== null && method === "GET") {
-    const artifact = Object.values(state.artifacts ?? {}).find(
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
       (candidate) => candidate.id === Number(artifactMatch[1]),
     );
     if (artifact === undefined) throw new Error("Actions artifact not found");
@@ -958,6 +1105,10 @@ async function api(argv) {
 async function main() {
   const argv = process.argv.slice(2);
   const first = argv[0];
+  if (first === "--server") {
+    await serveProvider();
+    return;
+  }
   if (first === "--version") {
     process.stdout.write("gh version 2.0.0\n");
     return;

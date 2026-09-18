@@ -26,6 +26,7 @@ const DEFAULT_HOSTNAME = "github.com";
 const MAX_HOSTNAME_LENGTH = 255;
 const MAX_PATH_LENGTH = 4_096;
 const MAX_TOKEN_LENGTH = 4_096;
+const MAX_API_URL_LENGTH = 2_048;
 /** Default bounded deadline for every provider request. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 /** Compile-time hard ceiling. No runtime configuration may exceed this bound. */
@@ -103,6 +104,30 @@ function normalizedHostname(hostname: string): string {
     throw new GitHubHttpTransportError("transport", "GitHub hostname is invalid.");
   }
   return hostname.toLowerCase();
+}
+
+function normalizedApiUrl(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.length === 0 || value.length > MAX_API_URL_LENGTH) {
+    throw new GitHubHttpTransportError("transport", "GitHub API URL is invalid.");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new GitHubHttpTransportError("transport", "GitHub API URL is invalid.");
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0 ||
+    /[\u0000-\u001F\u007F]/u.test(parsed.pathname)
+  ) {
+    throw new GitHubHttpTransportError("transport", "GitHub API URL is invalid.");
+  }
+  return `${parsed.origin}${parsed.pathname.replace(/\/+$/u, "")}`;
 }
 
 function boundedPath(path: string): string {
@@ -247,6 +272,8 @@ export interface GitHubHttpGraphqlRequest {
 export interface GitHubNativeHttpTransportOptions {
   /** Trusted-only constructor input; never returned or logged by this class. */
   readonly token: string;
+  /** Optional fully-qualified REST API base, otherwise derived from hostname. */
+  readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
   /** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 10s. */
   readonly requestTimeoutMs?: number;
@@ -263,12 +290,14 @@ export interface GitHubNativeHttpTransportOptions {
  */
 export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   readonly #token: string;
+  readonly #apiUrl: string | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #requestTimeoutMs: number;
   readonly #maxResponseBytes: number;
 
   constructor(options: GitHubNativeHttpTransportOptions) {
     this.#token = boundedToken(options.token);
+    this.#apiUrl = normalizedApiUrl(options.apiUrl);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
     this.#maxResponseBytes = normalizedMaxResponseBytes(options.maxResponseBytes);
@@ -276,14 +305,13 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
 
   async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
     const path = boundedPath(request.path);
-    const url =
-      path.length === 0 ? githubRestBaseUrl(request.hostname) : `${githubRestBaseUrl(request.hostname)}/${path}`;
+    const url = this.restUrl(request.hostname, path);
     const { response, bytes } = await this.execute(url, request.method, request.body);
     return { status: response.status, body: decodeJsonBody(bytes) };
   }
 
   async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubChangeEffectResponse> {
-    const url = githubGraphqlUrl(request.hostname);
+    const url = this.#apiUrl === undefined ? githubGraphqlUrl(request.hostname) : `${this.#apiUrl}/graphql`;
     const { response, bytes } = await this.execute(url, "POST", {
       query: request.query,
       variables: request.variables ?? {},
@@ -299,7 +327,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     readonly accept?: string;
   }): Promise<GitHubHttpBinaryResponse> {
     const path = boundedPath(request.path);
-    const url = `${githubRestBaseUrl(request.hostname)}/${path}`;
+    const url = this.restUrl(request.hostname, path);
     const { response, bytes } = await this.execute(url, request.method, undefined, request.accept);
     const contentType = response.headers.get("content-type");
     return {
@@ -307,6 +335,11 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
       ...(bytes === undefined ? {} : { bytes }),
       ...(contentType === null ? {} : { contentType }),
     };
+  }
+
+  private restUrl(hostname: string, path: string): string {
+    const base = this.#apiUrl ?? githubRestBaseUrl(hostname);
+    return path.length === 0 ? base : `${base}/${path}`;
   }
 
   /**

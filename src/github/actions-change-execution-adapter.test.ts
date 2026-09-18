@@ -13,6 +13,7 @@ import {
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import {
   ActionsChangeExecutionAdapter,
+  ActionsChangeExecutionNativeHttpApi,
   createActionsChangeExecutionAdapter,
   INARI_CHANGE_EXECUTOR_REF,
   INARI_CHANGE_EXECUTOR_WORKFLOW,
@@ -145,6 +146,13 @@ function archive(value: unknown): Uint8Array {
   end.writeUInt32LE(central.length, 12);
   end.writeUInt32LE(local.length, 16);
   return new Uint8Array(Buffer.concat([local, central, end]));
+}
+
+function nativeJsonResponse(value: unknown, status = 200): Response {
+  return new Response(value === undefined ? null : JSON.stringify(value), {
+    status,
+    headers: value === undefined ? {} : { "content-type": "application/json" },
+  });
 }
 
 function branchPolicySource(pattern: string): string {
@@ -347,6 +355,137 @@ test("Actions transport accepts no repository projection API and delegates reads
 
   assert.deepEqual(await adapter.read(changeReadRequest(42)), source.result);
   assert.deepEqual(await adapter.execute(changeMutationRequest("issue", 42)), { projection: source.result });
+});
+
+test("default Actions transport uses native HTTP for dispatch, runs, artifacts, and binary download", async () => {
+  const requests: Array<{ readonly url: string; readonly method: string; readonly body?: unknown }> = [];
+  let runReads = 0;
+  let dispatchBody: unknown;
+  const nativeFetch: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
+    requests.push({ url, method, ...(body === undefined ? {} : { body }) });
+    const parsed = new URL(url);
+    if (parsed.pathname === "/repos/acme/inari" && method === "GET") {
+      return nativeJsonResponse({ id: 100000157, fork: false, default_branch: "main" });
+    }
+    if (parsed.pathname.endsWith(`/actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/runs`)) {
+      runReads += 1;
+      return nativeJsonResponse({
+        workflow_runs:
+          runReads === 1
+            ? [
+                {
+                  id: 10,
+                  status: "completed",
+                  conclusion: "success",
+                  event: "workflow_dispatch",
+                  head_branch: "main",
+                  display_title: runDisplayTitle(unrelatedCorrelation),
+                },
+              ]
+            : [
+                {
+                  id: 11,
+                  status: "completed",
+                  conclusion: "success",
+                  event: "workflow_dispatch",
+                  head_branch: "main",
+                  display_title: runDisplayTitle(correlation),
+                },
+              ],
+      });
+    }
+    if (parsed.pathname.endsWith(`/actions/workflows/${INARI_CHANGE_EXECUTOR_WORKFLOW}/dispatches`)) {
+      dispatchBody = body;
+      return nativeJsonResponse(undefined, 204);
+    }
+    if (parsed.pathname.endsWith("/actions/runs/11/jobs")) {
+      return nativeJsonResponse({
+        total_count: 1,
+        jobs: [{ id: 31, run_id: 11, status: "completed", conclusion: "success" }],
+      });
+    }
+    if (parsed.pathname.endsWith("/actions/artifacts") && method === "GET") {
+      return nativeJsonResponse({
+        artifacts: [
+          {
+            id: 21,
+            name: `inari-change-result-${correlation}`,
+            expired: false,
+            workflow_run: { id: 11, repository_id: 100000157 },
+          },
+        ],
+      });
+    }
+    if (parsed.pathname.endsWith("/actions/artifacts/21/zip") && method === "GET") {
+      return new Response(Buffer.from(archive({ projection: projection() })), {
+        status: 200,
+        headers: { "content-type": "application/zip" },
+      });
+    }
+    throw new Error(`unexpected native URL ${url}`);
+  };
+  const adapter = new ActionsChangeExecutionAdapter({
+    cwd: process.cwd(),
+    repository: "acme/inari",
+    token: "actions-transport-secret",
+    fetch: nativeFetch,
+    read: { read: async () => projection() },
+    randomUUID: () => correlation,
+    pollIntervalMs: 0,
+    sleep: async () => undefined,
+    maxPollAttempts: 2,
+  });
+
+  const result = await adapter.execute(changeMutationRequest("issue", 42));
+
+  assert.deepEqual(result, { projection: projection() });
+  assert.equal(
+    requests.some((request) => request.url.startsWith("gh ")),
+    false,
+  );
+  assert.equal(
+    requests.some((request) => request.url.endsWith("/user")),
+    false,
+  );
+  assert.deepEqual(dispatchBody, {
+    ref: INARI_CHANGE_EXECUTOR_REF,
+    inputs: {
+      request: JSON.stringify({ version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION, operation: "issue", issue: 42 }),
+      correlation,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(dispatchBody), /actions-transport-secret|requester|token/iu);
+  assert.ok(requests.some((request) => request.url.includes("/actions/workflows/")));
+  assert.ok(requests.some((request) => request.url.includes("/actions/artifacts")));
+  assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
+});
+
+test("native Actions transport errors remain bounded and never expose the credential", async () => {
+  const secret = "actions-transport-secret";
+  const nativeFetch: typeof fetch = async () => {
+    throw new Error(`provider failed while sending Bearer ${secret}`);
+  };
+  const adapter = new ActionsChangeExecutionAdapter({
+    cwd: process.cwd(),
+    repository: "acme/inari",
+    token: secret,
+    fetch: nativeFetch,
+    read: { read: async () => projection() },
+    randomUUID: () => correlation,
+    maxPollAttempts: 1,
+    pollIntervalMs: 0,
+    sleep: async () => undefined,
+  });
+
+  await assert.rejects(adapter.execute(changeMutationRequest("issue", 42)), (error: unknown) => {
+    assert.ok(error instanceof ChangeExecutionPortError);
+    assert.equal(error.code, "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE");
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(secret, "u"));
+    return true;
+  });
 });
 
 test("issue, ready, and abort dispatch the same semantic request through the trusted workflow", async () => {
@@ -681,6 +820,38 @@ test("#617 stops absent workflow-run discovery at the bounded page limit", async
     pollPages,
     Array.from({ length: 10 }, (_, index) => index + 1),
   );
+});
+
+test("native Actions job inspection is paginated and bound to the correlated run", async () => {
+  const pages: number[] = [];
+  const nativeFetch: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/repos/acme/inari") return nativeJsonResponse({ id: 100000157, fork: false });
+    if (url.pathname.endsWith("/actions/runs/11/jobs")) {
+      const page = Number(url.searchParams.get("page"));
+      pages.push(page);
+      return nativeJsonResponse({
+        total_count: 101,
+        jobs: Array.from({ length: page === 1 ? 100 : 1 }, (_, index) => ({
+          id: 31 + index,
+          run_id: 11,
+          status: "completed",
+          conclusion: "success",
+        })),
+      });
+    }
+    throw new Error(`unexpected native URL ${url}`);
+  };
+  const api = new ActionsChangeExecutionNativeHttpApi({
+    cwd: process.cwd(),
+    repository: "acme/inari",
+    token: "actions-transport-secret",
+    fetch: nativeFetch,
+  });
+
+  await api.inspectActionsJobs?.(11);
+
+  assert.deepEqual(pages, [1, 2]);
 });
 
 test("a sole unrelated completed executor run is not sufficient evidence and never reports a missing result artifact for this request", async () => {

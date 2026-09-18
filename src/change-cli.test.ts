@@ -30,6 +30,7 @@ import {
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { runCli } from "./cli.js";
 import { GhUnauthenticatedError, GitHubAdapter } from "./github/index.js";
+import { createActionsChangeExecutionAdapter } from "./github/actions-change-execution-adapter.js";
 import { findSkillScenario, SKILL_MODEL_VERSION } from "./skill.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
 import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
@@ -405,51 +406,58 @@ test("CLI preserves the normalized provider rejection projection in execution ev
 });
 
 test("default Change wiring omits caller requester and normalizes dispatch failure", async () => {
-  const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
-  let authenticatedUserReads = 0;
-  const adapter = runtimeTrustAdapter({
-    async getAuthenticatedUser() {
-      authenticatedUserReads += 1;
-      return "octocat";
-    },
-    async requestActionsApi(path: string, method: "GET" | "POST", fields: Readonly<Record<string, string>> = {}) {
-      calls.push({ path, method, fields });
-      if (method === "POST") throw new Error("Bearer secret-token");
-      return { workflow_runs: [] };
-    },
+  const calls: Array<{ url: URL; body: unknown }> = [];
+  const token = "native-actions-test-token";
+  const originalToken = process.env.GH_TOKEN;
+  process.env.GH_TOKEN = token;
+  const restoreFetch = installFakeFetch((url, body) => {
+    calls.push({ url, body });
+    if (url.pathname === "/repos/acme/inari") return { status: 200, body: { id: identity.repositoryId, fork: false } };
+    if (url.pathname.endsWith(`/actions/workflows/inari-change-executor.yml/runs`)) {
+      return { status: 200, body: { workflow_runs: [] } };
+    }
+    if (url.pathname.endsWith(`/actions/workflows/inari-change-executor.yml/dispatches`)) {
+      return { status: 500, body: { message: "dispatch failed" } };
+    }
+    throw new Error(`unexpected URL ${url}`);
   });
   const adapterOptions: ConstructorParameters<typeof GitHubAdapter>[0][] = [];
-  const result = await capture(["change", "issue", "42", "--json"], {
-    repositoryRoot: "/workspace/inari",
-    environment: runtimeSignerEnvironment,
-    createAdapter: (options) => {
-      adapterOptions.push(options);
-      return adapter;
-    },
-  });
+  try {
+    const result = await capture(["change", "issue", "42", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/workspace/inari",
+      environment: runtimeSignerEnvironment,
+      createAdapter: (options) => {
+        adapterOptions.push(options);
+        return runtimeTrustAdapter();
+      },
+    });
 
-  assert.equal(result.exitCode, 3);
-  assert.equal((result.output?.error as { code?: string } | undefined)?.code, "CHANGE_REMOTE_DISPATCH_FAILED");
-  assert.deepEqual(adapterOptions, [{ cwd: "/workspace/inari" }]);
-  assert.equal(calls[0]?.method, "GET");
-  assert.equal(calls[1]?.method, "POST");
-  assert.equal(authenticatedUserReads, 0);
-  assert.equal(calls[1]?.path, "actions/workflows/inari-change-executor.yml/dispatches");
-  const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
-  const signedProvenanceRecord = dispatched.signedProvenanceRecord;
-  delete dispatched.signedProvenanceRecord;
-  assert.deepEqual(dispatched, {
-    version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
-    operation: "issue",
-    issue: 42,
-  });
-  assert.equal(typeof signedProvenanceRecord, "object");
-  assert.deepEqual(verifyChangeProvenanceRecord(signedProvenanceRecord, runtimeSignerAuthority), {
-    version: 1,
-    rootIssue: 42,
-    operation: "change.issue",
-  });
-  assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
+    assert.equal(result.exitCode, 3);
+    assert.equal((result.output?.error as { code?: string } | undefined)?.code, "CHANGE_REMOTE_DISPATCH_FAILED");
+    assert.deepEqual(adapterOptions, [{ cwd: "/workspace/inari", repository: "acme/inari" }]);
+    const dispatch = calls.find((call) => call.url.pathname.endsWith("/dispatches"));
+    assert.ok(dispatch);
+    const dispatched = dispatch.body as { readonly inputs?: { readonly request?: string } };
+    const request = JSON.parse(dispatched.inputs?.request ?? "{}") as Record<string, unknown>;
+    const signedProvenanceRecord = request.signedProvenanceRecord;
+    delete request.signedProvenanceRecord;
+    assert.deepEqual(request, {
+      version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
+      operation: "issue",
+      issue: 42,
+    });
+    assert.equal(typeof signedProvenanceRecord, "object");
+    assert.deepEqual(verifyChangeProvenanceRecord(signedProvenanceRecord, runtimeSignerAuthority), {
+      version: 1,
+      rootIssue: 42,
+      operation: "change.issue",
+    });
+    assert.doesNotMatch(JSON.stringify(result.output), /token|privateKey|secret|workflow_path/iu);
+  } finally {
+    restoreFetch();
+    if (originalToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = originalToken;
+  }
 });
 
 test("GitHub Actions Change wiring never supplies caller-side requester or resolves /user", async () => {
@@ -673,6 +681,14 @@ test("caller transport authentication failure is distinct from an unconfigured e
   const authResult = await capture(["change", "issue", "42", "--json"], {
     environment: runtimeSignerEnvironment,
     createAdapter: () => adapter,
+    createChangeExecutor: (options) =>
+      createActionsChangeExecutionAdapter({
+        ...options,
+        api: adapter,
+        maxPollAttempts: 1,
+        pollIntervalMs: 0,
+        sleep: async () => undefined,
+      }),
   });
   assert.equal(authResult.exitCode, 3);
   assert.deepEqual(authResult.output?.error, {

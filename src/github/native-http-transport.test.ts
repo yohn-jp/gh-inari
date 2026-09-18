@@ -59,6 +59,24 @@ test("request() targets an Enterprise host's /api/v3 base URL", async () => {
   assert.equal(requestedUrl, "https://ghe.example.com/api/v3/repos/acme/inari");
 });
 
+test("request() and requestBinary() honor an explicit API base URL", async () => {
+  const requestedUrls: string[] = [];
+  const transport = new GitHubNativeHttpTransport({
+    token: TOKEN,
+    apiUrl: "http://127.0.0.1:1234/api/v3/",
+    fetch: async (url) => {
+      requestedUrls.push(String(url));
+      return jsonResponse(200, {});
+    },
+  });
+  await transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari" });
+  await transport.requestBinary({ hostname: "github.com", method: "GET", path: "repos/acme/inari/archive" });
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:1234/api/v3/repos/acme/inari",
+    "http://127.0.0.1:1234/api/v3/repos/acme/inari/archive",
+  ]);
+});
+
 test("request() propagates a non-200 status without throwing", async () => {
   const transport = new GitHubNativeHttpTransport({
     token: TOKEN,
