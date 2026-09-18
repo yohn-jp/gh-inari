@@ -90,6 +90,7 @@ export type ImplementationFrontierDiagnosticCode =
   | "FRONTIER_CONFORMANCE_INVALID"
   | "FRONTIER_CHANGE_INVALID"
   | "FRONTIER_CHANGE_STALE"
+  | "FRONTIER_CHANGE_TERMINAL"
   | "FRONTIER_CONTRADICTORY_EVIDENCE"
   | "FRONTIER_DEPENDENCY_MISSING"
   | "FRONTIER_DEPENDENCY_BLOCKED"
@@ -739,6 +740,13 @@ function normalizeChange(
       );
     } else if (change.state === "MERGED") {
       return { satisfied: true, active: false, invalid: false, diagnostics: [] };
+    } else if (change.state === "ABORTED") {
+      addDiagnostic(
+        local,
+        "FRONTIER_CHANGE_TERMINAL",
+        path,
+        "An aborted Change is terminal and cannot be re-admitted as READY from the same Implementation candidate.",
+      );
     } else if (change.state === "DRAFT" || change.state === "REVIEW" || change.state === "ACCEPTED") {
       return { satisfied: false, active: true, invalid: false, diagnostics: [] };
     }
