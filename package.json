@@ -144,6 +144,14 @@
       "types": "./dist/semantic-issue-lifecycle.d.ts",
       "import": "./dist/semantic-issue-lifecycle.js"
     },
+    "./semantic-issue-closure": {
+      "types": "./dist/semantic-issue-closure.d.ts",
+      "import": "./dist/semantic-issue-closure.js"
+    },
+    "./semantic-issue-closure-executor": {
+      "types": "./dist/semantic-issue-closure-executor.d.ts",
+      "import": "./dist/semantic-issue-closure-executor.js"
+    },
     "./semantic-branch-projection": {
       "types": "./dist/semantic-branch-projection.d.ts",
       "import": "./dist/semantic-branch-projection.js"

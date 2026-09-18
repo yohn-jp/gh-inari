@@ -910,6 +910,26 @@ test("updateIssue fails closed before mutating a pull-request-shaped resource", 
   );
 });
 
+test("closeIssue applies only the explicit Issue close state after an Issue-kind reread", async () => {
+  const closed = { ...JSON.parse(issuePayload(50)), state: "closed" };
+  const transport = new StubFixtureTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, issuePayload(50)),
+    command(0, JSON.stringify(closed)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
+
+  const result = await adapter.closeIssue(50);
+  assert.equal(result.state, "closed");
+  const closeCall = transport.calls.find(
+    (call) => call.args.includes("repos/acme/inari/issues/50") && call.args.includes("PATCH"),
+  );
+  assert.ok(closeCall);
+  assert.ok(closeCall.args.includes("state=closed"));
+});
+
 function blobPayload(sha: string, contentBase64: string): string {
   return JSON.stringify({ sha, encoding: "base64", content: contentBase64 });
 }

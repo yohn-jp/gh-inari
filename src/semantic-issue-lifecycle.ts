@@ -79,6 +79,8 @@ export interface SemanticIssueLifecycleCompletion {
 
 export interface SemanticIssueLifecycleIssueProjection {
   readonly reference: IssueReference;
+  /** Provider-observed state; it is metadata and never terminal proof. */
+  readonly observedState?: "open" | "closed";
   readonly role?: SemanticIssueLifecycleRole;
   readonly parent?: IssueReference;
   readonly parentEvidence: SemanticIssueLifecycleEvidenceStatus;
@@ -776,6 +778,7 @@ export function tryProjectSemanticIssueLifecycle(input: unknown): SemanticIssueL
       );
     issues.push({
       reference: node.reference,
+      ...(stateFor(node) === undefined ? {} : { observedState: stateFor(node) }),
       ...(role === undefined ? {} : { role }),
       ...(node.parent.references[0] === undefined ? {} : { parent: node.parent.references[0] }),
       parentEvidence,
