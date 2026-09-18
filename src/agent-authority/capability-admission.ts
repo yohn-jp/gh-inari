@@ -453,8 +453,7 @@ function claimForOperation(
   const issue = subject.issue;
   const changeClaim = (
     kind: "change.implement" | "change.ready" | "change.abort" | "change.merge",
-  ): CapabilityClaim | undefined =>
-    claims.find((claim) => claim.kind === kind && claim.issue === issue);
+  ): CapabilityClaim | undefined => claims.find((claim) => claim.kind === kind && claim.issue === issue);
 
   if (operation === "change.issue" || operation === "change.show") {
     const claim = changeClaim("change.implement");
