@@ -37,6 +37,7 @@ const IMPLEMENTATION_REPOSITORY = {
   repository: "acme/inari",
 } as const;
 const IMPLEMENTATION = { ...IMPLEMENTATION_REPOSITORY, number: 374 } as const;
+const IMPLEMENTATION_SOURCE = { ...IMPLEMENTATION_REPOSITORY, number: 373 } as const;
 const IMPLEMENTATION_BASE = {
   branch: "main",
   revision: "implementation-base-revision",
@@ -47,7 +48,7 @@ const IMPLEMENTATION_BODY = renderImplementationIssueBody(
     version: IMPLEMENTATION_CONTRACT_VERSION,
     kind: IMPLEMENTATION_KIND,
     repository: IMPLEMENTATION_REPOSITORY,
-    sources: [],
+    sources: [IMPLEMENTATION_SOURCE],
     objective: "Authenticate one bound implementation session.",
     nonGoals: ["Provider trust resolution"],
     architecture: {
@@ -69,7 +70,7 @@ const IMPLEMENTATION_BODY = renderImplementationIssueBody(
       baseRevision: IMPLEMENTATION_BASE.revision,
       baseFreshness: IMPLEMENTATION_BASE.freshness,
       branch: "feat/374-implementation-session",
-      dependencies: [],
+      dependencies: [IMPLEMENTATION_SOURCE],
     },
   }),
 );
@@ -82,6 +83,17 @@ function currentImplementationAuthorization(
     body: IMPLEMENTATION_BODY,
     repository: IMPLEMENTATION_REPOSITORY,
     base: IMPLEMENTATION_BASE,
+    readiness: {
+      evidence: [
+        {
+          reference: IMPLEMENTATION_SOURCE,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
   });
   return {
     authorization,
