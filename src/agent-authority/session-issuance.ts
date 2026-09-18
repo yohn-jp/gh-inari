@@ -395,11 +395,12 @@ function validateCurrentImplementationBinding(
   request: ManagedSessionIssuanceRequest,
   currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
 ): void {
-  if (request.implementationBinding === undefined && currentAuthorization === undefined) return;
+  const implementationNative = request.capabilities.some((claim) => claim.kind === "change.implement");
+  if (!implementationNative && request.implementationBinding === undefined && currentAuthorization === undefined) return;
   if (request.implementationBinding === undefined || currentAuthorization === undefined) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED",
-      "Implementation Session issuance requires both a bounded binding and current authorization evidence.",
+      "Implementation-native Session issuance requires both a bounded binding and current authorization evidence.",
     );
   }
   let current: ImplementationSessionAuthorizationBinding;
