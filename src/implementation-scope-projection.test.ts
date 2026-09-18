@@ -105,6 +105,49 @@ function projectionInput(record = authorization(), bodyValue = body): Record<str
   return { authorization: record, implementation, body: bodyValue, repository, base };
 }
 
+function abortedChangeIdentity(record: ImplementationAuthorizationRecord): Record<string, unknown> {
+  const branch = "feat/574-implementation-scope-projection";
+  return {
+    contract: contract(),
+    implementation,
+    authorization: record,
+    change: {
+      version: 1,
+      identity: {
+        repositoryHost: repository.repositoryHost,
+        repositoryId: repository.repositoryId,
+        rootIssue: implementation.number,
+      },
+      state: "ABORTED",
+      provenance: { requester: "agent:implementation", issuer: "app:inari" },
+      projection: { branch, pullRequest: 1574 },
+    },
+    session: {
+      task: { kind: "issue", number: implementation.number },
+      capabilities: [{ kind: "change.implement", issue: implementation.number }],
+      authorizationDigest: record.governedBodyDigest,
+    },
+    branch,
+    baseBranch: base.branch,
+    pullRequest: {
+      number: 1574,
+      relation: { relation: "implements", references: [implementation], representation: "native" },
+      closingReference: implementation,
+    },
+    executionEvidence: {
+      version: 1,
+      kind: "implementation-execution-evidence",
+      implementation,
+      repository,
+      governedBodyDigest: record.governedBodyDigest,
+      base,
+      branch,
+      headRevision: "terminal-head-revision",
+      targetedTests: [],
+    },
+  };
+}
+
 test("projects only the current authorization and preserves every distinct scope", () => {
   const result = tryProjectImplementationScope(projectionInput());
   assert.equal(result.valid, true);
@@ -124,6 +167,23 @@ test("projects only the current authorization and preserves every distinct scope
   assert.deepEqual(result.projection?.base, base);
   assert.equal(Object.isFrozen(result.projection), true);
   assert.equal(Object.isFrozen(result.projection?.scope), true);
+});
+
+test("terminal abort prevents the same authorization from regenerating execution scope", () => {
+  const record = authorization();
+  assert.equal(tryProjectImplementationScope(projectionInput(record)).valid, true);
+
+  const terminal = tryProjectImplementationScope({
+    ...projectionInput(record),
+    changeIdentity: abortedChangeIdentity(record),
+  });
+  assert.equal(terminal.valid, false);
+  assert.equal(terminal.projection, undefined);
+  assert.ok(
+    terminal.violations.some(
+      (violation) => violation.code === "IMPLEMENTATION_SCOPE_PROJECTION_AUTHORIZATION_NOT_CURRENT",
+    ),
+  );
 });
 
 test("does not widen authorization and applies DENY before every operation allowlist", () => {
