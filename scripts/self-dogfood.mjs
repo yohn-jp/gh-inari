@@ -24,6 +24,7 @@ import {
   MAX_CERTIFICATION_DIAGNOSTIC_MESSAGE_LENGTH,
   MAX_CERTIFICATION_DIAGNOSTICS,
   MAX_CERTIFICATION_OPERATIONS,
+  projectNativeCommandFailure,
   projectStructuredCommandError,
   sanitizeCertificationText,
   serializeCertificationEvidence,
@@ -271,7 +272,7 @@ function runInari(options, args, evidence) {
     try {
       const value = parseJsonOutput(result, args.join(" "));
       preserveAuthoritativeFinalState(evidence, value);
-      structuredFailure = projectStructuredCommandError(value);
+      structuredFailure = projectStructuredCommandError(value) ?? projectNativeCommandFailure(value);
     } catch {
       // A failed command without readable authoritative JSON remains unavailable.
     }

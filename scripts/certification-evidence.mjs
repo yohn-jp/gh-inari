@@ -144,8 +144,10 @@ const STRUCTURED_DETAIL_KEYS = new Set([
   "path",
   "field",
   "category",
+  "classification",
   "issue",
   "status",
+  "valid",
   "version",
   "recovery",
   "provider",
@@ -412,6 +414,11 @@ function safeStructuredText(value, maximum) {
   return sanitizeCertificationText(value, maximum);
 }
 
+function safeStructuredStatus(value) {
+  if (Number.isSafeInteger(value) && value > 0) return value;
+  return safeStructuredText(value, MAX_CERTIFICATION_STRING_LENGTH);
+}
+
 function safeStructuredCode(value) {
   return typeof value === "string" && DIAGNOSTIC_CODE_PATTERN.test(value)
     ? value.slice(0, MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH)
@@ -455,14 +462,14 @@ function projectStructuredEffectFailure(value) {
   return Object.keys(failure).length === 0 ? undefined : failure;
 }
 
-function projectStructuredChangeDiagnostics(value) {
+function projectStructuredChangeDiagnostics(value, { allowMissingVersion = false } = {}) {
   if (!Array.isArray(value) || value.length > MAX_STRUCTURED_DIAGNOSTICS) return undefined;
   const diagnostics = [];
   for (const candidate of value) {
     if (
       !isRecord(candidate) ||
       [...Object.keys(candidate)].some((key) => !["version", "code", "path", "message"].includes(key)) ||
-      candidate.version !== 1
+      (candidate.version !== 1 && !(allowMissingVersion && candidate.version === undefined))
     )
       return undefined;
     const code = safeStructuredCode(candidate.code);
@@ -576,11 +583,18 @@ function projectStructuredDetails(value) {
     if (key === "trustedCode") {
       const projected = safeStructuredCode(value[key]);
       if (projected !== undefined) details[key] = projected;
-    } else if (["operation", "reason", "stage", "stageReason", "path", "field", "category"].includes(key)) {
+    } else if (
+      ["operation", "reason", "stage", "stageReason", "path", "field", "category", "classification"].includes(key)
+    ) {
       const projected = safeStructuredText(value[key], MAX_CERTIFICATION_STRING_LENGTH);
       if (projected !== undefined) details[key] = projected;
-    } else if (["issue", "status", "version"].includes(key)) {
+    } else if (key === "status") {
+      const projected = safeStructuredStatus(value[key]);
+      if (projected !== undefined) details[key] = projected;
+    } else if (["issue", "version"].includes(key)) {
       if (Number.isSafeInteger(value[key]) && value[key] > 0) details[key] = value[key];
+    } else if (key === "valid") {
+      if (typeof value[key] === "boolean") details.valid = value[key];
     } else if (key === "recovery" && isRecord(value[key])) {
       const state = safeStructuredText(value[key].state, 64);
       const action = value[key].action === null ? null : safeStructuredText(value[key].action, 128);
@@ -626,6 +640,29 @@ export function projectStructuredCommandError(value) {
   if (diagnostics !== undefined) structured.diagnostics = diagnostics;
   if (evidence !== undefined) structured.evidence = evidence;
   return { code, message, structured };
+}
+
+/** Project a native check-style failure into the canonical evidence fields. */
+export function projectNativeCommandFailure(value) {
+  if (!isRecord(value) || value.ok !== false || value.valid !== false) return undefined;
+  const status = safeStructuredStatus(value.status);
+  const diagnostics = projectStructuredChangeDiagnostics(value.diagnostics, { allowMissingVersion: true });
+  if (status === undefined || diagnostics === undefined) return undefined;
+
+  const operation = safeStructuredText(value.operation, MAX_CERTIFICATION_STRING_LENGTH);
+  const classification = safeStructuredText(value.classification, MAX_CERTIFICATION_STRING_LENGTH);
+  const details = {
+    status,
+    valid: false,
+    ...(operation === undefined ? {} : { operation }),
+    ...(classification === undefined ? {} : { classification }),
+  };
+  const firstDiagnostic = diagnostics[0];
+  return {
+    code: firstDiagnostic?.code ?? "INARI_COMMAND_FAILED",
+    message: firstDiagnostic?.message ?? "Installed Inari reported a structured command failure.",
+    structured: { details, diagnostics },
+  };
 }
 
 function rejectUnknownKeys(value, allowed, path, errors) {
@@ -945,11 +982,28 @@ function validateStructuredDetails(value, path, errors) {
   }
   rejectUnknownKeys(value, STRUCTURED_DETAIL_KEYS, path, errors);
   let valid = true;
-  for (const key of ["operation", "reason", "stage", "stageReason", "trustedCode", "path", "field", "category"]) {
+  for (const key of [
+    "operation",
+    "reason",
+    "stage",
+    "stageReason",
+    "trustedCode",
+    "path",
+    "field",
+    "category",
+    "classification",
+  ]) {
     if (value[key] !== undefined) valid = validateSafeStructuredString(value[key], `${path}.${key}`, errors) && valid;
   }
-  for (const key of ["issue", "status", "version"]) {
+  for (const key of ["issue", "version"]) {
     if (value[key] !== undefined) valid = requirePositiveInteger(value[key], `${path}.${key}`, errors) && valid;
+  }
+  if (value.status !== undefined && !(Number.isSafeInteger(value.status) && value.status > 0)) {
+    valid = validateSafeStructuredString(value.status, `${path}.status`, errors) && valid;
+  }
+  if (value.valid !== undefined && typeof value.valid !== "boolean") {
+    addValidationError(errors, "EVIDENCE_MALFORMED", `${path}.valid: must be a boolean`);
+    valid = false;
   }
   if (value.recovery !== undefined)
     valid = validateStructuredRecovery(value.recovery, `${path}.recovery`, errors) && valid;

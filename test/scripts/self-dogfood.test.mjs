@@ -161,6 +161,86 @@ test("self-dogfood delegates structured evidence handling to the canonical autho
   assert.doesNotMatch(source, /\bfunction redact\(/u);
 });
 
+test("self-dogfood retains native check diagnostics from a failed installed command", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "inari-self-dogfood-native-check-"));
+  const workerDirectory = path.join(root, "worker");
+  const outputFile = path.join(root, "evidence.json");
+  const fakeInari = path.join(root, "fake-inari.mjs");
+  fs.mkdirSync(workerDirectory);
+  fs.writeFileSync(
+    fakeInari,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("--version")) {
+  console.log(JSON.stringify({ ok: true, name: "gh-inari", version: "0.11.0" }));
+  process.exit(0);
+}
+if (args.includes("skill")) {
+  console.log(JSON.stringify({ id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" } }));
+  process.exit(0);
+}
+if (args.includes("issue") && args.includes("check")) {
+  console.log(JSON.stringify({
+    ok: false,
+    operation: "check",
+    kind: "issue",
+    number: 239,
+    status: "non-canonical",
+    classification: "valid",
+    valid: false,
+    diagnostics: [{ code: "EXISTING_NON_CANONICAL", path: "$.body", message: "The artifact is not canonical." }],
+  }));
+  process.exit(2);
+}
+console.log(JSON.stringify({ ok: false }));
+process.exit(1);
+`,
+    { encoding: "utf8", mode: 0o700 },
+  );
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        scriptPath,
+        "--inari",
+        fakeInari,
+        "--repository",
+        "yohn-jp/gh-inari",
+        "--issue",
+        "239",
+        "--confirm-disposable",
+        "239",
+        "--worker-cwd",
+        workerDirectory,
+        "--worker-command",
+        '["node","-e","process.exit(0)"]',
+        "--output",
+        outputFile,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, INARI_SELF_DOGFOOD: "1", GITHUB_RUN_ID: "5104", GITHUB_RUN_ATTEMPT: "1" },
+      },
+    );
+    assert.equal(result.status, 2, `stderr: ${result.stderr}\nstdout: ${result.stdout}`);
+    const evidence = JSON.parse(fs.readFileSync(outputFile, "utf8"));
+    const diagnostic = evidence.diagnostics.find(({ code }) => code === "EXISTING_NON_CANONICAL");
+    assert.deepEqual(diagnostic, {
+      code: "EXISTING_NON_CANONICAL",
+      message: "The artifact is not canonical.",
+      details: { status: "non-canonical", valid: false, operation: "check", classification: "valid" },
+      diagnostics: [
+        { version: 1, code: "EXISTING_NON_CANONICAL", path: "$.body", message: "The artifact is not canonical." },
+      ],
+    });
+    assert.doesNotMatch(JSON.stringify(diagnostic), /exit status/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("worker handoff allowlists environment and carries only bounded identities", () => {
   const environment = sanitizeWorkerEnvironment(
     {

@@ -9,6 +9,7 @@ import {
   CERTIFICATION_EVIDENCE_SCHEMA_VERSION,
   CertificationEvidenceError,
   assertCertificationEvidence,
+  projectNativeCommandFailure,
   projectStructuredCommandError,
   readCertificationEvidence,
   sanitizeCertificationText,
@@ -69,6 +70,25 @@ function structuredCommandError() {
   };
 }
 
+function nativeCheckFailure() {
+  return {
+    ok: false,
+    operation: "check",
+    kind: "issue",
+    number: 659,
+    status: "non-canonical",
+    classification: "valid",
+    valid: false,
+    diagnostics: [
+      {
+        code: "EXISTING_NON_CANONICAL",
+        path: "$.body",
+        message: "Artifact is semantically valid but differs from the canonical rendered representation.",
+      },
+    ],
+  };
+}
+
 test("projects structured Change errors through the canonical evidence authority", () => {
   const projected = projectStructuredCommandError(structuredCommandError());
 
@@ -112,6 +132,44 @@ test("projects structured Change errors through the canonical evidence authority
       },
     },
   });
+});
+
+test("projects native check failures through the canonical evidence authority", () => {
+  const projected = projectNativeCommandFailure(nativeCheckFailure());
+
+  assert.deepEqual(projected, {
+    code: "EXISTING_NON_CANONICAL",
+    message: "Artifact is semantically valid but differs from the canonical rendered representation.",
+    structured: {
+      details: { status: "non-canonical", valid: false, operation: "check", classification: "valid" },
+      diagnostics: [
+        {
+          version: 1,
+          code: "EXISTING_NON_CANONICAL",
+          path: "$.body",
+          message: "Artifact is semantically valid but differs from the canonical rendered representation.",
+        },
+      ],
+    },
+  });
+
+  const diagnostics = [];
+  appendCertificationDiagnostic(diagnostics, projected.code, projected.message, projected.structured);
+  assert.deepEqual(diagnostics, [
+    {
+      code: "EXISTING_NON_CANONICAL",
+      message: "Artifact is semantically valid but differs from the canonical rendered representation.",
+      details: { status: "non-canonical", valid: false, operation: "check", classification: "valid" },
+      diagnostics: [
+        {
+          version: 1,
+          code: "EXISTING_NON_CANONICAL",
+          path: "$.body",
+          message: "Artifact is semantically valid but differs from the canonical rendered representation.",
+        },
+      ],
+    },
+  ]);
 });
 
 test("canonical structured projection fails closed for unknown and unsafe command evidence", () => {

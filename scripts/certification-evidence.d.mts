@@ -77,6 +77,7 @@ export interface CertificationStructuredCommandError {
 
 export function sanitizeCertificationText(value: unknown, maximum?: number): string | undefined;
 export function projectStructuredCommandError(value: unknown): CertificationStructuredCommandError | undefined;
+export function projectNativeCommandFailure(value: unknown): CertificationStructuredCommandError | undefined;
 
 export type CertificationDiagnosticCode =
   | "EXPECTED_IDENTITY_INVALID"
