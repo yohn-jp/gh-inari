@@ -12,6 +12,17 @@ import { assertRuntimeAuthority } from "./runtime-authority.js";
 import { authenticateSessionRequest, SessionAuthenticationError } from "./session-authentication.js";
 import type { GitHubAppRepositoryReadCapability } from "../github/app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository } from "../github/change-effect-adapter.js";
+import {
+  IMPLEMENTATION_CONTRACT_VERSION,
+  IMPLEMENTATION_KIND,
+  parseImplementationContract,
+  renderImplementationIssueBody,
+} from "../implementation-contract.js";
+import {
+  authorizeImplementation,
+  type ImplementationAuthorizationVerificationInput,
+} from "../implementation-authorization.js";
+import { projectImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 
 const NOW = new Date("2026-09-12T00:00:30.000Z");
 const NOW_SECONDS = Math.floor(NOW.getTime() / 1000);
@@ -20,6 +31,67 @@ const REPOSITORY_ID = "123456789";
 const AUTHORITY_ID = "runtime-authentication-test";
 const COMMIT_SHA = "a".repeat(40);
 const BLOB_SHA = "c".repeat(40);
+const IMPLEMENTATION_REPOSITORY = {
+  repositoryHost: "github.com",
+  repositoryId: REPOSITORY_ID,
+  repository: "acme/inari",
+} as const;
+const IMPLEMENTATION = { ...IMPLEMENTATION_REPOSITORY, number: 374 } as const;
+const IMPLEMENTATION_BASE = {
+  branch: "main",
+  revision: "implementation-base-revision",
+  freshness: "implementation-base-freshness",
+} as const;
+const IMPLEMENTATION_BODY = renderImplementationIssueBody(
+  parseImplementationContract({
+    version: IMPLEMENTATION_CONTRACT_VERSION,
+    kind: IMPLEMENTATION_KIND,
+    repository: IMPLEMENTATION_REPOSITORY,
+    sources: [],
+    objective: "Authenticate one bound implementation session.",
+    nonGoals: ["Provider trust resolution"],
+    architecture: {
+      decision: "Bind the certificate to the exact current Implementation authorization.",
+      affectedComponents: ["Session authentication"],
+      invariants: ["Replay after authorization drift fails closed."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: [], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Authentication rereads the current authorization."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: IMPLEMENTATION_BASE.branch,
+      baseRevision: IMPLEMENTATION_BASE.revision,
+      baseFreshness: IMPLEMENTATION_BASE.freshness,
+      branch: "feat/374-implementation-session",
+      dependencies: [],
+    },
+  }),
+);
+
+function currentImplementationAuthorization(
+  overrides: Partial<ImplementationAuthorizationVerificationInput> = {},
+): ImplementationAuthorizationVerificationInput {
+  const authorization = authorizeImplementation({
+    implementation: IMPLEMENTATION,
+    body: IMPLEMENTATION_BODY,
+    repository: IMPLEMENTATION_REPOSITORY,
+    base: IMPLEMENTATION_BASE,
+  });
+  return {
+    authorization,
+    implementation: IMPLEMENTATION,
+    body: IMPLEMENTATION_BODY,
+    repository: IMPLEMENTATION_REPOSITORY,
+    base: IMPLEMENTATION_BASE,
+    ...overrides,
+  };
+}
 
 function runtimeAuthority(
   key = generateRuntimeAuthorityKeyPair(),
@@ -199,6 +271,88 @@ test("authenticates from one fresh App read capability and emits only bounded au
     "repos/acme/inari/git/blobs/cccccccccccccccccccccccccccccccccccccccc",
   ]);
   assert.equal(fixture.enter.value, true);
+});
+
+test("rejects replay when a bound Implementation authorization is no longer current", async () => {
+  const runtime = runtimeAuthority(undefined, { capabilityCeiling: ["change.implement"] });
+  const current = currentImplementationAuthorization();
+  const binding = projectImplementationSessionAuthorizationBinding({
+    ...current,
+    task: { kind: "issue", number: IMPLEMENTATION.number },
+  });
+  const session = createManagedSession();
+  const issuanceRequest = session.createIssuanceRequest({
+    repository: { id: REPOSITORY_ID, name: "acme/inari" },
+    task: { kind: "issue", number: IMPLEMENTATION.number },
+    implementationBinding: binding,
+    capabilities: [{ kind: "change.implement", issue: IMPLEMENTATION.number }],
+    ttlSeconds: 600,
+  });
+  const issued = issueSessionCertificate({
+    repository: { id: REPOSITORY_ID, name: "acme/inari" },
+    runtimeAuthority: runtime.authority,
+    runtimeKey: runtime.key,
+    request: issuanceRequest,
+    implementationAuthorization: current,
+    now: NOW,
+  });
+  session.acceptCertificate(issued.compact);
+  const request = signSessionRequest({
+    session,
+    request: { issue: IMPLEMENTATION.number },
+    operation: "change.implement",
+    requestId: "request-bound-implementation",
+    issuedAt: NOW_SECONDS,
+    expiresAt: NOW_SECONDS + 60,
+  });
+  const fixture = capability(runtime.authority);
+  const broker = {
+    async withRepositoryReadCapability<T>(
+      _input: unknown,
+      operation: (value: GitHubAppRepositoryReadCapability) => Promise<T>,
+    ): Promise<T> {
+      return operation(fixture.capability);
+    },
+  };
+
+  const authenticated = await authenticateSessionRequest({
+    broker,
+    repository: REPOSITORY,
+    request,
+    implementationAuthorization: current,
+    now: NOW,
+  });
+  assert.deepEqual(authenticated.implementationBinding, binding);
+
+  await assert.rejects(
+    authenticateSessionRequest({
+      broker,
+      repository: REPOSITORY,
+      request,
+      implementationAuthorization: {
+        ...current,
+        base: { ...IMPLEMENTATION_BASE, revision: "stale-base-revision" },
+      },
+      now: NOW,
+    }),
+    (error: unknown) =>
+      error instanceof SessionAuthenticationError && error.reason === "implementation-authorization",
+  );
+
+  await assert.rejects(
+    authenticateSessionRequest({
+      broker,
+      repository: REPOSITORY,
+      request,
+      implementationAuthorization: {
+        ...current,
+        supersession: { supersededBy: [{ ...IMPLEMENTATION_REPOSITORY, number: 375 }] },
+      },
+      now: NOW,
+    }),
+    (error: unknown) =>
+      error instanceof SessionAuthenticationError && error.reason === "implementation-authorization",
+  );
 });
 
 test("succeeds across a provider-resolved repository rename with unchanged immutable repository ID", async () => {
