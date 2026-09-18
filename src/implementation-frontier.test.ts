@@ -84,6 +84,68 @@ function authorizationRecord(
   return { body, record };
 }
 
+function collection(items: readonly unknown[]): Record<string, unknown> {
+  return {
+    status: "available",
+    items,
+    pagination: { perPage: 100, pages: 1, returned: items.length, truncated: false },
+    diagnostics: [],
+  };
+}
+
+function completionEvidence(
+  reference: IssueReference,
+  body: string,
+  record: ImplementationAuthorizationRecord,
+): { readonly conformance: Record<string, unknown>; readonly executionEvidence: Record<string, unknown> } {
+  const branch = `feat/${reference.number}-implementation-frontier-fixture`;
+  const headRevision = `head-${reference.number}`;
+  const executionEvidence = {
+    version: 1,
+    kind: "implementation-execution-evidence",
+    implementation: reference,
+    repository,
+    governedBodyDigest: record.governedBodyDigest,
+    base,
+    branch,
+    headRevision,
+    targetedTests: [],
+  };
+  const pullRequest = {
+    repository: { host: "github.com", nameWithOwner: "acme/frontier", repositoryId: repository.repositoryId },
+    number: 1_000 + reference.number,
+    title: "Frontier completion",
+    body: "provider body is not lifecycle authority",
+    state: "open",
+    author: null,
+    head: { ref: branch, sha: headRevision },
+    base: { ref: base.branch, sha: base.revision },
+    draft: false,
+    labels: [],
+    assignees: [],
+    url: `https://github.com/acme/frontier/pull/${1_000 + reference.number}`,
+    checks: collection([]),
+    requiredCheckBindings: collection([]),
+    reviews: collection([]),
+    comments: collection([]),
+    inlineReviewComments: collection([]),
+    changedFiles: collection([]),
+    provenance: { provider: "github", endpoints: [`pulls/${1_000 + reference.number}`] },
+  };
+  return {
+    conformance: {
+      authorization: record,
+      issue: { reference, body },
+      repository,
+      base,
+      pullRequestNumber: pullRequest.number,
+      pullRequest,
+      executionEvidence,
+    },
+    executionEvidence,
+  };
+}
+
 function observed(
   reference: IssueReference,
   state: "open" | "closed",
@@ -147,16 +209,19 @@ test("projects READY and BLOCKED from semantic dependencies", () => {
   );
 });
 
-test("derives SATISFIED from a completed current authorization, never Issue state", () => {
+test("derives SATISFIED only from conformant reread plus exact execution evidence, never Issue state", () => {
   const complete = issue(10);
   const closedOnly = issue(11);
   const { body, record } = authorizationRecord(complete);
+  const completion = completionEvidence(complete, body, record);
   const result = project(
     [
       {
         reference: complete,
         implementation: {
-          authorization: { authorization: record, body, repository, base, completed: true },
+          authorization: { authorization: record, body, repository, base },
+          conformance: completion.conformance,
+          executionEvidence: completion.executionEvidence,
         },
       },
       { reference: closedOnly },
