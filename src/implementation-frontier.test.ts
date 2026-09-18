@@ -6,12 +6,82 @@ import {
   deserializeImplementationFrontierProjection,
   serializeImplementationFrontierProjection,
   tryProjectImplementationFrontier,
+  validateImplementationFrontierProjection,
+  type ImplementationFrontierProjection,
 } from "./implementation-frontier.js";
+import {
+  IMPLEMENTATION_CONTRACT_VERSION,
+  IMPLEMENTATION_KIND,
+  parseImplementationContract,
+  renderImplementationIssueBody,
+} from "./implementation-contract.js";
+import { authorizeImplementation, type ImplementationAuthorizationRecord } from "./implementation-authorization.js";
 
 const repository = { repositoryHost: "github.com", repositoryId: "677", repository: "acme/frontier" };
+const base = { branch: "main", revision: "a".repeat(40), freshness: "fresh-1" };
 
 function issue(number: number): IssueReference {
   return { ...repository, number };
+}
+
+function contract(reference: IssueReference, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const source = { ...repository, number: reference.number + 500 };
+  return {
+    version: IMPLEMENTATION_CONTRACT_VERSION,
+    kind: IMPLEMENTATION_KIND,
+    repository,
+    sources: [source],
+    objective: "Project the implementation frontier.",
+    nonGoals: ["Automatic re-authorization"],
+    architecture: {
+      decision: "Keep the frontier projection pure.",
+      affectedComponents: ["Implementation Frontier"],
+      invariants: ["Authority evidence is never inferred from lifecycle flags."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/implementation-frontier.ts"], create: [], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: ["The canonical contract is valid."] },
+    verification: {
+      acceptanceCriteria: ["The frontier projects deterministically."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: base.branch,
+      baseRevision: base.revision,
+      baseFreshness: base.freshness,
+      branch: `feat/${reference.number}-implementation-frontier-fixture`,
+      dependencies: [source],
+    },
+    ...overrides,
+  };
+}
+
+function authorizationRecord(
+  reference: IssueReference,
+  overrides: Record<string, unknown> = {},
+): { readonly body: string; readonly record: ImplementationAuthorizationRecord } {
+  const source = { ...repository, number: reference.number + 500 };
+  const body = renderImplementationIssueBody(parseImplementationContract(contract(reference, overrides)));
+  const record = authorizeImplementation({
+    implementation: reference,
+    body,
+    repository,
+    base,
+    readiness: {
+      evidence: [
+        {
+          reference: source,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
+  return { body, record };
 }
 
 function observed(
@@ -77,14 +147,17 @@ test("projects READY and BLOCKED from semantic dependencies", () => {
   );
 });
 
-test("derives SATISFIED from current Implementation evidence, never Issue state", () => {
+test("derives SATISFIED from a completed current authorization, never Issue state", () => {
   const complete = issue(10);
   const closedOnly = issue(11);
+  const { body, record } = authorizationRecord(complete);
   const result = project(
     [
       {
         reference: complete,
-        implementation: { lifecycle: { status: "completed", authorized: true, current: true } },
+        implementation: {
+          authorization: { authorization: record, body, repository, base, completed: true },
+        },
       },
       { reference: closedOnly },
     ],
@@ -97,14 +170,34 @@ test("derives SATISFIED from current Implementation evidence, never Issue state"
   );
 });
 
-test("projects ACTIVE from current authorization evidence", () => {
+test("projects ACTIVE from a current authorization inspection, never bare lifecycle flags", () => {
   const reference = issue(20);
+  const { body, record } = authorizationRecord(reference);
   const result = project([
-    { reference, implementation: { lifecycle: { status: "authorized", authorized: true, current: true } } },
+    { reference, implementation: { authorization: { authorization: record, body, repository, base } } },
   ]);
   assert.equal(result.valid, true);
   assert.deepEqual(classifications(result), ["20:ACTIVE"]);
   assert.deepEqual(result.projection?.ready, []);
+});
+
+test("a contradictory authorization result (valid:false with completed flags) fails closed as INVALID", () => {
+  const reference = issue(21);
+  const { record } = authorizationRecord(reference);
+  const result = project([
+    {
+      reference,
+      implementation: {
+        // A body mismatch makes the authorization stale/invalid even though
+        // the caller asserts completion; the frontier must not trust the
+        // caller's flags over the recomputed authority result.
+        authorization: { authorization: record, body: "not an Implementation body", repository, base, completed: true },
+      },
+    },
+  ]);
+  assert.equal(result.valid, false);
+  assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
+  assert.ok(result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_AUTHORIZATION_INVALID"));
 });
 
 test("fails closed for cycles and self-dependencies", () => {
@@ -155,12 +248,17 @@ test("fails closed for stale and contradictory authority evidence", () => {
   const stale = issue(60);
   const contradictory = issue(61);
   const other = issue(99);
+  const { body: staleBody, record: staleRecord } = authorizationRecord(stale);
   const result = tryProjectImplementationFrontier({
     candidates: [
       {
         reference: stale,
         issue: rawNode(stale, "open"),
-        implementation: { lifecycle: { status: "invalidated", authorized: false, current: false } },
+        implementation: {
+          // A stale base revision makes the recomputed authorization
+          // invalidated even though a record exists.
+          authorization: { authorization: staleRecord, body: staleBody, repository, base: { ...base, revision: "b".repeat(40) } },
+        },
       },
       {
         reference: contradictory,
@@ -184,4 +282,145 @@ test("fails closed for stale and contradictory authority evidence", () => {
   );
   assert.ok(result.projection?.diagnostics.some((entry) => entry.code === "FRONTIER_AUTHORIZATION_INVALID"));
   assert.ok(result.projection?.diagnostics.some((entry) => entry.code === "FRONTIER_CONTRADICTORY_EVIDENCE"));
+});
+
+test("a dependency with no candidate evidence fails closed as INVALID, not BLOCKED", () => {
+  const depending = issue(70);
+  const missingDependency = issue(71);
+  const result = project(
+    [{ reference: depending }],
+    [rawNode(depending, "open", [missingDependency])],
+  );
+  assert.equal(result.valid, false);
+  assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
+  assert.ok(
+    result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_DEPENDENCY_MISSING"),
+  );
+  assert.ok(
+    !result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_DEPENDENCY_BLOCKED"),
+  );
+});
+
+test("candidate-local Issue evidence contradicting batch lifecycle evidence fails closed", () => {
+  const reference = issue(80);
+  const dependency = issue(81);
+  const result = tryProjectImplementationFrontier({
+    issues: [rawNode(reference, "open", []), rawNode(dependency, "open")],
+    candidates: [
+      {
+        reference,
+        // Disagrees with the batch lifecycle evidence above, which reports
+        // no dependencies for this candidate.
+        issue: { reference, dependsOn: [dependency], dependsOnEvidence: "present", drift: [] },
+      },
+      { reference: dependency },
+    ],
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.projection?.candidates.find((c) => c.reference.number === 80)?.classification, "INVALID");
+  assert.ok(
+    result.projection?.diagnostics.some(
+      (entry) => entry.code === "FRONTIER_CONTRADICTORY_EVIDENCE" && entry.path === "$.candidates[0].issue",
+    ),
+  );
+});
+
+test("disagreement between semantic dependencies and the canonical contract dependency set fails closed", () => {
+  const reference = issue(90);
+  const semanticOnlyDependency = issue(91);
+  // `contract(reference, ...)` binds the contract's own dependency set to
+  // `reference.number + 500`, which differs from the semantic dependency
+  // supplied via the raw Issue node below.
+  const result = project(
+    [{ reference, implementation: { contract: contract(reference) } }],
+    [rawNode(reference, "open", [semanticOnlyDependency])],
+  );
+  assert.equal(result.valid, false);
+  assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
+  assert.ok(
+    result.projection?.diagnostics.some(
+      (entry) => entry.code === "FRONTIER_CONTRADICTORY_EVIDENCE" && entry.path === "$.candidates[0].dependencies",
+    ),
+  );
+});
+
+function validProjection(): ImplementationFrontierProjection {
+  const blocked = issue(200);
+  const ready = issue(201);
+  const result = project(
+    [{ reference: blocked }, { reference: ready }],
+    [rawNode(blocked, "open", [ready]), rawNode(ready, "open")],
+  );
+  assert.equal(result.valid, true);
+  if (result.projection === undefined) throw new Error("expected a valid fixture projection");
+  return result.projection;
+}
+
+test("validateImplementationFrontierProjection rejects projection integrity violations", () => {
+  const baseline = validProjection();
+  assert.equal(validateImplementationFrontierProjection(baseline).valid, true);
+
+  // valid:true while a candidate is INVALID.
+  const invalidCandidate = {
+    ...baseline,
+    valid: true,
+    candidates: baseline.candidates.map((candidate) =>
+      candidate.reference.number === 200 ? { ...candidate, classification: "INVALID" as const } : candidate,
+    ),
+  };
+  assert.equal(validateImplementationFrontierProjection(invalidCandidate).valid, false);
+
+  // A reference in `ready` whose candidate is not READY.
+  const readyMismatch = { ...baseline, ready: [...baseline.ready, issue(200)] };
+  assert.equal(validateImplementationFrontierProjection(readyMismatch).valid, false);
+
+  // A READY candidate omitted from `ready`.
+  const readyOmitted = { ...baseline, ready: [] };
+  assert.equal(validateImplementationFrontierProjection(readyOmitted).valid, false);
+
+  // parallelReadyGroups containing a non-READY/unknown reference.
+  const groupNonReady = {
+    ...baseline,
+    parallelReadyGroups: [{ items: [issue(200)] }],
+  };
+  assert.equal(validateImplementationFrontierProjection(groupNonReady).valid, false);
+
+  // Duplicate READY reference across groups.
+  const groupDuplicate = {
+    ...baseline,
+    parallelReadyGroups: [{ items: [issue(201)] }, { items: [issue(201)] }],
+  };
+  assert.equal(validateImplementationFrontierProjection(groupDuplicate).valid, false);
+
+  // A READY candidate missing from every group.
+  const groupMissing = { ...baseline, parallelReadyGroups: [] };
+  assert.equal(validateImplementationFrontierProjection(groupMissing).valid, false);
+
+  // satisfiedDependencies/unsatisfiedDependencies that do not partition dependencies.
+  const partitionGap = {
+    ...baseline,
+    candidates: baseline.candidates.map((candidate) =>
+      candidate.reference.number === 200 ? { ...candidate, unsatisfiedDependencies: [] } : candidate,
+    ),
+  };
+  assert.equal(validateImplementationFrontierProjection(partitionGap).valid, false);
+
+  // The same dependency in both satisfied and unsatisfied sets.
+  const partitionOverlap = {
+    ...baseline,
+    candidates: baseline.candidates.map((candidate) =>
+      candidate.reference.number === 200
+        ? { ...candidate, satisfiedDependencies: [issue(201)], unsatisfiedDependencies: [issue(201)] }
+        : candidate,
+    ),
+  };
+  assert.equal(validateImplementationFrontierProjection(partitionOverlap).valid, false);
+
+  // `valid:false` claimed with no INVALID candidate is also inconsistent.
+  const validityUnderclaimed = { ...baseline, valid: false };
+  assert.equal(validateImplementationFrontierProjection(validityUnderclaimed).valid, false);
+
+  // Duplicate candidate references.
+  const duplicateCandidate = { ...baseline, candidates: [...baseline.candidates, baseline.candidates[0]] };
+  assert.equal(validateImplementationFrontierProjection(duplicateCandidate).valid, false);
 });

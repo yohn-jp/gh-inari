@@ -15,9 +15,10 @@ import {
 import { validateChangeProjectionResult, type ChangeProjectionResult } from "./change.js";
 import { validateImplementationContract, type ImplementationContract } from "./implementation-contract.js";
 import {
-  validateImplementationAuthorizationRecord,
-  type ImplementationAuthorizationRecord,
+  tryVerifyImplementationAuthorization,
+  type ImplementationAuthorizationInspectionResult,
 } from "./implementation-authorization.js";
+import { tryVerifyImplementationConformance, type ImplementationConformanceResult } from "./implementation-conformance.js";
 import {
   tryParseImplementationExecutionEvidence,
   type ImplementationExecutionEvidence,
@@ -162,10 +163,8 @@ interface LifecycleEvidence {
 
 interface ImplementationEvidence {
   readonly contract?: ImplementationContract;
-  readonly authorization?: ImplementationAuthorizationRecord;
-  readonly authorizationStatus?: "draft" | "ready" | "authorized" | "invalidated" | "superseded" | "completed";
-  readonly authorizationCurrent?: boolean;
-  readonly authorizationAuthorized?: boolean;
+  readonly authorizationInspection?: ImplementationAuthorizationInspectionResult;
+  readonly conformance?: ImplementationConformanceResult;
   readonly executionEvidence?: ImplementationExecutionEvidence;
   readonly satisfied: boolean;
   readonly active: boolean;
@@ -200,30 +199,7 @@ const CANDIDATE_KEYS = new Set([
   "changeProjection",
   "state",
 ]);
-const IMPLEMENTATION_KEYS = new Set(["contract", "authorization", "lifecycle", "conformance", "executionEvidence"]);
-const AUTHORIZATION_RESULT_KEYS = new Set([
-  "valid",
-  "status",
-  "authorization",
-  "record",
-  "contract",
-  "governedBodyDigest",
-  "authorized",
-  "current",
-  "violations",
-]);
-const CONFORMANCE_KEYS = new Set([
-  "version",
-  "kind",
-  "status",
-  "valid",
-  "authorization",
-  "binding",
-  "pullRequest",
-  "changes",
-  "verification",
-  "diagnostics",
-]);
+const IMPLEMENTATION_KEYS = new Set(["contract", "authorization", "conformance", "executionEvidence"]);
 
 function isRecord(value: unknown): value is RecordValue {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -540,130 +516,15 @@ function normalizeLifecycle(
   return { scope, issues, diagnostics: [] };
 }
 
-function normalizeAuthorizationResult(
-  value: RecordValue,
-  path: string,
-  diagnostics: ImplementationFrontierDiagnostic[],
-): {
-  readonly status?: ImplementationEvidence["authorizationStatus"];
-  readonly authorized?: boolean;
-  readonly current?: boolean;
-  readonly record?: ImplementationAuthorizationRecord;
-  readonly invalid: boolean;
-} {
-  unknownProperties(value, AUTHORIZATION_RESULT_KEYS, path, diagnostics);
-  const status = value.status;
-  const validStatus =
-    status === undefined ||
-    status === "draft" ||
-    status === "ready" ||
-    status === "authorized" ||
-    status === "invalidated" ||
-    status === "superseded" ||
-    status === "completed";
-  if (!validStatus)
-    addDiagnostic(diagnostics, "FRONTIER_AUTHORIZATION_INVALID", `${path}.status`, "Authorization status is invalid.");
-  const authorized = value.authorized;
-  const current = value.current;
-  if (authorized !== undefined && typeof authorized !== "boolean")
-    addDiagnostic(
-      diagnostics,
-      "FRONTIER_AUTHORIZATION_INVALID",
-      `${path}.authorized`,
-      "Authorization authorized flag is invalid.",
-    );
-  if (current !== undefined && typeof current !== "boolean")
-    addDiagnostic(
-      diagnostics,
-      "FRONTIER_AUTHORIZATION_INVALID",
-      `${path}.current`,
-      "Authorization current flag is invalid.",
-    );
-  const recordValue = value.record ?? value.authorization;
-  let record: ImplementationAuthorizationRecord | undefined;
-  if (recordValue !== undefined) {
-    const result = validateImplementationAuthorizationRecord(recordValue);
-    if (!result.valid || result.record === undefined) {
-      addDiagnostic(
-        diagnostics,
-        "FRONTIER_AUTHORIZATION_INVALID",
-        `${path}.${hasOwn(value, "record") ? "record" : "authorization"}`,
-        "Authorization record is invalid.",
-      );
-    } else record = result.record;
-  }
-  return {
-    ...(validStatus && typeof status === "string"
-      ? { status: status as ImplementationEvidence["authorizationStatus"] }
-      : {}),
-    ...(typeof authorized === "boolean" ? { authorized } : {}),
-    ...(typeof current === "boolean" ? { current } : {}),
-    ...(record === undefined ? {} : { record }),
-    invalid: diagnostics.some((entry) => entry.path.startsWith(path)),
-  };
-}
-
-function normalizeConformance(
-  value: unknown,
-  path: string,
-  diagnostics: ImplementationFrontierDiagnostic[],
-): { readonly satisfied: boolean; readonly invalid: boolean } {
-  if (!isRecord(value)) {
-    addDiagnostic(diagnostics, "FRONTIER_CONFORMANCE_INVALID", path, "Conformance evidence must be an object.");
-    return { satisfied: false, invalid: true };
-  }
-  unknownProperties(value, CONFORMANCE_KEYS, path, diagnostics);
-  const validStatus = [
-    "conformant",
-    "scope-violation",
-    "stale-invalid-authorization",
-    "missing-verification",
-    "unverifiable",
-  ].includes(value.status as string);
-  if (
-    value.version !== 1 ||
-    value.kind !== "implementation-conformance" ||
-    !validStatus ||
-    typeof value.valid !== "boolean"
-  ) {
-    addDiagnostic(
-      diagnostics,
-      "FRONTIER_CONFORMANCE_INVALID",
-      path,
-      "Conformance evidence version or status is invalid.",
-    );
-    return { satisfied: false, invalid: true };
-  }
-  const authorization = value.authorization;
-  if (!isRecord(authorization) || authorization.authorized !== true || authorization.current !== true) {
-    addDiagnostic(
-      diagnostics,
-      "FRONTIER_CONFORMANCE_INVALID",
-      `${path}.authorization`,
-      "Conformance must prove a current authorized Implementation.",
-    );
-    return { satisfied: false, invalid: true };
-  }
-  if (!Array.isArray(value.diagnostics)) {
-    addDiagnostic(
-      diagnostics,
-      "FRONTIER_CONFORMANCE_INVALID",
-      `${path}.diagnostics`,
-      "Conformance diagnostics are invalid.",
-    );
-    return { satisfied: false, invalid: true };
-  }
-  const satisfied = value.status === "conformant" && value.valid === true && value.diagnostics.length === 0;
-  if (!satisfied)
-    addDiagnostic(
-      diagnostics,
-      "FRONTIER_CONFORMANCE_INVALID",
-      path,
-      "Conformance evidence does not prove completed work.",
-    );
-  return { satisfied, invalid: !satisfied };
-}
-
+/**
+ * Authorization and conformance are re-derived here from the same
+ * authoritative functions the CLI/MCP use, never trusted as caller-supplied
+ * flags. `input.authorization` must be a raw `ImplementationAuthorizationVerificationInput`
+ * (record + current body/repository/base evidence); `input.conformance` must
+ * be a raw `ImplementationConformanceInput` (authorization record + current
+ * Issue/PR evidence). Both are pure and reproduce currency from that
+ * evidence instead of accepting an already-computed status.
+ */
 function normalizeImplementation(
   value: unknown,
   path: string,
@@ -679,7 +540,6 @@ function normalizeImplementation(
     isRecord(value) &&
     (hasOwn(value, "contract") ||
       hasOwn(value, "authorization") ||
-      hasOwn(value, "lifecycle") ||
       hasOwn(value, "conformance") ||
       hasOwn(value, "executionEvidence"))
   ) {
@@ -701,61 +561,74 @@ function normalizeImplementation(
     else contract = result.contract;
   }
 
-  let authorization: ImplementationAuthorizationRecord | undefined;
-  let authorizationStatus: ImplementationEvidence["authorizationStatus"];
-  let authorizationAuthorized: boolean | undefined;
-  let authorizationCurrent: boolean | undefined;
+  let authorizationInspection: ImplementationAuthorizationInspectionResult | undefined;
   if (input.authorization !== undefined) {
-    if (
-      isRecord(input.authorization) &&
-      (hasOwn(input.authorization, "status") ||
-        hasOwn(input.authorization, "record") ||
-        hasOwn(input.authorization, "authorized") ||
-        hasOwn(input.authorization, "current") ||
-        hasOwn(input.authorization, "valid"))
-    ) {
-      const result = normalizeAuthorizationResult(input.authorization, `${path}.authorization`, local);
-      authorization = result.record;
-      authorizationStatus = result.status;
-      authorizationAuthorized = result.authorized;
-      authorizationCurrent = result.current;
+    if (!isRecord(input.authorization) || input.authorization.authorization === undefined) {
+      addDiagnostic(
+        local,
+        "FRONTIER_AUTHORIZATION_INVALID",
+        `${path}.authorization`,
+        "Authorization evidence must include a canonical authorization record.",
+      );
     } else {
-      const result = validateImplementationAuthorizationRecord(input.authorization);
-      if (!result.valid || result.record === undefined)
+      const suppliedImplementation = input.authorization.implementation;
+      if (
+        suppliedImplementation !== undefined &&
+        !sameReference(normalizeIssueReference(suppliedImplementation).reference ?? reference, reference)
+      )
+        addDiagnostic(
+          local,
+          "FRONTIER_CONTRADICTORY_EVIDENCE",
+          `${path}.authorization.implementation`,
+          "Authorization targets a different Issue than the frontier candidate.",
+          reference,
+          suppliedImplementation,
+        );
+      authorizationInspection = tryVerifyImplementationAuthorization({
+        ...input.authorization,
+        implementation: reference,
+      });
+      if (!authorizationInspection.authorized || !authorizationInspection.current)
         addDiagnostic(
           local,
           "FRONTIER_AUTHORIZATION_INVALID",
           `${path}.authorization`,
-          "Authorization record is invalid.",
+          "Authorization is not currently valid.",
         );
-      else authorization = result.record;
     }
   }
-  if (authorization !== undefined && !sameReference(authorization.implementation, reference))
-    addDiagnostic(
-      local,
-      "FRONTIER_CONTRADICTORY_EVIDENCE",
-      `${path}.authorization.implementation`,
-      "Authorization targets a different Issue than the frontier candidate.",
-      reference,
-      authorization.implementation,
-    );
 
-  const lifecycleValue = input.lifecycle;
-  if (lifecycleValue !== undefined) {
-    if (!isRecord(lifecycleValue))
+  let conformance: ImplementationConformanceResult | undefined;
+  if (input.conformance !== undefined) {
+    if (!isRecord(input.conformance) || input.conformance.authorization === undefined) {
       addDiagnostic(
         local,
-        "FRONTIER_AUTHORIZATION_INVALID",
-        `${path}.lifecycle`,
-        "Implementation lifecycle evidence is invalid.",
+        "FRONTIER_CONFORMANCE_INVALID",
+        `${path}.conformance`,
+        "Conformance evidence must include a canonical authorization record.",
       );
-    else {
-      const result = normalizeAuthorizationResult(lifecycleValue, `${path}.lifecycle`, local);
-      authorizationStatus ??= result.status;
-      authorizationAuthorized ??= result.authorized;
-      authorizationCurrent ??= result.current;
-      authorization ??= result.record;
+    } else {
+      const suppliedIssue = isRecord(input.conformance.issue) ? input.conformance.issue.reference : undefined;
+      if (
+        suppliedIssue !== undefined &&
+        !sameReference(normalizeIssueReference(suppliedIssue).reference ?? reference, reference)
+      )
+        addDiagnostic(
+          local,
+          "FRONTIER_CONTRADICTORY_EVIDENCE",
+          `${path}.conformance.issue.reference`,
+          "Conformance targets a different Issue than the frontier candidate.",
+          reference,
+          suppliedIssue,
+        );
+      conformance = tryVerifyImplementationConformance(input.conformance);
+      if (!conformance.valid || conformance.status !== "conformant")
+        addDiagnostic(
+          local,
+          "FRONTIER_CONFORMANCE_INVALID",
+          `${path}.conformance`,
+          "Conformance evidence does not prove completed work.",
+        );
     }
   }
 
@@ -776,44 +649,46 @@ function normalizeImplementation(
         `${path}.executionEvidence.implementation`,
         "Execution evidence targets a different Issue than the frontier candidate.",
       );
+    else if (
+      authorizationInspection?.authorization !== undefined &&
+      (authorizationInspection.authorization.governedBodyDigest !== result.evidence.governedBodyDigest ||
+        authorizationInspection.authorization.base.revision !== result.evidence.base.revision)
+    )
+      addDiagnostic(
+        local,
+        "FRONTIER_CONTRADICTORY_EVIDENCE",
+        `${path}.executionEvidence`,
+        "Execution evidence does not bind to the current authorization.",
+      );
     else executionEvidence = result.evidence;
   }
 
-  let satisfied = false;
-  let active = false;
-  if (input.conformance !== undefined) {
-    const conformance = normalizeConformance(input.conformance, `${path}.conformance`, local);
-    satisfied = conformance.satisfied;
-    if (conformance.invalid && !satisfied) {
-      // A supplied conformance result is authoritative evidence, so an
-      // incomplete or stale result must not silently become READY.
-    }
-  }
-  if (
+  // Conformance is the strongest completion evidence; a completed and
+  // currently-authorized authorization inspection is the other authoritative
+  // completion path. Either must be freshly re-verified, never a bare flag.
+  const authorizationCompleted =
+    authorizationInspection !== undefined &&
+    authorizationInspection.authorized &&
+    authorizationInspection.current &&
+    authorizationInspection.status === "completed";
+  const satisfied =
+    (conformance !== undefined && conformance.valid && conformance.status === "conformant") ||
+    authorizationCompleted;
+  // Execution evidence alone never proves ACTIVE (checked above, it only
+  // corroborates an already-current authorization); ACTIVE always requires a
+  // freshly re-verified current authorization.
+  const active =
     !satisfied &&
-    (authorizationStatus === "authorized" || authorizationStatus === "completed") &&
-    authorizationAuthorized !== false &&
-    authorizationCurrent !== false
-  )
-    active = authorizationStatus === "authorized";
-  if (authorizationStatus === "completed" && authorizationAuthorized === true && authorizationCurrent === true)
-    satisfied = true;
-  if (!satisfied && executionEvidence !== undefined) active = true;
-  if (authorizationStatus === "invalidated" || authorizationStatus === "superseded")
-    addDiagnostic(
-      local,
-      "FRONTIER_AUTHORIZATION_INVALID",
-      `${path}.authorization`,
-      "Authorization is no longer current.",
-    );
+    authorizationInspection !== undefined &&
+    authorizationInspection.authorized &&
+    authorizationInspection.current &&
+    authorizationInspection.status === "authorized";
 
   diagnostics.push(...local);
   return {
     ...(contract === undefined ? {} : { contract }),
-    ...(authorization === undefined ? {} : { authorization }),
-    ...(authorizationStatus === undefined ? {} : { authorizationStatus }),
-    ...(authorizationCurrent === undefined ? {} : { authorizationCurrent }),
-    ...(authorizationAuthorized === undefined ? {} : { authorizationAuthorized }),
+    ...(authorizationInspection === undefined ? {} : { authorizationInspection }),
+    ...(conformance === undefined ? {} : { conformance }),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     satisfied,
     active,
@@ -1003,18 +878,36 @@ export function tryProjectImplementationFrontier(input: unknown): Implementation
     if (!referenceResult.valid || referenceResult.reference === undefined) return;
     const reference = referenceResult.reference;
     const localDiagnostics: ImplementationFrontierDiagnostic[] = [];
-    const issueValue =
-      entry.lifecycle ?? entry.issue ?? entry.semantic ?? normalized.lifecycle.issues.get(issueReferenceKey(reference));
-    const issue =
-      issueValue === undefined
-        ? normalized.lifecycle.issues.get(issueReferenceKey(reference))
-        : (normalized.lifecycle.issues.get(issueReferenceKey(reference)) ??
-          lifecycleIssueFromProjection(
-            issueValue,
+    const globalIssue = normalized.lifecycle.issues.get(issueReferenceKey(reference));
+    const candidateLocalValue = entry.lifecycle ?? entry.issue ?? entry.semantic;
+    const candidateLocalIssue =
+      candidateLocalValue === undefined
+        ? undefined
+        : lifecycleIssueFromProjection(
+            candidateLocalValue,
             `${path}.issue`,
             localDiagnostics,
             normalizeState(entry.state, `${path}.state`, localDiagnostics),
-          ));
+          );
+    if (globalIssue !== undefined && candidateLocalIssue !== undefined) {
+      const sameDependencies =
+        globalIssue.dependsOn.length === candidateLocalIssue.dependsOn.length &&
+        globalIssue.dependsOn.every((dependency, position) =>
+          sameReference(dependency, candidateLocalIssue.dependsOn[position] as IssueReference),
+        );
+      if (
+        !sameReference(globalIssue.reference, candidateLocalIssue.reference) ||
+        globalIssue.state !== candidateLocalIssue.state ||
+        !sameDependencies
+      )
+        addDiagnostic(
+          localDiagnostics,
+          "FRONTIER_CONTRADICTORY_EVIDENCE",
+          `${path}.issue`,
+          "Candidate-local Issue evidence disagrees with the batch Semantic Issue lifecycle evidence.",
+        );
+    }
+    const issue = globalIssue ?? candidateLocalIssue;
     if (issue === undefined) {
       addDiagnostic(
         localDiagnostics,
@@ -1057,9 +950,28 @@ export function tryProjectImplementationFrontier(input: unknown): Implementation
       reference,
       localDiagnostics,
     );
+    const hasSemanticDependencyEvidence =
+      issue !== undefined && (issue.dependencyEvidence === "present" || issue.dependencyEvidence === "empty");
     const semanticDependencies = issue?.dependsOn ?? [];
     const contractDependencies = implementation.contract?.execution.dependencies ?? [];
-    const dependencies = unionReferences(semanticDependencies, contractDependencies);
+    const hasContractDependencyEvidence = implementation.contract !== undefined;
+    if (hasSemanticDependencyEvidence && hasContractDependencyEvidence) {
+      const semanticKeys = new Set(semanticDependencies.map((dependency) => issueReferenceKey(dependency)));
+      const contractKeys = new Set(contractDependencies.map((dependency) => issueReferenceKey(dependency)));
+      const agree =
+        semanticKeys.size === contractKeys.size && [...semanticKeys].every((key) => contractKeys.has(key));
+      if (!agree)
+        addDiagnostic(
+          localDiagnostics,
+          "FRONTIER_CONTRADICTORY_EVIDENCE",
+          `${path}.dependencies`,
+          "Semantic Issue dependencies disagree with the canonical Implementation contract dependencies.",
+        );
+    }
+    const dependencies = unionReferences(
+      hasSemanticDependencyEvidence ? semanticDependencies : [],
+      hasContractDependencyEvidence ? contractDependencies : [],
+    );
     for (const dependency of dependencies)
       if (sameReference(dependency, reference))
         addDiagnostic(
@@ -1124,15 +1036,19 @@ export function tryProjectImplementationFrontier(input: unknown): Implementation
     }
     const nextVisiting = new Set(visiting);
     nextVisiting.add(key);
+    let blocked = false;
     for (const dependency of candidate.dependencies) {
       const dependencyCandidate = byKey.get(issueReferenceKey(dependency));
-      if (dependencyCandidate === undefined || classify(dependencyCandidate, nextVisiting) !== "SATISFIED") {
-        classifications.set(key, "BLOCKED");
-        return "BLOCKED";
+      if (dependencyCandidate === undefined) {
+        // A dependency reference with no candidate evidence in the bounded
+        // input is incomplete graph evidence, not a proven ordinary blocker.
+        classifications.set(key, "INVALID");
+        return "INVALID";
       }
+      if (classify(dependencyCandidate, nextVisiting) !== "SATISFIED") blocked = true;
     }
-    classifications.set(key, "READY");
-    return "READY";
+    classifications.set(key, blocked ? "BLOCKED" : "READY");
+    return blocked ? "BLOCKED" : "READY";
   };
   for (const candidate of candidates) classify(candidate, new Set());
   const projected: ImplementationFrontierCandidateProjection[] = [];
@@ -1304,6 +1220,8 @@ export function validateImplementationFrontierProjection(
     "unsatisfiedDependencies",
     "diagnostics",
   ]);
+  const seenCandidateKeys = new Set<string>();
+  const candidateInfo = new Map<string, { readonly classification: ImplementationFrontierClassification }>();
   (input.candidates as readonly unknown[]).forEach((entry, index) => {
     const path = `$.candidates[${index}]`;
     if (!isRecord(entry)) {
@@ -1314,30 +1232,137 @@ export function validateImplementationFrontierProjection(
     const reference = normalizeIssueReference(entry.reference, `${path}.reference`);
     if (!reference.valid)
       addDiagnostic(diagnostics, "FRONTIER_REFERENCE_INVALID", `${path}.reference`, "Candidate reference is invalid.");
-    if (!IMPLEMENTATION_FRONTIER_CLASSIFICATIONS.includes(entry.classification as ImplementationFrontierClassification))
+    const validClassification = IMPLEMENTATION_FRONTIER_CLASSIFICATIONS.includes(
+      entry.classification as ImplementationFrontierClassification,
+    );
+    if (!validClassification)
       addDiagnostic(
         diagnostics,
         "FRONTIER_INPUT_INVALID",
         `${path}.classification`,
         "Candidate classification is invalid.",
       );
-    for (const key of ["dependencies", "satisfiedDependencies", "unsatisfiedDependencies"] as const)
-      normalizeReferences(entry[key], `${path}.${key}`, diagnostics);
-    validateProjectionDiagnostics(entry.diagnostics, `${path}.diagnostics`);
-  });
-  normalizeReferences(input.ready, "$.ready", diagnostics);
-  (input.parallelReadyGroups as readonly unknown[]).forEach((entry, index) => {
-    if (!isRecord(entry) || !Array.isArray(entry.items)) {
+    const dependencies = normalizeReferences(entry.dependencies, `${path}.dependencies`, diagnostics);
+    const satisfiedDependencies = normalizeReferences(
+      entry.satisfiedDependencies,
+      `${path}.satisfiedDependencies`,
+      diagnostics,
+    );
+    const unsatisfiedDependencies = normalizeReferences(
+      entry.unsatisfiedDependencies,
+      `${path}.unsatisfiedDependencies`,
+      diagnostics,
+    );
+    const dependencyKeys = new Set(dependencies.map((dependency) => issueReferenceKey(dependency)));
+    const satisfiedKeys = new Set(satisfiedDependencies.map((dependency) => issueReferenceKey(dependency)));
+    const unsatisfiedKeys = new Set(unsatisfiedDependencies.map((dependency) => issueReferenceKey(dependency)));
+    for (const key of satisfiedKeys)
+      if (unsatisfiedKeys.has(key))
+        addDiagnostic(
+          diagnostics,
+          "FRONTIER_INPUT_INVALID",
+          `${path}.satisfiedDependencies`,
+          "A dependency cannot be both satisfied and unsatisfied.",
+        );
+    const partitionKeys = new Set([...satisfiedKeys, ...unsatisfiedKeys]);
+    const partitionAgrees =
+      partitionKeys.size === dependencyKeys.size && [...partitionKeys].every((key) => dependencyKeys.has(key));
+    if (!partitionAgrees)
       addDiagnostic(
         diagnostics,
         "FRONTIER_INPUT_INVALID",
-        `$.parallelReadyGroups[${index}]`,
-        "Parallel group is invalid.",
+        `${path}.dependencies`,
+        "Satisfied and unsatisfied dependencies must exactly partition the dependency set.",
       );
+    const entryDiagnostics = Array.isArray(entry.diagnostics) ? entry.diagnostics : [];
+    validateProjectionDiagnostics(entryDiagnostics, `${path}.diagnostics`);
+    if (reference.valid && reference.reference !== undefined && validClassification) {
+      const key = issueReferenceKey(reference.reference);
+      if (seenCandidateKeys.has(key))
+        addDiagnostic(
+          diagnostics,
+          "FRONTIER_CANDIDATE_DUPLICATE",
+          `${path}.reference`,
+          "Candidate references must be unique.",
+        );
+      seenCandidateKeys.add(key);
+      candidateInfo.set(key, { classification: entry.classification as ImplementationFrontierClassification });
+    }
+  });
+  if (diagnostics.length > 0) return { valid: false, diagnostics };
+
+  const readyReferences = normalizeReferences(input.ready, "$.ready", diagnostics);
+  const readyKeys = new Set(readyReferences.map((reference) => issueReferenceKey(reference)));
+  const expectedReadyKeys = new Set(
+    [...candidateInfo.entries()].filter(([, info]) => info.classification === "READY").map(([key]) => key),
+  );
+  if (readyKeys.size !== expectedReadyKeys.size || [...readyKeys].some((key) => !expectedReadyKeys.has(key)))
+    addDiagnostic(
+      diagnostics,
+      "FRONTIER_INPUT_INVALID",
+      "$.ready",
+      "The ready set must exactly equal the READY-classified candidates.",
+    );
+
+  const seenGroupKeys = new Set<string>();
+  (input.parallelReadyGroups as readonly unknown[]).forEach((entry, index) => {
+    const path = `$.parallelReadyGroups[${index}]`;
+    if (!isRecord(entry) || !Array.isArray(entry.items)) {
+      addDiagnostic(diagnostics, "FRONTIER_INPUT_INVALID", path, "Parallel group is invalid.");
       return;
     }
-    normalizeReferences(entry.items, `$.parallelReadyGroups[${index}].items`, diagnostics);
+    const items = normalizeReferences(entry.items, `${path}.items`, diagnostics);
+    for (const item of items) {
+      const key = issueReferenceKey(item);
+      if (candidateInfo.get(key)?.classification !== "READY")
+        addDiagnostic(
+          diagnostics,
+          "FRONTIER_INPUT_INVALID",
+          `${path}.items`,
+          "Parallel groups may only contain READY candidates.",
+        );
+      if (seenGroupKeys.has(key))
+        addDiagnostic(
+          diagnostics,
+          "FRONTIER_CANDIDATE_DUPLICATE",
+          `${path}.items`,
+          "A READY candidate may appear in only one parallel group.",
+        );
+      seenGroupKeys.add(key);
+    }
   });
+  if (seenGroupKeys.size !== expectedReadyKeys.size || [...expectedReadyKeys].some((key) => !seenGroupKeys.has(key)))
+    addDiagnostic(
+      diagnostics,
+      "FRONTIER_INPUT_INVALID",
+      "$.parallelReadyGroups",
+      "Every READY candidate must appear in exactly one parallel group.",
+    );
+
+  // `valid` is false whenever any candidate is INVALID; a projection with no
+  // INVALID candidates may still carry ordinary BLOCKED-dependency
+  // diagnostics and remain valid (matching the projector's own definition).
+  const anyInvalid = [...candidateInfo.values()].some((info) => info.classification === "INVALID");
+  // A global (input-level) diagnostic is one that appears in the top-level
+  // `diagnostics` but not in any single candidate's own `diagnostics` — the
+  // serialized shape merges both, so this recovers the distinction.
+  const candidateDiagnosticSignatures = new Set(
+    (input.candidates as readonly RecordValue[]).flatMap((candidate) =>
+      (Array.isArray(candidate.diagnostics) ? candidate.diagnostics : []).map((entry) => stableSerialize(entry)),
+    ),
+  );
+  const hasGlobalDiagnostic = (input.diagnostics as readonly unknown[]).some(
+    (entry) => !candidateDiagnosticSignatures.has(stableSerialize(entry)),
+  );
+  const expectedValid = !anyInvalid && !hasGlobalDiagnostic;
+  if (input.valid !== expectedValid)
+    addDiagnostic(
+      diagnostics,
+      "FRONTIER_INPUT_INVALID",
+      "$.valid",
+      "Projection validity is inconsistent with candidate classifications and input-level diagnostics.",
+    );
+
   if (diagnostics.length > 0) return { valid: false, diagnostics };
   return {
     valid: true,
