@@ -333,8 +333,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
 
   async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubNativeHttpResponse> {
     const url =
-      this.#graphqlUrl ??
-      (this.#apiUrl === undefined ? githubGraphqlUrl(request.hostname) : `${this.#apiUrl}/graphql`);
+      this.#graphqlUrl ?? (this.#apiUrl === undefined ? githubGraphqlUrl(request.hostname) : `${this.#apiUrl}/graphql`);
     const { response, bytes } = await this.execute(url, "POST", {
       query: request.query,
       variables: request.variables ?? {},
