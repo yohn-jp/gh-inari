@@ -274,6 +274,7 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
       listed.tools.map((tool) => tool.name).sort(),
       [
         "inari_golden_path_status",
+        "inari_impl_frontier",
         "inari_issue_contract",
         "inari_issue_materialize",
         "inari_issue_plan",
