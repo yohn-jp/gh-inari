@@ -12,7 +12,7 @@ import type { GoldenPathGovernanceDiscoveryResult } from "./golden-path-governan
 
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 
-export const SKILL_MODEL_VERSION = "1.5.0";
+export const SKILL_MODEL_VERSION = "1.6.0";
 export const SKILL_DEFAULT_SCENARIO_ID = "golden-path" as const;
 
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
@@ -197,6 +197,10 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       "Use when you need to read the governance classification of an existing Issue or PR without changing it.",
     scope: "specialized-alternative",
     workflow: [
+      [
+        "For an ordinary 'show me this Issue/PR' read, view bounded provider content with semantic status beside it.",
+        "issue.view",
+      ],
       ["Classify the artifact against its governed contract.", "issue.check"],
       ["Read canonical fields and metadata when the artifact is available canonically.", "issue.get"],
       ["Read detailed diagnostics when the classification needs explanation.", "issue.explain"],
@@ -204,6 +208,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     invariants: [
       "Read-only: this scenario never mutates the artifact.",
       "Applies equally to PRs via the corresponding `inari pr` commands.",
+      "Use `view` for ordinary provider-content reads, `get` for semantic projection, and `observe` for explicit Operational Observation evidence.",
       HELP_DISCLAIMER,
     ],
     canonicalCommandId: "issue.check",

@@ -3,7 +3,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { test } from "node:test";
 import { createInariMcpServer } from "./mcp/server.js";
-import { GitHubAdapter, type RepositoryContext, type RepositoryTree } from "./github/index.js";
+import { composedViewOutputSchema } from "./mcp/tools.js";
+import { GitHubApiError, GitHubAdapter, type RepositoryContext, type RepositoryTree } from "./github/index.js";
 import type {
   GitHubOperationalCollection,
   GitHubOperationalIssueEvidence,
@@ -30,6 +31,8 @@ function collection<T>(): GitHubOperationalCollection<T> {
 }
 
 class McpOperationalAdapter extends GitHubAdapter {
+  issueReads = 0;
+  pullRequestReads = 0;
   override async resolveRepositoryContext(): Promise<RepositoryContext> {
     return context;
   }
@@ -43,10 +46,12 @@ class McpOperationalAdapter extends GitHubAdapter {
   }
 
   override async getIssue(_number: number): Promise<never> {
+    this.issueReads += 1;
     throw new Error("semantic template unavailable");
   }
 
   override async getPullRequest(_number: number): Promise<never> {
+    this.pullRequestReads += 1;
     throw new Error("semantic template unavailable");
   }
 
@@ -94,7 +99,8 @@ class McpOperationalAdapter extends GitHubAdapter {
 }
 
 test("MCP Issue and PR observation expose the same versioned Core fields", async () => {
-  const server = createInariMcpServer({ adapter: new McpOperationalAdapter() });
+  const adapter = new McpOperationalAdapter();
+  const server = createInariMcpServer({ adapter });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "operational-observation", version: "1" }, { capabilities: {} });
   try {
@@ -111,6 +117,54 @@ test("MCP Issue and PR observation expose the same versioned Core fields", async
     assert.equal((issue.observed as Record<string, unknown>).body, "body");
     assert.equal((pullRequest.observed as Record<string, unknown>).reviewDecision, "approved");
     assert.equal((pullRequest.observed as Record<string, unknown>).mergeability, "unknown");
+
+    const view = (await client.callTool({ name: "inari_issue_view", arguments: { number: 7 } }))
+      .structuredContent as Record<string, unknown>;
+    assert.equal(view.valid, true);
+    assert.equal(view.operation, "issue.view");
+    assert.equal(view.url, "https://github.com/acme/inari/issues/7");
+    assert.equal((view.observed as Record<string, unknown>).body, "body");
+    assert.equal((view.semantic as Record<string, unknown>).status, "no-matching-template");
+    assert.equal(composedViewOutputSchema.safeParse(view).success, true);
+
+    const pullRequestView = (await client.callTool({ name: "inari_pr_view", arguments: { number: 8 } }))
+      .structuredContent as Record<string, unknown>;
+    assert.equal(pullRequestView.valid, true);
+    assert.equal(pullRequestView.operation, "pr.view");
+    assert.equal(pullRequestView.url, "https://github.com/acme/inari/pull/8");
+    assert.equal(
+      ((pullRequestView.observed as Record<string, unknown>).head as Record<string, unknown>).branch,
+      "feat/observe",
+    );
+    assert.equal((pullRequestView.observed as Record<string, unknown>).body, "body");
+    assert.deepEqual((pullRequestView.observed as Record<string, unknown>).base, { branch: "main", sha: "base" });
+    assert.equal((pullRequestView.semantic as Record<string, unknown>).status, "no-matching-template");
+    assert.equal(composedViewOutputSchema.safeParse(pullRequestView).success, true);
+    assert.equal(adapter.issueReads, 0);
+    assert.equal(adapter.pullRequestReads, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("MCP composed-view schema accepts a provider failure without pretending semantic success", async () => {
+  class FailingAdapter extends McpOperationalAdapter {
+    override async observePullRequest(): Promise<GitHubOperationalPullRequestEvidence> {
+      throw new GitHubApiError("pull_request.observe", "provider unavailable");
+    }
+  }
+  const server = createInariMcpServer({ adapter: new FailingAdapter() });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "operational-observation-failure", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const output = (await client.callTool({ name: "inari_pr_view", arguments: { number: 8 } }))
+      .structuredContent as Record<string, unknown>;
+    assert.equal(output.ok, false);
+    assert.equal((output.semantic as Record<string, unknown>).status, "provider-failure");
+    assert.equal(composedViewOutputSchema.safeParse(output).success, true);
   } finally {
     await client.close();
     await server.close();

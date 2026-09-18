@@ -3,6 +3,7 @@ import {
   loadCanonicalArtifact,
   prepareIssueArtifact,
   preparePullRequestArtifact,
+  projectExistingArtifact,
   recoverExistingArtifactValues,
   renderIssueArtifact,
   renderPullRequestArtifact,
@@ -25,15 +26,21 @@ import {
 import {
   compileRepositoryGovernedContract,
   compileRepositoryGovernedContracts,
+  GovernanceError,
   updateGovernedIssue,
   updateGovernedPullRequest,
   type CompiledTemplateOutcome,
   type GovernedArtifactDomain,
   type GovernedMutationResult,
 } from "./governance.js";
-import { GitHubAdapter, type GitHubIssue, type GitHubPullRequest } from "./github/index.js";
-import type { ValidatedRenderedIssueArtifact, ValidatedRenderedPullRequestArtifact } from "./github/types.js";
-import type { TemplateSelector } from "./template-discovery.js";
+import { GitHubAdapter, isGitHubAdapterError, type GitHubIssue, type GitHubPullRequest } from "./github/index.js";
+import type {
+  GitHubOperationalIssueEvidence,
+  GitHubOperationalPullRequestEvidence,
+  ValidatedRenderedIssueArtifact,
+  ValidatedRenderedPullRequestArtifact,
+} from "./github/types.js";
+import { TemplateNotFoundError, type TemplateSelector } from "./template-discovery.js";
 import { createHash } from "node:crypto";
 
 export type RemediationOperation = "check" | "edit" | "normalize" | "sync";
@@ -313,6 +320,198 @@ export interface ExistingArtifactRead {
   readonly templateSelection?: "explicit" | "inferred";
   /** Candidate-local parser diagnostics retained only for normalize/edit projection. */
   readonly remediationDiagnostics?: readonly ExistingArtifactDiagnostic[];
+  /** Governance failures retained so composed reads do not misreport evidence loss as artifact invalidity. */
+  readonly governanceFailures?: readonly ExistingArtifactGovernanceFailure[];
+}
+
+export interface ExistingArtifactGovernanceFailure {
+  readonly path: string;
+  readonly message: string;
+  readonly kind: "template-invalid" | "governance-unavailable";
+  readonly code?: string;
+}
+
+export type OperationalSemanticStatus =
+  | "valid"
+  | "malformed-template"
+  | "no-matching-template"
+  | "legacy-artifact"
+  | "ambiguous-template"
+  | "semantic-invalidity"
+  | "governance-evidence-unavailable"
+  | "provider-failure";
+
+export interface OperationalSemanticOverlay {
+  readonly status: OperationalSemanticStatus;
+  readonly classification?: ExistingArtifactValidationResult["classification"];
+  readonly result?: ReturnType<typeof projectExistingArtifact>;
+  readonly diagnostics: readonly unknown[];
+  readonly failure?: Readonly<{ readonly kind: "governance-evidence" | "provider"; readonly code?: string }>;
+}
+
+/**
+ * Compose Semantic interpretation from the exact Operational provider
+ * evidence snapshot already acquired by `view`/`observe`.
+ */
+export async function projectOperationalSemanticOverlay(
+  adapter: GitHubAdapter,
+  domain: GovernedArtifactDomain,
+  evidence: GitHubOperationalIssueEvidence | GitHubOperationalPullRequestEvidence,
+  includeResult = false,
+): Promise<OperationalSemanticOverlay> {
+  const remote =
+    domain === "issue"
+      ? operationalIssueSnapshot(evidence as GitHubOperationalIssueEvidence)
+      : operationalPullRequestSnapshot(evidence as GitHubOperationalPullRequestEvidence);
+  try {
+    const read = await readGovernedExistingArtifactFromSnapshot(adapter, domain, remote);
+    const providerGovernanceFailure = read.governanceFailures?.find(
+      (failure) => failure.kind === "governance-unavailable",
+    );
+    if (providerGovernanceFailure !== undefined) {
+      const providerCode = providerGovernanceFailure.code;
+      if (providerCode !== undefined) {
+        return {
+          status: "provider-failure",
+          classification: read.result.classification,
+          diagnostics: [
+            {
+              code: providerCode,
+              path: providerGovernanceFailure.path,
+              message: "The provider could not acquire governance evidence for semantic interpretation.",
+            },
+          ],
+          failure: { kind: "provider", code: providerCode },
+        };
+      }
+      return {
+        status: "governance-evidence-unavailable",
+        classification: read.result.classification,
+        diagnostics: [
+          {
+            code: "GOVERNANCE_EVIDENCE_UNAVAILABLE",
+            path: providerGovernanceFailure.path,
+            message: providerGovernanceFailure.message,
+          },
+        ],
+        failure: { kind: "governance-evidence", code: "GOVERNANCE_SOURCE_UNAVAILABLE" },
+      };
+    }
+
+    const projection = projectExistingArtifact(read.result);
+    const status = semanticStatusForResult(read.result, read.governanceFailures);
+    return {
+      status,
+      classification: read.result.classification,
+      ...(includeResult ? { result: projection } : {}),
+      diagnostics: projection.diagnostics,
+    };
+  } catch (error: unknown) {
+    if (error instanceof TemplateNotFoundError) {
+      return {
+        status: "no-matching-template",
+        diagnostics: [
+          {
+            code: "SEMANTIC_TEMPLATE_NOT_FOUND",
+            path: "$.template",
+            message: "No repository-native template is available for this artifact kind.",
+          },
+        ],
+      };
+    }
+    if (error instanceof GovernanceError) {
+      const cause = error.cause;
+      if (isGitHubAdapterError(cause)) {
+        return {
+          status: "provider-failure",
+          diagnostics: [
+            {
+              code: cause.code,
+              path: error.details.path ?? "$.semantic",
+              message: "The provider could not acquire governance evidence for semantic interpretation.",
+            },
+          ],
+          failure: { kind: "provider", code: cause.code },
+        };
+      }
+      return {
+        status: error.code === "GOVERNANCE_SOURCE_INVALID" ? "malformed-template" : "governance-evidence-unavailable",
+        diagnostics: [
+          {
+            code: error.code,
+            path: error.details.path ?? "$.semantic",
+            message: error.message,
+          },
+        ],
+        failure: { kind: "governance-evidence", code: error.code },
+      };
+    }
+    if (isGitHubAdapterError(error)) {
+      return {
+        status: "provider-failure",
+        diagnostics: [
+          { code: error.code, path: "$.semantic", message: "The provider could not acquire governance evidence." },
+        ],
+        failure: { kind: "provider", code: error.code },
+      };
+    }
+    throw error;
+  }
+}
+
+function semanticStatusForResult(
+  result: ExistingArtifactValidationResult,
+  governanceFailures: readonly ExistingArtifactGovernanceFailure[] | undefined,
+): OperationalSemanticStatus {
+  if (result.valid) return "valid";
+  if (governanceFailures?.some((failure) => failure.kind === "template-invalid") === true) {
+    return "malformed-template";
+  }
+  switch (result.classification) {
+    case "wrong-template":
+      return "no-matching-template";
+    case "ambiguous":
+      return "ambiguous-template";
+    case "semantic":
+      return "semantic-invalidity";
+    case "unparseable":
+      return "legacy-artifact";
+    case "valid":
+      return "valid";
+  }
+}
+
+function operationalIssueSnapshot(evidence: GitHubOperationalIssueEvidence): GitHubIssue {
+  return {
+    number: evidence.number,
+    title: evidence.title,
+    body: evidence.body,
+    state: evidence.state === "closed" ? "closed" : "open",
+    url: evidence.url,
+    labels: evidence.labels,
+    assignees: evidence.assignees.flatMap((actor) => (actor.login === undefined ? [] : [actor.login])),
+    ...(evidence.milestone === undefined ? {} : { milestone: evidence.milestone }),
+    ...(evidence.repository.repositoryId === undefined ? {} : { repositoryId: evidence.repository.repositoryId }),
+    repositoryHost: evidence.repository.host,
+  };
+}
+
+function operationalPullRequestSnapshot(evidence: GitHubOperationalPullRequestEvidence): GitHubPullRequest {
+  return {
+    number: evidence.number,
+    title: evidence.title,
+    body: evidence.body,
+    state: evidence.state === "closed" ? "closed" : "open",
+    url: evidence.url,
+    draft: evidence.draft ?? false,
+    head: evidence.head.ref ?? "unknown",
+    ...(evidence.head.sha === undefined ? {} : { headSha: evidence.head.sha }),
+    base: evidence.base.ref ?? "unknown",
+    ...(evidence.base.sha === undefined ? {} : { baseSha: evidence.base.sha }),
+    labels: evidence.labels,
+    assignees: evidence.assignees.flatMap((actor) => (actor.login === undefined ? [] : [actor.login])),
+    ...(evidence.milestone === undefined ? {} : { milestone: evidence.milestone }),
+  };
 }
 
 export interface ExistingArtifactAssessment {
@@ -416,21 +615,55 @@ export async function readGovernedExistingArtifact(
   number: number,
   selector?: string | TemplateSelector,
 ): Promise<ExistingArtifactRead> {
+  return readGovernedExistingArtifactCore(adapter, domain, selector, number);
+}
+
+/**
+ * Reuse an already acquired artifact snapshot for semantic interpretation.
+ * Repository Canon/template reads remain owned by the existing reconciliation
+ * authority; this seam only prevents that authority from acquiring the
+ * artifact content a second time.
+ */
+export async function readGovernedExistingArtifactFromSnapshot(
+  adapter: GitHubAdapter,
+  domain: GovernedArtifactDomain,
+  remote: GitHubIssue | GitHubPullRequest,
+  selector?: string | TemplateSelector,
+): Promise<ExistingArtifactRead> {
+  return readGovernedExistingArtifactCore(adapter, domain, selector, undefined, remote);
+}
+
+async function readGovernedExistingArtifactCore(
+  adapter: GitHubAdapter,
+  domain: GovernedArtifactDomain,
+  selector?: string | TemplateSelector,
+  number?: number,
+  existingRemote?: GitHubIssue | GitHubPullRequest,
+): Promise<ExistingArtifactRead> {
   let contracts: readonly CanonicalContract[];
-  let failedTemplates: readonly { readonly path: string; readonly message: string }[];
+  let failedTemplates: readonly ExistingArtifactGovernanceFailure[];
   if (selector === undefined) {
     const outcomes = await compileRepositoryGovernedContracts(adapter, domain);
     contracts = outcomes.filter(isCompiledOutcome).map((outcome) => outcome.contract);
     failedTemplates = outcomes.filter(isFailedOutcome).map((outcome) => ({
       path: outcome.path,
       message: outcome.message,
+      kind: outcome.failureKind,
+      ...(outcome.failureCode === undefined ? {} : { code: outcome.failureCode }),
     }));
   } else {
     contracts = [await compileRepositoryGovernedContract(adapter, domain, selector)];
     failedTemplates = [];
   }
 
-  const remote = domain === "issue" ? await adapter.getIssue(number) : await adapter.getPullRequest(number);
+  const remote =
+    existingRemote ??
+    (number === undefined
+      ? undefined
+      : domain === "issue"
+        ? await adapter.getIssue(number)
+        : await adapter.getPullRequest(number));
+  if (remote === undefined) throw new Error("An artifact snapshot or number is required.");
 
   if (selector === undefined) {
     const marker = extractTemplateIdentityMarker(remote.body ?? "");
@@ -443,7 +676,7 @@ export async function readGovernedExistingArtifact(
     contract,
     result:
       domain === "issue"
-        ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, number))
+        ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, remote.number))
         : validateExistingPullRequestArtifact(contract, remote.body),
   }));
   const selected = selectExistingArtifactCandidate(candidates);
@@ -489,6 +722,7 @@ export async function readGovernedExistingArtifact(
       contract: selected.contract ?? explicitContract,
       result: selected.result,
       templateSelection: selector === undefined ? "inferred" : "explicit",
+      ...(failedTemplates.length === 0 ? {} : { governanceFailures: failedTemplates }),
       ...(remediationDiagnostics === undefined || remediationDiagnostics.length === 0
         ? {}
         : { remediationDiagnostics }),
@@ -510,6 +744,7 @@ export async function readGovernedExistingArtifact(
       violations: diagnostics,
       attemptedTemplates: selected.result.attemptedTemplates,
     },
+    governanceFailures: failedTemplates,
   };
 }
 
@@ -517,7 +752,7 @@ function resolveExistingArtifactByMarker(
   domain: GovernedArtifactDomain,
   remote: GitHubIssue | GitHubPullRequest,
   contracts: readonly CanonicalContract[],
-  failedTemplates: readonly { readonly path: string; readonly message: string }[],
+  failedTemplates: readonly ExistingArtifactGovernanceFailure[],
   status: "valid" | "malformed" | "unsupported-version",
   marker: TemplateIdentityMarker | undefined,
 ): ExistingArtifactRead {
@@ -535,6 +770,7 @@ function resolveExistingArtifactByMarker(
         parse: { parsed: false, values: {}, diagnostics: [diagnostic] },
         violations: [diagnostic],
       },
+      ...(failedTemplates.length === 0 ? {} : { governanceFailures: failedTemplates }),
     };
   };
 
@@ -564,7 +800,12 @@ function resolveExistingArtifactByMarker(
     domain === "issue"
       ? validateExistingIssueArtifact(contract, remote.body, issueReferenceFromRemote(remote, remote.number))
       : validateExistingPullRequestArtifact(contract, remote.body);
-  return { remote, contract, result };
+  return {
+    remote,
+    contract,
+    result,
+    ...(failedTemplates.length === 0 ? {} : { governanceFailures: failedTemplates }),
+  };
 }
 
 /** Classify the current artifact and prove whether a canonical body can preserve its semantics. */

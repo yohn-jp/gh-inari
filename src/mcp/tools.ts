@@ -72,8 +72,7 @@ import type {
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
-import { readGovernedExistingArtifact } from "../reconciliation.js";
-import { projectExistingArtifact } from "../artifact.js";
+import { projectOperationalSemanticOverlay } from "../reconciliation.js";
 import type { McpSessionAppBridge } from "./session-app-bridge.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
@@ -85,6 +84,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_issue_materialize",
   "inari_issue_plan",
   "inari_issue_observe",
+  "inari_issue_view",
   "inari_issue_drift",
   "inari_issue_relations_plan",
   "inari_branch_contract",
@@ -96,6 +96,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_materialize",
   "inari_pr_plan",
   "inari_pr_observe",
+  "inari_pr_view",
   "inari_pr_drift",
   "inari_pr_comment",
   "inari_pr_review",
@@ -259,10 +260,12 @@ export type SemanticBranchContractInput = z.infer<typeof semanticBranchContractI
 export type SemanticBranchMaterializeInput = z.infer<typeof semanticBranchMaterializeInputSchema>;
 export type SemanticBranchPlanInput = z.infer<typeof semanticBranchPlanInputSchema>;
 export type SemanticIssueObserveInput = z.infer<typeof semanticIssueObserveInputSchema>;
+export type SemanticIssueViewInput = SemanticIssueObserveInput;
 export type SemanticIssueDriftInput = z.infer<typeof semanticIssueDriftInputSchema>;
 export type SemanticBranchObserveInput = z.infer<typeof semanticBranchObserveInputSchema>;
 export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSchema>;
 export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
+export type SemanticPullRequestViewInput = SemanticPullRequestObserveInput;
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
 export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
 export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
@@ -324,6 +327,7 @@ export const semanticPullRequestOutputSchema = z
     evaluationOrder: z.unknown().optional(),
     capabilities: z.unknown().optional(),
     number: artifactNumberSchema.optional(),
+    url: z.string().optional(),
     artifact: z.unknown().optional(),
     plan: z.unknown().optional(),
     outcome: z.enum(["succeeded", "idempotent", "stale", "blocked", "failed", "recovery-required"]).optional(),
@@ -351,6 +355,52 @@ export type SemanticIssueMcpOutput = SemanticPullRequestMcpOutput;
 export type SemanticBranchMcpOutput = SemanticPullRequestMcpOutput;
 export const semanticIssueOutputSchema = semanticPullRequestOutputSchema;
 export const semanticBranchOutputSchema = semanticPullRequestOutputSchema;
+
+const composedViewSemanticOutputSchema = z
+  .object({
+    status: z.enum([
+      "valid",
+      "malformed-template",
+      "no-matching-template",
+      "legacy-artifact",
+      "ambiguous-template",
+      "semantic-invalidity",
+      "governance-evidence-unavailable",
+      "provider-failure",
+    ]),
+    classification: z.enum(["valid", "semantic", "wrong-template", "unparseable", "ambiguous"]).optional(),
+    result: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+    failure: z
+      .object({
+        kind: z.enum(["governance-evidence", "provider"]),
+        code: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/** Dedicated contract for the composed Issue/PR view surface. */
+export const composedViewOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.enum(["issue.view", "pr.view"]),
+    kind: z.enum(["issue", "pull_request"]),
+    version: z.union([z.string(), z.number()]),
+    number: artifactNumberSchema,
+    url: z.string(),
+    observed: z.unknown(),
+    semantic: composedViewSemanticOutputSchema,
+    mutation: z.literal(false),
+    phase: z.literal("observation").optional(),
+    diagnostics: z.array(z.unknown()).optional(),
+    violations: z.array(z.unknown()).optional(),
+  })
+  .strict();
+
+export type ComposedViewMcpOutput = z.infer<typeof composedViewOutputSchema>;
 
 /** Structured output schema for the canonical Change implementation handoff. */
 export const implementationHandoffOutputSchema = z
@@ -584,6 +634,29 @@ function result<T extends Record<string, unknown>>(data: T, summary: string): Ca
   return {
     structuredContent: data,
     content: [{ type: "text", text: summary }],
+  };
+}
+
+function operationalViewFailure(
+  domain: "issue" | "pr",
+  number: number,
+  diagnostics: readonly unknown[],
+): Readonly<Record<string, unknown>> {
+  const bounded = boundedDiagnostics(diagnostics);
+  return {
+    ok: false,
+    valid: false,
+    operation: `${domain}.view`,
+    kind: domain === "issue" ? "issue" : "pull_request",
+    version: 1,
+    number,
+    url: "",
+    observed: null,
+    semantic: { status: "provider-failure", diagnostics: bounded },
+    mutation: false,
+    phase: "observation",
+    diagnostics: bounded,
+    violations: bounded,
   };
 }
 
@@ -886,6 +959,9 @@ async function observePullRequestFromGitHub(
 }
 
 interface OperationalObserveEnvelope {
+  readonly evidence:
+    | import("../github/types.js").GitHubOperationalIssueEvidence
+    | import("../github/types.js").GitHubOperationalPullRequestEvidence;
   readonly observation:
     ReturnType<typeof tryObserveOperationalIssue> | ReturnType<typeof tryObserveOperationalPullRequest>;
 }
@@ -894,44 +970,19 @@ async function observeOperationalIssueFromGitHub(
   adapter: GitHubAdapter,
   number: number,
 ): Promise<OperationalObserveEnvelope> {
-  return { observation: tryObserveOperationalIssue({ issue: await adapter.observeIssue(number) }) };
+  const evidence = await adapter.observeIssue(number);
+  return { evidence, observation: tryObserveOperationalIssue({ issue: evidence }) };
 }
 
 async function observeOperationalPullRequestFromGitHub(
   adapter: GitHubAdapter,
   number: number,
 ): Promise<OperationalObserveEnvelope> {
+  const evidence = await adapter.observePullRequest(number);
   return {
-    observation: tryObserveOperationalPullRequest({ pullRequest: await adapter.observePullRequest(number) }),
+    evidence,
+    observation: tryObserveOperationalPullRequest({ pullRequest: evidence }),
   };
-}
-
-async function operationalSemanticOverlay(
-  adapter: GitHubAdapter,
-  domain: "issue" | "pr",
-  number: number,
-): Promise<Readonly<Record<string, unknown>>> {
-  try {
-    const read = await readGovernedExistingArtifact(adapter, domain, number);
-    const projection = projectExistingArtifact(read.result);
-    const unavailable = new Set(["wrong-template", "unparseable", "ambiguous", "unsupported"]);
-    return {
-      status: projection.valid ? "valid" : unavailable.has(read.result.classification) ? "unavailable" : "invalid",
-      diagnostics: boundedDiagnostics(projection.diagnostics),
-      classification: read.result.classification,
-    };
-  } catch {
-    return {
-      status: "unavailable",
-      diagnostics: [
-        {
-          code: "SEMANTIC_PROJECTION_UNAVAILABLE",
-          path: "$.semantic",
-          message: "Semantic Artifact projection read failed closed; observed provider state remains available.",
-        },
-      ],
-    };
-  }
 }
 
 async function handleIssueObserve(
@@ -958,7 +1009,7 @@ async function handleIssueObserve(
         "Operational Issue observation failed; see diagnostics.",
       );
     }
-    const semantic = await operationalSemanticOverlay(adapter, "issue", input.number);
+    const semantic = await projectOperationalSemanticOverlay(adapter, "issue", envelope.evidence);
     return result(
       {
         ok: true,
@@ -979,6 +1030,55 @@ async function handleIssueObserve(
       "Operational Issue observation failed; see diagnostics.",
     );
   }
+}
+
+async function handleOperationalView(
+  domain: "issue" | "pr",
+  input: Readonly<{ readonly repository?: string; readonly number: number }>,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  const adapter = adapterFor(input.repository, dependencies);
+  try {
+    const envelope =
+      domain === "issue"
+        ? await observeOperationalIssueFromGitHub(adapter, input.number)
+        : await observeOperationalPullRequestFromGitHub(adapter, input.number);
+    if (!envelope.observation.valid || envelope.observation.observation === undefined) {
+      return result(
+        operationalViewFailure(domain, input.number, envelope.observation.violations),
+        `${domain === "issue" ? "Issue" : "PR"} view provider observation failed; see diagnostics.`,
+      );
+    }
+    const observed = envelope.observation.observation;
+    const semantic = await projectOperationalSemanticOverlay(adapter, domain, envelope.evidence, true);
+    return result(
+      {
+        ok: true,
+        valid: true,
+        operation: `${domain}.view`,
+        kind: domain === "issue" ? "issue" : "pull_request",
+        number: input.number,
+        url: observed.url,
+        version: observed.version,
+        observed,
+        semantic,
+        mutation: false,
+      },
+      `Viewed the ${domain === "issue" ? "Issue" : "pull-request"} through the bounded provider observation and semantic overlay.`,
+    );
+  } catch (error: unknown) {
+    return result(
+      operationalViewFailure(domain, input.number, diagnosticsForError(error)),
+      `${domain === "issue" ? "Issue" : "PR"} view provider observation failed; see diagnostics.`,
+    );
+  }
+}
+
+async function handleIssueView(
+  input: SemanticIssueViewInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  return handleOperationalView("issue", input, dependencies);
 }
 
 async function handleIssueDrift(
@@ -1065,7 +1165,7 @@ async function handlePullRequestObserve(
         },
         "Operational PR observation failed; see diagnostics.",
       );
-    const semantic = await operationalSemanticOverlay(adapter, "pr", input.number);
+    const semantic = await projectOperationalSemanticOverlay(adapter, "pr", envelope.evidence);
     return result(
       {
         ok: true,
@@ -1086,6 +1186,13 @@ async function handlePullRequestObserve(
       "Operational PR observation failed; see diagnostics.",
     );
   }
+}
+
+async function handlePullRequestView(
+  input: SemanticPullRequestViewInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
+  return handleOperationalView("pr", input, dependencies);
 }
 
 async function handlePullRequestDrift(
@@ -1414,6 +1521,18 @@ export function registerSemanticPullRequestTools(
     },
     async (input: SemanticPullRequestObserveInput) => handlePullRequestObserve(input, dependencies),
   );
+  const view = server.registerTool(
+    "inari_pr_view",
+    {
+      title: "View PR with semantic status",
+      description:
+        "View bounded pull-request provider content and place the existing semantic projection beside it; semantic failure never suppresses readable provider evidence.",
+      inputSchema: semanticPullRequestObserveInputSchema,
+      outputSchema: composedViewOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticPullRequestViewInput) => handlePullRequestView(input, dependencies),
+  );
   const drift = server.registerTool(
     "inari_pr_drift",
     {
@@ -1426,7 +1545,7 @@ export function registerSemanticPullRequestTools(
     },
     async (input: SemanticPullRequestDriftInput) => handlePullRequestDrift(input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan, observe, drift]);
+  return Object.freeze([contract, materialize, plan, observe, view, drift]);
 }
 
 type SemanticArtifactKind = "issue" | "branch";
@@ -1612,6 +1731,18 @@ export function registerSemanticIssueTools(
     },
     async (input: SemanticIssueObserveInput) => handleIssueObserve(input, dependencies),
   );
+  const view = server.registerTool(
+    "inari_issue_view",
+    {
+      title: "View Issue with semantic status",
+      description:
+        "View bounded Issue provider content and place the existing semantic projection beside it; semantic failure never suppresses readable provider evidence.",
+      inputSchema: semanticIssueObserveInputSchema,
+      outputSchema: composedViewOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: SemanticIssueViewInput) => handleIssueView(input, dependencies),
+  );
   const drift = server.registerTool(
     "inari_issue_drift",
     {
@@ -1636,7 +1767,7 @@ export function registerSemanticIssueTools(
     },
     async (input: IssueRelationsPlanInput) => handleIssueRelationsPlan(input, dependencies),
   );
-  return Object.freeze([contract, materialize, plan, observe, drift, relationsPlan]);
+  return Object.freeze([contract, materialize, plan, observe, view, drift, relationsPlan]);
 }
 
 /** Register the typed Branch semantic artifact catalog without adding policy. */

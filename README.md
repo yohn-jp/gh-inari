@@ -144,6 +144,8 @@ inari issue explain <number> --template <template> --json
 inari pr explain <number> --template <template> --json
 inari issue get <number> [--template <template>] --json
 inari pr get <number> [--template <template>] --json
+inari issue view <number> --json
+inari pr view <number> --json
 inari issue observe <number> --json
 inari pr observe <number> --json
 inari issue check <number> [--template <template>]
@@ -216,6 +218,14 @@ materialization, and Change lifecycle authority remain fail-closed and
 unchanged. MCP tools `inari_issue_observe` and `inari_pr_observe` project this
 same Core observation model; observation is read-only and is not a GitHub API
 pass-through.
+
+`issue view` and `pr view` are the ordinary composed read surface. They return
+the same bounded provider observation with the existing semantic status,
+result, and diagnostics beside it, so invalid, legacy, ambiguous, or unknown
+templates cannot hide readable title/body/state. Use `get` for semantic JSON
+only and `observe` when explicit Operational Observation evidence is needed.
+MCP tools `inari_issue_view` and `inari_pr_view` project the same composed
+result.
 
 Existing artifact remediation uses one semantic pipeline for both Issues and
 pull requests. `check` is read-only and classifies an artifact as
@@ -308,7 +318,7 @@ Issue Form top-level `title` is a fixed native prefix for create validation, but
 
 Inari owns repository-governed GitHub mutations: it reads repository-native governance, exposes it as machine-readable contracts, validates structured input against that governance, renders the canonical artifact, and performs the corresponding `gh` operation — or rejects it with actionable feedback.
 
-Inari is not a general GitHub CLI wrapper. Generic read/query operations such as `pr view`, `issue view`, diff/search summarization, or token-efficient GitHub inspection remain out of scope; `get` only reconstructs artifacts that match the repository-governed canonical contract.
+Inari is not a general GitHub CLI wrapper. Generic read/query operations such as diff/search summarization or token-efficient GitHub inspection remain out of scope; the governed `view` surface is bounded and composes provider evidence with semantic interpretation, while `get` only reconstructs artifacts that match the repository-governed canonical contract.
 
 ## Safety and existing artifacts
 

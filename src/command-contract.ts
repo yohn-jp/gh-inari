@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.11.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.12.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -56,6 +56,7 @@ export type CommandId =
   | "issue.create"
   | "issue.explain"
   | "issue.get"
+  | "issue.view"
   | "issue.observe"
   | "issue.check"
   | "issue.edit"
@@ -77,6 +78,7 @@ export type CommandId =
   | "pr.create"
   | "pr.explain"
   | "pr.get"
+  | "pr.view"
   | "pr.observe"
   | "pr.check"
   | "pr.edit"
@@ -870,6 +872,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "issue.view",
+    "issue",
+    "view",
+    ["issue", "view"],
+    "View bounded provider content with semantic interpretation beside it.",
+    OBSERVATION_OPTIONS,
+    "<number>",
+  ),
+  command(
     "issue.observe",
     "issue",
     "observe",
@@ -1049,6 +1060,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["pr", "get"],
     "Project an existing PR as canonical semantic JSON.",
     [...EXISTING_OPTIONS],
+    "<number>",
+  ),
+  command(
+    "pr.view",
+    "pr",
+    "view",
+    ["pr", "view"],
+    "View bounded provider content with semantic interpretation beside it.",
+    OBSERVATION_OPTIONS,
     "<number>",
   ),
   command(

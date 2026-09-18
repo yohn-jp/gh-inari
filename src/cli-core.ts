@@ -59,6 +59,7 @@ import {
   remediationDiagnosticReport,
   remediationFailureDetails,
   projectRemediationRouting,
+  projectOperationalSemanticOverlay,
   readGovernedExistingArtifact,
   RemediationError,
   translateRemediationFailure,
@@ -2225,7 +2226,11 @@ async function runArtifactCommand(
   }
   if (command === "observe") {
     if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError(domain, rest[0]);
-    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies);
+    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies, "observe");
+  }
+  if (command === "view") {
+    if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError(domain, rest[0]);
+    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies, "view");
   }
   if (
     command === "check" &&
@@ -2386,36 +2391,6 @@ async function runArtifactCommand(
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
 
-interface OperationalSemanticOverlay {
-  readonly status: "valid" | "invalid" | "unavailable";
-  readonly diagnostics: readonly unknown[];
-  readonly classification?: string;
-}
-
-async function projectOperationalSemanticOverlay(
-  domain: "issue" | "pr",
-  number: number,
-  adapter: GitHubAdapter,
-): Promise<OperationalSemanticOverlay> {
-  try {
-    const read = await readGovernedExistingArtifact(adapter, domain, number);
-    const projection = projectExistingArtifact(read.result);
-    const unavailable = new Set(["wrong-template", "unparseable", "ambiguous", "unsupported"]);
-    return {
-      status: projection.valid ? "valid" : unavailable.has(read.result.classification) ? "unavailable" : "invalid",
-      diagnostics: projection.diagnostics,
-      classification: read.result.classification,
-    };
-  } catch {
-    const diagnostic: OperationalDiagnostic = {
-      code: "SEMANTIC_PROJECTION_UNAVAILABLE",
-      path: "$.semantic",
-      message: "Semantic Artifact projection read failed closed; observed provider state remains available.",
-    };
-    return { status: "unavailable", diagnostics: [diagnostic] };
-  }
-}
-
 /** Project the canonical Operational Observation surface for CLI callers. */
 async function runOperationalObservationCommand(
   domain: "issue" | "pr",
@@ -2423,6 +2398,7 @@ async function runOperationalObservationCommand(
   parsed: ParsedArgs,
   root: string,
   dependencies: CliDependencies,
+  operation: "observe" | "view" = "observe",
 ): Promise<number> {
   const unsupported = Object.keys(parsed.options).find((key) => !["json", "repository"].includes(key));
   if (unsupported !== undefined) {
@@ -2461,15 +2437,16 @@ async function runOperationalObservationCommand(
     );
     return EXIT_VALIDATION;
   }
-  const semantic = await projectOperationalSemanticOverlay(domain, number, adapter);
+  const semantic = await projectOperationalSemanticOverlay(adapter, domain, evidence, operation === "view");
   console.log(
     JSON.stringify({
       ok: true,
       valid: true,
-      operation: `${domain}.observe`,
+      operation: `${domain}.${operation}`,
       kind: domain === "issue" ? "issue" : "pull_request",
       version: observedResult.observation.version,
       number,
+      ...(operation === "view" ? { url: observedResult.observation.url } : {}),
       observed: observedResult.observation,
       semantic,
       mutation: false,
