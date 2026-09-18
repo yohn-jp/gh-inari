@@ -321,6 +321,26 @@ export interface GitHubOperationalProvenance {
   readonly endpoints: readonly string[];
 }
 
+export type GitHubOperationalDiscoveryState = "open" | "closed" | "all";
+
+/** Exact, bounded filters accepted by the native operational discovery reader. */
+export interface GitHubOperationalDiscoveryFilters {
+  readonly state: GitHubOperationalDiscoveryState;
+  readonly page: number;
+  readonly limit: number;
+  readonly head?: string;
+  readonly base?: string;
+}
+
+/** Pagination for one explicit discovery page; continuation is never implicit. */
+export interface GitHubOperationalDiscoveryPagination {
+  readonly page: number;
+  readonly limit: number;
+  readonly returned: number;
+  readonly truncated: boolean;
+  readonly nextPage?: number;
+}
+
 /** Normalized provider evidence for one Issue; no Canon/template semantics. */
 export interface GitHubOperationalIssueEvidence {
   readonly repository: GitHubOperationalRepository;
@@ -373,5 +393,29 @@ export interface GitHubOperationalPullRequestEvidence {
   readonly comments: GitHubOperationalCollection<GitHubOperationalComment>;
   readonly inlineReviewComments: GitHubOperationalCollection<GitHubOperationalComment>;
   readonly changedFiles: GitHubOperationalCollection<GitHubOperationalChangedFile>;
+  readonly provenance: GitHubOperationalProvenance;
+}
+
+/** Summary evidence returned by the bounded Issue discovery endpoint. */
+export type GitHubOperationalIssueSummary = Omit<GitHubOperationalIssueEvidence, "body" | "comments" | "provenance">;
+
+/** Summary evidence returned by the bounded pull-request discovery endpoint. */
+export type GitHubOperationalPullRequestSummary = Omit<
+  GitHubOperationalPullRequestEvidence,
+  | "body"
+  | "checks"
+  | "requiredCheckBindings"
+  | "reviews"
+  | "comments"
+  | "inlineReviewComments"
+  | "changedFiles"
+  | "provenance"
+>;
+
+export interface GitHubOperationalDiscoveryPage<T> {
+  readonly repository: GitHubOperationalRepository;
+  readonly filters: GitHubOperationalDiscoveryFilters;
+  readonly items: readonly T[];
+  readonly pagination: GitHubOperationalDiscoveryPagination;
   readonly provenance: GitHubOperationalProvenance;
 }
