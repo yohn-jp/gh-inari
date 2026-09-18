@@ -2272,6 +2272,7 @@ async function runArtifactCommand(
     if (rest.length !== 0)
       throw new CliError("UNKNOWN_COMMAND", `${domain} list does not accept positional arguments.`);
     return runOperationalDiscoveryCommand(domain, parsed, root, dependencies);
+  }
   if (
     command === "check" &&
     typeof parsed.options.from === "string" &&
