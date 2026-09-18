@@ -575,7 +575,7 @@ function diagnoseCanonicalRuntime(
   return { status: "ready", version: info.version, capabilities: info.capabilities, recovery: FALLBACK_COMMAND };
 }
 
-/** Delegates argv gh-inari does not own to the real `gh` binary, so `gh inari` is a strict superset of `gh`. */
+/** Delegates argv outside Inari's owned command surface to the real `gh` binary. */
 function runGhFallback(argv: readonly string[], dependencies: CliDependencies): number {
   const execute = dependencies.runGhFallback ?? runGhPassthroughCommand;
   return execute(argv);
