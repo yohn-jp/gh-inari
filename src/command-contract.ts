@@ -58,6 +58,7 @@ export type CommandId =
   | "issue.get"
   | "issue.view"
   | "issue.observe"
+  | "issue.list"
   | "issue.check"
   | "issue.edit"
   | "issue.normalize"
@@ -80,6 +81,7 @@ export type CommandId =
   | "pr.get"
   | "pr.view"
   | "pr.observe"
+  | "pr.list"
   | "pr.check"
   | "pr.edit"
   | "pr.normalize"
@@ -132,6 +134,9 @@ export type OptionId =
   | "title"
   | "head"
   | "base"
+  | "state"
+  | "limit"
+  | "page"
   | "to"
   | "requireCapability"
   | "minimumVersion"
@@ -198,6 +203,8 @@ const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const OBSERVATION_OPTIONS = ["help", "json", "repository"] as const;
+const ISSUE_DISCOVERY_OPTIONS = ["help", "json", "repository", "state", "limit", "page"] as const;
+const PR_DISCOVERY_OPTIONS = [...ISSUE_DISCOVERY_OPTIONS, "head", "base"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const PR_SYNC_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
@@ -354,6 +361,33 @@ export const COMMAND_OPTIONS = {
   ),
   head: option("head", "head", ["--head"], "string", "required", "PR head branch for create.", "branch"),
   base: option("base", "base", ["--base"], "string", "required", "PR base branch for create or edit.", "branch"),
+  state: option(
+    "state",
+    "state",
+    ["--state"],
+    "string",
+    "required",
+    "Bounded discovery state filter: open, closed, or all.",
+    "open|closed|all",
+  ),
+  limit: option(
+    "limit",
+    "limit",
+    ["--limit", "-L"],
+    "string",
+    "required",
+    "Maximum number of results in the explicitly requested discovery page (1-100).",
+    "number",
+  ),
+  page: option(
+    "page",
+    "page",
+    ["--page"],
+    "string",
+    "required",
+    "Explicit discovery page number; continuation is never implicit.",
+    "number",
+  ),
   to: option(
     "to",
     "to",
@@ -891,6 +925,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "issue.list",
+    "issue",
+    "list",
+    ["issue", "list"],
+    "Discover bounded provider-normalized Issue summaries without semantic projection coupling.",
+    ISSUE_DISCOVERY_OPTIONS,
+  ),
+  command(
     "issue.check",
     "issue",
     "check",
@@ -1080,6 +1122,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Observe normalized provider runtime state for an existing pull request without semantic projection coupling.",
     OBSERVATION_OPTIONS,
     "<number>",
+  ),
+  command(
+    "pr.list",
+    "pr",
+    "list",
+    ["pr", "list"],
+    "Discover bounded provider-normalized pull-request summaries without semantic projection coupling.",
+    PR_DISCOVERY_OPTIONS,
   ),
   command(
     "pr.check",
