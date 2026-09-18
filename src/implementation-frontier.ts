@@ -1393,6 +1393,3 @@ export function deserializeImplementationFrontierProjection(serialized: string):
   if (!result.valid || result.projection === undefined) throw new ImplementationFrontierError(result.diagnostics);
   return result.projection;
 }
-
-export const tryProjectImplementationReadiness = tryProjectImplementationFrontier;
-export const projectImplementationReadiness = projectImplementationFrontier;
