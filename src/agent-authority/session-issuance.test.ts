@@ -41,7 +41,7 @@ function requestFor(
   return session.createIssuanceRequest({
     repository: REPOSITORY,
     task: { kind: "issue", number: 371 },
-    capabilities: [{ kind: "change.ready", issue: 371 }],
+    capabilities: [{ kind: "change.implement", issue: 371 }],
     ttlSeconds: 1800,
     ...overrides,
   });
@@ -199,12 +199,12 @@ test("Runtime rejects a TTL over the Runtime ceiling and accepts the exact ceili
 
 test("Runtime rejects every capability outside the Runtime ceiling before signing", () => {
   const runtimeKey = generateRuntimeAuthorityKeyPair();
-  const runtimeAuthority = authority(runtimeKey, { capabilityCeiling: ["change.ready"] });
+  const runtimeAuthority = authority(runtimeKey, { capabilityCeiling: ["change.implement"] });
   const session = createManagedSession();
   const request = requestFor(session, {
     capabilities: [
+      { kind: "change.implement", issue: 371 },
       { kind: "change.ready", issue: 371 },
-      { kind: "change.abort", issue: 371 },
     ],
   });
 
