@@ -23,6 +23,7 @@ test("SKILL_SCENARIOS has a fixed, deterministic order", () => {
     "inspect-governance",
     "repair-invalid-artifact",
     "manage-issue-relationships",
+    "implementation-frontier",
     "manage-implementation",
     "manage-change",
     "golden-path",
@@ -119,6 +120,7 @@ test("Implementation authoring uses the current impl command surface", () => {
     scenario.workflow.map((step) => step.command),
     [
       "inari impl plan <number>",
+      "inari impl frontier",
       "inari issue create",
       "inari impl show <number>",
       "inari impl validate <number>",

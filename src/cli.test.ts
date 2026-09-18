@@ -492,6 +492,7 @@ test("skill --json lists the same scenarios as a versioned JSON projection", asy
       "inspect-governance",
       "repair-invalid-artifact",
       "manage-issue-relationships",
+      "implementation-frontier",
       "manage-implementation",
       "manage-change",
       "golden-path",

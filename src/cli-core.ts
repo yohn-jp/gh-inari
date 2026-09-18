@@ -219,6 +219,7 @@ import {
   validateImplementationAuthorizationRecord,
 } from "./implementation-authorization.js";
 import { tryVerifyImplementationConformance } from "./implementation-conformance.js";
+import { tryProjectImplementationFrontier } from "./implementation-frontier.js";
 import type { IssueReference } from "./contract/issue-reference.js";
 
 const EXIT_USAGE = 1;
@@ -2018,6 +2019,36 @@ async function runImplementationCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  const definition = command === undefined ? undefined : getCommandForPositionals(["impl", command]);
+  if (command === "frontier") {
+    if (definition === undefined) throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command}".`);
+    if (rest.length > 0)
+      throw new CliError("UNKNOWN_COMMAND", `Unexpected Implementation argument "${rest[0] ?? ""}".`);
+    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+    if (unsupported !== undefined) {
+      const option = getOption(unsupported as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by impl frontier.`,
+        "$argv",
+        { command: "impl frontier", option: option.id },
+      );
+    }
+    const input = await readJsonValue(parsed.options.from);
+    const frontier = tryProjectImplementationFrontier(input);
+    printImplementationResult(
+      {
+        ok: frontier.valid,
+        valid: frontier.valid,
+        operation: "impl.frontier",
+        ...(frontier.projection === undefined ? {} : frontier.projection),
+        diagnostics: frontier.diagnostics,
+        mutation: false,
+      },
+      json,
+    );
+    return frontier.valid ? 0 : EXIT_VALIDATION;
+  }
   if (
     command !== "plan" &&
     command !== "show" &&
@@ -2027,7 +2058,6 @@ async function runImplementationCommand(
     command !== "verify"
   )
     throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command ?? ""}".`);
-  const definition = getCommandForPositionals(["impl", command]);
   if (definition === undefined) throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command}".`);
   if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("issue", rest[0]);
   const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));

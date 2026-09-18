@@ -131,12 +131,13 @@ evidence fails closed.
 
 <!-- BEGIN GENERATED IMPLEMENTATION COMMAND SURFACE -->
 
-The current command contract is version `1.11.0` (`urn:inari:command-contract:1.11.0`).
+The current command contract is version `1.12.0` (`urn:inari:command-contract:1.12.0`).
 The `impl` namespace projects these operations from the command contract:
 
 | Command                         | Command ID       | Metadata summary                                                                                            |
 | ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------- |
 | `inari impl plan <number>`      | `impl.plan`      | Draft a bounded Implementation recommendation from authoritative Issue evidence without granting authority. |
+| `inari impl frontier`           | `impl.frontier`  | Project the deterministic readiness frontier from existing Issue, Implementation, and Change evidence.      |
 | `inari impl show <number>`      | `impl.show`      | Show the current Implementation body, canonical contract projection, and authorization state.               |
 | `inari impl validate <number>`  | `impl.validate`  | Validate an existing Implementation body against the canonical contract without mutation.                   |
 | `inari impl authorize <number>` | `impl.authorize` | Authorize one current canonical Implementation body through the #572 Core boundary.                         |
@@ -146,6 +147,7 @@ The `impl` namespace projects these operations from the command contract:
 The exact contract usage and option applicability are:
 
 - `impl plan <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl frontier --from <path>`
 - `impl show <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl validate <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl authorize <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
@@ -154,10 +156,11 @@ The exact contract usage and option applicability are:
 
 <!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->
 
-Each operation accepts a positive Issue number. The generated projection above
-owns the command IDs, version, contract ID, summaries, usage, and option
-applicability. `--capability` is repeatable. `--from` accepts a JSON input file
-or `-` for stdin; for lifecycle verification it can carry the current
+Issue-specific operations accept a positive Issue number; `impl frontier`
+accepts a bounded JSON evidence document through required `--from`. The
+generated projection above owns the command IDs, version, contract ID,
+summaries, usage, and option applicability. `--capability` is repeatable.
+`--from` accepts a JSON input file or `-` for stdin; for lifecycle verification it can carry the current
 authorization, base, supersession, or completion evidence accepted by the
 existing Core boundary. `--repository` overrides the repository context for
 the governed read. Use `--json` for structured output.
