@@ -391,6 +391,37 @@ test("an aborted tracker child does not satisfy tracker completion", () => {
   assert.equal(result.projection?.status, "blocked");
 });
 
+test("duplicate child evidence entries for one tracker child fail closed regardless of order", () => {
+  const tracker = issue(28);
+  const child = issue(29);
+  const baseLifecycle = lifecycle([
+    node(tracker, "open", { role: "tracker" }),
+    node(child, "closed", { parent: tracker }),
+  ]);
+  const completed = { reference: child, implementation: implementationEvidence(child) };
+  const aborted = { reference: child, implementation: implementationEvidenceAborted(child) };
+
+  const completedFirst = tryProjectSemanticIssueClosure({
+    target: tracker,
+    intent: "close",
+    lifecycle: baseLifecycle,
+    children: [completed, aborted],
+  });
+  assert.equal(completedFirst.valid, false);
+  assert.equal(completedFirst.projection?.status, "unverifiable");
+  assert.ok(completedFirst.diagnostics.some((entry) => entry.code === "CLOSURE_INPUT_INVALID"));
+
+  const abortedFirst = tryProjectSemanticIssueClosure({
+    target: tracker,
+    intent: "close",
+    lifecycle: baseLifecycle,
+    children: [aborted, completed],
+  });
+  assert.equal(abortedFirst.valid, false);
+  assert.equal(abortedFirst.projection?.status, "unverifiable");
+  assert.ok(abortedFirst.diagnostics.some((entry) => entry.code === "CLOSURE_INPUT_INVALID"));
+});
+
 test("missing, stale, contradictory, and cyclic evidence fail closed", () => {
   const target = issue(30);
   const missing = tryProjectSemanticIssueClosure({

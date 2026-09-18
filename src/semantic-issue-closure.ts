@@ -535,7 +535,19 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
         }
         unknownProperties(entry, CHILD_KEYS, path, diagnostics);
         const childReference = reference(entry.reference, `${path}.reference`, diagnostics);
-        if (childReference !== undefined) childEvidenceByKey.set(issueReferenceKey(childReference), entry);
+        if (childReference === undefined) return;
+        const childKey = issueReferenceKey(childReference);
+        if (childEvidenceByKey.has(childKey)) {
+          diagnostics.push(
+            diagnostic(
+              "CLOSURE_INPUT_INVALID",
+              path,
+              "Closure children evidence must not repeat the same authoritative child reference.",
+            ),
+          );
+          return;
+        }
+        childEvidenceByKey.set(childKey, entry);
       });
   }
   let childrenTerminalConfirmed = true;
