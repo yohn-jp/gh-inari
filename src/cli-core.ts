@@ -117,6 +117,7 @@ import {
 } from "./change-execution-port.js";
 import { tryProjectImplementationHandoff } from "./change-handoff.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
+import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
 import { tryProjectImplementationFrontier } from "./implementation-frontier.js";
 import { projectSelfDogfoodIssueMarker } from "./self-dogfood-marker.js";
@@ -1960,6 +1961,27 @@ function implementationLifecycle(
   };
 }
 
+function implementationGoldenPathProjection(
+  evidence: ImplementationIssueEvidence,
+  contract: Record<string, unknown> | undefined,
+  lifecycle: Record<string, unknown>,
+  conformance?: unknown,
+): unknown {
+  const sources = contract?.sources;
+  const sourceIssue = Array.isArray(sources) ? sources[0] : undefined;
+  const result = tryProjectGoldenPathImplementation({
+    implementation: evidence.reference,
+    ...(sourceIssue === undefined ? {} : { sourceIssue }),
+    ...(contract === undefined ? {} : { contract }),
+    authorization: lifecycle,
+    ...(lifecycle.readiness === undefined ? {} : { readiness: lifecycle.readiness }),
+    ...(conformance === undefined ? {} : { conformance }),
+  });
+  return result.valid && result.projection !== undefined
+    ? result.projection
+    : { status: "blocked", diagnostics: result.diagnostics };
+}
+
 function implementationCurrent(evidence: ImplementationIssueEvidence): Record<string, unknown> {
   return {
     issue: {
@@ -2166,6 +2188,7 @@ async function runImplementationCommand(
   }
 
   const lifecycle = implementationLifecycle(evidence, evidence.body, input, base);
+  const goldenPathImplementation = implementationGoldenPathProjection(evidence, contract, lifecycle);
   if (command === "show") {
     const result = {
       ok: bodyProjection.valid === true && lifecycle.status !== "invalidated" && lifecycle.status !== "superseded",
@@ -2176,6 +2199,7 @@ async function runImplementationCommand(
       current: implementationCurrent(evidence),
       canonical: bodyProjection,
       authorization: lifecycle,
+      goldenPath: goldenPathImplementation,
       mutation: false,
     };
     printImplementationResult(result, json);
@@ -2193,6 +2217,7 @@ async function runImplementationCommand(
       current: implementationCurrent(evidence),
       canonical: bodyProjection,
       authorization: lifecycle,
+      goldenPath: goldenPathImplementation,
       relationships,
       mutation: false,
     };
@@ -2207,6 +2232,13 @@ async function runImplementationCommand(
     ...(input.authorization === undefined ? {} : { existingAuthorization: input.authorization }),
     ...(input.readiness === undefined ? {} : { readiness: input.readiness }),
   });
+  const authorizationProjection = {
+    status: authorization.status,
+    authorized: authorization.valid && authorization.status === "authorized",
+    current: authorization.valid && authorization.status === "authorized",
+    ...(authorization.authorization === undefined ? {} : { record: authorization.authorization }),
+    ...(authorization.readiness === undefined ? {} : { readiness: authorization.readiness }),
+  };
   const result = {
     ok: authorization.valid,
     valid: authorization.valid,
@@ -2216,16 +2248,13 @@ async function runImplementationCommand(
     current: implementationCurrent(evidence),
     canonical: bodyProjection,
     authorization: {
-      status: authorization.status,
-      authorized: authorization.valid && authorization.status === "authorized",
-      current: authorization.valid && authorization.status === "authorized",
-      ...(authorization.authorization === undefined ? {} : { record: authorization.authorization }),
+      ...authorizationProjection,
       ...(authorization.governedBodyDigest === undefined
         ? {}
         : { governedBodyDigest: authorization.governedBodyDigest }),
-      ...(authorization.readiness === undefined ? {} : { readiness: authorization.readiness }),
       violations: authorization.violations,
     },
+    goldenPath: implementationGoldenPathProjection(evidence, contract, authorizationProjection),
     base: base === undefined ? { available: false } : { available: true, evidence: base },
     mutation: false,
   };

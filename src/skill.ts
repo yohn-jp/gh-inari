@@ -371,7 +371,10 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     workflow: [
       ["Verify the canonical runtime is available before starting governed work.", "root.diagnose"],
       ["Resolve repository-native governance, then create the governed root Issue when it is absent.", "issue.create"],
-      ["Issue the semantic Change and consume its canonical entry result before implementation.", "change.issue"],
+      [
+        "Read the source Issue and current Implementation authorization, then issue the Implementation-rooted Change through its canonical entry result.",
+        "change.issue",
+      ],
       [
         "Hand implementation responsibility to the canonical worker boundary and wait for completion evidence.",
         "change.show",
@@ -408,7 +411,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
         contract: "golden-path-status",
         output: "nextAction",
         instruction:
-          "Treat nextAction as the only normal-path routing signal; do not create a second transition model.",
+          "Consume the shared Implementation-native status (including readiness, authorization, conformance, Change, and review states) and treat nextAction as the only normal-path routing signal; do not create a second transition model.",
       },
       {
         contract: "golden-path-recovery",
@@ -419,7 +422,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     ],
     invariants: [
       "Use repository-native governance and semantic Change contracts; do not invent branch names, PR identity, or raw GitHub mutations.",
-      "The normal route is governed intent -> Change issuance -> implementation handoff -> governed readiness -> REVIEW; exact routing comes from canonical nextAction output.",
+      "The normal route is source Issue -> executable Implementation -> authorization -> Implementation-rooted Change -> handoff -> conformance -> governed readiness -> REVIEW; exact routing comes from the shared canonical composition.",
       "Inari emits the implementation handoff; Nawabari owns the worktree, session, process, and local Git execution without exposing its internals here.",
       "Never infer retry safety or cleanup. Reread authoritative recovery evidence before any retry, abort, or recovery action.",
       "Stop on MANUAL_REVIEW, unavailable or ambiguous evidence, unsupported capability, or any terminal result that provides no safe action.",

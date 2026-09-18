@@ -251,6 +251,10 @@ export type IssueRelationsPlanInput = z.infer<typeof issueRelationsPlanInputSche
 export const implementationHandoffInputSchema = z.strictObject({
   repository: repositorySchema.optional(),
   issue: artifactNumberSchema,
+  implementation: z.unknown().optional(),
+  authorization: z.unknown().optional(),
+  sourceIssues: z.array(z.unknown()).optional(),
+  compatibility: z.enum(["implementation-native", "historical-issue-root"]).optional(),
 });
 
 /**
@@ -270,6 +274,12 @@ export const changeImplementationHandoffInputSchema = implementationHandoffInput
 export const goldenPathEntryInputSchema = z.strictObject({
   repository: repositorySchema.optional(),
   issue: artifactNumberSchema,
+  sourceIssue: z.unknown().optional(),
+  implementation: z.unknown().optional(),
+  implementationAuthorization: z.unknown().optional(),
+  implementationReadiness: z.unknown().optional(),
+  implementationConformance: z.unknown().optional(),
+  compatibility: z.enum(["implementation-native", "historical-issue-root"]).optional(),
 });
 export type GoldenPathEntryInput = z.infer<typeof goldenPathEntryInputSchema>;
 
@@ -722,7 +732,13 @@ function operationalViewFailure(
 function projectChangeHandoffResult(
   issue: number,
   projection: Awaited<ReturnType<typeof readChangeProjection>>,
-  options: { readonly repositoryNameWithOwner?: string } = {},
+  options: {
+    readonly repositoryNameWithOwner?: string;
+    readonly implementation?: unknown;
+    readonly authorization?: unknown;
+    readonly sourceIssues?: readonly unknown[];
+    readonly compatibility?: "implementation-native" | "historical-issue-root";
+  } = {},
 ): Record<string, unknown> {
   const change = projection.change;
   const changeProjection = change?.projection;
@@ -770,7 +786,13 @@ async function handleImplementationHandoff(
       }
     }
     return result(
-      projectChangeHandoffResult(input.issue, projection, { repositoryNameWithOwner }),
+      projectChangeHandoffResult(input.issue, projection, {
+        repositoryNameWithOwner,
+        ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
+        ...(input.authorization === undefined ? {} : { authorization: input.authorization }),
+        ...(input.sourceIssues === undefined ? {} : { sourceIssues: input.sourceIssues }),
+        ...(input.compatibility === undefined ? {} : { compatibility: input.compatibility }),
+      }),
       "Read the canonical implementation handoff through the Change Core boundary.",
     );
   } catch (error: unknown) {
@@ -800,7 +822,22 @@ async function handleGoldenPathEntry(
   try {
     const executor = changeExecutorFor(input.repository, dependencies);
     const projection = await readChangeProjection(executor, changeReadRequest(input.issue));
-    const entry = tryProjectGoldenPathEntry({ projection, requireGovernedIssue: false });
+    const entry = tryProjectGoldenPathEntry({
+      projection,
+      requireGovernedIssue: false,
+      ...(input.sourceIssue === undefined ? {} : { sourceIssue: input.sourceIssue }),
+      ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
+      ...(input.implementationAuthorization === undefined
+        ? {}
+        : { implementationAuthorization: input.implementationAuthorization }),
+      ...(input.implementationReadiness === undefined
+        ? {}
+        : { implementationReadiness: input.implementationReadiness }),
+      ...(input.implementationConformance === undefined
+        ? {}
+        : { implementationConformance: input.implementationConformance }),
+      ...(input.compatibility === undefined ? {} : { compatibility: input.compatibility }),
+    });
     return result(
       {
         ok: entry.valid,
