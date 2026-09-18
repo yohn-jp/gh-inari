@@ -31,20 +31,7 @@ import type { SemanticSessionRequest } from "./session-request.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
 import type { ChangeState } from "../change.js";
-import {
-  projectImplementationSessionAuthorizationBinding,
-  type ImplementationSessionAuthorizationBinding,
-} from "../implementation-session-binding.js";
-import {
-  IMPLEMENTATION_CONTRACT_VERSION,
-  IMPLEMENTATION_KIND,
-  parseImplementationContract,
-  renderImplementationIssueBody,
-} from "../implementation-contract.js";
-import {
-  authorizeImplementation,
-  type ImplementationAuthorizationVerificationInput,
-} from "../implementation-authorization.js";
+import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends <Value>() => Value extends Right ? 1 : 2 ? true : false;
@@ -141,64 +128,6 @@ const BLOB_SHA = "c".repeat(40);
 const BRANCH_SHA = "d".repeat(40);
 const CANONICAL_BRANCH = "feat/375-semantic-capability-admission";
 const BASE_BRANCH = "main";
-const IMPLEMENTATION_REPOSITORY = {
-  repositoryHost: "github.com",
-  repositoryId: REPOSITORY_ID,
-  repository: "acme/inari",
-} as const;
-const IMPLEMENTATION_BASE = {
-  branch: BASE_BRANCH,
-  revision: "implementation-base-revision",
-  freshness: "implementation-base-freshness",
-} as const;
-
-function implementationAuthorization(issue: number): ImplementationAuthorizationVerificationInput {
-  const implementation = { ...IMPLEMENTATION_REPOSITORY, number: issue };
-  const body = renderImplementationIssueBody(
-    parseImplementationContract({
-      version: IMPLEMENTATION_CONTRACT_VERSION,
-      kind: IMPLEMENTATION_KIND,
-      repository: IMPLEMENTATION_REPOSITORY,
-      sources: [],
-      objective: `Authorize implementation session ${issue}.`,
-      nonGoals: ["Capability-admission policy"],
-      architecture: {
-        decision: "Bind the delegated Session to the current Implementation authorization.",
-        affectedComponents: ["Session authority"],
-        invariants: ["The binding cannot be omitted for change.implement."],
-        compatibilityConstraints: [],
-      },
-      scope: { readOnly: ["src/**"], write: ["src/**"], create: [], delete: [], deny: [] },
-      constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
-      verification: {
-        acceptanceCriteria: ["The exact authorization is retained."],
-        targetedTests: [],
-        requiredChecks: [],
-        postconditions: [],
-      },
-      execution: {
-        baseBranch: IMPLEMENTATION_BASE.branch,
-        baseRevision: IMPLEMENTATION_BASE.revision,
-        baseFreshness: IMPLEMENTATION_BASE.freshness,
-        branch: `feat/${issue}-semantic-capability-admission`,
-        dependencies: [],
-      },
-    }),
-  );
-  const authorization = authorizeImplementation({
-    implementation,
-    body,
-    repository: IMPLEMENTATION_REPOSITORY,
-    base: IMPLEMENTATION_BASE,
-  });
-  return {
-    authorization,
-    implementation,
-    body,
-    repository: IMPLEMENTATION_REPOSITORY,
-    base: IMPLEMENTATION_BASE,
-  };
-}
 
 function runtimeAuthority(key = generateRuntimeAuthorityKeyPair()): {
   readonly authority: RuntimeAuthority;
@@ -236,20 +165,9 @@ function signedRequest(
   taskNumber: number,
 ) {
   const session = createManagedSession();
-  const currentAuthorization = capabilities.some((claim) => claim.kind === "change.implement")
-    ? implementationAuthorization(taskNumber)
-    : undefined;
-  const implementationBinding =
-    currentAuthorization === undefined
-      ? undefined
-      : projectImplementationSessionAuthorizationBinding({
-          ...currentAuthorization,
-          task: { kind: "issue", number: taskNumber },
-        });
   const issuanceRequest = session.createIssuanceRequest({
     repository: { id: REPOSITORY_ID, name: "acme/inari" },
     task: { kind: "issue", number: taskNumber },
-    ...(implementationBinding === undefined ? {} : { implementationBinding }),
     capabilities,
     ttlSeconds: 600,
   });
@@ -258,7 +176,6 @@ function signedRequest(
     runtimeAuthority: authority,
     runtimeKey: key,
     request: issuanceRequest,
-    ...(currentAuthorization === undefined ? {} : { implementationAuthorization: currentAuthorization }),
     now: NOW,
   });
   session.acceptCertificate(issued.compact);
@@ -339,9 +256,6 @@ async function authenticatedContext(
     },
     repository: REPOSITORY,
     request: envelope,
-    ...(capabilities.some((claim) => claim.kind === "change.implement")
-      ? { implementationAuthorization: implementationAuthorization(issue) }
-      : {}),
     now: NOW,
   });
 }
