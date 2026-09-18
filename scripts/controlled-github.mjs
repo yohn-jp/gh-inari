@@ -884,7 +884,10 @@ async function dispatchActionsRun(state, statePath, requestJson, correlation) {
       conclusion: run.conclusion,
     },
   ];
-  state.artifacts[correlation] = { id: artifactId, runId, bytes: archive.toString("base64") };
+  state.artifacts = [
+    ...(Array.isArray(state.artifacts) ? state.artifacts : []),
+    { correlation, id: artifactId, runId, bytes: archive.toString("base64") },
+  ];
   stateChanged(statePath, state);
 }
 
@@ -937,7 +940,10 @@ async function actionsHttpApi(request, response, parsed, parts, state, statePath
   if (method === "GET" && parts.length === 2 && parts[1] === "artifacts") {
     const name = parsed.searchParams.get("name");
     const page = Number(parsed.searchParams.get("page"));
-    const artifact = name === null ? undefined : state.artifacts?.[name.replace("inari-change-result-", "")];
+    const correlation = name === null ? undefined : name.replace("inari-change-result-", "");
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.correlation === correlation,
+    );
     sendJson(response, 200, {
       artifacts:
         artifact === undefined || page !== 1
@@ -962,15 +968,16 @@ async function actionsHttpApi(request, response, parsed, parts, state, statePath
   }
   if (method === "GET" && parts.length === 3 && parts[1] === "artifacts") {
     const artifactId = Number(parts[2]);
-    const entry = Object.entries(state.artifacts ?? {}).find(([, candidate]) => candidate.id === artifactId);
-    if (entry === undefined) {
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.id === artifactId,
+    );
+    if (artifact === undefined) {
       sendJson(response, 404, { message: "Actions artifact not found" });
       return;
     }
-    const [correlation, artifact] = entry;
     sendJson(response, 200, {
       id: artifact.id,
-      name: `inari-change-result-${correlation}`,
+      name: `inari-change-result-${artifact.correlation}`,
       expired: false,
       workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) },
     });
@@ -978,7 +985,9 @@ async function actionsHttpApi(request, response, parsed, parts, state, statePath
   }
   if (method === "GET" && parts.length === 4 && parts[1] === "artifacts" && parts[3] === "zip") {
     const artifactId = Number(parts[2]);
-    const artifact = Object.values(state.artifacts ?? {}).find((candidate) => candidate.id === artifactId);
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.id === artifactId,
+    );
     if (artifact === undefined) {
       sendJson(response, 404, { message: "Actions artifact not found" });
       return;
@@ -1022,7 +1031,10 @@ async function actionsApi(argv) {
     const requestUrl = new URL(`https://provider.invalid/${relativeEndpoint}`);
     const name = requestUrl.searchParams.get("name");
     const page = Number(requestUrl.searchParams.get("page"));
-    const artifact = name === null ? undefined : state.artifacts?.[name.replace("inari-change-result-", "")];
+    const correlation = name === null ? undefined : name.replace("inari-change-result-", "");
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.correlation === correlation,
+    );
     process.stdout.write(
       `${JSON.stringify({ artifacts: artifact === undefined || page !== 1 ? [] : [{ id: artifact.id, name, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } }] })}\n`,
     );
@@ -1039,17 +1051,18 @@ async function actionsApi(argv) {
   const exactArtifactMatch = /^actions\/artifacts\/(\d+)$/u.exec(relativeEndpoint);
   if (exactArtifactMatch !== null && method === "GET") {
     const artifactId = Number(exactArtifactMatch[1]);
-    const entry = Object.entries(state.artifacts ?? {}).find(([, candidate]) => candidate.id === artifactId);
-    if (entry === undefined) throw new Error("Actions artifact not found");
-    const [correlation, artifact] = entry;
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
+      (candidate) => candidate.id === artifactId,
+    );
+    if (artifact === undefined) throw new Error("Actions artifact not found");
     process.stdout.write(
-      `${JSON.stringify({ id: artifact.id, name: `inari-change-result-${correlation}`, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } })}\n`,
+      `${JSON.stringify({ id: artifact.id, name: `inari-change-result-${artifact.correlation}`, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } })}\n`,
     );
     return;
   }
   const artifactMatch = /^repos\/yohn-jp\/gh-inari\/actions\/artifacts\/(\d+)\/zip$/u.exec(endpoint);
   if (artifactMatch !== null && method === "GET") {
-    const artifact = Object.values(state.artifacts ?? {}).find(
+    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
       (candidate) => candidate.id === Number(artifactMatch[1]),
     );
     if (artifact === undefined) throw new Error("Actions artifact not found");
