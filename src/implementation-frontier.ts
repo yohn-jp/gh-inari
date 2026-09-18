@@ -667,16 +667,28 @@ function normalizeImplementation(
     else executionEvidence = result.evidence;
   }
 
-  // Conformance is the strongest completion evidence; a completed and
-  // currently-authorized authorization inspection is the other authoritative
-  // completion path. Either must be freshly re-verified, never a bare flag.
-  const authorizationCompleted =
-    authorizationInspection !== undefined &&
-    authorizationInspection.authorized &&
-    authorizationInspection.current &&
-    authorizationInspection.status === "completed";
-  const satisfied =
-    (conformance !== undefined && conformance.valid && conformance.status === "conformant") || authorizationCompleted;
+  // Terminal completion requires both a conformant authoritative reread
+  // and exact execution evidence bound to the current authorization. Neither
+  // Issue state nor the legacy authorization `completed` assertion can
+  // manufacture SATISFIED.
+  const conformantCompletion =
+    conformance !== undefined &&
+    conformance.valid &&
+    conformance.status === "conformant" &&
+    executionEvidence !== undefined;
+  if (
+    conformance !== undefined &&
+    conformance.valid &&
+    conformance.status === "conformant" &&
+    executionEvidence === undefined
+  )
+    addDiagnostic(
+      local,
+      "FRONTIER_EXECUTION_EVIDENCE_INVALID",
+      `${path}.executionEvidence`,
+      "Conformant work is not terminal until exact execution evidence is present.",
+    );
+  const satisfied = conformantCompletion;
   // Execution evidence alone never proves ACTIVE (checked above, it only
   // corroborates an already-current authorization); ACTIVE always requires a
   // freshly re-verified current authorization.
