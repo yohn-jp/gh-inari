@@ -124,7 +124,8 @@ template workflows as Inari-owned and routes agents to `inari skill` /
 `inari skill <scenario>` for the actual operational playbooks, and to
 `inari <domain> --help` for exact command syntax. It does not duplicate
 scenario content, so it stays correct as `inari skill` evolves. Raw `gh`
-remains available for anything outside Inari's governed surface.
+remains available for anything outside Inari's governed surface; use Inari's
+bounded `issue list` and `pr list` commands for Issue/PR discovery.
 
 ## Commands
 
@@ -148,6 +149,8 @@ inari issue view <number> --json
 inari pr view <number> --json
 inari issue observe <number> --json
 inari pr observe <number> --json
+inari issue list [--state <open|closed|all>] [--limit <number>] [--page <number>]
+inari pr list [--state <open|closed|all>] [--head <branch>] [--base <branch>] [--limit <number>] [--page <number>]
 inari issue check <number> [--template <template>]
 inari pr check <number> [--template <template>]
 inari issue edit <number> [--from patch.json] [--field name=value] [--title title] [--dry-run]
