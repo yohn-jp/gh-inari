@@ -451,7 +451,7 @@ test("abort retries are idempotent and recovery retries only canonical cleanup",
   assert.equal(recovery.to, "ABORTED");
 });
 
-test("invalid and future transitions fail closed with structured diagnostics", () => {
+test("invalid transitions fail closed with structured diagnostics", () => {
   const invalid = validateChangeTransitionRequest({
     ...issueRequest,
     transition: "ready",
@@ -475,7 +475,7 @@ test("invalid and future transitions fail closed with structured diagnostics", (
     change: validChange,
   });
   assert.equal(future.valid, false);
-  assert.ok(future.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_UNSUPPORTED_TRANSITION"));
+  assert.ok(future.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_TRANSITION_NOT_ALLOWED"));
 
   const missingTarget = validateChangeTransitionRequest({
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
