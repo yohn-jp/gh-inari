@@ -41,6 +41,7 @@ import {
 } from "../semantic-issue-projection.js";
 import { compareSemanticIssueProjection, tryObserveSemanticIssue } from "../semantic-issue-observation.js";
 import { tryObserveOperationalIssue, tryObserveOperationalPullRequest } from "../operational-observation.js";
+import { tryDiscoverOperationalIssues, tryDiscoverOperationalPullRequests } from "../operational-discovery.js";
 import {
   SemanticPullRequestProjectionError,
   tryPlanSemanticPullRequest,
@@ -86,6 +87,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_issue_plan",
   "inari_issue_observe",
   "inari_issue_view",
+  "inari_issue_list",
   "inari_issue_drift",
   "inari_issue_relations_plan",
   "inari_branch_contract",
@@ -98,6 +100,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_plan",
   "inari_pr_observe",
   "inari_pr_view",
+  "inari_pr_list",
   "inari_pr_drift",
   "inari_pr_comment",
   "inari_pr_review",
@@ -204,6 +207,24 @@ export const semanticPullRequestObserveInputSchema = z.strictObject({
   ...commonRequestShape,
   number: artifactNumberSchema,
 });
+
+const discoveryStateSchema = z.enum(["open", "closed", "all"]);
+const discoveryPageSchema = z.number().int().min(1).max(10_000).describe("Explicit bounded discovery page number.");
+const discoveryLimitSchema = z.number().int().min(1).max(100).describe("Maximum results in one discovery page.");
+export const operationalIssueListInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  state: discoveryStateSchema.optional(),
+  page: discoveryPageSchema.optional(),
+  limit: discoveryLimitSchema.optional(),
+});
+export const operationalPullRequestListInputSchema = z.strictObject({
+  repository: repositorySchema.optional(),
+  state: discoveryStateSchema.optional(),
+  head: branchNameSchema.optional(),
+  base: branchNameSchema.optional(),
+  page: discoveryPageSchema.optional(),
+  limit: discoveryLimitSchema.optional(),
+});
 export const semanticPullRequestDriftInputSchema = z.strictObject({
   ...commonRequestShape,
   number: artifactNumberSchema,
@@ -269,6 +290,8 @@ export type SemanticBranchDriftInput = z.infer<typeof semanticBranchDriftInputSc
 export type SemanticPullRequestObserveInput = z.infer<typeof semanticPullRequestObserveInputSchema>;
 export type SemanticPullRequestViewInput = SemanticPullRequestObserveInput;
 export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDriftInputSchema>;
+export type OperationalIssueListInput = z.infer<typeof operationalIssueListInputSchema>;
+export type OperationalPullRequestListInput = z.infer<typeof operationalPullRequestListInputSchema>;
 export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
 export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
 export type GoldenPathStatusMcpInput = z.infer<typeof goldenPathStatusInputSchema>;
@@ -404,6 +427,13 @@ export const composedViewOutputSchema = z
 
 export type ComposedViewMcpOutput = z.infer<typeof composedViewOutputSchema>;
 
+export const operationalDiscoveryOutputSchema = z
+    operation: z.enum(["issue.list", "pr.list"]).optional(),
+    kind: z.enum(["issue", "pull_request"]).optional(),
+    phase: z.literal("discovery").optional(),
+    version: z.number().int().optional(),
+    discovered: z.unknown().optional(),
+    mutation: z.literal(false).optional(),
 /** Structured output schema for the canonical Change implementation handoff. */
 export const implementationHandoffOutputSchema = z
   .object({
@@ -1216,6 +1246,95 @@ async function handlePullRequestView(
   return handleOperationalView("pr", input, dependencies);
 }
 
+async function handleOperationalIssueList(
+  input: OperationalIssueListInput,
+  try {
+    const adapter = adapterFor(input.repository, dependencies);
+    const page = await adapter.listOperationalIssues({
+      state: input.state ?? "open",
+      page: input.page ?? 1,
+      limit: input.limit ?? 30,
+    });
+    const discovered = tryDiscoverOperationalIssues({ discovery: page });
+    if (!discovered.valid || discovered.discovery === undefined)
+      return result(
+        {
+          ok: false,
+          valid: false,
+          operation: "issue.list",
+          kind: "issue",
+          phase: "discovery",
+          diagnostics: discovered.violations,
+          violations: discovered.violations,
+        },
+        "Operational Issue discovery failed; see diagnostics.",
+      );
+    return result(
+      {
+        ok: true,
+        valid: true,
+        operation: "issue.list",
+        kind: "issue",
+        version: discovered.discovery.version,
+        discovered: discovered.discovery,
+        mutation: false,
+        diagnostics: [],
+      },
+      "Discovered bounded Issue summaries through the native GitHub adapter.",
+    );
+  } catch (error: unknown) {
+    const diagnostics = diagnosticsForError(error);
+    return result(
+      { ok: false, valid: false, operation: "issue.list", kind: "issue", phase: "discovery", diagnostics },
+      "Operational Issue discovery failed; see diagnostics.",
+    );
+  }
+async function handleOperationalPullRequestList(
+  input: OperationalPullRequestListInput,
+  dependencies: NativeSemanticPullRequestDependencies,
+  try {
+    const adapter = adapterFor(input.repository, dependencies);
+    const page = await adapter.listOperationalPullRequests({
+      state: input.state ?? "open",
+      ...(input.head === undefined ? {} : { head: input.head }),
+      ...(input.base === undefined ? {} : { base: input.base }),
+      page: input.page ?? 1,
+      limit: input.limit ?? 30,
+    });
+    const discovered = tryDiscoverOperationalPullRequests({ discovery: page });
+    if (!discovered.valid || discovered.discovery === undefined)
+      return result(
+        {
+          ok: false,
+          valid: false,
+          operation: "pr.list",
+          kind: "pull_request",
+          phase: "discovery",
+          diagnostics: discovered.violations,
+          violations: discovered.violations,
+        },
+        "Operational pull-request discovery failed; see diagnostics.",
+      );
+    return result(
+      {
+        ok: true,
+        valid: true,
+        operation: "pr.list",
+        kind: "pull_request",
+        version: discovered.discovery.version,
+        discovered: discovered.discovery,
+        mutation: false,
+        diagnostics: [],
+      },
+      "Discovered bounded pull-request summaries through the native GitHub adapter.",
+    );
+  } catch (error: unknown) {
+    const diagnostics = diagnosticsForError(error);
+    return result(
+      { ok: false, valid: false, operation: "pr.list", kind: "pull_request", phase: "discovery", diagnostics },
+      "Operational pull-request discovery failed; see diagnostics.",
+    );
+  }
 async function handlePullRequestDrift(
   input: SemanticPullRequestDriftInput,
   dependencies: NativeSemanticPullRequestDependencies,
@@ -1487,6 +1606,38 @@ export function registerGoldenPathTools(server: McpServer): readonly RegisteredT
     async (input: GoldenPathStatusMcpInput) => handleGoldenPathStatus(input),
   );
   return Object.freeze([status]);
+}
+
+/** Register the shared read-only Operational Discovery catalog on any MCP transport. */
+export function registerOperationalDiscoveryTools(
+  server: McpServer,
+  dependencies: NativeSemanticArtifactDependencies = {},
+): readonly RegisteredTool[] {
+  const issues = server.registerTool(
+    "inari_issue_list",
+    {
+      title: "Discover Issues",
+      description:
+        "Discover one bounded page of provider-normalized GitHub Issue summaries through the versioned Operational Discovery Core.",
+      inputSchema: operationalIssueListInputSchema,
+      outputSchema: operationalDiscoveryOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: OperationalIssueListInput) => handleOperationalIssueList(input, dependencies),
+  );
+  const pullRequests = server.registerTool(
+    "inari_pr_list",
+    {
+      title: "Discover pull requests",
+      description:
+        "Discover one bounded page of provider-normalized pull-request summaries with exact state, head, and base filters through the versioned Operational Discovery Core.",
+      inputSchema: operationalPullRequestListInputSchema,
+      outputSchema: operationalDiscoveryOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: OperationalPullRequestListInput) => handleOperationalPullRequestList(input, dependencies),
+  );
+  return Object.freeze([issues, pullRequests]);
 }
 
 /** Register the read-only semantic PR contract/materialize/plan/observe/drift catalog on any MCP transport. */
