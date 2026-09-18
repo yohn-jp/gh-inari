@@ -173,6 +173,47 @@ test("body drift, base drift, supersession, task mismatch, and repository substi
   );
 });
 
+test("implementation-native issuance cannot omit the authorization binding", () => {
+  const session = createManagedSession();
+  const request = session.createIssuanceRequest({
+    repository: { id: repository.repositoryId, name: repository.repository as string },
+    task: { kind: "issue", number: implementation.number },
+    capabilities: [{ kind: "change.implement", issue: implementation.number }],
+    ttlSeconds: 600,
+  });
+  const key = generateRuntimeAuthorityKeyPair();
+  const authority = runtimeAuthority(key);
+
+  assert.throws(
+    () =>
+      issueSessionCertificate({
+        repository: request.repository,
+        runtimeAuthority: authority,
+        runtimeKey: key,
+        request,
+        now: new Date("2026-09-18T00:00:00Z"),
+      }),
+    (error: unknown) =>
+      error instanceof SessionCertificateIssuanceError &&
+      error.code === "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED",
+  );
+
+  assert.throws(
+    () =>
+      issueSessionCertificate({
+        repository: request.repository,
+        runtimeAuthority: authority,
+        runtimeKey: key,
+        request,
+        implementationAuthorization: currentAuthorization(),
+        now: new Date("2026-09-18T00:00:00Z"),
+      }),
+    (error: unknown) =>
+      error instanceof SessionCertificateIssuanceError &&
+      error.code === "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED",
+  );
+});
+
 test("managed issuance signs the binding only after current authorization verification", () => {
   const binding = projectImplementationSessionAuthorizationBinding({
     ...currentAuthorization(),
