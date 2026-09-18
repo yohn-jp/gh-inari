@@ -63,6 +63,8 @@ export interface ImplementationScopeProjection {
   readonly authorization: ImplementationScopeAuthorizationIdentity;
   readonly repository: ImplementationRepositoryIdentity;
   readonly base: ImplementationBaseEvidence;
+  /** The canonical Implementation execution branch, when the contract has already decided one. */
+  readonly branch?: string;
   readonly scope: ImplementationScope;
 }
 
@@ -113,7 +115,7 @@ export class ImplementationScopeProjectionError extends Error {
   }
 }
 
-const PROJECTION_KEYS = new Set(["version", "kind", "authorization", "repository", "base", "scope"]);
+const PROJECTION_KEYS = new Set(["version", "kind", "authorization", "repository", "base", "branch", "scope"]);
 const AUTHORIZATION_IDENTITY_KEYS = new Set([
   "version",
   "kind",
@@ -482,12 +484,17 @@ function normalizeProjection(input: unknown): ImplementationScopeProjectionResul
   const repository = normalizeRepository(input.repository, "$.repository", violations);
   const base = normalizeBase(input.base, "$.base", violations);
   const scope = normalizeScope(input.scope, "$.scope", violations);
+  const branchInputProvided = Object.prototype.hasOwnProperty.call(input, "branch") && input.branch !== undefined;
+  const branch = branchInputProvided ? text(input.branch, "$.branch", violations) : undefined;
+  if (branch !== undefined && !BRANCH_PATTERN.test(branch))
+    addViolation(violations, "IMPLEMENTATION_SCOPE_PROJECTION_INVALID_VALUE", "$.branch", "branch is invalid.");
   if (
     violations.length > 0 ||
     authorization === undefined ||
     repository === undefined ||
     base === undefined ||
-    scope === undefined
+    scope === undefined ||
+    (branchInputProvided && branch === undefined)
   )
     return { valid: false, violations: Object.freeze([...violations]) };
   return {
@@ -498,6 +505,7 @@ function normalizeProjection(input: unknown): ImplementationScopeProjectionResul
       authorization,
       repository,
       base,
+      ...(branch === undefined ? {} : { branch }),
       scope,
     }),
     violations: [],
@@ -598,6 +606,7 @@ export function tryProjectImplementationScope(input: unknown): ImplementationSco
     },
     repository: verification.authorization.repository,
     base: verification.authorization.base,
+    ...(verification.contract.execution.branch === undefined ? {} : { branch: verification.contract.execution.branch }),
     scope: verification.contract.scope,
   };
   const normalized = validateImplementationScopeProjection(candidate);

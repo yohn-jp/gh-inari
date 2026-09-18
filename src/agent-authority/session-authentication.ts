@@ -35,6 +35,10 @@ import {
   type ImplementationSessionAuthorizationBinding,
 } from "../implementation-session-binding.js";
 import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
+import {
+  tryProjectImplementationScope,
+  type ImplementationScopeProjection,
+} from "../implementation-scope-projection.js";
 
 /** The only broker operation accepted by this boundary. */
 export interface SessionAuthenticationReadCapabilityBroker {
@@ -101,6 +105,8 @@ export interface AuthenticatedSessionContext {
   readonly session: AuthenticatedSessionIdentity;
   readonly task?: SessionCertificateTask;
   readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
+  /** Current execution authority derived from the same verified authorization binding. */
+  readonly implementationScope?: ImplementationScopeProjection;
   readonly capabilities: readonly CapabilityClaim[];
   readonly authority: AuthenticatedSessionAuthorityRef;
   readonly request: AuthenticatedSessionRequestIdentity;
@@ -245,6 +251,17 @@ function verifyImplementationBinding(
   }
 }
 
+function projectImplementationScopeForSession(
+  certificate: DecodedSessionCertificate,
+  currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
+): ImplementationScopeProjection | undefined {
+  if (certificate.payload.implementationBinding === undefined) return undefined;
+  if (currentAuthorization === undefined) fail("implementation-authorization");
+  const result = tryProjectImplementationScope(currentAuthorization);
+  if (!result.valid || result.projection === undefined) fail("implementation-authorization");
+  return result.projection;
+}
+
 function sessionId(subject: string): string {
   return subject.startsWith("session:") ? subject.slice("session:".length) : subject;
 }
@@ -254,6 +271,7 @@ function authenticatedContext(
   verifiedRequest: VerifiedSessionRequest,
   runtime: LoadedDelegator,
   repository: RepositoryIdentity,
+  implementationScope?: ImplementationScopeProjection,
 ): AuthenticatedSessionContext {
   const payload = certificate.payload;
   const context: AuthenticatedSessionContext = {
@@ -264,6 +282,7 @@ function authenticatedContext(
     ...(payload.implementationBinding === undefined
       ? {}
       : { implementationBinding: Object.freeze(payload.implementationBinding) }),
+    ...(implementationScope === undefined ? {} : { implementationScope }),
     capabilities: Object.freeze(payload.capabilities.map((claim) => Object.freeze({ ...claim }))),
     authority: Object.freeze({ ref: runtime.provenance.ref, sha: runtime.provenance.policySha }),
     request: Object.freeze({
@@ -312,6 +331,10 @@ export async function authenticateSessionRequest(
       verifyRuntimeSignature(certificate, runtime);
       verifyCertificateClaims(certificate, runtime, resolvedIdentity.value, now);
       verifyImplementationBinding(certificate, resolvedIdentity.value, options.implementationAuthorization);
+      const implementationScope = projectImplementationScopeForSession(
+        certificate,
+        options.implementationAuthorization,
+      );
 
       let requestVerification;
       try {
@@ -330,7 +353,7 @@ export async function authenticateSessionRequest(
       ) {
         fail("session-request");
       }
-      return authenticatedContext(certificate, verifiedRequest, runtime, resolvedIdentity.value);
+      return authenticatedContext(certificate, verifiedRequest, runtime, resolvedIdentity.value, implementationScope);
     });
   } catch (error: unknown) {
     if (error instanceof SessionAuthenticationError) throw error;

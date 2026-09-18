@@ -18,6 +18,17 @@ import { assertRuntimeAuthority } from "./agent-authority/runtime-authority.js";
 import { createDirectAppSessionExecutor } from "./github/direct-app-execution.js";
 import { createInariMcpServer } from "./mcp/server.js";
 import type { GitHubChangeEffectRepository } from "./github/change-effect-adapter.js";
+import {
+  IMPLEMENTATION_CONTRACT_VERSION,
+  IMPLEMENTATION_KIND,
+  parseImplementationContract,
+  renderImplementationIssueBody,
+} from "./implementation-contract.js";
+import {
+  authorizeImplementation,
+  type ImplementationAuthorizationVerificationInput,
+} from "./implementation-authorization.js";
+import { projectImplementationSessionAuthorizationBinding } from "./implementation-session-binding.js";
 
 const NOW = new Date("2026-09-13T00:00:30.000Z");
 const NOW_SECONDS = Math.floor(NOW.getTime() / 1000);
@@ -46,12 +57,84 @@ const PRIVATE_KEY_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
   .toString();
 
+const IMPLEMENTATION_REPOSITORY = {
+  repositoryHost: "github.com",
+  repositoryId: REPOSITORY_ID,
+  repository: "acme/inari",
+} as const;
+const IMPLEMENTATION_SOURCE = { ...IMPLEMENTATION_REPOSITORY, number: ISSUE - 1 } as const;
+const IMPLEMENTATION_BASE = {
+  branch: "main",
+  revision: "integration-base-revision",
+  freshness: "integration-base-freshness",
+} as const;
+const IMPLEMENTATION_BODY = renderImplementationIssueBody(
+  parseImplementationContract({
+    version: IMPLEMENTATION_CONTRACT_VERSION,
+    kind: IMPLEMENTATION_KIND,
+    repository: IMPLEMENTATION_REPOSITORY,
+    sources: [IMPLEMENTATION_SOURCE],
+    objective: "Advance the integration branch under a bound Implementation scope.",
+    nonGoals: ["Provider trust resolution"],
+    architecture: {
+      decision: "Bind the certificate to the exact current Implementation authorization.",
+      affectedComponents: ["Session execution"],
+      invariants: ["branch.advance requires a bound scope."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: [], write: ["src/**"], create: ["src/**"], delete: ["src/**"], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["branch.advance succeeds within the bound scope."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: IMPLEMENTATION_BASE.branch,
+      baseRevision: IMPLEMENTATION_BASE.revision,
+      baseFreshness: IMPLEMENTATION_BASE.freshness,
+      branch: BRANCH,
+      dependencies: [IMPLEMENTATION_SOURCE],
+    },
+  }),
+);
+
+function currentImplementationAuthorization(taskIssue: number = ISSUE): ImplementationAuthorizationVerificationInput {
+  const implementation = { ...IMPLEMENTATION_REPOSITORY, number: taskIssue };
+  const authorization = authorizeImplementation({
+    implementation,
+    body: IMPLEMENTATION_BODY,
+    repository: IMPLEMENTATION_REPOSITORY,
+    base: IMPLEMENTATION_BASE,
+    readiness: {
+      evidence: [
+        {
+          reference: IMPLEMENTATION_SOURCE,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
+  return {
+    authorization,
+    implementation,
+    body: IMPLEMENTATION_BODY,
+    repository: IMPLEMENTATION_REPOSITORY,
+    base: IMPLEMENTATION_BASE,
+  };
+}
+
 type ProviderMode = "abort" | "abort-branch-only" | "abort-timeout-after-close" | "branch-success" | "branch-stale";
 
 interface SessionFixture {
   readonly authority: RuntimeAuthority;
   readonly envelope: unknown;
   readonly runtimePrivateKeyPem: string;
+  readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
 }
 
 interface ProviderState {
@@ -108,6 +191,7 @@ function signedSession(
     readonly certificateRepository?: { readonly id: string; readonly name: string };
     readonly certificateNow?: Date;
     readonly requestExpiresAt?: number;
+    readonly implementationBound?: boolean;
   } = {},
 ): SessionFixture {
   const runtime = createRuntimeAuthority();
@@ -115,11 +199,23 @@ function signedSession(
   const certificateRepository = options.certificateRepository ?? { id: REPOSITORY_ID, name: "acme/inari" };
   const certificateNow = options.certificateNow ?? NOW;
   const issuedAt = Math.floor(certificateNow.getTime() / 1000);
+  const taskIssue = options.taskIssue ?? ISSUE;
+  const implementationAuthorization = options.implementationBound
+    ? currentImplementationAuthorization(taskIssue)
+    : undefined;
+  const implementationBinding =
+    implementationAuthorization === undefined
+      ? undefined
+      : projectImplementationSessionAuthorizationBinding({
+          ...implementationAuthorization,
+          task: { kind: "issue" as const, number: taskIssue },
+        });
   const issuance = session.createIssuanceRequest({
     repository: certificateRepository,
-    task: { kind: "issue", number: options.taskIssue ?? ISSUE },
+    task: { kind: "issue", number: taskIssue },
     capabilities,
     ttlSeconds: 600,
+    ...(implementationBinding === undefined ? {} : { implementationBinding }),
   });
   const certificate = issueSessionCertificate({
     repository: certificateRepository,
@@ -127,10 +223,12 @@ function signedSession(
     runtimeKey: runtime.key,
     request: issuance,
     now: certificateNow,
+    ...(implementationAuthorization === undefined ? {} : { implementationAuthorization }),
   });
   session.acceptCertificate(certificate.compact);
   return {
     authority: runtime.authority,
+    ...(implementationAuthorization === undefined ? {} : { implementationAuthorization }),
     envelope: signSessionRequest({
       session,
       request: request as unknown as SemanticSessionRequest,
@@ -351,6 +449,9 @@ function directExecutor(session: SessionFixture, provider: ProviderFixture) {
     apiUrl: "https://api.test",
     fetch: provider.fetch,
     now: () => NOW,
+    ...(session.implementationAuthorization === undefined
+      ? {}
+      : { implementationAuthorization: session.implementationAuthorization }),
   });
 }
 
@@ -549,7 +650,9 @@ test("branch-only Change recovery cleans up the branch and replays without anoth
 
 test("production branch.advance composition consumes the exact signed request and preserves #466 provenance", async () => {
   const request = branchAdvanceRequest();
-  const session = signedSession("branch.advance", request, [{ kind: "branch.advance", branch: BRANCH }]);
+  const session = signedSession("branch.advance", request, [{ kind: "branch.advance", branch: BRANCH }], {
+    implementationBound: true,
+  });
   const provider = providerFixture("branch-success", session.authority);
   const result = await directExecutor(session, provider).execute(session.envelope);
 
@@ -564,7 +667,14 @@ test("production branch.advance composition consumes the exact signed request an
 });
 
 test("production branch.advance replay with an unrelated concurrent tree change is not idempotent success", async () => {
-  const session = signedSession("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
+  const session = signedSession(
+    "branch.advance",
+    branchAdvanceRequest(),
+    [{ kind: "branch.advance", branch: BRANCH }],
+    {
+      implementationBound: true,
+    },
+  );
   const provider = providerFixture("branch-stale", session.authority);
   const result = await directExecutor(session, provider).execute(session.envelope);
 
@@ -581,7 +691,14 @@ test("production branch.advance replay with an unrelated concurrent tree change 
 });
 
 test("replaying the same signed branch.advance request resolves only from the exact authoritative target", async () => {
-  const session = signedSession("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
+  const session = signedSession(
+    "branch.advance",
+    branchAdvanceRequest(),
+    [{ kind: "branch.advance", branch: BRANCH }],
+    {
+      implementationBound: true,
+    },
+  );
   const provider = providerFixture("branch-success", session.authority);
   const executor = directExecutor(session, provider);
 
@@ -615,7 +732,14 @@ test("replaying the same signed branch.advance request resolves only from the ex
 });
 
 test("Runtime revocation rejects the next otherwise-unexpired privileged request at authentication", async () => {
-  const session = signedSession("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
+  const session = signedSession(
+    "branch.advance",
+    branchAdvanceRequest(),
+    [{ kind: "branch.advance", branch: BRANCH }],
+    {
+      implementationBound: true,
+    },
+  );
   const provider = providerFixture("branch-success", session.authority);
   const executor = directExecutor(session, provider);
 
