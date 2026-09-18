@@ -17,13 +17,23 @@ repository Change. It is a product-level composition over the existing
 Repository Canon, Semantic Artifact Core, Change, XState, GitHub adapters, and
 `inari skill` authorities.
 
+For new implementation-native execution, the composed subject is the
+Implementation authorization, not the broader ordinary source Issue. The
+Golden Path consumes the identity binding defined by
+[`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md): source Issue ->
+Implementation -> Change(root = Implementation) -> Session -> branch/PR ->
+execution evidence/conformance. Historical Issue-rooted Changes remain
+readable through the explicit compatibility rule and are never silently
+reinterpreted by composition.
+
 The normative path is:
 
 ```text
 fresh environment
   -> packaged gh-inari compatibility/preflight
   -> repository Canon and semantic contract discovery
-  -> governed Issue
+  -> governed source Issue and first-class Implementation
+  -> current Implementation authorization
   -> Change issuance
   -> canonical branch + canonical Draft PR
   -> implementation
@@ -80,8 +90,18 @@ Rulesets, and tests remain the mechanical authorities for their own contracts.
   identity, template path, lifecycle legality, or compensation effect.
 - A governed Issue may exist in `DEFINED` without an issued Change. Issue
   creation does not implicitly create a branch or PR.
+- A source Issue may have multiple independent Implementations. A new Change
+  is issued only for one current Implementation authorization, and the
+  Implementation Issue is its canonical root.
 - An issued active Change has exactly one canonical branch and one canonical
   Draft PR, both projected from the same Change identity.
+- Session task/capability, branch, canonical PR `implements`/closing relation,
+  execution evidence, and conformance must bind to that same Implementation
+  authorization. Source Issue references do not substitute for the execution
+  root.
+- Historical Issue-rooted Changes remain readable/recoverable but are not
+  admissible as new Implementation-native execution without fresh
+  Implementation-rooted evidence; ambiguity fails closed.
 - Issuance retry is create-or-return-existing and never creates a duplicate
   canonical branch or PR.
 - Every retry, compensation, abort, or recovery decision starts from fresh
@@ -128,6 +148,7 @@ The Golden Path is a composition layer. The following table is normative:
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | Repository Canon and native repository contracts                            | Repository-specific Issue/PR meaning, template selection, branch policy, governance generation, and declared supplied/derived/fixed values                                                                   | Embed repository paths, regexes, title/body rules, branch grammars, or template defaults in orchestration         |
 | Semantic Artifact Core                                                      | Contract compilation, effective input schema, artifact materialization, relation semantics, canonical branch/PR desired projections, validation, observed-vs-desired reconciliation, and bounded diagnostics | Re-derive artifact values, render a parallel body, or turn GitHub presentation into semantic policy               |
+| Implementation Contract/Authorization Core                                  | One-session contract, current body digest/base binding, execution scope/evidence, and the cross-artifact identity binding consumed by this composition                                                       | Treat source Issue state, a PR, or a branch convention as a replacement Implementation/authorization authority    |
 | Change Core and [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md)      | Change identity, `DEFINED`/`DRAFT`/`REVIEW`/terminal lifecycle, provenance roles, transition legality, issuance idempotency, effect plans, compensation, abort, and recovery semantics                       | Add a parallel lifecycle, Change ID, effect plan, or persistent Change record                                     |
 | XState runtime and [`XSTATE_CHANGE_MACHINE.md`](./XSTATE_CHANGE_MACHINE.md) | Executable control flow: sequencing, explicit retry/no-op branches, reread, postcondition verification, compensation routing, and recovery routing                                                           | Decide semantic names, template meaning, provenance policy, GitHub normalization, or public state vocabulary      |
 | GitHub and bounded adapters                                                 | Observable repository state and bounded provider I/O; read normalization and application of already-admitted effects                                                                                         | Become semantic policy, infer missing intent, or report provider success as semantic success without verification |
@@ -156,15 +177,15 @@ Neither choice changes the authority table or creates a new lifecycle.
 
 ### 4.1 Stages and exit conditions
 
-| Stage            | Authoritative activity                                                                                                                                                                                          | Exit condition and next action                                                                                           |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `ENVIRONMENT`    | Run the packaged executable's compatibility/capability preflight in a clean environment.                                                                                                                        | Package identity and required capabilities are verified; discover the target repository Canon.                           |
-| `GOVERNANCE`     | Resolve the target repository, immutable governance generation, Issue/PR contracts, and effective semantic inputs through existing Core discovery.                                                              | Governance is available and valid; obtain or create a governed Issue through the existing Issue path.                    |
-| `ISSUE`          | Read an existing governed Issue or create one with the existing governed Issue operation.                                                                                                                       | The root Issue is valid and eligible; its Change projection is `DEFINED`; issue the Change.                              |
-| `CHANGE`         | Invoke existing Change issuance semantics: root-Issue validation, authoritative projection, Semantic Branch/PR plan admission, canonical branch creation, separate Draft PR creation, reread, and verification. | Exactly one healthy canonical branch and Draft PR exist; Change is `DRAFT`; implement on that canonical branch.          |
-| `IMPLEMENTATION` | A worker edits, commits, and updates the already-issued working branch under the existing Change and local execution boundaries.                                                                                | Ready preconditions and required evidence are satisfied; request the governed `ready` transition.                        |
-| `READY`          | Invoke existing Change ready semantics. Core validates the projection and preconditions; XState/executor sequences the effect, rereads, and verifies.                                                           | Canonical PR is non-draft and the Change is `REVIEW`; repository review and CI become the next external activity.        |
-| `REVIEW`         | GitHub review, required checks, Rulesets, and merge admission remain repository and Change policy.                                                                                                              | The Golden Path certification target is reached. Any later accepted/merged state is observed under existing authorities. |
+| Stage            | Authoritative activity                                                                                                                                                                                                   | Exit condition and next action                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `ENVIRONMENT`    | Run the packaged executable's compatibility/capability preflight in a clean environment.                                                                                                                                 | Package identity and required capabilities are verified; discover the target repository Canon.                                |
+| `GOVERNANCE`     | Resolve the target repository, immutable governance generation, source Issue/Implementation contracts, and effective semantic inputs through existing Core discovery.                                                    | Governance is available and valid; obtain or create the source Issue and bounded Implementation through existing authorities. |
+| `ISSUE`          | Read the source Issue and current first-class Implementation authorization evidence.                                                                                                                                     | The Implementation is valid/current and its Change projection is `DEFINED`; issue the Implementation-rooted Change.           |
+| `CHANGE`         | Invoke existing Change issuance semantics with the Implementation as root: authoritative projection, Semantic Branch/PR plan admission, canonical branch creation, separate Draft PR creation, reread, and verification. | Exactly one healthy canonical branch and Draft PR exist; Change is `DRAFT`; implement on that canonical branch.               |
+| `IMPLEMENTATION` | A worker edits, commits, and updates the already-issued working branch under the existing Change and local execution boundaries.                                                                                         | Ready preconditions and required evidence are satisfied; request the governed `ready` transition.                             |
+| `READY`          | Invoke existing Change ready semantics. Core validates the projection and preconditions; XState/executor sequences the effect, rereads, and verifies.                                                                    | Canonical PR is non-draft and the Change is `REVIEW`; repository review and CI become the next external activity.             |
+| `REVIEW`         | GitHub review, required checks, Rulesets, and merge admission remain repository and Change policy.                                                                                                                       | The Golden Path certification target is reached. Any later accepted/merged state is observed under existing authorities.      |
 
 The stage name is a composition-level read projection, not a replacement for
 Change state. In particular:
@@ -277,8 +298,10 @@ The fields have these rules:
 
 - `version` is the Golden Path envelope version. It is independent of, and
   must not fork, the versions of the underlying Change or Artifact contracts.
-- `subject` reuses the stable Change repository identity and root Issue. It is
-  absent or incomplete only before repository/Issue scope has been resolved.
+- `subject` reuses the stable Change repository identity and execution root.
+  For new Implementation-native execution, `rootIssue` is the Implementation
+  Issue. It is absent or incomplete only before repository/execution scope has
+  been resolved; historical projections retain their original Issue root.
 - `status.phase` is one of `ENVIRONMENT`, `GOVERNANCE`, `ISSUE`, `CHANGE`,
   `IMPLEMENTATION`, `READY`, `REVIEW`, `TERMINAL`, or `RECOVERY`.
 - `status.availability` is one of `actionable`, `blocked`,
