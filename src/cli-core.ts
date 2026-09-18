@@ -237,11 +237,7 @@ interface PackageMetadata {
 }
 
 const DIAGNOSTIC_PROTOCOL_VERSION = 1;
-const {
-  extensionInstall: INSTALL_COMMAND,
-  extensionUpdate: UPDATE_COMMAND,
-  fallback: FALLBACK_COMMAND,
-} = AGENT_INVOCATION_CONTRACT;
+const { fallback: FALLBACK_COMMAND } = AGENT_INVOCATION_CONTRACT;
 const CANONICAL_INVOCATION = AGENT_INVOCATION_CONTRACT.canonical;
 
 interface RuntimeInfo {
@@ -252,17 +248,9 @@ interface RuntimeInfo {
   readonly capabilities: readonly string[];
   readonly invocation: {
     readonly canonical: string;
-    readonly compatibility: string;
     readonly direct: string;
     readonly fallback: string;
   };
-}
-
-interface DiagnosticCommandResult {
-  readonly status: number | null;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly error?: string;
 }
 
 interface RuntimeDiagnostic {
@@ -280,7 +268,6 @@ export interface CliDependencies {
   readonly environment?: NodeJS.ProcessEnv;
   readonly createAdapter?: (options: ConstructorParameters<typeof GitHubAdapter>[0]) => GitHubAdapter;
   readonly packageMetadata?: PackageMetadata;
-  readonly runDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
   readonly runGhFallback?: (argv: readonly string[]) => number;
   readonly templateResolver?: TemplateResolverDependencies;
   /** Injectable semantic executor; it never carries App credentials. */
@@ -412,7 +399,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   const json = parsed.options.json === true;
   try {
     if (versionRequested) return runVersion(metadata, parsed.options, json);
-    if (diagnosticRequested) return runDiagnostic(metadata, parsed.options, json, dependencies);
+    if (diagnosticRequested) return runDiagnostic(metadata, parsed.options, json);
 
     const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
     const [domain, command, ...rest] = parsed.positionals;
@@ -502,12 +489,10 @@ function runDiagnostic(
   metadata: PackageMetadata,
   options: Readonly<Record<string, string | boolean>>,
   json: boolean,
-  dependencies: CliDependencies,
 ): number {
   const info = runtimeInfo(metadata);
   const requirements = runtimeRequirements(options, true);
   const canonical = diagnoseCanonicalRuntime(info, requirements);
-  const compatibility = probeCompatibilityExtension(requirements, dependencies.runDiagnosticCommand);
   const ok = canonical.status === "ready";
   const output = {
     ok,
@@ -515,7 +500,6 @@ function runDiagnostic(
     requiredCapabilities: requirements.capabilities,
     ...(requirements.minimumVersion === undefined ? {} : { minimumVersion: requirements.minimumVersion }),
     canonical: projectRuntimeDiagnostic(CANONICAL_INVOCATION, canonical),
-    compatibility: projectRuntimeDiagnostic(AGENT_INVOCATION_CONTRACT.compatibility, compatibility, "extension"),
   };
   if (json) console.log(JSON.stringify(output));
   else {
@@ -524,15 +508,6 @@ function runDiagnostic(
     else {
       console.error(`${CANONICAL_INVOCATION}: ${runtimeDiagnosticMessage(canonical, "canonical runtime")}`);
       console.error(`Action: ${canonical.recovery}`);
-    }
-    if (compatibility.status !== "ready") {
-      console.error(
-        `${AGENT_INVOCATION_CONTRACT.compatibility} (compatibility): ${runtimeDiagnosticMessage(
-          compatibility,
-          "extension",
-        )}`,
-      );
-      console.error(`Action: ${compatibility.recovery}`);
     }
   }
   return ok ? 0 : EXIT_VALIDATION;
@@ -547,7 +522,6 @@ function runtimeInfo(metadata: PackageMetadata): RuntimeInfo {
     capabilities: [...RUNTIME_CAPABILITIES],
     invocation: {
       canonical: CANONICAL_INVOCATION,
-      compatibility: AGENT_INVOCATION_CONTRACT.compatibility,
       direct: AGENT_INVOCATION_CONTRACT.direct,
       fallback: FALLBACK_COMMAND,
     },
@@ -601,115 +575,6 @@ function diagnoseCanonicalRuntime(
   return { status: "ready", version: info.version, capabilities: info.capabilities, recovery: FALLBACK_COMMAND };
 }
 
-function probeCompatibilityExtension(
-  requirements: { readonly capabilities: readonly string[]; readonly minimumVersion?: string },
-  runCommand: CliDependencies["runDiagnosticCommand"],
-): RuntimeDiagnostic {
-  const execute = runCommand ?? runGhDiagnosticCommand;
-  const list = execute(["extension", "list"]);
-  if (list.status !== 0) {
-    return {
-      status: "unavailable",
-      detail: diagnosticProcessDetail(list),
-      recovery: FALLBACK_COMMAND,
-    };
-  }
-  if (!hasInariExtension(list.stdout)) return { status: "missing", recovery: INSTALL_COMMAND };
-
-  const version = execute(["inari", "--version", "--json"]);
-  if (version.status !== 0) {
-    return {
-      status: "stale",
-      detail: diagnosticProcessDetail(version),
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(version.stdout.trim()) as unknown;
-  } catch {
-    return {
-      status: "stale",
-      detail: "the installed extension does not support machine-readable version output",
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  if (!isRuntimeInfo(parsed)) {
-    return {
-      status: "stale",
-      detail: "the installed extension returned an incompatible version contract",
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  if (parsed.protocol !== DIAGNOSTIC_PROTOCOL_VERSION) {
-    return {
-      status: "stale",
-      version: parsed.version,
-      capabilities: parsed.capabilities,
-      detail: `the installed extension uses diagnostic protocol ${parsed.protocol}; expected ${DIAGNOSTIC_PROTOCOL_VERSION}`,
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  if (parsed.invocation.canonical !== CANONICAL_INVOCATION) {
-    return {
-      status: "stale",
-      version: parsed.version,
-      capabilities: parsed.capabilities,
-      detail: `the installed extension reports "${parsed.invocation.canonical}" as canonical; expected "${CANONICAL_INVOCATION}"`,
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  if (parsed.commandContractVersion !== COMMAND_CONTRACT_VERSION) {
-    return {
-      status: "stale",
-      version: parsed.version,
-      capabilities: parsed.capabilities,
-      detail: `the installed extension uses command contract ${parsed.commandContractVersion ?? "unknown"}; expected ${COMMAND_CONTRACT_VERSION}`,
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  const missingCapabilities = requirements.capabilities.filter(
-    (capability) => !parsed.capabilities.includes(capability),
-  );
-  if (
-    missingCapabilities.length > 0 ||
-    (requirements.minimumVersion !== undefined && !versionAtLeast(parsed.version, requirements.minimumVersion))
-  ) {
-    return {
-      status: "stale",
-      version: parsed.version,
-      capabilities: parsed.capabilities,
-      ...(missingCapabilities.length === 0 ? {} : { missingCapabilities }),
-      detail: runtimeRequirementMessage(parsed, missingCapabilities, requirements.minimumVersion),
-      recovery: UPDATE_COMMAND,
-    };
-  }
-  return { status: "ready", version: parsed.version, capabilities: parsed.capabilities, recovery: UPDATE_COMMAND };
-}
-
-function runGhDiagnosticCommand(args: readonly string[]): DiagnosticCommandResult {
-  try {
-    const result = spawnSync("gh", [...args], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024,
-      timeout: 3_000,
-    });
-    return {
-      status: result.status,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? "",
-      ...(result.error === undefined ? {} : { error: result.error.message }),
-    };
-  } catch (error: unknown) {
-    return {
-      status: null,
-      stdout: "",
-      stderr: "",
-      error: error instanceof Error ? error.message : "unable to execute gh",
-    };
-  }
-}
-
 /** Delegates argv gh-inari does not own to the real `gh` binary, so `gh inari` is a strict superset of `gh`. */
 function runGhFallback(argv: readonly string[], dependencies: CliDependencies): number {
   const execute = dependencies.runGhFallback ?? runGhPassthroughCommand;
@@ -720,31 +585,6 @@ function runGhPassthroughCommand(argv: readonly string[]): number {
   const result = spawnSync("gh", [...argv], { stdio: "inherit" });
   if (result.error) throw new CliError("GH_FALLBACK_FAILED", `Cannot execute gh: ${result.error.message}.`);
   return result.status ?? EXIT_INTERNAL;
-}
-
-function hasInariExtension(output: string): boolean {
-  return output.split(/\r?\n/u).some((line) => /^\s*gh\s+inari(?:\s|$)/u.test(line));
-}
-
-function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  const invocation = candidate.invocation;
-  return (
-    candidate.ok !== false &&
-    typeof candidate.name === "string" &&
-    candidate.name === "gh-inari" &&
-    typeof candidate.version === "string" &&
-    typeof candidate.protocol === "number" &&
-    (candidate.commandContractVersion === undefined || typeof candidate.commandContractVersion === "string") &&
-    Array.isArray(candidate.capabilities) &&
-    candidate.capabilities.every((capability) => typeof capability === "string") &&
-    typeof invocation === "object" &&
-    invocation !== null &&
-    typeof (invocation as Record<string, unknown>).canonical === "string" &&
-    typeof (invocation as Record<string, unknown>).direct === "string" &&
-    typeof (invocation as Record<string, unknown>).fallback === "string"
-  );
 }
 
 function runtimeRequirementMessage(
@@ -763,11 +603,9 @@ function runtimeRequirementMessage(
 function projectRuntimeDiagnostic(
   invocation: string,
   diagnostic: RuntimeDiagnostic,
-  kind?: "extension",
 ): Record<string, unknown> {
   return {
     invocation,
-    ...(kind === undefined ? {} : { kind }),
     status: diagnostic.status,
     ...(diagnostic.version === undefined ? {} : { version: diagnostic.version }),
     ...(diagnostic.capabilities === undefined ? {} : { capabilities: diagnostic.capabilities }),
@@ -782,11 +620,6 @@ function runtimeDiagnosticMessage(diagnostic: RuntimeDiagnostic, subject: string
   if (diagnostic.status === "unavailable") return diagnostic.detail ?? "the GitHub CLI could not be executed";
   if (diagnostic.status === "stale") return diagnostic.detail ?? `the ${subject} is stale`;
   return `the ${subject} is ready`;
-}
-
-function diagnosticProcessDetail(result: DiagnosticCommandResult): string {
-  const detail = (result.error ?? result.stderr ?? "").trim().split(/\r?\n/u)[0];
-  return detail === "" ? "the GitHub CLI command failed" : detail.slice(0, 240);
 }
 
 function parseVersion(value: string): readonly [number, number, number] | undefined {
@@ -4684,10 +4517,9 @@ Change commands request semantic lifecycle operations through the configured rem
 All other commands pass through to the real gh binary unchanged.
 
 Canonical invocation: inari
-Compatibility invocation: gh inari
+Direct npm alias: gh-inari
 Canonical install: npm install --global gh-inari
-PATH-independent fallback: npx --yes gh-inari
-Extension compatibility path: gh extension install yohn-jp/gh-inari`);
+PATH-independent fallback: npx --yes gh-inari`);
 }
 
 function leafSummary(command: CommandDefinition): string {
