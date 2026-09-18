@@ -238,20 +238,20 @@ test("rejects an unknown branch type prefix", () => {
 });
 test("advances through narrow capability with decoded-content identity and CAS", async () => {
   const { calls, broker } = fake();
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.outcome, "advanced");
   assert.deepEqual(calls.blobs, [content]);
   assert.deepEqual(calls.updates[0], { branch: BRANCH, beforeOid: HEAD, afterOid: COMMIT, force: false });
 });
 test("rejects CAS conflict without force", async () => {
   const { calls, broker } = fake("rejected");
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.outcome, "stale");
   assert.equal(calls.updates[0]?.force, false);
 });
 test("resolves an applied mutation after the provider throws", async () => {
   const { calls, broker } = fake("throws-applied");
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.status, "succeeded");
   assert.equal(result.outcome, "idempotent");
   assert.equal(result.resultingHead, COMMIT);
@@ -260,7 +260,7 @@ test("resolves an applied mutation after the provider throws", async () => {
 });
 test("does not claim mutation when the provider throws before applying it", async () => {
   const { calls, broker } = fake("throws-not-applied");
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.outcome, "failed");
   assert.equal(result.failure?.reason, "provider");
@@ -270,7 +270,7 @@ test("does not claim mutation when the provider throws before applying it", asyn
 });
 test("requires recovery when reread is unavailable after an ambiguous mutation", async () => {
   const { calls, broker } = fake("throws-reread");
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.outcome, "recovery-required");
   assert.equal(result.failure?.reason, "recovery-required");
@@ -373,6 +373,8 @@ test("rejects stale expected head without overwriting concurrent work", async ()
   const staleRequest = { ...request, expectedHead: "9".repeat(40) };
   const staleContext = {
     ...context,
+    implementationBinding,
+    implementationScope,
     verifiedRequest: { envelope: { request: staleRequest } },
   } as unknown as AuthenticatedSessionContext;
   // The provider's current head still traces to a tree that does not already
@@ -398,7 +400,7 @@ test("does not treat a replay with an unrelated concurrent path as idempotent", 
   ]);
   const { calls, broker } = replayFake(expectedBase, concurrentTarget);
 
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
 
   assert.equal(result.status, "failed");
   assert.equal(result.outcome, "stale");
@@ -416,7 +418,7 @@ test("returns idempotent success when the stale head is the exact requested targ
   ]);
   const { calls, broker } = replayFake(expectedBase, exactTarget);
 
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.outcome, "idempotent");
@@ -435,7 +437,7 @@ test("returns stale failure when the stale head does not contain the requested t
   ]);
   const { calls, broker } = replayFake(expectedBase, nonTarget);
 
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
 
   assert.equal(result.status, "failed");
   assert.equal(result.outcome, "stale");
@@ -446,7 +448,7 @@ test("returns stale failure when the stale head does not contain the requested t
 
 test("rejects a concurrent head update via compare-and-swap rejection", async () => {
   const { calls, broker } = fake("rejected");
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.outcome, "stale");
   assert.equal(result.failure?.reason, "stale-head");
@@ -498,7 +500,7 @@ test("rejects an unsupported Git mode such as a symlink", async () => {
 
 test("resolves provider ambiguity authoritatively instead of guessing an outcome", async () => {
   const { calls, broker } = fake("throws-applied");
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.status, "succeeded");
   assert.equal(result.outcome, "idempotent");
   assert.ok(calls.readRefs >= 2, "must reread authoritatively rather than trust the throw");
@@ -506,7 +508,7 @@ test("resolves provider ambiguity authoritatively instead of guessing an outcome
 
 test("keeps App and commit identities separate and leaks no credential or token", async () => {
   const { calls, broker } = fake();
-  const result = await executeBranchAdvance({ context, broker, admission });
+  const result = await executeBranchAdvance({ context: scopedContextFor(request.changes), broker, admission });
   assert.equal(result.status, "succeeded");
   assert.equal(result.provenance?.app?.principal, "app:inari-issuer");
   assert.equal(result.provenance?.commitAuthor?.name, "Session author");
@@ -626,4 +628,13 @@ test("rejects scope identity and path attacks before any Git effect", async () =
     assert.equal(calls.blobs.length, 0);
     assert.equal(calls.updates.length, 0);
   }
+});
+
+test("fails closed when neither Implementation scope nor binding is present", async () => {
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
 });

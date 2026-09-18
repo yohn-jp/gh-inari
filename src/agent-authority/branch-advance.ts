@@ -452,10 +452,8 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   const classification = classifyDelegatedTreeDelta(projected);
   if (classification.kind !== "allowed") return fail(r, "protected-path", classification.message);
   const implementationScope = context.implementationScope;
-  if (implementationScope !== undefined || context.implementationBinding !== undefined) {
-    if (implementationScope === undefined || !matchesImplementationScopeBinding(context, implementationScope, r.issue))
-      return fail(r, "authorization", "The current Implementation scope is not bound to this Session request.");
-  }
+  if (implementationScope === undefined || !matchesImplementationScopeBinding(context, implementationScope, r.issue))
+    return fail(r, "authorization", "The current Implementation scope is not bound to this Session request.");
   if (c.pathPolicy !== undefined) return fail(r, "authorization", "Named path policy could not be resolved.");
   const target = {
     repositoryHost: context.repository.repositoryHost,
