@@ -748,6 +748,7 @@ export async function runGitHubActionsChangeExecutor(
       "semanticPullRequestPlan",
       "signedProvenanceRecord",
       "mergeStrategy",
+      "implementationConformance",
     ]);
     if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
@@ -771,6 +772,9 @@ export async function runGitHubActionsChangeExecutor(
     if (requestRecord.signedProvenanceRecord !== undefined && requestRecord.operation !== "issue") {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
+    if (requestRecord.implementationConformance !== undefined && requestRecord.operation !== "ready") {
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
     const request =
       requestRecord.operation === "show"
         ? changeReadRequest(requestRecord.issue)
@@ -780,6 +784,7 @@ export async function runGitHubActionsChangeExecutor(
             requestRecord.semanticPullRequestPlan,
             requestRecord.signedProvenanceRecord as SignedChangeProvenanceRecord | undefined,
             requestRecord.mergeStrategy as "merge" | "squash" | "rebase" | undefined,
+            requestRecord.implementationConformance,
           );
     const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
     const result =

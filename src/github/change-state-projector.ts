@@ -78,8 +78,17 @@ import type { ContractProvenance, CanonicalContract, PullRequestBranchGovernance
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 import { isGitHubAdapterError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
+import { parseImplementationIssueBody } from "../implementation-contract.js";
 
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
 export interface GitHubChangeStateProjectorOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly identity: { readonly repositoryHost: string; readonly repositoryId: string; readonly rootIssue: number };
@@ -214,7 +223,7 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
         : undefined;
     const readyEvidence =
       request.operation === "ready" || request.operation === "merge"
-        ? await this.readReadyEvidence(repository.defaultBranch, issue.body, pullRequests, canonicalBranch)
+        ? await this.readReadyEvidence(repository.defaultBranch, issue.body, pullRequests, canonicalBranch, request)
         : undefined;
     let semanticPullRequestPlan: SemanticPullRequestMutationPlan | undefined;
     if (this.#options.semanticPullRequestPlan !== undefined) {
@@ -378,6 +387,7 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
     issueBody: string | null | undefined,
     pullRequests: readonly ChangePullRequestEvidence[],
     branch: string,
+    request: ChangeMutationRequest,
   ): Promise<ChangeReadyEvidence | undefined> {
     if (
       (this.#options.cwd === undefined && this.#options.remoteGovernance === undefined) ||
@@ -402,10 +412,54 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
       pullRequestMarker.status === "valid" && pullRequestMarker.marker !== undefined
         ? await this.resolveGovernedContract("pr", baseBranch, generation, pullRequestMarker.marker.path)
         : undefined;
-    if (issueContract === undefined || pullRequestContract === undefined) return undefined;
+    const implementationBody = parseImplementationIssueBody(issueBody);
+    const implementationNative =
+      request.operation === "ready" && (implementationBody.valid || request.implementationConformance !== undefined);
+    if (pullRequestContract === undefined || (!implementationNative && issueContract === undefined)) return undefined;
+
+    let implementationConformance: unknown;
+    let baseRevision: string | undefined;
+    if (implementationNative) {
+      const baseEvidence = await this.#reader.readBranch(baseBranch);
+      baseRevision = baseEvidence?.sha;
+      const suppliedSeed = request.implementationConformance;
+      const seed = isRecord(suppliedSeed) ? suppliedSeed : undefined;
+      if (suppliedSeed !== undefined && seed === undefined) {
+        implementationConformance = suppliedSeed;
+      }
+      const repository = {
+        repositoryHost: this.#options.identity.repositoryHost,
+        repositoryId: this.#options.identity.repositoryId,
+        repository: `${this.#options.repository.owner}/${this.#options.repository.name}`.toLocaleLowerCase("en-US"),
+      };
+      const reference = { ...repository, number: this.#options.identity.rootIssue };
+      const base =
+        baseRevision === undefined
+          ? undefined
+          : { branch: baseBranch, revision: baseRevision, freshness: baseRevision };
+      const authorization = seed?.authorization;
+      if (implementationConformance === undefined) {
+        const operationalPullRequest = await this.#reader.readOperationalPullRequest(pullRequest.number);
+        implementationConformance = {
+          authorization,
+          issue: { reference, body: issueBody },
+          repository,
+          base: base ?? { branch: baseBranch, revision: "", freshness: "" },
+          pullRequestNumber: pullRequest.number,
+          pullRequest: operationalPullRequest,
+          ...(seed !== undefined && hasOwn(seed, "supersession") ? { supersession: seed.supersession } : {}),
+          ...(seed !== undefined && hasOwn(seed, "completed") ? { completed: seed.completed } : {}),
+          ...(seed !== undefined && hasOwn(seed, "executionEvidence")
+            ? { executionEvidence: seed.executionEvidence }
+            : {}),
+        };
+      }
+    }
     return {
-      issue: { contract: issueContract, body: issueBody },
+      ...(issueContract === undefined ? {} : { issue: { contract: issueContract, body: issueBody } }),
       pullRequest: { contract: pullRequestContract, body: pullRequestBody },
+      ...(implementationConformance === undefined ? {} : { implementationConformance }),
+      ...(implementationNative ? { implementationIssueBody: issueBody, baseRevision } : {}),
     };
   }
 

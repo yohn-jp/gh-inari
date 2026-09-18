@@ -270,6 +270,9 @@ export function createDirectAppChangeExecutionAdapter(
         ...(request.signedProvenanceRecord === undefined
           ? {}
           : { signedProvenanceRecord: asJson(request.signedProvenanceRecord) }),
+        ...(request.implementationConformance === undefined
+          ? {}
+          : { implementationConformance: asJson(request.implementationConformance) }),
         ...(options.agent === undefined ? {} : { agent: asJson(options.agent) }),
       };
       const response = await send(operation, semanticRequest);

@@ -26,6 +26,7 @@ import {
 } from "./contract/issue-reference.js";
 import { validateCanonicalContract, type CanonicalContract, type PullRequestBranchGovernance } from "./contract/ir.js";
 import { parsePullRequestPolicyOverlay } from "./pr-policy.js";
+import { tryVerifyImplementationConformance } from "./implementation-conformance.js";
 import {
   validateSemanticPullRequestMutationPlan,
   type SemanticPullRequestMutationPlan,
@@ -491,7 +492,9 @@ export type ChangeDiagnosticCode =
   | "CHANGE_PROVENANCE_INVALID_ISSUER"
   | "CHANGE_PROVENANCE_ISSUER_MISMATCH"
   | "CHANGE_PROVENANCE_INVALID_PR_CONTRACT"
-  | "CHANGE_PROVENANCE_CONFLICT";
+  | "CHANGE_PROVENANCE_CONFLICT"
+  | "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED"
+  | "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID";
 
 export interface ChangeDiagnosticInput {
   readonly code: ChangeDiagnosticCode;
@@ -732,16 +735,25 @@ export interface ChangeReadyArtifactEvidence {
 
 /** Fresh evidence required by the governed DRAFT -> REVIEW transition. */
 export interface ChangeReadyEvidence {
-  readonly issue: ChangeReadyArtifactEvidence;
+  readonly issue?: ChangeReadyArtifactEvidence;
   readonly pullRequest: ChangeMergeAdmissionPullRequest;
+  /** Raw evidence re-read by the authoritative Implementation conformance verifier. */
+  readonly implementationConformance?: unknown;
+  /** Current Implementation Issue body read in the same evidence boundary. */
+  readonly implementationIssueBody?: string | null;
+  /** Current base branch revision read in the same evidence boundary. */
+  readonly baseRevision?: string;
 }
 
 /** Inputs to the Core-owned Ready precondition gate. */
 export interface ChangeReadyTransitionInput {
   readonly change: Change;
   readonly projection: ChangeProjectionInput | ChangeProjectionResult;
-  readonly issue: ChangeReadyArtifactEvidence;
+  readonly issue?: ChangeReadyArtifactEvidence;
   readonly pullRequest: ChangeMergeAdmissionPullRequest;
+  readonly implementationConformance?: unknown;
+  readonly implementationIssueBody?: string | null;
+  readonly baseRevision?: string;
   /** Optional explicit issuer assertion from the trusted caller. */
   readonly issuer?: string;
 }
@@ -1015,6 +1027,8 @@ const DIAGNOSTIC_CODES: readonly ChangeDiagnosticCode[] = [
   "CHANGE_PROVENANCE_ISSUER_MISMATCH",
   "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
   "CHANGE_PROVENANCE_CONFLICT",
+  "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED",
+  "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
 ];
 
 export function isChangeDiagnosticCode(value: unknown): value is ChangeDiagnosticCode {
@@ -1202,6 +1216,9 @@ const CHANGE_READY_INPUT_KEYS = new Set([
   "evidence",
   "provenance",
   "readyEvidence",
+  "implementationConformance",
+  "implementationIssueBody",
+  "baseRevision",
 ]);
 const CHANGE_READY_ARTIFACT_KEYS = new Set(["contract", "body"]);
 const CHANGE_PROJECTION_CANDIDATES_KEYS = new Set(["branches", "pullRequests"]);
@@ -8037,10 +8054,23 @@ function readyAdmissionInput(input: RecordValue, diagnostics: ChangeDiagnostic[]
 function readyIssueEvidence(
   input: RecordValue,
   diagnostics: ChangeDiagnostic[],
+  implementationNative: boolean,
 ): ParsedChangeReadyArtifactEvidence | undefined {
   const nested = isRecord(input.readyEvidence) ? input.readyEvidence : undefined;
   if (nested !== undefined) {
-    addUnknownProperties(nested, new Set(["issue", "rootIssue", "pullRequest"]), "$.readyEvidence", diagnostics);
+    addUnknownProperties(
+      nested,
+      new Set([
+        "issue",
+        "rootIssue",
+        "pullRequest",
+        "implementationConformance",
+        "implementationIssueBody",
+        "baseRevision",
+      ]),
+      "$.readyEvidence",
+      diagnostics,
+    );
   }
   const direct = readChangeMergeAdmissionAlias(
     input,
@@ -8075,8 +8105,232 @@ function readyIssueEvidence(
       diagnostics,
     );
   }
-  addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.issue", "Root Issue governance evidence is required.");
+  if (!implementationNative)
+    addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.issue", "Root Issue governance evidence is required.");
   return undefined;
+}
+
+interface ReadyEvidenceValue {
+  readonly present: boolean;
+  readonly value?: unknown;
+}
+
+function readyEvidenceValue(input: RecordValue, key: string): ReadyEvidenceValue {
+  if (hasOwn(input, key)) return { present: true, value: input[key] };
+  const nested = isRecord(input.readyEvidence) ? input.readyEvidence : undefined;
+  return nested !== undefined && hasOwn(nested, key) ? { present: true, value: nested[key] } : { present: false };
+}
+
+function sameImplementationReference(left: unknown, right: ChangeIdentity | undefined): boolean {
+  if (right === undefined) return false;
+  const normalized = normalizeIssueReference(left);
+  return (
+    normalized.valid &&
+    normalized.reference !== undefined &&
+    normalized.reference.repositoryHost === right.repositoryHost &&
+    normalized.reference.repositoryId === right.repositoryId &&
+    normalized.reference.number === right.rootIssue
+  );
+}
+
+function validateImplementationReadyConformance(
+  input: RecordValue,
+  admission: ChangeMergeAdmissionValidationResult,
+  identity: ChangeIdentity | undefined,
+  diagnostics: ChangeDiagnostic[],
+): boolean {
+  const conformanceInput = readyEvidenceValue(input, "implementationConformance");
+  if (!conformanceInput.present) return false;
+  if (conformanceInput.value === undefined) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED",
+      "$.implementationConformance",
+      "Implementation-native Ready requires raw current Implementation conformance evidence.",
+    );
+    return true;
+  }
+
+  const result = tryVerifyImplementationConformance(conformanceInput.value);
+  if (
+    !result.valid ||
+    result.status !== "conformant" ||
+    result.authorization.authorized !== true ||
+    result.authorization.current !== true ||
+    result.authorization.status !== "authorized" ||
+    result.binding === undefined ||
+    result.binding.pullRequest !== "matched" ||
+    result.binding.repository !== "matched" ||
+    result.binding.base !== "matched" ||
+    result.binding.branch !== "matched" ||
+    result.pullRequest === undefined ||
+    result.diagnostics.length > 0
+  ) {
+    if (result.diagnostics.length === 0) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.implementationConformance",
+        `Implementation conformance is ${result.status} and cannot admit Ready.`,
+      );
+    } else {
+      for (const entry of result.diagnostics) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+          `$.implementationConformance${entry.path === "$" ? "" : entry.path.slice(1)}`,
+          `${entry.code}: ${entry.message}`,
+        );
+      }
+    }
+  }
+
+  const currentIssueBody = readyEvidenceValue(input, "implementationIssueBody");
+  const currentBaseRevision = readyEvidenceValue(input, "baseRevision");
+  const raw = isRecord(conformanceInput.value) ? conformanceInput.value : undefined;
+  const rawIssue = raw !== undefined && isRecord(raw.issue) ? raw.issue : undefined;
+  const rawPullRequest = raw !== undefined ? raw.pullRequest : undefined;
+  const rawPullRequestRecord = isRecord(rawPullRequest) ? rawPullRequest : undefined;
+  const rawBase = raw !== undefined && isRecord(raw.base) ? raw.base : undefined;
+
+  if (!sameImplementationReference(rawIssue?.reference, identity))
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+      "$.implementationConformance.issue.reference",
+      "Implementation conformance must target the canonical Change Implementation.",
+    );
+
+  if (typeof currentIssueBody.value !== "string")
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED",
+      "$.implementationIssueBody",
+      "Current Implementation Issue body evidence is required.",
+    );
+  else if (rawIssue?.body !== currentIssueBody.value)
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+      "$.implementationConformance.issue.body",
+      "Implementation conformance was not derived from the current Implementation body.",
+    );
+
+  if (typeof currentBaseRevision.value !== "string" || currentBaseRevision.value.length === 0)
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED",
+      "$.baseRevision",
+      "Current base revision evidence is required.",
+    );
+  else if (result.pullRequest !== undefined && result.pullRequest.base.revision !== currentBaseRevision.value)
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+      "$.implementationConformance.pullRequest.base.revision",
+      "Implementation conformance does not bind to the current base revision.",
+    );
+
+  if (rawBase === undefined || rawBase.revision !== currentBaseRevision.value)
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+      "$.implementationConformance.base.revision",
+      "Implementation conformance base evidence is stale or unavailable.",
+    );
+
+  const canonicalChange = admission.change;
+  const canonicalPullRequest = canonicalChange?.projection?.pullRequest;
+  const physicalPullRequest = admission.physicalPullRequest;
+  if (result.pullRequest !== undefined) {
+    if (canonicalPullRequest === undefined || result.pullRequest.number !== canonicalPullRequest)
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.implementationConformance.pullRequest.number",
+        "Implementation conformance PR identity does not match the canonical Change PR.",
+      );
+    if (identity !== undefined) {
+      if (
+        result.pullRequest.repository.host !== identity.repositoryHost ||
+        result.pullRequest.repository.repositoryId !== identity.repositoryId
+      )
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+          "$.implementationConformance.pullRequest.repository",
+          "Implementation conformance PR repository does not match the canonical Change repository.",
+        );
+    }
+    if (
+      canonicalChange?.projection?.branch === undefined ||
+      result.pullRequest.head.branch !== canonicalChange.projection.branch
+    )
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.implementationConformance.pullRequest.head.branch",
+        "Implementation conformance PR branch does not match the canonical Change branch.",
+      );
+    if (
+      admission.projection?.canonicalBaseBranch === undefined ||
+      result.pullRequest.base.branch !== admission.projection.canonicalBaseBranch
+    )
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+        "$.implementationConformance.pullRequest.base.branch",
+        "Implementation conformance PR base branch does not match the canonical Change base.",
+      );
+  }
+  if (physicalPullRequest === undefined || typeof physicalPullRequest.headSha !== "string")
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED",
+      "$.projection.candidates.pullRequests.headSha",
+      "Current pull-request head revision evidence is required for Implementation Ready.",
+    );
+  else if (result.pullRequest !== undefined && result.pullRequest.head.revision !== physicalPullRequest.headSha)
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+      "$.implementationConformance.pullRequest.head.revision",
+      "Implementation conformance is stale for the current pull-request head.",
+    );
+
+  if (rawPullRequestRecord === undefined || !hasOwn(rawPullRequestRecord, "body"))
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_REQUIRED",
+      "$.implementationConformance.pullRequest.body",
+      "Current pull-request body evidence is required for Implementation Ready.",
+    );
+  else if (rawPullRequestRecord.body !== admissionInputPullRequestBody(input))
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID",
+      "$.implementationConformance.pullRequest.body",
+      "Implementation conformance was not derived from the current pull-request body.",
+    );
+  return true;
+}
+
+function admissionInputPullRequestBody(input: RecordValue): unknown {
+  const nested = isRecord(input.readyEvidence) ? input.readyEvidence : undefined;
+  const source = hasOwn(input, "pullRequest")
+    ? input
+    : hasOwn(input, "governedPullRequest")
+      ? input
+      : nested !== undefined && (hasOwn(nested, "pullRequest") || hasOwn(nested, "governedPullRequest"))
+        ? nested
+        : undefined;
+  if (source === undefined) {
+    if (hasOwn(input, "pullRequestBody")) return input.pullRequestBody;
+    if (hasOwn(input, "prBody")) return input.prBody;
+    return hasOwn(input, "body") ? input.body : undefined;
+  }
+  const direct = hasOwn(source, "pullRequest") ? source.pullRequest : source.governedPullRequest;
+  return isRecord(direct) ? direct.body : undefined;
 }
 
 function readyPullRequestInput(input: RecordValue): unknown {
@@ -8110,9 +8364,10 @@ export function validateChangeReadyTransition(input: unknown): ChangeReadyTransi
   const projectionValue = admissionInput.projection;
   validateReadyRootIssueEvidence(projectionValue, identity, diagnostics);
 
-  const issueEvidence = readyIssueEvidence(input, diagnostics);
+  const implementationNative = validateImplementationReadyConformance(input, admission, identity, diagnostics);
+  const issueEvidence = readyIssueEvidence(input, diagnostics, implementationNative);
   const baseBranch = admission.projection?.canonicalBaseBranch;
-  validateReadyIssueArtifact(issueEvidence, identity, baseBranch, diagnostics);
+  if (!implementationNative) validateReadyIssueArtifact(issueEvidence, identity, baseBranch, diagnostics);
 
   let idempotent = false;
   if (admission.valid && admission.change !== undefined) {
