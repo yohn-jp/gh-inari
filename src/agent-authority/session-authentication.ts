@@ -222,11 +222,7 @@ function verifyImplementationBinding(
   currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
 ): void {
   const binding = certificate.payload.implementationBinding;
-  const implementationNative = certificate.payload.capabilities.some((claim) => claim.kind === "change.implement");
-  if (binding === undefined) {
-    if (implementationNative) fail("implementation-authorization");
-    return;
-  }
+  if (binding === undefined) return;
   if (currentAuthorization === undefined) fail("implementation-authorization");
   if (
     binding.repository.repositoryHost.toLowerCase() !== repository.repositoryHost.toLowerCase() ||
