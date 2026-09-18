@@ -361,6 +361,25 @@ export class GitHubAdapter {
     return parseIssue(result, "issue.read", context.repositoryId, context.hostname);
   }
 
+  /** Apply the provider-level close effect for one already-admitted Issue. */
+  async closeIssue(issueNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubIssue> {
+    assertIssueNumber(issueNumber, "issue_number");
+    const context = await this.resolveRepositoryContext(deadline);
+    // GitHub's Issues endpoint also addresses pull requests; preserve the
+    // adapter's resource-kind guard before an Issue-only mutation.
+    const before = await this.getIssue(issueNumber, deadline);
+    if (before.state === "closed") return before;
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/issues/${issueNumber}`,
+      "PATCH",
+      { state: "closed" },
+      "issue.close",
+      deadline,
+    );
+    return parseIssue(result, "issue.close", context.repositoryId, context.hostname);
+  }
+
   async readIssue(issueNumber: number, deadline?: ChangeExecutionDeadline): Promise<GitHubIssue> {
     return this.getIssue(issueNumber, deadline);
   }
