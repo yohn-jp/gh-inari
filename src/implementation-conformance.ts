@@ -74,6 +74,7 @@ export interface ImplementationConformanceInput {
   /** Provider evidence normalized by the Operational Observation boundary. */
   readonly pullRequest: unknown;
   readonly supersession?: unknown;
+  /** Legacy lifecycle input; completion is derived by the lifecycle projector. */
   readonly completed?: boolean;
   /** Immutable post-authorization execution evidence; validated only after authorization is current. */
   readonly executionEvidence?: unknown;

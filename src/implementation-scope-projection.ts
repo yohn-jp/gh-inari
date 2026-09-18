@@ -559,7 +559,7 @@ export function tryProjectImplementationScope(input: unknown): ImplementationSco
         violations,
         "IMPLEMENTATION_SCOPE_PROJECTION_AUTHORIZATION_NOT_CURRENT",
         "$.authorization",
-        "Execution authority requires an active authorized Implementation; completed authority cannot be projected.",
+        "Execution authority requires an active authorized Implementation; terminal authority cannot be projected.",
       );
     else if (verification.valid && (!verification.authorized || !verification.current))
       addViolation(

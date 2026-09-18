@@ -31,7 +31,7 @@ export const IMPLEMENTATION_AUTHORIZATION_KIND = "implementation-authorization" 
 export const IMPLEMENTATION_AUTHORIZATION_DIGEST_ALGORITHM = "sha256" as const;
 
 export type ImplementationLifecycleStatus =
-  "draft" | "ready" | "authorized" | "invalidated" | "superseded" | "completed";
+  "draft" | "ready" | "authorized" | "invalidated" | "superseded" | "completed" | "aborted";
 
 export interface ImplementationBaseEvidence {
   /** Provider-resolved base branch name. */
@@ -96,6 +96,10 @@ export interface ImplementationAuthorizationVerificationInput {
   /** Optional current dependency readiness evidence for verification/replay. */
   readonly readiness?: unknown;
   readonly supersession?: ImplementationSupersessionEvidence;
+  /**
+   * Legacy input retained for representation compatibility; `true` is
+   * rejected and can never create terminal completion state.
+   */
   readonly completed?: boolean;
 }
 
@@ -1040,23 +1044,12 @@ export function tryVerifyImplementationAuthorization(input: unknown): Implementa
       "$.supersession.supersededBy",
       "A newer Implementation supersedes this authorization.",
     );
-  if (value?.completed === true && !isSuperseded && violations.length === 0)
-    return {
-      ...authorizationResult("completed", [], {
-        authorization: record,
-        contract: parsed.contract,
-        governedBodyDigest: parsed.digest,
-        ...(readiness === undefined ? {} : { readiness }),
-      }),
-      authorized: true,
-      current: true,
-    };
-  if (value?.completed === true && !isSuperseded && violations.length > 0)
+  if (value?.completed === true && !isSuperseded)
     addViolation(
       violations,
       "IMPLEMENTATION_AUTHORIZATION_COMPLETION_INVALID",
       "$.completed",
-      "Completion requires a current authorization.",
+      "Completion cannot be supplied as an authorization assertion; it requires authoritative conformance and execution evidence.",
     );
   if (violations.length > 0)
     return {

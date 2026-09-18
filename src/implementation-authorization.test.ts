@@ -182,7 +182,7 @@ test("metadata-only changes remain current while body changes invalidate", () =>
   assert.equal(current.status, "authorized");
 });
 
-test("lifecycle distinguishes draft, ready, authorized, superseded, and completed", () => {
+test("lifecycle distinguishes draft, ready, authorized, superseded, and rejected completion assertions", () => {
   const draft = inspectImplementationLifecycle({ body: "invalid" });
   assert.equal(draft.status, "draft");
 
@@ -201,7 +201,7 @@ test("lifecycle distinguishes draft, ready, authorized, superseded, and complete
   assert.equal(superseded.status, "superseded");
   assert.equal(superseded.authorized, false);
 
-  const completed = tryVerifyImplementationAuthorization({
+  const completionAssertion = tryVerifyImplementationAuthorization({
     authorization: record,
     body,
     implementation,
@@ -209,8 +209,13 @@ test("lifecycle distinguishes draft, ready, authorized, superseded, and complete
     base,
     completed: true,
   });
-  assert.equal(completed.status, "completed");
-  assert.equal(completed.authorized, true);
+  assert.equal(completionAssertion.status, "invalidated");
+  assert.equal(completionAssertion.authorized, false);
+  assert.ok(
+    completionAssertion.violations.some(
+      (violation) => violation.code === "IMPLEMENTATION_AUTHORIZATION_COMPLETION_INVALID",
+    ),
+  );
 });
 
 test("supersession requires an explicit replacement relationship", () => {
