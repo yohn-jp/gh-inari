@@ -31,9 +31,7 @@ test("controlled Actions artifact download emits the exact ZIP bytes on stdout",
   const archive = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x10, 0x80]);
   withProviderState(
     {
-      artifacts: {
-        correlation: { id: 2000, runId: 1000, bytes: archive.toString("base64") },
-      },
+      artifacts: [{ correlation: "correlation", id: 2000, runId: 1000, bytes: archive.toString("base64") }],
     },
     (statePath) => {
       const result = downloadArtifact(statePath, 2000);
@@ -45,7 +43,7 @@ test("controlled Actions artifact download emits the exact ZIP bytes on stdout",
 });
 
 test("controlled Actions artifact download fails closed for an unknown artifact id", () => {
-  withProviderState({ artifacts: {} }, (statePath) => {
+  withProviderState({ artifacts: [] }, (statePath) => {
     const result = downloadArtifact(statePath, 9999);
     assert.equal(result.status, 1);
     assert.equal(result.stdout.length, 0);

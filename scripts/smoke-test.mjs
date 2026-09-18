@@ -651,7 +651,7 @@ function createProviderState(statePath, workflowSha, issueBody) {
         branches: { main: "0123456789abcdef0123456789abcdef01234567" },
         pulls: {},
         runs: [],
-        artifacts: {},
+        artifacts: [],
         nextRunId: 1000,
         nextArtifactId: 2000,
         failDeleteOnce: { 416: true },
