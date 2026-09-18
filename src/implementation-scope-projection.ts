@@ -549,7 +549,10 @@ export function tryProjectImplementationScope(input: unknown): ImplementationSco
   const violations = authorizationViolations(
     verification.violations.map((violation) => ({
       ...violation,
-      code: violation.code as ImplementationAuthorizationViolationCode,
+      code:
+        violation.code === "IMPLEMENTATION_LIFECYCLE_INPUT_INVALID"
+          ? "IMPLEMENTATION_AUTHORIZATION_UNKNOWN_PROPERTY"
+          : (violation.code as ImplementationAuthorizationViolationCode),
     })),
   );
   if (
