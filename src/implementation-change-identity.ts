@@ -680,6 +680,18 @@ export function tryProjectImplementationChangeIdentity(input: unknown): Implemen
       "$.branch",
       "Branch must match the Change projection.",
     );
+  if (
+    contract !== undefined &&
+    contract.execution.branch !== undefined &&
+    typeof input.branch === "string" &&
+    input.branch !== contract.execution.branch
+  )
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_MISMATCH",
+      "$.branch",
+      "Branch must match the Implementation contract.",
+    );
 
   const pullRequest = validatePullRequestBinding(input.pullRequest, implementation, change, diagnostics);
   const evidenceResult = tryParseImplementationExecutionEvidence(input.executionEvidence);

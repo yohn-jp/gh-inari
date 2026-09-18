@@ -213,6 +213,20 @@ test("historical Issue-rooted Changes remain readable but fail closed for native
   assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_HISTORICAL_CHANGE"));
 });
 
+test("rejects a Change/branch that diverges from the contract's declared execution branch", () => {
+  const result = tryProjectImplementationChangeIdentity(
+    identityInput(575, "feat/575-identity", 1475, {
+      contract: contract(575, "feat/575-attacker-branch"),
+    }),
+  );
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_MISMATCH" && entry.path === "$.branch",
+    ),
+  );
+});
+
 test("one Implementation cannot silently claim two branch or PR identities", () => {
   const first = tryProjectImplementationChangeIdentity(identityInput(575, "feat/575-identity", 1475));
   const second = tryProjectImplementationChangeIdentity(identityInput(575, "feat/575-other", 1476));
