@@ -428,12 +428,20 @@ export const composedViewOutputSchema = z
 export type ComposedViewMcpOutput = z.infer<typeof composedViewOutputSchema>;
 
 export const operationalDiscoveryOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
     operation: z.enum(["issue.list", "pr.list"]).optional(),
     kind: z.enum(["issue", "pull_request"]).optional(),
     phase: z.literal("discovery").optional(),
     version: z.number().int().optional(),
     discovered: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+    violations: z.array(z.unknown()).optional(),
     mutation: z.literal(false).optional(),
+  })
+  .strict();
+
 /** Structured output schema for the canonical Change implementation handoff. */
 export const implementationHandoffOutputSchema = z
   .object({
@@ -1248,6 +1256,8 @@ async function handlePullRequestView(
 
 async function handleOperationalIssueList(
   input: OperationalIssueListInput,
+  dependencies: NativeSemanticArtifactDependencies,
+): Promise<CallToolResult> {
   try {
     const adapter = adapterFor(input.repository, dependencies);
     const page = await adapter.listOperationalIssues({
@@ -1289,9 +1299,12 @@ async function handleOperationalIssueList(
       "Operational Issue discovery failed; see diagnostics.",
     );
   }
+}
+
 async function handleOperationalPullRequestList(
   input: OperationalPullRequestListInput,
   dependencies: NativeSemanticPullRequestDependencies,
+): Promise<CallToolResult> {
   try {
     const adapter = adapterFor(input.repository, dependencies);
     const page = await adapter.listOperationalPullRequests({
@@ -1335,6 +1348,8 @@ async function handleOperationalPullRequestList(
       "Operational pull-request discovery failed; see diagnostics.",
     );
   }
+}
+
 async function handlePullRequestDrift(
   input: SemanticPullRequestDriftInput,
   dependencies: NativeSemanticPullRequestDependencies,
