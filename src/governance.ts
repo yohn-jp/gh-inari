@@ -4,8 +4,11 @@ import path from "node:path";
 import {
   compileIssueFormTemplate,
   compileIssueFormYaml,
+  IssueFormCompilerError,
   type IssueFormTemplateIdentity,
 } from "./contract/issue-form.js";
+import { ArtifactContractValidationError } from "./contract/artifact-contract.js";
+import { EffectiveArtifactContractCompilationError } from "./contract/effective-artifact-contract.js";
 import {
   assertCanonicalContract,
   type CanonicalContract,
@@ -24,6 +27,7 @@ import {
 import type { ArtifactContract } from "./contract/artifact-contract.js";
 import {
   GitHubAdapter,
+  isGitHubAdapterError,
   type GitHubIssue,
   type GitHubPullRequest,
   type RepositoryContext,
@@ -36,8 +40,13 @@ import {
   compilePullRequestPolicyFile,
   compilePullRequestPolicyOverlay,
   parsePullRequestPolicyOverlay,
+  PullRequestPolicyError,
 } from "./pr-policy.js";
-import { compilePullRequestTemplate, parsePullRequestTemplate } from "./pull-request-template.js";
+import {
+  compilePullRequestTemplate,
+  parsePullRequestTemplate,
+  PullRequestTemplateError,
+} from "./pull-request-template.js";
 import {
   compileSemanticTemplate,
   compileSemanticTemplateSource,
@@ -45,6 +54,7 @@ import {
   readSemanticTemplate,
   normalizeSemanticTemplate,
   renderSemanticNative,
+  SemanticTemplateError,
   type SemanticTemplateIdentity,
 } from "./semantic-template.js";
 import {
@@ -64,6 +74,7 @@ import {
   resolveTemplate,
   semanticTemplateResolutionCandidate,
   TEMPLATE_RESOLUTION_CONFIG_PATH,
+  TemplateResolutionError,
   type TemplateResolutionCandidate,
   type TemplateResolverDependencies,
 } from "./template-resolver.js";
@@ -124,6 +135,31 @@ export class GovernanceError extends Error {
   toJSON(): { code: GovernanceErrorCode; message: string; details: Readonly<GovernanceErrorDetails> } {
     return { code: this.code, message: this.message, details: this.details };
   }
+}
+
+function classifyTemplateCompilationFailure(error: unknown): {
+  readonly kind: "template-invalid" | "governance-unavailable";
+  readonly code?: string;
+} {
+  if (error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_UNAVAILABLE") {
+    return {
+      kind: "governance-unavailable",
+      ...(isGitHubAdapterError(error.cause) ? { code: error.cause.code } : {}),
+    };
+  }
+  if (
+    error instanceof GovernanceError ||
+    error instanceof ArtifactContractValidationError ||
+    error instanceof EffectiveArtifactContractCompilationError ||
+    error instanceof IssueFormCompilerError ||
+    error instanceof PullRequestPolicyError ||
+    error instanceof PullRequestTemplateError ||
+    error instanceof SemanticTemplateError ||
+    error instanceof TemplateResolutionError
+  ) {
+    return { kind: "template-invalid" };
+  }
+  throw error;
 }
 
 /** Arbitrary local policy files are never accepted by governed remote operations. */
@@ -271,7 +307,13 @@ export async function compileRepositoryGovernedContract(
 /** One repository-native template's compilation outcome: either a usable contract or a bounded diagnostic. */
 export type CompiledTemplateOutcome =
   | { readonly status: "compiled"; readonly contract: CanonicalContract }
-  | { readonly status: "failed"; readonly path: string; readonly message: string };
+  | {
+      readonly status: "failed";
+      readonly path: string;
+      readonly message: string;
+      readonly failureKind: "template-invalid" | "governance-unavailable";
+      readonly failureCode?: string;
+    };
 
 /**
  * Compile every supported native template from the target repository's
@@ -301,10 +343,13 @@ export async function compileRepositoryGovernedContracts(
           contract: await compileRepositorySemanticContractFromSource(adapter, source, identity),
         });
       } catch (error: unknown) {
+        const failure = classifyTemplateCompilationFailure(error);
         outcomes.push({
           status: "failed",
           path: identity.sourcePath,
           message: error instanceof Error ? error.message : String(error),
+          failureKind: failure.kind,
+          ...(failure.code === undefined ? {} : { failureCode: failure.code }),
         });
       }
     }
@@ -330,10 +375,13 @@ export async function compileRepositoryGovernedContracts(
         ),
       });
     } catch (error: unknown) {
+      const failure = classifyTemplateCompilationFailure(error);
       outcomes.push({
         status: "failed",
         path: template.path,
         message: error instanceof Error ? error.message : String(error),
+        failureKind: failure.kind,
+        ...(failure.code === undefined ? {} : { failureCode: failure.code }),
       });
     }
   }

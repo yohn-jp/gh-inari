@@ -122,7 +122,7 @@ test("CLI Issue observation remains available for a wrong-template/non-canonical
   assert.equal(observed.title, "Legacy Issue");
   assert.equal(observed.body, "This body must remain observable.");
   assert.equal(observed.state, "open");
-  assert.equal(semantic.status, "unavailable");
+  assert.equal(semantic.status, "no-matching-template");
 });
 
 test("CLI PR observation exposes identity and explicit unknown merge state", async () => {
@@ -145,5 +145,5 @@ test("CLI PR view keeps provider identity beside unavailable semantic interpreta
   const observed = output.observed as Record<string, unknown>;
   assert.equal(observed.title, "Runtime PR");
   assert.equal((observed.head as Record<string, unknown>).branch, "feat/runtime");
-  assert.equal((output.semantic as Record<string, unknown>).status, "unavailable");
+  assert.equal((output.semantic as Record<string, unknown>).status, "no-matching-template");
 });

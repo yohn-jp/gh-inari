@@ -59,6 +59,7 @@ import {
   remediationDiagnosticReport,
   remediationFailureDetails,
   projectRemediationRouting,
+  projectOperationalSemanticOverlay,
   readGovernedExistingArtifact,
   RemediationError,
   translateRemediationFailure,
@@ -2374,39 +2375,6 @@ async function runArtifactCommand(
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
 
-interface OperationalSemanticOverlay {
-  readonly status: "valid" | "invalid" | "unavailable";
-  readonly result?: ReturnType<typeof projectExistingArtifact>;
-  readonly diagnostics: readonly unknown[];
-  readonly classification?: string;
-}
-
-async function projectOperationalSemanticOverlay(
-  domain: "issue" | "pr",
-  number: number,
-  adapter: GitHubAdapter,
-  includeResult = false,
-): Promise<OperationalSemanticOverlay> {
-  try {
-    const read = await readGovernedExistingArtifact(adapter, domain, number);
-    const projection = projectExistingArtifact(read.result);
-    const unavailable = new Set(["wrong-template", "unparseable", "ambiguous", "unsupported"]);
-    return {
-      status: projection.valid ? "valid" : unavailable.has(read.result.classification) ? "unavailable" : "invalid",
-      ...(includeResult ? { result: projection } : {}),
-      diagnostics: projection.diagnostics,
-      classification: read.result.classification,
-    };
-  } catch {
-    const diagnostic: OperationalDiagnostic = {
-      code: "SEMANTIC_PROJECTION_UNAVAILABLE",
-      path: "$.semantic",
-      message: "Semantic Artifact projection read failed closed; observed provider state remains available.",
-    };
-    return { status: "unavailable", diagnostics: [diagnostic] };
-  }
-}
-
 /** Project the canonical Operational Observation surface for CLI callers. */
 async function runOperationalObservationCommand(
   domain: "issue" | "pr",
@@ -2453,7 +2421,7 @@ async function runOperationalObservationCommand(
     );
     return EXIT_VALIDATION;
   }
-  const semantic = await projectOperationalSemanticOverlay(domain, number, adapter, operation === "view");
+  const semantic = await projectOperationalSemanticOverlay(adapter, domain, evidence, operation === "view");
   console.log(
     JSON.stringify({
       ok: true,
