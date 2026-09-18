@@ -400,6 +400,17 @@ test("Implementation-native Ready blocks the authoritative non-conformant reason
       ),
       reason: "IMPLEMENTATION_CONFORMANCE_PR_IDENTITY_MISMATCH",
     },
+    {
+      // A current, otherwise-authorizable Implementation body must not admit
+      // Ready merely because it looks authorizable now: Ready may only
+      // consume an existing authorization it did not itself create.
+      name: "no existing authorization supplied",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        implementationConformance({ authorization: undefined }),
+      ),
+      reason: "IMPLEMENTATION_AUTHORIZATION_RECORD_INVALID",
+    },
   ] as const;
 
   for (const entry of cases) {

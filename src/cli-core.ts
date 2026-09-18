@@ -1692,7 +1692,7 @@ async function runChangeCommand(
   });
   const implementationConformance =
     definition.operation === "ready" && typeof parsed.options.executionEvidence === "string"
-      ? { executionEvidence: await readJsonValue(parsed.options.executionEvidence, "--execution-evidence") }
+      ? readyImplementationConformance(await readJsonValue(parsed.options.executionEvidence, "--execution-evidence"))
       : undefined;
   const result =
     definition.operation === "show" || definition.operation === "handoff"
@@ -1846,6 +1846,36 @@ function implementationBodyProjection(body: string): Record<string, unknown> {
       : { contract: parsed.contract, digest: implementationIssueBodyDigest(body) }),
     ...(parsed.fields === undefined ? {} : { fields: parsed.fields }),
     violations: parsed.violations,
+  };
+}
+
+/**
+ * Accept either a bare execution-evidence payload (existing `change ready
+ * --execution-evidence` contract) or an envelope additionally carrying the
+ * caller-held Implementation authorization record that execution was bound
+ * to. Ready only ever verifies a supplied authorization; it never mints one.
+ */
+function readyImplementationConformance(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { executionEvidence: value };
+  const record = value as Record<string, unknown>;
+  const envelope =
+    Object.prototype.hasOwnProperty.call(record, "authorization") ||
+    Object.prototype.hasOwnProperty.call(record, "executionEvidence");
+  if (!envelope) return { executionEvidence: value };
+  const authorization = record.authorization;
+  const authorizationRecord =
+    typeof authorization === "object" && authorization !== null && !Array.isArray(authorization)
+      ? (authorization as Record<string, unknown>).record
+      : undefined;
+  return {
+    ...(Object.prototype.hasOwnProperty.call(record, "authorization")
+      ? { authorization: authorizationRecord ?? authorization }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, "executionEvidence")
+      ? { executionEvidence: record.executionEvidence }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, "supersession") ? { supersession: record.supersession } : {}),
+    ...(typeof record.completed === "boolean" ? { completed: record.completed } : {}),
   };
 }
 

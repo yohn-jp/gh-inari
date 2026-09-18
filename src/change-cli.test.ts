@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import {
@@ -366,6 +366,48 @@ test("authoritative Change commands use semantic executor requests only", async 
   assert.equal(result.output?.operation, "change.ready");
   assert.equal(result.output?.state, "REVIEW");
   assert.doesNotMatch(JSON.stringify(calls), /workflow|dispatch|token|credential|privateKey/iu);
+});
+
+test("change ready --execution-evidence forwards a caller-held authorization record alongside execution evidence", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".change-ready-execution-evidence-"));
+  try {
+    const authorization = { kind: "implementation-authorization", record: { version: 1 } };
+    const executionEvidence = { branch: "feat/42-example", headRevision: "c".repeat(40) };
+    const evidencePath = path.join(dir, "evidence.json");
+    await writeFile(evidencePath, JSON.stringify({ authorization, executionEvidence }), "utf8");
+
+    const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
+    const result = await capture(["change", "ready", "42", "--execution-evidence", evidencePath, "--json"], {
+      changeExecutor: executor(calls),
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(calls.length, 1);
+    const request = calls[0] as ChangeMutationRequest;
+    assert.deepEqual(request.implementationConformance, { authorization: authorization.record, executionEvidence });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("change ready --execution-evidence without an authorization field is forwarded as bare execution evidence", async () => {
+  const dir = await mkdtemp(path.join(process.cwd(), ".change-ready-execution-evidence-"));
+  try {
+    const executionEvidence = { branch: "feat/42-example", headRevision: "c".repeat(40) };
+    const evidencePath = path.join(dir, "evidence.json");
+    await writeFile(evidencePath, JSON.stringify(executionEvidence), "utf8");
+
+    const calls: Array<ChangeMutationRequest | ChangeReadRequest> = [];
+    const result = await capture(["change", "ready", "42", "--execution-evidence", evidencePath, "--json"], {
+      changeExecutor: executor(calls),
+    });
+
+    assert.equal(result.exitCode, 0);
+    const request = calls[0] as ChangeMutationRequest;
+    assert.deepEqual(request.implementationConformance, { executionEvidence });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("abort is routed through the same executor boundary", async () => {

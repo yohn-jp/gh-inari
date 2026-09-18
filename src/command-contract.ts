@@ -670,7 +670,7 @@ export const COMMAND_OPTIONS = {
     ["--execution-evidence"],
     "string",
     "required",
-    "JSON file with immutable post-authorization execution evidence (implementation branch and targeted-test results); never mutates GitHub.",
+    "JSON file with immutable post-authorization execution evidence (implementation branch and targeted-test results); on change ready, may instead be an envelope additionally carrying the caller-held Implementation authorization record; never mutates GitHub.",
     "path",
   ),
 } satisfies Record<OptionId, CommandOptionDefinition>;

@@ -79,7 +79,6 @@ import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 import { isGitHubAdapterError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { parseImplementationIssueBody } from "../implementation-contract.js";
-import { tryAuthorizeImplementation } from "../implementation-authorization.js";
 
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
 
@@ -438,20 +437,7 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
         baseRevision === undefined
           ? undefined
           : { branch: baseBranch, revision: baseRevision, freshness: baseRevision };
-      let authorization = seed?.authorization;
-      if (
-        suppliedSeed === undefined &&
-        authorization === undefined &&
-        implementationBody.valid &&
-        implementationBody.contract !== undefined
-      ) {
-        const authorized = tryAuthorizeImplementation({
-          issue: { reference, body: issueBody },
-          repository,
-          ...(base === undefined ? {} : { base }),
-        });
-        authorization = authorized.authorization;
-      }
+      const authorization = seed?.authorization;
       if (implementationConformance === undefined) {
         const operationalPullRequest = await this.#reader.readOperationalPullRequest(pullRequest.number);
         implementationConformance = {
