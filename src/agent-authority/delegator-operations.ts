@@ -13,6 +13,7 @@ import {
   DELEGATOR_CONTRACT_VERSION,
   DELEGATOR_KIND,
   DELEGATOR_ID_PATTERN,
+  MAX_SESSION_TTL_SECONDS,
   type Delegator,
 } from "./delegator.js";
 import {
@@ -23,7 +24,7 @@ import {
   type DelegatorKeyPair,
 } from "./delegator-key.js";
 import { assertEd25519PublicJwk, type Ed25519PublicJwk } from "./ed25519-jwk.js";
-import { isCapabilityKind, type CapabilityKind } from "./capability.js";
+import { CAPABILITY_KINDS, isCapabilityKind, type CapabilityKind } from "./capability.js";
 import {
   resolveDelegator,
   DelegatorTrustError,
@@ -524,6 +525,75 @@ export async function createDelegatorSignedChangeProvenanceRecord(
     now: options.now,
   });
   const payload = verifyChangeProvenanceRecord(renderChangeProvenanceRecord(record), loaded.authority);
+  if (payload.rootIssue !== rootIssue || payload.operation !== "change.issue") {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime provenance record is not bound to the requested Change issue.",
+    );
+  }
+  return record;
+}
+
+/**
+ * Create the caller-owned provenance record for one fresh `change.issue`
+ * using only locally provisioned Delegator signing material.
+ *
+ * Unlike `createDelegatorSignedChangeProvenanceRecord`, this signer performs
+ * no GitHub-authenticated Canon read: it never accepts or constructs a
+ * `DelegatorSourceReader`. The self-declared Delegator envelope built here
+ * exists only to satisfy the local record schema/signing guard and is never
+ * transmitted -- only the signed payload and key id cross the transport.
+ * Canonical Delegator trust/admissibility is resolved and enforced inside
+ * trusted execution (the App-scoped read capability) before any effect.
+ */
+export async function createLocalDelegatorSignedChangeProvenanceRecord(
+  rootIssue: number,
+  options: DelegatorChangeProvenanceSignerOptions,
+): Promise<SignedChangeProvenanceRecord> {
+  if (!Number.isSafeInteger(rootIssue) || rootIssue < 1) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_INVALID",
+      "Root Issue must be a positive safe integer.",
+    );
+  }
+  if (
+    !isAuthorityId(options.authorityId) ||
+    (options.privateKey === undefined && options.privateKeyPath === undefined)
+  ) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer configuration must provide an authority ID and private key.",
+    );
+  }
+  const runtimeKey = privateKeyFromOptions(options);
+  if (runtimeKey === undefined) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer private key is missing, malformed, or not Ed25519 PKCS#8.",
+    );
+  }
+  let localEnvelope: Delegator;
+  try {
+    localEnvelope = createDelegatorRecord({
+      id: options.authorityId,
+      key: runtimeKey,
+      maxSessionTtlSeconds: MAX_SESSION_TTL_SECONDS,
+      capabilityCeiling: [...CAPABILITY_KINDS],
+      ...(options.now === undefined ? {} : { notBefore: options.now }),
+    });
+  } catch {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer private key is missing, malformed, or not Ed25519 PKCS#8.",
+    );
+  }
+  const record = createChangeProvenanceRecord({
+    rootIssue,
+    runtimeAuthority: localEnvelope,
+    runtimeKey,
+    now: options.now,
+  });
+  const payload = verifyChangeProvenanceRecord(renderChangeProvenanceRecord(record), localEnvelope);
   if (payload.rootIssue !== rootIssue || payload.operation !== "change.issue") {
     throw new ChangeProvenanceRecordError(
       "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   createRuntimeAuthorityRecord,
   checkRuntimeAuthorityRotationOrder,
+  createLocalDelegatorSignedChangeProvenanceRecord,
   createRuntimeSignedChangeProvenanceRecord,
   deriveRuntimeAuthorityIdentity,
   projectRuntimeSigningEnvironment,
@@ -182,6 +183,32 @@ test("the Runtime signing seam resolves canonical trust before returning a Chang
   });
   assert.equal(record.signature.kid, authority.id);
   assert.equal(JSON.stringify(record).includes("BEGIN PRIVATE KEY"), false);
+});
+
+test("the local Change provenance signer needs only local key material and never a Canon reader", async () => {
+  const { pair, authority } = authorityFromPair("runtime-local-change-signer");
+  // No `DelegatorSourceReader`/`RuntimeAuthoritySourceReader` is constructed
+  // or passed here at all -- this signer's whole call surface is bounded to
+  // rootIssue plus local signer configuration.
+  const record = await createLocalDelegatorSignedChangeProvenanceRecord(618, {
+    authorityId: authority.id,
+    privateKey: pair.privateKey,
+    now: new Date("2026-06-01T00:00:00Z"),
+  });
+
+  assert.deepEqual(verifyChangeProvenanceRecord(record, authority), {
+    version: 1,
+    rootIssue: 618,
+    operation: "change.issue",
+  });
+  assert.equal(record.signature.kid, authority.id);
+  assert.equal(JSON.stringify(record).includes("BEGIN PRIVATE KEY"), false);
+});
+
+test("the local Change provenance signer fails closed without a private key", async () => {
+  await assert.rejects(
+    createLocalDelegatorSignedChangeProvenanceRecord(618, { authorityId: "runtime-local-change-signer" }),
+  );
 });
 
 test("rotation order requires trusted replacement readiness before activation and migration before revocation", () => {
