@@ -133,6 +133,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ["For explicit artifact generation, render input without creating.", "issue.render"],
     ],
     invariants: [
+      "Use `inari issue list` for bounded Issue discovery; do not use raw `gh issue list` for this owned case.",
       "Never call raw `gh issue create` for a governed template; it bypasses contract validation.",
       "Normal development follows `inari skill golden-path`; this leaf does not issue a Change or create a PR.",
       "An ordinary Issue records a problem, request, or decision; session scopes, base binding, verification, and authorization belong in a separate Implementation Issue.",
@@ -170,6 +171,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ["For explicit artifact generation, render input without creating.", "pr.render"],
     ],
     invariants: [
+      "Use `inari pr list` for bounded pull-request discovery; do not use raw `gh pr list` for this owned case.",
       "Never call raw `gh pr create` for a governed template; it bypasses contract validation.",
       "Normal development uses Golden Path Change issuance; this leaf does not replace the canonical Draft PR.",
       "A PR records delivered work and validation; it does not replace an Implementation contract or carry a second session authorization.",
@@ -303,11 +305,11 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ["Validate the current Implementation body without mutation.", "impl.validate"],
       ["Authorize the current canonical Implementation body through the existing Core boundary.", "impl.authorize"],
       ["Inspect lifecycle and provider-authoritative parent/source relationships.", "impl.inspect"],
-      ["Project the bounded Implementation Frontier before selecting runnable Implementation work.", "impl.frontier"],
       [
         "Verify a pull request and its authoritative diff against the current authorized Implementation.",
         "impl.verify",
       ],
+      ["Project the bounded Implementation Frontier before selecting runnable Implementation work.", "impl.frontier"],
     ],
     invariants: [
       "The ordinary Issue remains the problem, request, or decision record; this scenario keeps one-session detail in the Implementation.",

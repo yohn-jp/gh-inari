@@ -125,12 +125,14 @@ test("Implementation authoring uses the current impl command surface", () => {
       "inari impl authorize <number>",
       "inari impl inspect <number>",
       "inari impl verify <number>",
+      "inari impl frontier --from <frontier-input.json>",
     ],
   );
   assert.match(scenario.invariants.join(" "), /not authoritative/u);
   assert.match(scenario.invariants.join(" "), /without a GitHub mutation/u);
   assert.match(scenario.invariants.join(" "), /native parent\/sub-issue/u);
   assert.match(scenario.invariants.join(" "), /impl\.verify/u);
+  assert.match(scenario.invariants.join(" "), /impl\.frontier/u);
   assert.match(scenario.invariants.join(" "), /command contract/u);
   assert.doesNotMatch(JSON.stringify(scenario), /impl (?:create|edit|start|complete|ready)/u);
 });

@@ -704,14 +704,14 @@ test("an unrecognized top-level domain falls back to the real gh binary with the
 
 test("an unrecognized issue/pr subcommand falls back to the real gh binary and propagates its exit code", async () => {
   const calls: (readonly string[])[] = [];
-  const exitCode = await runCli(["pr", "list", "--state", "open"], {
+  const exitCode = await runCli(["pr", "legacy", "--state", "open"], {
     runGhFallback: (argv) => {
       calls.push(argv);
       return 7;
     },
   });
   assert.equal(exitCode, 7);
-  assert.deepEqual(calls, [["pr", "list", "--state", "open"]]);
+  assert.deepEqual(calls, [["pr", "legacy", "--state", "open"]]);
 });
 
 test("--help on an unowned domain falls back to real gh --help instead of printing Inari's own help", async () => {
@@ -728,14 +728,14 @@ test("--help on an unowned domain falls back to real gh --help instead of printi
 
 test("--help on an unowned issue/pr subcommand falls back to real gh --help", async () => {
   const calls: (readonly string[])[] = [];
-  const exitCode = await runCli(["pr", "list", "--help"], {
+  const exitCode = await runCli(["pr", "legacy", "--help"], {
     runGhFallback: (argv) => {
       calls.push(argv);
       return 0;
     },
   });
   assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [["pr", "list", "--help"]]);
+  assert.deepEqual(calls, [["pr", "legacy", "--help"]]);
 });
 
 test("invalid issue/pr numbers on get and explain are classified as INVALID_ARTIFACT_NUMBER, not UNKNOWN_COMMAND", async () => {

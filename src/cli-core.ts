@@ -177,6 +177,7 @@ import {
   tryObserveOperationalPullRequest,
   type OperationalDiagnostic,
 } from "./operational-observation.js";
+import { tryDiscoverOperationalIssues, tryDiscoverOperationalPullRequests } from "./operational-discovery.js";
 import {
   SEMANTIC_PULL_REQUEST_MUTATION_CONTRACT_VERSION,
   SemanticPullRequestMutationError,
@@ -327,6 +328,9 @@ const VALUE_OPTIONS = new Set([
   "title",
   "head",
   "base",
+  "state",
+  "limit",
+  "page",
   "to",
   "requireCapability",
   "minimumVersion",
@@ -2264,6 +2268,11 @@ async function runArtifactCommand(
     if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError(domain, rest[0]);
     return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies, "view");
   }
+  if (command === "list") {
+    if (rest.length !== 0)
+      throw new CliError("UNKNOWN_COMMAND", `${domain} list does not accept positional arguments.`);
+    return runOperationalDiscoveryCommand(domain, parsed, root, dependencies);
+  }
   if (
     command === "check" &&
     typeof parsed.options.from === "string" &&
@@ -2485,6 +2494,94 @@ async function runOperationalObservationCommand(
     }),
   );
   return 0;
+}
+
+async function runOperationalDiscoveryCommand(
+  domain: "issue" | "pr",
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const unsupported = Object.keys(parsed.options).find(
+    (key) => !["json", "repository", "state", "limit", "page", "head", "base"].includes(key),
+  );
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by Operational Discovery.`,
+      "$argv",
+    );
+  }
+  if (parsed.fields.length > 0 || parsed.capabilities.length > 0)
+    throw new CliError(
+      "INVALID_OPTION",
+      "Operational Discovery does not accept semantic field or capability input.",
+      "$argv",
+    );
+  const stateValue = parsed.options.state;
+  const state = stateValue === undefined ? "open" : stateValue;
+  if (state !== "open" && state !== "closed" && state !== "all")
+    throw new CliError("INVALID_OPTION", "Option --state must be exactly open, closed, or all.", "--state");
+  const page = parseDiscoveryInteger(parsed.options.page, "--page", 10_000, 1);
+  const limit = parseDiscoveryInteger(parsed.options.limit, "--limit", 100, 30);
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const options = {
+    state,
+    page,
+    limit,
+    ...(domain === "pr" && typeof parsed.options.head === "string" ? { head: parsed.options.head } : {}),
+    ...(domain === "pr" && typeof parsed.options.base === "string" ? { base: parsed.options.base } : {}),
+  } as const;
+  const pageEvidence =
+    domain === "issue"
+      ? await adapter.listOperationalIssues(options)
+      : await adapter.listOperationalPullRequests(options);
+  const discovered =
+    domain === "issue"
+      ? tryDiscoverOperationalIssues({ discovery: pageEvidence })
+      : tryDiscoverOperationalPullRequests({ discovery: pageEvidence });
+  if (!discovered.valid || discovered.discovery === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        valid: false,
+        operation: `${domain}.list`,
+        kind: domain === "issue" ? "issue" : "pull_request",
+        phase: "discovery",
+        diagnostics: discovered.violations,
+        violations: discovered.violations,
+      }),
+    );
+    return EXIT_VALIDATION;
+  }
+  console.log(
+    JSON.stringify({
+      ok: true,
+      valid: true,
+      operation: `${domain}.list`,
+      kind: domain === "issue" ? "issue" : "pull_request",
+      version: discovered.discovery.version,
+      discovered: discovered.discovery,
+      mutation: false,
+    }),
+  );
+  return 0;
+}
+
+function parseDiscoveryInteger(
+  value: string | boolean | undefined,
+  option: string,
+  maximum: number,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string" || !/^[1-9]\d*$/u.test(value))
+    throw new CliError("INVALID_OPTION", `${option} must be a positive integer.`, option);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > maximum)
+    throw new CliError("INVALID_OPTION", `${option} must be at most ${maximum}.`, option);
+  return parsed;
 }
 
 type SemanticIssueOperation = "contract" | "materialize" | "plan" | "check";

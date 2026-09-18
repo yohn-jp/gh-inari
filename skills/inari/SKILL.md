@@ -25,6 +25,8 @@ Prefer `inari` over raw `gh` for:
 
 - Creating a governed Issue or PR (schema, validate, render, create).
 - Reading the governance classification of an existing Issue or PR.
+- Bounded discovery of existing Issues or pull requests by state, page, limit,
+  and (for pull requests) exact head/base branch.
 - Repairing an invalid or non-normalized Issue or PR.
 - Reconciling an existing Issue's native parent (sub-issue) or blocked-by
   relationships instead of hand-editing relationship prose.
@@ -32,8 +34,9 @@ Prefer `inari` over raw `gh` for:
 - Issuing, inspecting, reviewing, or stopping a governed Change through the
   semantic Change command surface.
 
-Raw `gh` remains fine for anything outside that surface (e.g. listing,
-searching, commenting, or other operations Inari does not govern). Inari
+Raw `gh` remains fine for anything outside that surface (e.g. project
+searching, commenting, or other operations Inari does not govern). For bounded
+Issue/PR discovery, use Inari's `issue list` and `pr list` commands. Inari
 itself falls through to real `gh` for any command it does not own, so it is
 always safe to prefer `inari` first.
 

@@ -147,6 +147,7 @@ The `impl` namespace projects these operations from the command contract:
 | `inari impl authorize <number>` | `impl.authorize` | Authorize one current canonical Implementation body through the #572 Core boundary.                         |
 | `inari impl inspect <number>`   | `impl.inspect`   | Inspect Implementation lifecycle and provider-authoritative parent/source relationships.                    |
 | `inari impl verify <number>`    | `impl.verify`    | Verify a pull request and its authoritative diff against one current authorized Implementation.             |
+| `inari impl frontier`           | `impl.frontier`  | Project the bounded Implementation Frontier from authoritative Core evidence.                               |
 
 The exact contract usage and option applicability are:
 
@@ -156,11 +157,13 @@ The exact contract usage and option applicability are:
 - `impl authorize <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl inspect <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl verify <number> [--repository <repository>] --from <path> [--capability <id> ...] --pr <number> [--execution-evidence <path>]`
+- `impl frontier [--from <path>]`
 
 <!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->
 
-Each operation accepts a positive Issue number. The generated projection above
-owns the command IDs, version, contract ID, summaries, usage, and option
+The Issue-specific operations accept a positive Issue number; `impl frontier`
+consumes bounded frontier evidence without an Issue positional. The generated
+projection above owns the command IDs, version, contract ID, summaries, usage, and option
 applicability. `--capability` is repeatable. `--from` accepts a JSON input file
 or `-` for stdin; for lifecycle verification it can carry the current
 authorization, base, supersession, or completion evidence accepted by the
