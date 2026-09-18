@@ -92,9 +92,11 @@ the release tag.
      published.
    - `npm pack` — the tarball is built once and reused by every
      downstream job (no rebuild-then-publish drift).
-   - **Smoke test the packed tarball** on a matrix of OS/Node versions
-     (`ubuntu-latest` × Node 22/24): install the exact tarball into an
-     isolated directory and run both npm bin aliases.
+   - **Smoke test the packed tarball** on the configured Node matrix. The
+     reusable workflow defaults to `ubuntu-latest` × Node 24 unless the
+     caller overrides `smoke-test-node-versions`. Each smoke-test job
+     checks out the exact release tag, installs the exact tarball in an
+     isolated directory, and runs both npm bin aliases.
    - **Publish**, only after every smoke-test matrix leg is green.
      Publishing uses npm Trusted Publishing (OIDC) — no long-lived npm
      token is stored in repository secrets. The `npm` GitHub Environment
@@ -103,8 +105,6 @@ the release tag.
    - The publish step checks whether `<name>@<version>` is already on
      the registry first and skips publishing if so (idempotent re-runs
      do not error).
-   - Any `npm warn publish` output is treated as a failure even if `npm
-publish` itself exits 0.
 
 ## What this buys
 
