@@ -1,25 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { GitHubAdapter, GitHubResourceKindMismatchError } from "./index.js";
 import {
-  GitHubAdapter,
-  GitHubResourceKindMismatchError,
-  type GhCommandResult,
-  type GhTransport,
-  type GhTransportOptions,
-} from "./index.js";
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./test-native-transport.test.js";
 
-function command(stdout = "", exitCode = 0): GhCommandResult {
+function command(stdout = "", exitCode = 0): FixtureCommandResult {
   return { stdout, exitCode, stderr: "" };
 }
 
-function included(body: unknown, link?: string): GhCommandResult {
+function included(body: unknown, link?: string): FixtureCommandResult {
   return command(`HTTP/1.1 200 OK\n${link === undefined ? "" : `Link: ${link}\n`}\n${JSON.stringify(body)}`);
 }
 
-class OperationalTransport implements GhTransport {
+class OperationalTransport implements FixtureCommandTransport {
   private readonly history: string[][] = [];
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.history.push([...args]);
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth") return command();
@@ -182,7 +182,10 @@ class OperationalTransport implements GhTransport {
 
 test("GitHub adapter preserves bounded Issue comments pagination and provenance", async () => {
   const transport = new OperationalTransport();
-  const observed = await new GitHubAdapter({ repository: "acme/inari", transport }).observeIssue(7);
+  const observed = await new GitHubAdapter({
+    repository: "acme/inari",
+    transport: nativeTestTransport(transport),
+  }).observeIssue(7);
   assert.equal(observed.body, "Provider body remains readable.\n\n- line one\r\n- line two\ttabbed");
   assert.equal(observed.comments.status, "available");
   assert.equal(observed.comments.items.length, 101);
@@ -193,7 +196,10 @@ test("GitHub adapter preserves bounded Issue comments pagination and provenance"
 
 test("GitHub adapter makes the bounded collection truncation continuation explicit", async () => {
   const transport = new OperationalTransport();
-  const observed = await new GitHubAdapter({ repository: "acme/inari", transport }).observeIssue(9);
+  const observed = await new GitHubAdapter({
+    repository: "acme/inari",
+    transport: nativeTestTransport(transport),
+  }).observeIssue(9);
   assert.equal(observed.comments.status, "available");
   assert.equal(observed.comments.pagination.pages, 10);
   assert.equal(observed.comments.pagination.returned, 1_000);
@@ -206,7 +212,7 @@ test("GitHub adapter makes the bounded collection truncation continuation explic
 test("GitHub adapter observeIssue fails closed when the resource is PR-shaped", async () => {
   const transport = new OperationalTransport();
   await assert.rejects(
-    new GitHubAdapter({ repository: "acme/inari", transport }).observeIssue(11),
+    new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) }).observeIssue(11),
     (error: unknown) =>
       error instanceof GitHubResourceKindMismatchError &&
       error.code === "GITHUB_RESOURCE_KIND_MISMATCH" &&
@@ -216,7 +222,10 @@ test("GitHub adapter observeIssue fails closed when the resource is PR-shaped", 
 
 test("GitHub adapter normalizes PR runtime evidence without raw API shapes", async () => {
   const transport = new OperationalTransport();
-  const observed = await new GitHubAdapter({ repository: "acme/inari", transport }).observePullRequest(8);
+  const observed = await new GitHubAdapter({
+    repository: "acme/inari",
+    transport: nativeTestTransport(transport),
+  }).observePullRequest(8);
   assert.deepEqual(observed.head, { ref: "feat/observation", sha: "head-sha" });
   assert.deepEqual(observed.base, { ref: "main", sha: "base-sha" });
   assert.equal(observed.reviewDecision, "APPROVED");
@@ -245,7 +254,10 @@ test("GitHub adapter normalizes PR runtime evidence without raw API shapes", asy
 
 test("GitHub adapter uses the fixed aggregate review decision read when REST omits it", async () => {
   const transport = new OperationalTransport();
-  const observed = await new GitHubAdapter({ repository: "acme/inari", transport }).observePullRequest(10);
+  const observed = await new GitHubAdapter({
+    repository: "acme/inari",
+    transport: nativeTestTransport(transport),
+  }).observePullRequest(10);
   assert.equal(observed.reviewDecision, "CHANGES_REQUESTED");
   assert.ok(observed.provenance.endpoints.includes("graphql:pullRequest.reviewDecision"));
   assert.ok(transport.calls.some((args) => args[1] === "graphql"));

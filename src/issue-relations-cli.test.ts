@@ -4,9 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli.js";
-import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -39,15 +45,15 @@ const canonSource = JSON.stringify({
  * `execute` re-compiles it again independently), so both sequences recur;
  * a strict FIFO queue would misalign.
  */
-class IssueRelationsTransport implements GhTransport {
+class IssueRelationsTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
-  constructor(responses: readonly GhCommandResult[]) {
+  constructor(responses: readonly FixtureCommandResult[]) {
     this.responses = [...responses];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
@@ -78,7 +84,7 @@ class IssueRelationsTransport implements GhTransport {
   }
 }
 
-class GenericRelationsTransport implements GhTransport {
+class GenericRelationsTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
   private readonly parentByChild = new Map<number, number>([[701, 20]]);
 
@@ -86,7 +92,7 @@ class GenericRelationsTransport implements GhTransport {
     return this.parentByChild.get(child);
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
@@ -137,7 +143,7 @@ async function invoke(
   operation: "plan" | "execute",
   issueNumber: number,
   input: Record<string, unknown>,
-  transportResponses: readonly GhCommandResult[],
+  transportResponses: readonly FixtureCommandResult[],
 ): Promise<{
   readonly exitCode: number;
   readonly output: Record<string, unknown>;
@@ -169,7 +175,7 @@ async function invoke(
       ];
       const exitCode = await runCli(argv, {
         repositoryRoot: directory,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
       return { exitCode, output, calls: transport.calls };
@@ -236,9 +242,9 @@ test("issue relations plan fails closed when the repository Issue Canon does not
       properties: { title: { presence: "required", authority: { kind: "supplied" } } },
       fields: [],
     });
-    class UngovernedTransport implements GhTransport {
+    class UngovernedTransport implements FixtureCommandTransport {
       readonly calls: string[][] = [];
-      async run(args: readonly string[]): Promise<GhCommandResult> {
+      async run(args: readonly string[]): Promise<FixtureCommandResult> {
         this.calls.push([...args]);
         if (args[0] === "--version") return command("gh version 2.0");
         if (args[0] === "auth" && args[1] === "status") return command();
@@ -283,7 +289,10 @@ test("issue relations plan fails closed when the repository Issue Canon does not
           "github.issue.parent.native",
           "--json",
         ],
-        { repositoryRoot: directory, createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+        {
+          repositoryRoot: directory,
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+        },
       );
       const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
       assert.equal(exitCode, 2);
@@ -343,7 +352,7 @@ test("issue relations rejects an unsupported option before touching the adapter"
         ["issue", "relations", "plan", "701", "--from", inputPath, "--template", "default", "--json"],
         {
           repositoryRoot: directory,
-          createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
         },
       );
       assert.equal(exitCode, 1);
@@ -374,7 +383,10 @@ test("generic Issue relationship CLI inspects provider parent and direct childre
         "github.issue.parent.native",
         "--json",
       ],
-      { repositoryRoot: "/tmp", createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      {
+        repositoryRoot: "/tmp",
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+      },
     );
     assert.equal(parentExit, 0);
     const parentOutput = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
@@ -393,7 +405,10 @@ test("generic Issue relationship CLI inspects provider parent and direct childre
         "github.issue.parent.native",
         "--json",
       ],
-      { repositoryRoot: "/tmp", createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      {
+        repositoryRoot: "/tmp",
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+      },
     );
     assert.equal(childrenExit, 0);
     const childrenOutput = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
@@ -431,7 +446,10 @@ test("generic Issue relationship CLI mutates only through verified attach, detac
           "github.issue.parent.native",
           "--json",
         ],
-        { repositoryRoot: directory, createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+        {
+          repositoryRoot: directory,
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+        },
       );
     };
     assert.equal(await invoke("attach", { parent: 20 }), 0);

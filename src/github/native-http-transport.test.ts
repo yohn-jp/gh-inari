@@ -87,6 +87,40 @@ test("request() propagates a non-200 status without throwing", async () => {
   assert.deepEqual(response.body, { message: "Not Found" });
 });
 
+test("request() exposes only the bounded pagination link header", async () => {
+  const transport = new GitHubNativeHttpTransport({
+    token: TOKEN,
+    fetch: async () =>
+      jsonResponse(200, [], {
+        link: '<https://api.github.com/repos/acme/inari/issues?page=2>; rel="next"',
+        authorization: `Bearer ${TOKEN}`,
+      }),
+  });
+  const response = await transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari/issues" });
+  assert.deepEqual(response.headers, {
+    link: '<https://api.github.com/repos/acme/inari/issues?page=2>; rel="next"',
+  });
+});
+
+test("request() accepts ordinary PUT mutations without widening the Change transport seam", async () => {
+  let method = "";
+  const transport = new GitHubNativeHttpTransport({
+    token: TOKEN,
+    fetch: async (_url, init) => {
+      method = String((init as RequestInit).method);
+      return jsonResponse(200, { merged: true });
+    },
+  });
+  const response = await transport.request({
+    hostname: "github.com",
+    method: "PUT",
+    path: "repos/acme/inari/pulls/1/merge",
+    body: { merge_method: "squash" },
+  });
+  assert.equal(method, "PUT");
+  assert.deepEqual(response.body, { merged: true });
+});
+
 test("requestGraphql() posts the query/variables to the GraphQL endpoint", async () => {
   let body: unknown;
   let url = "";

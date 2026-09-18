@@ -19,7 +19,7 @@ import {
   INARI_CHANGE_EXECUTOR_WORKFLOW,
   type GitHubActionsRemoteApi,
 } from "./actions-change-execution-adapter.js";
-import { GhUnauthenticatedError } from "./errors.js";
+import { GitHubAuthenticationError } from "./errors.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
@@ -1407,7 +1407,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
   runApi.requestActionsApi = async (path, method, fields = {}) => {
     if (method === "GET" && path.startsWith("actions/workflows/")) {
       runReads += 1;
-      if (runReads === 2) throw new GhUnauthenticatedError("github.com", "run-secret");
+      if (runReads === 2) throw new GitHubAuthenticationError("github.com", "run-secret");
     }
     return runRequest(path, method, fields);
   };
@@ -1421,7 +1421,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
   const artifactRequest = artifactApi.requestActionsApi.bind(artifactApi);
   artifactApi.requestActionsApi = async (path, method, fields = {}) => {
     if (method === "GET" && path.startsWith("actions/artifacts?")) {
-      throw new GhUnauthenticatedError("github.com", "artifact-secret");
+      throw new GitHubAuthenticationError("github.com", "artifact-secret");
     }
     return artifactRequest(path, method, fields);
   };
@@ -1433,7 +1433,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
 
   const downloadApi = new FakeActionsApi();
   downloadApi.downloadActionsArtifact = async () => {
-    throw new GhUnauthenticatedError("github.com", "download-secret");
+    throw new GitHubAuthenticationError("github.com", "download-secret");
   };
   await expectFailure(downloadApi, {
     code: "CHANGE_REMOTE_TRANSPORT_FAILED",

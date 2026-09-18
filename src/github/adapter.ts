@@ -1,11 +1,10 @@
 import {
   ContractViolationError,
-  GhNotInstalledError,
-  GhUnauthenticatedError,
+  GitHubAuthenticationError,
   GitHubAdapterError,
   GitHubApiError,
   GitHubApiResponseError,
-  GitHubOutputLimitError,
+  GitHubResponseLimitError,
   GitHubResourceKindMismatchError,
   GitHubTimeoutError,
   GitHubTransportError,
@@ -18,15 +17,22 @@ import {
   isTrustedValidatedRenderedArtifact,
 } from "./capability.js";
 import {
-  DEFAULT_GH_OUTPUT_LIMITS_BYTES,
-  GhTransportOutputLimitError,
-  GhTransportTimeoutError,
-  ProcessGhTransport,
-  type GhCommandResult,
-  type GhTransport,
-  type GhTransportOptions,
-  type GhTransportOutputLimits,
-} from "./transport.js";
+  GitHubHttpMalformedResponseError,
+  GitHubHttpResponseLimitError,
+  GitHubHttpTimeoutError,
+  GitHubHttpTransportError,
+  GitHubNativeHttpTransport,
+  type GitHubNativeHttpResponse,
+} from "./native-http-transport.js";
+import { resolveGitHubUserCredential, GitHubUserCredentialError } from "./user-credential.js";
+import {
+  parseRepositoryLocator,
+  RepositoryContextResolutionError,
+  resolveLocalRepositoryContext,
+  type GitCommandRunner,
+} from "./local-repository-context.js";
+import { resolveAuthenticatedGitHubUser, GitHubUserIdentityError } from "./user-identity.js";
+import type { GitHubChangeEffectJsonObject, GitHubChangeEffectRequest } from "./change-effect-adapter.js";
 import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
@@ -61,77 +67,30 @@ import {
 } from "./types.js";
 import type { ChangeExecutionDeadline } from "../change-execution-port.js";
 
-const DEFAULT_HOSTNAME = "github.com";
-const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
 const MAX_PULL_REQUEST_LIST_ITEMS = 100;
 const OPERATIONAL_PAGE_SIZE = 100;
 const OPERATIONAL_MAX_PAGES = 10;
 const OPERATIONAL_MAX_ITEMS = OPERATIONAL_PAGE_SIZE * OPERATIONAL_MAX_PAGES;
 const MAX_PULL_REQUEST_COMMENTS = 100;
 const MAX_PULL_REQUEST_REVIEWS = 100;
-const UNAUTHENTICATED_MESSAGE_PATTERN = /not logged in|authentication failed|login required|status code 401|\b401\b/iu;
+export type GitHubArtifactHttpMethod = "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
+export type GitHubArtifactRequest = Omit<GitHubChangeEffectRequest, "method"> & {
+  readonly method: GitHubArtifactHttpMethod;
+};
 
-/** Bounded gh CLI timeouts by operation class. Real adapter calls always run under one of these. */
-export type GhOperationClass = "auth" | "repositoryResolution" | "read" | "mutation";
-
-export const DEFAULT_GH_TIMEOUTS_MS: Readonly<Record<GhOperationClass, number>> = Object.freeze({
-  auth: 10_000,
-  repositoryResolution: 15_000,
-  read: 20_000,
-  mutation: 30_000,
-});
-
-const OPERATION_CLASSES: Readonly<Record<string, GhOperationClass>> = Object.freeze({
-  "gh.version": "auth",
-  "auth.status": "auth",
-  "repository.resolve": "repositoryResolution",
-  "repository.default_branch": "read",
-  "repository.governance.tree": "read",
-  "repository.governance.blob": "read",
-  "auth.identity": "auth",
-  "actions.request": "mutation",
-  "actions.artifact.download": "read",
-  "issue.read": "read",
-  "issue.observe": "read",
-  "pull_request.read": "read",
-  "pull_request.observe": "read",
-  "pull_request.review_decision": "read",
-  "operational.collection.read": "read",
-  "issue.create": "mutation",
-  "issue.update": "mutation",
-  "issue.relation.read": "read",
-  "issue.relation.mutate": "mutation",
-  "pull_request.create": "mutation",
-  "pull_request.update": "mutation",
-  "pull_request.comment.read": "read",
-  "pull_request.comment.mutate": "mutation",
-  "pull_request.review.read": "read",
-  "pull_request.review.mutate": "mutation",
-  "pull_request.merge": "mutation",
-  "pull_request.policy.read": "read",
-  "branch.read": "read",
-  "branch.create": "mutation",
-});
-
-function operationClass(operation: string): GhOperationClass {
-  const operationClassValue = OPERATION_CLASSES[operation];
-  if (operationClassValue === undefined) {
-    throw new Error(`No timeout class registered for gh operation "${operation}".`);
-  }
-  return operationClassValue;
-}
-
-function effectiveTimeoutMs(
-  configuredTimeoutMs: number,
-  operation: string,
-  deadline: ChangeExecutionDeadline | undefined,
-): number {
-  if (deadline === undefined) return configuredTimeoutMs;
-  const remainingMs = deadline.remainingMs();
-  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
-    throw new GitHubTimeoutError(operation, 0);
-  }
-  return Math.max(1, Math.floor(Math.min(configuredTimeoutMs, remainingMs)));
+export interface GitHubArtifactTransport {
+  request(request: GitHubArtifactRequest): Promise<GitHubNativeHttpResponse>;
+  requestGraphql?(request: {
+    readonly hostname: string;
+    readonly query: string;
+    readonly variables?: Readonly<Record<string, unknown>>;
+  }): Promise<GitHubNativeHttpResponse>;
+  requestBinary?(request: {
+    readonly hostname: string;
+    readonly method: "GET";
+    readonly path: string;
+    readonly accept?: string;
+  }): Promise<{ readonly status: number; readonly bytes?: Uint8Array; readonly contentType?: string }>;
 }
 
 function repositoryApiOperation(repositoryPath: string, method: "GET" | "POST" | "PATCH" | "DELETE"): string {
@@ -144,61 +103,27 @@ function repositoryApiOperation(repositoryPath: string, method: "GET" | "POST" |
   return method === "GET" ? "issue.relation.read" : "issue.relation.mutate";
 }
 
-/**
- * Rejects invalid overrides outright instead of silently disabling a bound: an
- * explicit `{ auth: undefined }` would otherwise erase the default via spread,
- * and non-finite or non-positive values would produce an unbounded or
- * effectively immediate timer.
- */
-function validatedTimeoutOverrides(
-  overrides: Partial<Record<GhOperationClass, number>> | undefined,
-): Partial<Record<GhOperationClass, number>> {
-  if (overrides === undefined) return {};
-  const validated: Partial<Record<GhOperationClass, number>> = {};
-  for (const [operationClassKey, value] of Object.entries(overrides)) {
-    if (value === undefined) continue;
-    if (!Number.isFinite(value) || value <= 0) {
-      throw new ContractViolationError(
-        `Timeout override for "${operationClassKey}" must be a finite number greater than zero.`,
-        `timeoutsMs.${operationClassKey}`,
-      );
-    }
-    validated[operationClassKey as GhOperationClass] = value;
-  }
-  return validated;
-}
-
-function validatedOutputLimitOverrides(
-  overrides: Partial<GhTransportOutputLimits> | undefined,
-): Partial<GhTransportOutputLimits> {
-  if (overrides === undefined) return {};
-  const validated: Partial<Record<keyof GhTransportOutputLimits, number>> = {};
-  for (const [stream, value] of Object.entries(overrides)) {
-    if (value === undefined) continue;
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new ContractViolationError(
-        `Output limit for "${stream}" must be a finite non-negative integer.`,
-        `outputLimitsBytes.${stream}`,
-      );
-    }
-    validated[stream as keyof GhTransportOutputLimits] = value;
-  }
-  return validated;
-}
-
 export interface GitHubAdapterOptions {
-  /** Working directory used by gh for local repository resolution. */
+  /** Working directory used for local Git repository resolution. */
   readonly cwd?: string;
+  /** Injectable local Git runner used by repository-context resolution. */
+  readonly git?: GitCommandRunner;
   /** owner/name, host/owner/name, or a repository URL. */
   readonly repository?: string;
-  /** Hostname used with an owner/name override or gh auth status. */
+  /** Hostname used with an owner/name override or local Git inference. */
   readonly hostname?: string;
-  /** Injectable command transport for tests and alternate local execution. */
-  readonly transport?: GhTransport;
-  /** Overrides for the default bounded timeout (ms) per gh operation class. */
-  readonly timeoutsMs?: Partial<Record<GhOperationClass, number>>;
-  /** Overrides for the default bounded stdout/stderr byte limits for every gh operation. */
-  readonly outputLimitsBytes?: Partial<GhTransportOutputLimits>;
+  /** Injectable native transport for deterministic tests and SDK embeddings. */
+  readonly transport?: GitHubArtifactTransport;
+  /** Explicit standalone user credential; environment resolution is used otherwise. */
+  readonly token?: string;
+  /** Injectable fetch implementation for deterministic HTTP fixtures. */
+  readonly fetch?: typeof globalThis.fetch;
+  /** Explicit REST API base override for hosted or controlled GitHub providers. */
+  readonly apiUrl?: string;
+  /** Bounded native request timeout in milliseconds. */
+  readonly requestTimeoutMs?: number;
+  /** Bounded native response size in bytes. */
+  readonly maxResponseBytes?: number;
 }
 
 export interface GitHubApiResponse {
@@ -213,48 +138,48 @@ export type GitHubApiFieldValue = string | number | boolean;
 
 export class GitHubAdapter {
   private readonly cwd: string | undefined;
+  private readonly git: GitCommandRunner | undefined;
   private readonly repository: string | undefined;
   private readonly hostname: string | undefined;
-  private readonly transport: GhTransport;
-  private readonly executable: string;
-  private readonly timeoutsMs: Readonly<Record<GhOperationClass, number>>;
-  private readonly outputLimitsBytes: Readonly<GhTransportOutputLimits>;
-  /** No-deadline coalescing only; a deadline-bound caller never joins these. */
-  private availablePromise: Promise<void> | undefined;
+  private readonly configuredTransport: GitHubArtifactTransport | undefined;
+  private readonly token: string | undefined;
+  private readonly fetch: typeof globalThis.fetch | undefined;
+  private readonly apiUrl: string | undefined;
+  private readonly requestTimeoutMs: number | undefined;
+  private readonly maxResponseBytes: number | undefined;
+  private nativeTransport: GitHubArtifactTransport | undefined;
   private contextPromise: Promise<RepositoryContext> | undefined;
   /** Completed evidence: reusable by every caller without any further wait. */
-  private ghAvailable = false;
   private contextValue: RepositoryContext | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
   private readonly authenticationPromises = new Map<string | undefined, Promise<void>>();
 
   constructor(options: GitHubAdapterOptions = {}) {
     this.cwd = options.cwd;
+    this.git = options.git;
     this.repository = options.repository;
     this.hostname = options.hostname;
-    this.transport = options.transport ?? new ProcessGhTransport();
-    this.executable = this.transport instanceof ProcessGhTransport ? this.transport.executable : "gh";
-    this.timeoutsMs = Object.freeze({ ...DEFAULT_GH_TIMEOUTS_MS, ...validatedTimeoutOverrides(options.timeoutsMs) });
-    this.outputLimitsBytes = Object.freeze({
-      ...DEFAULT_GH_OUTPUT_LIMITS_BYTES,
-      ...validatedOutputLimitOverrides(options.outputLimitsBytes),
-    });
+    this.configuredTransport = options.transport;
+    this.token = options.token;
+    this.fetch = options.fetch;
+    this.apiUrl = options.apiUrl ?? process.env.GITHUB_API_URL;
+    this.requestTimeoutMs = options.requestTimeoutMs;
+    this.maxResponseBytes = options.maxResponseBytes;
   }
 
   async checkAuthentication(deadline?: ChangeExecutionDeadline): Promise<void> {
-    await this.ensureGhAvailable(deadline);
-    await this.ensureAuthenticated(this.repositoryHostOverride(), deadline);
+    await this.ensureAuthenticated(this.targetHostname(), deadline);
   }
 
-  /** Read the login attached to the caller's existing gh session. */
+  /** Read the login attached to the caller's native GitHub credential. */
   async getAuthenticatedUser(deadline?: ChangeExecutionDeadline): Promise<string> {
-    const context = await this.resolveRepositoryContext(deadline);
-    const result = await this.runApi(
-      ["api", "user", "--hostname", context.hostname, "--method", "GET"],
-      "auth.identity",
-      deadline,
-    );
-    const record = responseRecord(result, "auth.identity");
+    const hostname = this.targetHostname();
+    await this.ensureAuthenticated(hostname, deadline);
+    const response = await this.requestNative({ hostname, method: "GET", path: "user" }, "auth.identity", deadline);
+    if (response.status < 200 || response.status >= 300) {
+      throw new GitHubApiError("auth.identity", "GitHub authenticated-user request failed.");
+    }
+    const record = responseRecord(response.body, "auth.identity");
     const login = responseString(record.login, "login", "auth.identity");
     if (!/^[A-Za-z0-9-]{1,39}$/u.test(login)) {
       throw new GitHubApiResponseError("auth.identity", "GitHub returned an invalid authenticated user identity.");
@@ -281,24 +206,6 @@ export class GitHubAdapter {
 
   async getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
     return this.resolveRepositoryContext(deadline);
-  }
-
-  /**
-   * Request the fixed Actions API surface used by the Change transport.
-   * Callers supply only an adapter-owned relative Actions path and bounded form
-   * fields; repository, host, and authentication remain resolved here.
-   */
-  async requestActionsApi(
-    actionsPath: string,
-    method: "GET" | "POST",
-    fields: Readonly<Record<string, string>> = {},
-    deadline?: ChangeExecutionDeadline,
-  ): Promise<unknown> {
-    assertActionsApiPath(actionsPath);
-    const context = await this.resolveRepositoryContext(deadline);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/${actionsPath}`, method);
-    for (const [name, value] of Object.entries(fields)) appendRawField(args, name, value);
-    return this.runApi(args, "actions.request", deadline);
   }
 
   /** Read the bounded repository API surface needed by Change projection. */
@@ -329,61 +236,26 @@ export class GitHubAdapter {
   ): Promise<GitHubApiResponse> {
     assertRepositoryApiPath(repositoryPath);
     const operation = repositoryApiOperation(repositoryPath, method);
-    const args = [
-      "api",
-      `repos/${nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`,
-      "--hostname",
-      hostname,
-      "--method",
-      method,
-      "--include",
-    ];
-    for (const [name, value] of Object.entries(fields)) appendRepositoryApiField(args, name, value);
-    const result = await this.runCommand(args, operation, {}, deadline);
-    const response = parseIncludedApiResponse(result.stdout, operation);
-    if (response !== undefined) {
-      if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
-        throw new GitHubApiError(operation, "GitHub repository API request failed.");
-      }
-      return response;
-    }
-    if (result.exitCode !== 0) throw new GitHubApiError(operation, "GitHub repository API request failed.");
-    throw new GitHubApiResponseError(operation, "GitHub returned no API response.");
-  }
-
-  /** Download one bounded Actions artifact archive through the caller's gh session. */
-  async downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array> {
-    if (!Number.isSafeInteger(artifactId) || artifactId < 1) {
-      throw new ContractViolationError("Actions artifact ID must be a positive integer.", "artifactId");
-    }
-    const context = await this.resolveRepositoryContext(deadline);
-    const result = await this.runCommand(
-      [
-        "api",
-        `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
-        "--hostname",
-        context.hostname,
-        "--method",
-        "GET",
-      ],
-      "actions.artifact.download",
-      { binaryStdout: true },
+    const path = `repos/${nameWithOwner}${repositoryPath === "" ? "" : `/${repositoryPath}`}`;
+    const response = await this.requestNative(
+      { hostname, method, path, ...(Object.keys(fields).length === 0 ? {} : { body: fields }) },
+      operation,
       deadline,
     );
-    if (result.exitCode !== 0) {
-      throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
+    if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
+      throw new GitHubApiError(operation, "GitHub repository API request failed.");
     }
-    if (result.stdoutBytes === undefined || result.stdoutBytes.byteLength > MAX_ACTIONS_ARTIFACT_BYTES) {
-      throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
-    }
-    return new Uint8Array(result.stdoutBytes);
+    return response;
   }
 
   /** Read the target repository metadata used to select the trusted governance ref. */
   async getRepositoryDefaultBranch(deadline?: ChangeExecutionDeadline): Promise<string> {
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(context, `repos/${context.nameWithOwner}`, "GET"),
+      context,
+      `repos/${context.nameWithOwner}`,
+      "GET",
+      undefined,
       "repository.default_branch",
       deadline,
     );
@@ -398,11 +270,10 @@ export class GitHubAdapter {
     assertRepositoryRef(ref);
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(
-        context,
-        `repos/${context.nameWithOwner}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
-        "GET",
-      ),
+      context,
+      `repos/${context.nameWithOwner}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+      "GET",
+      undefined,
       "repository.governance.tree",
       deadline,
     );
@@ -414,7 +285,10 @@ export class GitHubAdapter {
     if (sha.trim().length === 0) throw new ContractViolationError("Repository blob SHA must not be empty.", "sha");
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(context, `repos/${context.nameWithOwner}/git/blobs/${encodeURIComponent(sha)}`, "GET"),
+      context,
+      `repos/${context.nameWithOwner}/git/blobs/${encodeURIComponent(sha)}`,
+      "GET",
+      undefined,
       "repository.governance.blob",
       deadline,
     );
@@ -461,7 +335,10 @@ export class GitHubAdapter {
     assertIssueNumber(issueNumber, "issue_number");
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "GET"),
+      context,
+      `repos/${context.nameWithOwner}/issues/${issueNumber}`,
+      "GET",
+      undefined,
       "issue.read",
       deadline,
     );
@@ -476,7 +353,10 @@ export class GitHubAdapter {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`, "GET"),
+      context,
+      `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`,
+      "GET",
+      undefined,
       "pull_request.read",
       deadline,
     );
@@ -495,11 +375,10 @@ export class GitHubAdapter {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(
-        context,
-        `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments?per_page=${MAX_PULL_REQUEST_COMMENTS}`,
-        "GET",
-      ),
+      context,
+      `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments?per_page=${MAX_PULL_REQUEST_COMMENTS}`,
+      "GET",
+      undefined,
       "pull_request.comment.read",
       deadline,
     );
@@ -515,14 +394,15 @@ export class GitHubAdapter {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     assertMutationBody(body, "body");
     const context = await this.resolveRepositoryContext(deadline);
-    const args = this.apiArguments(
-      context,
-      `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments`,
-      "POST",
-    );
-    appendRawField(args, "body", body);
     return parsePullRequestComment(
-      await this.runApi(args, "pull_request.comment.mutate", deadline),
+      await this.runApi(
+        context,
+        `repos/${context.nameWithOwner}/issues/${pullRequestNumber}/comments`,
+        "POST",
+        { body },
+        "pull_request.comment.mutate",
+        deadline,
+      ),
       "pull_request.comment.mutate",
     );
   }
@@ -535,11 +415,10 @@ export class GitHubAdapter {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
-      this.apiArguments(
-        context,
-        `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews?per_page=${MAX_PULL_REQUEST_REVIEWS}`,
-        "GET",
-      ),
+      context,
+      `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews?per_page=${MAX_PULL_REQUEST_REVIEWS}`,
+      "GET",
+      undefined,
       "pull_request.review.read",
       deadline,
     );
@@ -558,16 +437,15 @@ export class GitHubAdapter {
     assertMutationBody(body, "body", true);
     const event = intent === "approve" ? "APPROVE" : intent === "request-changes" ? "REQUEST_CHANGES" : "COMMENT";
     const context = await this.resolveRepositoryContext(deadline);
-    const args = this.apiArguments(
-      context,
-      `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews`,
-      "POST",
-    );
-    appendRawField(args, "event", event);
-    appendRawField(args, "body", body);
-    if (expectedHead !== undefined) appendRawField(args, "commit_id", expectedHead);
     return parsePullRequestReview(
-      await this.runApi(args, "pull_request.review.mutate", deadline),
+      await this.runApi(
+        context,
+        `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/reviews`,
+        "POST",
+        { event, body, ...(expectedHead === undefined ? {} : { commit_id: expectedHead }) },
+        "pull_request.review.mutate",
+        deadline,
+      ),
       "pull_request.review.mutate",
     );
   }
@@ -583,10 +461,17 @@ export class GitHubAdapter {
     if (strategy !== "merge" && strategy !== "squash" && strategy !== "rebase")
       throw new ContractViolationError("Merge strategy is invalid.", "strategy");
     const context = await this.resolveRepositoryContext(deadline);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/merge`, "PUT");
-    appendRawField(args, "merge_method", strategy);
-    if (expectedHead !== undefined) appendRawField(args, "sha", expectedHead);
-    const record = responseRecord(await this.runApi(args, "pull_request.merge", deadline), "pull_request.merge");
+    const record = responseRecord(
+      await this.runApi(
+        context,
+        `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}/merge`,
+        "PUT",
+        { merge_method: strategy, ...(expectedHead === undefined ? {} : { sha: expectedHead }) },
+        "pull_request.merge",
+        deadline,
+      ),
+      "pull_request.merge",
+    );
     const merged = responseBoolean(record.merged, "merged", "pull_request.merge");
     const sha = record.sha === undefined ? undefined : responseString(record.sha, "sha", "pull_request.merge");
     return { merged, ...(sha === undefined ? {} : { sha }) };
@@ -605,7 +490,10 @@ export class GitHubAdapter {
     const context = await this.resolveRepositoryContext(deadline);
     const repository = responseRecord(
       await this.runApi(
-        this.apiArguments(context, `repos/${context.nameWithOwner}`, "GET"),
+        context,
+        `repos/${context.nameWithOwner}`,
+        "GET",
+        undefined,
         "pull_request.policy.read",
         deadline,
       ),
@@ -644,7 +532,10 @@ export class GitHubAdapter {
     const context = await this.resolveRepositoryContext(deadline);
     const baseEndpoint = `issues/${issueNumber}`;
     const result = await this.runApi(
-      this.apiArguments(context, `repos/${context.nameWithOwner}/${baseEndpoint}`, "GET"),
+      context,
+      `repos/${context.nameWithOwner}/${baseEndpoint}`,
+      "GET",
+      undefined,
       "issue.observe",
       deadline,
     );
@@ -685,7 +576,10 @@ export class GitHubAdapter {
     const context = await this.resolveRepositoryContext(deadline);
     const baseEndpoint = `pulls/${pullRequestNumber}`;
     const result = await this.runApi(
-      this.apiArguments(context, `repos/${context.nameWithOwner}/${baseEndpoint}`, "GET"),
+      context,
+      `repos/${context.nameWithOwner}/${baseEndpoint}`,
+      "GET",
+      undefined,
       "pull_request.observe",
       deadline,
     );
@@ -877,33 +771,27 @@ export class GitHubAdapter {
   ): Promise<{ readonly value?: string; readonly attempted: boolean }> {
     const query =
       "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}";
-    let result: GhCommandResult;
+    const transport = this.transportFor(context.hostname);
+    if (transport.requestGraphql === undefined) return { attempted: true };
+    let result: GitHubNativeHttpResponse;
     try {
-      result = await this.runCommand(
-        [
-          "api",
-          "graphql",
-          "--hostname",
-          context.hostname,
-          "-f",
-          `query=${query}`,
-          "-f",
-          `owner=${context.owner}`,
-          "-f",
-          `name=${context.name}`,
-          "-F",
-          `number=${pullRequestNumber}`,
-        ],
+      result = await this.boundedTransportCall(
         "pull_request.review_decision",
-        {},
         deadline,
+        () =>
+          transport.requestGraphql?.({
+            hostname: context.hostname,
+            query,
+            variables: { owner: context.owner, name: context.name, number: pullRequestNumber },
+          }) ??
+          Promise.reject(new GitHubTransportError("pull_request.review_decision", "GraphQL reads are unavailable.")),
       );
     } catch {
       return { attempted: true };
     }
-    if (result.exitCode !== 0) return { attempted: true };
+    if (result.status < 200 || result.status >= 300) return { attempted: true };
     try {
-      const payload = parseJson(result.stdout, "pull_request.review_decision");
+      const payload = result.body;
       if (!isRecord(payload) || !isRecord(payload.data) || !isRecord(payload.data.repository))
         return { attempted: true };
       const pullRequest = payload.data.repository.pullRequest;
@@ -1091,10 +979,14 @@ export class GitHubAdapter {
     const base = await this.findBranch(source, deadline);
     if (base === undefined) throw new GitHubApiError("branch.create", "GitHub branch source ref was not found.");
     const context = await this.resolveRepositoryContext(deadline);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/git/refs`, "POST");
-    appendRawField(args, "ref", `refs/heads/${branch}`);
-    appendRawField(args, "sha", base.sha);
-    const result = await this.runApi(args, "branch.create", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/git/refs`,
+      "POST",
+      { ref: `refs/heads/${branch}`, sha: base.sha },
+      "branch.create",
+      deadline,
+    );
     return parseBranch(result, branch, "branch.create");
   }
 
@@ -1105,12 +997,19 @@ export class GitHubAdapter {
     assertValidatedRenderedIssueArtifact(artifact);
     const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues`, "POST");
-    appendRawField(args, "title", artifact.title);
-    appendRawField(args, "body", artifact.body);
-    appendRawFields(args, "labels[]", artifact.labels);
-    appendRawFields(args, "assignees[]", artifact.assignees);
-    const result = await this.runApi(args, "issue.create", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/issues`,
+      "POST",
+      {
+        title: artifact.title,
+        body: artifact.body,
+        ...(artifact.labels === undefined ? {} : { labels: artifact.labels }),
+        ...(artifact.assignees === undefined ? {} : { assignees: artifact.assignees }),
+      },
+      "issue.create",
+      deadline,
+    );
     return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
   }
 
@@ -1122,12 +1021,19 @@ export class GitHubAdapter {
     assertTrustedSemanticIssueArtifact(artifact);
     const context = await this.resolveRepositoryContext(deadline);
     assertArtifactContractRepository(artifact, context);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues`, "POST");
-    appendRawField(args, "title", artifact.title);
-    appendRawField(args, "body", artifact.body);
-    appendRawFields(args, "labels[]", artifact.labels);
-    appendRawFields(args, "assignees[]", artifact.assignees);
-    const result = await this.runApi(args, "issue.create", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/issues`,
+      "POST",
+      {
+        title: artifact.title,
+        body: artifact.body,
+        ...(artifact.labels === undefined ? {} : { labels: artifact.labels }),
+        ...(artifact.assignees === undefined ? {} : { assignees: artifact.assignees }),
+      },
+      "issue.create",
+      deadline,
+    );
     return parseIssue(result, "issue.create", context.repositoryId, context.hostname);
   }
 
@@ -1143,12 +1049,19 @@ export class GitHubAdapter {
     // GitHub's issues API also accepts pull request numbers; read first so a
     // pull request is never silently overwritten with Issue Form content.
     await this.getIssue(issueNumber, deadline);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/issues/${issueNumber}`, "PATCH");
-    appendRawField(args, "title", artifact.title);
-    appendRawField(args, "body", artifact.body);
-    appendRawFields(args, "labels[]", artifact.labels);
-    appendRawFields(args, "assignees[]", artifact.assignees);
-    const result = await this.runApi(args, "issue.update", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/issues/${issueNumber}`,
+      "PATCH",
+      {
+        title: artifact.title,
+        body: artifact.body,
+        ...(artifact.labels === undefined ? {} : { labels: artifact.labels }),
+        ...(artifact.assignees === undefined ? {} : { assignees: artifact.assignees }),
+      },
+      "issue.update",
+      deadline,
+    );
     return parseIssue(result, "issue.update", context.repositoryId, context.hostname);
   }
 
@@ -1159,14 +1072,21 @@ export class GitHubAdapter {
     assertValidatedRenderedPullRequestArtifact(artifact);
     const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
-    appendRawField(args, "title", artifact.title);
-    appendRawField(args, "body", artifact.body);
-    appendRawField(args, "head", artifact.head);
-    appendRawField(args, "base", artifact.base);
-    appendBooleanField(args, "draft", artifact.draft);
-    appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
-    const result = await this.runApi(args, "pull_request.create", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/pulls`,
+      "POST",
+      {
+        title: artifact.title,
+        body: artifact.body,
+        head: artifact.head,
+        base: artifact.base,
+        ...(artifact.draft === undefined ? {} : { draft: artifact.draft }),
+        ...(artifact.maintainerCanModify === undefined ? {} : { maintainer_can_modify: artifact.maintainerCanModify }),
+      },
+      "pull_request.create",
+      deadline,
+    );
     return parsePullRequest(result, "pull_request.create");
   }
 
@@ -1178,28 +1098,38 @@ export class GitHubAdapter {
     assertTrustedSemanticPullRequestArtifact(artifact);
     const context = await this.resolveRepositoryContext(deadline);
     assertArtifactContractRepository(artifact, context);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls`, "POST");
-    appendRawField(args, "title", artifact.title);
-    appendRawField(args, "body", artifact.body);
-    appendRawField(args, "head", artifact.head);
-    appendRawField(args, "base", artifact.base);
-    appendBooleanField(args, "draft", artifact.draft);
-    appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
-    const result = await this.runApi(args, "pull_request.create", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/pulls`,
+      "POST",
+      {
+        title: artifact.title,
+        body: artifact.body,
+        head: artifact.head,
+        base: artifact.base,
+        ...(artifact.draft === undefined ? {} : { draft: artifact.draft }),
+        ...(artifact.maintainerCanModify === undefined ? {} : { maintainer_can_modify: artifact.maintainerCanModify }),
+      },
+      "pull_request.create",
+      deadline,
+    );
     const pullRequest = parsePullRequest(result, "pull_request.create");
 
     // The pull-request create endpoint does not accept labels or assignees.
     // Keep this provider-specific follow-up inside the adapter so Core and the
     // Executor never reconstruct GitHub mutation semantics.
     if ((artifact.labels?.length ?? 0) > 0 || (artifact.assignees?.length ?? 0) > 0) {
-      const metadataArgs = this.apiArguments(
+      await this.runApi(
         context,
         `repos/${context.nameWithOwner}/issues/${pullRequest.number}`,
         "PATCH",
+        {
+          ...(artifact.labels === undefined ? {} : { labels: artifact.labels }),
+          ...(artifact.assignees === undefined ? {} : { assignees: artifact.assignees }),
+        },
+        "pull_request.update",
+        deadline,
       );
-      appendRawFields(metadataArgs, "labels[]", artifact.labels);
-      appendRawFields(metadataArgs, "assignees[]", artifact.assignees);
-      await this.runApi(metadataArgs, "pull_request.update", deadline);
     }
     return pullRequest;
   }
@@ -1213,144 +1143,103 @@ export class GitHubAdapter {
     assertValidatedRenderedPullRequestArtifact(artifact);
     const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
-    const args = this.apiArguments(context, `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`, "PATCH");
-    appendRawField(args, "title", artifact.title);
-    appendRawField(args, "body", artifact.body);
-    appendRawField(args, "base", artifact.base);
-    appendBooleanField(args, "maintainer_can_modify", artifact.maintainerCanModify);
-    const result = await this.runApi(args, "pull_request.update", deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`,
+      "PATCH",
+      {
+        title: artifact.title,
+        body: artifact.body,
+        base: artifact.base,
+        ...(artifact.maintainerCanModify === undefined ? {} : { maintainer_can_modify: artifact.maintainerCanModify }),
+      },
+      "pull_request.update",
+      deadline,
+    );
     return parsePullRequest(result, "pull_request.update");
   }
 
   private async resolveRepositoryContextOnce(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
-    await this.ensureGhAvailable(deadline);
-    const override = this.repositoryOverride();
-    const hostname = override?.hostname ?? this.normalizedHostname();
-    await this.ensureAuthenticated(hostname, deadline);
-    const repositoryArgument = override === undefined ? undefined : `${override.hostname}/${override.nameWithOwner}`;
-    const context = await this.resolveRepositoryView(repositoryArgument, hostname ?? DEFAULT_HOSTNAME, deadline);
+    let metadata: RepositoryContext;
+    try {
+      metadata = resolveLocalRepositoryContext({
+        cwd: this.cwd,
+        ...(this.git === undefined ? {} : { git: this.git }),
+        repository: this.repository,
+        ...(this.hostname === undefined ? {} : { hostname: this.hostname }),
+      });
+    } catch (error) {
+      if (error instanceof RepositoryContextResolutionError) {
+        if (error.reason === "invalid-override" || error.reason === "invalid-hostname") {
+          throw new InvalidRepositoryOverrideError(error);
+        }
+        throw new RepositoryResolutionError("Unable to resolve the local Git repository context.", {}, error);
+      }
+      throw new RepositoryResolutionError("Unable to resolve the local Git repository context.", {}, error);
+    }
+
+    await this.ensureAuthenticated(metadata.hostname, deadline);
+    const response = await this.requestNative(
+      { hostname: metadata.hostname, method: "GET", path: `repos/${metadata.nameWithOwner}` },
+      "repository.resolve",
+      deadline,
+    );
+    if (response.status < 200 || response.status >= 300) {
+      throw new RepositoryResolutionError(
+        "Unable to resolve the GitHub repository database identity. Check the target repository and authentication.",
+        { operation: "repository.resolve" },
+      );
+    }
+    const record = responseRecord(response.body, "repository.resolve");
+    const repositoryId = parseRepositoryDatabaseId(record.id);
+    if (repositoryId === undefined) {
+      throw new RepositoryResolutionError("GitHub returned no valid repository database identity.", {
+        operation: "repository.resolve",
+      });
+    }
+    const context = Object.freeze({ ...metadata, repositoryId });
     this.contextValue = context;
     return context;
   }
 
-  /** Resolve the host-scoped REST repository database identity for both local and explicit targets. */
-  private async resolveRepositoryView(
-    repositoryArgument: string | undefined,
-    fallbackHostname: string,
-    deadline?: ChangeExecutionDeadline,
-  ): Promise<RepositoryContext> {
-    let metadata: RepositoryContext;
-    if (repositoryArgument === undefined) {
-      const result = await this.runCommand(
-        ["repo", "view", "--json", "nameWithOwner,url"],
-        "repository.resolve",
-        {},
-        deadline,
-      );
-      if (result.exitCode !== 0) {
-        if (UNAUTHENTICATED_MESSAGE_PATTERN.test(result.stderr)) {
-          throw new GhUnauthenticatedError(fallbackHostname, summarize(result.stderr));
-        }
-        throw new RepositoryResolutionError(
-          "Unable to resolve the current GitHub repository. Check the working directory and authentication.",
-          { operation: "repository.resolve", exitCode: result.exitCode, stderr: summarize(result.stderr) },
-        );
-      }
-      const payload = parseJson(result.stdout, "repository.resolve");
-      if (!isRecord(payload) || typeof payload.nameWithOwner !== "string") {
-        throw new RepositoryResolutionError("gh returned no valid repository locator.", {
-          operation: "repository.resolve",
-          response: summarize(result.stdout),
-        });
-      }
-      try {
-        metadata = repositoryContextFromNameWithOwner(
-          payload.nameWithOwner,
-          typeof payload.url === "string" ? payload.url : undefined,
-          fallbackHostname,
-        );
-      } catch (error) {
-        if (error instanceof RepositoryResolutionError) throw error;
-        throw new RepositoryResolutionError(
-          "gh returned an invalid repository locator.",
-          { operation: "repository.resolve", response: summarize(result.stdout) },
-          error,
-        );
-      }
-    } else {
-      metadata = parseRepositoryOverride(repositoryArgument, fallbackHostname);
-    }
-
-    const identityResult = await this.runCommand(
-      ["api", `repos/${metadata.nameWithOwner}`, "--hostname", metadata.hostname, "--method", "GET", "--jq", ".id"],
-      "repository.resolve",
-      {},
-      deadline,
-    );
-    if (identityResult.exitCode !== 0) {
-      if (UNAUTHENTICATED_MESSAGE_PATTERN.test(identityResult.stderr)) {
-        throw new GhUnauthenticatedError(metadata.hostname, summarize(identityResult.stderr));
-      }
-      throw new RepositoryResolutionError(
-        "Unable to resolve the GitHub repository database identity. Check the target repository and authentication.",
-        {
-          operation: "repository.resolve",
-          exitCode: identityResult.exitCode,
-          stderr: summarize(identityResult.stderr),
-        },
-      );
-    }
-    const repositoryId = parseRepositoryDatabaseId(identityResult.stdout);
-    if (repositoryId === undefined) {
-      throw new RepositoryResolutionError("gh returned no valid repository database identity.", {
-        operation: "repository.resolve",
-        response: summarize(identityResult.stdout),
-      });
-    }
-    return repositoryContext(metadata.hostname, metadata.owner, metadata.name, metadata.url, repositoryId);
-  }
-
-  private repositoryOverride(): RepositoryContext | undefined {
-    if (this.repository === undefined) return undefined;
-    return parseRepositoryOverride(this.repository, this.normalizedHostname() ?? DEFAULT_HOSTNAME);
-  }
-
-  private repositoryHostOverride(): string | undefined {
-    const override = this.repositoryOverride();
-    if (override !== undefined) return override.hostname;
-    return this.normalizedHostname();
-  }
-
   private normalizedHostname(): string | undefined {
-    if (this.hostname === undefined) return undefined;
-    const value = this.hostname.trim().toLowerCase();
-    if (!isValidHostname(value)) throw new InvalidRepositoryOverrideError(this.hostname);
-    return value;
+    return this.hostname?.trim().toLowerCase();
   }
 
-  private async ensureGhAvailable(deadline?: ChangeExecutionDeadline): Promise<void> {
-    if (this.ghAvailable) return;
-    if (deadline === undefined) {
-      if (this.availablePromise === undefined) {
-        const pending = this.ensureGhAvailableOnce(undefined);
-        this.availablePromise = pending;
-        pending.catch(() => {
-          if (this.availablePromise === pending) this.availablePromise = undefined;
-        });
-      }
-      return this.availablePromise;
+  private targetHostname(): string {
+    const fallback = this.normalizedHostname() ?? "github.com";
+    if (this.repository === undefined) return fallback;
+    try {
+      return parseRepositoryLocator(this.repository, fallback).hostname;
+    } catch (error) {
+      if (error instanceof RepositoryContextResolutionError) throw new InvalidRepositoryOverrideError(error);
+      throw error;
     }
-    // A deadline-bound caller with no completed availability evidence must
-    // never join an in-flight check started by another (possibly unbounded) caller.
-    return this.ensureGhAvailableOnce(deadline);
   }
 
-  private async ensureGhAvailableOnce(deadline?: ChangeExecutionDeadline): Promise<void> {
-    const result = await this.runCommand(["--version"], "gh.version", {}, deadline);
-    if (result.exitCode !== 0) {
-      throw new GhNotInstalledError(this.executable);
+  private transportFor(hostname: string): GitHubArtifactTransport {
+    if (this.configuredTransport !== undefined) return this.configuredTransport;
+    if (this.nativeTransport !== undefined) return this.nativeTransport;
+    let credential: ReturnType<typeof resolveGitHubUserCredential>;
+    try {
+      credential = resolveGitHubUserCredential({ hostname, token: this.token });
+    } catch (error) {
+      if (error instanceof GitHubUserCredentialError) throw new GitHubAuthenticationError(hostname, error);
+      throw error;
     }
-    this.ghAvailable = true;
+    const native = new GitHubNativeHttpTransport({
+      token: credential.token,
+      fetch: this.fetch,
+      ...(this.apiUrl === undefined ? {} : { apiUrl: this.apiUrl }),
+      ...(this.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: this.requestTimeoutMs }),
+      ...(this.maxResponseBytes === undefined ? {} : { maxResponseBytes: this.maxResponseBytes }),
+    });
+    this.nativeTransport = {
+      request: (request) => native.request(request),
+      requestGraphql: (request) => native.requestGraphql(request),
+      requestBinary: (request) => native.requestBinary(request),
+    };
+    return this.nativeTransport;
   }
 
   private async ensureAuthenticated(hostname: string | undefined, deadline?: ChangeExecutionDeadline): Promise<void> {
@@ -1377,68 +1266,99 @@ export class GitHubAdapter {
     hostname: string | undefined,
     deadline?: ChangeExecutionDeadline,
   ): Promise<void> {
-    const args = ["auth", "status"];
-    if (hostname !== undefined) args.push("--hostname", hostname);
-    const result = await this.runCommand(args, "auth.status", {}, deadline);
-    if (result.exitCode !== 0) {
-      throw new GhUnauthenticatedError(hostname, summarize(result.stderr));
+    if (hostname === undefined) throw new GitHubAuthenticationError(undefined);
+    try {
+      await resolveAuthenticatedGitHubUser(
+        {
+          request: (request) => this.requestNative(request, "auth.identity", deadline),
+        },
+        hostname,
+      );
+      this.authenticatedHostnames.add(hostname);
+    } catch (error) {
+      if (error instanceof GitHubAuthenticationError) throw error;
+      const mapped = this.mapProviderError("auth.identity", error);
+      if (mapped instanceof GitHubAuthenticationError) {
+        throw new GitHubAuthenticationError(hostname, error);
+      }
+      throw mapped;
     }
-    this.authenticatedHostnames.add(hostname);
   }
 
   private async runApi(
-    args: readonly string[],
+    context: RepositoryContext,
+    path: string,
+    method: GitHubArtifactHttpMethod,
+    body: GitHubChangeEffectJsonObject | undefined,
     operation: string,
     deadline?: ChangeExecutionDeadline,
   ): Promise<unknown> {
-    const result = await this.runCommand(args, operation, {}, deadline);
-    if (result.exitCode !== 0) {
-      throw new GitHubApiError(operation, `GitHub API request failed during ${operation}.`, {
-        exitCode: result.exitCode,
-        stderr: summarize(result.stderr),
-      });
+    const response = await this.requestNative(
+      { hostname: context.hostname, method, path, ...(body === undefined ? {} : { body }) },
+      operation,
+      deadline,
+    );
+    if (response.status < 200 || response.status >= 300) {
+      throw new GitHubApiError(operation, `GitHub API request failed during ${operation}.`);
     }
-    return parseJson(result.stdout, operation);
+    return response.body;
   }
 
-  private async runCommand(
-    args: readonly string[],
+  private async requestNative(
+    request: GitHubArtifactRequest,
     operation: string,
-    transportOptions: Pick<GhTransportOptions, "binaryStdout"> = {},
     deadline?: ChangeExecutionDeadline,
-  ): Promise<GhCommandResult> {
-    const timeoutMs = effectiveTimeoutMs(this.timeoutsMs[operationClass(operation)], operation, deadline);
+  ): Promise<GitHubNativeHttpResponse> {
+    const remainingMs = deadline?.remainingMs();
+    if (remainingMs !== undefined && (!Number.isFinite(remainingMs) || remainingMs <= 0)) {
+      throw new GitHubTimeoutError(operation, 0);
+    }
     try {
-      return await this.transport.run(args, {
-        cwd: this.cwd,
-        timeoutMs,
-        maxStdoutBytes: this.outputLimitsBytes.stdout,
-        maxStderrBytes: this.outputLimitsBytes.stderr,
-        ...transportOptions,
-      });
-    } catch (error) {
-      if (error instanceof GhTransportOutputLimitError) {
-        throw new GitHubOutputLimitError(operation, error.stream, error.limitBytes, error.outputBytes, error);
-      }
-      if (error instanceof GhTransportTimeoutError) {
-        throw new GitHubTimeoutError(operation, error.timeoutMs, error);
-      }
-      if (isErrno(error, "ENOENT")) throw new GhNotInstalledError(this.executable, error);
-      throw new GitHubTransportError(
-        operation,
-        `Unable to execute gh during ${operation}.`,
-        { stderr: error instanceof Error ? summarize(error.message) : undefined },
-        error,
+      return await this.boundedTransportCall(operation, deadline, () =>
+        this.transportFor(request.hostname).request(request),
       );
+    } catch (error) {
+      throw this.mapProviderError(operation, error);
     }
   }
 
-  private apiArguments(
-    context: RepositoryContext,
-    endpoint: string,
-    method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT",
-  ): string[] {
-    return ["api", endpoint, "--hostname", context.hostname, "--method", method];
+  private async boundedTransportCall<T>(
+    operation: string,
+    deadline: ChangeExecutionDeadline | undefined,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    const remainingMs = deadline?.remainingMs();
+    if (remainingMs !== undefined && (!Number.isFinite(remainingMs) || remainingMs <= 0)) {
+      throw new GitHubTimeoutError(operation, 0);
+    }
+    const timeoutMs = Math.max(1, Math.floor(Math.min(this.requestTimeoutMs ?? 10_000, remainingMs ?? 10_000)));
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        call(),
+        new Promise<T>((_, reject) => {
+          timeout = setTimeout(() => reject(new GitHubTimeoutError(operation, timeoutMs)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  private mapProviderError(operation: string, error: unknown): GitHubAdapterError {
+    if (error instanceof GitHubAdapterError) return error;
+    if (error instanceof GitHubHttpTimeoutError) return new GitHubTimeoutError(operation, error.timeoutMs, error);
+    if (error instanceof GitHubHttpResponseLimitError)
+      return new GitHubResponseLimitError(operation, error.limitBytes, error);
+    if (error instanceof GitHubHttpMalformedResponseError)
+      return new GitHubApiResponseError(operation, "GitHub returned a malformed response.", {}, error);
+    if (error instanceof GitHubHttpTransportError)
+      return new GitHubTransportError(operation, "Unable to complete the native GitHub request.", {}, error);
+    if (error instanceof GitHubUserIdentityError) {
+      if (error.cause !== undefined) return this.mapProviderError(operation, error.cause);
+      return new GitHubAuthenticationError(undefined, error);
+    }
+    return new GitHubTransportError(operation, "Unable to complete the native GitHub request.", {}, error);
   }
 }
 
@@ -1633,86 +1553,6 @@ function assertStringArray(value: unknown, path: string): asserts value is reado
 function assertOptionalBoolean(value: unknown, path: string): asserts value is boolean | undefined {
   if (value !== undefined && typeof value !== "boolean") {
     throw new ContractViolationError(`Artifact field ${path} must be a boolean.`, path);
-  }
-}
-
-function appendRawField(args: string[], name: string, value: string | undefined): void {
-  if (value !== undefined) args.push("--raw-field", `${name}=${value}`);
-}
-
-function appendRepositoryApiField(args: string[], name: string, value: GitHubApiFieldValue): void {
-  if (typeof value === "string") args.push("--raw-field", `${name}=${value}`);
-  else args.push("--field", `${name}=${String(value)}`);
-}
-
-function appendRawFields(args: string[], name: string, values: readonly string[] | undefined): void {
-  if (values === undefined) return;
-  for (const value of values) args.push("--raw-field", `${name}=${value}`);
-}
-
-function appendBooleanField(args: string[], name: string, value: boolean | undefined): void {
-  if (value !== undefined) args.push("--field", `${name}=${value ? "true" : "false"}`);
-}
-
-function parseJson(value: string, operation: string): unknown {
-  if (value.trim() === "") return undefined;
-  try {
-    return JSON.parse(value) as unknown;
-  } catch (error) {
-    throw new GitHubApiResponseError(
-      operation,
-      `gh returned invalid JSON during ${operation}.`,
-      { response: summarize(value) },
-      error,
-    );
-  }
-}
-
-function parseIncludedApiResponse(value: string, operation: string): GitHubApiResponse | undefined {
-  const lines = value.split(/\r?\n/u);
-  let statusIndex = -1;
-  let status = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const match = /^HTTP\/[^ ]+\s+(\d{3})(?:\s|$)/u.exec(lines[index] ?? "");
-    if (match !== null) {
-      statusIndex = index;
-      status = Number(match[1]);
-    }
-  }
-  if (statusIndex < 0) return undefined;
-  let separator = statusIndex + 1;
-  while (separator < lines.length && lines[separator] !== "") separator += 1;
-  if (separator >= lines.length) {
-    throw new GitHubApiResponseError(operation, "GitHub returned an incomplete API response.");
-  }
-  const headers: Record<string, string> = {};
-  for (const line of lines.slice(statusIndex + 1, separator)) {
-    const delimiter = line.indexOf(":");
-    if (delimiter <= 0) continue;
-    const name = line.slice(0, delimiter).trim().toLowerCase();
-    const headerValue = line.slice(delimiter + 1).trim();
-    // Pagination is the only provider header currently admitted to the
-    // normalized read contract. Keeping the surface narrow avoids turning
-    // request metadata into an accidental public API.
-    if (name === "link") headers[name] = headerValue;
-  }
-  return {
-    status,
-    body: parseJson(lines.slice(separator + 1).join("\n"), operation),
-    ...(Object.keys(headers).length === 0 ? {} : { headers }),
-  };
-}
-
-function assertActionsApiPath(value: string): void {
-  if (
-    value.length === 0 ||
-    value.length > 2048 ||
-    value.startsWith("/") ||
-    value.includes("\u0000") ||
-    value.includes("..") ||
-    !/^actions\//u.test(value)
-  ) {
-    throw new ContractViolationError("Actions API path is invalid.", "actionsPath");
   }
 }
 
@@ -2883,109 +2723,20 @@ function parseRepositoryTree(value: unknown, operation: string): RepositoryTree 
   return { sha, entries };
 }
 
-function parseRepositoryOverride(repository: string, fallbackHostname: string): RepositoryContext {
-  const value = repository.trim();
-  if (value.length === 0) throw new InvalidRepositoryOverrideError(repository);
-
-  if (/^https?:\/\//iu.test(value)) {
-    try {
-      const url = new URL(value);
-      const parts = url.pathname.split("/").filter(Boolean);
-      if (parts.length !== 2) throw new Error("repository URL path must contain owner and name");
-      const name = parts[1].replace(/\.git$/iu, "");
-      return repositoryContext(url.hostname, parts[0], name, url.toString());
-    } catch (error) {
-      throw new InvalidRepositoryOverrideError(repository, error);
-    }
-  }
-
-  const parts = value.split("/");
-  try {
-    if (parts.length === 2) return repositoryContext(fallbackHostname, parts[0], parts[1]);
-    if (parts.length === 3) return repositoryContext(parts[0], parts[1], parts[2]);
-  } catch (error) {
-    throw new InvalidRepositoryOverrideError(repository, error);
-  }
-  throw new InvalidRepositoryOverrideError(repository);
-}
-
-function repositoryContextFromNameWithOwner(
-  nameWithOwner: string,
-  url: string | undefined,
-  fallbackHostname: string,
-  repositoryId?: string,
-): RepositoryContext {
-  const parts = nameWithOwner.split("/");
-  if (parts.length !== 2) {
-    throw new RepositoryResolutionError("Repository nameWithOwner must contain exactly owner/name.", {
-      path: "nameWithOwner",
-    });
-  }
-  const hostname = url === undefined ? fallbackHostname : repositoryUrlHostname(url, fallbackHostname);
-  return repositoryContext(hostname, parts[0], parts[1], url, repositoryId);
-}
-
-function repositoryContext(
-  hostname: string,
-  owner: string,
-  name: string,
-  url?: string,
-  repositoryId?: string,
-): RepositoryContext {
-  const normalizedHostname = hostname.trim().toLowerCase();
-  if (!isValidHostname(normalizedHostname) || !isValidRepositorySegment(owner) || !isValidRepositorySegment(name)) {
-    throw new RepositoryResolutionError("Repository identity contains an invalid hostname, owner, or name.", {
-      path: "repository",
-    });
-  }
-  const nameWithOwner = `${owner}/${name}`;
-  return Object.freeze({
-    hostname: normalizedHostname,
-    host: normalizedHostname,
-    owner,
-    name,
-    nameWithOwner,
-    url: url ?? `https://${normalizedHostname}/${nameWithOwner}`,
-    ...(repositoryId === undefined ? {} : { repositoryId }),
-  });
-}
-
-function repositoryUrlHostname(url: string, fallbackHostname: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return fallbackHostname;
-  }
-}
-
-function isValidHostname(value: string): boolean {
-  return value.length > 0 && !/[\s/]/u.test(value);
-}
-
-function isValidRepositorySegment(value: string): boolean {
-  if (value === "." || value === "..") return false;
-  return /^[A-Za-z0-9_.-]+$/u.test(value);
-}
-
 function isStableRepositoryId(value: unknown): value is string {
   return typeof value === "string" && /^[1-9][0-9]{0,19}$/u.test(value);
 }
 
-function parseRepositoryDatabaseId(value: string): string | undefined {
-  const normalized = value.trim();
+function parseRepositoryDatabaseId(value: unknown): string | undefined {
+  const normalized =
+    typeof value === "string"
+      ? value.trim()
+      : typeof value === "number" && Number.isSafeInteger(value)
+        ? String(value)
+        : "";
   return isStableRepositoryId(normalized) ? normalized : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isErrno(value: unknown, code: string): boolean {
-  return isRecord(value) && value.code === code;
-}
-
-function summarize(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}…` : trimmed;
 }

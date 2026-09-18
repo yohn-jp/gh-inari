@@ -4,11 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli.js";
-import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 
-class SemanticPrTransport implements GhTransport {
+class SemanticPrTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
   constructor(source: string, treeEntries: readonly { readonly path: string; readonly sha: string }[]) {
     this.responses = [
@@ -27,7 +33,7 @@ class SemanticPrTransport implements GhTransport {
     ];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -35,11 +41,11 @@ class SemanticPrTransport implements GhTransport {
   }
 }
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
-function blobResponse(sha: string, source: string): GhCommandResult {
+function blobResponse(sha: string, source: string): FixtureCommandResult {
   return command(
     JSON.stringify({
       sha,
@@ -145,7 +151,7 @@ async function invoke(
       ];
       const exitCode = await runCli(argv, {
         repositoryRoot: directory,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
       return { exitCode, output, calls: transport.calls };
@@ -179,7 +185,7 @@ async function invokeWithTree(
       ];
       const exitCode = await runCli(argv, {
         repositoryRoot: directory,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
       return { exitCode, output };

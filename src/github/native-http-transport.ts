@@ -106,28 +106,27 @@ function normalizedHostname(hostname: string): string {
   return hostname.toLowerCase();
 }
 
-function normalizedApiUrl(value: string | undefined): string | undefined {
+function boundedEndpoint(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   if (value.length === 0 || value.length > MAX_API_URL_LENGTH) {
-    throw new GitHubHttpTransportError("transport", "GitHub API URL is invalid.");
+    throw new GitHubHttpTransportError("transport", "GitHub API endpoint is invalid.");
   }
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    throw new GitHubHttpTransportError("transport", "GitHub API URL is invalid.");
+    throw new GitHubHttpTransportError("transport", "GitHub API endpoint is invalid.");
   }
   if (
-    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
     parsed.username.length > 0 ||
     parsed.password.length > 0 ||
     parsed.search.length > 0 ||
-    parsed.hash.length > 0 ||
-    /[\u0000-\u001F\u007F]/u.test(parsed.pathname)
+    parsed.hash.length > 0
   ) {
-    throw new GitHubHttpTransportError("transport", "GitHub API URL is invalid.");
+    throw new GitHubHttpTransportError("transport", "GitHub API endpoint is invalid.");
   }
-  return `${parsed.origin}${parsed.pathname.replace(/\/+$/u, "")}`;
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function boundedPath(path: string): string {
@@ -263,11 +262,23 @@ export interface GitHubHttpBinaryResponse {
   readonly contentType?: string;
 }
 
+/** Native response metadata retained by ordinary artifact observation. */
+export interface GitHubNativeHttpResponse extends GitHubChangeEffectResponse {
+  readonly body: unknown;
+  /** Only bounded, non-secret response headers are exposed to callers. */
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
 export interface GitHubHttpGraphqlRequest {
   readonly hostname: string;
   readonly query: string;
   readonly variables?: Readonly<Record<string, unknown>>;
 }
+
+/** REST request shape used by ordinary artifact operations, including merge PUTs. */
+export type GitHubNativeHttpRequest = Omit<GitHubChangeEffectRequest, "method"> & {
+  readonly method: GitHubChangeEffectHttpMethod | "PUT";
+};
 
 export interface GitHubNativeHttpTransportOptions {
   /** Trusted-only constructor input; never returned or logged by this class. */
@@ -297,26 +308,28 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
 
   constructor(options: GitHubNativeHttpTransportOptions) {
     this.#token = boundedToken(options.token);
-    this.#apiUrl = normalizedApiUrl(options.apiUrl);
+    this.#apiUrl = boundedEndpoint(options.apiUrl);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
     this.#maxResponseBytes = normalizedMaxResponseBytes(options.maxResponseBytes);
   }
 
-  async request(request: GitHubChangeEffectRequest): Promise<GitHubChangeEffectResponse> {
+  async request(request: GitHubChangeEffectRequest): Promise<GitHubNativeHttpResponse>;
+  async request(request: GitHubNativeHttpRequest): Promise<GitHubNativeHttpResponse>;
+  async request(request: GitHubNativeHttpRequest): Promise<GitHubNativeHttpResponse> {
     const path = boundedPath(request.path);
     const url = this.restUrl(request.hostname, path);
     const { response, bytes } = await this.execute(url, request.method, request.body);
-    return { status: response.status, body: decodeJsonBody(bytes) };
+    return this.jsonResponse(response, bytes);
   }
 
-  async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubChangeEffectResponse> {
+  async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubNativeHttpResponse> {
     const url = this.#apiUrl === undefined ? githubGraphqlUrl(request.hostname) : `${this.#apiUrl}/graphql`;
     const { response, bytes } = await this.execute(url, "POST", {
       query: request.query,
       variables: request.variables ?? {},
     });
-    return { status: response.status, body: decodeJsonBody(bytes) };
+    return this.jsonResponse(response, bytes);
   }
 
   /** Bounded binary read (for example an Actions artifact archive); never JSON-decoded. */
@@ -342,6 +355,15 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     return path.length === 0 ? base : `${base}/${path}`;
   }
 
+  private jsonResponse(response: Response, bytes: Uint8Array | undefined): GitHubNativeHttpResponse {
+    const link = response.headers.get("link");
+    return {
+      status: response.status,
+      body: decodeJsonBody(bytes),
+      ...(link === null ? {} : { headers: { link } }),
+    };
+  }
+
   /**
    * Runs the fetch and the bounded body read under the same deadline/signal:
    * a provider that returns headers promptly and then stalls the body must
@@ -350,7 +372,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
    */
   private async execute(
     url: string,
-    method: GitHubChangeEffectHttpMethod,
+    method: GitHubChangeEffectHttpMethod | "PUT",
     body: unknown,
     accept?: string,
   ): Promise<{ readonly response: Response; readonly bytes: Uint8Array | undefined }> {

@@ -2,12 +2,11 @@ export type GitHubAdapterErrorCategory =
   "environment" | "authentication" | "repository" | "transport" | "timeout" | "api" | "contract";
 
 export type GitHubAdapterErrorCode =
-  | "GH_NOT_INSTALLED"
-  | "GH_UNAUTHENTICATED"
+  | "GITHUB_AUTHENTICATION_FAILED"
   | "REPOSITORY_RESOLUTION_FAILED"
   | "INVALID_REPOSITORY_OVERRIDE"
   | "GITHUB_TRANSPORT_FAILED"
-  | "GITHUB_OUTPUT_LIMIT_EXCEEDED"
+  | "GITHUB_RESPONSE_LIMIT_EXCEEDED"
   | "GITHUB_TIMEOUT"
   | "GITHUB_API_FAILED"
   | "GITHUB_API_RESPONSE_INVALID"
@@ -17,15 +16,10 @@ export type GitHubAdapterErrorCode =
 export interface GitHubAdapterErrorDetails {
   readonly operation?: string;
   readonly path?: string;
-  readonly executable?: string;
   readonly hostname?: string;
-  readonly exitCode?: number;
-  readonly stderr?: string;
   readonly response?: string;
   readonly timeoutMs?: number;
-  readonly stream?: string;
   readonly limitBytes?: number;
-  readonly outputBytes?: number;
   readonly [key: string]: string | number | undefined;
 }
 
@@ -49,30 +43,17 @@ export class GitHubAdapterError extends Error {
   }
 }
 
-export class GhNotInstalledError extends GitHubAdapterError {
-  constructor(executable = "gh", cause?: unknown) {
-    super(
-      "environment",
-      "GH_NOT_INSTALLED",
-      `The GitHub CLI executable "${executable}" is not available. Install gh and try again.`,
-      { executable },
-      { cause },
-    );
-    this.name = "GhNotInstalledError";
-  }
-}
-
-export class GhUnauthenticatedError extends GitHubAdapterError {
-  constructor(hostname: string | undefined, stderr?: string, cause?: unknown) {
+export class GitHubAuthenticationError extends GitHubAdapterError {
+  constructor(hostname: string | undefined, cause?: unknown) {
     const hostMessage = hostname === undefined ? "GitHub" : `GitHub host ${hostname}`;
     super(
       "authentication",
-      "GH_UNAUTHENTICATED",
-      `${hostMessage} is not authenticated through gh. Run gh auth login and try again.`,
-      { hostname, stderr },
+      "GITHUB_AUTHENTICATION_FAILED",
+      `${hostMessage} authentication could not be established through the native GitHub provider.`,
+      { hostname },
       { cause },
     );
-    this.name = "GhUnauthenticatedError";
+    this.name = "GitHubAuthenticationError";
   }
 }
 
@@ -84,11 +65,11 @@ export class RepositoryResolutionError extends GitHubAdapterError {
 }
 
 export class InvalidRepositoryOverrideError extends GitHubAdapterError {
-  constructor(repository: string, cause?: unknown) {
+  constructor(cause?: unknown) {
     super(
       "repository",
       "INVALID_REPOSITORY_OVERRIDE",
-      `Repository override "${repository}" must be owner/name, host/owner/name, or a GitHub repository URL.`,
+      "Repository override must be owner/name, host/owner/name, or a GitHub repository URL.",
       { path: "repository" },
       { cause },
     );
@@ -103,22 +84,16 @@ export class GitHubTransportError extends GitHubAdapterError {
   }
 }
 
-export class GitHubOutputLimitError extends GitHubAdapterError {
-  constructor(
-    operation: string,
-    stream: "stdout" | "stderr",
-    limitBytes: number,
-    outputBytes: number,
-    cause?: unknown,
-  ) {
+export class GitHubResponseLimitError extends GitHubAdapterError {
+  constructor(operation: string, limitBytes: number, cause?: unknown) {
     super(
       "transport",
-      "GITHUB_OUTPUT_LIMIT_EXCEEDED",
-      `gh ${stream} output exceeded its bounded limit of ${limitBytes} bytes during ${operation}.`,
-      { operation, stream, limitBytes, outputBytes },
+      "GITHUB_RESPONSE_LIMIT_EXCEEDED",
+      `GitHub response exceeded its bounded limit of ${limitBytes} bytes during ${operation}.`,
+      { operation, limitBytes },
       { cause },
     );
-    this.name = "GitHubOutputLimitError";
+    this.name = "GitHubResponseLimitError";
   }
 }
 
@@ -127,7 +102,7 @@ export class GitHubTimeoutError extends GitHubAdapterError {
     super(
       "timeout",
       "GITHUB_TIMEOUT",
-      `gh did not complete ${operation} within the bounded timeout of ${timeoutMs}ms.`,
+      `GitHub did not complete ${operation} within the bounded timeout of ${timeoutMs}ms.`,
       { operation, timeoutMs },
       { cause },
     );

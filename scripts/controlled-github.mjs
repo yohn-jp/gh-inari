@@ -246,6 +246,11 @@ function sendNoContent(response, status = 204) {
   response.end();
 }
 
+function sendBytes(response, status, bytes, contentType) {
+  response.writeHead(status, { "content-type": contentType, "content-length": bytes.byteLength });
+  response.end(bytes);
+}
+
 function endpointParts(requestUrl) {
   const parsed = new URL(requestUrl, "http://127.0.0.1");
   const parts = parsed.pathname
@@ -434,6 +439,11 @@ function createProviderServer(state, statePath, consumerRoot) {
       }
       if (parts[0] === "actions") {
         await actionsHttpApi(request, response, parsed, parts, state, statePath);
+        return;
+      }
+
+      if (request.method === "GET" && parts.length === 1 && parts[0] === "user") {
+        sendJson(response, 200, { login: "packed-certification" });
         return;
       }
 

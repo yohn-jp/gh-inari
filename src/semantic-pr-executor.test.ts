@@ -4,8 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli.js";
-import type { GhCommandResult, GhTransport, GhTransportOptions } from "./github/index.js";
 import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import { LocalSemanticPullRequestExecutor, type SemanticPullRequestExecutionRequest } from "./semantic-pr-executor.js";
 import { compileEffectiveArtifactContract } from "./contract/effective-artifact-contract.js";
 import { parseArtifactContract } from "./contract/artifact-contract.js";
@@ -13,7 +18,7 @@ import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import { planSemanticPullRequest } from "./semantic-pr-projection.js";
 import type { ArtifactContractProvenance } from "./contract/ir.js";
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -98,7 +103,7 @@ function rawFieldsAll(args: readonly string[], name: string): string[] {
   return values;
 }
 
-class ExecutorTransport implements GhTransport {
+class ExecutorTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
   readonly treeShas: string[];
   private created: string | undefined;
@@ -107,7 +112,7 @@ class ExecutorTransport implements GhTransport {
     this.treeShas = [...treeShas];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
@@ -195,7 +200,7 @@ async function invoke(
         ],
         {
           repositoryRoot: directory,
-          createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
         },
       );
       return { exitCode, output: JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown> };
@@ -296,7 +301,10 @@ test("plan-only executor admission remains versioned and rejects tampered plans"
     artifact,
     capabilities: ["github.pull_request.implements.closing-reference"],
   });
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: new ExecutorTransport() });
+  const adapter = new GitHubAdapter({
+    repository: "acme/repository-b",
+    transport: nativeTestTransport(new ExecutorTransport()),
+  });
   const executor = new LocalSemanticPullRequestExecutor({ adapter });
   const request: SemanticPullRequestExecutionRequest = {
     version: "1",

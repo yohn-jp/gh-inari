@@ -5,21 +5,27 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import { runCli } from "./cli.js";
 import { COMMAND_CONTRACT_VERSION } from "./command-contract.js";
 
-class CliStubTransport implements GhTransport {
+class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
   readonly calls: readonly string[][];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
-  constructor(responses: GhCommandResult[]) {
+  constructor(responses: FixtureCommandResult[]) {
     this.responses = [...responses];
     this.calls = this.callHistory;
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.callHistory.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -27,7 +33,7 @@ class CliStubTransport implements GhTransport {
   }
 }
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -233,7 +239,7 @@ const REMOTE_PR_BODY = [
   "",
 ].join("\n");
 
-function blobResponse(sha: string, content: string): GhCommandResult {
+function blobResponse(sha: string, content: string): FixtureCommandResult {
   return command(JSON.stringify({ sha, encoding: "base64", content: Buffer.from(content, "utf8").toString("base64") }));
 }
 
@@ -244,7 +250,7 @@ function remoteGovernanceResponses(
   templateSha: string,
   templateSource: string,
   policy?: { readonly sha: string; readonly source: string },
-): GhCommandResult[] {
+): FixtureCommandResult[] {
   const tree = [
     { path: templatePath, type: "blob", sha: templateSha },
     ...(policy === undefined ? [] : [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: policy.sha }]),
@@ -265,7 +271,7 @@ function governanceFreshnessRecheckResponses(
   templatePath: string,
   templateSha: string,
   policy?: { readonly sha: string },
-): GhCommandResult[] {
+): FixtureCommandResult[] {
   const tree = [
     { path: templatePath, type: "blob", sha: templateSha },
     ...(policy === undefined ? [] : [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: policy.sha }]),
@@ -280,7 +286,7 @@ function remoteArtifactResponses(
   templates: readonly { readonly path: string; readonly sha: string; readonly source: string }[],
   artifact: Record<string, unknown>,
   policy?: { readonly sha: string; readonly source: string },
-): GhCommandResult[] {
+): FixtureCommandResult[] {
   return [
     command("gh version 2.0"),
     command(),
@@ -783,7 +789,7 @@ test("positive integer issue/pr numbers on get and explain still dispatch normal
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -820,7 +826,9 @@ test("--repo and -R behave as aliases for --repository on governed commands", as
     for (const argv of invocations) {
       lines.length = 0;
       const transport = new CliStubTransport(remoteResponse());
-      const exitCode = await runCli(argv, { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) });
+      const exitCode = await runCli(argv, {
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+      });
       assert.equal(exitCode, 0, `${argv.join(" ")} should exit 0`);
       outputs.push(JSON.parse(lines[0] ?? "{}"));
     }
@@ -1194,7 +1202,7 @@ test("invalid create input is rejected after target governance is resolved and b
         repositoryRoot,
         createAdapter: (options) => {
           factoryCalls += 1;
-          return new GitHubAdapter({ ...options, transport });
+          return new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) });
         },
       },
     );
@@ -1233,7 +1241,7 @@ test("Issue create rejects a missing or prefix-only title before mutation with s
         ["issue", "create", "--template", "feature", "--from", inputPath, "--repository", "acme/inari", "--json"],
         {
           repositoryRoot,
-          createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
         },
       );
       assert.equal(exitCode, 2, testCase.name);
@@ -1297,7 +1305,7 @@ test("PR create rejects a missing title before mutation", async () => {
       ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
     assert.equal(exitCode, 2);
@@ -1357,7 +1365,7 @@ test("valid Issue create reaches the adapter only after canonical rendering", as
       ["issue", "create", "--template", "feature", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
     assert.equal(exitCode, 0);
@@ -1399,7 +1407,8 @@ test("structured validate and render use authoritative governance for --reposito
       ["issue", "validate", "--template", "remote", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport: validateTransport }),
+        createAdapter: (options) =>
+          new GitHubAdapter({ ...options, transport: nativeTestTransport(validateTransport) }),
       },
     );
     assert.equal(validateExitCode, 0);
@@ -1412,7 +1421,7 @@ test("structured validate and render use authoritative governance for --reposito
       ["issue", "render", "--template", "remote", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport: renderTransport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(renderTransport) }),
       },
     );
     assert.equal(renderExitCode, 0);
@@ -1443,7 +1452,7 @@ test("template list --repository reports authoritative remote templates", async 
   try {
     const exitCode = await runCli(["template", "list", "--repository", "acme/inari"], {
       repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0);
     assert.deepEqual(
@@ -1500,7 +1509,7 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
     assert.equal(exitCode, 0);
@@ -1573,7 +1582,7 @@ test("PR create preflights the actual resolved head branch, not the --from docum
       ],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
     assert.equal(exitCode, 0);
@@ -1627,7 +1636,7 @@ test("PR create fails closed before mutation when the actual resolved head branc
       ],
       {
         repositoryRoot,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
     assert.equal(exitCode, 3);
@@ -1684,7 +1693,7 @@ test("ambiguous remote template selection fails after target resolution", async 
       repositoryRoot,
       createAdapter: (options) => {
         factoryCalls += 1;
-        return new GitHubAdapter({ ...options, transport });
+        return new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) });
       },
     });
     assert.equal(exitCode, 2);
@@ -1775,7 +1784,7 @@ test("unsupported remote Issue Form semantics fail closed before mutation", asyn
         repositoryRoot: root,
         createAdapter: (options) => {
           factoryCalls += 1;
-          return new GitHubAdapter({ ...options, transport });
+          return new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) });
         },
       },
     );
@@ -1816,7 +1825,7 @@ test("issue get auto-selects the matching governed Issue Form and omits raw Mark
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
       repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -1873,7 +1882,7 @@ test("issue get succeeds for a valid-template issue even when an unrelated sibli
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
       repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -1907,7 +1916,7 @@ test("issue get fails closed with a bounded diagnostic when every candidate Issu
   try {
     const exitCode = await runCli(["issue", "get", "21", "--repository", "acme/inari", "--json"], {
       repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -1948,7 +1957,7 @@ test("pr get returns canonical fields and minimal pull request metadata", async 
   try {
     const exitCode = await runCli(["pr", "get", "43", "--repository", "acme/inari", "--json"], {
       repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2050,7 +2059,7 @@ test("get returns deterministic diagnostics and never guesses fields for invalid
     try {
       const exitCode = await runCli([testCase.domain, "get", testCase.number, "--repository", "acme/inari", "--json"], {
         repositoryRoot: path.resolve("test-fixtures/stale-local-copy"),
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       assert.equal(exitCode, 2, testCase.name);
       const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2092,7 +2101,7 @@ test("issue check is read-only and classifies a canonical artifact as current", 
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "check", "80", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2128,7 +2137,7 @@ test("issue check exposes disposability only for the exact self-dogfood marker",
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "check", "81", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2213,7 +2222,7 @@ test("issue edit dry-run emits a bounded diff and performs no mutation", async (
   try {
     const exitCode = await runCli(
       ["issue", "edit", "80", "--from", inputPath, "--dry-run", "--repository", "acme/inari"],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2251,7 +2260,7 @@ test("issue edit uses the remote artifact for a metadata-only patch and exposes 
   try {
     const exitCode = await runCli(
       ["issue", "edit", "80", "--title", "feat: renamed", "--dry-run", "--repository", "acme/inari"],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2309,7 +2318,7 @@ test("pr edit applies supported metadata flags while preserving omitted remote m
         "--repository",
         "acme/inari",
       ],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2387,7 +2396,7 @@ test("pr edit mutates every supported metadata field and omits draft from PATCH"
         "--repository",
         "acme/inari",
       ],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2430,7 +2439,7 @@ test("issue edit rejects PR-only metadata before any mutation", async () => {
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "edit", "80", "--draft", "--json", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2471,7 +2480,7 @@ test("pr edit rejects draft before mutation because pull-request PATCH does not 
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "edit", "81", "--draft", "--json", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2517,7 +2526,7 @@ test("pull request normalize dry-run reports representation drift without mutati
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "normalize", "81", "--dry-run", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2586,7 +2595,7 @@ test("explicit PR template normalizes a wrong-order body and preserves recoverab
   try {
     const exitCode = await runCli(
       ["pr", "normalize", "112", "--template", "default", "--dry-run", "--repository", "acme/inari"],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2660,7 +2669,7 @@ test("explicit PR template lets edit repair a malformed body without inferred-te
         "--repository",
         "acme/inari",
       ],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2704,7 +2713,7 @@ test("explicit PR normalization returns bounded requirements for unrecoverable r
   try {
     const exitCode = await runCli(
       ["pr", "normalize", "113", "--template", "default", "--json", "--repository", "acme/inari"],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 2);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2791,7 +2800,7 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
     console.log = (line: string) => lines.push(line);
     try {
       const exitCode = await runCli([testCase.domain, "check", testCase.number, "--repository", "acme/inari"], {
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       assert.equal(exitCode, 2, testCase.name);
       const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2835,7 +2844,7 @@ test("check projects complete sync after explicit reconstruction rejects normali
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "check", "114", "--template", "default", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as {
@@ -2881,7 +2890,7 @@ test("issue check on a multi-template wrong-template match emits diagnostics onc
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "check", "74", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2943,7 +2952,7 @@ test("a valid template identity marker resolves deterministically even when stru
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "check", "91", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -2981,7 +2990,7 @@ test("a template identity marker naming an unknown template fails closed instead
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "check", "92", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3029,7 +3038,7 @@ test("an oversized template identity marker fails closed instead of being ignore
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "check", "93", "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3102,7 +3111,7 @@ test("issue edit performs the mutation, reaches the adapter, and reports reconci
         "--repository",
         "acme/inari",
       ],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3142,7 +3151,7 @@ test("pr edit rejects a head-branch change before mutation, since PRs cannot cha
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "edit", "81", "--from", inputPath, "--repository", "acme/inari", "--json"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as { error?: { code?: string } };
@@ -3219,7 +3228,7 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
   console.log = (line: string) => lines.push(line);
   try {
     const firstExitCode = await runCli(["issue", "sync", "80", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport: firstTransport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(firstTransport) }),
     });
     assert.equal(firstExitCode, 0, lines[0]);
     const firstOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3244,7 +3253,7 @@ test("issue sync mutates once to converge, then a repeated sync against the conv
       ),
     );
     const secondExitCode = await runCli(["issue", "sync", "80", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport: secondTransport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(secondTransport) }),
     });
     assert.equal(secondExitCode, 0, lines[0]);
     const secondOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3321,7 +3330,7 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "sync", "81", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3390,7 +3399,7 @@ test("pr sync rejects immutable and unsupported metadata with bounded diagnostic
         ),
       );
       const result = await captureJson(["pr", "sync", "81", "--from", inputPath, "--repository", "acme/inari"], {
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       assert.equal(result.exitCode, 2, testCase.key);
       const error = result.output.error as {
@@ -3467,7 +3476,7 @@ test("issue sync rejects PR-only metadata from its generic input envelope before
   );
   try {
     const result = await captureJson(["issue", "sync", "80", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(result.exitCode, 2);
     const error = result.output.error as {
@@ -3549,7 +3558,7 @@ test("issue sync with an explicit --template replaces a current body that does n
   try {
     const exitCode = await runCli(
       ["issue", "sync", "97", "--template", "feature", "--from", inputPath, "--repository", "acme/inari"],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3597,7 +3606,7 @@ test("issue sync without an explicit --template still refuses to replace a curre
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "sync", "97", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 2, lines[0]);
   } finally {
@@ -3667,7 +3676,7 @@ test("edit surfaces governance-generation reconciliation instead of hiding a cro
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["issue", "edit", "80", "--from", inputPath, "--repository", "acme/inari"], {
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3713,7 +3722,10 @@ async function runIssueValidateDirectFields(
   try {
     const exitCode = await runCli(
       ["issue", "validate", "--template", "direct-fields", "--repository", "acme/inari", "--json", ...argv],
-      { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      {
+        repositoryRoot,
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+      },
     );
     return { exitCode, output: JSON.parse(lines[0] ?? "{}") as Record<string, unknown> };
   } finally {
@@ -3837,7 +3849,7 @@ test("pr validate accepts direct --field input equivalent to --from JSON for a g
         ["pr", "validate", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
         {
           repositoryRoot,
-          createAdapter: (options) => new GitHubAdapter({ ...options, transport: fromTransport }),
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(fromTransport) }),
         },
       );
       fromOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -3857,7 +3869,10 @@ test("pr validate accepts direct --field input equivalent to --from JSON for a g
           "acme/inari",
           "--json",
         ],
-        { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport: fieldTransport }) },
+        {
+          repositoryRoot,
+          createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(fieldTransport) }),
+        },
       );
       fieldOutput = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     } finally {
@@ -3988,7 +4003,7 @@ test("issue edit accepts a direct --field patch without --from, changing only th
   try {
     const exitCode = await runCli(
       ["issue", "edit", "80", "--field", "problem=A changed problem", "--repository", "acme/inari"],
-      { createAdapter: (options) => new GitHubAdapter({ ...options, transport }) },
+      { createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }) },
     );
     assert.equal(exitCode, 0, lines[0]);
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -4106,7 +4121,7 @@ test("schema's directFields projection matches accepted --field names, types, an
   try {
     const exitCode = await runCli(["issue", "schema", "direct-fields", "--repository", "acme/inari", "--json"], {
       repositoryRoot,
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport: schemaTransport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(schemaTransport) }),
     });
     assert.equal(exitCode, 0);
     directFields = (JSON.parse(lines[0] ?? "{}") as { directFields: typeof directFields }).directFields;
@@ -4165,7 +4180,11 @@ test("schema's directFields projection matches accepted --field names, types, an
   try {
     await runCli(
       ["issue", "validate", "--template", "direct-fields", "--repository", "acme/inari", "--json", ...args],
-      { repositoryRoot, createAdapter: (options) => new GitHubAdapter({ ...options, transport: validateTransport }) },
+      {
+        repositoryRoot,
+        createAdapter: (options) =>
+          new GitHubAdapter({ ...options, transport: nativeTestTransport(validateTransport) }),
+      },
     );
   } finally {
     console.log = originalLog;

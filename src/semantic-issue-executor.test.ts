@@ -5,8 +5,13 @@ import { compileEffectiveArtifactContract } from "./contract/effective-artifact-
 import { parseArtifactContract } from "./contract/artifact-contract.js";
 import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import type { ArtifactContractProvenance } from "./contract/ir.js";
-import type { GhCommandResult, GhTransport, GhTransportOptions } from "./github/index.js";
 import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import {
   LocalSemanticIssueExecutor,
   SemanticIssueExecutorError,
@@ -14,7 +19,7 @@ import {
 } from "./semantic-issue-executor.js";
 import { planSemanticIssue } from "./semantic-issue-projection.js";
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -102,7 +107,7 @@ function issuePayload(
   });
 }
 
-class ExecutorTransport implements GhTransport {
+class ExecutorTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
   readonly treeShas: string[];
   private created: string | undefined;
@@ -111,7 +116,7 @@ class ExecutorTransport implements GhTransport {
     this.treeShas = [...treeShas];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
@@ -201,7 +206,7 @@ test("local Semantic Issue Executor re-resolves, creates, rereads, and verifies 
   const transport = new ExecutorTransport();
   const { artifact, plan } = createPlan({ labels: ["semantic"], assignees: ["octocat"] });
   const executor = new LocalSemanticIssueExecutor({
-    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
   });
 
   const result = await executor.execute({
@@ -227,7 +232,7 @@ test("local Semantic Issue Executor fails closed on stale Canon generation befor
   const transport = new ExecutorTransport(["tree-other"]);
   const { plan } = createPlan();
   const executor = new LocalSemanticIssueExecutor({
-    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
   });
   await assert.rejects(
     executor.execute({ version: "1", plan }),
@@ -244,7 +249,7 @@ test("unsupported desired Issue semantics fail closed without silently dropping 
   const transport = new ExecutorTransport();
   const { plan } = createPlan({ milestone: "wave" });
   const executor = new LocalSemanticIssueExecutor({
-    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
   });
   await assert.rejects(
     executor.execute({ version: "1", plan }),
@@ -259,7 +264,7 @@ test("plan-only admission rejects tampered Issue plans", async () => {
   const { plan } = createPlan();
   const tampered = { ...plan, desired: { ...plan.desired, title: "tampered" } };
   const executor = new LocalSemanticIssueExecutor({
-    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    adapter: new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
   });
   const request: SemanticIssueExecutionRequest = { version: "1", plan: tampered };
   await assert.rejects(
