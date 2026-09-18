@@ -1757,8 +1757,8 @@ export function commandUsage(entry: CommandDefinition): string {
           id === "from") ||
         (entry.id === "pr.comment" && id === "rawBody") ||
         (entry.id === "pr.review" && (id === "expectedHead" || id === "reviewIntent")) ||
-        ((entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
-          (entry.id === "change.merge" && id === "mergeStrategy")) ||
+        (entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
+        (entry.id === "change.merge" && id === "mergeStrategy") ||
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||

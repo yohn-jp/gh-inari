@@ -197,7 +197,9 @@ test("a contradictory authorization result (valid:false with completed flags) fa
   ]);
   assert.equal(result.valid, false);
   assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
-  assert.ok(result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_AUTHORIZATION_INVALID"));
+  assert.ok(
+    result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_AUTHORIZATION_INVALID"),
+  );
 });
 
 test("aborted Change evidence is terminal and cannot re-enter READY", () => {
@@ -239,17 +241,10 @@ test("aborted Change evidence is terminal and cannot re-enter READY", () => {
     diagnostics: [],
   };
 
-  const result = project(
-    [{ reference, change: changeProjection }],
-    [rawNode(reference, "open")],
-  );
+  const result = project([{ reference, change: changeProjection }], [rawNode(reference, "open")]);
   assert.equal(result.valid, false);
   assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
-  assert.ok(
-    result.projection?.candidates[0]?.diagnostics.some(
-      (entry) => entry.code === "FRONTIER_CHANGE_TERMINAL",
-    ),
-  );
+  assert.ok(result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_CHANGE_TERMINAL"));
   assert.deepEqual(result.projection?.ready, []);
 });
 
@@ -310,7 +305,12 @@ test("fails closed for stale and contradictory authority evidence", () => {
         implementation: {
           // A stale base revision makes the recomputed authorization
           // invalidated even though a record exists.
-          authorization: { authorization: staleRecord, body: staleBody, repository, base: { ...base, revision: "b".repeat(40) } },
+          authorization: {
+            authorization: staleRecord,
+            body: staleBody,
+            repository,
+            base: { ...base, revision: "b".repeat(40) },
+          },
         },
       },
       {
@@ -340,10 +340,7 @@ test("fails closed for stale and contradictory authority evidence", () => {
 test("a dependency with no candidate evidence fails closed as INVALID, not BLOCKED", () => {
   const depending = issue(70);
   const missingDependency = issue(71);
-  const result = project(
-    [{ reference: depending }],
-    [rawNode(depending, "open", [missingDependency])],
-  );
+  const result = project([{ reference: depending }], [rawNode(depending, "open", [missingDependency])]);
   assert.equal(result.valid, false);
   assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
   assert.ok(

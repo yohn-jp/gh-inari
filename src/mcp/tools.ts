@@ -425,7 +425,9 @@ export const goldenPathStatusOutputSchema = z
 export type GoldenPathStatusMcpOutput = z.infer<typeof goldenPathStatusOutputSchema>;
 
 export const implementationFrontierInputSchema = z.strictObject({
-  frontier: z.unknown().describe("Bounded authoritative evidence consumed by the Implementation Frontier Core projector."),
+  frontier: z
+    .unknown()
+    .describe("Bounded authoritative evidence consumed by the Implementation Frontier Core projector."),
 });
 
 export const implementationFrontierOutputSchema = z

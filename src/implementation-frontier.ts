@@ -18,7 +18,10 @@ import {
   tryVerifyImplementationAuthorization,
   type ImplementationAuthorizationInspectionResult,
 } from "./implementation-authorization.js";
-import { tryVerifyImplementationConformance, type ImplementationConformanceResult } from "./implementation-conformance.js";
+import {
+  tryVerifyImplementationConformance,
+  type ImplementationConformanceResult,
+} from "./implementation-conformance.js";
 import {
   tryParseImplementationExecutionEvidence,
   type ImplementationExecutionEvidence,
@@ -673,8 +676,7 @@ function normalizeImplementation(
     authorizationInspection.current &&
     authorizationInspection.status === "completed";
   const satisfied =
-    (conformance !== undefined && conformance.valid && conformance.status === "conformant") ||
-    authorizationCompleted;
+    (conformance !== undefined && conformance.valid && conformance.status === "conformant") || authorizationCompleted;
   // Execution evidence alone never proves ACTIVE (checked above, it only
   // corroborates an already-current authorization); ACTIVE always requires a
   // freshly re-verified current authorization.
@@ -966,8 +968,7 @@ export function tryProjectImplementationFrontier(input: unknown): Implementation
     if (hasSemanticDependencyEvidence && hasContractDependencyEvidence) {
       const semanticKeys = new Set(semanticDependencies.map((dependency) => issueReferenceKey(dependency)));
       const contractKeys = new Set(contractDependencies.map((dependency) => issueReferenceKey(dependency)));
-      const agree =
-        semanticKeys.size === contractKeys.size && [...semanticKeys].every((key) => contractKeys.has(key));
+      const agree = semanticKeys.size === contractKeys.size && [...semanticKeys].every((key) => contractKeys.has(key));
       if (!agree)
         addDiagnostic(
           localDiagnostics,

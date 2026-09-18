@@ -2032,7 +2032,8 @@ async function runImplementationCommand(
   const definition = getCommandForPositionals(["impl", command]);
   if (definition === undefined) throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command}".`);
   if (command === "frontier") {
-    if (rest.length !== 0) throw new CliError("INVALID_ARGUMENT", "impl frontier does not accept an Issue number.", "$argv");
+    if (rest.length !== 0)
+      throw new CliError("INVALID_ARGUMENT", "impl frontier does not accept an Issue number.", "$argv");
     const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
     if (unsupported !== undefined) {
       const option = getOption(unsupported as OptionId);

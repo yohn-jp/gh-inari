@@ -18,14 +18,27 @@ import {
   type SemanticPullRequestMutationResult,
 } from "./semantic-pr-mutation.js";
 import { changeMutationRequest, type ChangeMutationRequest } from "./change-execution-port.js";
-import { TrustedChangeExecutor, ChangeTrustedExecutorError, type ChangeTrustedEvidenceReader } from "./change-trusted-executor.js";
-import { INARI_ISSUER_PRINCIPAL, type IssuerMutationRequest, type IssuerMutationResult, type TrustedExecutionContext } from "./github/effect-authorizer.js";
+import {
+  TrustedChangeExecutor,
+  ChangeTrustedExecutorError,
+  type ChangeTrustedEvidenceReader,
+} from "./change-trusted-executor.js";
+import {
+  INARI_ISSUER_PRINCIPAL,
+  type IssuerMutationRequest,
+  type IssuerMutationResult,
+  type TrustedExecutionContext,
+} from "./github/effect-authorizer.js";
 
 const identity = { repositoryHost: "github.com", repositoryId: "687000001", rootIssue: 687 } as const;
 const branch = "feat/687-change-merge-terminalization";
 const base = "main";
 const headSha = "a".repeat(40);
-const target = { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId, nameWithOwner: "acme/inari" } as const;
+const target = {
+  repositoryHost: identity.repositoryHost,
+  repositoryId: identity.repositoryId,
+  nameWithOwner: "acme/inari",
+} as const;
 const execution: TrustedExecutionContext = {
   version: 1,
   runtime: "github-actions",
@@ -119,7 +132,11 @@ function mergePlan() {
   return planSemanticPullRequestMutation({
     version: "1",
     operation: "merge",
-    repository: { hostname: identity.repositoryHost, nameWithOwner: target.nameWithOwner, repositoryId: identity.repositoryId },
+    repository: {
+      hostname: identity.repositoryHost,
+      nameWithOwner: target.nameWithOwner,
+      repositoryId: identity.repositoryId,
+    },
     pullRequest: 6870,
     expectedHead: headSha,
     expectedBase: base,
@@ -147,7 +164,10 @@ test("Change merge planning binds the canonical PR/head/base and has no duplicat
 
 class Reader implements ChangeTrustedEvidenceReader {
   count = 0;
-  constructor(readonly first: ChangeProjectionInput, readonly second?: ChangeProjectionInput) {}
+  constructor(
+    readonly first: ChangeProjectionInput,
+    readonly second?: ChangeProjectionInput,
+  ) {}
   async read(_request: ChangeMutationRequest): Promise<ChangeProjectionInput> {
     this.count += 1;
     if (this.count > 1 && this.second !== undefined) return this.second;
@@ -168,7 +188,10 @@ class RereadFailureReader implements ChangeTrustedEvidenceReader {
 class MutationExecutor implements SemanticPullRequestMutationExecutionPort {
   calls: unknown[] = [];
   constructor(readonly outcome: "succeeded" | "idempotent" = "succeeded") {}
-  async execute(request: { readonly version: "1"; readonly plan: unknown }): Promise<SemanticPullRequestMutationResult> {
+  async execute(request: {
+    readonly version: "1";
+    readonly plan: unknown;
+  }): Promise<SemanticPullRequestMutationResult> {
     this.calls.push(request);
     const plan = request.plan as ReturnType<typeof mergePlan>;
     return {
@@ -211,7 +234,13 @@ const authorizer = {
 };
 
 function mergeExecutor(reader: Reader, semantic: SemanticPullRequestMutationExecutionPort): TrustedChangeExecutor {
-  return new TrustedChangeExecutor({ reader, effectAuthorizer: authorizer, execution, target, semanticPullRequestMutationExecutor: semantic });
+  return new TrustedChangeExecutor({
+    reader,
+    effectAuthorizer: authorizer,
+    execution,
+    target,
+    semanticPullRequestMutationExecutor: semantic,
+  });
 }
 
 test("trusted Change merge delegates REVIEW and ACCEPTED to Semantic PR authority and rereads MERGED", async () => {
@@ -220,7 +249,9 @@ test("trusted Change merge delegates REVIEW and ACCEPTED to Semantic PR authorit
     const second = input(pullRequest({ accepted, state: "closed", merged: true }));
     const reader = new Reader(first, second);
     const semantic = new MutationExecutor();
-    const result = await mergeExecutor(reader, semantic).execute(changeMutationRequest("merge", 687, undefined, undefined, "squash"));
+    const result = await mergeExecutor(reader, semantic).execute(
+      changeMutationRequest("merge", 687, undefined, undefined, "squash"),
+    );
     assert.equal(result.projection.change?.state, "MERGED");
     assert.equal(result.evidence?.outcome, "verified");
     assert.equal(reader.count, 2);
@@ -238,7 +269,8 @@ test("Change merge rejects DRAFT, stale head, and reread ambiguity with typed cl
     mergeExecutor(new Reader(input(pullRequest({ draft: true }))), draftSemantic).execute(
       changeMutationRequest("merge", 687, undefined, undefined, "squash"),
     ),
-    (error: unknown) => error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED",
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED",
   );
   assert.equal(draftSemantic.calls.length, 0);
 
@@ -249,10 +281,19 @@ test("Change merge rejects DRAFT, stale head, and reread ambiguity with typed cl
     diagnostics: [{ code: "PR_MUTATION_STALE_HEAD", path: "$.expectedHead", message: "stale" }],
     evidence: { version: "1", operation: "merge", outcome: "stale", effect: "not-attempted", verified: false },
   });
-  const staleExecutor: SemanticPullRequestMutationExecutionPort = { execute: async () => { throw stale; } };
+  const staleExecutor: SemanticPullRequestMutationExecutionPort = {
+    execute: async () => {
+      throw stale;
+    },
+  };
   await assert.rejects(
-    mergeExecutor(new Reader(input()), staleExecutor).execute(changeMutationRequest("merge", 687, undefined, undefined, "squash")),
-    (error: unknown) => error instanceof ChangeTrustedExecutorError && error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED" && error.evidence?.failure?.kind === "MERGE_PULL_REQUEST",
+    mergeExecutor(new Reader(input()), staleExecutor).execute(
+      changeMutationRequest("merge", 687, undefined, undefined, "squash"),
+    ),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError &&
+      error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED" &&
+      error.evidence?.failure?.kind === "MERGE_PULL_REQUEST",
   );
 
   const successful = new MutationExecutor();
