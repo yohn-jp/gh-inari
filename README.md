@@ -46,21 +46,9 @@ authority for that routing decision, and every unowned command already
 delegates to real `gh` unchanged. The hook's only job is the executable
 boundary, not the command tree.
 
-The `gh inari ...` extension form remains supported as a compatibility path:
-
-```bash
-gh extension install yohn-jp/gh-inari
-gh inari --version --json
-```
-
 The package name is `gh-inari`; its npm executables are `gh-inari` and
-`inari`, both resolving to the same entrypoint. The GitHub CLI extension
-command is `gh inari`. On a supported platform, `gh extension install`
-downloads a precompiled, dependency-free `gh-inari` binary from the
-matching GitHub Release; there is no Node runtime requirement and no
-consumer-repository changes are ever made. On an unsupported platform,
-`gh` falls back to a git-clone install that bootstraps only production
-dependencies inside its own installation directory.
+`inari` is the canonical executable and `gh-inari` is a normal npm bin alias;
+both resolve to the same entrypoint.
 
 Global npm bin directories are environment-specific; use `npx --yes gh-inari`
 instead of repairing shell startup files when `inari` is not found.
@@ -72,13 +60,6 @@ For a global npm install:
 ```bash
 npm install --global gh-inari@latest
 npm uninstall --global gh-inari
-```
-
-For the `gh inari` extension form:
-
-```bash
-gh extension upgrade inari
-gh extension remove inari
 ```
 
 The bounded diagnostic path checks the install without touching repository
@@ -95,27 +76,16 @@ npx --yes gh-inari --diagnose --json
 `--require-capability <id>` and `--minimum-version <version>` for a
 mutation-sensitive preflight. A failed check exits `2` and includes one
 recovery command. The current capability identifiers are
-`canonical-invocation`, `machine-readable-version`, `capability-diagnostics`,
-and `extension-bootstrap`.
+`canonical-invocation`, `machine-readable-version`, and
+`capability-diagnostics`.
 
 The `inari` executable is canonical. The direct package executable
-`gh-inari` and the `gh inari` extension form are compatibility paths with the
-same governed command semantics; prefer `inari` for agent and human-facing
-commands:
+`gh-inari` is a normal npm alias with the same governed command semantics;
+prefer `inari` for agent and human-facing commands:
 
 ```bash
 inari issue schema feature --json
 gh-inari issue schema feature --json
-gh inari issue schema feature --json
-```
-
-The repository launcher also supports a clean checkout as a local extension:
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run build
-gh extension install . --force
-gh inari --version --json
 ```
 
 For a prerelease or local packed artifact, select the package explicitly

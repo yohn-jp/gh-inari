@@ -11,9 +11,6 @@ The exact machine-enforced rules live here, not in this document:
 
 - [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) —
   build, verify-version, pack, smoke-test, publish pipeline.
-- [`.github/workflows/gh-extension-release.yml`](../../.github/workflows/gh-extension-release.yml)
-  and [`scripts/build-gh-extension-release.sh`](../../scripts/build-gh-extension-release.sh) —
-  precompiled `gh` extension binary build and Release upload.
 - [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — format,
   lint, typecheck, test, build, package-contents checks that run on every
   PR and must be green before merge.
@@ -82,14 +79,9 @@ the release tag.
    commit (`git log -1 v<version>`) before relying on the release.
 
 5. **Publishing the Release is the only trigger for
-   `.github/workflows/publish.yml`** (npm publish) **and
-   `.github/workflows/gh-extension-release.yml`** (precompiled `gh`
-   extension binaries, built by
-   [`scripts/build-gh-extension-release.sh`](../../scripts/build-gh-extension-release.sh)
-   and uploaded to the same Release by the shared
-   `yohn-jp/.github/.github/workflows/gh-extension-release.yml@main`
-   workflow). Both run independently off the same `release: published`
-   event; a failure in one does not block the other.
+   `.github/workflows/publish.yml`** (npm publish). The workflow uses
+   npm Trusted Publishing and certifies the exact packed artifact before
+   publication.
 6. **Automated pipeline runs, in order, and stops at the first failure:**
    - `pnpm install --frozen-lockfile`
    - `pnpm run typecheck`
@@ -102,8 +94,7 @@ the release tag.
      downstream job (no rebuild-then-publish drift).
    - **Smoke test the packed tarball** on a matrix of OS/Node versions
      (`ubuntu-latest` × Node 22/24): install the exact tarball into an
-     isolated directory, run it as `gh-inari` and as a discovered `gh
-inari` extension.
+     isolated directory and run both npm bin aliases.
    - **Publish**, only after every smoke-test matrix leg is green.
      Publishing uses npm Trusted Publishing (OIDC) — no long-lived npm
      token is stored in repository secrets. The `npm` GitHub Environment
@@ -114,24 +105,6 @@ inari` extension.
      do not error).
    - Any `npm warn publish` output is treated as a failure even if `npm
 publish` itself exits 0.
-
-## Precompiled `gh` extension binaries
-
-`dist/**` is build output and is gitignored — it is never committed and
-`gh extension install`/`gh extension upgrade` no longer depend on it
-being present in the repository. Instead, publishing a Release triggers
-[`.github/workflows/gh-extension-release.yml`](../../.github/workflows/gh-extension-release.yml),
-a thin wrapper around the shared, organization-owned
-`yohn-jp/.github/.github/workflows/gh-extension-release.yml@main`
-workflow. That shared workflow checks out the exact release tag, runs
-this repository's own
-[`scripts/build-gh-extension-release.sh`](../../scripts/build-gh-extension-release.sh)
-(which owns the Node/TypeScript build, packaging, and target-platform
-list end to end), verifies the produced artifacts follow the GitHub CLI
-naming contract (`gh-inari-<os>-<arch>[.exe]`), and uploads them to that
-same Release. `gh extension install`/`gh extension upgrade` pick up
-these precompiled binaries directly; no build step or Node runtime is
-required on the installing machine.
 
 ## What this buys
 
