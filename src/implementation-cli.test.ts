@@ -274,7 +274,7 @@ test("impl is discoverable and plan keeps inferred recommendations unauthorized"
   const help = JSON.parse(helpLines.at(-1) ?? "{}") as { commands: readonly { id: string }[] };
   assert.deepEqual(
     help.commands.map((entry) => entry.id),
-    ["impl.plan", "impl.frontier", "impl.show", "impl.validate", "impl.authorize", "impl.inspect", "impl.verify"],
+    ["impl.plan", "impl.show", "impl.validate", "impl.authorize", "impl.inspect", "impl.verify"],
   );
 
   const adapter = new ImplementationCliAdapter("A source Issue with a checklist.\n\n- [ ] Keep scope explicit");

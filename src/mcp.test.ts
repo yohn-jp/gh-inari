@@ -273,7 +273,6 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
       [
-        "inari_implementation_frontier",
         "inari_golden_path_status",
         "inari_issue_contract",
         "inari_issue_materialize",
@@ -302,29 +301,6 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
       assert.ok(tool.outputSchema, tool.name);
     }
   });
-});
-
-test("native MCP exposes the shared Implementation Frontier Core result", async () => {
-  const server = createInariMcpServer();
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "inari-mcp-frontier-test", version: "1" }, { capabilities: {} });
-  try {
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    const response = await client.callTool({
-      name: "inari_implementation_frontier",
-      arguments: { input: { candidates: [] } },
-    });
-    const content = structuredContent(response.structuredContent);
-    assert.equal(content.ok, true);
-    assert.equal(content.valid, true);
-    assert.equal(content.operation, "impl.frontier");
-    assert.deepEqual(content.ready, []);
-    assert.equal(content.mutation, false);
-  } finally {
-    await client.close();
-    await server.close();
-  }
 });
 
 test("governed PR comment/review/merge writes are never exposed through MCP, even with a Session executor", async () => {

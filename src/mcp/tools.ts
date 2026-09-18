@@ -49,7 +49,6 @@ import {
 import { compareSemanticPullRequestProjection, tryObserveSemanticPullRequest } from "../semantic-pr-observation.js";
 import { projectGoldenPathRecovery } from "../golden-path-recovery.js";
 import { tryProjectGoldenPathStatus } from "../golden-path-status.js";
-import { tryProjectImplementationFrontier } from "../implementation-frontier.js";
 import {
   createActionsChangeExecutionAdapter,
   GitHubAdapter,
@@ -81,7 +80,6 @@ import type { McpSessionAppBridge } from "./session-app-bridge.js";
 export const INARI_MCP_TOOL_CONTRACT_VERSION = "1" as const;
 
 export const INARI_MCP_TOOL_NAMES = Object.freeze([
-  "inari_implementation_frontier",
   "inari_golden_path_status",
   "inari_issue_contract",
   "inari_issue_materialize",
@@ -199,11 +197,6 @@ export const goldenPathStatusInputSchema = z.strictObject({
     .optional()
     .describe("Optional bounded Change execution or recovery-plan evidence consumed by the recovery projector."),
 });
-/** Input schema for the transport-neutral Implementation Frontier projection. */
-export const implementationFrontierInputSchema = z.strictObject({
-  input: z.unknown().describe("Bounded existing Issue, Implementation, and Change authority projections."),
-});
-export type ImplementationFrontierMcpInput = z.infer<typeof implementationFrontierInputSchema>;
 export const semanticPullRequestObserveInputSchema = z.strictObject({
   ...commonRequestShape,
   number: artifactNumberSchema,
@@ -274,22 +267,6 @@ export type SemanticPullRequestDriftInput = z.infer<typeof semanticPullRequestDr
 export type ImplementationHandoffInput = z.infer<typeof implementationHandoffInputSchema>;
 export type ChangeImplementationHandoffInput = ImplementationHandoffInput;
 export type GoldenPathStatusMcpInput = z.infer<typeof goldenPathStatusInputSchema>;
-
-/** Structured output for the shared Core Implementation Frontier result. */
-export const implementationFrontierOutputSchema = z
-  .object({
-    ok: z.boolean(),
-    valid: z.boolean(),
-    operation: z.literal("impl.frontier"),
-    version: z.literal(1).optional(),
-    kind: z.literal("implementation-frontier").optional(),
-    candidates: z.array(z.unknown()).optional(),
-    ready: z.array(z.unknown()).optional(),
-    parallelReadyGroups: z.array(z.unknown()).optional(),
-    diagnostics: z.array(z.unknown()),
-    mutation: z.literal(false),
-  })
-  .strict();
 
 /** Injectable Core adapter seam used by stdio and tests. */
 export interface NativeSemanticPullRequestDependencies {
@@ -772,24 +749,6 @@ async function handleGoldenPathStatus(input: GoldenPathStatusMcpInput): Promise<
       "Golden Path status projection failed; see diagnostics.",
     );
   }
-}
-
-/** Project the same Core Implementation Frontier exposed by the CLI. */
-async function handleImplementationFrontier(input: ImplementationFrontierMcpInput): Promise<CallToolResult> {
-  const frontier = tryProjectImplementationFrontier(input.input);
-  return result(
-    {
-      ok: frontier.valid,
-      valid: frontier.valid,
-      operation: "impl.frontier",
-      ...(frontier.projection === undefined ? {} : frontier.projection),
-      diagnostics: frontier.diagnostics,
-      mutation: false,
-    },
-    frontier.valid
-      ? "Projected the Implementation Frontier through the shared Core authority."
-      : "Implementation Frontier projection failed closed; see diagnostics.",
-  );
 }
 
 function unavailableSessionExecution(): CapabilityAuthorizedSessionExecutionResult {
@@ -1400,23 +1359,6 @@ export function registerGoldenPathTools(server: McpServer): readonly RegisteredT
     async (input: GoldenPathStatusMcpInput) => handleGoldenPathStatus(input),
   );
   return Object.freeze([status]);
-}
-
-/** Register the read-only Implementation Frontier Core projection. */
-export function registerImplementationFrontierTools(server: McpServer): readonly RegisteredTool[] {
-  const frontier = server.registerTool(
-    "inari_implementation_frontier",
-    {
-      title: "Project Implementation Frontier",
-      description:
-        "Project READY, BLOCKED, ACTIVE, SATISFIED, and INVALID governed work from existing Issue, Implementation, and Change evidence through the shared Core authority. This tool never schedules, assigns, creates Changes, or mutates GitHub.",
-      inputSchema: implementationFrontierInputSchema,
-      outputSchema: implementationFrontierOutputSchema,
-      annotations: READ_ONLY,
-    },
-    async (input: ImplementationFrontierMcpInput) => handleImplementationFrontier(input),
-  );
-  return Object.freeze([frontier]);
 }
 
 /** Register the read-only semantic PR contract/materialize/plan/observe/drift catalog on any MCP transport. */

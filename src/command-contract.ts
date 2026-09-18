@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.12.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.11.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -86,7 +86,6 @@ export type CommandId =
   | "pr.review"
   | "pr.merge"
   | "impl.plan"
-  | "impl.frontier"
   | "impl.show"
   | "impl.validate"
   | "impl.authorize"
@@ -252,7 +251,6 @@ const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHe
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
 const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
-const IMPLEMENTATION_FRONTIER_OPTIONS = ["help", "json", "from"] as const;
 const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest", "executionEvidence"] as const;
 
 const option = (
@@ -1135,14 +1133,6 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
-    "impl.frontier",
-    "impl",
-    "frontier",
-    ["impl", "frontier"],
-    "Project the deterministic readiness frontier from existing Issue, Implementation, and Change evidence.",
-    IMPLEMENTATION_FRONTIER_OPTIONS,
-  ),
-  command(
     "impl.show",
     "impl",
     "show",
@@ -1765,8 +1755,7 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "pr.sync" && id === "from") ||
         (entry.id === "authority.bootstrap" &&
           (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability")) ||
-        (entry.id === "impl.verify" && (id === "from" || id === "pullRequest")) ||
-        (entry.id === "impl.frontier" && id === "from");
+        (entry.id === "impl.verify" && (id === "from" || id === "pullRequest"));
       const syntax =
         entry.id === "authority.register" && id === "from"
           ? "--from <authority.json>"

@@ -279,29 +279,6 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     helpDomain: "issue",
   }),
   skillScenario({
-    id: "implementation-frontier",
-    title: "Project the Implementation Frontier",
-    whenToUse:
-      "Use when an orchestrator needs the current deterministic set of governed work that is ready, blocked, active, satisfied, or invalid.",
-    scope: "specialized-alternative",
-    workflow: [
-      [
-        "Project the bounded readiness frontier from existing Issue, Implementation, and Change authority evidence.",
-        "impl.frontier",
-      ],
-    ],
-    invariants: [
-      "The frontier is a read-only Core projection; it does not choose priority, schedule, delegate, or assign work.",
-      "READY groups describe dependency independence only and do not claim write-set or runtime conflict safety.",
-      "Consume the same Implementation Frontier result as the CLI and MCP adapters; do not reconstruct readiness from Issue state, branches, or PR titles.",
-      "Missing, stale, contradictory, cyclic, or self-dependent evidence remains fail-closed.",
-      IMPLEMENTATION_COMMAND_CONTRACT_INVARIANT,
-      HELP_DISCLAIMER,
-    ],
-    canonicalCommandId: "impl.frontier",
-    helpDomain: "impl",
-  }),
-  skillScenario({
     id: "manage-implementation",
     title: "Prepare and inspect an Implementation",
     whenToUse:
@@ -313,7 +290,6 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
         "Draft a bounded Implementation recommendation from authoritative source Issue evidence without granting authority.",
         "impl.plan",
       ],
-      ["Project the current readiness frontier before starting an Implementation session.", "impl.frontier"],
       [
         "Create a separate Implementation Issue through the governed Issue operation using the Implementation template.",
         "issue.create",
@@ -329,7 +305,6 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     ],
     invariants: [
       "The ordinary Issue remains the problem, request, or decision record; this scenario keeps one-session detail in the Implementation.",
-      "Use the shared Implementation Frontier projection to identify admissible work; it does not select priority or schedule execution.",
       "`impl.plan` is a preview and its recommendations are not authoritative; it does not authorize or mutate an Issue.",
       "`impl.validate` is read-only. `impl.show` and `impl.inspect` project current evidence without mutation.",
       "`impl.authorize` requires the current canonical body and authoritative base evidence, then emits Core authorization evidence without a GitHub mutation.",
