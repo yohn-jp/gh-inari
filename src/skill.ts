@@ -305,11 +305,11 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ["Validate the current Implementation body without mutation.", "impl.validate"],
       ["Authorize the current canonical Implementation body through the existing Core boundary.", "impl.authorize"],
       ["Inspect lifecycle and provider-authoritative parent/source relationships.", "impl.inspect"],
-      ["Project the bounded Implementation Frontier before selecting runnable Implementation work.", "impl.frontier"],
       [
         "Verify a pull request and its authoritative diff against the current authorized Implementation.",
         "impl.verify",
       ],
+      ["Project the bounded Implementation Frontier before selecting runnable Implementation work.", "impl.frontier"],
     ],
     invariants: [
       "The ordinary Issue remains the problem, request, or decision record; this scenario keeps one-session detail in the Implementation.",
