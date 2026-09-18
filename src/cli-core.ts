@@ -1770,6 +1770,8 @@ interface ImplementationInputEvidence {
   readonly base?: unknown;
   readonly supersession?: unknown;
   readonly completed?: boolean;
+  /** Core-owned dependency readiness evidence; collected/normalized by the caller, never invented here. */
+  readonly readiness?: unknown;
 }
 
 function implementationIssueEvidence(
@@ -1834,7 +1836,8 @@ function implementationInputEvidence(value: unknown): ImplementationInputEvidenc
     Object.prototype.hasOwnProperty.call(record, "authorization") ||
     Object.prototype.hasOwnProperty.call(record, "base") ||
     Object.prototype.hasOwnProperty.call(record, "supersession") ||
-    Object.prototype.hasOwnProperty.call(record, "completed");
+    Object.prototype.hasOwnProperty.call(record, "completed") ||
+    Object.prototype.hasOwnProperty.call(record, "readiness");
   if (!envelope) return { authorization: value };
   const authorization = record.authorization;
   const authorizationRecord =
@@ -1848,6 +1851,7 @@ function implementationInputEvidence(value: unknown): ImplementationInputEvidenc
     ...(Object.prototype.hasOwnProperty.call(record, "base") ? { base: record.base } : {}),
     ...(Object.prototype.hasOwnProperty.call(record, "supersession") ? { supersession: record.supersession } : {}),
     ...(typeof record.completed === "boolean" ? { completed: record.completed } : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, "readiness") ? { readiness: record.readiness } : {}),
   };
 }
 
@@ -1929,6 +1933,7 @@ function implementationLifecycle(
           ...(base === undefined ? {} : { base }),
           ...(input.supersession === undefined ? {} : { supersession: input.supersession }),
           ...(input.completed === undefined ? {} : { completed: input.completed }),
+          ...(input.readiness === undefined ? {} : { readiness: input.readiness }),
         });
   return {
     status: result.status,
@@ -1936,6 +1941,7 @@ function implementationLifecycle(
     current: result.current,
     ...(result.authorization === undefined ? {} : { record: result.authorization }),
     ...(result.governedBodyDigest === undefined ? {} : { governedBodyDigest: result.governedBodyDigest }),
+    ...(result.readiness === undefined ? {} : { readiness: result.readiness }),
     violations: result.violations,
   };
 }
@@ -2154,6 +2160,7 @@ async function runImplementationCommand(
     repository: evidence.repository,
     ...(base === undefined ? {} : { base }),
     ...(input.authorization === undefined ? {} : { existingAuthorization: input.authorization }),
+    ...(input.readiness === undefined ? {} : { readiness: input.readiness }),
   });
   const result = {
     ok: authorization.valid,
@@ -2171,6 +2178,7 @@ async function runImplementationCommand(
       ...(authorization.governedBodyDigest === undefined
         ? {}
         : { governedBodyDigest: authorization.governedBodyDigest }),
+      ...(authorization.readiness === undefined ? {} : { readiness: authorization.readiness }),
       violations: authorization.violations,
     },
     base: base === undefined ? { available: false } : { available: true, evidence: base },

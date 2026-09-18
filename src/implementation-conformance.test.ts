@@ -30,6 +30,7 @@ const repository = {
   repository: "acme/inari",
 } as const;
 const implementation = { ...repository, number: 575 } as const;
+const source = { ...repository, number: 568 } as const;
 const base = { branch: "main", revision: "base-revision", freshness: "base-revision" } as const;
 
 function contract(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -37,7 +38,7 @@ function contract(overrides: Record<string, unknown> = {}): Record<string, unkno
     version: IMPLEMENTATION_CONTRACT_VERSION,
     kind: IMPLEMENTATION_KIND,
     repository,
-    sources: [{ ...repository, number: 568 }],
+    sources: [source],
     objective: "Verify one exact authorized Implementation.",
     nonGoals: ["Automatic merge"],
     architecture: {
@@ -69,7 +70,7 @@ function contract(overrides: Record<string, unknown> = {}): Record<string, unkno
       baseRevision: base.revision,
       baseFreshness: base.freshness,
       branch: "feat/575-implementation-pr-conformance",
-      dependencies: [{ ...repository, number: 568 }],
+      dependencies: [source],
     },
     ...overrides,
   };
@@ -78,7 +79,23 @@ function contract(overrides: Record<string, unknown> = {}): Record<string, unkno
 const body = renderImplementationIssueBody(parseImplementationContract(contract()));
 
 function authorization(): ImplementationAuthorizationRecord {
-  return authorizeImplementation({ implementation, body, repository, base });
+  return authorizeImplementation({
+    implementation,
+    body,
+    repository,
+    base,
+    readiness: {
+      evidence: [
+        {
+          reference: source,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
 }
 
 function collection<T>(items: readonly T[]): GitHubOperationalCollection<T> {
@@ -188,7 +205,7 @@ function branchAbsentContract(overrides: Record<string, unknown> = {}): Record<s
       baseBranch: base.branch,
       baseRevision: base.revision,
       baseFreshness: base.freshness,
-      dependencies: [{ ...repository, number: 568 }],
+      dependencies: [source],
     },
     ...overrides,
   });
@@ -201,7 +218,23 @@ function build(contractValue: Record<string, unknown>): {
   const testBody = renderImplementationIssueBody(parseImplementationContract(contractValue));
   return {
     body: testBody,
-    authorization: authorizeImplementation({ implementation, body: testBody, repository, base }),
+    authorization: authorizeImplementation({
+      implementation,
+      body: testBody,
+      repository,
+      base,
+      readiness: {
+        evidence: [
+          {
+            reference: source,
+            authority: "implementation-conformance",
+            status: "satisfied",
+            freshness: "current",
+            dependencies: [],
+          },
+        ],
+      },
+    }),
   };
 }
 
@@ -679,7 +712,23 @@ test("a targeted test is never satisfied by a same-named or successful CI check"
   );
   const result = tryVerifyImplementationConformance(
     input(
-      authorizeImplementation({ implementation, body: testBody, repository, base }),
+      authorizeImplementation({
+        implementation,
+        body: testBody,
+        repository,
+        base,
+        readiness: {
+          evidence: [
+            {
+              reference: source,
+              authority: "implementation-conformance",
+              status: "satisfied",
+              freshness: "current",
+              dependencies: [],
+            },
+          ],
+        },
+      }),
       testBody,
       pullRequest({
         checks: collection([

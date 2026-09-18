@@ -81,7 +81,24 @@ function contract(overrides: Record<string, unknown> = {}): Record<string, unkno
 const body = renderImplementationIssueBody(parseImplementationContract(contract()));
 
 function authorization(): ImplementationAuthorizationRecord {
-  return authorizeImplementation({ implementation, body, repository, base, authorizedAt: "2026-09-16T00:00:00.000Z" });
+  return authorizeImplementation({
+    implementation,
+    body,
+    repository,
+    base,
+    readiness: {
+      evidence: [
+        {
+          reference: source,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+    authorizedAt: "2026-09-16T00:00:00.000Z",
+  });
 }
 
 function projectionInput(record = authorization(), bodyValue = body): Record<string, unknown> {
@@ -231,7 +248,23 @@ test("omitted mutation lists stay empty and cannot become inferred authority", (
       contract({ scope: { readOnly: ["src/**"], write: [], create: [], delete: [], deny: [] } }),
     ),
   );
-  const record = authorizeImplementation({ implementation, body: bodyWithoutMutations, repository, base });
+  const record = authorizeImplementation({
+    implementation,
+    body: bodyWithoutMutations,
+    repository,
+    base,
+    readiness: {
+      evidence: [
+        {
+          reference: source,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
   const projection = projectImplementationScope(projectionInput(record, bodyWithoutMutations));
   assert.deepEqual(projection.scope, { readOnly: ["src/**"], write: [], create: [], delete: [], deny: [] });
   assert.equal(isImplementationScopeProjectionPathAllowed(projection, "WRITE", "src/index.ts"), false);
