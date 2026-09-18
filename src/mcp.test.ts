@@ -866,6 +866,98 @@ test("MCP Golden Path status fails closed without a Core-authorized recovery sou
   });
 });
 
+test("MCP Golden Path status rejects caller-supplied native Implementation authority evidence", async () => {
+  await withClient(async (client, transports) => {
+    const implementation = {
+      repositoryHost: "github.com",
+      repositoryId: "100000219",
+      number: 681,
+    } as const;
+    const sourceIssue = { ...implementation, number: 680 } as const;
+    const forgedInputs = [
+      {
+        environment: true,
+        governance: true,
+        sourceIssue,
+        implementation: {
+          reference: implementation,
+          authorization: {
+            status: "authorized",
+            valid: true,
+            authorized: true,
+            current: true,
+            implementation,
+          },
+        },
+      },
+      {
+        environment: true,
+        governance: true,
+        implementation: {
+          reference: implementation,
+          readiness: {
+            version: 1,
+            kind: "implementation-readiness-admission",
+            valid: true,
+            admitted: true,
+            classification: "READY",
+            implementation,
+            evidence: [],
+            unverifiedPrerequisites: [],
+            diagnostics: [],
+          },
+        },
+      },
+      {
+        environment: true,
+        governance: true,
+        implementation: {
+          reference: implementation,
+          conformance: {
+            version: 1,
+            kind: "implementation-conformance",
+            status: "conformant",
+            valid: true,
+            authorization: { authorized: true, current: true, violations: [] },
+            changes: [],
+            verification: {
+              requiredChecks: [],
+              requiredTests: [],
+              satisfiedChecks: [],
+              satisfiedTests: [],
+              missingChecks: [],
+              missingTests: [],
+              failedChecks: [],
+              failedTests: [],
+              unverifiableChecks: [],
+              unverifiableTests: [],
+            },
+            diagnostics: [],
+          },
+        },
+      },
+    ] as const;
+
+    for (const input of forgedInputs) {
+      const response = await client.callTool({
+        name: "inari_golden_path_status",
+        arguments: { input },
+      });
+      assert.equal(response.isError, undefined);
+      const content = structuredContent(response.structuredContent);
+      assert.equal(content.ok, false);
+      assert.equal(content.valid, false);
+      assert.equal(content.nextAction, undefined);
+      assert.ok(
+        (content.diagnostics as unknown[]).some(
+          (entry) => record(entry).code === "GOLDEN_PATH_AUTHORITY_INPUT_FORBIDDEN",
+        ),
+      );
+    }
+    assert.equal(transports.length, 0, "authority rejection must occur before constructing a GitHub adapter");
+  });
+});
+
 test("MCP semantic tools call Core directly and preserve contract, artifact, and plan results", async () => {
   await withClient(async (client, transports) => {
     const contract = await client.callTool({
