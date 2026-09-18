@@ -39,7 +39,7 @@ function runtimeAuthority(
       notBefore: "2026-01-01T00:00:00Z",
       notAfter: null,
       maxSessionTtlSeconds: 3_600,
-      capabilityCeiling: ["change.implement"],
+      capabilityCeiling: ["change.ready"],
       ...overrides,
     }),
   };
@@ -50,7 +50,7 @@ function sessionRequest(authority: RuntimeAuthority, key: ReturnType<typeof gene
   const issuanceRequest = session.createIssuanceRequest({
     repository: { id: REPOSITORY_ID, name: "old-owner/old-name" },
     task: { kind: "issue", number: 374 },
-    capabilities: [{ kind: "change.implement", issue: 374 }],
+    capabilities: [{ kind: "change.ready", issue: 374 }],
     ttlSeconds: 600,
   });
   const issued = issueSessionCertificate({
@@ -64,7 +64,7 @@ function sessionRequest(authority: RuntimeAuthority, key: ReturnType<typeof gene
   return signSessionRequest({
     session,
     request: { issue: 374 },
-    operation: "change.implement",
+    operation: "change.ready",
     requestId: "request-authentication-test",
     issuedAt: NOW_SECONDS,
     expiresAt: NOW_SECONDS + 60,
@@ -179,7 +179,7 @@ test("authenticates from one fresh App read capability and emits only bounded au
   assert.equal(context.session.id.startsWith("session:"), false);
   assert.equal(context.session.certificateJti, context.verifiedRequest.certificate.payload.jti);
   assert.deepEqual(context.task, { kind: "issue", number: 374 });
-  assert.deepEqual(context.capabilities, [{ kind: "change.implement", issue: 374 }]);
+  assert.deepEqual(context.capabilities, [{ kind: "change.ready", issue: 374 }]);
   assert.deepEqual(context.authority, { ref: "main", sha: COMMIT_SHA });
   assert.deepEqual(context.request, {
     requestId: request.requestId,
