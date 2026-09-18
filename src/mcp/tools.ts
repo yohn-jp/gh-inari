@@ -992,6 +992,54 @@ function goldenPathFailure(diagnostics: readonly unknown[]): GoldenPathStatusMcp
   };
 }
 
+const PUBLIC_GOLDEN_PATH_STATUS_NATIVE_AUTHORITY_KEYS = Object.freeze([
+  "sourceIssue",
+  "implementationAuthorization",
+  "implementationReadiness",
+  "implementationConformance",
+  "compatibility",
+] as const);
+
+const PUBLIC_GOLDEN_PATH_STATUS_NATIVE_IMPLEMENTATION_KEYS = Object.freeze([
+  "reference",
+  "sourceIssue",
+  "contract",
+  "authorization",
+  "readiness",
+  "conformance",
+  "change",
+  "compatibility",
+  "repositoryHost",
+  "repositoryId",
+  "number",
+  "complete",
+] as const);
+
+function publicGoldenPathStatusAuthorityDiagnostics(input: Record<string, unknown>): readonly unknown[] {
+  const diagnostics: Array<{ readonly code: string; readonly path: string; readonly message: string }> = [];
+  for (const key of PUBLIC_GOLDEN_PATH_STATUS_NATIVE_AUTHORITY_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(input, key))
+      diagnostics.push({
+        code: "GOLDEN_PATH_AUTHORITY_INPUT_FORBIDDEN",
+        path: `$.${key}`,
+        message: "Public Golden Path status cannot accept caller-supplied Implementation authority evidence.",
+      });
+  }
+  const implementation = input.implementation;
+  if (
+    isRecord(implementation) &&
+    PUBLIC_GOLDEN_PATH_STATUS_NATIVE_IMPLEMENTATION_KEYS.some((key) =>
+      Object.prototype.hasOwnProperty.call(implementation, key),
+    )
+  )
+    diagnostics.push({
+      code: "GOLDEN_PATH_AUTHORITY_INPUT_FORBIDDEN",
+      path: "$.implementation",
+      message: "Public Golden Path status cannot accept a caller-supplied native Implementation authority projection.",
+    });
+  return diagnostics;
+}
+
 /** Compose the existing recovery and status projectors without adding policy. */
 async function handleGoldenPathStatus(input: GoldenPathStatusMcpInput): Promise<CallToolResult> {
   try {
@@ -999,6 +1047,17 @@ async function handleGoldenPathStatus(input: GoldenPathStatusMcpInput): Promise<
     // recovery must cross the #410 projector boundary first.
     const statusInput = { ...input.input };
     delete statusInput.recovery;
+    // The pure status projector is also used by trusted in-process callers and
+    // can compose canonical Implementation projections. The public MCP
+    // boundary must not let an untrusted caller manufacture those authority
+    // results, so native Implementation authority-bearing evidence is rejected
+    // before it reaches the projector.
+    const authorityDiagnostics = publicGoldenPathStatusAuthorityDiagnostics(statusInput);
+    if (authorityDiagnostics.length > 0)
+      return goldenPathResult(
+        goldenPathFailure(authorityDiagnostics),
+        "Golden Path status rejected caller-supplied Implementation authority evidence.",
+      );
     const recovery =
       input.recoveryInput === undefined
         ? null
