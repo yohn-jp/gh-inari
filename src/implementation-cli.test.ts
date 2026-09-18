@@ -9,6 +9,7 @@ import {
   IMPLEMENTATION_KIND,
   renderImplementationIssueBody,
 } from "./implementation-contract.js";
+import { authorizeImplementation } from "./implementation-authorization.js";
 import {
   GitHubAdapter,
   type GitHubApiResponse,
@@ -227,6 +228,40 @@ async function invoke(
   }
 }
 
+function implementationAuthorizationRecord(body = implementationBody(), branch = BRANCH) {
+  return authorizeImplementation({
+    implementation: {
+      repositoryHost: CONTEXT.hostname,
+      repositoryId: CONTEXT.repositoryId,
+      repository: CONTEXT.nameWithOwner,
+      number: 42,
+    },
+    body,
+    repository: {
+      repositoryHost: CONTEXT.hostname,
+      repositoryId: CONTEXT.repositoryId,
+      repository: CONTEXT.nameWithOwner,
+    },
+    base: { branch: branch.name, revision: branch.sha, freshness: branch.sha },
+    readiness: {
+      evidence: [
+        {
+          reference: {
+            repositoryHost: CONTEXT.hostname,
+            repositoryId: CONTEXT.repositoryId,
+            repository: CONTEXT.nameWithOwner,
+            number: 7,
+          },
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
+}
+
 test("impl is discoverable and plan keeps inferred recommendations unauthorized", async () => {
   const helpLines: string[] = [];
   const originalLog = console.log;
@@ -259,26 +294,24 @@ test("impl validate and authorize use the canonical body and #572 Core", async (
   assert.equal((validated.output.canonical as Record<string, unknown>).valid, true);
 
   const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
-  assert.equal(authorized.exitCode, 0);
+  assert.equal(authorized.exitCode, 2);
   const authorization = authorized.output.authorization as Record<string, unknown>;
-  assert.equal(authorization.authorized, true);
-  assert.equal((authorization.record as Record<string, unknown>).kind, "implementation-authorization");
+  assert.equal(authorization.authorized, false);
+  assert.ok(
+    (authorization.violations as Array<Record<string, unknown>>).some(
+      (entry) => entry.code === "IMPLEMENTATION_AUTHORIZATION_NOT_READY",
+    ),
+  );
   assert.equal(authorized.output.mutation, false);
 });
 
 test("impl inspect uses provider relationship authority and detects stale base evidence", async () => {
   const adapter = new ImplementationCliAdapter(implementationBody(), BRANCH, 10);
-  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
+  const record = implementationAuthorizationRecord();
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-cli-"));
   try {
     const authorizationPath = path.join(directory, "authorization.json");
-    await writeFile(
-      authorizationPath,
-      JSON.stringify(
-        authorized.output.authorization && (authorized.output.authorization as Record<string, unknown>).record,
-      ),
-      "utf8",
-    );
+    await writeFile(authorizationPath, JSON.stringify(record), "utf8");
     const inspected = await invoke(
       ["impl", "inspect", "42", "--from", authorizationPath, "--capability", "github.issue.parent.native", "--json"],
       adapter,
@@ -302,18 +335,11 @@ test("impl inspect uses provider relationship authority and detects stale base e
 
 test("impl verify rereads the Implementation and checks the normalized PR evidence", async () => {
   const adapter = new ImplementationCliAdapter(implementationBody());
-  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
-  assert.equal(authorized.exitCode, 0);
+  const record = implementationAuthorizationRecord();
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-cli-"));
   try {
     const authorizationPath = path.join(directory, "authorization.json");
-    await writeFile(
-      authorizationPath,
-      JSON.stringify(
-        authorized.output.authorization && (authorized.output.authorization as Record<string, unknown>).record,
-      ),
-      "utf8",
-    );
+    await writeFile(authorizationPath, JSON.stringify(record), "utf8");
     const verified = await invoke(
       ["impl", "verify", "42", "--from", authorizationPath, "--pr", "90", "--json"],
       adapter,
@@ -338,11 +364,9 @@ test("impl verify rereads the Implementation and checks the normalized PR eviden
 
 test("impl verify --execution-evidence reaches conformant when authorization, PR, and targeted-test evidence match", async () => {
   const adapter = new ImplementationCliAdapter(implementationBody());
-  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
-  assert.equal(authorized.exitCode, 0);
+  const record = implementationAuthorizationRecord();
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-evidence-cli-"));
   try {
-    const record = (authorized.output.authorization as Record<string, unknown>).record as Record<string, unknown>;
     const authorizationPath = path.join(directory, "authorization.json");
     await writeFile(authorizationPath, JSON.stringify(record), "utf8");
     const evidencePath = path.join(directory, "evidence.json");
@@ -392,16 +416,11 @@ test("impl verify --execution-evidence reaches conformant when authorization, PR
 
 test("impl verify --execution-evidence fails closed on a malformed evidence file without leaking its path or contents", async () => {
   const adapter = new ImplementationCliAdapter(implementationBody());
-  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
-  assert.equal(authorized.exitCode, 0);
+  const record = implementationAuthorizationRecord();
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-malformed-cli-"));
   try {
     const authorizationPath = path.join(directory, "authorization.json");
-    await writeFile(
-      authorizationPath,
-      JSON.stringify((authorized.output.authorization as Record<string, unknown>).record),
-      "utf8",
-    );
+    await writeFile(authorizationPath, JSON.stringify(record), "utf8");
     const evidencePath = path.join(directory, "evidence.json");
     const secretMarker = "provider-secret-should-not-leak";
     await writeFile(evidencePath, JSON.stringify({ not: "valid execution evidence", marker: secretMarker }), "utf8");
@@ -434,16 +453,11 @@ test("impl verify --execution-evidence fails closed on a malformed evidence file
 
 test("impl verify --execution-evidence fails closed through the existing CLI error convention when the file is unreadable", async () => {
   const adapter = new ImplementationCliAdapter(implementationBody());
-  const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
-  assert.equal(authorized.exitCode, 0);
+  const record = implementationAuthorizationRecord();
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-verify-missing-evidence-cli-"));
   try {
     const authorizationPath = path.join(directory, "authorization.json");
-    await writeFile(
-      authorizationPath,
-      JSON.stringify((authorized.output.authorization as Record<string, unknown>).record),
-      "utf8",
-    );
+    await writeFile(authorizationPath, JSON.stringify(record), "utf8");
     const missingEvidencePath = path.join(directory, "missing-evidence.json");
     const verified = await invoke(
       [

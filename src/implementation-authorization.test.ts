@@ -16,6 +16,7 @@ import {
   validateImplementationSupersession,
   deserializeImplementationAuthorization,
 } from "./implementation-authorization.js";
+import { tryAdmitImplementationReadiness } from "./implementation-readiness.js";
 
 const repository = {
   repositoryHost: "github.com",
@@ -72,7 +73,38 @@ function contract(overrides: Record<string, unknown> = {}): Record<string, unkno
 const body = renderImplementationIssueBody(parseImplementationContract(contract()));
 
 function authorizationInput(bodyValue = body): Record<string, unknown> {
-  return { implementation, body: bodyValue, repository, base, authorizedAt: "2026-09-16T00:00:00.000Z" };
+  return {
+    implementation,
+    body: bodyValue,
+    repository,
+    base,
+    readiness: {
+      evidence: [
+        {
+          reference: source,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+    authorizedAt: "2026-09-16T00:00:00.000Z",
+  };
+}
+
+function readinessEvidence(
+  reference: Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    reference,
+    authority: "implementation-conformance",
+    status: "satisfied",
+    freshness: "current",
+    dependencies: [],
+    ...overrides,
+  };
 }
 
 test("canonical governed body digest ignores formatting and Issue metadata", () => {
@@ -192,4 +224,103 @@ test("supersession requires an explicit replacement relationship", () => {
   const record = authorizeImplementation(authorizationInput());
   const serialized = serializeImplementationAuthorization(record);
   assert.deepEqual(deserializeImplementationAuthorization(serialized), record);
+});
+
+test("readiness admits satisfied dependencies and surfaces prose prerequisites as unverified", () => {
+  const result = tryAdmitImplementationReadiness({
+    contract: parseImplementationContract(contract()),
+    implementation,
+    evidence: [readinessEvidence(source)],
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.admitted, true);
+  assert.equal(result.classification, "READY");
+  assert.deepEqual(result.unverifiedPrerequisites, ["The canonical contract is valid."]);
+});
+
+test("authorization rejects a blocked dependency at the Core boundary", () => {
+  const result = tryAuthorizeImplementation({
+    ...authorizationInput(),
+    readiness: { evidence: [readinessEvidence(source, { status: "blocked" })] },
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.readiness?.classification, "BLOCKED");
+  assert.equal(result.violations[0]?.code, "IMPLEMENTATION_AUTHORIZATION_NOT_READY");
+});
+
+test("missing and stale dependency evidence fail closed", () => {
+  const missing = tryAdmitImplementationReadiness({
+    contract: parseImplementationContract(contract()),
+    implementation,
+    evidence: [],
+  });
+  assert.equal(missing.classification, "INVALID");
+  assert.ok(missing.diagnostics.some((diagnostic) => diagnostic.code === "READINESS_DEPENDENCY_EVIDENCE_MISSING"));
+
+  const stale = tryAdmitImplementationReadiness({
+    contract: parseImplementationContract(contract()),
+    implementation,
+    evidence: [readinessEvidence(source, { freshness: "stale" })],
+  });
+  assert.equal(stale.classification, "INVALID");
+  assert.ok(stale.diagnostics.some((diagnostic) => diagnostic.code === "READINESS_DEPENDENCY_STALE"));
+});
+
+test("cycles and self-dependencies cannot be admitted", () => {
+  const other = { ...repository, number: 569 };
+  const cycleContract = parseImplementationContract(
+    contract({
+      execution: {
+        baseBranch: base.branch,
+        baseRevision: base.revision,
+        baseFreshness: base.freshness,
+        branch: "feat/572",
+        dependencies: [source],
+      },
+    }),
+  );
+  const cycle = tryAdmitImplementationReadiness({
+    contract: cycleContract,
+    implementation,
+    evidence: [
+      readinessEvidence(source, { dependencies: [other] }),
+      readinessEvidence(other, { dependencies: [source] }),
+    ],
+  });
+  assert.equal(cycle.classification, "INVALID");
+  assert.ok(cycle.diagnostics.some((diagnostic) => diagnostic.code === "READINESS_DEPENDENCY_CYCLE"));
+
+  const self = tryAdmitImplementationReadiness({
+    contract: parseImplementationContract(
+      contract({
+        execution: {
+          baseBranch: base.branch,
+          baseRevision: base.revision,
+          baseFreshness: base.freshness,
+          branch: "feat/572",
+          dependencies: [implementation],
+        },
+      }),
+    ),
+    implementation,
+    evidence: [],
+  });
+  assert.equal(self.classification, "INVALID");
+  assert.ok(self.diagnostics.some((diagnostic) => diagnostic.code === "READINESS_SELF_DEPENDENCY"));
+});
+
+test("superseded dependency evidence rejects authorization and replay preserves the record", () => {
+  const record = authorizeImplementation(authorizationInput());
+  const replay = tryAuthorizeImplementation({
+    ...authorizationInput(),
+    existingAuthorization: record,
+    readiness: {
+      evidence: [readinessEvidence(source, { supersededBy: [{ ...repository, number: 600 }] })],
+    },
+  });
+  assert.equal(replay.valid, false);
+  assert.equal(replay.status, "invalidated");
+  assert.equal(replay.readiness?.classification, "INVALID");
+  assert.deepEqual(replay.authorization, record);
+  assert.ok(replay.readiness?.diagnostics.some((diagnostic) => diagnostic.code === "READINESS_DEPENDENCY_SUPERSEDED"));
 });

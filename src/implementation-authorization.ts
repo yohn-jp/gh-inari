@@ -20,6 +20,10 @@ import {
   type ImplementationRepositoryIdentity,
 } from "./implementation-contract.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
+import {
+  tryAdmitImplementationReadiness,
+  type ImplementationReadinessAdmissionResult,
+} from "./implementation-readiness.js";
 
 export const IMPLEMENTATION_AUTHORIZATION_VERSION = 1 as const;
 export type ImplementationAuthorizationVersion = typeof IMPLEMENTATION_AUTHORIZATION_VERSION;
@@ -75,6 +79,8 @@ export interface ImplementationAuthorizationInput {
   readonly body?: string;
   readonly repository: ImplementationRepositoryIdentity;
   readonly base: ImplementationBaseEvidence;
+  /** Core-owned dependency readiness evidence required before authorization. */
+  readonly readiness?: unknown;
   /** Existing evidence must be supplied on replay; it is never overwritten. */
   readonly existingAuthorization?: unknown;
   readonly authorizedAt?: string;
@@ -87,6 +93,8 @@ export interface ImplementationAuthorizationVerificationInput {
   readonly body?: string;
   readonly repository?: ImplementationRepositoryIdentity;
   readonly base?: ImplementationBaseEvidence;
+  /** Optional current dependency readiness evidence for verification/replay. */
+  readonly readiness?: unknown;
   readonly supersession?: ImplementationSupersessionEvidence;
   readonly completed?: boolean;
 }
@@ -127,6 +135,7 @@ export interface ImplementationAuthorizationResult {
   readonly authorization?: ImplementationAuthorizationRecord;
   readonly contract?: ImplementationContract;
   readonly governedBodyDigest?: string;
+  readonly readiness?: ImplementationReadinessAdmissionResult;
   readonly violations: readonly ImplementationAuthorizationViolation[];
 }
 
@@ -167,6 +176,7 @@ const INPUT_KEYS = new Set([
   "body",
   "repository",
   "base",
+  "readiness",
   "existingAuthorization",
   "authorizedAt",
 ]);
@@ -177,6 +187,7 @@ const VERIFICATION_KEYS = new Set([
   "body",
   "repository",
   "base",
+  "readiness",
   "supersession",
   "completed",
 ]);
@@ -543,6 +554,35 @@ function contractBody(
   return { contract: parsed.contract, digest: implementationIssueBodyDigest(body) };
 }
 
+function readinessAdmission(
+  contract: ImplementationContract,
+  implementation: IssueReference | undefined,
+  input: unknown,
+): ImplementationReadinessAdmissionResult {
+  const evidence =
+    isRecord(input) && hasOwn(input, "evidence") ? input.evidence : input === undefined ? undefined : input;
+  return tryAdmitImplementationReadiness({
+    contract,
+    implementation,
+    ...(evidence === undefined ? {} : { evidence }),
+  });
+}
+
+function appendReadinessViolation(
+  readiness: ImplementationReadinessAdmissionResult,
+  violations: ImplementationAuthorizationViolation[],
+): void {
+  if (readiness.admitted) return;
+  addViolation(
+    violations,
+    "IMPLEMENTATION_AUTHORIZATION_NOT_READY",
+    "$.readiness",
+    `Implementation readiness admission is ${readiness.classification}.`,
+    "READY",
+    readiness.classification,
+  );
+}
+
 function bindingViolations(
   contract: ImplementationContract,
   implementation: IssueReference | undefined,
@@ -747,6 +787,7 @@ function authorizationResult(
     readonly authorization?: ImplementationAuthorizationRecord;
     readonly contract?: ImplementationContract;
     readonly governedBodyDigest?: string;
+    readonly readiness?: ImplementationReadinessAdmissionResult;
   } = {},
 ): ImplementationAuthorizationResult {
   return {
@@ -776,6 +817,8 @@ export function tryAuthorizeImplementation(input: unknown): ImplementationAuthor
   if (value === undefined || normalized.body === undefined) return authorizationResult("draft", violations);
   const parsed = contractBody(normalized.body, violations);
   if (parsed.contract === undefined || parsed.digest === undefined) return authorizationResult("draft", violations);
+  const readiness = readinessAdmission(parsed.contract, normalized.implementation, value.readiness);
+  appendReadinessViolation(readiness, violations);
   if (normalized.implementation === undefined)
     addViolation(
       violations,
@@ -834,20 +877,27 @@ export function tryAuthorizeImplementation(input: unknown): ImplementationAuthor
           authorization: record,
           contract: parsed.contract,
           governedBodyDigest: parsed.digest,
+          readiness,
         });
       return authorizationResult("invalidated", violations, {
         authorization: record,
         contract: parsed.contract,
         governedBodyDigest: parsed.digest,
+        readiness,
       });
     }
     return authorizationResult("invalidated", violations, {
       contract: parsed.contract,
       governedBodyDigest: parsed.digest,
+      readiness,
     });
   }
   if (violations.length > 0)
-    return authorizationResult("ready", violations, { contract: parsed.contract, governedBodyDigest: parsed.digest });
+    return authorizationResult("ready", violations, {
+      contract: parsed.contract,
+      governedBodyDigest: parsed.digest,
+      readiness,
+    });
   const repository = normalized.repository as ImplementationRepositoryIdentity;
   const base = normalized.base as ImplementationBaseEvidence;
   const implementation = normalized.implementation as IssueReference;
@@ -865,6 +915,7 @@ export function tryAuthorizeImplementation(input: unknown): ImplementationAuthor
     authorization: record,
     contract: parsed.contract,
     governedBodyDigest: parsed.digest,
+    readiness,
   });
 }
 
@@ -952,6 +1003,11 @@ export function tryVerifyImplementationAuthorization(input: unknown): Implementa
       authorized: false,
       current: false,
     };
+  const readiness =
+    value?.readiness === undefined
+      ? undefined
+      : readinessAdmission(parsed.contract, normalizedInput.implementation, value.readiness);
+  if (readiness !== undefined) appendReadinessViolation(readiness, violations);
   if (normalizedInput.implementation === undefined)
     addViolation(
       violations,
@@ -990,6 +1046,7 @@ export function tryVerifyImplementationAuthorization(input: unknown): Implementa
         authorization: record,
         contract: parsed.contract,
         governedBodyDigest: parsed.digest,
+        ...(readiness === undefined ? {} : { readiness }),
       }),
       authorized: true,
       current: true,
@@ -1007,6 +1064,7 @@ export function tryVerifyImplementationAuthorization(input: unknown): Implementa
         authorization: record,
         contract: parsed.contract,
         governedBodyDigest: parsed.digest,
+        ...(readiness === undefined ? {} : { readiness }),
       }),
       authorized: false,
       current: false,
@@ -1016,6 +1074,7 @@ export function tryVerifyImplementationAuthorization(input: unknown): Implementa
       authorization: record,
       contract: parsed.contract,
       governedBodyDigest: parsed.digest,
+      ...(readiness === undefined ? {} : { readiness }),
     }),
     authorized: true,
     current: true,
