@@ -7,6 +7,17 @@ import {
   SemanticIssueClosureExecutorError,
   type SemanticIssueClosureProvider,
 } from "./semantic-issue-closure-executor.js";
+import {
+  IMPLEMENTATION_CONTRACT_VERSION,
+  IMPLEMENTATION_KIND,
+  parseImplementationContract,
+  renderImplementationIssueBody,
+} from "./implementation-contract.js";
+import { authorizeImplementation, type ImplementationAuthorizationRecord } from "./implementation-authorization.js";
+import {
+  IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
+  IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
+} from "./implementation-execution-evidence.js";
 
 const target: IssueReference = {
   repositoryHost: "github.com",
@@ -14,10 +25,168 @@ const target: IssueReference = {
   repository: "acme/inari",
   number: 10,
 };
+const implementationSource = { ...target, number: 678 } as const;
+const implementationBase = { branch: "main", revision: "base-revision", freshness: "base-freshness" } as const;
+
+function implementationContract(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: IMPLEMENTATION_CONTRACT_VERSION,
+    kind: IMPLEMENTATION_KIND,
+    repository: {
+      repositoryHost: target.repositoryHost,
+      repositoryId: target.repositoryId,
+      repository: target.repository,
+    },
+    sources: [implementationSource],
+    objective: "Reach closure admissibility for the target Issue.",
+    nonGoals: ["Change merge"],
+    architecture: {
+      decision: "Compose existing evidence boundaries.",
+      affectedComponents: ["Issue closure"],
+      invariants: ["Completion is never caller asserted."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: [], delete: [], deny: ["src/private/**"] },
+    constraints: {
+      prohibitedOperations: ["Do not equate merge with completion."],
+      immutableAreas: ["Authorization identity"],
+      prerequisites: ["Current evidence is reread."],
+    },
+    verification: {
+      acceptanceCriteria: ["Terminal state is evidence-derived."],
+      targetedTests: [],
+      requiredChecks: ["verify"],
+      postconditions: ["Historical authorization remains inspectable."],
+    },
+    execution: {
+      baseBranch: implementationBase.branch,
+      baseRevision: implementationBase.revision,
+      baseFreshness: implementationBase.freshness,
+      branch: "feat/10-closure",
+      dependencies: [implementationSource],
+    },
+    ...overrides,
+  };
+}
+
+function implementationAuthorization(): ImplementationAuthorizationRecord {
+  const body = renderImplementationIssueBody(parseImplementationContract(implementationContract()));
+  return authorizeImplementation({
+    implementation: target,
+    body,
+    repository: {
+      repositoryHost: target.repositoryHost,
+      repositoryId: target.repositoryId,
+      repository: target.repository,
+    },
+    base: implementationBase,
+    readiness: {
+      evidence: [
+        {
+          reference: implementationSource,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
+}
+
+function implementationCollection(items: readonly unknown[]): Record<string, unknown> {
+  return {
+    status: "available",
+    items,
+    pagination: { perPage: 100, pages: 1, returned: items.length, truncated: false },
+    diagnostics: [],
+  };
+}
+
+function implementationPullRequest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    repository: { host: target.repositoryHost, nameWithOwner: target.repository, repositoryId: target.repositoryId },
+    number: 9010,
+    title: "Closure for Issue 10",
+    body: "not lifecycle authority",
+    state: "open",
+    author: null,
+    head: { ref: "feat/10-closure", sha: "head-revision" },
+    base: { ref: "main", sha: "base-revision" },
+    draft: false,
+    labels: [],
+    assignees: [],
+    url: "https://provider.invalid/pull/9010",
+    checks: implementationCollection([
+      {
+        id: "verify",
+        name: "verify",
+        kind: "check-run",
+        identity: { context: "verify", producer: "app:trusted" },
+        status: "completed",
+        conclusion: "success",
+        current: true,
+      },
+    ]),
+    requiredCheckBindings: implementationCollection([{ context: "verify", producer: "app:trusted" }]),
+    reviews: implementationCollection([]),
+    comments: implementationCollection([]),
+    inlineReviewComments: implementationCollection([]),
+    changedFiles: implementationCollection([{ filename: "src/semantic-issue-closure.ts", status: "modified" }]),
+    provenance: { provider: "github", endpoints: ["pulls/9010"] },
+    ...overrides,
+  };
+}
+
+function implementationExecutionEvidence(
+  record: ImplementationAuthorizationRecord,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
+    kind: IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
+    implementation: record.implementation,
+    repository: record.repository,
+    governedBodyDigest: record.governedBodyDigest,
+    base: record.base,
+    branch: "feat/10-closure",
+    headRevision: "head-revision",
+    targetedTests: [],
+    ...overrides,
+  };
+}
+
+/** Genuine raw #686 Implementation lifecycle evidence proving completion for `target`. */
+function implementationEvidence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const record = implementationAuthorization();
+  const body = renderImplementationIssueBody(parseImplementationContract(implementationContract()));
+  return {
+    authorization: record,
+    issue: { reference: target, body },
+    repository: {
+      repositoryHost: target.repositoryHost,
+      repositoryId: target.repositoryId,
+      repository: target.repository,
+    },
+    base: implementationBase,
+    pullRequestNumber: 9010,
+    pullRequest: implementationPullRequest(),
+    executionEvidence: implementationExecutionEvidence(record),
+    ...overrides,
+  };
+}
+
+/** Genuine raw evidence that resolves to a non-current, non-authorized (invalidated) result. */
+function implementationEvidenceStale(): Record<string, unknown> {
+  const driftedBody = renderImplementationIssueBody(
+    parseImplementationContract(implementationContract({ objective: "A drifted objective." })),
+  );
+  return implementationEvidence({ issue: { reference: target, body: driftedBody } });
+}
 
 function evidence(
   state: "open" | "closed",
-  implementation: Record<string, unknown> = {},
+  implementation: Record<string, unknown> = implementationEvidence(),
 ): SemanticIssueClosureEvidenceInput {
   return {
     lifecycle: {
@@ -47,15 +216,7 @@ function evidence(
         },
       ],
     },
-    implementation: {
-      valid: true,
-      status: "completed",
-      authorized: true,
-      current: true,
-      authorization: { implementation: target },
-      violations: [],
-      ...implementation,
-    },
+    implementation,
   };
 }
 
@@ -97,7 +258,7 @@ test("close executor rereads, applies one explicit effect, and verifies provider
 });
 
 test("close executor rejects stale reread evidence before the effect", async () => {
-  const provider = new Provider(evidence("open", { current: false, authorized: false }));
+  const provider = new Provider(evidence("open", implementationEvidenceStale()));
   await assert.rejects(
     new LocalSemanticIssueClosureExecutor({ provider }).execute({ version: "1", plan: plan() }),
     (error: unknown) =>
@@ -116,7 +277,7 @@ test("already-closed retry is idempotent only for compatible evidence", async ()
   assert.equal(retry.outcome, "idempotent");
   assert.deepEqual(provider.calls, ["readEvidence", "closeIssue", "readState", "readEvidence"]);
 
-  const incompatible = new Provider(evidence("closed", { current: false, authorized: false }));
+  const incompatible = new Provider(evidence("closed", implementationEvidenceStale()));
   await assert.rejects(
     new LocalSemanticIssueClosureExecutor({ provider: incompatible }).execute(request),
     (error: unknown) =>

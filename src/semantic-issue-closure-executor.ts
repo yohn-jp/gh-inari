@@ -162,6 +162,7 @@ function evidenceInput(plan: SemanticIssueClosurePlan, evidence: SemanticIssueCl
     lifecycle: evidence.lifecycle,
     ...(evidence.implementation === undefined ? {} : { implementation: evidence.implementation }),
     ...(evidence.change === undefined ? {} : { change: evidence.change }),
+    ...(evidence.children === undefined ? {} : { children: evidence.children }),
   };
 }
 

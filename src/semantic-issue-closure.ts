@@ -10,6 +10,7 @@
 
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 import { validateChangeProjectionResult } from "./change.js";
+import { tryProjectImplementationLifecycle } from "./implementation-lifecycle.js";
 import {
   tryProjectSemanticIssueLifecycle,
   type SemanticIssueLifecycleIssueProjection,
@@ -31,13 +32,24 @@ export type SemanticIssueClosureStatus = (typeof SEMANTIC_ISSUE_CLOSURE_STATUSES
 export const SEMANTIC_ISSUE_CLOSURE_TERMINAL_STATES = Object.freeze(["completed", "aborted", "merged"] as const);
 export type SemanticIssueClosureTerminalState = (typeof SEMANTIC_ISSUE_CLOSURE_TERMINAL_STATES)[number];
 
+/** Raw per-child terminal evidence, required for every tracker child before close. */
+export interface SemanticIssueClosureChildEvidence {
+  readonly reference: IssueReference;
+  /** Raw #686 Implementation lifecycle evidence for this child, when applicable. */
+  readonly implementation?: unknown;
+  /** Raw #687 Change projection result for this child, when applicable. */
+  readonly change?: unknown;
+}
+
 /** Evidence read from the existing lifecycle and terminal authorities. */
 export interface SemanticIssueClosureEvidenceInput {
   readonly lifecycle: unknown;
-  /** Existing #686 Implementation lifecycle result, when this is a leaf. */
+  /** Raw #686 Implementation lifecycle evidence (authorization/conformance/change-identity reread), when this is a leaf. */
   readonly implementation?: unknown;
   /** Existing #687 Change projection result, when this is a leaf. */
   readonly change?: unknown;
+  /** Per-child terminal evidence; every authoritative tracker child requires an entry. */
+  readonly children?: readonly SemanticIssueClosureChildEvidence[];
 }
 
 /** Caller input for one explicit close-admissibility query. */
@@ -77,6 +89,12 @@ export interface SemanticIssueClosureProjection {
     readonly implementation: SemanticIssueClosureTerminalEvidenceProjection;
     readonly change: SemanticIssueClosureTerminalEvidenceProjection;
   }>;
+  /** Per-child terminal evidence for a tracker's required children. */
+  readonly childTerminalEvidence?: readonly {
+    readonly reference: IssueReference;
+    readonly implementation: SemanticIssueClosureTerminalEvidenceProjection;
+    readonly change: SemanticIssueClosureTerminalEvidenceProjection;
+  }[];
   readonly finalGateRemainder?: IssueReference;
   readonly effect?: SemanticIssueClosureEffect;
 }
@@ -142,18 +160,10 @@ export class SemanticIssueClosureError extends Error {
 
 type RecordValue = Record<string, unknown>;
 
-const INPUT_KEYS = new Set(["target", "intent", "lifecycle", "implementation", "change"]);
+const INPUT_KEYS = new Set(["target", "intent", "lifecycle", "implementation", "change", "children"]);
+const CHILD_KEYS = new Set(["reference", "implementation", "change"]);
 const PLAN_KEYS = new Set(["version", "kind", "request", "evidence", "admissibility", "effect"]);
 const REQUEST_KEYS = new Set(["target", "intent"]);
-const TERMINAL_RESULT_STATUSES = new Set([
-  "draft",
-  "ready",
-  "authorized",
-  "invalidated",
-  "superseded",
-  "completed",
-  "aborted",
-]);
 
 function isRecord(value: unknown): value is RecordValue {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -250,30 +260,35 @@ function terminalEvidence(
   kind: "implementation" | "change",
   target: IssueReference,
   diagnostics: SemanticIssueClosureDiagnostic[],
+  pathPrefix = "$",
 ): SemanticIssueClosureTerminalEvidenceProjection {
   if (value === undefined) return { status: "absent" };
   if (!isRecord(value)) {
     diagnostics.push(
-      diagnostic("CLOSURE_TERMINAL_EVIDENCE_INVALID", `$.${kind}`, `${kind} terminal evidence must be an object.`),
+      diagnostic(
+        "CLOSURE_TERMINAL_EVIDENCE_INVALID",
+        `${pathPrefix}.${kind}`,
+        `${kind} terminal evidence must be an object.`,
+      ),
     );
     return { status: "unverifiable" };
   }
 
   if (kind === "implementation") {
-    const status = value.status;
-    const valid = value.valid;
-    const current = value.current;
-    const authorized = value.authorized;
-    const authorization = isRecord(value.authorization) ? value.authorization : undefined;
+    const result = tryProjectImplementationLifecycle(value);
     const implementation =
-      authorization === undefined
+      result.authorization === undefined
         ? undefined
-        : reference(authorization.implementation, "$.implementation.authorization.implementation", diagnostics);
+        : reference(
+            result.authorization.implementation,
+            `${pathPrefix}.implementation.authorization.implementation`,
+            diagnostics,
+          );
     if (implementation !== undefined && !sameReference(implementation, target)) {
       diagnostics.push(
         diagnostic(
           "CLOSURE_TERMINAL_EVIDENCE_CONTRADICTORY",
-          "$.implementation.authorization.implementation",
+          `${pathPrefix}.implementation.authorization.implementation`,
           "Implementation terminal evidence targets a different Issue.",
           target,
           implementation,
@@ -282,37 +297,36 @@ function terminalEvidence(
       return { status: "unverifiable" };
     }
     if (
-      typeof status !== "string" ||
-      !TERMINAL_RESULT_STATUSES.has(status) ||
-      valid !== true ||
-      authorization === undefined ||
+      result.valid !== true ||
+      result.status === undefined ||
+      result.authorization === undefined ||
       implementation === undefined
     ) {
       diagnostics.push(
         diagnostic(
           "CLOSURE_TERMINAL_EVIDENCE_INVALID",
-          "$.implementation",
+          `${pathPrefix}.implementation`,
           "Implementation lifecycle evidence is not a complete authoritative result.",
         ),
       );
       return { status: "unverifiable" };
     }
-    if (Array.isArray(value.violations) && value.violations.length > 0) {
+    if (result.violations.length > 0) {
       diagnostics.push(
         diagnostic(
           "CLOSURE_TERMINAL_EVIDENCE_STALE",
-          "$.implementation.violations",
+          `${pathPrefix}.implementation.violations`,
           "Implementation terminal evidence contains violations.",
         ),
       );
       return { status: "unverifiable" };
     }
-    if (status === "completed") {
-      if (current !== true || authorized !== true) {
+    if (result.status === "completed") {
+      if (result.current !== true || result.authorized !== true) {
         diagnostics.push(
           diagnostic(
             "CLOSURE_TERMINAL_EVIDENCE_STALE",
-            "$.implementation",
+            `${pathPrefix}.implementation`,
             "Completed Implementation evidence is not current and authorized.",
           ),
         );
@@ -320,12 +334,12 @@ function terminalEvidence(
       }
       return { status: "terminal", state: "completed", outcome: "successful" };
     }
-    if (status === "aborted") {
-      if (current !== false || authorized !== false) {
+    if (result.status === "aborted") {
+      if (result.current !== false || result.authorized !== false) {
         diagnostics.push(
           diagnostic(
             "CLOSURE_TERMINAL_EVIDENCE_STALE",
-            "$.implementation",
+            `${pathPrefix}.implementation`,
             "Aborted Implementation evidence has an inconsistent authority state.",
           ),
         );
@@ -333,11 +347,11 @@ function terminalEvidence(
       }
       return { status: "terminal", state: "aborted", outcome: "aborted" };
     }
-    if (current !== true || authorized !== true) {
+    if (result.current !== true || result.authorized !== true) {
       diagnostics.push(
         diagnostic(
           "CLOSURE_TERMINAL_EVIDENCE_STALE",
-          "$.implementation",
+          `${pathPrefix}.implementation`,
           "Non-terminal Implementation evidence is not current and authorized.",
         ),
       );
@@ -351,7 +365,7 @@ function terminalEvidence(
     diagnostics.push(
       diagnostic(
         "CLOSURE_TERMINAL_EVIDENCE_INVALID",
-        "$.change",
+        `${pathPrefix}.change`,
         "Change evidence is not a valid #687 projection result.",
       ),
     );
@@ -361,7 +375,11 @@ function terminalEvidence(
   if (projection.status === "absent") return { status: "absent" };
   if (projection.status !== "healthy" || projection.change === undefined || projection.valid !== true) {
     diagnostics.push(
-      diagnostic("CLOSURE_TERMINAL_EVIDENCE_STALE", "$.change", "Change evidence is incomplete or unavailable."),
+      diagnostic(
+        "CLOSURE_TERMINAL_EVIDENCE_STALE",
+        `${pathPrefix}.change`,
+        "Change evidence is incomplete or unavailable.",
+      ),
     );
     return { status: "unverifiable" };
   }
@@ -374,7 +392,7 @@ function terminalEvidence(
     diagnostics.push(
       diagnostic(
         "CLOSURE_TERMINAL_EVIDENCE_CONTRADICTORY",
-        "$.change.change.identity",
+        `${pathPrefix}.change.change.identity`,
         "Change terminal evidence targets a different Issue.",
         target,
         changeReference,
@@ -502,6 +520,30 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
         "Issue closure requires an explicit tracker or leaf role.",
       ),
     );
+  const childEvidenceByKey = new Map<string, RecordValue>();
+  if (input.children !== undefined) {
+    if (!Array.isArray(input.children))
+      diagnostics.push(
+        diagnostic("CLOSURE_INPUT_INVALID", "$.children", "Closure children evidence must be an array."),
+      );
+    else
+      input.children.forEach((entry, index) => {
+        const path = `$.children[${index}]`;
+        if (!isRecord(entry)) {
+          diagnostics.push(diagnostic("CLOSURE_INPUT_INVALID", path, "Child evidence must be an object."));
+          return;
+        }
+        unknownProperties(entry, CHILD_KEYS, path, diagnostics);
+        const childReference = reference(entry.reference, `${path}.reference`, diagnostics);
+        if (childReference !== undefined) childEvidenceByKey.set(issueReferenceKey(childReference), entry);
+      });
+  }
+  let childrenTerminalConfirmed = true;
+  const childTerminalEvidence: {
+    readonly reference: IssueReference;
+    readonly implementation: SemanticIssueClosureTerminalEvidenceProjection;
+    readonly change: SemanticIssueClosureTerminalEvidenceProjection;
+  }[] = [];
   if (targetIssue.role === "tracker") {
     for (const child of targetIssue.children) {
       const childIssue = byReference.get(issueReferenceKey(child));
@@ -513,6 +555,48 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
             "Every authoritative tracker child must have complete observed state evidence.",
           ),
         );
+        childrenTerminalConfirmed = false;
+        continue;
+      }
+      if (childIssue.observedState !== "closed") continue;
+      const childKey = issueReferenceKey(child);
+      const childEntry = childEvidenceByKey.get(childKey);
+      const childPath = `$.children[${childKey}]`;
+      if (childEntry === undefined) {
+        diagnostics.push(
+          diagnostic(
+            "CLOSURE_RELATION_EVIDENCE_UNAVAILABLE",
+            childPath,
+            "Every authoritative tracker child requires terminal evidence.",
+          ),
+        );
+        childrenTerminalConfirmed = false;
+        continue;
+      }
+      const childImplementation = terminalEvidence(
+        childEntry.implementation,
+        "implementation",
+        child,
+        diagnostics,
+        childPath,
+      );
+      const childChange = terminalEvidence(childEntry.change, "change", child, diagnostics, childPath);
+      childTerminalEvidence.push({ reference: child, implementation: childImplementation, change: childChange });
+      const childCombined = combineTerminalEvidence(childImplementation, childChange, diagnostics);
+      if (childCombined === "absent") {
+        diagnostics.push(
+          diagnostic(
+            "CLOSURE_TERMINAL_EVIDENCE_MISSING",
+            childPath,
+            "Tracker child requires authoritative Implementation or Change terminal evidence.",
+          ),
+        );
+        childrenTerminalConfirmed = false;
+      } else if (
+        childCombined !== "terminal" ||
+        (childImplementation.outcome ?? childChange.outcome) !== "successful"
+      ) {
+        childrenTerminalConfirmed = false;
       }
     }
   }
@@ -534,7 +618,7 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
   if (diagnostics.length === 0 && targetState !== undefined) {
     if (role === "tracker") {
       if (targetIssue.completion.status === "complete")
-        status = targetState === "closed" ? "already-closed" : "closable";
+        status = childrenTerminalConfirmed ? (targetState === "closed" ? "already-closed" : "closable") : "blocked";
       else if (targetIssue.completion.status === "in-progress") status = "blocked";
       else {
         diagnostics.push(
@@ -582,6 +666,7 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
       childrenEvidence: targetIssue.childrenEvidence,
     },
     terminalEvidence: { implementation, change },
+    ...(role === "tracker" ? { childTerminalEvidence: Object.freeze(childTerminalEvidence) } : {}),
     ...(targetIssue.completion.finalGateRemainder === undefined
       ? {}
       : { finalGateRemainder: targetIssue.completion.finalGateRemainder }),
@@ -626,6 +711,9 @@ export function tryPlanSemanticIssueClosure(input: unknown): SemanticIssueClosur
     lifecycle: input.lifecycle,
     ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
     ...(input.change === undefined ? {} : { change: input.change }),
+    ...(input.children === undefined
+      ? {}
+      : { children: input.children as SemanticIssueClosureEvidenceInput["children"] }),
   };
   const plan: SemanticIssueClosurePlan = {
     version: SEMANTIC_ISSUE_CLOSURE_VERSION,
@@ -670,6 +758,7 @@ export function validateSemanticIssueClosurePlan(input: unknown): SemanticIssueC
     lifecycle: input.evidence.lifecycle,
     ...(input.evidence.implementation === undefined ? {} : { implementation: input.evidence.implementation }),
     ...(input.evidence.change === undefined ? {} : { change: input.evidence.change }),
+    ...(input.evidence.children === undefined ? {} : { children: input.evidence.children }),
   });
   diagnostics.push(...fresh.diagnostics);
   if (target !== undefined && fresh.plan !== undefined) {
