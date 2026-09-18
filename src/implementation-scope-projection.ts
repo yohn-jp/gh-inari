@@ -20,10 +20,7 @@ import {
   type ImplementationAuthorizationViolationCode,
   type ImplementationBaseEvidence,
 } from "./implementation-authorization.js";
-import {
-  tryProjectImplementationLifecycle,
-  type ImplementationLifecycleInput,
-} from "./implementation-lifecycle.js";
+import { tryProjectImplementationLifecycle, type ImplementationLifecycleInput } from "./implementation-lifecycle.js";
 import {
   IMPLEMENTATION_CONTRACT_VERSION,
   canonicalizeImplementationScopePath,
