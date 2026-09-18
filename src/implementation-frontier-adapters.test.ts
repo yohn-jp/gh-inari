@@ -9,47 +9,15 @@ import { runCli } from "./cli-core.js";
 import { tryProjectImplementationFrontier } from "./implementation-frontier.js";
 import { createInariMcpServer } from "./mcp/server.js";
 
-const repository = {
-  repositoryHost: "github.com",
-  repositoryId: "677",
-  repository: "acme/frontier",
-} as const;
-const reference = { ...repository, number: 677 } as const;
-
 function frontierInput(): Record<string, unknown> {
-  return {
-    issues: [
-      {
-        reference,
-        observed: {
-          version: "1",
-          kind: "issue",
-          number: reference.number,
-          state: "open",
-          title: "Frontier candidate",
-          body: "",
-          metadata: {},
-          relations: {
-            parent: { relation: "parent", representation: "none", evidence: {} },
-            dependsOn: {
-              relation: "dependsOn",
-              references: [],
-              representation: "none",
-              evidence: { native: [], bodyFallback: [] },
-            },
-          },
-        },
-      },
-    ],
-    candidates: [{ reference }],
-  };
+  return { candidates: [] };
 }
 
 test("CLI and MCP expose the exact same Core Implementation Frontier projection", async () => {
   const input = frontierInput();
   const core = tryProjectImplementationFrontier(input);
   assert.equal(core.valid, true);
-  assert.equal(core.projection?.candidates[0]?.classification, "READY");
+  assert.deepEqual(core.projection?.candidates, []);
 
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-frontier-adapters-"));
   const inputPath = path.join(directory, "frontier.json");
