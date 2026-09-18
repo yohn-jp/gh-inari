@@ -11,7 +11,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 const bin = packageJson.bin ?? {};
 
-const targets = new Set(["gh-inari", ...Object.values(bin)]);
+const targets = new Set(Object.values(bin));
 for (const relativeTarget of targets) {
   const target = path.join(repoRoot, relativeTarget);
   const stat = fs.statSync(target);

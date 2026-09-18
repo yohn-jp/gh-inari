@@ -43,8 +43,8 @@ Implementation detail belongs to child Issues.
 Generate projections after editing a semantic source:
 
 ```sh
-gh inari template sync
-gh inari template sync --check
+inari template sync
+inari template sync --check
 ```
 
 The check mode never writes files and exits non-zero when a committed projection is missing or differs. Generation is byte-stable for unchanged semantic JSON and emits a bounded generated notice in the native file.
@@ -52,8 +52,8 @@ The check mode never writes files and exits non-zero when a committed projection
 Existing native templates can be bootstrapped into the semantic directory with:
 
 ```sh
-gh inari template import --from .github/ISSUE_TEMPLATE/legacy.yml
-gh inari template import --from .github/PULL_REQUEST_TEMPLATE.md
+inari template import --from .github/ISSUE_TEMPLATE/legacy.yml
+inari template import --from .github/PULL_REQUEST_TEMPLATE.md
 ```
 
 Import uses the supported native parser and fails closed for unsupported or ambiguous constructs. After import, the semantic source is authoritative; native files must be regenerated.
@@ -73,15 +73,15 @@ The shared resolver applies explicit selector, configured default, sole
 candidate, interactive TTY selection, and bounded non-interactive failure in
 that order. A configured selector that is invalid or unavailable fails closed.
 
-Governed `issue create`/`pr create` against a repository using `.github/inari/` requires the committed native projection to be current: the contract's provenance is bound to the generated native file (matching `templateIdentity.path`), not the semantic JSON, so `gh inari template sync` must be run and pushed before governed mutations pick up a semantic source change.
+Governed `issue create`/`pr create` against a repository using `.github/inari/` requires the committed native projection to be current: the contract's provenance is bound to the generated native file (matching `templateIdentity.path`), not the semantic JSON, so `inari template sync` must be run and pushed before governed mutations pick up a semantic source change.
 
 Omitting `--to` writes to the correct discoverable default. An explicit `--to` outside the discoverable paths above still succeeds but prints a warning, since `template list`'s `semanticTemplates` will not include it.
 
 For machine input, use the compact semantic view:
 
 ```sh
-gh inari issue schema bug --compact --json
-gh inari pr schema --compact --json
+inari issue schema bug --compact --json
+inari pr schema --compact --json
 ```
 
 The compact view contains field identity, type, requiredness, choices, and relevant constraints. Fixed Markdown/YAML presentation is intentionally omitted. Issue/PR creation continues to accept semantic JSON with `--from <file.json>` or `--from -`; rendering and round-trip validation happen before the existing governed GitHub mutation boundary.

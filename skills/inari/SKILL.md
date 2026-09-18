@@ -15,9 +15,9 @@ templates into deterministic typed contracts, validates structured input,
 renders canonical Markdown, and mutates GitHub only after contract,
 input, and rendered artifact have all passed validation.
 
-`inari` is the canonical executable for agents and humans. `gh inari` remains
-the GitHub CLI extension compatibility path; `gh-inari` is the direct package
-executable and `npx --yes gh-inari` is the deterministic fallback.
+`inari` is the canonical executable for agents and humans. `gh-inari` is the
+direct npm package alias and `npx --yes gh-inari` is the deterministic
+fallback.
 
 ## When to use
 

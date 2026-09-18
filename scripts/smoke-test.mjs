@@ -1025,34 +1025,7 @@ function main() {
     observedContractVersions.statusRecovery = goldenPathVersions.statusRecoveryVersion;
     certifyNpxFallback(certificationRoot, tarballPath, externalExecutables);
 
-    // Compatibility certification is also fed from the installed package. It
-    // is deliberately performed after canonical preflight; no checked-out
-    // executable or repository-local package is installed as an extension.
-    const extensionEnvironment = {
-      ...installedEnvironment,
-      GH_CONFIG_DIR: path.join(certificationRoot, "extension-gh"),
-    };
-    console.log("installing the packed executable as a local GitHub CLI extension...");
-    run(ghExecutable, ["extension", "install", "."], {
-      cwd: installedPackageDirectory,
-      env: extensionEnvironment,
-    });
-    const extensionHelp = invoke(ghExecutable, ["inari", "--help"], {
-      cwd: consumerDirectory,
-      env: extensionEnvironment,
-    });
-    if (extensionHelp.status !== 0 || !(extensionHelp.stdout ?? "").includes("Usage: inari"))
-      fail("gh inari did not execute the installed packed executable");
-    const extensionVersion = jsonOutput(
-      invoke(ghExecutable, ["inari", "--version", "--json"], {
-        cwd: consumerDirectory,
-        env: extensionEnvironment,
-      }),
-      "gh inari packed --version --json",
-    );
-    validateVersionOutput(extensionVersion, packageJson);
-
-    console.log("packed artifact preflight, entry, and complete Golden Path certification passed.");
+    console.log("packed npm artifact preflight, entry, and complete Golden Path certification passed.");
     if (evidence !== undefined) {
       writePackedEvidence(evidence, tarballPath, CERTIFICATION_RESULTS[0], [], observedContractVersions);
       console.log(`packed certification evidence written to ${path.resolve(evidence)}`);

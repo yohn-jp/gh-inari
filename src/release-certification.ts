@@ -124,41 +124,9 @@ export interface ReleaseCertificationVerificationResult {
   readonly diagnostics: readonly ReleaseCertificationVerificationDiagnostic[];
 }
 
-export interface GhExtensionReleaseCertificationVerificationInput {
-  readonly expectedReleaseSourceCommitSha: string;
-  readonly expectedRepositoryOwner: string;
-  readonly expectedRepositoryName: string;
-  readonly expectedDogfoodWorkflowRunId: string;
-  readonly expectedDogfoodWorkflowRunAttempt: string;
-  readonly expectedReleaseTag?: string;
-  readonly expectedArtifactManifestSha256: string;
-  readonly observedArtifactManifestSha256: string;
-  readonly dogfoodEvidence: unknown;
-}
-
-export type GhExtensionReleaseCertificationDiagnosticCode =
-  ReleaseCertificationDiagnosticCode | "ARTIFACT_MANIFEST_INVALID" | "ARTIFACT_MANIFEST_MISMATCH";
-
-export interface GhExtensionReleaseCertificationDiagnostic extends CertificationDiagnostic {
-  readonly code: GhExtensionReleaseCertificationDiagnosticCode;
-}
-
-export interface GhExtensionReleaseCertificationVerificationResult {
-  readonly passed: boolean;
-  readonly diagnostics: readonly GhExtensionReleaseCertificationDiagnostic[];
-}
-
 function pushDiagnostic(
   diagnostics: ReleaseCertificationVerificationDiagnostic[],
   code: ReleaseCertificationDiagnosticCode,
-  message: string,
-): void {
-  appendCertificationDiagnostic(diagnostics, code, message);
-}
-
-function pushExtensionDiagnostic(
-  diagnostics: GhExtensionReleaseCertificationDiagnostic[],
-  code: GhExtensionReleaseCertificationDiagnosticCode,
   message: string,
 ): void {
   appendCertificationDiagnostic(diagnostics, code, message);
@@ -237,43 +205,6 @@ function verifySelfDogfoodIdentityValue(
   return valid;
 }
 
-function verifySelfDogfoodEvidence(
-  value: unknown,
-  expectedReleaseSourceCommitSha: string,
-  expectedRepositoryOwner: string,
-  expectedRepositoryName: string,
-  expectedWorkflowRunId: string,
-  expectedWorkflowRunAttempt: string,
-  diagnostics: { code: string; message: string }[],
-): boolean {
-  const evidence = validatedEvidence(value, CERTIFICATION_KINDS[1], diagnostics);
-  if (evidence === undefined) return false;
-  const dogfood = evidence as SelfDogfoodCertificationEvidence;
-  let valid = true;
-  if (dogfood.result !== CERTIFICATION_RESULTS[0]) {
-    appendCertificationDiagnostic(diagnostics, "RESULT_NOT_PASSED", "Certification evidence did not pass.");
-    valid = false;
-  }
-  if (dogfood.sourceCommitSha !== expectedReleaseSourceCommitSha) {
-    appendCertificationDiagnostic(
-      diagnostics,
-      "SOURCE_SHA_MISMATCH",
-      "Certification evidence source SHA does not match the release.",
-    );
-    valid = false;
-  }
-  return (
-    verifySelfDogfoodIdentityValue(
-      dogfood,
-      expectedRepositoryOwner,
-      expectedRepositoryName,
-      expectedWorkflowRunId,
-      expectedWorkflowRunAttempt,
-      diagnostics,
-    ) && valid
-  );
-}
-
 function verifyEvidence(
   value: unknown,
   expectedKind: ReleaseCertificationKind,
@@ -348,67 +279,6 @@ export function verifyReleaseCertification(
     pushDiagnostic(diagnostics, "EVIDENCE_MISSING", "Self-dogfood certification evidence is required.");
   } else {
     verifyEvidence(input.dogfoodEvidence, CERTIFICATION_KINDS[1], input, diagnostics);
-  }
-  return { passed: diagnostics.length === 0, diagnostics };
-}
-
-const ARTIFACT_MANIFEST_SHA256_PATTERN = /^[0-9a-f]{64}$/u;
-
-function validGhExtensionExpectedIdentity(input: GhExtensionReleaseCertificationVerificationInput): boolean {
-  return (
-    isCertificationSourceCommitSha(input.expectedReleaseSourceCommitSha) &&
-    isCertificationRepositoryPart(input.expectedRepositoryOwner) &&
-    isCertificationRepositoryPart(input.expectedRepositoryName) &&
-    isCertificationWorkflowRunId(input.expectedDogfoodWorkflowRunId) &&
-    isCertificationWorkflowRunAttempt(input.expectedDogfoodWorkflowRunAttempt) &&
-    (input.expectedReleaseTag === undefined ||
-      isCertificationBoundedString(input.expectedReleaseTag, MAX_CERTIFICATION_STRING_LENGTH)) &&
-    ARTIFACT_MANIFEST_SHA256_PATTERN.test(input.expectedArtifactManifestSha256)
-  );
-}
-
-/**
- * Verify the exact-artifact gh-extension release lane against the canonical
- * self-dogfood evidence. Filesystem, environment, and GitHub concerns stay
- * in the workflow adapter; this composition is deliberately pure.
- */
-export function verifyGhExtensionReleaseCertification(
-  input: GhExtensionReleaseCertificationVerificationInput,
-): GhExtensionReleaseCertificationVerificationResult {
-  const diagnostics: GhExtensionReleaseCertificationDiagnostic[] = [];
-  if (!isRecord(input) || !validGhExtensionExpectedIdentity(input)) {
-    pushExtensionDiagnostic(
-      diagnostics,
-      "EXPECTED_IDENTITY_INVALID",
-      "Extension release identity inputs are malformed.",
-    );
-    return { passed: false, diagnostics };
-  }
-  if (!ARTIFACT_MANIFEST_SHA256_PATTERN.test(input.observedArtifactManifestSha256)) {
-    pushExtensionDiagnostic(
-      diagnostics,
-      "ARTIFACT_MANIFEST_INVALID",
-      "Observed extension artifact manifest digest is malformed.",
-    );
-  } else if (input.expectedArtifactManifestSha256 !== input.observedArtifactManifestSha256) {
-    pushExtensionDiagnostic(
-      diagnostics,
-      "ARTIFACT_MANIFEST_MISMATCH",
-      "Extension artifact manifest digest does not match the shared release manifest.",
-    );
-  }
-  if (input.dogfoodEvidence === undefined || input.dogfoodEvidence === null) {
-    pushExtensionDiagnostic(diagnostics, "EVIDENCE_MISSING", "Self-dogfood certification evidence is required.");
-  } else {
-    verifySelfDogfoodEvidence(
-      input.dogfoodEvidence,
-      input.expectedReleaseSourceCommitSha,
-      input.expectedRepositoryOwner,
-      input.expectedRepositoryName,
-      input.expectedDogfoodWorkflowRunId,
-      input.expectedDogfoodWorkflowRunAttempt,
-      diagnostics,
-    );
   }
   return { passed: diagnostics.length === 0, diagnostics };
 }

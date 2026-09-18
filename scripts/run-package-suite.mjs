@@ -13,7 +13,6 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 // This manifest must be updated whenever a source module is added or renamed.
 // Suite failures are intentional until the manifest is maintained.
 const EXPECTED_PACKED_FILES = [
-  "gh-inari",
   "LICENSE",
   "README.md",
   "package.json",
@@ -581,7 +580,7 @@ async function main() {
     }
   }
 
-  const executableBinPaths = ["gh-inari", ...Object.values(packageJson.bin ?? {})];
+  const executableBinPaths = Object.values(packageJson.bin ?? {});
   for (const binPath of executableBinPaths) {
     if (!packedFiles.includes(binPath)) {
       throw new Error(`bin entry "${binPath}" is not included in the packed tarball`);

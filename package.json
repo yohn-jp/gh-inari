@@ -1,7 +1,7 @@
 {
   "name": "gh-inari",
   "version": "0.12.1",
-  "description": "A deterministic GitHub CLI extension for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
+  "description": "A deterministic GitHub CLI for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
   "type": "module",
   "bin": {
     "gh-inari": "dist/index.js",
@@ -190,7 +190,6 @@
     }
   },
   "files": [
-    "gh-inari",
     "dist",
     "branch-naming-authority.mjs",
     "branch-naming-authority.d.mts",
@@ -231,7 +230,6 @@
     "@xstate/graph": "3.0.4",
     "esbuild": "0.28.2",
     "eslint": "10.10.0",
-    "postject": "1.0.0-alpha.6",
     "prettier": "3.9.6",
     "tsx": "^4.19.4",
     "typescript": "^6.0.3",
@@ -246,7 +244,6 @@
     "access": "public",
     "registry": "https://registry.npmjs.org/",
     "executableFiles": [
-      "gh-inari",
       "dist/index.js"
     ]
   },
