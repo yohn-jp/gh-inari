@@ -257,6 +257,8 @@ test("trusted Change merge delegates REVIEW and ACCEPTED to Semantic PR authorit
     assert.equal(reader.count, 2);
     assert.equal(semantic.calls.length, 1);
     const plan = (semantic.calls[0] as { readonly plan: ReturnType<typeof mergePlan> }).plan;
+    assert.equal(plan.request.operation, "merge");
+    if (plan.request.operation !== "merge") assert.fail("expected a semantic PR merge request");
     assert.equal(plan.request.pullRequest, 6870);
     assert.equal(plan.request.expectedHead, headSha);
     assert.equal(plan.request.expectedBase, base);

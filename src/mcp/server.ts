@@ -5,6 +5,7 @@ import {
   INARI_MCP_TOOL_CONTRACT_VERSION,
   registerChangeTools,
   registerGoldenPathTools,
+  registerImplementationTools,
   registerSessionAuthorizedChangeTools,
   registerSemanticBranchTools,
   registerSemanticIssueTools,
@@ -44,6 +45,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
   registerSemanticIssueTools(server, options);
   registerSemanticBranchTools(server, options);
   registerSemanticPullRequestTools(server, options);
+  registerImplementationTools(server);
   registerChangeTools(server, options);
   if (options.sessionExecutor !== undefined) {
     registerSessionAuthorizedChangeTools(server, createMcpSessionAppBridge(options.sessionExecutor));

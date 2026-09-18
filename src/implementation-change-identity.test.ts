@@ -83,7 +83,23 @@ function authorization(
   return {
     implementation,
     body,
-    authorization: authorizeImplementation({ implementation, body, repository, base }),
+    authorization: authorizeImplementation({
+      implementation,
+      body,
+      repository,
+      base,
+      readiness: {
+        evidence: [
+          {
+            reference: source,
+            authority: "implementation-conformance",
+            status: "satisfied",
+            freshness: "current",
+            dependencies: [],
+          },
+        ],
+      },
+    }),
   };
 }
 

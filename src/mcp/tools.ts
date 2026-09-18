@@ -71,6 +71,7 @@ import type {
 } from "../session-authorized-change-executor.js";
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
+import { tryProjectImplementationFrontier } from "../implementation-frontier.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
 import { projectOperationalSemanticOverlay } from "../reconciliation.js";
 import type { McpSessionAppBridge } from "./session-app-bridge.js";
@@ -103,6 +104,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_pr_merge",
   "inari_golden_path_entry",
   "inari_change_handoff",
+  "inari_impl_frontier",
 ] as const);
 
 /** Optional privileged catalog, enabled only by an embedding with App execution. */
@@ -471,6 +473,25 @@ export const goldenPathStatusOutputSchema = z
   .strict();
 
 export type GoldenPathStatusMcpOutput = z.infer<typeof goldenPathStatusOutputSchema>;
+
+export const implementationFrontierInputSchema = z.strictObject({
+  frontier: z
+    .unknown()
+    .describe("Bounded authoritative evidence consumed by the Implementation Frontier Core projector."),
+});
+
+export const implementationFrontierOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("impl.frontier"),
+    frontier: z.unknown().optional(),
+    diagnostics: z.array(z.unknown()),
+    mutation: z.literal(false),
+  })
+  .strict();
+
+export type ImplementationFrontierMcpInput = z.infer<typeof implementationFrontierInputSchema>;
 
 function adapterFor(
   requestRepository: string | undefined,
@@ -1833,6 +1854,36 @@ export function registerSemanticBranchTools(
     async (input: SemanticBranchDriftInput) => handleBranchDrift(input, dependencies),
   );
   return Object.freeze([contract, materialize, plan, observe, drift]);
+}
+
+/** Register the transport-neutral Implementation Frontier projection. */
+export function registerImplementationTools(server: McpServer): readonly RegisteredTool[] {
+  const frontier = server.registerTool(
+    "inari_impl_frontier",
+    {
+      title: "Project Implementation Frontier",
+      description:
+        "Project READY, BLOCKED, ACTIVE, SATISFIED, and INVALID Implementation candidates through the single Core frontier authority without mutation.",
+      inputSchema: implementationFrontierInputSchema,
+      outputSchema: implementationFrontierOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: ImplementationFrontierMcpInput) => {
+      const projected = tryProjectImplementationFrontier(input.frontier);
+      return result(
+        {
+          ok: projected.valid,
+          valid: projected.valid,
+          operation: "impl.frontier",
+          ...(projected.projection === undefined ? {} : { frontier: projected.projection }),
+          diagnostics: projected.diagnostics,
+          mutation: false,
+        },
+        projected.valid ? "Projected the current Implementation Frontier." : "Implementation Frontier failed closed.",
+      );
+    },
+  );
+  return Object.freeze([frontier]);
 }
 
 /** Register the read-only worker handoff projection over the existing Change read boundary. */

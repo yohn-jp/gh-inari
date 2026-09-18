@@ -93,6 +93,7 @@ export type CommandId =
   | "impl.authorize"
   | "impl.inspect"
   | "impl.verify"
+  | "impl.frontier"
   | "branch.check"
   | "branch.semantic.check"
   | "template.list"
@@ -1196,6 +1197,16 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Verify a pull request and its authoritative diff against one current authorized Implementation.",
     IMPLEMENTATION_VERIFY_OPTIONS,
     "<number>",
+  ),
+  command(
+    "impl.frontier",
+    "impl",
+    "frontier",
+    ["impl", "frontier"],
+    "Project the bounded Implementation Frontier from authoritative Core evidence.",
+    ["help", "json", "from"],
+    undefined,
+    "--from <frontier-input.json>",
   ),
   command(
     "branch.check",
