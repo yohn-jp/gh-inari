@@ -72,7 +72,7 @@ test("command projections bind authoritative option values without changing gene
 });
 
 test("unknown upstream command trees stay outside the owned command contract", () => {
-  assert.equal(getCommandForPositionals(["pr", "list"]), undefined);
+  assert.equal(getCommandForPositionals(["pr", "legacy"]), undefined);
   assert.equal(getCommandForPositionals(["repo", "view"]), undefined);
 });
 
