@@ -25,17 +25,17 @@ import {
   type ExistingArtifactCandidate,
 } from "./artifact.js";
 import type { ArtifactContract } from "./contract/artifact-contract.js";
-import {
-  GitHubAdapter,
-  isGitHubAdapterError,
-  type GitHubIssue,
-  type GitHubPullRequest,
-  type RepositoryContext,
-  type RepositoryTree,
-  type RepositoryTreeEntry,
-  type ValidatedRenderedIssueArtifact,
-  type ValidatedRenderedPullRequestArtifact,
-} from "./github/index.js";
+import { GitHubAdapter } from "./github/adapter.js";
+import { isGitHubAdapterError } from "./github/errors.js";
+import type {
+  GitHubIssue,
+  GitHubPullRequest,
+  RepositoryContext,
+  RepositoryTree,
+  RepositoryTreeEntry,
+  ValidatedRenderedIssueArtifact,
+  ValidatedRenderedPullRequestArtifact,
+} from "./github/types.js";
 import {
   compilePullRequestPolicyFile,
   compilePullRequestPolicyOverlay,
