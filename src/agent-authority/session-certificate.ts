@@ -36,6 +36,10 @@ import {
   type CapabilityClaim,
 } from "./capability.js";
 import { DELEGATOR_ID_PATTERN, isDelegatorActive, type Delegator } from "./delegator.js";
+import {
+  validateImplementationSessionAuthorizationBinding,
+  type ImplementationSessionAuthorizationBinding,
+} from "../implementation-session-binding.js";
 
 export const SESSION_CERTIFICATE_CONTRACT_VERSION = 1 as const;
 export type SessionCertificateContractVersion = typeof SESSION_CERTIFICATE_CONTRACT_VERSION;
@@ -85,6 +89,8 @@ export interface SessionCertificatePayload {
   readonly repository: SessionCertificateRepository;
   readonly sessionKey: Ed25519PublicJwk;
   readonly task?: SessionCertificateTask;
+  /** Safe projection of the current Implementation authorization, when this is an Implementation Session. */
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: readonly CapabilityClaim[];
   readonly iat: number;
   readonly nbf: number;
@@ -105,6 +111,8 @@ export type SessionCertificateDiagnosticCode =
   | "SESSION_CERTIFICATE_INVALID_REPOSITORY"
   | "SESSION_CERTIFICATE_INVALID_SESSION_KEY"
   | "SESSION_CERTIFICATE_INVALID_TASK"
+  | "SESSION_CERTIFICATE_INVALID_IMPLEMENTATION_BINDING"
+  | "SESSION_CERTIFICATE_IMPLEMENTATION_BINDING_MISMATCH"
   | "SESSION_CERTIFICATE_INVALID_CAPABILITIES"
   | "SESSION_CERTIFICATE_TASK_SCOPE_MISMATCH"
   | "SESSION_CERTIFICATE_INVALID_TIME"
@@ -310,6 +318,7 @@ const PAYLOAD_KEYS = new Set([
   "repository",
   "sessionKey",
   "task",
+  "implementationBinding",
   "capabilities",
   "iat",
   "nbf",
@@ -405,6 +414,20 @@ export function validateSessionCertificatePayload(
     task = taskResult.value;
   }
 
+  let implementationBinding: ImplementationSessionAuthorizationBinding | undefined;
+  if ("implementationBinding" in input) {
+    const bindingResult = validateImplementationSessionAuthorizationBinding(input.implementationBinding);
+    if (!bindingResult.valid || bindingResult.binding === undefined) {
+      diagnostics.push(
+        ...bindingResult.violations.map((violation) =>
+          createDiagnostic("SESSION_CERTIFICATE_INVALID_IMPLEMENTATION_BINDING", violation.path, violation.message),
+        ),
+      );
+    } else {
+      implementationBinding = bindingResult.binding;
+    }
+  }
+
   let capabilities: readonly CapabilityClaim[] | undefined;
   if (requireProperty(input, "capabilities", path, diagnostics)) {
     const value = input.capabilities;
@@ -461,6 +484,30 @@ export function validateSessionCertificatePayload(
         );
       }
     });
+  }
+
+  if (implementationBinding !== undefined) {
+    if (task === undefined || task.number !== implementationBinding.task.number) {
+      diagnostics.push(
+        createDiagnostic(
+          "SESSION_CERTIFICATE_IMPLEMENTATION_BINDING_MISMATCH",
+          `${path}.implementationBinding.task`,
+          "Implementation binding task must match the Session task.",
+        ),
+      );
+    }
+    if (
+      repositoryResult.value !== undefined &&
+      implementationBinding.repository.repositoryId !== repositoryResult.value.id
+    ) {
+      diagnostics.push(
+        createDiagnostic(
+          "SESSION_CERTIFICATE_IMPLEMENTATION_BINDING_MISMATCH",
+          `${path}.implementationBinding.repository.repositoryId`,
+          "Implementation binding repository must match the Session repository.",
+        ),
+      );
+    }
   }
 
   let iat: number | undefined;
@@ -529,6 +576,7 @@ export function validateSessionCertificatePayload(
       repository: repositoryResult.value,
       sessionKey,
       ...(task === undefined ? {} : { task }),
+      ...(implementationBinding === undefined ? {} : { implementationBinding }),
       capabilities,
       iat,
       nbf,

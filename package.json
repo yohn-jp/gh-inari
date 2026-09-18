@@ -24,6 +24,10 @@
       "types": "./dist/implementation-authorization.d.ts",
       "import": "./dist/implementation-authorization.js"
     },
+    "./implementation-session-binding": {
+      "types": "./dist/implementation-session-binding.d.ts",
+      "import": "./dist/implementation-session-binding.js"
+    },
     "./implementation-scope-projection": {
       "types": "./dist/implementation-scope-projection.d.ts",
       "import": "./dist/implementation-scope-projection.js"

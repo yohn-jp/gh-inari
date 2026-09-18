@@ -35,6 +35,8 @@ import {
 } from "./session-certificate.js";
 import { MIN_SESSION_TTL_SECONDS, MAX_SESSION_TTL_SECONDS, assertDelegator, type Delegator } from "./delegator.js";
 import { issueSessionCertificate, type ManagedSessionIssuanceRequest } from "./session-issuance.js";
+import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
+import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 import { exportDelegatorPublicKey, type DelegatorKeyPair } from "./delegator-key.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 
@@ -82,6 +84,7 @@ export interface SessionIssuanceRequestDocument {
   readonly runtimeAuthority: Delegator;
   readonly repository: SessionCertificateRepository;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: ManagedSessionIssuanceRequest["capabilities"];
   readonly ttlSeconds: number;
   readonly agent?: SessionAgentMetadata;
@@ -116,6 +119,7 @@ export interface SessionCredentialBundleInspection {
   };
   readonly repository: SessionCertificateRepository;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: ManagedSessionIssuanceRequest["capabilities"];
   readonly expiry: {
     readonly iat: number;
@@ -187,6 +191,7 @@ const REQUEST_KEYS = new Set([
   "runtimeAuthority",
   "repository",
   "task",
+  "implementationBinding",
   "capabilities",
   "ttlSeconds",
   "agent",
@@ -345,6 +350,7 @@ export function parseSessionIssuanceRequest(input: unknown): SessionIssuanceRequ
     repository,
     sessionKey: VALIDATION_SESSION_KEY,
     ...(input.task === undefined ? {} : { task: input.task }),
+    ...(input.implementationBinding === undefined ? {} : { implementationBinding: input.implementationBinding }),
     capabilities,
     iat: 0,
     nbf: 0,
@@ -366,6 +372,9 @@ export function parseSessionIssuanceRequest(input: unknown): SessionIssuanceRequ
     runtimeAuthority,
     repository: normalized.repository,
     ...(normalized.task === undefined ? {} : { task: normalized.task }),
+    ...(normalized.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: normalized.implementationBinding }),
     capabilities: normalized.capabilities,
     ttlSeconds,
     ...(agent === undefined ? {} : { agent }),
@@ -523,6 +532,7 @@ function manualSessionId(): string {
 export function createSessionCredentialBundle(options: {
   readonly request: unknown;
   readonly runtimeKey: KeyObject | DelegatorKeyPair;
+  readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
   readonly now?: Date;
 }): CreatedSessionCredentialBundle {
   const request = parseSessionIssuanceRequest(options.request);
@@ -534,6 +544,7 @@ export function createSessionCredentialBundle(options: {
     sessionKey,
     repository: request.repository,
     ...(request.task === undefined ? {} : { task: request.task }),
+    ...(request.implementationBinding === undefined ? {} : { implementationBinding: request.implementationBinding }),
     capabilities: request.capabilities,
     ttlSeconds: request.ttlSeconds,
   });
@@ -544,6 +555,9 @@ export function createSessionCredentialBundle(options: {
       runtimeAuthority: request.runtimeAuthority,
       runtimeKey: options.runtimeKey,
       request: issuanceRequest,
+      ...(options.implementationAuthorization === undefined
+        ? {}
+        : { implementationAuthorization: options.implementationAuthorization }),
       ...(options.now === undefined ? {} : { now: options.now }),
     });
   } catch (error: unknown) {
@@ -833,6 +847,7 @@ export function inspectSessionCredentialBundle(
     bundle: Object.freeze({ version: parsed.bundle.version, kind: parsed.bundle.kind }),
     repository: payload.repository,
     ...(payload.task === undefined ? {} : { task: payload.task }),
+    ...(payload.implementationBinding === undefined ? {} : { implementationBinding: payload.implementationBinding }),
     capabilities: payload.capabilities,
     expiry: Object.freeze({ iat: payload.iat, nbf: payload.nbf, exp: payload.exp }),
     runtime: Object.freeze({ authorityId: header.kid, issuer: payload.iss }),

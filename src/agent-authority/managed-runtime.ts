@@ -34,6 +34,7 @@ import {
 import { signSessionRequest, type SemanticSessionRequest, type SessionRequestEnvelope } from "./session-request.js";
 import type { CapabilityClaim } from "./capability.js";
 import type { SessionCertificateRepository, SessionCertificateTask } from "./session-certificate.js";
+import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 
 /** Provenance is diagnostic metadata only; it is not a Session principal. */
 export interface ManagedRuntimeProvenance {
@@ -50,7 +51,14 @@ export interface ManagedRuntimeProvenance {
 export const MAX_MANAGED_RUNTIME_PROVENANCE_KEYS = 4 as const;
 export const MAX_MANAGED_RUNTIME_PROVENANCE_LABEL_LENGTH = 128 as const;
 
-const MANAGED_RUNTIME_BEGIN_OPTION_KEYS = new Set(["repository", "task", "capabilities", "ttlSeconds", "provenance"]);
+const MANAGED_RUNTIME_BEGIN_OPTION_KEYS = new Set([
+  "repository",
+  "task",
+  "implementationBinding",
+  "capabilities",
+  "ttlSeconds",
+  "provenance",
+]);
 const MANAGED_RUNTIME_PROVENANCE_KEYS = new Set(["runtime", "worktree", "workspace", "session"]);
 const SAFE_PROVENANCE_LABEL = /^[\x20-\x7e]+$/u;
 const SENSITIVE_PROVENANCE_LABEL = /(?:private\s*key|secret|token|credential|jwt|installation|begin\s+[-a-z]+\s+key)/iu;
@@ -91,6 +99,7 @@ export class ManagedRuntimeSessionError extends Error {
 export interface ManagedRuntimeSessionBeginOptions {
   readonly repository: SessionCertificateRepository;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: readonly CapabilityClaim[];
   readonly ttlSeconds: number;
   readonly provenance?: ManagedRuntimeProvenance;
@@ -228,6 +237,9 @@ function validateBeginOptions(input: unknown): ManagedRuntimeSessionBeginOptions
   return {
     repository: input.repository as SessionCertificateRepository,
     ...(input.task === undefined ? {} : { task: input.task as SessionCertificateTask }),
+    ...(input.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: input.implementationBinding as ImplementationSessionAuthorizationBinding }),
     capabilities: input.capabilities as readonly CapabilityClaim[],
     ttlSeconds: input.ttlSeconds as number,
     ...(provenance === undefined ? {} : { provenance }),
@@ -281,6 +293,9 @@ export function beginManagedRuntimeSession(options: ManagedRuntimeSessionBeginOp
   const issuanceRequest = session.createIssuanceRequest({
     repository: normalized.repository,
     ...(normalized.task === undefined ? {} : { task: normalized.task }),
+    ...(normalized.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: normalized.implementationBinding }),
     capabilities: normalized.capabilities,
     ttlSeconds: normalized.ttlSeconds,
   });
