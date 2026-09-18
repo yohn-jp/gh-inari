@@ -8,6 +8,12 @@ import { createCapabilityExecutionProvenance, type CapabilityExecutionProvenance
 import type { AuthenticatedSessionContext } from "./session-authentication.js";
 import type { SessionAgentMetadata } from "./session-bundle.js";
 import {
+  isImplementationScopeProjectionPathAllowed,
+  isImplementationScopeProjectionPathDenied,
+  type ImplementationScopeProjection,
+} from "../implementation-scope-projection.js";
+import type { ImplementationScopeOperation } from "../implementation-contract.js";
+import {
   GitDataCapabilityError,
   type GitDataTree,
   type GitDataRefUpdateInput,
@@ -352,6 +358,49 @@ function provenance(
   }
 }
 
+function matchesImplementationScopeBinding(
+  context: AuthenticatedSessionContext,
+  scope: ImplementationScopeProjection,
+  issue: number,
+): boolean {
+  const binding = context.implementationBinding;
+  if (binding === undefined) return false;
+  return (
+    binding.task.kind === "issue" &&
+    binding.task.number === issue &&
+    binding.authorization.version === scope.authorization.version &&
+    binding.authorization.kind === scope.authorization.kind &&
+    binding.authorization.contractVersion === scope.authorization.contractVersion &&
+    binding.authorization.governedBodyDigest === scope.authorization.governedBodyDigest &&
+    binding.authorization.implementation.repositoryHost === scope.authorization.implementation.repositoryHost &&
+    binding.authorization.implementation.repositoryId === scope.authorization.implementation.repositoryId &&
+    binding.authorization.implementation.number === scope.authorization.implementation.number &&
+    binding.authorization.implementation.number === issue &&
+    binding.repository.repositoryHost.toLowerCase() === scope.repository.repositoryHost.toLowerCase() &&
+    binding.repository.repositoryId === scope.repository.repositoryId &&
+    binding.base.branch === scope.base.branch &&
+    binding.base.revision === scope.base.revision &&
+    binding.base.freshness === scope.base.freshness &&
+    context.repository.repositoryHost.toLowerCase() === scope.repository.repositoryHost.toLowerCase() &&
+    context.repository.repositoryId === scope.repository.repositoryId
+  );
+}
+
+function scopeAllows(
+  scope: ImplementationScopeProjection,
+  operation: ImplementationScopeOperation,
+  path: string,
+): boolean {
+  try {
+    return (
+      !isImplementationScopeProjectionPathDenied(scope, path) &&
+      isImplementationScopeProjectionPathAllowed(scope, operation, path)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions): Promise<BranchAdvanceSemanticResult> {
   const signed = options?.context?.verifiedRequest?.envelope?.request;
   const candidate = options?.request ?? signed;
@@ -402,6 +451,11 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   const projected = { changes: r.changes.map((x) => ({ operation: "modify" as const, path: x.path })) };
   const classification = classifyDelegatedTreeDelta(projected);
   if (classification.kind !== "allowed") return fail(r, "protected-path", classification.message);
+  const implementationScope = context.implementationScope;
+  if (implementationScope !== undefined || context.implementationBinding !== undefined) {
+    if (implementationScope === undefined || !matchesImplementationScopeBinding(context, implementationScope, r.issue))
+      return fail(r, "authorization", "The current Implementation scope is not bound to this Session request.");
+  }
   if (c.pathPolicy !== undefined) return fail(r, "authorization", "Named path policy could not be resolved.");
   const target = {
     repositoryHost: context.repository.repositoryHost,
@@ -433,10 +487,26 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
           return result(r, "idempotent", undefined, ref.sha, provenance(context, capability, r, c));
         return fail(r, "stale-head", "Expected head is stale; no overwrite was attempted.", "stale");
       }
-      const writes = [];
-      for (const ch of r.changes) {
+      const operations = r.changes.map((ch) => {
         if (ch.operation === "delete") {
-          if (!before.has(ch.path)) return fail(r, "branch-state", "Cannot delete a missing path.");
+          if (!before.has(ch.path)) return undefined;
+          return { change: ch, operation: "DELETE" as const };
+        }
+        return { change: ch, operation: before.has(ch.path) ? ("WRITE" as const) : ("CREATE" as const) };
+      });
+      if (operations.some((operation) => operation === undefined))
+        return fail(r, "branch-state", "Cannot delete a missing path.");
+      if (implementationScope !== undefined) {
+        for (const entry of operations) {
+          if (entry !== undefined && !scopeAllows(implementationScope, entry.operation, entry.change.path))
+            return fail(r, "authorization", "The proposed tree delta is outside the authorized Implementation scope.");
+        }
+      }
+      const writes = [];
+      for (const entry of operations) {
+        if (entry === undefined) continue;
+        const ch = entry.change;
+        if (ch.operation === "delete") {
           writes.push({
             path: ch.path,
             sha: null,

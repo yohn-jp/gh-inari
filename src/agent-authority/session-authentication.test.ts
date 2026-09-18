@@ -336,6 +336,13 @@ test("rejects replay when a bound Implementation authorization is no longer curr
     now: NOW,
   });
   assert.deepEqual(authenticated.implementationBinding, binding);
+  assert.deepEqual(authenticated.implementationScope?.scope, {
+    readOnly: ["src/**"],
+    write: ["src/**"],
+    create: [],
+    delete: [],
+    deny: [],
+  });
 
   await assert.rejects(
     authenticateSessionRequest({

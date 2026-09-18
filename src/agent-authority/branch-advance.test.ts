@@ -9,6 +9,8 @@ import {
 } from "./branch-advance.js";
 import type { AdmittedSessionCapability } from "./capability-admission.js";
 import type { AuthenticatedSessionContext } from "./session-authentication.js";
+import type { ImplementationScopeProjection } from "../implementation-scope-projection.js";
+import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 import type {
   GitDataCommitInput,
   GitDataRefUpdateInput,
@@ -66,6 +68,63 @@ const context = {
   request: admission.request,
   verifiedRequest: { envelope: { request } },
 } as unknown as AuthenticatedSessionContext;
+
+const implementationBase = {
+  branch: "main",
+  revision: "base-revision",
+  freshness: "base-freshness",
+} as const;
+const implementationAuthorization = {
+  version: 1 as const,
+  kind: "implementation-authorization" as const,
+  contractVersion: 1 as const,
+  implementation: {
+    repositoryHost: repository.repositoryHost,
+    repositoryId: repository.repositoryId,
+    repository: repository.nameWithOwner,
+    number: 466,
+  },
+  governedBodyDigest: "1".repeat(64),
+};
+const implementationScope = {
+  version: 1 as const,
+  kind: "implementation-execution-scope" as const,
+  authorization: implementationAuthorization,
+  repository: {
+    repositoryHost: repository.repositoryHost,
+    repositoryId: repository.repositoryId,
+    repository: repository.nameWithOwner,
+  },
+  base: implementationBase,
+  scope: {
+    readOnly: [],
+    write: ["src/**"],
+    create: ["docs/**"],
+    delete: ["src/**"],
+    deny: ["src/private/**"],
+  },
+} satisfies ImplementationScopeProjection;
+const implementationBinding = {
+  version: 1 as const,
+  kind: "implementation-session-binding" as const,
+  authorization: implementationAuthorization,
+  repository: {
+    repositoryHost: repository.repositoryHost,
+    repositoryId: repository.repositoryId,
+    repository: repository.nameWithOwner,
+  },
+  base: implementationBase,
+  task: { kind: "issue" as const, number: 466 },
+} satisfies ImplementationSessionAuthorizationBinding;
+
+function scopedContextFor(changes: BranchAdvanceSemanticRequest["changes"]): AuthenticatedSessionContext {
+  return {
+    ...context,
+    implementationBinding,
+    implementationScope,
+    verifiedRequest: { envelope: { request: { ...request, changes } } },
+  } as unknown as AuthenticatedSessionContext;
+}
 
 function fake(mode: "updated" | "rejected" | "throws-applied" | "throws-not-applied" | "throws-reread" = "updated") {
   const calls: { blobs: string[]; updates: GitDataRefUpdateInput[]; readRefs: number } = {
@@ -457,4 +516,114 @@ test("keeps App and commit identities separate and leaks no credential or token"
   assert.equal(serialized.includes("private-key"), false);
   assert.equal(serialized.includes("secret"), false);
   assert.deepEqual(calls.blobs, [content]);
+});
+
+test("enforces independent WRITE, CREATE, and DELETE scope operations", async () => {
+  const cases = [
+    {
+      operation: "WRITE" as const,
+      change: { operation: "upsert" as const, path: "src/file.txt", mode: "100644" as const, content },
+    },
+    {
+      operation: "CREATE" as const,
+      change: { operation: "upsert" as const, path: "docs/new.md", mode: "100644" as const, content },
+    },
+    { operation: "DELETE" as const, change: { operation: "delete" as const, path: "src/file.txt" } },
+  ];
+  for (const item of cases) {
+    const { calls, broker } = fake();
+    const result = await executeBranchAdvance({
+      context: scopedContextFor([item.change]),
+      broker,
+      admission,
+    });
+    assert.equal(result.outcome, "advanced", item.operation);
+    assert.equal(calls.updates.length, 1, item.operation);
+  }
+});
+
+test("does not infer one mutation operation from another allowlist", async () => {
+  const cases = [
+    { operation: "WRITE", path: "src/file.txt", scope: { write: [], create: ["src/**"], delete: ["src/**"] } },
+    { operation: "CREATE", path: "docs/new.md", scope: { write: ["docs/**"], create: [], delete: ["docs/**"] } },
+    { operation: "DELETE", path: "src/file.txt", scope: { write: ["src/**"], create: ["src/**"], delete: [] } },
+  ] as const;
+  for (const item of cases) {
+    const { calls, broker } = fake();
+    const result = await executeBranchAdvance({
+      context: {
+        ...scopedContextFor([
+          item.operation === "DELETE"
+            ? { operation: "delete" as const, path: item.path }
+            : { operation: "upsert" as const, path: item.path, mode: "100644" as const, content },
+        ]),
+        implementationScope: { ...implementationScope, scope: { ...implementationScope.scope, ...item.scope } },
+      } as AuthenticatedSessionContext,
+      broker,
+      admission,
+    });
+    assert.equal(result.status, "failed", item.operation);
+    assert.equal(result.failure?.reason, "authorization", item.operation);
+    assert.equal(calls.blobs.length, 0, item.operation);
+    assert.equal(calls.updates.length, 0, item.operation);
+  }
+});
+
+test("DENY overrides every mutation allowlist before Git effects", async () => {
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({
+    context: {
+      ...scopedContextFor([request.changes[0]]),
+      implementationScope: {
+        ...implementationScope,
+        scope: { write: ["**"], create: ["**"], delete: ["**"], readOnly: [], deny: ["src/file.txt"] },
+      },
+    } as AuthenticatedSessionContext,
+    broker,
+    admission,
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
+});
+
+test("enforces a rename as independent DELETE and CREATE operations", async () => {
+  const { calls, broker } = fake();
+  const changes = [
+    { operation: "delete" as const, path: "src/file.txt" },
+    { operation: "upsert" as const, path: "docs/renamed.txt", mode: "100644" as const, content },
+  ];
+  const result = await executeBranchAdvance({ context: scopedContextFor(changes), broker, admission });
+  assert.equal(result.outcome, "advanced");
+  assert.deepEqual(calls.blobs, [content]);
+  assert.equal(calls.updates.length, 1);
+});
+
+test("rejects scope identity and path attacks before any Git effect", async () => {
+  const mismatched = {
+    ...implementationBinding,
+    authorization: { ...implementationAuthorization, governedBodyDigest: "2".repeat(64) },
+  } as ImplementationSessionAuthorizationBinding;
+  for (const item of [
+    {
+      changes: [{ operation: "upsert" as const, path: "src/file.txt", mode: "100644" as const, content }],
+      binding: mismatched,
+    },
+    { changes: [{ operation: "upsert" as const, path: "src/../secret.txt", mode: "100644" as const, content }] },
+    { changes: [{ operation: "upsert" as const, path: "src\\secret.txt", mode: "100644" as const, content }] },
+  ]) {
+    const { calls, broker } = fake();
+    const result = await executeBranchAdvance({
+      context: {
+        ...scopedContextFor(item.changes),
+        ...(item.binding === undefined ? {} : { implementationBinding: item.binding }),
+      } as AuthenticatedSessionContext,
+      broker,
+      admission,
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(calls.blobs.length, 0);
+    assert.equal(calls.updates.length, 0);
+  }
 });

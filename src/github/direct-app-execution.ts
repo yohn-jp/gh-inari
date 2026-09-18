@@ -32,6 +32,7 @@ import {
   type CapabilityAuthorizedSessionExecutor,
 } from "../session-authorized-change-executor.js";
 import { executeBranchAdvance } from "../agent-authority/branch-advance.js";
+import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
 import type {
   ChangeExecutionResult,
   ChangeExecutionPort,
@@ -55,6 +56,8 @@ export interface DirectAppSessionExecutorConfig {
   readonly now?: () => Date;
   /** Bounded deadline applied to every GitHub provider request. Defaults to 10s; hard ceiling 30s. */
   readonly requestTimeoutMs?: number;
+  /** Current repository-verified Implementation evidence for bound Sessions. */
+  readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
 }
 
 function isMutationRequest(request: ChangeReadRequest | ChangeMutationRequest): request is ChangeMutationRequest {
@@ -132,6 +135,9 @@ export function createDirectAppSessionExecutor(
     authentication: {
       broker,
       repository: config.repository,
+      ...(config.implementationAuthorization === undefined
+        ? {}
+        : { implementationAuthorization: config.implementationAuthorization }),
       ...(config.now === undefined ? {} : { now: config.now }),
     },
     readExecutor: {
