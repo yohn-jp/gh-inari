@@ -41,6 +41,7 @@ type ExpectedCapabilityAdmissionOperation =
   | "change.show"
   | "change.ready"
   | "change.abort"
+  | "change.merge"
   | "branch.create"
   | "branch.advance"
   | "pullRequest.create";

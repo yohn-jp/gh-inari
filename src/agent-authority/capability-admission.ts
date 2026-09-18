@@ -37,6 +37,7 @@ export type CapabilityAdmissionOperation =
   | "change.show"
   | "change.ready"
   | "change.abort"
+  | "change.merge"
   | "branch.create"
   | "branch.advance"
   | "pullRequest.create";
@@ -46,6 +47,7 @@ const CAPABILITY_ADMISSION_OPERATIONS = Object.freeze([
   "change.show",
   "change.ready",
   "change.abort",
+  "change.merge",
   "branch.create",
   "branch.advance",
   "pullRequest.create",
@@ -176,6 +178,7 @@ function sameClaim(left: CapabilityClaim, right: CapabilityClaim): boolean {
     case "change.implement":
     case "change.ready":
     case "change.abort":
+    case "change.merge":
       return right.kind === left.kind && right.issue === left.issue;
     case "branch.create":
       return right.kind === left.kind && right.branch === left.branch && right.max === left.max;
@@ -448,7 +451,9 @@ function claimForOperation(
   claims: readonly CapabilityClaim[],
 ): CapabilityClaim {
   const issue = subject.issue;
-  const changeClaim = (kind: "change.implement" | "change.ready" | "change.abort"): CapabilityClaim | undefined =>
+  const changeClaim = (
+    kind: "change.implement" | "change.ready" | "change.abort" | "change.merge",
+  ): CapabilityClaim | undefined =>
     claims.find((claim) => claim.kind === kind && claim.issue === issue);
 
   if (operation === "change.issue" || operation === "change.show") {
@@ -467,6 +472,12 @@ function claimForOperation(
     const claim = changeClaim("change.abort");
     if (claim !== undefined) return claim;
     if (claims.some((claim) => claim.kind === "change.abort")) deny("task");
+    deny("session-capability");
+  }
+  if (operation === "change.merge") {
+    const claim = changeClaim("change.merge");
+    if (claim !== undefined) return claim;
+    if (claims.some((claim) => claim.kind === "change.merge")) deny("task");
     deny("session-capability");
   }
 
@@ -515,7 +526,8 @@ function requireSubjectShape(operation: CapabilityAdmissionOperation, subject: C
     (operation === "change.issue" ||
       operation === "change.show" ||
       operation === "change.ready" ||
-      operation === "change.abort") &&
+      operation === "change.abort" ||
+      operation === "change.merge") &&
     subject.kind !== "change"
   ) {
     deny("canonical-identity");
@@ -576,6 +588,15 @@ function requireCanonicalState(operation: CapabilityAdmissionOperation, canonica
           },
         });
       } catch {
+        deny("canonical-state");
+      }
+      return;
+    case "change.merge":
+      if (
+        projection.status !== "healthy" ||
+        pullRequest === undefined ||
+        (change.state !== "REVIEW" && change.state !== "ACCEPTED" && change.state !== "MERGED")
+      ) {
         deny("canonical-state");
       }
       return;

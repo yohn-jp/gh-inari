@@ -1,5 +1,6 @@
 export * from "./adapter.js";
 export * from "./app-installation-credential-broker.js";
+export * from "./app-semantic-pr-mutation.js";
 export * from "./app-repository-evidence-reader.js";
 export * from "./repository-evidence-reader.js";
 export * from "./change-state-projector.js";

@@ -37,7 +37,7 @@ export interface GitHubChangeEffectRepository {
   readonly name: string;
 }
 
-export type GitHubChangeEffectHttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
+export type GitHubChangeEffectHttpMethod = "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
 
 export type GitHubChangeEffectJsonValue =
   | string

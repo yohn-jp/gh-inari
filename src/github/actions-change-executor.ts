@@ -52,6 +52,7 @@ import {
   type GitHubAppRepositoryReadCapability,
   type GitHubAppCredentialFailureStage,
 } from "./app-installation-credential-broker.js";
+import type { SemanticPullRequestMutationExecutionPort } from "../semantic-pr-mutation.js";
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { GitHubChangeStateProjector, type GitHubChangeStateProjectorOptions } from "./change-state-projector.js";
 import {
@@ -674,13 +675,17 @@ export async function createGitHubActionsChangeExecutor(
       }
     },
   };
-  const withTrustedExecutor = <T>(operation: (executor: TrustedChangeExecutor) => Promise<T>): Promise<T> =>
+  const withTrustedExecutor = <T>(
+    operation: (executor: TrustedChangeExecutor) => Promise<T>,
+    semanticPullRequestMutationExecutor?: SemanticPullRequestMutationExecutionPort,
+  ): Promise<T> =>
     withBrokeredEvidence(async (capability) => {
       const trustedExecutor = new TrustedChangeExecutor({
         reader: buildReader(capability),
         effectAuthorizer: stagedEffectAuthorizer,
         execution,
         target,
+        ...(semanticPullRequestMutationExecutor === undefined ? {} : { semanticPullRequestMutationExecutor }),
       });
       return operation(trustedExecutor);
     });
@@ -688,6 +693,11 @@ export async function createGitHubActionsChangeExecutor(
     execute: async (request) => {
       issuerStage = undefined;
       try {
+        if (request.operation === "merge") {
+          return await broker.withSemanticPullRequestMutationExecutor({ target }, async (semanticExecutor) =>
+            withTrustedExecutor((trustedExecutor) => trustedExecutor.execute(request), semanticExecutor),
+          );
+        }
         return await withTrustedExecutor((trustedExecutor) => trustedExecutor.execute(request));
       } catch (error: unknown) {
         throw asTrustedActionsFailure(error, issuerStage);
@@ -737,6 +747,7 @@ export async function runGitHubActionsChangeExecutor(
       "issue",
       "semanticPullRequestPlan",
       "signedProvenanceRecord",
+      "mergeStrategy",
     ]);
     if (Object.keys(requestRecord).some((key) => !allowedRequestKeys.has(key))) {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
@@ -748,10 +759,13 @@ export async function runGitHubActionsChangeExecutor(
     ) {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
-    if (requestRecord.operation !== "show" && !["issue", "ready", "abort"].includes(requestRecord.operation)) {
+    if (requestRecord.operation !== "show" && !["issue", "ready", "abort", "merge"].includes(requestRecord.operation)) {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     if (requestRecord.semanticPullRequestPlan !== undefined && requestRecord.operation !== "issue") {
+      throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
+    }
+    if (requestRecord.mergeStrategy !== undefined && requestRecord.operation !== "merge") {
       throw new GitHubActionsChangeExecutorError(undefined, "trusted-execution");
     }
     if (requestRecord.signedProvenanceRecord !== undefined && requestRecord.operation !== "issue") {
@@ -761,10 +775,11 @@ export async function runGitHubActionsChangeExecutor(
       requestRecord.operation === "show"
         ? changeReadRequest(requestRecord.issue)
         : changeMutationRequest(
-            requestRecord.operation as "issue" | "ready" | "abort",
+            requestRecord.operation as "issue" | "ready" | "abort" | "merge",
             requestRecord.issue,
             requestRecord.semanticPullRequestPlan,
             requestRecord.signedProvenanceRecord as SignedChangeProvenanceRecord | undefined,
+            requestRecord.mergeStrategy as "merge" | "squash" | "rebase" | undefined,
           );
     const executor = await createGitHubActionsChangeExecutor({ cwd, request, environment });
     const result =

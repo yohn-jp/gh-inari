@@ -12,11 +12,11 @@ import {
   normalizeChangeExecutionResult,
   normalizeChangeProjection,
   type ChangeExecutionResult,
+  type ChangeExecutionEffectKind,
   type ChangeMutation,
   type ChangeExecutionOutcome,
 } from "./change-execution-port.js";
 import type {
-  ChangeEffectKind,
   ChangeGitHubEvidence,
   ChangeIdentity,
   ChangeProjectionResult,
@@ -51,7 +51,7 @@ export interface CrossDeploymentAuthoritySnapshot {
 }
 
 export interface CrossDeploymentEffectSummary {
-  readonly kind: ChangeEffectKind;
+  readonly kind: ChangeExecutionEffectKind;
   readonly status: "succeeded" | "failed";
 }
 

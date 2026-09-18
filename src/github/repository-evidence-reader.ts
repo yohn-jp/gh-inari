@@ -144,6 +144,11 @@ function optionalCommitSha(value: unknown): string | undefined {
     : undefined;
 }
 
+function optionalPullRequestHeadSha(value: unknown): string | undefined {
+  if (!isRecord(value) || value.sha === undefined) return undefined;
+  return typeof value.sha === "string" && COMMIT_SHA_PATTERN.test(value.sha) ? value.sha.toLowerCase() : undefined;
+}
+
 function boundedGitHubTimestamp(value: unknown): string {
   const timestamp = boundedString(value, MAX_TIMESTAMP_LENGTH);
   const match = GITHUB_TIMESTAMP_PATTERN.exec(timestamp);
@@ -360,6 +365,7 @@ export class GitHubRepositoryEvidenceReader {
     }
     const login = boundedString(user.login, MAX_LOGIN_LENGTH);
     const headName = boundedString(head.ref, MAX_REPOSITORY_TEXT_LENGTH);
+    const headSha = optionalPullRequestHeadSha(head);
     if (expectedHead !== undefined && headName !== expectedHead) return undefined;
     if (head.repo !== undefined && head.repo !== null) {
       const headRepository = record(head.repo, "pull-request-evidence");
@@ -369,6 +375,7 @@ export class GitHubRepositoryEvidenceReader {
     return {
       number,
       head: headName,
+      ...(headSha === undefined ? {} : { headSha }),
       base: boundedString(base.ref, MAX_REPOSITORY_TEXT_LENGTH),
       state,
       draft: value.draft,

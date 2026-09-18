@@ -30,6 +30,11 @@ import {
   validateSemanticPullRequestMutationPlan,
   type SemanticPullRequestMutationPlan,
 } from "./semantic-pr-projection.js";
+import {
+  validateSemanticPullRequestMutationPlan as validateSemanticPullRequestMergePlan,
+  type SemanticPullRequestMergeRequest,
+  type SemanticPullRequestMutationPlan as SemanticPullRequestMergePlan,
+} from "./semantic-pr-mutation.js";
 
 export const CHANGE_CONTRACT_VERSION = 1 as const;
 export type ChangeContractVersion = typeof CHANGE_CONTRACT_VERSION;
@@ -111,16 +116,12 @@ export interface Change {
 export const CHANGE_TRANSITION_CONTRACT_VERSION = CHANGE_CONTRACT_VERSION;
 export type ChangeTransitionContractVersion = typeof CHANGE_TRANSITION_CONTRACT_VERSION;
 
-/**
- * `merge` is reserved for a future merge-coordination capability.  It is
- * represented in the request vocabulary but is intentionally not executable
- * by this planning contract yet.
- */
+/** `merge` composes the existing governed Semantic PR merge authority. */
 export const CHANGE_TRANSITION_OPERATIONS = Object.freeze(["issue", "ready", "abort", "merge"] as const);
 export type ChangeTransition = (typeof CHANGE_TRANSITION_OPERATIONS)[number];
 export type ChangeTransitionOperation = ChangeTransition;
 export const CHANGE_TRANSITIONS = CHANGE_TRANSITION_OPERATIONS;
-export const CHANGE_IMPLEMENTED_TRANSITIONS = Object.freeze(["issue", "ready", "abort"] as const);
+export const CHANGE_IMPLEMENTED_TRANSITIONS = Object.freeze(["issue", "ready", "abort", "merge"] as const);
 
 /**
  * Inputs resolved by Core's projection policy before a transition is
@@ -132,8 +133,10 @@ export interface ChangeTransitionTarget {
   readonly branch?: string;
   readonly baseBranch?: string;
   readonly pullRequest?: number;
-  /** Core-produced PR plan consumed by Change for initial Draft publication. */
+  /** Core-produced PR plan consumed by Change for issuance or merge composition. */
   readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
+  /** Fresh merge plan delegated to the governed Semantic PR mutation authority. */
+  readonly semanticPullRequestMergePlan?: SemanticPullRequestMergePlan;
 }
 
 export interface ChangeTransitionRequest {
@@ -605,6 +608,8 @@ export interface ChangeBranchEvidence {
 export interface ChangePullRequestEvidence {
   readonly number: number;
   readonly head: string;
+  /** Current or terminal head commit, when the trusted provider exposes it. */
+  readonly headSha?: string;
   readonly base: string;
   readonly state: "open" | "closed";
   readonly draft: boolean;
@@ -1029,6 +1034,7 @@ const TRANSITION_TARGET_KEYS = new Set([
   "baseBranch",
   "pullRequest",
   "semanticPullRequestPlan",
+  "semanticPullRequestMergePlan",
 ]);
 const TRANSITION_PLAN_KEYS = new Set(["version", "request", "from", "to", "result", "effects"]);
 const EFFECT_KEYS = new Set([
@@ -1209,6 +1215,7 @@ const CHANGE_BRANCH_EVIDENCE_KEYS = new Set(["name", "sha", "rootIssue"]);
 const CHANGE_PULL_REQUEST_EVIDENCE_KEYS = new Set([
   "number",
   "head",
+  "headSha",
   "base",
   "state",
   "draft",
@@ -1882,6 +1889,8 @@ function parseChangePullRequestEvidence(
 
   const number = projectionNumber(value.number, `${path}.number`, diagnostics, "Pull-request number");
   const head = projectionText(value.head, `${path}.head`, diagnostics, "Pull-request head", MAX_CHANGE_BRANCH_LENGTH);
+  let headSha: string | undefined;
+  if (hasOwn(value, "headSha")) headSha = projectionCommitSha(value.headSha, `${path}.headSha`, diagnostics);
   const base = projectionText(
     value.base,
     `${path}.base`,
@@ -1983,6 +1992,7 @@ function parseChangePullRequestEvidence(
   return {
     number,
     head,
+    ...(headSha === undefined ? {} : { headSha }),
     base,
     state,
     draft,
@@ -2046,6 +2056,7 @@ function compareChangePullRequestEvidence(
   return (
     left.number - right.number ||
     compareText(left.head, right.head) ||
+    compareText(left.headSha ?? "", right.headSha ?? "") ||
     compareText(left.base, right.base) ||
     compareText(left.state, right.state) ||
     Number(left.draft) - Number(right.draft) ||
@@ -2829,6 +2840,7 @@ interface ResolvedTransitionTarget {
   readonly baseBranch?: string;
   readonly pullRequest?: number;
   readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
+  readonly semanticPullRequestMergePlan?: SemanticPullRequestMergePlan;
 }
 
 function normalizeChangeTransition(input: unknown): ChangeTransition | undefined {
@@ -2873,6 +2885,7 @@ function validateTransitionTarget(input: unknown, path: string): ChangeTransitio
   let baseBranch: string | undefined;
   let pullRequest: number | undefined;
   let semanticPullRequestPlan: SemanticPullRequestMutationPlan | undefined;
+  let semanticPullRequestMergePlan: SemanticPullRequestMergePlan | undefined;
   if (hasOwn(input, "branch")) {
     branch = validateTransitionBranch(input.branch, `${path}.branch`, MAX_CHANGE_BRANCH_LENGTH, diagnostics);
   }
@@ -2928,6 +2941,19 @@ function validateTransitionTarget(input: unknown, path: string): ChangeTransitio
       diagnostics,
     );
   }
+  if (hasOwn(input, "semanticPullRequestMergePlan")) {
+    const result = validateSemanticPullRequestMergePlan(input.semanticPullRequestMergePlan);
+    diagnostics.push(
+      ...result.violations.map((violation) =>
+        createChangeDiagnostic({
+          code: "CHANGE_INVALID_PLAN",
+          path: semanticPlanDiagnosticPath(`${path}.semanticPullRequestMergePlan`, violation.path),
+          message: violation.message,
+        }),
+      ),
+    );
+    semanticPullRequestMergePlan = result.plan;
+  }
   if (diagnostics.length > 0) {
     return { valid: false, diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
   }
@@ -2939,6 +2965,7 @@ function validateTransitionTarget(input: unknown, path: string): ChangeTransitio
       ...(baseBranch === undefined ? {} : { baseBranch }),
       ...(pullRequest === undefined ? {} : { pullRequest }),
       ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
+      ...(semanticPullRequestMergePlan === undefined ? {} : { semanticPullRequestMergePlan }),
     },
     diagnostics: [],
   };
@@ -3030,16 +3057,6 @@ function validateTransitionSemantics(
   target: ChangeTransitionTarget | undefined,
 ): { readonly diagnostics: readonly ChangeDiagnostic[]; readonly resolved?: ResolvedTransitionTarget } {
   const diagnostics: ChangeDiagnostic[] = [];
-  if (transition === "merge") {
-    addDiagnostic(
-      diagnostics,
-      "CHANGE_UNSUPPORTED_TRANSITION",
-      "$.transition",
-      "The merge transition is reserved for a future merge-coordination capability.",
-    );
-    return { diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
-  }
-
   const rule = resolveChangeLifecycleTransition(transition, change.state);
   if (rule === undefined) {
     reportTransitionMismatch(
@@ -3126,11 +3143,99 @@ function validateTransitionSemantics(
     };
   }
 
+  if (transition === "merge") {
+    if (target?.semanticPullRequestMergePlan === undefined) {
+      reportTargetProblem(
+        diagnostics,
+        "$.target.semanticPullRequestMergePlan",
+        "A merge transition requires the existing Semantic PR merge plan.",
+      );
+    } else if (target.semanticPullRequestMergePlan.operation !== "merge") {
+      reportTargetProblem(
+        diagnostics,
+        "$.target.semanticPullRequestMergePlan.operation",
+        "A Change merge transition must delegate to a Semantic PR merge plan.",
+      );
+    } else {
+      const mergeRequest = target.semanticPullRequestMergePlan.request as SemanticPullRequestMergeRequest;
+      if (target.pullRequest === undefined) {
+        reportTargetProblem(diagnostics, "$.target.pullRequest", "A merge transition requires a canonical pull request.");
+      } else if (mergeRequest.pullRequest !== target.pullRequest) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_PULL_REQUEST_MISMATCH",
+          "$.target.semanticPullRequestMergePlan.request.pullRequest",
+          "Semantic PR merge plan pull request must match the canonical Change pull request.",
+        );
+      }
+      if (target.baseBranch === undefined) {
+        reportTargetProblem(diagnostics, "$.target.baseBranch", "A merge transition requires a canonical base branch.");
+      } else if (mergeRequest.expectedBase !== target.baseBranch) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_BASE_MISMATCH",
+          "$.target.semanticPullRequestMergePlan.request.expectedBase",
+          "Semantic PR merge plan base must match the canonical Change base branch.",
+        );
+      }
+      if (
+        mergeRequest.repository.hostname.toLocaleLowerCase("en-US") !== change.identity.repositoryHost ||
+        mergeRequest.repository.repositoryId !== change.identity.repositoryId
+      ) {
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_PROVENANCE_IDENTITY_MISMATCH",
+          "$.target.semanticPullRequestMergePlan.request.repository",
+          "Semantic PR merge plan repository identity must match the Change identity.",
+        );
+      }
+      if (target.branch !== undefined && target.branch !== change.projection?.branch) {
+        reportTargetProblem(diagnostics, "$.target.branch", "Target branch does not match the current Change projection.");
+      }
+      if (target.pullRequest !== undefined && target.pullRequest !== change.projection?.pullRequest) {
+        reportTargetProblem(
+          diagnostics,
+          "$.target.pullRequest",
+          "Target pull request does not match the current Change projection.",
+        );
+      }
+    }
+    if (target?.branch === undefined && change.projection?.branch === undefined) {
+      reportTargetProblem(diagnostics, "$.change.projection.branch", "The merge transition requires a canonical branch.");
+    }
+    if (target?.pullRequest === undefined && change.projection?.pullRequest === undefined) {
+      reportTargetProblem(
+        diagnostics,
+        "$.change.projection.pullRequest",
+        "The merge transition requires a canonical pull request.",
+      );
+    }
+    if (diagnostics.length > 0) {
+      return { diagnostics: createChangeDiagnosticReport(diagnostics).diagnostics };
+    }
+    return {
+      diagnostics: [],
+      resolved: {
+        branch: target?.branch ?? change.projection?.branch,
+        baseBranch: target?.baseBranch,
+        pullRequest: target?.pullRequest ?? change.projection?.pullRequest,
+        semanticPullRequestMergePlan: target?.semanticPullRequestMergePlan,
+      },
+    };
+  }
+
   if (target?.semanticPullRequestPlan !== undefined) {
     reportTargetProblem(
       diagnostics,
       "$.target.semanticPullRequestPlan",
       `The ${transition} transition accepts a Semantic PR plan only for issue issuance.`,
+    );
+  }
+  if (target?.semanticPullRequestMergePlan !== undefined) {
+    reportTargetProblem(
+      diagnostics,
+      "$.target.semanticPullRequestMergePlan",
+      `The ${transition} transition accepts a Semantic PR merge plan only for merge coordination.`,
     );
   }
 
@@ -3262,6 +3367,16 @@ function resolvedTransitionTarget(request: ChangeTransitionRequest): ResolvedTra
         : { semanticPullRequestPlan: target.semanticPullRequestPlan }),
     };
   }
+  if (request.transition === "merge") {
+    return {
+      branch: request.target?.branch ?? projection?.branch,
+      baseBranch: request.target?.baseBranch,
+      pullRequest: request.target?.pullRequest ?? projection?.pullRequest,
+      ...(request.target?.semanticPullRequestMergePlan === undefined
+        ? {}
+        : { semanticPullRequestMergePlan: request.target.semanticPullRequestMergePlan }),
+    };
+  }
   return {
     branch: target?.branch ?? projection?.branch,
     pullRequest: target?.pullRequest ?? projection?.pullRequest,
@@ -3360,8 +3475,10 @@ function buildChangeTransitionPlan(request: ChangeTransitionRequest): ChangeTran
         { kind: "DELETE_BRANCH", branch: resolved.branch! },
       );
     }
-  } else {
-    throw new Error("The merge transition is not currently plannable.");
+  } else if (request.transition === "merge") {
+    // The actual PR mutation is deliberately absent from Change effects. The
+    // trusted executor delegates the canonical plan to the Semantic PR
+    // mutation authority and verifies the resulting Change projection.
   }
   return {
     version: CHANGE_TRANSITION_CONTRACT_VERSION,

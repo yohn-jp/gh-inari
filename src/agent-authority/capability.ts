@@ -22,6 +22,7 @@ export const CAPABILITY_KINDS = Object.freeze([
   "change.implement",
   "change.ready",
   "change.abort",
+  "change.merge",
   "branch.create",
   "branch.advance",
   "pullRequest.create",
@@ -33,6 +34,7 @@ const CHANGE_CAPABILITY_KINDS: ReadonlySet<CapabilityKind> = new Set([
   "change.implement",
   "change.ready",
   "change.abort",
+  "change.merge",
 ]);
 
 export const MAX_ISSUE_NUMBER = 999_999_999 as const;
@@ -41,7 +43,7 @@ export const MAX_PATH_POLICY_LENGTH = 160 as const;
 export const CAPABILITY_CREATE_MAX = 1 as const;
 
 export interface ChangeCapabilityClaim {
-  readonly kind: "change.implement" | "change.ready" | "change.abort";
+  readonly kind: "change.implement" | "change.ready" | "change.abort" | "change.merge";
   readonly issue: number;
 }
 
