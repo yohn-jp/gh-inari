@@ -298,6 +298,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       ["Validate the current Implementation body without mutation.", "impl.validate"],
       ["Authorize the current canonical Implementation body through the existing Core boundary.", "impl.authorize"],
       ["Inspect lifecycle and provider-authoritative parent/source relationships.", "impl.inspect"],
+      ["Project the bounded Implementation Frontier before selecting runnable Implementation work.", "impl.frontier"],
       [
         "Verify a pull request and its authoritative diff against the current authorized Implementation.",
         "impl.verify",
@@ -309,6 +310,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       "`impl.validate` is read-only. `impl.show` and `impl.inspect` project current evidence without mutation.",
       "`impl.authorize` requires the current canonical body and authoritative base evidence, then emits Core authorization evidence without a GitHub mutation.",
       "`impl.verify` requires current authorization and verifies the pull request and diff against that bounded Implementation.",
+      "`impl.frontier` consumes the single Core frontier projection; READY/BLOCKED/ACTIVE/SATISFIED/INVALID must never be reconstructed in the Skill.",
       "Use native parent/sub-issue provider evidence where supported; prose `Parent:` is compatibility guidance for older artifacts and never triggers bulk reparenting.",
       IMPLEMENTATION_COMMAND_CONTRACT_INVARIANT,
       HELP_DISCLAIMER,
