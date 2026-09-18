@@ -6,6 +6,7 @@ import {
   registerChangeTools,
   registerGoldenPathTools,
   registerImplementationTools,
+  registerOperationalDiscoveryTools,
   registerSessionAuthorizedChangeTools,
   registerSemanticBranchTools,
   registerSemanticIssueTools,
@@ -42,6 +43,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
     },
   );
   registerGoldenPathTools(server);
+  registerOperationalDiscoveryTools(server, options);
   registerSemanticIssueTools(server, options);
   registerSemanticBranchTools(server, options);
   registerSemanticPullRequestTools(server, options);
