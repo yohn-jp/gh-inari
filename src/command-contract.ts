@@ -6,23 +6,19 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.12.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.13.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
   canonical: "inari",
-  compatibility: "gh inari",
   direct: "gh-inari",
   fallback: "npx --yes gh-inari",
-  extensionInstall: "gh extension install yohn-jp/gh-inari",
-  extensionUpdate: "gh extension upgrade inari",
 } as const;
 
 export const RUNTIME_CAPABILITIES = [
   "canonical-invocation",
   "machine-readable-version",
   "capability-diagnostics",
-  "extension-bootstrap",
 ] as const;
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
