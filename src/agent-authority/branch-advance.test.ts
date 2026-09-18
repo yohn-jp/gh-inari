@@ -96,6 +96,7 @@ const implementationScope = {
     repository: repository.nameWithOwner,
   },
   base: implementationBase,
+  branch: BRANCH,
   scope: {
     readOnly: [],
     write: ["src/**"],
@@ -633,6 +634,22 @@ test("rejects scope identity and path attacks before any Git effect", async () =
 test("fails closed when neither Implementation scope nor binding is present", async () => {
   const { calls, broker } = fake();
   const result = await executeBranchAdvance({ context, broker, admission });
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.reason, "authorization");
+  assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
+});
+
+test("rejects an admitted branch that differs from the canonical Implementation execution branch", async () => {
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({
+    context: {
+      ...scopedContextFor(request.changes),
+      implementationScope: { ...implementationScope, branch: "feat/466-a-different-implementation-branch" },
+    } as AuthenticatedSessionContext,
+    broker,
+    admission,
+  });
   assert.equal(result.status, "failed");
   assert.equal(result.failure?.reason, "authorization");
   assert.equal(calls.blobs.length, 0);

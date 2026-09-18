@@ -165,8 +165,45 @@ test("projects only the current authorization and preserves every distinct scope
   assert.equal(result.projection?.authorization.governedBodyDigest, implementationIssueBodyDigest(body));
   assert.deepEqual(result.projection?.repository, repository);
   assert.deepEqual(result.projection?.base, base);
+  assert.equal(result.projection?.branch, "feat/574-implementation-scope-projection");
   assert.equal(Object.isFrozen(result.projection), true);
   assert.equal(Object.isFrozen(result.projection?.scope), true);
+});
+
+test("omits branch when the contract has not yet decided one", () => {
+  const undecidedBody = renderImplementationIssueBody(
+    parseImplementationContract(
+      contract({
+        execution: {
+          baseBranch: base.branch,
+          baseRevision: base.revision,
+          baseFreshness: base.freshness,
+          dependencies: [source],
+        },
+      }),
+    ),
+  );
+  const record = authorizeImplementation({
+    implementation,
+    body: undecidedBody,
+    repository,
+    base,
+    readiness: {
+      evidence: [
+        {
+          reference: source,
+          authority: "implementation-conformance",
+          status: "satisfied",
+          freshness: "current",
+          dependencies: [],
+        },
+      ],
+    },
+  });
+  const result = tryProjectImplementationScope(projectionInput(record, undecidedBody));
+  assert.equal(result.valid, true);
+  assert.equal(result.projection?.branch, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(result.projection ?? {}, "branch"), false);
 });
 
 test("terminal abort prevents the same authorization from regenerating execution scope", () => {

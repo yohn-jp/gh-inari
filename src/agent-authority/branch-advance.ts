@@ -362,6 +362,7 @@ function matchesImplementationScopeBinding(
   context: AuthenticatedSessionContext,
   scope: ImplementationScopeProjection,
   issue: number,
+  branch: string,
 ): boolean {
   const binding = context.implementationBinding;
   if (binding === undefined) return false;
@@ -382,7 +383,8 @@ function matchesImplementationScopeBinding(
     binding.base.revision === scope.base.revision &&
     binding.base.freshness === scope.base.freshness &&
     context.repository.repositoryHost.toLowerCase() === scope.repository.repositoryHost.toLowerCase() &&
-    context.repository.repositoryId === scope.repository.repositoryId
+    context.repository.repositoryId === scope.repository.repositoryId &&
+    scope.branch === branch
   );
 }
 
@@ -452,7 +454,10 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   const classification = classifyDelegatedTreeDelta(projected);
   if (classification.kind !== "allowed") return fail(r, "protected-path", classification.message);
   const implementationScope = context.implementationScope;
-  if (implementationScope === undefined || !matchesImplementationScopeBinding(context, implementationScope, r.issue))
+  if (
+    implementationScope === undefined ||
+    !matchesImplementationScopeBinding(context, implementationScope, r.issue, r.branch)
+  )
     return fail(r, "authorization", "The current Implementation scope is not bound to this Session request.");
   if (c.pathPolicy !== undefined) return fail(r, "authorization", "Named path policy could not be resolved.");
   const target = {
