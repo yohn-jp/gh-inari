@@ -158,6 +158,12 @@ export interface RuntimeSessionCertificateIssuanceOptions {
   /** #368 Delegator private key or the keypair returned by its machinery. */
   readonly runtimeKey: KeyObject | DelegatorKeyPair;
   readonly request: ManagedSessionIssuanceRequest;
+  /**
+   * Trusted Runtime classification for an Implementation-native Session.
+   * This flag is not Session-supplied authority. When true, issuance requires
+   * both a bounded binding and fresh current Implementation evidence.
+   */
+  readonly implementationSession?: true;
   /** Current repository-verified Implementation authorization evidence. */
   readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
   readonly now?: Date;
@@ -394,9 +400,9 @@ function validationPayload(
 function validateCurrentImplementationBinding(
   request: ManagedSessionIssuanceRequest,
   currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
+  implementationSession: boolean,
 ): void {
-  const implementationNative = request.capabilities.some((claim) => claim.kind === "change.implement");
-  if (!implementationNative && request.implementationBinding === undefined && currentAuthorization === undefined) return;
+  if (!implementationSession && request.implementationBinding === undefined && currentAuthorization === undefined) return;
   if (request.implementationBinding === undefined || currentAuthorization === undefined) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED",
@@ -687,7 +693,11 @@ export function issueSessionCertificate(options: RuntimeSessionCertificateIssuan
   }
 
   assertManagedRequest(options.request, options.repository);
-  validateCurrentImplementationBinding(options.request, options.implementationAuthorization);
+  validateCurrentImplementationBinding(
+    options.request,
+    options.implementationAuthorization,
+    options.implementationSession === true,
+  );
   if (options.request.ttlSeconds > authority.maxSessionTtlSeconds) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING",
