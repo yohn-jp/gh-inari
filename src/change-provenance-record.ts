@@ -370,6 +370,83 @@ export function createChangeProvenanceRecord(
   });
 }
 
+export interface CreateLocalChangeProvenanceRecordOptions {
+  readonly rootIssue: number;
+  readonly actor?: ChangeProvenanceActor;
+  /** The local signer's own key id. No Delegator trust, capability ceiling, activation window, or session-TTL ceiling is asserted or implied. */
+  readonly authorityId: string;
+  readonly runtimeKey: ChangeProvenanceRuntimeKey;
+  readonly now?: Date;
+}
+
+/**
+ * Sign a Change provenance record from a bare signer key id and private key
+ * only. Unlike `createChangeProvenanceRecord`, this never constructs,
+ * asserts, or requires a `Delegator` record -- no canonical trust, capability
+ * ceiling, activation window, or session-TTL ceiling is invented locally.
+ * Canonical Delegator admissibility is established exclusively by trusted
+ * execution, which calls `verifyChangeProvenanceRecord` against the
+ * repository-trusted Delegator record it reads through its own App-scoped
+ * read capability before any effect.
+ */
+export function createLocalChangeProvenanceRecord(
+  options: CreateLocalChangeProvenanceRecordOptions,
+): SignedChangeProvenanceRecord {
+  if (
+    typeof options.authorityId !== "string" ||
+    options.authorityId.length === 0 ||
+    options.authorityId.length > MAX_DELEGATOR_ID_LENGTH ||
+    !DELEGATOR_ID_PATTERN.test(options.authorityId)
+  ) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime signer key id is missing or malformed.",
+    );
+  }
+  const diagnostics: ChangeProvenanceRecordDiagnostic[] = [];
+  const actor = options.actor === undefined ? undefined : validActor(options.actor, "$.actor", diagnostics);
+  if (!Number.isSafeInteger(options.rootIssue) || options.rootIssue < 1) {
+    diagnostics.push({ path: "$.rootIssue", message: "Root Issue must be a positive safe integer." });
+  }
+  if (diagnostics.length > 0 || (actor === undefined && options.actor !== undefined)) {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_INVALID",
+      "Provenance payload is invalid.",
+      diagnostics,
+    );
+  }
+  const payload: ChangeProvenancePayload = {
+    version: CHANGE_PROVENANCE_RECORD_VERSION,
+    rootIssue: options.rootIssue,
+    operation: CHANGE_PROVENANCE_RECORD_OPERATION,
+    ...(actor === undefined ? {} : { actor }),
+  };
+  let value: string;
+  try {
+    value = ed25519Sign(
+      null,
+      Buffer.from(signingInput(payload, options.authorityId), "utf8"),
+      options.runtimeKey instanceof Object && "privateKey" in options.runtimeKey
+        ? options.runtimeKey.privateKey
+        : options.runtimeKey,
+    ).toString("base64url");
+  } catch {
+    throw new ChangeProvenanceRecordError(
+      "CHANGE_PROVENANCE_RECORD_SIGNING_FAILED",
+      "Runtime provenance signing failed.",
+    );
+  }
+  return Object.freeze({
+    ...payload,
+    signature: Object.freeze({
+      alg: CHANGE_PROVENANCE_RECORD_SIGNATURE_ALGORITHM,
+      typ: CHANGE_PROVENANCE_RECORD_SIGNATURE_TYPE,
+      kid: options.authorityId,
+      value,
+    }),
+  });
+}
+
 export function renderChangeProvenanceRecord(record: SignedChangeProvenanceRecord): string {
   const validation = validateChangeProvenanceRecord(record);
   if (!validation.valid || validation.record === undefined) {

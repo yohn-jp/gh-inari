@@ -10,7 +10,9 @@ import {
   renderRuntimeAuthorityArtifact,
   signSessionRequest,
 } from "../agent-authority/index.js";
-import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
+import { assertRuntimeAuthority, type RuntimeAuthority } from "../agent-authority/runtime-authority.js";
+import { createLocalDelegatorSignedChangeProvenanceRecord } from "../agent-authority/delegator-operations.js";
+import type { SemanticSessionRequest } from "../agent-authority/session-request.js";
 import { compileSemanticTemplateSource, parseSemanticTemplate, renderSemanticNative } from "../semantic-template.js";
 import { createDirectAppSessionExecutor } from "./direct-app-execution.js";
 
@@ -71,7 +73,7 @@ const RUNTIME_AUTHORITY = assertRuntimeAuthority({
   notBefore: "2026-01-01T00:00:00Z",
   notAfter: null,
   maxSessionTtlSeconds: 3_600,
-  capabilityCeiling: ["change.abort"],
+  capabilityCeiling: ["change.abort", "change.implement"],
 });
 const RUNTIME_ARTIFACT = renderRuntimeAuthorityArtifact(RUNTIME_AUTHORITY);
 
@@ -106,6 +108,130 @@ function signedAbortEnvelope(): unknown {
     issuedAt: Math.floor(NOW.getTime() / 1000),
     expiresAt: Math.floor(NOW.getTime() / 1000) + 60,
   });
+}
+
+/**
+ * Builds a signed `change.issue` Session request envelope embedding the
+ * given caller-produced provenance record -- exactly the composition the CLI
+ * now performs on the Direct App Session path: a local-only signer produces
+ * `signedProvenanceRecord`, and the Session request carries it unmodified to
+ * the real trusted executor for canonical Delegator resolution/verification.
+ */
+function signedIssueEnvelope(signedProvenanceRecord: unknown): unknown {
+  const session = createManagedSession();
+  const issuance = session.createIssuanceRequest({
+    repository: { id: REPOSITORY_ID, name: "acme/inari" },
+    task: { kind: "issue", number: ISSUE },
+    capabilities: [{ kind: "change.implement", issue: ISSUE }],
+    ttlSeconds: 600,
+  });
+  const certificate = issueSessionCertificate({
+    repository: { id: REPOSITORY_ID, name: "acme/inari" },
+    runtimeAuthority: RUNTIME_AUTHORITY,
+    runtimeKey: RUNTIME_KEY,
+    request: issuance,
+    now: NOW,
+  });
+  session.acceptCertificate(certificate.compact);
+  return signSessionRequest({
+    session,
+    request: { version: 1, issue: ISSUE, signedProvenanceRecord } as unknown as SemanticSessionRequest,
+    operation: "change.issue",
+    requestId: "direct-app-issue-request",
+    issuedAt: Math.floor(NOW.getTime() / 1000),
+    expiresAt: Math.floor(NOW.getTime() / 1000) + 60,
+  });
+}
+
+/** A fresh-Issue fixture: no branch or pull request exists yet. Deliberately omits `git/commits` and `pulls` POST handlers past branch creation -- the composition regressions below only need to prove trust resolves and effect execution is reached, not a complete mutation round trip (already covered by `session-app-execution.integration.test.ts` for `branch.advance`/`change.abort`). */
+function freshIssueMutationFetch(canonAuthority: RuntimeAuthority = RUNTIME_AUTHORITY): {
+  readonly fetch: typeof globalThis.fetch;
+  readonly calls: readonly { readonly method: string; readonly path: string }[];
+} {
+  const calls: Array<{ method: string; path: string }> = [];
+  let branchPresent = false;
+  let branchSha = "";
+  const fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    const method = String(init?.method ?? "GET").toUpperCase();
+    const path = decodeURIComponent(url.pathname.replace(/^\//u, ""));
+    calls.push({ method, path });
+
+    if (path === `app/installations/${INSTALLATION_ID}/access_tokens`) {
+      const body = JSON.parse(String(init?.body)) as { readonly permissions: unknown };
+      return jsonResponse(
+        {
+          token: "installation-token",
+          expires_at: "2026-09-13T00:10:00.000Z",
+          permissions: body.permissions,
+          repositories: [{ id: Number(REPOSITORY_ID), full_name: "acme/inari" }],
+        },
+        201,
+      );
+    }
+    if (path === "repos/acme/inari" && method === "GET") {
+      return jsonResponse({ id: Number(REPOSITORY_ID), full_name: "acme/inari", fork: false, default_branch: "main" });
+    }
+    if (path === "repos/acme/inari/git/ref/heads/main" && method === "GET") {
+      return jsonResponse({ ref: "refs/heads/main", object: { type: "commit", sha: POLICY_SHA } });
+    }
+    if (path.startsWith("repos/acme/inari/git/trees/") && url.search === "?recursive=1" && method === "GET") {
+      return jsonResponse({
+        sha: TREE_SHA,
+        truncated: false,
+        tree: [
+          { path: RUNTIME_ARTIFACT.path, type: "blob", sha: AUTHORITY_BLOB_SHA },
+          { path: ".github/inari/issues/feature.json", type: "blob", sha: ISSUE_SOURCE_SHA },
+          { path: ISSUE_NATIVE_PATH, type: "blob", sha: ISSUE_NATIVE_SHA },
+        ],
+      });
+    }
+    if (path === `repos/acme/inari/git/blobs/${AUTHORITY_BLOB_SHA}` && method === "GET") {
+      return jsonResponse({
+        sha: AUTHORITY_BLOB_SHA,
+        encoding: "base64",
+        content: Buffer.from(canonicalRuntimeAuthorityJson(canonAuthority), "utf8").toString("base64"),
+      });
+    }
+    if (path === `repos/acme/inari/git/blobs/${ISSUE_SOURCE_SHA}` && method === "GET") {
+      return jsonResponse({
+        sha: ISSUE_SOURCE_SHA,
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify(ISSUE_SOURCE), "utf8").toString("base64"),
+      });
+    }
+    if (path === `repos/acme/inari/git/blobs/${ISSUE_NATIVE_SHA}` && method === "GET") {
+      return jsonResponse({
+        sha: ISSUE_NATIVE_SHA,
+        encoding: "base64",
+        content: Buffer.from(ISSUE_NATIVE, "utf8").toString("base64"),
+      });
+    }
+    if (path === `repos/acme/inari/issues/${ISSUE}` && method === "GET") {
+      return jsonResponse({ number: ISSUE, title: "feat: Verify direct App", state: "open", body: ISSUE_BODY });
+    }
+    if (path === `repos/acme/inari/git/ref/heads/${BRANCH}` && method === "GET") {
+      return branchPresent
+        ? jsonResponse({ ref: `refs/heads/${BRANCH}`, object: { type: "commit", sha: branchSha } })
+        : jsonResponse({}, 404);
+    }
+    if (path === "repos/acme/inari/git/matching-refs/heads/" && method === "GET") {
+      return jsonResponse(
+        branchPresent ? [{ ref: `refs/heads/${BRANCH}`, object: { type: "commit", sha: branchSha } }] : [],
+      );
+    }
+    if (path === "repos/acme/inari/pulls" && method === "GET") {
+      return jsonResponse([]);
+    }
+    if (path === "repos/acme/inari/git/refs" && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { readonly ref: string; readonly sha: string };
+      branchPresent = true;
+      branchSha = body.sha;
+      return jsonResponse({ ref: body.ref, object: { type: "commit", sha: body.sha } }, 201);
+    }
+    throw new Error(`unexpected provider request: ${method} ${path}${url.search}`);
+  }) as typeof globalThis.fetch;
+  return { fetch, calls };
 }
 
 function successfulMutationFetch(): {
@@ -277,4 +403,103 @@ test("successful direct-App Change mutation retains verified broker App provenan
   });
   assert.ok(provider.calls.some((call) => call.method === "PATCH"));
   assert.ok(provider.calls.some((call) => call.method === "DELETE"));
+});
+
+test("a locally signed change.issue provenance record resolves canonical Delegator trust through the App broker and reaches effect execution", async () => {
+  const signedProvenanceRecord = await createLocalDelegatorSignedChangeProvenanceRecord(ISSUE, {
+    authorityId: RUNTIME_AUTHORITY.id,
+    privateKey: RUNTIME_KEY.privateKey,
+    now: NOW,
+  });
+  // The record never carries or implies canonical trust on its own -- the
+  // App broker must independently resolve `RUNTIME_AUTHORITY` from the
+  // repository Canon and verify the signature against it before any effect.
+  const provider = freshIssueMutationFetch();
+  const executor = createDirectAppSessionExecutor({
+    appId: "123",
+    installationId: INSTALLATION_ID,
+    privateKeyPem: APP_PRIVATE_KEY_PEM,
+    repository: REPOSITORY,
+    fetch: provider.fetch,
+    now: () => NOW,
+  });
+
+  const result = await executor.execute(signedIssueEnvelope(signedProvenanceRecord));
+
+  // The canon walk (trust artifact tree/blob) proves the App broker resolved
+  // `RUNTIME_AUTHORITY` from repository Canon. Reaching semantic Issue
+  // template compilation (the source/native blob reads below) is only
+  // possible once `createChangeExecutor`'s provenance resolution/verification
+  // block returned successfully and Change planning began -- the
+  // "unknown/revoked/tampered" cases below never reach it, confirming this
+  // is a genuine positive proof of trust resolution, not merely activity.
+  assert.ok(
+    provider.calls.some(
+      (call) => call.method === "GET" && call.path === `repos/acme/inari/git/blobs/${AUTHORITY_BLOB_SHA}`,
+    ),
+    "the App broker must read the canonical Delegator trust artifact",
+  );
+  assert.ok(
+    provider.calls.some(
+      (call) => call.method === "GET" && call.path === `repos/acme/inari/git/blobs/${ISSUE_SOURCE_SHA}`,
+    ),
+    "Change planning must reach semantic Issue template compilation, which only follows successful provenance verification",
+  );
+  assert.equal(result.status, "failed", JSON.stringify(result));
+});
+
+test("unknown, revoked, and tampered change.issue provenance are rejected before any evidence read or effect", async () => {
+  const unknownAuthorityRecord = await createLocalDelegatorSignedChangeProvenanceRecord(ISSUE, {
+    authorityId: "unknown-not-in-canon",
+    privateKey: RUNTIME_KEY.privateKey,
+    now: NOW,
+  });
+  const revokedAuthority = assertRuntimeAuthority({ ...RUNTIME_AUTHORITY, status: "disabled" });
+  const validRecord = await createLocalDelegatorSignedChangeProvenanceRecord(ISSUE, {
+    authorityId: RUNTIME_AUTHORITY.id,
+    privateKey: RUNTIME_KEY.privateKey,
+    now: NOW,
+  });
+  const tamperedRecord = { ...validRecord, rootIssue: ISSUE + 1 };
+
+  const cases: readonly [name: string, record: unknown, canonAuthority: RuntimeAuthority][] = [
+    ["unknown authority", unknownAuthorityRecord, RUNTIME_AUTHORITY],
+    ["revoked authority", validRecord, revokedAuthority],
+    ["tampered payload", tamperedRecord, RUNTIME_AUTHORITY],
+  ];
+  for (const [name, record, canonAuthority] of cases) {
+    const provider = freshIssueMutationFetch(canonAuthority);
+    const executor = createDirectAppSessionExecutor({
+      appId: "123",
+      installationId: INSTALLATION_ID,
+      privateKeyPem: APP_PRIVATE_KEY_PEM,
+      repository: REPOSITORY,
+      fetch: provider.fetch,
+      now: () => NOW,
+    });
+
+    const result = await executor.execute(signedIssueEnvelope(record));
+
+    assert.equal(result.status, "failed", `${name}: ${JSON.stringify(result)}`);
+    // None of these ever reach Change planning (semantic Issue template
+    // compilation) or attempt a repository mutation -- the same positive
+    // signal asserted above (git/blobs/{ISSUE_SOURCE_SHA}) never appears,
+    // and no branch/PR-create POST is attempted.
+    assert.equal(
+      provider.calls.some(
+        (call) => call.method === "GET" && call.path === `repos/acme/inari/git/blobs/${ISSUE_SOURCE_SHA}`,
+      ),
+      false,
+      `${name}: Change planning must not be reached before provenance is verified`,
+    );
+    assert.equal(
+      provider.calls.some(
+        (call) =>
+          call.method === "POST" &&
+          (call.path === "repos/acme/inari/git/refs" || call.path === "repos/acme/inari/pulls"),
+      ),
+      false,
+      `${name}: no mutation effect may be attempted before provenance is verified`,
+    );
+  }
 });
