@@ -44,6 +44,12 @@ import { exportDelegatorPublicKey, type DelegatorKeyPair } from "./delegator-key
 import { assertEd25519PublicJwk, type Ed25519PublicJwk } from "./ed25519-jwk.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./codec.js";
 import { capabilityClaimWithinCeiling, type CapabilityClaim } from "./capability.js";
+import {
+  projectImplementationSessionAuthorizationBinding,
+  serializeImplementationSessionAuthorizationBinding,
+  type ImplementationSessionAuthorizationBinding,
+} from "../implementation-session-binding.js";
+import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const SESSION_ID_BYTES = 18;
@@ -51,11 +57,20 @@ const CERTIFICATE_ID_BYTES = 18;
 const VALIDATION_RUNTIME_ID = "session-issuance-validation-runtime";
 const VALIDATION_CERTIFICATE_ID = "session-issuance-validation-certificate";
 
-const REQUEST_KEYS = new Set(["sessionId", "sessionKey", "repository", "task", "capabilities", "ttlSeconds"]);
+const REQUEST_KEYS = new Set([
+  "sessionId",
+  "sessionKey",
+  "repository",
+  "task",
+  "implementationBinding",
+  "capabilities",
+  "ttlSeconds",
+]);
 
 export interface ManagedSessionIssuanceRequestInput {
   readonly repository: SessionCertificateRepository;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: readonly CapabilityClaim[];
   /** Requested certificate validity in whole seconds. */
   readonly ttlSeconds: number;
@@ -70,6 +85,7 @@ export interface ManagedSessionIssuanceRequest {
   readonly sessionKey: Ed25519PublicJwk;
   readonly repository: SessionCertificateRepository;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: readonly CapabilityClaim[];
   readonly ttlSeconds: number;
 }
@@ -142,6 +158,8 @@ export interface RuntimeSessionCertificateIssuanceOptions {
   /** #368 Delegator private key or the keypair returned by its machinery. */
   readonly runtimeKey: KeyObject | DelegatorKeyPair;
   readonly request: ManagedSessionIssuanceRequest;
+  /** Current repository-verified Implementation authorization evidence. */
+  readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
   readonly now?: Date;
 }
 
@@ -163,6 +181,9 @@ export type SessionCertificateIssuanceErrorCode =
   | "SESSION_CERTIFICATE_REPOSITORY_MISMATCH"
   | "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING"
   | "SESSION_CERTIFICATE_CAPABILITY_EXCEEDS_RUNTIME_CEILING"
+  | "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED"
+  | "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_INVALID"
+  | "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_MISMATCH"
   | "SESSION_CERTIFICATE_ISSUANCE_RUNTIME_EXPIRY"
   | "SESSION_CERTIFICATE_ISSUANCE_SIGNING_FAILED";
 
@@ -270,6 +291,7 @@ function freezeRequest(
     sessionKey,
     repository: freezeRepository(input.repository),
     ...(task === undefined ? {} : { task }),
+    ...(input.implementationBinding === undefined ? {} : { implementationBinding: input.implementationBinding }),
     capabilities: Object.freeze(input.capabilities.map(freezeCapability)),
     ttlSeconds: input.ttlSeconds,
   });
@@ -298,7 +320,7 @@ function validateSessionRequestShape(request: unknown): void {
     }
   }
   for (const key of REQUEST_KEYS) {
-    if (key === "task") continue;
+    if (key === "task" || key === "implementationBinding") continue;
     if (!(key in request)) {
       throw new SessionCertificateIssuanceError(
         "SESSION_CERTIFICATE_ISSUANCE_INVALID_REQUEST",
@@ -361,11 +383,52 @@ function validationPayload(
     repository,
     sessionKey: request.sessionKey,
     ...(request.task === undefined ? {} : { task: request.task }),
+    ...(request.implementationBinding === undefined ? {} : { implementationBinding: request.implementationBinding }),
     capabilities: request.capabilities,
     iat: nowSeconds,
     nbf: nowSeconds,
     exp: nowSeconds + request.ttlSeconds,
   };
+}
+
+function validateCurrentImplementationBinding(
+  request: ManagedSessionIssuanceRequest,
+  currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
+): void {
+  if (request.implementationBinding === undefined && currentAuthorization === undefined) return;
+  if (request.implementationBinding === undefined || currentAuthorization === undefined) {
+    throw new SessionCertificateIssuanceError(
+      "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED",
+      "Implementation Session issuance requires both a bounded binding and current authorization evidence.",
+    );
+  }
+  let current: ImplementationSessionAuthorizationBinding;
+  try {
+    current = projectImplementationSessionAuthorizationBinding({
+      ...currentAuthorization,
+      task: request.task,
+    });
+  } catch (error: unknown) {
+    throw new SessionCertificateIssuanceError(
+      "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_INVALID",
+      error instanceof Error ? error.message : "Current Implementation authorization is not admissible.",
+    );
+  }
+  let requestedSerialized: string;
+  try {
+    requestedSerialized = serializeImplementationSessionAuthorizationBinding(request.implementationBinding);
+  } catch (error: unknown) {
+    throw new SessionCertificateIssuanceError(
+      "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_INVALID",
+      error instanceof Error ? error.message : "Session Implementation binding is invalid.",
+    );
+  }
+  if (requestedSerialized !== serializeImplementationSessionAuthorizationBinding(current)) {
+    throw new SessionCertificateIssuanceError(
+      "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_MISMATCH",
+      "Session binding does not match the current Implementation authorization.",
+    );
+  }
 }
 
 function runtimeSigningKey(input: KeyObject | DelegatorKeyPair): KeyObject {
@@ -623,6 +686,7 @@ export function issueSessionCertificate(options: RuntimeSessionCertificateIssuan
   }
 
   assertManagedRequest(options.request, options.repository);
+  validateCurrentImplementationBinding(options.request, options.implementationAuthorization);
   if (options.request.ttlSeconds > authority.maxSessionTtlSeconds) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING",

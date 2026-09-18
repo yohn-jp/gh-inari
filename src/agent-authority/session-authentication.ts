@@ -29,6 +29,12 @@ import { resolveDelegator, type LoadedDelegator } from "./delegator-trust.js";
 import type { CapabilityClaim } from "./capability.js";
 import { verifySessionRequest, type VerifiedSessionRequest } from "./session-request.js";
 import { validateRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
+import {
+  projectImplementationSessionAuthorizationBinding,
+  serializeImplementationSessionAuthorizationBinding,
+  type ImplementationSessionAuthorizationBinding,
+} from "../implementation-session-binding.js";
+import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
 
 /** The only broker operation accepted by this boundary. */
 export interface SessionAuthenticationReadCapabilityBroker {
@@ -45,6 +51,8 @@ export interface AuthenticateSessionRequestOptions {
   readonly repository: GitHubChangeEffectRepository;
   /** Untrusted #373 Session request envelope. */
   readonly request: unknown;
+  /** Fresh current Implementation evidence when the certificate carries a binding. */
+  readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
   /** One request-local verification clock. Defaults to the current time. */
   readonly now?: Date | number | (() => Date | number);
 }
@@ -92,6 +100,7 @@ export interface AuthenticatedSessionContext {
   readonly runtimeAuthority: AuthenticatedSessionDelegator;
   readonly session: AuthenticatedSessionIdentity;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capabilities: readonly CapabilityClaim[];
   readonly authority: AuthenticatedSessionAuthorityRef;
   readonly request: AuthenticatedSessionRequestIdentity;
@@ -104,6 +113,7 @@ export const SESSION_AUTHENTICATION_FAILURE_REASONS = Object.freeze([
   "repository-read",
   "runtime-trust",
   "runtime-signature",
+  "implementation-authorization",
   "session-request",
 ] as const);
 
@@ -206,6 +216,35 @@ function verifyCertificateClaims(
   }
 }
 
+function verifyImplementationBinding(
+  certificate: DecodedSessionCertificate,
+  repository: RepositoryIdentity,
+  currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
+): void {
+  const binding = certificate.payload.implementationBinding;
+  if (binding === undefined) return;
+  if (currentAuthorization === undefined) fail("implementation-authorization");
+  if (
+    binding.repository.repositoryHost.toLowerCase() !== repository.repositoryHost.toLowerCase() ||
+    binding.repository.repositoryId !== repository.repositoryId
+  )
+    fail("implementation-authorization");
+  try {
+    const current = projectImplementationSessionAuthorizationBinding({
+      ...currentAuthorization,
+      task: certificate.payload.task,
+    });
+    if (
+      serializeImplementationSessionAuthorizationBinding(current) !==
+      serializeImplementationSessionAuthorizationBinding(binding)
+    ) {
+      fail("implementation-authorization");
+    }
+  } catch {
+    fail("implementation-authorization");
+  }
+}
+
 function sessionId(subject: string): string {
   return subject.startsWith("session:") ? subject.slice("session:".length) : subject;
 }
@@ -222,6 +261,9 @@ function authenticatedContext(
     runtimeAuthority: Object.freeze({ id: runtime.authority.id, kid: certificate.header.kid }),
     session: Object.freeze({ id: sessionId(payload.sub), certificateJti: payload.jti }),
     ...(payload.task === undefined ? {} : { task: Object.freeze({ ...payload.task }) }),
+    ...(payload.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: Object.freeze(payload.implementationBinding) }),
     capabilities: Object.freeze(payload.capabilities.map((claim) => Object.freeze({ ...claim }))),
     authority: Object.freeze({ ref: runtime.provenance.ref, sha: runtime.provenance.policySha }),
     request: Object.freeze({
@@ -269,6 +311,7 @@ export async function authenticateSessionRequest(
 
       verifyRuntimeSignature(certificate, runtime);
       verifyCertificateClaims(certificate, runtime, resolvedIdentity.value, now);
+      verifyImplementationBinding(certificate, resolvedIdentity.value, options.implementationAuthorization);
 
       let requestVerification;
       try {

@@ -13,6 +13,7 @@ export * from "./governance.js";
 export * from "./contract/index.js";
 export * from "./implementation-contract.js";
 export * from "./implementation-authorization.js";
+export * from "./implementation-session-binding.js";
 export * from "./implementation-readiness.js";
 export * from "./implementation-execution-evidence.js";
 export * from "./implementation-scope-projection.js";

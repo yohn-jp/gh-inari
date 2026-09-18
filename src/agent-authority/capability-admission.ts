@@ -29,6 +29,10 @@ import { admitDelegatedWrite, PROTECTED_PATH_CLASSIFIER_VERSION, type DelegatedT
 import type { AuthenticatedSessionContext } from "./session-authentication.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
 import { validateRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
+import {
+  validateImplementationSessionAuthorizationBinding,
+  type ImplementationSessionAuthorizationBinding,
+} from "../implementation-session-binding.js";
 
 export const CAPABILITY_ADMISSION_CONTRACT_VERSION = 1 as const;
 
@@ -85,6 +89,7 @@ export interface AdmittedSessionCapability {
     expiresAt: number;
   }>;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capability: CapabilityClaim;
   readonly subject: CapabilityAdmissionSubject;
   readonly canonical: Readonly<{
@@ -259,6 +264,18 @@ function validateContext(
     if (!isRecord(context.task) || context.task.kind !== "issue" || !safeIssue(context.task.number)) {
       deny("task");
     }
+  }
+
+  if (context.implementationBinding !== undefined) {
+    const bindingResult = validateImplementationSessionAuthorizationBinding(context.implementationBinding);
+    if (!bindingResult.valid || bindingResult.binding === undefined) deny("session-capability");
+    if (
+      bindingResult.binding.repository.repositoryHost.toLowerCase() !==
+        repositoryResult.value.repositoryHost.toLowerCase() ||
+      bindingResult.binding.repository.repositoryId !== repositoryResult.value.repositoryId
+    )
+      deny("repository");
+    if (context.task === undefined || context.task.number !== bindingResult.binding.task.number) deny("task");
   }
 
   return {
@@ -453,8 +470,7 @@ function claimForOperation(
   const issue = subject.issue;
   const changeClaim = (
     kind: "change.implement" | "change.ready" | "change.abort" | "change.merge",
-  ): CapabilityClaim | undefined =>
-    claims.find((claim) => claim.kind === kind && claim.issue === issue);
+  ): CapabilityClaim | undefined => claims.find((claim) => claim.kind === kind && claim.issue === issue);
 
   if (operation === "change.issue" || operation === "change.show") {
     const claim = changeClaim("change.implement");
@@ -730,6 +746,9 @@ export function admitAuthenticatedSessionCapability(input: CapabilityAdmissionRe
     ...(validatedContext.context.task === undefined
       ? {}
       : { task: Object.freeze({ ...validatedContext.context.task }) }),
+    ...(validatedContext.context.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: Object.freeze(validatedContext.context.implementationBinding) }),
     capability: Object.freeze({ ...capability }),
     subject,
     canonical: Object.freeze({

@@ -31,6 +31,7 @@ import type { SemanticSessionRequest } from "./session-request.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
 import type { ChangeState } from "../change.js";
+import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends <Value>() => Value extends Right ? 1 : 2 ? true : false;
@@ -75,6 +76,7 @@ type ExpectedAdmittedSessionCapability = {
     expiresAt: number;
   }>;
   readonly task?: SessionCertificateTask;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
   readonly capability: CapabilityClaim;
   readonly subject: ExpectedCapabilityAdmissionSubject;
   readonly canonical: Readonly<{
