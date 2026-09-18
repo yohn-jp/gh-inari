@@ -266,6 +266,10 @@ function validateContext(
     }
   }
 
+  if (claims.some((claim) => claim.kind === "change.implement") && context.implementationBinding === undefined) {
+    deny("session-capability");
+  }
+
   if (context.implementationBinding !== undefined) {
     const bindingResult = validateImplementationSessionAuthorizationBinding(context.implementationBinding);
     if (!bindingResult.valid || bindingResult.binding === undefined) deny("session-capability");
