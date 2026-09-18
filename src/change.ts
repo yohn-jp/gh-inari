@@ -3159,7 +3159,11 @@ function validateTransitionSemantics(
     } else {
       const mergeRequest = target.semanticPullRequestMergePlan.request as SemanticPullRequestMergeRequest;
       if (target.pullRequest === undefined) {
-        reportTargetProblem(diagnostics, "$.target.pullRequest", "A merge transition requires a canonical pull request.");
+        reportTargetProblem(
+          diagnostics,
+          "$.target.pullRequest",
+          "A merge transition requires a canonical pull request.",
+        );
       } else if (mergeRequest.pullRequest !== target.pullRequest) {
         addDiagnostic(
           diagnostics,
@@ -3190,7 +3194,11 @@ function validateTransitionSemantics(
         );
       }
       if (target.branch !== undefined && target.branch !== change.projection?.branch) {
-        reportTargetProblem(diagnostics, "$.target.branch", "Target branch does not match the current Change projection.");
+        reportTargetProblem(
+          diagnostics,
+          "$.target.branch",
+          "Target branch does not match the current Change projection.",
+        );
       }
       if (target.pullRequest !== undefined && target.pullRequest !== change.projection?.pullRequest) {
         reportTargetProblem(
@@ -3201,7 +3209,11 @@ function validateTransitionSemantics(
       }
     }
     if (target?.branch === undefined && change.projection?.branch === undefined) {
-      reportTargetProblem(diagnostics, "$.change.projection.branch", "The merge transition requires a canonical branch.");
+      reportTargetProblem(
+        diagnostics,
+        "$.change.projection.branch",
+        "The merge transition requires a canonical branch.",
+      );
     }
     if (target?.pullRequest === undefined && change.projection?.pullRequest === undefined) {
       reportTargetProblem(

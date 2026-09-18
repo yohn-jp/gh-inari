@@ -67,8 +67,9 @@ statuses:
 
 ```text
 DRAFT -> READY -> AUTHORIZED -> COMPLETED
-                  |             ^
-                  +-------------+
+                  |      |
+                  |      +-----> ABORTED
+                  +------------> INVALIDATED
 
 AUTHORIZED + body/base drift -> INVALIDATED
 AUTHORIZED + explicit newer Implementation -> SUPERSEDED
@@ -86,8 +87,12 @@ migrations.
   Implementation identity, canonical body digest, repository, and base
   evidence. The implementation session may use only that current contract and
   its derived scope.
-- `completed` is reported only when completion is explicitly supplied while
-  the authorization remains current.
+- `completed` is reported only when the exact current authorization, bound
+  execution evidence, and recomputed conformance result are all authoritative
+  and conformant. A caller-supplied completion assertion is not authority.
+- `aborted` is reported only from a #679-bound Change/Session identity whose
+  Change state is `ABORTED`; the historical authorization remains inspectable,
+  but it is no longer current execution authority.
 - `invalidated` means current evidence no longer matches the authorization,
   including body or repository/base drift.
 - `superseded` means explicit provider evidence identifies a newer

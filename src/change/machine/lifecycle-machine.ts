@@ -2,10 +2,7 @@ import { assign, createActor, setup } from "xstate";
 import type { ChangeState, ChangeTransition } from "../../change.js";
 
 type LifecycleEvent =
-  | { readonly type: "ISSUE" }
-  | { readonly type: "READY" }
-  | { readonly type: "ABORT" }
-  | { readonly type: "MERGE" };
+  { readonly type: "ISSUE" } | { readonly type: "READY" } | { readonly type: "ABORT" } | { readonly type: "MERGE" };
 
 interface LifecycleContext {
   initialState: ChangeState;

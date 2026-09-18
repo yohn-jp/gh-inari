@@ -52,7 +52,10 @@ import {
   GITHUB_APP_SEMANTIC_PULL_REQUEST_PERMISSIONS,
   GitHubAppSemanticPullRequestMutationExecutor,
 } from "./app-semantic-pr-mutation.js";
-import { SemanticPullRequestMutationError, type SemanticPullRequestMutationExecutionPort } from "../semantic-pr-mutation.js";
+import {
+  SemanticPullRequestMutationError,
+  type SemanticPullRequestMutationExecutionPort,
+} from "../semantic-pr-mutation.js";
 
 const DEFAULT_API_URL = "https://api.github.com";
 const MAX_RESPONSE_BYTES = 1_048_576;

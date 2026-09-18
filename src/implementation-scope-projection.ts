@@ -17,11 +17,10 @@ import { type JsonSchema, type JsonSchemaDocument } from "./contract/schema.js";
 import {
   IMPLEMENTATION_AUTHORIZATION_KIND,
   IMPLEMENTATION_AUTHORIZATION_VERSION,
-  tryVerifyImplementationAuthorization,
-  type ImplementationAuthorizationVerificationInput,
   type ImplementationAuthorizationViolationCode,
   type ImplementationBaseEvidence,
 } from "./implementation-authorization.js";
+import { tryProjectImplementationLifecycle, type ImplementationLifecycleInput } from "./implementation-lifecycle.js";
 import {
   IMPLEMENTATION_CONTRACT_VERSION,
   canonicalizeImplementationScopePath,
@@ -68,7 +67,7 @@ export interface ImplementationScopeProjection {
 }
 
 /** Verification evidence accepted by the projection boundary. */
-export interface ImplementationScopeProjectionInput extends ImplementationAuthorizationVerificationInput {}
+export interface ImplementationScopeProjectionInput extends ImplementationLifecycleInput {}
 
 export type ImplementationScopeProjectionOperation = ImplementationScopeOperation | "DENY";
 
@@ -541,13 +540,21 @@ export function isImplementationScopeProjection(input: unknown): input is Implem
 }
 
 /**
- * Project execution authority only from a currently valid #572 authorization.
+ * Project execution authority only from the current non-terminal Implementation lifecycle.
  * There is no scope parameter: all five lists are copied from the verified
  * canonical contract, so callers cannot widen or replace authorized scope.
  */
 export function tryProjectImplementationScope(input: unknown): ImplementationScopeProjectionResult {
-  const verification = tryVerifyImplementationAuthorization(input);
-  const violations = authorizationViolations(verification.violations);
+  const verification = tryProjectImplementationLifecycle(input);
+  const violations = authorizationViolations(
+    verification.violations.map((violation) => ({
+      ...violation,
+      code:
+        violation.code === "IMPLEMENTATION_LIFECYCLE_INPUT_INVALID"
+          ? "IMPLEMENTATION_AUTHORIZATION_UNKNOWN_PROPERTY"
+          : (violation.code as ImplementationAuthorizationViolationCode),
+    })),
+  );
   if (
     !verification.valid ||
     !verification.authorized ||
@@ -559,7 +566,7 @@ export function tryProjectImplementationScope(input: unknown): ImplementationSco
         violations,
         "IMPLEMENTATION_SCOPE_PROJECTION_AUTHORIZATION_NOT_CURRENT",
         "$.authorization",
-        "Execution authority requires an active authorized Implementation; completed authority cannot be projected.",
+        "Execution authority requires an active authorized Implementation; terminal authority cannot be projected.",
       );
     else if (verification.valid && (!verification.authorized || !verification.current))
       addViolation(

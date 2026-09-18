@@ -877,7 +877,12 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
             message: error.message,
           },
         );
-        throw new ChangeTrustedExecutorError(executionCode, "Governed Semantic PR merge execution failed closed.", diagnostics, evidence);
+        throw new ChangeTrustedExecutorError(
+          executionCode,
+          "Governed Semantic PR merge execution failed closed.",
+          diagnostics,
+          evidence,
+        );
       }
       throw new ChangeTrustedExecutorError(
         "CHANGE_EXECUTION_EFFECT_FAILED",
@@ -889,7 +894,11 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
           this.#trustedRequester,
           [{ kind: "MERGE_PULL_REQUEST", status: "failed" }],
           "not-required",
-          { effect: { kind: "MERGE_PULL_REQUEST" }, code: "PR_MUTATION_EFFECT_FAILED", message: "Merge effect failed." },
+          {
+            effect: { kind: "MERGE_PULL_REQUEST" },
+            code: "PR_MUTATION_EFFECT_FAILED",
+            message: "Merge effect failed.",
+          },
         ),
       );
     }
