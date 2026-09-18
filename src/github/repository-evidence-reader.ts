@@ -12,6 +12,11 @@ import type { GitHubChangeEffectRepository, GitHubChangeEffectResponse } from ".
 import type { ChangePullRequestEvidence } from "../change.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import type { InariIssuerAppIdentity } from "./issuer-authority.js";
+import { GitHubAdapter, type GitHubArtifactTransport } from "./adapter.js";
+import {
+  tryObserveOperationalPullRequest,
+  type OperationalPullRequestObservation,
+} from "../operational-observation.js";
 
 export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
   "repository-configuration",
@@ -315,6 +320,23 @@ export class GitHubRepositoryEvidenceReader {
     const value = record(response.body);
     if (positiveNumber(value.number) !== number) fail("pull-request-evidence");
     return boundedArtifactBody(value.body);
+  }
+
+  /** Read the full Operational Observation used by Implementation conformance. */
+  async readOperationalPullRequest(number: number): Promise<OperationalPullRequestObservation> {
+    try {
+      const adapter = new GitHubAdapter({
+        repository: `${this.#options.repository.owner}/${this.#options.repository.name}`,
+        hostname: this.#options.repository.hostname,
+        transport: this.#options.transport as unknown as GitHubArtifactTransport,
+      });
+      const result = tryObserveOperationalPullRequest({ pullRequest: await adapter.observePullRequest(number) });
+      if (!result.valid || result.observation === undefined) fail("pull-request-evidence");
+      return result.observation;
+    } catch (error: unknown) {
+      if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
+      fail("pull-request-evidence");
+    }
   }
 
   async readGovernanceTree(ref: string): Promise<GitHubRepositoryGovernanceTree> {

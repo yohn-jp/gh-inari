@@ -23,6 +23,7 @@ export const CHANGE_EXECUTION_PORT_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT
  */
 export const DEFAULT_CHANGE_EXECUTION_DEADLINE_MS = 240_000 as const;
 const MAX_SEMANTIC_PULL_REQUEST_PLAN_BYTES = 1_048_576;
+const MAX_IMPLEMENTATION_CONFORMANCE_INPUT_BYTES = 16_384;
 export const MAX_CHANGE_EXECUTION_EVIDENCE_BYTES = 16_384 as const;
 
 /** Absolute deadline shared by every nested operation in one execution. */
@@ -79,6 +80,8 @@ export interface ChangeMutationRequest extends ChangeRequestBase {
   readonly mergeStrategy?: SemanticPullRequestMergeStrategy;
   /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
   readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
+  /** Seed evidence for the Core-owned Implementation conformance reread on Ready. */
+  readonly implementationConformance?: unknown;
 }
 
 export interface ChangeReadRequest extends ChangeRequestBase {
@@ -292,6 +295,35 @@ export function validateChangeRequest(
       throw new ChangeExecutionPortError(
         "CHANGE_REMOTE_REQUEST_INVALID",
         "Signed Change provenance exceeds the bounded request size.",
+        { issue: request.issue },
+      );
+    }
+  }
+  if (request.operation !== "show" && request.implementationConformance !== undefined) {
+    if (request.operation !== "ready") {
+      throw new ChangeExecutionPortError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Implementation conformance evidence is accepted only for Change Ready.",
+        { issue: request.issue },
+      );
+    }
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(request.implementationConformance);
+    } catch {
+      throw new ChangeExecutionPortError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Implementation conformance evidence must be JSON-serializable.",
+        { issue: request.issue },
+      );
+    }
+    if (
+      serialized === undefined ||
+      new TextEncoder().encode(serialized).byteLength > MAX_IMPLEMENTATION_CONFORMANCE_INPUT_BYTES
+    ) {
+      throw new ChangeExecutionPortError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Implementation conformance evidence exceeds the bounded request size.",
         { issue: request.issue },
       );
     }
@@ -542,6 +574,7 @@ export function changeMutationRequest(
   semanticPullRequestPlan?: unknown,
   signedProvenanceRecord?: SignedChangeProvenanceRecord,
   mergeStrategy?: SemanticPullRequestMergeStrategy,
+  implementationConformance?: unknown,
 ): ChangeMutationRequest {
   const request: ChangeMutationRequest = {
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
@@ -550,6 +583,7 @@ export function changeMutationRequest(
     ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
     ...(signedProvenanceRecord === undefined ? {} : { signedProvenanceRecord }),
     ...(mergeStrategy === undefined ? {} : { mergeStrategy }),
+    ...(implementationConformance === undefined ? {} : { implementationConformance }),
   };
   validateChangeRequest(request);
   return request;

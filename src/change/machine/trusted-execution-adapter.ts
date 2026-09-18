@@ -289,6 +289,13 @@ function readyInput(
     projection: input,
     ...(evidence?.issue === undefined ? {} : { issue: evidence.issue }),
     ...(evidence?.pullRequest === undefined ? {} : { pullRequest: evidence.pullRequest }),
+    ...(evidence?.implementationConformance === undefined
+      ? {}
+      : { implementationConformance: evidence.implementationConformance }),
+    ...(evidence?.implementationIssueBody === undefined
+      ? {}
+      : { implementationIssueBody: evidence.implementationIssueBody }),
+    ...(evidence?.baseRevision === undefined ? {} : { baseRevision: evidence.baseRevision }),
   };
 }
 

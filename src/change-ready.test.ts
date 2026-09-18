@@ -16,6 +16,16 @@ import {
   projectChangeFromGitHubEvidence,
 } from "./change.js";
 import { renderIssueArtifact, renderPullRequestArtifact } from "./artifact.js";
+import {
+  parseImplementationContract,
+  parseImplementationIssueBody,
+  renderImplementationIssueBody,
+} from "./implementation-contract.js";
+import { authorizeImplementation } from "./implementation-authorization.js";
+import {
+  IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
+  IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
+} from "./implementation-execution-evidence.js";
 import { issueContractFixture, pullRequestContractFixture } from "./contract/fixtures.js";
 import type { CanonicalContract } from "./contract/ir.js";
 import {
@@ -32,6 +42,7 @@ import {
 } from "./change-trusted-executor.js";
 import type { ChangeMutationRequest } from "./change-execution-port.js";
 import { executeReadyWithXState } from "./change/machine/ready-execution-machine.js";
+import type { GitHubOperationalPullRequestEvidence, GitHubOperationalCollection } from "./github/types.js";
 
 const identity = {
   repositoryHost: "github.com",
@@ -120,21 +131,312 @@ function canonicalChange(input: ChangeProjectionInput = projectionInput()): Chan
   return planChangeIssuance(input).result;
 }
 
+const implementationRepository = {
+  repositoryHost: identity.repositoryHost,
+  repositoryId: identity.repositoryId,
+  repository: "acme/inari",
+} as const;
+const implementationBase = { branch: baseBranch, revision: "base-revision", freshness: "base-revision" } as const;
+const implementationHeadRevision = "a".repeat(40);
+const implementationBody = renderImplementationIssueBody(
+  parseImplementationContract({
+    version: 1,
+    kind: "implementation",
+    repository: implementationRepository,
+    sources: [{ ...implementationRepository, number: 220 }],
+    objective: "Complete the Change Ready implementation.",
+    nonGoals: ["Review approval"],
+    architecture: {
+      decision: "Compose Implementation conformance with Change Ready.",
+      affectedComponents: ["Change Core"],
+      invariants: ["Change remains the lifecycle authority."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: [], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Ready is gated."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch,
+      baseRevision: implementationBase.revision,
+      baseFreshness: implementationBase.freshness,
+      branch,
+      dependencies: [{ ...implementationRepository, number: 220 }],
+    },
+  }),
+);
+const implementationAuthorization = authorizeImplementation({
+  implementation: { ...implementationRepository, number: identity.rootIssue },
+  body: implementationBody,
+  repository: implementationRepository,
+  base: implementationBase,
+  readiness: {
+    evidence: [
+      {
+        reference: { ...implementationRepository, number: 220 },
+        authority: "implementation-conformance",
+        status: "satisfied",
+        freshness: "current",
+        dependencies: [],
+      },
+    ],
+  },
+});
+
+function operationalCollection<T>(items: readonly T[]): GitHubOperationalCollection<T> {
+  return {
+    status: "available",
+    items,
+    pagination: { perPage: 100, pages: 1, returned: items.length, truncated: false },
+    diagnostics: [],
+  };
+}
+
+function implementationPullRequest(
+  overrides: Partial<GitHubOperationalPullRequestEvidence> = {},
+): GitHubOperationalPullRequestEvidence {
+  return {
+    repository: { host: identity.repositoryHost, nameWithOwner: "acme/inari", repositoryId: identity.repositoryId },
+    number: 2210,
+    title: "Implementation Ready",
+    body: pullRequestBody,
+    state: "open",
+    author: null,
+    head: { ref: branch, sha: implementationHeadRevision },
+    base: { ref: baseBranch, sha: implementationBase.revision },
+    draft: true,
+    labels: [],
+    assignees: [],
+    url: "https://github.com/acme/inari/pull/2210",
+    checks: operationalCollection([]),
+    requiredCheckBindings: operationalCollection([]),
+    reviews: operationalCollection([]),
+    comments: operationalCollection([]),
+    inlineReviewComments: operationalCollection([]),
+    changedFiles: operationalCollection([]),
+    provenance: { provider: "github", endpoints: ["pulls/2210"] },
+    ...overrides,
+  };
+}
+
+function implementationConformance(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const pullRequestValue = implementationPullRequest();
+  return {
+    authorization: implementationAuthorization,
+    issue: {
+      reference: { ...implementationRepository, number: identity.rootIssue },
+      body: implementationBody,
+    },
+    repository: implementationRepository,
+    base: implementationBase,
+    pullRequestNumber: pullRequestValue.number,
+    pullRequest: pullRequestValue,
+    ...overrides,
+  };
+}
+
+const parsedImplementation = parseImplementationIssueBody(implementationBody);
+if (parsedImplementation.contract === undefined) throw new Error("Implementation fixture must be canonical.");
+const targetedImplementationContract = {
+  ...parsedImplementation.contract,
+  verification: { ...parsedImplementation.contract.verification, targetedTests: ["pnpm test"] },
+};
+const targetedImplementationBody = renderImplementationIssueBody(targetedImplementationContract);
+const targetedImplementationAuthorization = authorizeImplementation({
+  implementation: { ...implementationRepository, number: identity.rootIssue },
+  body: targetedImplementationBody,
+  repository: implementationRepository,
+  base: implementationBase,
+  readiness: {
+    evidence: [
+      {
+        reference: { ...implementationRepository, number: 220 },
+        authority: "implementation-conformance",
+        status: "satisfied",
+        freshness: "current",
+        dependencies: [],
+      },
+    ],
+  },
+});
+
+function targetedImplementationConformance(executionEvidence?: unknown): Record<string, unknown> {
+  return implementationConformance({
+    authorization: targetedImplementationAuthorization,
+    issue: {
+      reference: { ...implementationRepository, number: identity.rootIssue },
+      body: targetedImplementationBody,
+    },
+    ...(executionEvidence === undefined ? {} : { executionEvidence }),
+  });
+}
+
+function targetedExecutionEvidence(result: "satisfied" | "failed"): Record<string, unknown> {
+  return {
+    version: IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
+    kind: IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
+    implementation: targetedImplementationAuthorization.implementation,
+    repository: targetedImplementationAuthorization.repository,
+    governedBodyDigest: targetedImplementationAuthorization.governedBodyDigest,
+    base: targetedImplementationAuthorization.base,
+    branch,
+    headRevision: implementationHeadRevision,
+    targetedTests: [{ command: "pnpm test", result }],
+  };
+}
+
+function nativeProjectionInput(
+  pullRequestEvidence: ChangePullRequestEvidence = pullRequest({ number: 2210, headSha: implementationHeadRevision }),
+  conformance: Record<string, unknown> = implementationConformance(),
+  currentIssueBody: string = implementationBody,
+  currentBaseRevision: string = implementationBase.revision,
+): ChangeProjectionInput {
+  return {
+    ...projectionInput(pullRequestEvidence),
+    readyEvidence: {
+      pullRequest: { contract: pullRequestContract, body: pullRequestBody },
+      implementationConformance: conformance,
+      implementationIssueBody: currentIssueBody,
+      baseRevision: currentBaseRevision,
+    },
+  };
+}
+
 function readyInput(input: ChangeProjectionInput = projectionInput(), change = canonicalChange(input)) {
   return {
     change,
     projection: input,
-    issue: input.readyEvidence?.issue,
-    pullRequest: input.readyEvidence?.pullRequest,
+    ...(input.readyEvidence?.issue === undefined ? {} : { issue: input.readyEvidence.issue }),
+    ...(input.readyEvidence?.pullRequest === undefined ? {} : { pullRequest: input.readyEvidence.pullRequest }),
+    ...(input.readyEvidence?.implementationConformance === undefined
+      ? {}
+      : { implementationConformance: input.readyEvidence.implementationConformance }),
+    ...(input.readyEvidence?.implementationIssueBody === undefined
+      ? {}
+      : { implementationIssueBody: input.readyEvidence.implementationIssueBody }),
+    ...(input.readyEvidence?.baseRevision === undefined ? {} : { baseRevision: input.readyEvidence.baseRevision }),
   };
 }
 
 test("healthy DRAFT -> REVIEW validates every Ready precondition in Core", () => {
   const result = validateChangeReadyTransition(readyInput());
-  assert.equal(result.valid, true);
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
   assert.equal(result.idempotent, false);
   assert.equal(result.change?.state, "DRAFT");
   assert.equal(result.projection?.status, "healthy");
+});
+
+test("Implementation-native Ready composes the authoritative current conformance result", () => {
+  const input = nativeProjectionInput();
+  const transitionInput = readyInput(input, canonicalChange(input));
+  const result = validateChangeReadyTransition(transitionInput);
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.idempotent, false);
+  assert.deepEqual(planChangeReadyTransition(transitionInput).effects, [
+    { kind: "MARK_PULL_REQUEST_READY", pullRequest: 2210 },
+  ]);
+});
+
+test("Implementation-native Ready blocks the authoritative non-conformant reasons", () => {
+  const cases = [
+    {
+      name: "scope violation",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        implementationConformance({
+          pullRequest: implementationPullRequest({
+            changedFiles: operationalCollection([{ filename: "outside/changed.ts", status: "modified" }]),
+          }),
+        }),
+      ),
+      reason: "IMPLEMENTATION_CONFORMANCE_SCOPE_VIOLATION",
+    },
+    {
+      name: "failed targeted test",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        targetedImplementationConformance(targetedExecutionEvidence("failed")),
+        targetedImplementationBody,
+      ),
+      reason: "IMPLEMENTATION_CONFORMANCE_TEST_FAILED",
+    },
+    {
+      name: "missing targeted evidence",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        targetedImplementationConformance(),
+        targetedImplementationBody,
+      ),
+      reason: "IMPLEMENTATION_CONFORMANCE_TEST_UNVERIFIABLE",
+    },
+    {
+      name: "body drift",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        implementationConformance(),
+        implementationBody.replace("Complete the Change Ready implementation.", "Changed objective."),
+      ),
+      reason: "not derived from the current Implementation body",
+    },
+    {
+      name: "base drift",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        implementationConformance(),
+        implementationBody,
+        "new-base-revision",
+      ),
+      reason: "base evidence is stale",
+    },
+    {
+      name: "pull-request identity mismatch",
+      input: nativeProjectionInput(
+        pullRequest({ headSha: implementationHeadRevision }),
+        implementationConformance({ pullRequestNumber: 999 }),
+      ),
+      reason: "IMPLEMENTATION_CONFORMANCE_PR_IDENTITY_MISMATCH",
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const result = validateChangeReadyTransition(readyInput(entry.input, canonicalChange(entry.input)));
+    assert.equal(result.valid, false, entry.name);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID" && diagnostic.message.includes(entry.reason),
+      ),
+      `${entry.name}: ${JSON.stringify(result.diagnostics)}`,
+    );
+  }
+});
+
+test("Implementation-native Ready admits an exact current-head retry idempotently", () => {
+  const input = nativeProjectionInput(
+    pullRequest({ draft: false, headSha: implementationHeadRevision }),
+    implementationConformance({ pullRequest: implementationPullRequest({ draft: false }) }),
+  );
+  const result = validateChangeReadyTransition(readyInput(input, canonicalChange(input)));
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.idempotent, true);
+});
+
+test("Implementation-native REVIEW retry rejects a stale conformance head", () => {
+  const input = nativeProjectionInput(pullRequest({ draft: false, headSha: "b".repeat(40) }));
+  const result = validateChangeReadyTransition(readyInput(input, { ...canonicalChange(input), state: "REVIEW" }));
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "CHANGE_IMPLEMENTATION_CONFORMANCE_INVALID" &&
+        diagnostic.message.includes("stale for the current pull-request head"),
+    ),
+    JSON.stringify(result.diagnostics),
+  );
 });
 
 test("missing Issue/PR evidence and invalid contract evidence reject before planning", () => {

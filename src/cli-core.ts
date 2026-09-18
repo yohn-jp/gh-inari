@@ -350,6 +350,7 @@ const VALUE_OPTIONS = new Set([
   "mergeStrategy",
   "retry",
   "pullRequest",
+  "executionEvidence",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -1689,6 +1690,10 @@ async function runChangeCommand(
     sessionCredential,
     appEndpoint,
   });
+  const implementationConformance =
+    definition.operation === "ready" && typeof parsed.options.executionEvidence === "string"
+      ? { executionEvidence: await readJsonValue(parsed.options.executionEvidence, "--execution-evidence") }
+      : undefined;
   const result =
     definition.operation === "show" || definition.operation === "handoff"
       ? { projection: await readChangeProjection(executor, changeReadRequest(issue)) }
@@ -1702,6 +1707,7 @@ async function runChangeCommand(
             definition.operation === "merge" && typeof parsed.options.mergeStrategy === "string"
               ? (parsed.options.mergeStrategy as "merge" | "squash" | "rebase")
               : undefined,
+            implementationConformance,
           ),
         );
   const projection = result.projection;

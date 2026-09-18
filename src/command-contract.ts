@@ -209,6 +209,7 @@ const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy",
 const PR_SYNC_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
+const CHANGE_READY_OPTIONS = [...CHANGE_SESSION_OPTIONS, "executionEvidence"] as const;
 const CHANGE_MERGE_OPTIONS = [...CHANGE_SESSION_OPTIONS, "mergeStrategy"] as const;
 const CHANGE_PUBLISH_OPTIONS = [...CHANGE_SESSION_OPTIONS, "commit"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
@@ -1330,7 +1331,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "ready",
     ["change", "ready"],
     "Request the governed transition of a Change from Draft to review.",
-    CHANGE_SESSION_OPTIONS,
+    CHANGE_READY_OPTIONS,
     "<number>",
   ),
   command(

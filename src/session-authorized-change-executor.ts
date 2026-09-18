@@ -91,6 +91,7 @@ export type DirectChangeSemanticRequest =
   | {
       readonly version: 1;
       readonly issue: number;
+      readonly implementationConformance?: unknown;
       readonly agent?: SessionAgentMetadata;
     };
 
@@ -128,6 +129,8 @@ export interface CapabilityAuthorizedChangeExecutorFactoryInput {
     readonly mergeStrategy?: "merge" | "squash" | "rebase";
     /** Runtime-signed provenance bootstrap record, present only for `operation: "issue"`. */
     readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
+    /** Seed evidence for the Core-owned Implementation conformance reread on Ready. */
+    readonly implementationConformance?: unknown;
   };
 }
 
@@ -177,6 +180,7 @@ const DIRECT_REQUEST_KEYS = new Set([
 ]);
 const DIRECT_MERGE_KEYS = new Set(["version", "issue", "mergeStrategy", "agent"]);
 const DIRECT_NON_ISSUE_KEYS = new Set(["version", "issue", "agent"]);
+const DIRECT_READY_KEYS = new Set([...DIRECT_NON_ISSUE_KEYS, "implementationConformance"]);
 const AGENT_KEYS = new Set(["name", "version", "runtime", "product"]);
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
 
@@ -238,7 +242,9 @@ function parseDirectRequest(
       ? DIRECT_REQUEST_KEYS
       : operation === "change.merge"
         ? DIRECT_MERGE_KEYS
-        : DIRECT_NON_ISSUE_KEYS;
+        : operation === "change.ready"
+          ? DIRECT_READY_KEYS
+          : DIRECT_NON_ISSUE_KEYS;
   if (Object.keys(input).some((key) => !allowed.has(key))) throw new TypeError("Direct Change request is invalid.");
   if (input.version !== CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION || !safeIssue(input.issue)) {
     throw new TypeError("Direct Change request is invalid.");
@@ -278,7 +284,14 @@ function parseDirectRequest(
   }
   if (hasOwn(input, "semanticPullRequestPlan")) throw new TypeError("Direct Change request is invalid.");
   if (hasOwn(input, "mergeStrategy")) throw new TypeError("Direct Change request is invalid.");
-  return Object.freeze({ version: 1, issue: input.issue, ...(agent === undefined ? {} : { agent }) });
+  return Object.freeze({
+    version: 1,
+    issue: input.issue,
+    ...(operation === "change.ready" && hasOwn(input, "implementationConformance")
+      ? { implementationConformance: input.implementationConformance }
+      : {}),
+    ...(agent === undefined ? {} : { agent }),
+  });
 }
 
 function directExecutionContext(context: AuthenticatedSessionContext): DirectAppTrustedExecutionContext {
@@ -623,6 +636,9 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
         ? directRequest.signedProvenanceRecord
         : undefined,
       operation === "change.merge" && "mergeStrategy" in directRequest ? directRequest.mergeStrategy : undefined,
+      operation === "change.ready" && "implementationConformance" in directRequest
+        ? directRequest.implementationConformance
+        : undefined,
     );
     const executionContext = (() => {
       try {
