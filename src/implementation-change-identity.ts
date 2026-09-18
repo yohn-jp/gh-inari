@@ -14,6 +14,7 @@ import { changeIdentityKey, validateChange, type Change, type ChangeIdentity } f
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 import {
   validateCapabilityClaim,
+  type BranchAdvanceCapabilityClaim,
   type CapabilityClaim,
   type ChangeCapabilityClaim,
 } from "./agent-authority/capability.js";
@@ -54,6 +55,8 @@ export interface ImplementationSessionIdentity {
   readonly task: SessionCertificateTask;
   /** The one capability that grants implementation of this Implementation. */
   readonly capability: ChangeCapabilityClaim;
+  /** The one branch-advance capability bound to the canonical branch, when the Session carries one. */
+  readonly branchCapability?: BranchAdvanceCapabilityClaim;
   /** Bound from the current authorization; Session admission must retain this binding. */
   readonly authorizationDigest: string;
 }
@@ -139,6 +142,7 @@ export type ImplementationChangeIdentityDiagnosticCode =
   | "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_INVALID"
   | "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_MISMATCH"
   | "IMPLEMENTATION_CHANGE_IDENTITY_CAPABILITY_INVALID"
+  | "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_BRANCH_MISMATCH"
   | "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_INVALID"
   | "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_MISMATCH"
   | "IMPLEMENTATION_CHANGE_IDENTITY_BASE_MISMATCH"
@@ -298,6 +302,7 @@ function validateSessionBinding(
   input: unknown,
   implementation: IssueReference | undefined,
   authorizationDigest: string | undefined,
+  canonicalBranch: string | undefined,
   diagnostics: ImplementationChangeIdentityDiagnostic[],
 ): ImplementationSessionIdentity | undefined {
   if (!isRecord(input)) {
@@ -378,6 +383,27 @@ function validateSessionBinding(
   const implementationCapability = capabilities.filter(
     (claim): claim is ChangeCapabilityClaim => claim.kind === "change.implement",
   );
+  const branchCapabilities = capabilities.filter(
+    (claim): claim is BranchAdvanceCapabilityClaim => claim.kind === "branch.advance",
+  );
+  if (branchCapabilities.length > 1)
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_BRANCH_MISMATCH",
+      "$.session.capabilities",
+      "At most one branch.advance capability may be present in the Session.",
+    );
+  else if (
+    branchCapabilities.length === 1 &&
+    canonicalBranch !== undefined &&
+    branchCapabilities[0].branch !== canonicalBranch
+  )
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_BRANCH_MISMATCH",
+      "$.session.capabilities",
+      "branch.advance must target the canonical branch.",
+    );
   if (
     implementation === undefined ||
     authorizationDigest === undefined ||
@@ -401,7 +427,12 @@ function validateSessionBinding(
       "change.implement must target the Implementation Issue.",
     );
   if (diagnostics.some((entry) => entry.path.startsWith("$.session"))) return undefined;
-  return { task, capability, authorizationDigest };
+  return {
+    task,
+    capability,
+    ...(branchCapabilities.length === 1 ? { branchCapability: branchCapabilities[0] } : {}),
+    authorizationDigest,
+  };
 }
 
 function validatePullRequestBinding(
@@ -644,7 +675,13 @@ export function tryProjectImplementationChangeIdentity(input: unknown): Implemen
       );
   }
 
-  const session = validateSessionBinding(input.session, implementation, authorization?.governedBodyDigest, diagnostics);
+  const session = validateSessionBinding(
+    input.session,
+    implementation,
+    authorization?.governedBodyDigest,
+    typeof input.branch === "string" ? input.branch : undefined,
+    diagnostics,
+  );
   if (typeof input.branch !== "string" || !validBranch(input.branch))
     diagnostic(
       diagnostics,

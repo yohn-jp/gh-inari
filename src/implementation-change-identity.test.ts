@@ -147,6 +147,7 @@ test("binds one Implementation authorization to the Change, Session, PR, and evi
   assert.equal(result.identity?.change.identity.rootIssue, 575);
   assert.equal(result.identity?.session.task.number, 575);
   assert.equal(result.identity?.session.capability.issue, 575);
+  assert.equal(result.identity?.session.branchCapability?.branch, result.identity?.branch.name);
   assert.equal(result.identity?.pullRequest.implements.number, 575);
   assert.equal(result.identity?.pullRequest.closingReference.number, 575);
   assert.equal(
@@ -224,6 +225,49 @@ test("rejects a Change/branch that diverges from the contract's declared executi
     result.diagnostics.some(
       (entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_MISMATCH" && entry.path === "$.branch",
     ),
+  );
+});
+
+test("rejects a Session branch.advance capability that diverges from the canonical branch", () => {
+  const number = 575;
+  const branch = `feat/${number}-identity`;
+  const result = tryProjectImplementationChangeIdentity(
+    identityInput(number, branch, 1475, {
+      session: {
+        task: { kind: "issue", number },
+        capabilities: [
+          { kind: "change.implement", issue: number },
+          { kind: "branch.advance", branch: "feat/575-attacker-branch" },
+        ],
+        authorizationDigest: authorization(number, branch).authorization.governedBodyDigest,
+      },
+    }),
+  );
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_BRANCH_MISMATCH"),
+  );
+});
+
+test("rejects conflicting Session branch.advance capabilities instead of selecting one", () => {
+  const number = 575;
+  const branch = `feat/${number}-identity`;
+  const result = tryProjectImplementationChangeIdentity(
+    identityInput(number, branch, 1475, {
+      session: {
+        task: { kind: "issue", number },
+        capabilities: [
+          { kind: "change.implement", issue: number },
+          { kind: "branch.advance", branch },
+          { kind: "branch.advance", branch: "feat/575-second-branch" },
+        ],
+        authorizationDigest: authorization(number, branch).authorization.governedBodyDigest,
+      },
+    }),
+  );
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_SESSION_BRANCH_MISMATCH"),
   );
 });
 
