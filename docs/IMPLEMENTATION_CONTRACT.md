@@ -198,6 +198,66 @@ through the explicit, bounded relationship workflow after inspecting current
 provider state. This documentation introduces no automatic historical
 reparenting or bulk migration.
 
+### 5.1 Implementation-native execution identity
+
+The following topology is normative for new implementation-native execution.
+It is a binding across existing authorities, not a second semantic object or
+state store:
+
+| Artifact                     | Canonical identity/binding                                                                                                          | Authority and responsibility                                                                                                                              |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ordinary source Issue        | `repository + Issue number`                                                                                                         | Problem, request, decision, and source/tracker acceptance. It is not an execution root.                                                                   |
+| Implementation Issue         | `repository + Implementation Issue number`                                                                                          | One bounded implementation session and its canonical contract. Multiple children of one source are independent.                                           |
+| Implementation authorization | Existing #572 record: `repository + Implementation + governedBodyDigest + base evidence`                                            | The current body digest and base-bound authorization record. A changed body is invalidation, not amendment.                                               |
+| Change                       | New execution: `Change.root = Implementation Issue`; `Change.identity = repository + root Issue`                                    | Existing Change/XState remains the sole lifecycle authority. The Change root is the Implementation for new execution.                                     |
+| Session task/capability      | `task.kind = issue` and `task.number = Implementation`; `change.implement.issue = Implementation`                                   | Existing Session Certificate and capability authorities validate the claims. Session admission must also retain the current authorization digest binding. |
+| Canonical branch             | Existing branch grammar derived from the Implementation-rooted Change                                                               | Branch naming remains owned by Branch/Change Core; one Implementation cannot claim two concurrent canonical branches.                                     |
+| Canonical PR                 | One PR projected from that Change; semantic `implements` and any recognized closing reference target the Implementation             | Existing Semantic PR Core owns relation projection. Source Issues may be contextual links, but are not the canonical closing target.                      |
+| Execution evidence           | Existing #574/#execution-evidence record bound to `Implementation + governedBodyDigest + base + branch + head`                      | Runtime evidence is immutable input to conformance; it does not create a second lifecycle.                                                                |
+| Source/tracker completion    | `source Issue` remains separately queryable and closes only through an explicit terminalization operation after admissible evidence | Source closure is not inferred from an open/closed flag, PR relation, or Implementation completion alone.                                                 |
+
+The stable implementation execution key is:
+
+```text
+key = repository identity + Implementation Issue number + current authorization body digest
+```
+
+The Change root, Session task, `change.implement` capability, canonical
+branch, canonical PR relation, execution evidence, and conformance all bind to
+that same Implementation identity. The body digest is evidence of the exact
+authorization; it is not a new Change ID namespace. The pure Core binding
+projection in `src/implementation-change-identity.ts` checks these joins and
+the focused fixtures prove that two Implementations under one source Issue do
+not alias.
+
+### 5.2 Lifecycle and compatibility rules
+
+The topology composes with, and does not replace, the existing authorities:
+
+- A new `Change` is admissible as Implementation-native only when its root
+  Issue is exactly the current Implementation Issue and the current
+  authorization record is available. A source-rooted Change is never silently
+  reinterpreted as its child Implementation.
+- A historical Issue-rooted Change remains readable and recoverable under its
+  original root. It is a compatibility projection only and is not admissible
+  for a new Implementation-native Session, branch, or PR binding unless fresh
+  evidence explicitly proves an Implementation-rooted Change. Ambiguous or
+  contradictory evidence fails closed.
+- `abort` keeps the same identity and records terminal Change evidence; it does
+  not create a replacement branch or PR. Supersession creates a new
+  Implementation and authorization identity; it never widens the old record.
+- Completion requires current authorization, execution evidence, and
+  conformance. Review rework that exceeds the authorized contract requires a
+  new bounded Implementation/session identity. Merge terminalizes the same
+  canonical Change/PR through existing merge authority; it does not introduce
+  a second merge engine.
+- Source/tracker terminalization is a later explicit operation and must remain
+  distinguishable from Change/Implementation completion.
+
+No provider mutation, Session lifecycle, ready admission, merge, or source
+closure behavior is introduced by this architecture binding. Those later
+leaves consume this identity topology and their existing authorities.
+
 ## 6. Supported hierarchy examples
 
 The arrows below mean actual parent/sub-issue relationships where GitHub

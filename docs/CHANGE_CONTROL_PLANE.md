@@ -14,7 +14,14 @@ The product already treats repository-native Issue Forms and pull request templa
 
 The central abstraction is `Change`.
 
-A Change is the governed execution identity that connects one intent-bearing Issue to one canonical remote branch and one canonical pull request. It is issued when implementation begins, remains observable while work proceeds, becomes reviewable through an explicit governed transition, and terminates through merge or abort.
+A Change is the governed execution identity that connects one
+Implementation-bearing execution to one canonical remote branch and one
+canonical pull request. A source Issue may have multiple independent
+Implementation children. A new Change is rooted in exactly one such
+Implementation; older Issue-rooted Changes remain readable under an explicit
+compatibility rule. A Change is issued when implementation begins, remains
+observable while work proceeds, becomes reviewable through an explicit
+governed transition, and terminates through merge or abort.
 
 This document defines the product model, lifecycle, authority boundaries, caller interfaces, trusted execution path, security model, failure semantics, provenance, and migration constraints for that control plane.
 
@@ -72,47 +79,74 @@ Today, Issue, branch, and pull request can be created as independent artifacts b
 
 These are symptoms of the same missing abstraction: publication of repository work is not yet a governed transition.
 
-Instead of treating branch creation and PR creation as unrelated user actions, Inari treats them as projections of one semantic operation: issue a Change.
+Instead of treating branch creation and PR creation as unrelated user actions,
+Inari treats them as projections of one semantic operation: issue a Change for
+one authorized Implementation.
 
 ```text
-Issue #189
+source Issue #568
+    |
+    | native parent/sub-issue
+    v
+Implementation #679
     |
     | issue Change
     v
-Change #189
+Change(root = #679)
     +-- canonical branch
     `-- canonical Draft PR
 ```
 
-The Issue number is the natural Change identity in the initial model. No independent Change ID namespace is introduced.
+The Implementation Issue number is the Change root for new execution. No
+independent Change ID namespace is introduced. Existing Issue-rooted Change
+projections retain their original root as historical compatibility evidence.
 
 ## 4. Core domain model
 
-### 4.1 Issue
+### 4.1 Ordinary Issue and Implementation
 
-An Issue represents intent, requirement, defect, architecture decision, maintenance request, or other governed work definition.
+An ordinary Issue represents intent, requirement, defect, architecture
+decision, maintenance request, or other governed work definition. It is a
+source/tracker record, not a session execution authority.
 
-An Issue may exist indefinitely without an active Change. Creating an Issue does not imply implementation has started.
+An ordinary Issue may exist indefinitely without an Implementation or active
+Change. Creating an Issue does not imply implementation has started. One
+ordinary Issue may have zero or more independent Implementation children.
 
 ```text
-Issue -> Change cardinality: 0..1 active canonical Change
+ordinary Issue -> Implementation cardinality: 0..many
+Implementation -> new Change cardinality: 0..1 active canonical Change
 ```
 
-The architecture does not require Issue creation itself to be issuer-only.
+An Implementation is the existing first-class one-session contract. Its
+canonical body, authorization record, base evidence, and execution scope
+remain owned by the Implementation authorities described in
+[`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md). This document
+does not introduce another Implementation or Session model.
 
 ### 4.2 Change
 
-A Change represents the governed execution identity for implementing one Issue.
+A Change represents the governed execution identity for implementing one
+Implementation.
 
 A Change is not a fourth persistent GitHub object. It is semantic state derived from canonical GitHub projections and governed metadata.
 
-The initial identity is:
+The identity for new Implementation-native execution is:
 
 ```text
-Change identity = repository identity + root Issue number
+Change identity = repository identity + Implementation Issue number
 ```
 
-For example, `yohn-jp/gh-inari#189` identifies the Change rooted in Issue #189 when that Issue has been issued.
+Existing historical Changes retain this compatibility identity:
+
+```text
+historical Change identity = repository identity + original ordinary Issue number
+```
+
+The latter is never silently reinterpreted as a child Implementation. The
+full cross-artifact binding and the fail-closed compatibility classification
+are defined by [`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md)
+and its pure Core projection.
 
 ### 4.3 Canonical branch
 
@@ -122,7 +156,8 @@ The branch name is a deterministic projection computed by Inari from governed in
 
 The exact naming grammar remains executable repository governance, not prose in this document.
 
-> Inari determines the canonical remote branch identity for a governed Change.
+> Inari determines the canonical remote branch identity for a governed
+> Implementation-rooted Change.
 
 ### 4.4 Canonical pull request
 
@@ -142,8 +177,12 @@ Commit authorship and other Git provenance continue to record who authored imple
 
 The following invariants are architectural requirements.
 
-- Every Change has exactly one root Issue.
-- An Issue may exist without an issued Change.
+- Every new Change has exactly one Implementation root.
+- An ordinary source Issue may exist without an Implementation or issued Change.
+- Historical Issue-rooted Changes remain readable under an explicit
+  compatibility mode and are never silently reinterpreted.
+- An Implementation has at most one current authorization, one active Change,
+  one canonical branch, and one canonical PR identity.
 - Every issued active Change has exactly one canonical branch.
 - Every issued active Change has exactly one canonical PR.
 - Branch and PR are projections of one Change, not independent authorities.
@@ -158,6 +197,15 @@ The following invariants are architectural requirements.
 - Draft represents implementation state.
 - Ready represents admission to review.
 - PR author represents proposal publication authority, not implementation authorship.
+- A canonical PR's semantic `implements` relation and recognized closing
+  reference target the execution Implementation; source Issues are not a
+  substitute execution target.
+- Session task and `change.implement` capability claims target the
+  Implementation Issue and remain bound to its current authorization digest.
+- Execution evidence and conformance target the same Implementation and
+  authorization digest as the Change.
+- Source Issue closure is a separate explicit terminalization operation and is
+  never inferred from Change or PR state.
 - Issuer and reviewer are separate authorities.
 - Human and agent callers never receive GitHub App private keys or installation tokens.
 - Requester, issuer, implementer, reviewer, and merger identities remain distinguishable.
@@ -255,14 +303,18 @@ inari change issue <issue>
 
 The public command spelling is not fixed by this document. The operation is.
 
-A compliant issuance transition performs these semantic steps:
+A compliant Implementation-native issuance transition performs these semantic
+steps:
 
 - Resolve target repository and governance generation.
-- Read the root Issue.
-- Resolve and validate the governing Issue contract.
-- Verify that the Issue is eligible for Change issuance.
+- Read the source Issue relationship and current Implementation Issue.
+- Resolve and validate the Implementation contract and current authorization
+  evidence.
+- Verify that the Implementation is eligible for Change issuance.
+- Use an existing Issue-rooted Change only through the explicit historical
+  compatibility rule; never reinterpret it as the Implementation Change.
 - Determine the target base branch.
-- Compute the canonical Change branch name.
+- Compute the canonical branch name from the Implementation-rooted Change.
 - Inspect existing GitHub state for prior issuance or inconsistency.
 - Create the canonical remote branch through the Effect Authorizer and App Principal provider boundary.
 - Create the canonical Draft PR through the Effect Authorizer and App Principal provider boundary.
@@ -377,10 +429,13 @@ A user may still be technically capable of creating a PR from an existing branch
 
 A required Change-provenance check should validate at least:
 
-- Root Issue identity.
+- Implementation root identity and its source Issue references.
 - Canonical branch identity.
 - Canonical base branch.
 - Canonical PR identity for the Change.
+- The PR semantic `implements` relation and recognized closing reference target
+  the Implementation, not only a source Issue.
+- The current Implementation authorization digest and execution evidence.
 - Expected issuer or proposal-author identity where applicable.
 - Valid governed PR contract.
 - Absence of conflicting canonical projections.
@@ -408,7 +463,11 @@ Draft PR = implementation state
 Ready PR = review-admitted state
 ```
 
-The initial Draft PR may contain only information derivable before implementation, such as root Issue, target, status, and governed placeholders.
+The initial Draft PR may contain only information derivable before
+implementation, such as the Implementation root, source/tracker references,
+target, status, and governed placeholders. Its canonical `implements` and
+closing-reference target is the Implementation; source Issues do not become
+execution authority because they are mentioned in the PR.
 
 The `ready` transition may canonicalize or complete implementation summary, validation evidence, acceptance evidence, and other required PR semantics before changing GitHub's Draft state.
 
@@ -632,7 +691,8 @@ The system must preserve enough identity to answer both of these questions:
 
 Provenance should distinguish at least:
 
-- Repository and root Issue.
+- Repository, source Issue references, and the Implementation root.
+- Current Implementation authorization identity and governed body digest.
 - Requested transition.
 - Requester identity.
 - Request source or client class where useful.
@@ -778,17 +838,36 @@ Inari currently provides direct governed Issue and PR mutation commands through 
 
 The new architecture is introduced incrementally rather than breaking all existing callers immediately.
 
-Migration may temporarily support both current direct artifact-level mutation operations and new authoritative Change transitions. Compatibility is directional: the long-term governed implementation workflow converges on Change issuance rather than preserving two equivalent canonical ways to create the same branch and PR lifecycle.
+Migration may temporarily support both current direct artifact-level mutation
+operations and new authoritative Change transitions. Compatibility is
+directional: the long-term governed implementation workflow converges on
+Implementation authorization followed by Change issuance rather than
+preserving two equivalent canonical ways to create the same branch and PR
+lifecycle.
+
+Historical Issue-rooted Changes remain readable and recoverable using their
+original root, branch, PR, and lifecycle evidence. They are not upgraded by
+matching a source Issue or by a prose `Parent:` line. A caller that asks to
+continue such work as Implementation-native must supply fresh evidence for a
+new Implementation-rooted Change; missing, mixed, or contradictory evidence
+is a fail-closed compatibility result.
 
 Existing branch-preflight capabilities remain useful as compatibility and diagnostic behavior. The target architecture moves canonical branch identity earlier, from validating a caller-chosen branch before PR creation to deriving and issuing the canonical branch as part of Change creation.
 
 ## 27. Migration strategy
 
-Implementation begins only after this architecture is merged and Epic #188 is decomposed into bounded Issues.
+Implementation begins only after this architecture is merged and the
+Implementation-native lifecycle is decomposed into bounded Issues.
 
 The dependency order is:
 
-- Define machine-readable Change identity, state, transition requests, transition plans, and diagnostics in Inari Core.
+- Define the Implementation-native identity binding before widening downstream
+  Change/Session behavior: Implementation authorization, Change root, Session
+  task/capability, branch, PR relation, execution evidence, and source
+  terminalization.
+- Preserve the existing machine-readable Change identity, state, transition
+  requests, transition plans, and diagnostics in Inari Core, with historical
+  Issue-rooted compatibility kept explicit.
 - Add deterministic Change read and projection from governed GitHub evidence.
 - Define issuance planning, idempotency, conflict detection, and recovery semantics independent of transport.
 - Establish the least-privilege GitHub App issuer boundary.
@@ -890,7 +969,19 @@ The largest product benefit is that branch naming, proposal authorship, and life
 Before implementation decomposition, reviewers should be able to answer yes to all of these questions:
 
 - Is `Change` clearly distinct from Issue, branch, and PR while being deterministically projected through them?
-- Is Issue-to-Change cardinality unambiguous?
+- Is source Issue -> Implementation -> Change cardinality unambiguous for new
+  execution, with historical Issue-rooted compatibility explicit and
+  fail-closed?
+- Does one current Implementation authorization digest bind the Change root,
+  Session task/capability, branch, PR relation, execution evidence, and
+  conformance?
+- Can two Implementation children of one source Issue be proven unable to
+  alias one Change, branch, PR, or Session execution identity?
+- Does the canonical PR relation/closing reference target the Implementation
+  rather than a broader source Issue?
+- Are abort, supersession, completion, review rework, merge, and explicit
+  source terminalization identities specified without adding a second
+  lifecycle authority?
 - Is branch creation authority separated from ordinary branch update authority?
 - Is canonical PR provenance enforceable even though GitHub cannot prevent every manual PR creation?
 - Is Draft-at-issuance justified as lifecycle state rather than automation convenience?
