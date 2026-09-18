@@ -378,7 +378,9 @@ export const changeImplementationHandoffOutputSchema = implementationHandoffOutp
 export const sessionAuthorizedChangeOutputSchema = z
   .object({
     version: z.literal(1),
-    operation: z.enum(["change.issue", "change.show", "change.ready", "change.abort", "branch.advance"]).optional(),
+    operation: z
+      .enum(["change.issue", "change.show", "change.ready", "change.abort", "change.merge", "branch.advance"])
+      .optional(),
     status: z.enum(["succeeded", "failed"]),
     projection: z.unknown().optional(),
     execution: z.unknown().optional(),

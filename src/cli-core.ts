@@ -1687,7 +1687,15 @@ async function runChangeCommand(
       ? { projection: await readChangeProjection(executor, changeReadRequest(issue)) }
       : await executeChangeMutationResult(
           executor,
-          changeMutationRequest(definition.operation as ChangeMutation, issue, undefined, signedProvenanceRecord),
+          changeMutationRequest(
+            definition.operation as ChangeMutation,
+            issue,
+            undefined,
+            signedProvenanceRecord,
+            definition.operation === "merge" && typeof parsed.options.mergeStrategy === "string"
+              ? (parsed.options.mergeStrategy as "merge" | "squash" | "rebase")
+              : undefined,
+          ),
         );
   const projection = result.projection;
   if (definition.operation === "handoff") {

@@ -12,6 +12,7 @@ import {
 } from "./change.js";
 import { isSecretSafeBoundedText } from "./change-failure-diagnostics.js";
 import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
+import type { SemanticPullRequestMergeStrategy } from "./semantic-pr-mutation.js";
 
 /** Version of the transport-neutral semantic request boundary. */
 export const CHANGE_EXECUTION_PORT_CONTRACT_VERSION = CHANGE_TRANSITION_CONTRACT_VERSION;
@@ -74,6 +75,8 @@ export interface ChangeMutationRequest extends ChangeRequestBase {
   readonly operation: ChangeMutation;
   /** Core-produced PR plan; validated again inside trusted execution. */
   readonly semanticPullRequestPlan?: unknown;
+  /** Explicit merge intent delegated to the existing Semantic PR authority. */
+  readonly mergeStrategy?: SemanticPullRequestMergeStrategy;
   /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
   readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
 }
@@ -83,8 +86,10 @@ export interface ChangeReadRequest extends ChangeRequestBase {
 }
 
 /** Bounded evidence emitted by a trusted Executor, never a raw API result. */
+export type ChangeExecutionEffectKind = ChangeEffectKind | "MERGE_PULL_REQUEST";
+
 export interface ChangeEffectEvidence {
-  readonly kind: ChangeEffectKind;
+  readonly kind: ChangeExecutionEffectKind;
   readonly status: "succeeded" | "failed";
   readonly createdCommitSha?: string;
 }
@@ -99,7 +104,7 @@ export const CHANGE_EXECUTION_OUTCOMES = Object.freeze([
 export type ChangeExecutionOutcome = (typeof CHANGE_EXECUTION_OUTCOMES)[number];
 
 export interface ChangeExecutionFailureEvidence {
-  readonly kind: ChangeEffectKind;
+  readonly kind: ChangeExecutionEffectKind;
   readonly code: string;
   readonly message: string;
   readonly reason?: ChangeEffectFailureClassification["reason"];
@@ -222,7 +227,7 @@ export function validateChangeRequest(
     if (request.operation !== "issue") {
       throw new ChangeExecutionPortError(
         "CHANGE_REMOTE_REQUEST_INVALID",
-        "A Semantic PR plan is accepted only for Change issuance.",
+        "A Semantic PR projection plan is accepted only for Change issuance.",
         { issue: request.issue },
       );
     }
@@ -243,6 +248,25 @@ export function validateChangeRequest(
         { issue: request.issue },
       );
     }
+  }
+  if (request.operation === "merge") {
+    if (
+      request.mergeStrategy !== "merge" &&
+      request.mergeStrategy !== "squash" &&
+      request.mergeStrategy !== "rebase"
+    ) {
+      throw new ChangeExecutionPortError(
+        "CHANGE_REMOTE_REQUEST_INVALID",
+        "Change merge requires a supported merge strategy.",
+        { issue: request.issue },
+      );
+    }
+  } else if (request.operation !== "show" && request.mergeStrategy !== undefined) {
+    throw new ChangeExecutionPortError(
+      "CHANGE_REMOTE_REQUEST_INVALID",
+      "Merge strategy is accepted only for Change merge.",
+      { issue: request.issue },
+    );
   }
   if (request.operation !== "show" && request.signedProvenanceRecord !== undefined) {
     if (request.operation !== "issue") {
@@ -349,7 +373,7 @@ export function normalizeChangeExecutionEvidence(operation: string, value: unkno
       );
     }
     const entry = effect as Record<string, unknown>;
-    if (!CHANGE_EFFECT_KINDS.includes(entry.kind as ChangeEffectKind)) {
+    if (!CHANGE_EFFECT_KINDS.includes(entry.kind as ChangeEffectKind) && entry.kind !== "MERGE_PULL_REQUEST") {
       throw new ChangeExecutionPortError(
         "CHANGE_REMOTE_RESULT_INVALID",
         "The Change executor returned invalid bounded execution evidence.",
@@ -389,7 +413,7 @@ export function normalizeChangeExecutionEvidence(operation: string, value: unkno
       createdCommitSha = entry.createdCommitSha.toLowerCase();
     }
     effects.push({
-      kind: entry.kind as ChangeEffectKind,
+      kind: entry.kind as ChangeExecutionEffectKind,
       status: entry.status,
       ...(createdCommitSha === undefined ? {} : { createdCommitSha }),
     });
@@ -419,7 +443,8 @@ export function normalizeChangeExecutionEvidence(operation: string, value: unkno
       Object.keys(failureValue).some(
         (key) => !["kind", "code", "message", "reason", "status", "provider"].includes(key),
       ) ||
-      !CHANGE_EFFECT_KINDS.includes(failureValue.kind as ChangeEffectKind) ||
+      (!CHANGE_EFFECT_KINDS.includes(failureValue.kind as ChangeEffectKind) &&
+        failureValue.kind !== "MERGE_PULL_REQUEST") ||
       !isSecretSafeBoundedText(failureValue.code, 80) ||
       !isSecretSafeBoundedText(failureValue.message, 240)
     ) {
@@ -447,7 +472,7 @@ export function normalizeChangeExecutionEvidence(operation: string, value: unkno
       );
     }
     return {
-      kind: failureValue.kind as ChangeEffectKind,
+      kind: failureValue.kind as ChangeExecutionEffectKind,
       code: failureValue.code,
       message: failureValue.message,
       ...(classification === undefined ? {} : classification),
@@ -520,6 +545,7 @@ export function changeMutationRequest(
   issue: number,
   semanticPullRequestPlan?: unknown,
   signedProvenanceRecord?: SignedChangeProvenanceRecord,
+  mergeStrategy?: SemanticPullRequestMergeStrategy,
 ): ChangeMutationRequest {
   const request: ChangeMutationRequest = {
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
@@ -527,6 +553,7 @@ export function changeMutationRequest(
     issue,
     ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
     ...(signedProvenanceRecord === undefined ? {} : { signedProvenanceRecord }),
+    ...(mergeStrategy === undefined ? {} : { mergeStrategy }),
   };
   validateChangeRequest(request);
   return request;

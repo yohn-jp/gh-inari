@@ -11,6 +11,8 @@ const EXPECTED_TRANSITIONS: ReadonlyMap<string, { readonly from: ChangeState; re
   ["abort/REVIEW", { from: "REVIEW", to: "ABORTED" }],
   ["abort/ABORTED", { from: "ABORTED", to: "ABORTED" }],
   ["abort/RECOVERY_REQUIRED", { from: "RECOVERY_REQUIRED", to: "ABORTED" }],
+  ["merge/REVIEW", { from: "REVIEW", to: "MERGED" }],
+  ["merge/ACCEPTED", { from: "ACCEPTED", to: "MERGED" }],
 ]);
 
 test("XState lifecycle machine has complete parity with the test-only transition oracle", () => {
@@ -25,7 +27,7 @@ test("XState lifecycle machine has complete parity with the test-only transition
       assert.equal(result.idempotent, expected !== undefined && expected.from === expected.to, `${state}/${operation}`);
       assert.equal(
         result.rejection,
-        expected === undefined ? (operation === "merge" ? "unsupported" : "not-allowed") : undefined,
+        expected === undefined ? "not-allowed" : undefined,
         `${state}/${operation} rejection`,
       );
     }
@@ -62,12 +64,13 @@ test("lifecycle facade admits authoritative state and preserves sequential retry
   assert.equal(retry.to, "ABORTED");
 });
 
-test("observation-derived states have no synthetic lifecycle mutation edges", () => {
-  for (const state of ["ACCEPTED", "MERGED"] as const satisfies readonly ChangeState[]) {
-    for (const operation of CHANGE_TRANSITION_OPERATIONS as readonly ChangeTransition[]) {
-      const result = transitionChangeLifecycle(state, operation);
-      assert.equal(result.accepted, false, `${state}/${operation}`);
-      assert.equal(result.to, state, `${state}/${operation}`);
-    }
+test("observation-derived states expose only the governed merge terminalization edge", () => {
+  for (const operation of CHANGE_TRANSITION_OPERATIONS as readonly ChangeTransition[]) {
+    const accepted = transitionChangeLifecycle("ACCEPTED", operation);
+    assert.equal(accepted.accepted, operation === "merge", `ACCEPTED/${operation}`);
+    assert.equal(accepted.to, operation === "merge" ? "MERGED" : "ACCEPTED", `ACCEPTED/${operation}`);
+    const merged = transitionChangeLifecycle("MERGED", operation);
+    assert.equal(merged.accepted, false, `MERGED/${operation}`);
+    assert.equal(merged.to, "MERGED", `MERGED/${operation}`);
   }
 });

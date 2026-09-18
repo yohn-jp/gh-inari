@@ -101,6 +101,7 @@ export type CommandId =
   | "change.handoff"
   | "change.ready"
   | "change.abort"
+  | "change.merge"
   | "change.publish"
   | "authority.generate"
   | "authority.bootstrap"
@@ -198,6 +199,7 @@ const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy",
 const PR_SYNC_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "dryRun"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
+const CHANGE_MERGE_OPTIONS = [...CHANGE_SESSION_OPTIONS, "mergeStrategy"] as const;
 const CHANGE_PUBLISH_OPTIONS = [...CHANGE_SESSION_OPTIONS, "commit"] as const;
 const AUTHORITY_OPTIONS = ["help", "json", "privateKey", "replace"] as const;
 const AUTHORITY_BOOTSTRAP_OPTIONS = [
@@ -1260,6 +1262,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "change.merge",
+    "change",
+    "merge",
+    ["change", "merge"],
+    "Request governed merge of the canonical Change pull request.",
+    CHANGE_MERGE_OPTIONS,
+    "<number>",
+  ),
+  command(
     "change.publish",
     "change",
     "publish",
@@ -1735,7 +1746,8 @@ export function commandUsage(entry: CommandDefinition): string {
           id === "from") ||
         (entry.id === "pr.comment" && id === "rawBody") ||
         (entry.id === "pr.review" && (id === "expectedHead" || id === "reviewIntent")) ||
-        (entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
+        ((entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
+          (entry.id === "change.merge" && id === "mergeStrategy")) ||
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||

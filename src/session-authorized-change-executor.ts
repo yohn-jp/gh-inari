@@ -55,6 +55,7 @@ export const CAPABILITY_AUTHORIZED_SESSION_OPERATIONS = Object.freeze([
   "change.show",
   "change.ready",
   "change.abort",
+  "change.merge",
   "branch.advance",
 ] as const);
 export type CapabilityAuthorizedSessionOperation = (typeof CAPABILITY_AUTHORIZED_SESSION_OPERATIONS)[number];
@@ -80,6 +81,12 @@ export type DirectChangeSemanticRequest =
       readonly agent?: SessionAgentMetadata;
       /** Runtime-signed provenance bootstrap record for `change.issue`; never a private key. */
       readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
+    }
+  | {
+      readonly version: 1;
+      readonly issue: number;
+      readonly mergeStrategy: "merge" | "squash" | "rebase";
+      readonly agent?: SessionAgentMetadata;
     }
   | {
       readonly version: 1;
@@ -115,9 +122,10 @@ export interface CapabilityAuthorizedChangeExecutorFactoryInput {
   readonly admission: AdmittedSessionCapability;
   readonly request: {
     readonly version: typeof CHANGE_EXECUTION_PORT_CONTRACT_VERSION;
-    readonly operation: "issue" | "ready" | "abort";
+    readonly operation: "issue" | "ready" | "abort" | "merge";
     readonly issue: number;
     readonly semanticPullRequestPlan?: unknown;
+    readonly mergeStrategy?: "merge" | "squash" | "rebase";
     /** Runtime-signed provenance bootstrap record, present only for `operation: "issue"`. */
     readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
   };
@@ -159,7 +167,15 @@ export interface CapabilityAuthorizedSessionExecutor {
   execute(envelope: unknown): Promise<CapabilityAuthorizedSessionExecutionResult>;
 }
 
-const DIRECT_REQUEST_KEYS = new Set(["version", "issue", "semanticPullRequestPlan", "agent", "signedProvenanceRecord"]);
+const DIRECT_REQUEST_KEYS = new Set([
+  "version",
+  "issue",
+  "semanticPullRequestPlan",
+  "mergeStrategy",
+  "agent",
+  "signedProvenanceRecord",
+]);
+const DIRECT_MERGE_KEYS = new Set(["version", "issue", "mergeStrategy", "agent"]);
 const DIRECT_NON_ISSUE_KEYS = new Set(["version", "issue", "agent"]);
 const AGENT_KEYS = new Set(["name", "version", "runtime", "product"]);
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
@@ -217,7 +233,12 @@ function parseDirectRequest(
   input: unknown,
 ): DirectChangeSemanticRequest {
   if (!isRecord(input) || operation === "branch.advance") throw new TypeError("Direct Change request is invalid.");
-  const allowed = operation === "change.issue" ? DIRECT_REQUEST_KEYS : DIRECT_NON_ISSUE_KEYS;
+  const allowed =
+    operation === "change.issue"
+      ? DIRECT_REQUEST_KEYS
+      : operation === "change.merge"
+        ? DIRECT_MERGE_KEYS
+        : DIRECT_NON_ISSUE_KEYS;
   if (Object.keys(input).some((key) => !allowed.has(key))) throw new TypeError("Direct Change request is invalid.");
   if (input.version !== CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION || !safeIssue(input.issue)) {
     throw new TypeError("Direct Change request is invalid.");
@@ -244,7 +265,19 @@ function parseDirectRequest(
       ...(signedProvenanceRecord === undefined ? {} : { signedProvenanceRecord }),
     });
   }
+  if (operation === "change.merge") {
+    if (input.mergeStrategy !== "merge" && input.mergeStrategy !== "squash" && input.mergeStrategy !== "rebase") {
+      throw new TypeError("Direct Change merge request is invalid.");
+    }
+    return Object.freeze({
+      version: 1,
+      issue: input.issue,
+      mergeStrategy: input.mergeStrategy,
+      ...(agent === undefined ? {} : { agent }),
+    });
+  }
   if (hasOwn(input, "semanticPullRequestPlan")) throw new TypeError("Direct Change request is invalid.");
+  if (hasOwn(input, "mergeStrategy")) throw new TypeError("Direct Change request is invalid.");
   return Object.freeze({ version: 1, issue: input.issue, ...(agent === undefined ? {} : { agent }) });
 }
 
@@ -575,7 +608,13 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     }
 
     const request = changeMutationRequest(
-      operation === "change.issue" ? "issue" : operation === "change.ready" ? "ready" : "abort",
+      operation === "change.issue"
+        ? "issue"
+        : operation === "change.ready"
+          ? "ready"
+          : operation === "change.abort"
+            ? "abort"
+            : "merge",
       issue,
       operation === "change.issue" && "semanticPullRequestPlan" in directRequest
         ? directRequest.semanticPullRequestPlan
@@ -583,6 +622,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       operation === "change.issue" && "signedProvenanceRecord" in directRequest
         ? directRequest.signedProvenanceRecord
         : undefined,
+      operation === "change.merge" && "mergeStrategy" in directRequest ? directRequest.mergeStrategy : undefined,
     );
     const executionContext = (() => {
       try {

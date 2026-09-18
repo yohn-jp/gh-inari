@@ -48,6 +48,11 @@ import {
   type TrustedInstallationCredentialBroker,
 } from "./effect-authorizer.js";
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
+import {
+  GITHUB_APP_SEMANTIC_PULL_REQUEST_PERMISSIONS,
+  GitHubAppSemanticPullRequestMutationExecutor,
+} from "./app-semantic-pr-mutation.js";
+import { SemanticPullRequestMutationError, type SemanticPullRequestMutationExecutionPort } from "../semantic-pr-mutation.js";
 
 const DEFAULT_API_URL = "https://api.github.com";
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -576,6 +581,49 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     try {
       await operation(capability);
     } catch (error: unknown) {
+      throw this.safeOperationError(error, credential.token, "projection-execution");
+    }
+  }
+
+  /**
+   * Expose the existing Semantic PR authority through one short-lived,
+   * repository-scoped App credential. The callback receives no transport or
+   * credential, only the provider-independent mutation port.
+   */
+  async withSemanticPullRequestMutationExecutor<T>(
+    request: { readonly target: RepositoryIdentity },
+    operation: (executor: SemanticPullRequestMutationExecutionPort) => Promise<T>,
+  ): Promise<T> {
+    const target = validateRepositoryIdentity(request.target);
+    if (!target.valid || target.value === undefined || !sameConfiguredRepository(target.value, this.#repository)) {
+      throw this.safeFailure("installation-scope", { reason: "scope" });
+    }
+    const credential = await this.issueInstallationToken({
+      app: this.#app,
+      target: target.value,
+      permissions: GITHUB_APP_SEMANTIC_PULL_REQUEST_PERMISSIONS,
+      kind: "mutation",
+    });
+    const transport = new GitHubAppApiTransport({
+      apiUrl: this.#apiUrl,
+      token: credential.token,
+      repositoryNodeId: credential.repositoryNodeId ?? this.#repositoryNodeId,
+      fetch: this.#fetch,
+      failureStage: "projection-execution",
+      failure: this.#failure,
+      requestTimeoutMs: this.#requestTimeoutMs,
+    });
+    const executor = new GitHubAppSemanticPullRequestMutationExecutor({
+      transport,
+      repository: target.value,
+    });
+    try {
+      return await operation(executor);
+    } catch (error: unknown) {
+      // The Semantic PR authority owns its bounded typed outcomes. Preserve
+      // those outcomes so Change can map stale, blocked, and recovery states
+      // without introducing a second merge policy.
+      if (error instanceof SemanticPullRequestMutationError) throw error;
       throw this.safeOperationError(error, credential.token, "projection-execution");
     }
   }

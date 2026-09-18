@@ -660,6 +660,7 @@ function canonicalMutationRequest(request: ChangeMutationRequest): ChangeMutatio
     request.issue,
     request.semanticPullRequestPlan,
     request.signedProvenanceRecord,
+    request.mergeStrategy,
   );
 }
 
@@ -1138,6 +1139,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       ...(request.signedProvenanceRecord === undefined
         ? {}
         : { signedProvenanceRecord: request.signedProvenanceRecord }),
+      ...(request.mergeStrategy === undefined ? {} : { mergeStrategy: request.mergeStrategy }),
     };
     try {
       await this.withinDeadline(

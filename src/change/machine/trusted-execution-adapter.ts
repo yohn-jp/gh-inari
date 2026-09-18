@@ -21,6 +21,7 @@ import {
   planChangeReadyTransition,
   planChangeTransition,
   projectChangeFromGitHubEvidence,
+  validateChangeMergeAdmission,
   validateGovernedRootIssueEvidence,
   validateChangeReadyTransition,
   type Change,
@@ -34,6 +35,14 @@ import {
   type ChangeProjectionResult,
   type ChangeTransitionPlan,
 } from "../../change.js";
+import {
+  planSemanticPullRequestMutation,
+  SemanticPullRequestMutationError,
+  type SemanticPullRequestMergeStrategy,
+  type SemanticPullRequestMutationExecutionPort,
+  type SemanticPullRequestMutationPlan,
+  type SemanticPullRequestMutationResult,
+} from "../../semantic-pr-mutation.js";
 import { isTrustedInariIssuerPrincipal } from "../../issuer-identity.js";
 import { readChangeEffectFailureClassification } from "../../change-failure-diagnostics.js";
 import {
@@ -99,6 +108,8 @@ interface ChangeTrustedExecutorOptionsBase {
   readonly reader: ChangeTrustedEvidenceReader;
   readonly execution: TrustedExecutionContext;
   readonly target: RepositoryIdentity;
+  /** Existing governed PR mutation authority used only for Change merge composition. */
+  readonly semanticPullRequestMutationExecutor?: SemanticPullRequestMutationExecutionPort;
 }
 
 export type ChangeTrustedExecutorOptions = ChangeTrustedExecutorOptionsBase &
@@ -209,8 +220,8 @@ function executionEvidence(
   requester: string | undefined,
   effects: readonly ChangeEffectEvidence[],
   compensation: ChangeExecutionEvidence["compensation"] = "not-required",
-  failure?: ChangeIssuanceFailureEvidence,
-  compensationFailure?: ChangeIssuanceFailureEvidence,
+  failure?: ExecutionFailureEvidence,
+  compensationFailure?: ExecutionFailureEvidence,
 ): ChangeExecutionEvidence {
   return {
     version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
@@ -245,6 +256,15 @@ function executionEvidence(
           },
         }),
   };
+}
+
+interface ExecutionFailureEvidence {
+  readonly effect: { readonly kind: ChangeExecutionEvidence["effects"][number]["kind"] };
+  readonly code: string;
+  readonly message: string;
+  readonly reason?: ChangeIssuanceFailureEvidence["reason"];
+  readonly status?: number;
+  readonly provider?: ChangeIssuanceFailureEvidence["provider"];
 }
 
 function projectionFor(input: ChangeProjectionInput): ChangeProjectionResult {
@@ -431,6 +451,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
   readonly #execution: TrustedExecutionContext;
   readonly #target: RepositoryIdentity;
   readonly #trustedRequester: string | undefined;
+  readonly #semanticPullRequestMutationExecutor: SemanticPullRequestMutationExecutionPort | undefined;
 
   constructor(options: ChangeTrustedExecutorOptions) {
     this.#reader = options.reader;
@@ -443,6 +464,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
     this.#execution = assertTrustedExecution(options.execution);
     this.#target = options.target;
     this.#trustedRequester = this.#execution.requester;
+    this.#semanticPullRequestMutationExecutor = options.semanticPullRequestMutationExecutor;
   }
 
   async read(request: ChangeReadRequest): Promise<ChangeProjectionResult> {
@@ -462,6 +484,7 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
     this.assertRequest(request);
     if (request.operation === "issue") return this.executeIssue(request);
     if (request.operation === "ready") return this.executeReady(request);
+    if (request.operation === "merge") return this.executeMerge(request);
     return this.executeAbort(request);
   }
 
@@ -662,6 +685,315 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
         "Trusted Change evidence read failed closed.",
       );
     }
+  }
+
+  private async executeMerge(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {
+    const input = await this.readRawInput(request);
+    const projection = projectionFor(input);
+    const change = projection.change;
+    if (change === undefined || !projection.valid || projection.status !== "healthy") {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "A healthy canonical Change projection is required before merge admission.",
+        projection.diagnostics,
+      );
+    }
+    if (change.identity.rootIssue !== request.issue) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_READ_FAILED",
+        "Trusted Change evidence identity does not match the semantic request.",
+      );
+    }
+    if (change.state !== "REVIEW" && change.state !== "ACCEPTED" && change.state !== "MERGED") {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Change merge is admitted only from REVIEW, ACCEPTED, or a proven MERGED replay.",
+        [
+          diagnostic(
+            "CHANGE_TRANSITION_NOT_ALLOWED",
+            "$.change.state",
+            `Merge is not allowed from Change state "${change.state}".`,
+          ),
+        ],
+      );
+    }
+
+    const readyEvidence = input.readyEvidence;
+    if (readyEvidence === undefined) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Governed pull-request evidence is required before merge admission.",
+        [
+          diagnostic(
+            "CHANGE_PROVENANCE_INVALID_PR_CONTRACT",
+            "$.readyEvidence.pullRequest",
+            "The canonical pull-request contract and body were not supplied.",
+          ),
+        ],
+      );
+    }
+    const admission = validateChangeMergeAdmission({
+      change,
+      projection: input,
+      pullRequest: readyEvidence.pullRequest,
+    });
+    if (!admission.valid || admission.change === undefined || admission.projection === undefined) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Change merge admission failed closed.",
+        admission.diagnostics,
+      );
+    }
+
+    const canonicalBranch = admission.change.projection?.branch;
+    const canonicalPullRequest = admission.change.projection?.pullRequest;
+    const canonicalBaseBranch = admission.projection.canonicalBaseBranch;
+    const physicalPullRequest = admission.physicalPullRequest;
+    const branchCandidate = admission.projection.candidates.branches.find(
+      (candidate) => candidate.classification === "canonical" && candidate.candidate.name === canonicalBranch,
+    );
+    const expectedHead = physicalPullRequest?.headSha ?? branchCandidate?.candidate.sha;
+    if (
+      canonicalBranch === undefined ||
+      canonicalPullRequest === undefined ||
+      canonicalBaseBranch === undefined ||
+      physicalPullRequest === undefined ||
+      expectedHead === undefined
+    ) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Canonical pull-request head, base, and identity evidence are required before merge.",
+        [
+          diagnostic(
+            "CHANGE_PROVENANCE_CONFLICT",
+            "$.projection.candidates",
+            "The canonical pull-request head generation is unavailable or ambiguous.",
+          ),
+        ],
+      );
+    }
+    if (request.mergeStrategy === undefined) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "Change merge strategy is required.",
+      );
+    }
+    if (this.#semanticPullRequestMutationExecutor === undefined) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "The governed Semantic PR merge authority is unavailable.",
+      );
+    }
+
+    let mergePlan: SemanticPullRequestMutationPlan;
+    try {
+      mergePlan = planSemanticPullRequestMutation({
+        version: "1",
+        operation: "merge",
+        repository: {
+          hostname: this.#target.repositoryHost,
+          nameWithOwner: this.#target.nameWithOwner,
+          repositoryId: this.#target.repositoryId,
+        },
+        pullRequest: canonicalPullRequest,
+        expectedHead,
+        expectedBase: canonicalBaseBranch,
+        strategy: request.mergeStrategy,
+      });
+    } catch {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PRECONDITION_FAILED",
+        "The canonical Semantic PR merge plan could not be prepared.",
+        [
+          diagnostic(
+            "CHANGE_INVALID_PLAN",
+            "$.semanticPullRequestMergePlan",
+            "The canonical Semantic PR merge plan is invalid.",
+          ),
+        ],
+      );
+    }
+
+    if (change.state !== "MERGED") {
+      try {
+        planChangeTransition({
+          version: CHANGE_TRANSITION_CONTRACT_VERSION,
+          transition: "merge",
+          change: admission.change,
+          target: {
+            branch: canonicalBranch,
+            baseBranch: canonicalBaseBranch,
+            pullRequest: canonicalPullRequest,
+            semanticPullRequestMergePlan: mergePlan,
+          },
+        });
+      } catch {
+        throw new ChangeTrustedExecutorError(
+          "CHANGE_EXECUTION_PRECONDITION_FAILED",
+          "Change merge transition planning failed closed.",
+          [
+            diagnostic(
+              "CHANGE_INVALID_PLAN",
+              "$.target.semanticPullRequestMergePlan",
+              "The merge plan is not bound to the canonical Change projection.",
+            ),
+          ],
+        );
+      }
+    }
+
+    let semanticResult: SemanticPullRequestMutationResult;
+    try {
+      semanticResult = await this.#semanticPullRequestMutationExecutor.execute({
+        version: "1",
+        plan: mergePlan,
+      });
+    } catch (error: unknown) {
+      if (error instanceof SemanticPullRequestMutationError) {
+        const executionCode =
+          error.outcome === "recovery-required"
+            ? "CHANGE_EXECUTION_RECOVERY_REQUIRED"
+            : error.outcome === "stale" || error.outcome === "blocked"
+              ? "CHANGE_EXECUTION_PRECONDITION_FAILED"
+              : "CHANGE_EXECUTION_EFFECT_FAILED";
+        const diagnostics = error.diagnostics.map((entry) =>
+          diagnostic(
+            entry.code === "PR_MUTATION_STALE_HEAD" || entry.code === "PR_MUTATION_STALE_BASE"
+              ? "CHANGE_PROVENANCE_CONFLICT"
+              : "CHANGE_INVALID_PLAN",
+            entry.path,
+            entry.message,
+          ),
+        );
+        const evidence = executionEvidence(
+          request.operation,
+          error.outcome === "recovery-required" ? "recovery-required" : "failed",
+          this.#trustedRequester,
+          [{ kind: "MERGE_PULL_REQUEST", status: "failed" }],
+          error.outcome === "recovery-required" ? "failed" : "not-required",
+          {
+            effect: { kind: "MERGE_PULL_REQUEST" },
+            code: error.code,
+            message: error.message,
+          },
+        );
+        throw new ChangeTrustedExecutorError(executionCode, "Governed Semantic PR merge execution failed closed.", diagnostics, evidence);
+      }
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_EFFECT_FAILED",
+        "Governed Semantic PR merge execution failed closed.",
+        [],
+        executionEvidence(
+          request.operation,
+          "failed",
+          this.#trustedRequester,
+          [{ kind: "MERGE_PULL_REQUEST", status: "failed" }],
+          "not-required",
+          { effect: { kind: "MERGE_PULL_REQUEST" }, code: "PR_MUTATION_EFFECT_FAILED", message: "Merge effect failed." },
+        ),
+      );
+    }
+
+    const currentHead = semanticResult.current.headSha ?? semanticResult.current.head;
+    if (
+      semanticResult.current.number !== canonicalPullRequest ||
+      currentHead !== expectedHead ||
+      semanticResult.current.base !== canonicalBaseBranch ||
+      semanticResult.current.state !== "closed"
+    ) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+        "Semantic PR merge postcondition did not prove the canonical merged pull request.",
+        [
+          diagnostic(
+            "CHANGE_PROVENANCE_CONFLICT",
+            "$.semanticPullRequestMutation.current",
+            "The merged pull-request postcondition differs from the canonical Change head or base.",
+          ),
+        ],
+        executionEvidence(
+          request.operation,
+          "recovery-required",
+          this.#trustedRequester,
+          [{ kind: "MERGE_PULL_REQUEST", status: "failed" }],
+          "failed",
+          {
+            effect: { kind: "MERGE_PULL_REQUEST" },
+            code: "PR_MUTATION_POSTCONDITION_FAILED",
+            message: "Merged postcondition was not proven.",
+          },
+        ),
+      );
+    }
+
+    let finalInput: ChangeProjectionInput;
+    try {
+      finalInput = await this.readRawInput(request);
+    } catch {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        "Merge effect completed without an authoritative Change reread.",
+        [],
+        executionEvidence(
+          request.operation,
+          "recovery-required",
+          this.#trustedRequester,
+          [{ kind: "MERGE_PULL_REQUEST", status: "succeeded" }],
+          "failed",
+          {
+            effect: { kind: "MERGE_PULL_REQUEST" },
+            code: "PR_MUTATION_POSTCONDITION_READ_FAILED",
+            message: "Merged Change projection reread failed.",
+          },
+        ),
+      );
+    }
+    const finalProjection = projectionFor(finalInput);
+    const finalAdmissionEvidence = finalInput.readyEvidence;
+    const finalChange = finalProjection.change;
+    const finalAdmission =
+      finalChange === undefined || finalAdmissionEvidence === undefined
+        ? { valid: false, diagnostics: finalProjection.diagnostics }
+        : validateChangeMergeAdmission({
+            change: finalChange,
+            projection: finalInput,
+            pullRequest: finalAdmissionEvidence.pullRequest,
+          });
+    if (
+      !finalProjection.valid ||
+      finalProjection.status !== "healthy" ||
+      finalChange?.state !== "MERGED" ||
+      !finalAdmission.valid ||
+      finalChange.projection?.pullRequest !== canonicalPullRequest ||
+      finalChange.projection?.branch !== canonicalBranch
+    ) {
+      throw new ChangeTrustedExecutorError(
+        "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED",
+        "Post-merge Change projection verification failed.",
+        finalAdmission.diagnostics.length > 0 ? finalAdmission.diagnostics : finalProjection.diagnostics,
+        executionEvidence(
+          request.operation,
+          "recovery-required",
+          this.#trustedRequester,
+          [{ kind: "MERGE_PULL_REQUEST", status: "succeeded" }],
+          "failed",
+          {
+            effect: { kind: "MERGE_PULL_REQUEST" },
+            code: "PR_MUTATION_POSTCONDITION_FAILED",
+            message: "Merged Change projection was not proven.",
+          },
+        ),
+      );
+    }
+    return {
+      projection: finalProjection,
+      evidence: executionEvidence(
+        request.operation,
+        semanticResult.outcome === "idempotent" ? "returned-existing" : "verified",
+        this.#trustedRequester,
+        semanticResult.outcome === "idempotent" ? [] : [{ kind: "MERGE_PULL_REQUEST", status: "succeeded" }],
+      ),
+    };
   }
 
   private async executeAbort(request: ChangeMutationRequest): Promise<ChangeExecutionResult> {

@@ -213,7 +213,7 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
         ? await this.readGovernedIssue(issue.body, repository.defaultBranch)
         : undefined;
     const readyEvidence =
-      request.operation === "ready"
+      request.operation === "ready" || request.operation === "merge"
         ? await this.readReadyEvidence(repository.defaultBranch, issue.body, pullRequests, canonicalBranch)
         : undefined;
     let semanticPullRequestPlan: SemanticPullRequestMutationPlan | undefined;

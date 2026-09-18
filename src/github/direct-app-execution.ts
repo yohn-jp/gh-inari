@@ -189,16 +189,30 @@ export function createDirectAppSessionExecutor(
       const executor: ChangeExecutionPort = {
         read: (request) => readChangeProjection(executionBroker, config, target, request),
         execute: async (request): Promise<ChangeProjectionResult | ChangeExecutionResult> =>
-          executionBroker.withRepositoryReadCapability({}, async (capability) => {
-            const reader = buildReader(capability, config, target, request);
-            const trustedExecutor = new TrustedChangeExecutor({
-              reader,
-              effectAuthorizer,
-              execution: input.execution,
-              target,
-            });
-            return trustedExecutor.execute(request);
-          }),
+          request.operation === "merge"
+            ? executionBroker.withSemanticPullRequestMutationExecutor({ target }, async (semanticExecutor) =>
+                executionBroker.withRepositoryReadCapability({}, async (capability) => {
+                  const reader = buildReader(capability, config, target, request);
+                  const trustedExecutor = new TrustedChangeExecutor({
+                    reader,
+                    effectAuthorizer,
+                    execution: input.execution,
+                    target,
+                    semanticPullRequestMutationExecutor: semanticExecutor,
+                  });
+                  return trustedExecutor.execute(request);
+                }),
+              )
+            : executionBroker.withRepositoryReadCapability({}, async (capability) => {
+                const reader = buildReader(capability, config, target, request);
+                const trustedExecutor = new TrustedChangeExecutor({
+                  reader,
+                  effectAuthorizer,
+                  execution: input.execution,
+                  target,
+                });
+                return trustedExecutor.execute(request);
+              }),
       };
       if (establishedApp === undefined) {
         throw new Error("The App installation identity was not established by the broker.");

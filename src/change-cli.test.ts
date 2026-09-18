@@ -213,6 +213,7 @@ test("Change commands are additions to the existing canonical command authority"
     "change.handoff",
     "change.ready",
     "change.abort",
+    "change.merge",
     "change.publish",
   ] as const;
   const contract = projectCommandContract();

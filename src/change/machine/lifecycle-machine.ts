@@ -1,7 +1,11 @@
 import { assign, createActor, setup } from "xstate";
 import type { ChangeState, ChangeTransition } from "../../change.js";
 
-type LifecycleEvent = { readonly type: "ISSUE" } | { readonly type: "READY" } | { readonly type: "ABORT" };
+type LifecycleEvent =
+  | { readonly type: "ISSUE" }
+  | { readonly type: "READY" }
+  | { readonly type: "ABORT" }
+  | { readonly type: "MERGE" };
 
 interface LifecycleContext {
   initialState: ChangeState;
@@ -67,10 +71,15 @@ export const lifecycleMachine = setup({
     REVIEW: {
       on: {
         READY: { target: "REVIEW", actions: "recordAcceptedEvent" },
+        MERGE: { target: "MERGED", actions: "recordAcceptedEvent" },
         ABORT: { target: "ABORTED", actions: "recordAcceptedEvent" },
       },
     },
-    ACCEPTED: {},
+    ACCEPTED: {
+      on: {
+        MERGE: { target: "MERGED", actions: "recordAcceptedEvent" },
+      },
+    },
     MERGED: {},
     ABORTED: {
       on: {
@@ -121,7 +130,7 @@ function eventForOperation(operation: ChangeTransition): LifecycleEvent | undefi
     case "abort":
       return { type: "ABORT" };
     case "merge":
-      return undefined;
+      return { type: "MERGE" };
   }
 }
 
