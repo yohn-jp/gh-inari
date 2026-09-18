@@ -41,11 +41,16 @@ import {
   type GitHubOperationalCheck,
   type GitHubOperationalCheckIdentity,
   type GitHubOperationalCollection,
+  type GitHubOperationalDiscoveryFilters,
+  type GitHubOperationalDiscoveryPage,
+  type GitHubOperationalDiscoveryPagination,
   type GitHubOperationalComment,
   type GitHubOperationalIssueEvidence,
+  type GitHubOperationalIssueSummary,
   type GitHubOperationalPagination,
   type GitHubOperationalProvenance,
   type GitHubOperationalPullRequestEvidence,
+  type GitHubOperationalPullRequestSummary,
   type GitHubOperationalRepository,
   type GitHubOperationalRequiredCheckBinding,
   type GitHubOperationalReview,
@@ -94,6 +99,8 @@ export interface GitHubArtifactTransport {
 }
 
 function repositoryApiOperation(repositoryPath: string, method: "GET" | "POST" | "PATCH" | "DELETE"): string {
+  if (repositoryPath === "issues" || repositoryPath.startsWith("issues?")) return "issue.list";
+  if (repositoryPath === "pulls" || repositoryPath.startsWith("pulls?")) return "pull_request.list";
   if (repositoryPath.startsWith("pulls/") && repositoryPath.includes("/reviews"))
     return method === "GET" ? "pull_request.review.read" : "pull_request.review.mutate";
   if (repositoryPath.startsWith("issues/") && repositoryPath.includes("/comments"))
@@ -124,6 +131,15 @@ export interface GitHubAdapterOptions {
   readonly requestTimeoutMs?: number;
   /** Bounded native response size in bytes. */
   readonly maxResponseBytes?: number;
+}
+
+export interface GitHubOperationalDiscoveryOptions {
+  readonly state?: "open" | "closed" | "all";
+  readonly head?: string;
+  readonly base?: string;
+  readonly page?: number;
+  readonly limit?: number;
+  readonly deadline?: ChangeExecutionDeadline;
 }
 
 export interface GitHubApiResponse {
@@ -672,6 +688,120 @@ export class GitHubAdapter {
     deadline?: ChangeExecutionDeadline,
   ): Promise<GitHubOperationalPullRequestEvidence> {
     return this.observePullRequest(pullRequestNumber, deadline);
+  }
+
+  /** Read one explicit, bounded Issue discovery page through native HTTP. */
+  async listOperationalIssues(
+    options: GitHubOperationalDiscoveryOptions = {},
+  ): Promise<GitHubOperationalDiscoveryPage<GitHubOperationalIssueSummary>> {
+    if (options.head !== undefined || options.base !== undefined)
+      throw new ContractViolationError("Issue discovery does not accept pull-request ref filters.", "filters");
+    return (await this.listOperationalDiscoveryPage(
+      "issue",
+      options,
+    )) as GitHubOperationalDiscoveryPage<GitHubOperationalIssueSummary>;
+  }
+
+  /** Read one explicit, bounded pull-request discovery page through native HTTP. */
+  async listOperationalPullRequests(
+    options: GitHubOperationalDiscoveryOptions = {},
+  ): Promise<GitHubOperationalDiscoveryPage<GitHubOperationalPullRequestSummary>> {
+    return (await this.listOperationalDiscoveryPage(
+      "pull_request",
+      options,
+    )) as GitHubOperationalDiscoveryPage<GitHubOperationalPullRequestSummary>;
+  }
+
+  private async listOperationalDiscoveryPage(
+    kind: "issue" | "pull_request",
+    options: GitHubOperationalDiscoveryOptions,
+  ): Promise<GitHubOperationalDiscoveryPage<GitHubOperationalIssueSummary | GitHubOperationalPullRequestSummary>> {
+    const state = options.state ?? "open";
+    if (state !== "open" && state !== "closed" && state !== "all")
+      throw new ContractViolationError("Discovery state must be open, closed, or all.", "state");
+    const page = options.page ?? 1;
+    const limit = options.limit ?? 30;
+    if (!Number.isSafeInteger(page) || page < 1 || page > 10_000)
+      throw new ContractViolationError("Discovery page must be a bounded positive integer.", "page");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new ContractViolationError("Discovery limit must be an integer between 1 and 100.", "limit");
+    if (options.head !== undefined) assertPullRequestRef(options.head, "head");
+    if (options.base !== undefined) assertPullRequestRef(options.base, "base");
+    const context = await this.resolveRepositoryContext(options.deadline);
+    const query = new URLSearchParams({
+      state,
+      sort: "created",
+      direction: "desc",
+      per_page: String(limit),
+      page: String(page),
+    });
+    if (kind === "pull_request" && options.head !== undefined) query.set("head", `${context.owner}:${options.head}`);
+    if (kind === "pull_request" && options.base !== undefined) query.set("base", options.base);
+    const endpoint = `${kind === "issue" ? "issues" : "pulls"}?${query.toString()}`;
+    const operation = kind === "issue" ? "issue.list" : "pull_request.list";
+    const response = await this.requestRepositoryApi(endpoint, "GET", {}, options.deadline);
+    if (response.status === 404)
+      throw new GitHubApiError(operation, `GitHub ${kind === "issue" ? "Issue" : "pull-request"} discovery failed.`);
+    let entries: readonly unknown[];
+    try {
+      entries = arrayResponse(response.body, `${kind} discovery`);
+    } catch (error) {
+      throw new GitHubApiResponseError(
+        operation,
+        "GitHub returned an invalid discovery collection.",
+        { path: "body" },
+        error,
+      );
+    }
+    if (entries.length > limit)
+      throw new GitHubApiResponseError(operation, "GitHub returned more discovery items than requested.", {
+        path: "body",
+      });
+    const items: Array<GitHubOperationalIssueSummary | GitHubOperationalPullRequestSummary> = [];
+    entries.forEach((entry, index) => {
+      // GitHub's `/issues` endpoint includes PR-shaped resources. They are
+      // not Issue discoveries and must be filtered without a second query.
+      if (kind === "issue" && isRecord(entry) && entry.pull_request !== undefined) return;
+      items.push(
+        kind === "issue"
+          ? operationalIssueSummary(entry, context, `${operation}.items[${index}]`)
+          : operationalPullRequestSummary(entry, context, `${operation}.items[${index}]`),
+      );
+    });
+    const nextPage = nextPageFromLinkStrict(response.headers?.link, operation);
+    const filters: GitHubOperationalDiscoveryFilters = {
+      state,
+      page,
+      limit,
+      ...(kind === "pull_request" && options.head === undefined
+        ? {}
+        : kind === "pull_request"
+          ? { head: options.head }
+          : {}),
+      ...(kind === "pull_request" && options.base === undefined
+        ? {}
+        : kind === "pull_request"
+          ? { base: options.base }
+          : {}),
+    };
+    const pagination: GitHubOperationalDiscoveryPagination = {
+      page,
+      limit,
+      returned: items.length,
+      truncated: nextPage !== undefined,
+      ...(nextPage === undefined ? {} : { nextPage }),
+    };
+    return {
+      repository: {
+        host: context.hostname,
+        nameWithOwner: context.nameWithOwner,
+        ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
+      },
+      filters,
+      items,
+      pagination,
+      provenance: { provider: "github", endpoints: [kind === "issue" ? "issues" : "pulls"] },
+    } as GitHubOperationalDiscoveryPage<GitHubOperationalIssueSummary | GitHubOperationalPullRequestSummary>;
   }
 
   private async readOperationalChecks(
@@ -1562,7 +1692,7 @@ function assertRepositoryApiPath(value: string): void {
     value.startsWith("/") ||
     value.includes("\u0000") ||
     value.includes("..") ||
-    (value !== "" && !/^(?:issues\/|pulls(?:\/|\?|$)|git\/|branches\/|commits\/)/u.test(value))
+    (value !== "" && !/^(?:issues(?:\/|\?|$)|pulls(?:\/|\?|$)|git\/|branches\/|commits\/)/u.test(value))
   ) {
     throw new ContractViolationError("Repository API path is invalid.", "repositoryPath");
   }
@@ -1837,6 +1967,36 @@ function parseOperationalPullRequest(
   };
 }
 
+function operationalIssueSummary(
+  value: unknown,
+  context: RepositoryContext,
+  operation: string,
+): GitHubOperationalIssueSummary {
+  const parsed = parseOperationalIssue(value, context, operation);
+  const { body: _body, ...summary } = parsed;
+  return summary;
+}
+
+function operationalPullRequestSummary(
+  value: unknown,
+  context: RepositoryContext,
+  operation: string,
+): GitHubOperationalPullRequestSummary {
+  const parsed = parseOperationalPullRequest(value, context, operation);
+  const {
+    body: _body,
+    checks: _checks,
+    requiredCheckBindings: _requiredCheckBindings,
+    reviews: _reviews,
+    comments: _comments,
+    inlineReviewComments: _inlineReviewComments,
+    changedFiles: _changedFiles,
+    provenance: _provenance,
+    ...summary
+  } = parsed as GitHubOperationalPullRequestEvidence;
+  return summary;
+}
+
 function operationalTeamSlugs(value: unknown, path: string, operation: string): readonly string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value))
@@ -2041,6 +2201,24 @@ function nextPageFromLink(value: string | undefined): number | undefined {
   if (match === null) return undefined;
   const page = Number(match[1]);
   return Number.isSafeInteger(page) && page > 0 ? page : undefined;
+}
+
+function nextPageFromLinkStrict(value: string | undefined, operation: string): number | undefined {
+  if (value === undefined) return undefined;
+  const next = value.split(",").find((part) => /;\s*rel="next"/iu.test(part));
+  if (next === undefined) return undefined;
+  const match = /[?&]page=(\d+)/u.exec(next);
+  if (match === null) {
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid discovery pagination link.", {
+      path: "headers.link",
+    });
+  }
+  const page = Number(match[1]);
+  if (!Number.isSafeInteger(page) || page < 1)
+    throw new GitHubApiResponseError(operation, "GitHub returned an invalid discovery pagination link.", {
+      path: "headers.link",
+    });
+  return page;
 }
 
 function operationalCollectionFailure<T>(
