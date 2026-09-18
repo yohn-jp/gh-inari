@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runCli } from "./cli.js";
-import { GitHubApiError, GitHubAdapter, type RepositoryContext, type RepositoryTree } from "./github/index.js";
+import {
+  GitHubApiError,
+  GitHubAuthenticationError,
+  GitHubAdapter,
+  GitHubTransportError,
+  type RepositoryContext,
+  type RepositoryTree,
+} from "./github/index.js";
 import type {
   GitHubIssue,
   GitHubOperationalCollection,
@@ -483,6 +490,57 @@ test("semantic governance evidence failure is distinct from artifact provider fa
   assert.equal(artifact.exitCode, 3);
   assert.equal(artifact.output.ok, false);
   assert.equal((artifact.output.error as Record<string, unknown>).code, "GITHUB_API_FAILED");
+});
+
+test("semantic provider failures retain distinct authentication, transport, and API codes", async () => {
+  class AuthenticationFailingAdapter extends PullRequestViewAdapter {
+    override async getRepositoryBlob(_sha: string): Promise<string> {
+      throw new GitHubAuthenticationError("github.com");
+    }
+  }
+  class TransportFailingAdapter extends PullRequestViewAdapter {
+    override async getRepositoryBlob(_sha: string): Promise<string> {
+      throw new GitHubTransportError("repository.governance.blob", "transport unavailable");
+    }
+  }
+  class ApiFailingAdapter extends PullRequestViewAdapter {
+    override async getRepositoryBlob(_sha: string): Promise<string> {
+      throw new GitHubApiError("repository.governance.blob", "provider API unavailable");
+    }
+  }
+
+  const cases = [
+    {
+      adapter: new AuthenticationFailingAdapter(pullRequest(8, validPullRequestBody), [
+        { path: ".github/PULL_REQUEST_TEMPLATE.md", source: pullRequestTemplate },
+      ]),
+      code: "GITHUB_AUTHENTICATION_FAILED",
+    },
+    {
+      adapter: new TransportFailingAdapter(pullRequest(8, validPullRequestBody), [
+        { path: ".github/PULL_REQUEST_TEMPLATE.md", source: pullRequestTemplate },
+      ]),
+      code: "GITHUB_TRANSPORT_FAILED",
+    },
+    {
+      adapter: new ApiFailingAdapter(pullRequest(8, validPullRequestBody), [
+        { path: ".github/PULL_REQUEST_TEMPLATE.md", source: pullRequestTemplate },
+      ]),
+      code: "GITHUB_API_FAILED",
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    const result = await capture(testCase.adapter, ["pr", "view", "8", "--json"]);
+    assert.equal(result.exitCode, 0, testCase.code);
+    assert.equal((result.output.semantic as Record<string, unknown>).status, "provider-failure", testCase.code);
+    assert.deepEqual(
+      (result.output.semantic as Record<string, unknown>).failure,
+      { kind: "provider", code: testCase.code },
+      testCase.code,
+    );
+    assert.equal((result.output.observed as Record<string, unknown>).body, validPullRequestBody, testCase.code);
+  }
 });
 
 test("view derives semantic and observed output from one artifact snapshot", async () => {
