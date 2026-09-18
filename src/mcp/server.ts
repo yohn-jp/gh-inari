@@ -47,7 +47,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
   registerSemanticIssueTools(server, options);
   registerSemanticBranchTools(server, options);
   registerSemanticPullRequestTools(server, options);
-  registerImplementationTools(server);
+  registerImplementationTools(server, options);
   registerChangeTools(server, options);
   if (options.sessionExecutor !== undefined) {
     registerSessionAuthorizedChangeTools(server, createMcpSessionAppBridge(options.sessionExecutor));

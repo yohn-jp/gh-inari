@@ -125,7 +125,7 @@ test("Implementation authoring uses the current impl command surface", () => {
       "inari impl authorize <number>",
       "inari impl inspect <number>",
       "inari impl verify <number>",
-      "inari impl frontier --from <frontier-input.json>",
+      "inari impl frontier <number> [--from <frontier-evidence.json>]",
     ],
   );
   assert.match(scenario.invariants.join(" "), /not authoritative/u);
