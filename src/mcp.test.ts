@@ -3,7 +3,13 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createInariMcpServer } from "./mcp/server.js";
-import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import { ChangeExecutionPortError, type ChangeExecutionResult } from "./change-execution-port.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
@@ -15,11 +21,11 @@ import {
   mutationRequest,
 } from "./golden-path-status/fixtures.js";
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
-function blobResponse(sha: string, source: string): GhCommandResult {
+function blobResponse(sha: string, source: string): FixtureCommandResult {
   return command(
     JSON.stringify({
       sha,
@@ -29,9 +35,9 @@ function blobResponse(sha: string, source: string): GhCommandResult {
   );
 }
 
-class SemanticPrTransport implements GhTransport {
+class SemanticPrTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
   constructor(source: string, sourcePath = ".github/inari/pull-requests/default.json") {
     this.responses = [
@@ -50,7 +56,7 @@ class SemanticPrTransport implements GhTransport {
     ];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -58,9 +64,9 @@ class SemanticPrTransport implements GhTransport {
   }
 }
 
-class SemanticObservationTransport implements GhTransport {
+class SemanticObservationTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
   constructor(kind: "issue" | "branch" | "pull_request", source: string) {
     const resource =
@@ -124,7 +130,7 @@ class SemanticObservationTransport implements GhTransport {
     ];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -230,7 +236,7 @@ function createAdapterFactory(
   return (options) => {
     const transport = new SemanticPrTransport(source);
     transports.push(transport);
-    return new GitHubAdapter({ ...options, transport });
+    return new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) });
   };
 }
 
@@ -788,7 +794,7 @@ test("native MCP exposes Issue and Branch catalogs through the same Core boundar
       const source = transports.length < 2 ? semanticIssueCanon : semanticBranchCanon;
       const transport = new SemanticPrTransport(source, sourcePath);
       transports.push(transport);
-      return new GitHubAdapter({ ...options, transport });
+      return new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) });
     },
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -831,7 +837,7 @@ test("native MCP exposes bounded observation tools for Issue, Branch, and PR", a
       const kind = transports.length === 0 ? "issue" : transports.length === 1 ? "branch" : "pull_request";
       const transport = new SemanticObservationTransport(kind, sources[kind]);
       transports.push(transport);
-      return new GitHubAdapter({ ...options, transport });
+      return new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) });
     },
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -876,15 +882,15 @@ const issueRelationsCanonSource = JSON.stringify({
   fields: [],
 });
 
-class IssueRelationsMcpTransport implements GhTransport {
+class IssueRelationsMcpTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
-  constructor(responses: readonly GhCommandResult[]) {
+  constructor(responses: readonly FixtureCommandResult[]) {
     this.responses = [...responses];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     if (args[0] === "--version") return command("gh version 2.0");
     if (args[0] === "auth" && args[1] === "status") return command();
@@ -919,7 +925,7 @@ test("native MCP previews an existing-Issue relationship plan without mutation",
   const transport = new IssueRelationsMcpTransport([command("HTTP/2 404 Not Found\n\n")]);
   const server = createInariMcpServer({
     repository: "acme/repository-b",
-    createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+    createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "inari-mcp-issue-relations-test", version: "1" }, { capabilities: {} });

@@ -18,8 +18,8 @@ export class GitHubUserIdentityError extends Error {
   readonly reason: GitHubUserIdentityFailureReason;
   readonly status?: number;
 
-  constructor(reason: GitHubUserIdentityFailureReason, message: string, status?: number) {
-    super(message);
+  constructor(reason: GitHubUserIdentityFailureReason, message: string, status?: number, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "GitHubUserIdentityError";
     this.reason = reason;
     if (status !== undefined) this.status = status;
@@ -43,8 +43,13 @@ export async function resolveAuthenticatedGitHubUser(
   let response: { readonly status: number; readonly body?: unknown };
   try {
     response = await transport.request({ hostname, method: "GET", path: "user" });
-  } catch {
-    throw new GitHubUserIdentityError("request", "Unable to reach GitHub to resolve the authenticated identity.");
+  } catch (error) {
+    throw new GitHubUserIdentityError(
+      "request",
+      "Unable to reach GitHub to resolve the authenticated identity.",
+      undefined,
+      error,
+    );
   }
   if (response.status !== 200) {
     throw new GitHubUserIdentityError(

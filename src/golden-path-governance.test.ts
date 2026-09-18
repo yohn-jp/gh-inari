@@ -5,19 +5,25 @@ import {
   type GoldenPathKnownGovernance,
   type GoldenPathGovernanceDiscoveryResult,
 } from "./golden-path-governance.js";
-import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 
-class StubTransport implements GhTransport {
+class StubTransport implements FixtureCommandTransport {
   readonly calls: readonly string[][];
   private readonly history: string[][] = [];
-  private readonly responses: Array<GhCommandResult | Error>;
+  private readonly responses: Array<FixtureCommandResult | Error>;
 
-  constructor(responses: Array<GhCommandResult | Error>) {
+  constructor(responses: Array<FixtureCommandResult | Error>) {
     this.responses = [...responses];
     this.calls = this.history;
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.history.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -26,11 +32,11 @@ class StubTransport implements GhTransport {
   }
 }
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
-function blob(sha: string, source: string): GhCommandResult {
+function blob(sha: string, source: string): FixtureCommandResult {
   return command(JSON.stringify({ sha, encoding: "base64", content: Buffer.from(source, "utf8").toString("base64") }));
 }
 
@@ -38,7 +44,7 @@ function adapterResponses(
   entries: readonly { readonly path: string; readonly sha: string }[],
   blobs: readonly { readonly sha: string; readonly source: string }[],
   treeSha = "tree-sha",
-): GhCommandResult[] {
+): FixtureCommandResult[] {
   return [
     command("gh version 2.0"),
     command(),
@@ -62,7 +68,7 @@ function nativeAdapter(
 ): GitHubAdapter {
   return new GitHubAdapter({
     repository: "acme/repository",
-    transport: new StubTransport(adapterResponses(entries, blobs, treeSha)),
+    transport: nativeTestTransport(new StubTransport(adapterResponses(entries, blobs, treeSha))),
   });
 }
 
@@ -241,10 +247,13 @@ test("Artifact Contract governance honors the shared configured default", async 
     ),
   );
   const result = assertResolved(
-    await discoverGoldenPathGovernance(new GitHubAdapter({ repository: "acme/repository", transport }), {
-      domain: "issue",
-      source: "artifact-contract",
-    }),
+    await discoverGoldenPathGovernance(
+      new GitHubAdapter({ repository: "acme/repository", transport: nativeTestTransport(transport) }),
+      {
+        domain: "issue",
+        source: "artifact-contract",
+      },
+    ),
   );
   assert.equal(result.source, "artifact-contract");
   assert.equal(

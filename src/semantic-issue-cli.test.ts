@@ -4,11 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli.js";
-import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 
-class SemanticIssueTransport implements GhTransport {
+class SemanticIssueTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
   constructor(source: string) {
     this.responses = [
@@ -33,7 +39,7 @@ class SemanticIssueTransport implements GhTransport {
     ];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -41,7 +47,7 @@ class SemanticIssueTransport implements GhTransport {
   }
 }
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -101,7 +107,7 @@ async function invoke(
       ];
       const exitCode = await runCli(argv, {
         repositoryRoot: directory,
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
       const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
       return { exitCode, output, calls: transport.calls };

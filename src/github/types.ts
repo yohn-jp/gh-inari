@@ -74,7 +74,7 @@ export interface RepositoryContext {
   readonly name: string;
   readonly nameWithOwner: string;
   readonly url: string;
-  /** Decimal REST repository database ID when resolved from gh. */
+  /** Decimal REST repository database ID when resolved from the native provider. */
   readonly repositoryId?: string;
 }
 

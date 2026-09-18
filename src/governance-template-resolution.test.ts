@@ -8,7 +8,13 @@ import {
   compileRepositoryGovernedContract,
   verifyGovernedMutationFreshness,
 } from "./governance.js";
-import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import { TemplateResolutionError } from "./template-resolver.js";
 
 const ISSUE_TEMPLATE = `name: Template
@@ -22,17 +28,17 @@ body:
 
 const PR_TEMPLATE = "## Summary\n\nTemplate summary.\n";
 
-class StubTransport implements GhTransport {
+class StubTransport implements FixtureCommandTransport {
   readonly calls: readonly string[][];
   private readonly history: string[][] = [];
-  private readonly responses: GhCommandResult[];
+  private readonly responses: FixtureCommandResult[];
 
-  constructor(responses: readonly GhCommandResult[]) {
+  constructor(responses: readonly FixtureCommandResult[]) {
     this.responses = [...responses];
     this.calls = this.history;
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.history.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -40,11 +46,11 @@ class StubTransport implements GhTransport {
   }
 }
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
-function blobResponse(sha: string, source: string): GhCommandResult {
+function blobResponse(sha: string, source: string): FixtureCommandResult {
   return command(JSON.stringify({ sha, encoding: "base64", content: Buffer.from(source, "utf8").toString("base64") }));
 }
 
@@ -54,7 +60,7 @@ function remoteResponses(
   selectedPath: string,
   selectedSha: string,
   selectedSource: string,
-): GhCommandResult[] {
+): FixtureCommandResult[] {
   const templateEntries = issue
     ? [
         { path: ".github/ISSUE_TEMPLATE/bug.yml", type: "blob", sha: "bug-sha" },
@@ -83,10 +89,10 @@ function remoteResponses(
 
 async function compileRemote(
   domain: "issue" | "pr",
-  responses: readonly GhCommandResult[],
+  responses: readonly FixtureCommandResult[],
 ): Promise<Awaited<ReturnType<typeof compileLocalGovernedContract>>> {
   return compileRepositoryGovernedContract(
-    new GitHubAdapter({ repository: "acme/repository", transport: new StubTransport(responses) }),
+    new GitHubAdapter({ repository: "acme/repository", transport: nativeTestTransport(new StubTransport(responses)) }),
     domain,
   );
 }
@@ -158,7 +164,7 @@ test("explicit remote selection records an existing resolution config for freshn
   ]);
   const adapter = new GitHubAdapter({
     repository: "acme/repository",
-    transport,
+    transport: nativeTestTransport(transport),
   });
 
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "bug");

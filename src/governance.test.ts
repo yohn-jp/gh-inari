@@ -15,24 +15,30 @@ import {
   updateGovernedPullRequest,
   resolveRemoteArtifactContractIdentity,
 } from "./governance.js";
-import { type GhCommandResult, type GhTransport, type GhTransportOptions, GitHubAdapter } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import { deserializeCanonicalContract, serializeCanonicalContract } from "./contract/index.js";
 import { prepareIssueArtifact, preparePullRequestArtifact } from "./artifact.js";
 import { runCli } from "./cli.js";
 import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 import { PullRequestPolicyError } from "./pr-policy.js";
 
-class StubGovernanceTransport implements GhTransport {
+class StubGovernanceTransport implements FixtureCommandTransport {
   readonly calls: readonly string[][];
   private readonly history: string[][] = [];
-  private readonly responses: Array<GhCommandResult | Error>;
+  private readonly responses: Array<FixtureCommandResult | Error>;
 
-  constructor(responses: Array<GhCommandResult | Error>) {
+  constructor(responses: Array<FixtureCommandResult | Error>) {
     this.responses = [...responses];
     this.calls = this.history;
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.history.push([...args]);
     const response = this.responses.shift();
     if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
@@ -41,7 +47,7 @@ class StubGovernanceTransport implements GhTransport {
   }
 }
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -49,7 +55,7 @@ function issueTemplate(fieldId: string, label = "Remote field"): string {
   return `name: Remote\ndescription: Remote governance\nbody:\n  - type: input\n    id: ${fieldId}\n    attributes:\n      label: ${label}\n    validations:\n      required: true\n`;
 }
 
-function blobResponse(sha: string, content: string): GhCommandResult {
+function blobResponse(sha: string, content: string): FixtureCommandResult {
   return command(
     JSON.stringify({
       sha,
@@ -65,7 +71,7 @@ function governanceResponses(
   templateSource: string,
   extraTreeEntries: readonly Record<string, string>[] = [],
   treeSha = "tree-sha-a",
-): GhCommandResult[] {
+): FixtureCommandResult[] {
   return [
     command("gh version 2.0"),
     command(),
@@ -93,7 +99,7 @@ function semanticGovernanceResponses(
   nativeSha = "native-sha",
   nativeSource?: string,
   treeSha = "tree-sha-a",
-): { readonly responses: GhCommandResult[]; readonly expectedNative: string; readonly source: string } {
+): { readonly responses: FixtureCommandResult[]; readonly expectedNative: string; readonly source: string } {
   const source = JSON.stringify(sourceInput);
   const normalized = normalizeSemanticTemplate(sourceInput, sourcePath);
   const expectedNative = renderSemanticNative(normalized, generatedPath);
@@ -127,7 +133,7 @@ function semanticTreeResponse(
   sourceSha: string,
   generatedPath: string,
   nativeSha: string,
-): GhCommandResult {
+): FixtureCommandResult {
   return command(
     JSON.stringify({
       sha: treeSha,
@@ -140,8 +146,8 @@ function semanticTreeResponse(
   );
 }
 
-function adapterFor(responses: GhCommandResult[], cwd: string, repository = "acme/repository-b"): GitHubAdapter {
-  return new GitHubAdapter({ cwd, repository, transport: new StubGovernanceTransport(responses) });
+function adapterFor(responses: FixtureCommandResult[], cwd: string, repository = "acme/repository-b"): GitHubAdapter {
+  return new GitHubAdapter({ cwd, repository, transport: nativeTestTransport(new StubGovernanceTransport(responses)) });
 }
 
 test("governance is bound to the repository override, not the CWD repository", async () => {
@@ -150,7 +156,11 @@ test("governance is bound to the repository override, not the CWD repository", a
     governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source),
   );
   const contract = await compileRepositoryGovernedContract(
-    new GitHubAdapter({ cwd: "/workspace/repository-a/.github", repository: "acme/repository-b", transport }),
+    new GitHubAdapter({
+      cwd: "/workspace/repository-a/.github",
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(transport),
+    }),
     "issue",
     "remote",
   );
@@ -180,12 +190,20 @@ test("the same target yields the same governed contract from different nested CW
     governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "stable-sha", source),
   );
   const firstContract = await compileRepositoryGovernedContract(
-    new GitHubAdapter({ cwd: "/tmp/nested/false/.github", repository: "acme/repository-b", transport: first }),
+    new GitHubAdapter({
+      cwd: "/tmp/nested/false/.github",
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(first),
+    }),
     "issue",
     "remote",
   );
   const secondContract = await compileRepositoryGovernedContract(
-    new GitHubAdapter({ cwd: "/tmp/another/nested/.github", repository: "acme/repository-b", transport: second }),
+    new GitHubAdapter({
+      cwd: "/tmp/another/nested/.github",
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(second),
+    }),
     "issue",
     "remote",
   );
@@ -217,7 +235,7 @@ test("authoritative discovery matches all supported native PR template locations
   ]);
 
   const discovery = await discoverRepositoryTemplates(
-    new GitHubAdapter({ repository: "acme/repository-b", transport }),
+    new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
   );
   assert.deepEqual(
     discovery.pullRequestTemplates.map(({ path }) => path),
@@ -263,7 +281,7 @@ test("nested remote governance paths fail closed", async () => {
   );
   await assert.rejects(
     compileRepositoryGovernedContract(
-      new GitHubAdapter({ repository: "acme/repository-b", transport }),
+      new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
       "issue",
       "remote",
     ),
@@ -282,7 +300,11 @@ test("missing or unavailable remote governance never falls back to local files",
   ]);
   await assert.rejects(
     compileRepositoryGovernedContract(
-      new GitHubAdapter({ cwd: "/workspace/stale-copy", repository: "acme/repository-b", transport }),
+      new GitHubAdapter({
+        cwd: "/workspace/stale-copy",
+        repository: "acme/repository-b",
+        transport: nativeTestTransport(transport),
+      }),
       "issue",
       "remote",
     ),
@@ -310,7 +332,7 @@ test("remote schema output exposes repository and trusted source provenance", as
   try {
     const exitCode = await runCli(["issue", "schema", "remote", "--repository", "acme/repository-b", "--json"], {
       repositoryRoot: path.resolve("test-fixtures/stale-copy"),
-      createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
     });
     const output = JSON.parse(lines[0] ?? "{}") as {
       contract?: { provenance?: { repository?: { nameWithOwner?: string }; ref?: string } };
@@ -352,7 +374,7 @@ test("createGovernedIssue mutates when the default branch advances without chang
     command(JSON.stringify({ default_branch: "main" })),
     unchangedTree,
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
   assert.equal(contract.provenance?.treeSha, "tree-sha-a");
   const prepared = prepareIssueArtifact(contract, {
@@ -380,7 +402,7 @@ test("createGovernedIssue fails closed when the template changed at a new govern
       }),
     ),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
   const prepared = prepareIssueArtifact(contract, {
     fields: { remote_field: "value" },
@@ -429,7 +451,7 @@ test("createGovernedIssue reports a reconciliation mismatch without losing the c
       }),
     ),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
   const prepared = prepareIssueArtifact(contract, {
     fields: { remote_field: "value" },
@@ -473,7 +495,7 @@ test("createGovernedPullRequest fails closed when a policy governance input is n
       }),
     ),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
   assert.equal(contract.provenance?.policy, undefined);
   const prepared = preparePullRequestArtifact(contract, {
@@ -530,7 +552,7 @@ test("createGovernedPullRequest proceeds through the existing mutation path when
     command(JSON.stringify({ default_branch: "main" })),
     tree,
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
   assert.deepEqual(contract.provenance?.branchGovernance, { pattern: "^feat/[0-9]+-[a-z0-9-]+$" });
   const prepared = preparePullRequestArtifact(contract, {
@@ -566,7 +588,7 @@ test("createGovernedPullRequest rejects a head branch that violates repository b
     blobResponse("pr-template-sha", templateSource),
     blobResponse("policy-sha", policySource),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
   const prepared = preparePullRequestArtifact(contract, {
     fields: { summary: "A summary" },
@@ -609,7 +631,7 @@ test("a malformed repository branch governance declaration fails closed while co
     blobResponse("pr-template-sha", templateSource),
     blobResponse("policy-sha", policySource),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
 
   await assert.rejects(
     compileRepositoryGovernedContract(adapter, "pr", "default"),
@@ -642,7 +664,7 @@ test("unavailable repository branch governance fails closed before any PR mutati
     blobResponse("pr-template-sha", templateSource),
     command("", 1, "offline"),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
 
   await assert.rejects(
     compileRepositoryGovernedContract(adapter, "pr", "default"),
@@ -693,7 +715,7 @@ test("a repository PR policy with no branch rule leaves the existing valid-branc
     command(JSON.stringify({ default_branch: "main" })),
     tree,
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
   assert.equal(contract.provenance?.branchGovernance, undefined);
   const prepared = preparePullRequestArtifact(contract, {
@@ -737,7 +759,7 @@ test("compileRepositoryGovernedContract succeeds for a repository governed by .g
     blobResponse("semantic-sha", JSON.stringify(semanticSource)),
     blobResponse("native-sha", nativeSource),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "bug");
 
   assert.equal(contract.templateIdentity.path, generatedPath);
@@ -763,7 +785,10 @@ test("remote semantic pull-request governance requires its exact generated proje
   const generatedPath = ".github/PULL_REQUEST_TEMPLATE.md";
   const fixture = semanticGovernanceResponses(source, ".github/inari/pull-request.json", generatedPath);
   const contract = await compileRepositoryGovernedContract(
-    new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(fixture.responses) }),
+    new GitHubAdapter({
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(new StubGovernanceTransport(fixture.responses)),
+    }),
     "pr",
     "pull-request",
   );
@@ -794,7 +819,10 @@ test("remote semantic governance rejects a divergent generated native projection
   );
   await assert.rejects(
     compileRepositoryGovernedContract(
-      new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(fixture.responses) }),
+      new GitHubAdapter({
+        repository: "acme/repository-b",
+        transport: nativeTestTransport(new StubGovernanceTransport(fixture.responses)),
+      }),
       "issue",
       "bug",
     ),
@@ -839,7 +867,10 @@ test("remote semantic governance rejects a missing generated native projection",
   ];
   await assert.rejects(
     compileRepositoryGovernedContract(
-      new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(responses) }),
+      new GitHubAdapter({
+        repository: "acme/repository-b",
+        transport: nativeTestTransport(new StubGovernanceTransport(responses)),
+      }),
       "pr",
       "pull-request",
     ),
@@ -870,7 +901,7 @@ test("semantic-only drift fails the Issue mutation freshness gate", async () => 
     command(JSON.stringify({ default_branch: "main" })),
     semanticTreeResponse("tree-sha-b", sourcePath, "semantic-sha-new", generatedPath, "native-sha"),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "bug");
   const prepared = prepareIssueArtifact(contract, {
     fields: { summary: "value" },
@@ -904,7 +935,7 @@ test("native-only drift fails the pull-request mutation freshness gate", async (
     command(JSON.stringify({ default_branch: "main" })),
     semanticTreeResponse("tree-sha-b", sourcePath, "semantic-sha", generatedPath, "native-sha-new"),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "pull-request");
   const prepared = preparePullRequestArtifact(contract, {
     fields: { summary: "value" },
@@ -944,7 +975,10 @@ test("synchronized semantic source and native projection changes compile as one 
     "tree-sha-v2",
   );
   const contract = await compileRepositoryGovernedContract(
-    new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport(fixture.responses) }),
+    new GitHubAdapter({
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(new StubGovernanceTransport(fixture.responses)),
+    }),
     "issue",
     "bug",
   );
@@ -984,7 +1018,7 @@ test("existing-artifact validation acquires the contract from the artifact targe
       ["issue", "validate", "42", "--template", "remote", "--repository", "acme/repository-b", "--json"],
       {
         repositoryRoot: path.resolve("test-fixtures/stale-local-copy/.github/false"),
-        createAdapter: (options) => new GitHubAdapter({ ...options, transport }),
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
     assert.equal(exitCode, 0);
@@ -1027,7 +1061,7 @@ test("successful Issue update keeps identity when post-effect governance crosses
       }),
     ),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
   const prepared = prepareIssueArtifact(contract, {
     fields: { remote_field: "updated" },
@@ -1074,7 +1108,7 @@ test("successful pull-request update keeps identity when post-effect governance 
       }),
     ),
   ]);
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "pr", "default");
   const prepared = preparePullRequestArtifact(contract, {
     fields: { summary: "Updated summary" },
@@ -1089,7 +1123,10 @@ test("successful pull-request update keeps identity when post-effect governance 
 });
 
 test("resolveGovernedIssueEvidence fails closed when the Issue body is missing", async () => {
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport([]) });
+  const adapter = new GitHubAdapter({
+    repository: "acme/repository-b",
+    transport: nativeTestTransport(new StubGovernanceTransport([])),
+  });
   await assert.rejects(
     resolveGovernedIssueEvidence(adapter, undefined, "main"),
     (error: unknown) => error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_INVALID",
@@ -1097,7 +1134,10 @@ test("resolveGovernedIssueEvidence fails closed when the Issue body is missing",
 });
 
 test("resolveGovernedIssueEvidence fails closed on a malformed template identity marker", async () => {
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: new StubGovernanceTransport([]) });
+  const adapter = new GitHubAdapter({
+    repository: "acme/repository-b",
+    transport: nativeTestTransport(new StubGovernanceTransport([])),
+  });
   const body = "Some body\n\n<!-- inari:template not-json -->";
   await assert.rejects(
     resolveGovernedIssueEvidence(adapter, body, "main"),
@@ -1110,7 +1150,7 @@ test("resolveGovernedIssueEvidence resolves marker-identified remote governance 
   const transport = new StubGovernanceTransport(
     governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source),
   );
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const contract = await compileRepositoryGovernedContract(adapter, "issue", "remote");
   const prepared = prepareIssueArtifact(contract, {
     fields: { remote_field: "value" },
@@ -1120,7 +1160,10 @@ test("resolveGovernedIssueEvidence resolves marker-identified remote governance 
   const secondTransport = new StubGovernanceTransport(
     governanceResponses(".github/ISSUE_TEMPLATE/remote.yml", "remote-sha", source),
   );
-  const secondAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: secondTransport });
+  const secondAdapter = new GitHubAdapter({
+    repository: "acme/repository-b",
+    transport: nativeTestTransport(secondTransport),
+  });
   const evidence = await resolveGovernedIssueEvidence(secondAdapter, prepared.body, "main");
   assert.equal(evidence.body, prepared.body);
   assert.equal(evidence.contract.provenance?.template.path, ".github/ISSUE_TEMPLATE/remote.yml");

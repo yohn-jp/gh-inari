@@ -9,7 +9,13 @@ import { compileEffectiveArtifactContract } from "./contract/effective-artifact-
 import { parseArtifactContract } from "./contract/artifact-contract.js";
 import { materializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import type { ArtifactContractProvenance } from "./contract/ir.js";
-import { GitHubAdapter, type GhCommandResult, type GhTransport, type GhTransportOptions } from "./github/index.js";
+import { GitHubAdapter } from "./github/index.js";
+import {
+  nativeTestTransport,
+  type FixtureCommandResult,
+  type FixtureCommandTransport,
+  type FixtureCommandOptions,
+} from "./github/test-native-transport.test.js";
 import {
   LocalSemanticBranchExecutor,
   type SemanticBranchExecutionRequest,
@@ -17,7 +23,7 @@ import {
 } from "./semantic-branch-executor.js";
 import { planSemanticBranch } from "./semantic-branch-projection.js";
 
-function command(stdout = "", exitCode = 0, stderr = ""): GhCommandResult {
+function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
 
@@ -75,7 +81,7 @@ function included(status: number, body: unknown): string {
   return `HTTP/1.1 ${status} Test\n\n${JSON.stringify(body)}`;
 }
 
-class ExecutorTransport implements GhTransport {
+class ExecutorTransport implements FixtureCommandTransport {
   readonly calls: string[][] = [];
   readonly targetAlreadyExists: boolean;
   private readonly canonPath: string;
@@ -97,7 +103,7 @@ class ExecutorTransport implements GhTransport {
     this.treeEntries = options.treeEntries ?? [{ path: this.canonPath, type: "blob", sha: "canon-sha" }];
   }
 
-  async run(args: readonly string[], _options?: GhTransportOptions): Promise<GhCommandResult> {
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
     this.calls.push([...args]);
     const endpoint = args.find((value) => value.startsWith("repos/acme/repository-b")) ?? "";
     if (args[0] === "--version") return command("gh version 2.0");
@@ -161,7 +167,7 @@ async function rejected(operation: () => Promise<unknown>): Promise<unknown> {
 
 test("local Semantic Branch Executor admits, creates, rereads, and verifies a plan", async () => {
   const transport = new ExecutorTransport();
-  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
   const effective = await compileRepositoryEffectiveBranchContract(adapter, "default");
   const artifact = materializeSemanticArtifact(effective, { type: "feat", slug: "execute" });
   const plan = planSemanticBranch({ artifact });
@@ -192,7 +198,7 @@ test("local Semantic Branch Executor rejects an existing target before effects",
   const plan = planSemanticBranch({ artifact: inputArtifact() });
   await assert.rejects(
     new LocalSemanticBranchExecutor({
-      adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+      adapter: new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
     }).execute(request(plan)),
     (error: unknown) =>
       error instanceof SemanticBranchExecutorError && error.code === "SEMANTIC_BRANCH_EXECUTION_PRECONDITION_FAILED",
@@ -208,7 +214,7 @@ test("local Semantic Branch Executor fails closed for a tampered plan", async ()
   const plan = planSemanticBranch({ artifact: inputArtifact() });
   await assert.rejects(
     new LocalSemanticBranchExecutor({
-      adapter: new GitHubAdapter({ repository: "acme/repository-b", transport }),
+      adapter: new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) }),
     }).execute(request({ ...plan, desired: { ...plan.desired, name: "evil" } })),
     (error: unknown) =>
       error instanceof SemanticBranchExecutorError && error.code === "SEMANTIC_BRANCH_EXECUTION_PLAN_INVALID",
@@ -243,13 +249,19 @@ test("Semantic Branch execution preserves shared Canon resolution diagnostics", 
 
   for (const invalidCase of invalidCases) {
     const sharedTransport = new ExecutorTransport(false, invalidCase.options);
-    const sharedAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: sharedTransport });
+    const sharedAdapter = new GitHubAdapter({
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(sharedTransport),
+    });
     const sharedError = await rejected(() => compileRepositoryEffectiveBranchContract(sharedAdapter));
     assert.ok(sharedError instanceof ArtifactContractResolutionError, invalidCase.name);
     assert.equal(sharedError.code, invalidCase.code, invalidCase.name);
 
     const executorTransport = new ExecutorTransport(false, invalidCase.options);
-    const executorAdapter = new GitHubAdapter({ repository: "acme/repository-b", transport: executorTransport });
+    const executorAdapter = new GitHubAdapter({
+      repository: "acme/repository-b",
+      transport: nativeTestTransport(executorTransport),
+    });
     const executorError = await rejected(() =>
       new LocalSemanticBranchExecutor({ adapter: executorAdapter }).execute(request(plan)),
     );

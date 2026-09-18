@@ -29,7 +29,7 @@ import {
 } from "./change-execution-port.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { runCli } from "./cli.js";
-import { GhUnauthenticatedError, GitHubAdapter } from "./github/index.js";
+import { GitHubAuthenticationError, GitHubAdapter } from "./github/index.js";
 import { createActionsChangeExecutionAdapter } from "./github/actions-change-execution-adapter.js";
 import { findSkillScenario, SKILL_MODEL_VERSION } from "./skill.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
@@ -675,7 +675,7 @@ test("CLI --json preserves the bounded trusted code and Core diagnostic envelope
 test("caller transport authentication failure is distinct from an unconfigured executor", async () => {
   const adapter = runtimeTrustAdapter({
     async requestActionsApi() {
-      throw new GhUnauthenticatedError("github.com", "token=secret");
+      throw new GitHubAuthenticationError("github.com", "token=secret");
     },
   });
   const authResult = await capture(["change", "issue", "42", "--json"], {
