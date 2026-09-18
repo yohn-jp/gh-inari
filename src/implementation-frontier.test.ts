@@ -200,6 +200,59 @@ test("a contradictory authorization result (valid:false with completed flags) fa
   assert.ok(result.projection?.candidates[0]?.diagnostics.some((entry) => entry.code === "FRONTIER_AUTHORIZATION_INVALID"));
 });
 
+test("aborted Change evidence is terminal and cannot re-enter READY", () => {
+  const reference = issue(29);
+  const branch = "feat/29-terminal-change";
+  const changeProjection = {
+    valid: true,
+    status: "healthy",
+    canonicalBranch: branch,
+    canonicalBaseBranch: "main",
+    candidates: {
+      branches: [{ candidate: { name: branch }, classification: "canonical", reason: "canonical" }],
+      pullRequests: [
+        {
+          candidate: {
+            number: 129,
+            head: branch,
+            base: "main",
+            state: "closed",
+            draft: false,
+            merged: false,
+          },
+          classification: "canonical",
+          reason: "canonical",
+        },
+      ],
+    },
+    change: {
+      version: 1,
+      identity: {
+        repositoryHost: reference.repositoryHost,
+        repositoryId: reference.repositoryId,
+        rootIssue: reference.number,
+      },
+      state: "ABORTED",
+      provenance: {},
+      projection: { branch, pullRequest: 129 },
+    },
+    diagnostics: [],
+  };
+
+  const result = project(
+    [{ reference, change: changeProjection }],
+    [rawNode(reference, "open")],
+  );
+  assert.equal(result.valid, false);
+  assert.equal(result.projection?.candidates[0]?.classification, "INVALID");
+  assert.ok(
+    result.projection?.candidates[0]?.diagnostics.some(
+      (entry) => entry.code === "FRONTIER_CHANGE_TERMINAL",
+    ),
+  );
+  assert.deepEqual(result.projection?.ready, []);
+});
+
 test("fails closed for cycles and self-dependencies", () => {
   const first = issue(30);
   const second = issue(31);
