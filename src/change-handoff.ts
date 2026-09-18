@@ -21,6 +21,12 @@ import {
   type ChangeProjectionResult,
   type ChangeProjectionStatus,
 } from "./change.js";
+import {
+  validateImplementationAuthorizationRecord,
+  type ImplementationAuthorizationRecord,
+} from "./implementation-authorization.js";
+import { normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
+import { classifyChangeRoot } from "./implementation-change-identity.js";
 
 /** Independent version for the transport-neutral handoff envelope. */
 export const IMPLEMENTATION_HANDOFF_CONTRACT_VERSION = 1 as const;
@@ -49,6 +55,11 @@ export interface ImplementationHandoff {
   readonly branch: string;
   readonly baseBranch: string;
   readonly pullRequest: number;
+  /** Native topology fields are omitted for historical compatibility callers. */
+  readonly compatibility?: "implementation-native" | "historical-issue-root";
+  readonly sourceIssues?: readonly IssueReference[];
+  readonly implementation?: IssueReference;
+  readonly authorization?: ImplementationAuthorizationRecord;
 }
 
 /** Compatibility name for callers that name the projection by its Change. */
@@ -93,6 +104,10 @@ const HANDOFF_KEYS = new Set([
   "branch",
   "baseBranch",
   "pullRequest",
+  "compatibility",
+  "sourceIssues",
+  "implementation",
+  "authorization",
 ]);
 
 const NON_ADMISSIBLE_STATUS_CODES: Readonly<Partial<Record<ChangeProjectionStatus, ChangeDiagnostic["code"]>>> = {
@@ -189,6 +204,7 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
     diagnostics.push(
       diagnostic("CHANGE_INVALID_PROJECTION", "$.pullRequest", "pullRequest must be a positive safe integer."),
     );
+  const normalizedIdentity = identityResult.identity;
   if (input.repositoryNameWithOwner !== undefined && !validNameWithOwner(input.repositoryNameWithOwner))
     diagnostics.push(
       diagnostic(
@@ -197,9 +213,113 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
         "repositoryNameWithOwner must be an owner/name locator.",
       ),
     );
+  const nativeHandoff =
+    input.compatibility !== undefined ||
+    input.implementation !== undefined ||
+    input.authorization !== undefined ||
+    input.sourceIssues !== undefined;
+  let nativeImplementation: IssueReference | undefined;
+  let nativeAuthorization: ImplementationAuthorizationRecord | undefined;
+  let nativeSourceIssues: IssueReference[] | undefined;
+  if (nativeHandoff) {
+    if (input.compatibility !== "implementation-native" && input.compatibility !== "historical-issue-root")
+      diagnostics.push(
+        diagnostic(
+          "CHANGE_INVALID_IDENTITY",
+          "$.compatibility",
+          "Native handoff compatibility must be implementation-native or historical-issue-root.",
+        ),
+      );
+    if (input.implementation !== undefined) {
+      const reference = normalizeIssueReference(input.implementation, "$.implementation");
+      if (!reference.valid || reference.reference === undefined)
+        diagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.implementation", "Implementation identity is invalid."),
+        );
+      else nativeImplementation = reference.reference;
+    }
+    if (input.authorization !== undefined) {
+      const authorization = validateImplementationAuthorizationRecord(input.authorization);
+      if (!authorization.valid || authorization.record === undefined)
+        diagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.authorization", "Implementation authorization is invalid."),
+        );
+      else nativeAuthorization = authorization.record;
+    }
+    if (input.sourceIssues !== undefined) {
+      if (!Array.isArray(input.sourceIssues))
+        diagnostics.push(diagnostic("CHANGE_INVALID_IDENTITY", "$.sourceIssues", "Source Issues must be an array."));
+      else {
+        nativeSourceIssues = [];
+        for (const [index, source] of input.sourceIssues.entries()) {
+          const reference = normalizeIssueReference(source, `$.sourceIssues[${index}]`);
+          if (!reference.valid || reference.reference === undefined)
+            diagnostics.push(
+              diagnostic("CHANGE_INVALID_IDENTITY", `$.sourceIssues[${index}]`, "Source Issue identity is invalid."),
+            );
+          else nativeSourceIssues.push(reference.reference);
+        }
+      }
+    }
+    if (input.compatibility === "implementation-native") {
+      if (nativeImplementation === undefined)
+        diagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.implementation", "Native Implementation identity is required."),
+        );
+      if (nativeAuthorization === undefined)
+        diagnostics.push(diagnostic("CHANGE_INVALID_IDENTITY", "$.authorization", "Native authorization is required."));
+      if (
+        nativeImplementation !== undefined &&
+        nativeAuthorization !== undefined &&
+        (nativeAuthorization.implementation.repositoryHost !== nativeImplementation.repositoryHost ||
+          nativeAuthorization.implementation.repositoryId !== nativeImplementation.repositoryId ||
+          nativeAuthorization.implementation.number !== nativeImplementation.number)
+      )
+        diagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.authorization.implementation",
+            "Authorization must target the exact Implementation in the handoff.",
+          ),
+        );
+      if (
+        nativeImplementation !== undefined &&
+        normalizedIdentity !== undefined &&
+        normalizedIdentity.rootIssue !== nativeImplementation.number
+      )
+        diagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.rootIssue",
+            "Implementation-native handoff Change root must equal the Implementation Issue.",
+          ),
+        );
+    } else if (input.compatibility === "historical-issue-root") {
+      if (nativeImplementation !== undefined || nativeAuthorization !== undefined)
+        diagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.compatibility",
+            "Historical handoff compatibility cannot carry native Implementation authorization.",
+          ),
+        );
+      if (
+        nativeSourceIssues === undefined ||
+        nativeSourceIssues.length === 0 ||
+        normalizedIdentity === undefined ||
+        !nativeSourceIssues.some((source) => source.number === normalizedIdentity.rootIssue)
+      )
+        diagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.sourceIssues",
+            "Historical handoff compatibility requires an explicit source Issue root match.",
+          ),
+        );
+    }
+  }
   if (!identityResult.valid) diagnostics.push(...identityResult.diagnostics);
   if (diagnostics.length > 0) return invalid(diagnostics);
-  const normalizedIdentity = identityResult.identity;
   if (normalizedIdentity === undefined)
     return invalid([diagnostic("CHANGE_INVALID_IDENTITY", "$.identity", "A valid Change identity is required.")]);
   const handoff: ImplementationHandoff = {
@@ -216,6 +336,12 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
     branch: input.branch as string,
     baseBranch: input.baseBranch as string,
     pullRequest: input.pullRequest as number,
+    ...(nativeHandoff
+      ? { compatibility: input.compatibility as "implementation-native" | "historical-issue-root" }
+      : {}),
+    ...(nativeSourceIssues === undefined ? {} : { sourceIssues: Object.freeze(nativeSourceIssues) }),
+    ...(nativeImplementation === undefined ? {} : { implementation: nativeImplementation }),
+    ...(nativeAuthorization === undefined ? {} : { authorization: nativeAuthorization }),
   };
   return { valid: true, handoff: Object.freeze(handoff), diagnostics: [] };
 }
@@ -255,6 +381,14 @@ export interface ImplementationHandoffProjectionOptions {
    * This function performs no GitHub I/O and cannot derive it independently.
    */
   readonly repositoryNameWithOwner?: string;
+  /** First-class executable Implementation identity for native handoff. */
+  readonly implementation?: unknown;
+  /** Exact authorization record bound to the Implementation. */
+  readonly authorization?: unknown;
+  /** Source Issue references declared by the Implementation contract. */
+  readonly sourceIssues?: readonly unknown[];
+  /** Explicit compatibility mode for a historical Issue-rooted handoff. */
+  readonly compatibility?: "implementation-native" | "historical-issue-root";
 }
 
 /**
@@ -291,6 +425,111 @@ export function tryProjectImplementationHandoff(
   const change: Change | undefined = projection.change;
   if (change === undefined) {
     return invalid([diagnostic("CHANGE_MISSING_PROPERTY", "$.change", "A healthy Change projection is required.")]);
+  }
+  const nativeHandoff =
+    options.compatibility !== undefined ||
+    options.implementation !== undefined ||
+    options.authorization !== undefined ||
+    options.sourceIssues !== undefined;
+  let nativeImplementation: IssueReference | undefined;
+  let nativeAuthorization: ImplementationAuthorizationRecord | undefined;
+  let nativeSourceIssues: IssueReference[] | undefined;
+  if (nativeHandoff) {
+    if (options.compatibility !== "implementation-native" && options.compatibility !== "historical-issue-root")
+      extraDiagnostics.push(
+        diagnostic("CHANGE_INVALID_IDENTITY", "$.compatibility", "Native handoff compatibility must be explicit."),
+      );
+    if (options.implementation !== undefined) {
+      const reference = normalizeIssueReference(options.implementation, "$.implementation");
+      if (!reference.valid || reference.reference === undefined)
+        extraDiagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.implementation", "Implementation identity is invalid."),
+        );
+      else nativeImplementation = reference.reference;
+    }
+    if (options.authorization !== undefined) {
+      const authorization = validateImplementationAuthorizationRecord(options.authorization);
+      if (!authorization.valid || authorization.record === undefined)
+        extraDiagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.authorization", "Implementation authorization is invalid."),
+        );
+      else nativeAuthorization = authorization.record;
+    }
+    if (options.sourceIssues !== undefined) {
+      if (!Array.isArray(options.sourceIssues))
+        extraDiagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.sourceIssues", "Source Issues must be an array."),
+        );
+      else {
+        nativeSourceIssues = [];
+        for (const [index, source] of options.sourceIssues.entries()) {
+          const reference = normalizeIssueReference(source, `$.sourceIssues[${index}]`);
+          if (!reference.valid || reference.reference === undefined)
+            extraDiagnostics.push(
+              diagnostic("CHANGE_INVALID_IDENTITY", `$.sourceIssues[${index}]`, "Source Issue identity is invalid."),
+            );
+          else nativeSourceIssues.push(reference.reference);
+        }
+      }
+    }
+    if (options.compatibility === "implementation-native") {
+      if (nativeImplementation === undefined)
+        extraDiagnostics.push(
+          diagnostic("CHANGE_INVALID_IDENTITY", "$.implementation", "Implementation identity is required."),
+        );
+      if (nativeAuthorization === undefined)
+        extraDiagnostics.push(diagnostic("CHANGE_INVALID_IDENTITY", "$.authorization", "Authorization is required."));
+      if (
+        nativeImplementation !== undefined &&
+        nativeAuthorization !== undefined &&
+        (nativeAuthorization.implementation.repositoryHost !== nativeImplementation.repositoryHost ||
+          nativeAuthorization.implementation.repositoryId !== nativeImplementation.repositoryId ||
+          nativeAuthorization.implementation.number !== nativeImplementation.number)
+      )
+        extraDiagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.authorization.implementation",
+            "Authorization must target the exact Implementation in the handoff.",
+          ),
+        );
+      if (nativeImplementation !== undefined) {
+        const identityClassification = classifyChangeRoot({
+          change,
+          implementation: nativeImplementation,
+          ...(nativeSourceIssues === undefined ? {} : { sourceIssues: nativeSourceIssues }),
+        });
+        if (!identityClassification.valid || !identityClassification.implementationNative)
+          extraDiagnostics.push(
+            diagnostic(
+              "CHANGE_INVALID_IDENTITY",
+              "$.change.identity.rootIssue",
+              "Implementation-native handoff Change root must equal the Implementation Issue.",
+            ),
+          );
+      }
+    } else if (options.compatibility === "historical-issue-root") {
+      if (nativeImplementation !== undefined || nativeAuthorization !== undefined)
+        extraDiagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.compatibility",
+            "Historical compatibility cannot carry native Implementation authorization.",
+          ),
+        );
+      if (
+        nativeSourceIssues === undefined ||
+        nativeSourceIssues.length === 0 ||
+        !nativeSourceIssues.some((source) => source.number === change.identity.rootIssue)
+      )
+        extraDiagnostics.push(
+          diagnostic(
+            "CHANGE_INVALID_IDENTITY",
+            "$.sourceIssues",
+            "Historical compatibility requires an explicit source Issue root match.",
+          ),
+        );
+    }
   }
   if (change.state !== "DRAFT") {
     return invalid([
@@ -428,6 +667,10 @@ export function tryProjectImplementationHandoff(
     branch,
     baseBranch,
     pullRequest,
+    ...(nativeHandoff ? { compatibility: options.compatibility } : {}),
+    ...(nativeSourceIssues === undefined ? {} : { sourceIssues: Object.freeze(nativeSourceIssues) }),
+    ...(nativeImplementation === undefined ? {} : { implementation: nativeImplementation }),
+    ...(nativeAuthorization === undefined ? {} : { authorization: nativeAuthorization }),
   };
   return { valid: true, handoff: Object.freeze(handoff), diagnostics: [] };
 }

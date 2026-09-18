@@ -62,6 +62,50 @@ test("handoff includes the repository locator when the caller supplies one", () 
   assert.equal(result.handoff?.repositoryNameWithOwner, "acme/inari");
 });
 
+test("native handoff binds the exact Implementation authorization to the Change root", () => {
+  const implementation = { repositoryHost: "github.com", repositoryId: "100000219", number: 42 } as const;
+  const authorization = {
+    version: 1,
+    kind: "implementation-authorization",
+    implementation,
+    contractVersion: 1,
+    repository: { repositoryHost: implementation.repositoryHost, repositoryId: implementation.repositoryId },
+    base: { branch: "main", revision: "base-revision", freshness: "base-revision" },
+    governedBodyDigest: "a".repeat(64),
+  } as const;
+  const result = tryProjectImplementationHandoff(projection(), {
+    compatibility: "implementation-native",
+    implementation,
+    authorization,
+    sourceIssues: [{ ...implementation, number: 41 }],
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.handoff?.compatibility, "implementation-native");
+  assert.deepEqual(result.handoff?.implementation, implementation);
+  assert.deepEqual(result.handoff?.authorization, authorization);
+  assert.equal(validateImplementationHandoff(result.handoff).valid, true);
+});
+
+test("native handoff rejects a Change rooted in a source Issue", () => {
+  const implementation = { repositoryHost: "github.com", repositoryId: "100000219", number: 43 } as const;
+  const authorization = {
+    version: 1,
+    kind: "implementation-authorization",
+    implementation,
+    contractVersion: 1,
+    repository: { repositoryHost: implementation.repositoryHost, repositoryId: implementation.repositoryId },
+    base: { branch: "main", revision: "base-revision", freshness: "base-revision" },
+    governedBodyDigest: "b".repeat(64),
+  } as const;
+  const result = tryProjectImplementationHandoff(projection(), {
+    compatibility: "implementation-native",
+    implementation,
+    authorization,
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.path === "$.change.identity.rootIssue"));
+});
+
 test("handoff omits the repository locator when the caller does not supply one", () => {
   const result = tryProjectImplementationHandoff(projection());
   assert.equal(result.valid, true);

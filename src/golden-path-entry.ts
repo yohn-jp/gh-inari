@@ -51,6 +51,16 @@ import {
 } from "./contract/semantic-artifact.js";
 import { tryProjectSemanticIssue, type SemanticIssueProjectionViolation } from "./semantic-issue-projection.js";
 import type { SignedChangeProvenanceRecord } from "./change-provenance-record.js";
+import { normalizeIssueReference } from "./contract/issue-reference.js";
+import {
+  GOLDEN_PATH_IMPLEMENTATION_COMPATIBILITY_MODES,
+  GOLDEN_PATH_IMPLEMENTATION_STATUSES,
+  GOLDEN_PATH_IMPLEMENTATION_VERSION,
+  tryProjectGoldenPathImplementation,
+  type GoldenPathImplementationCompatibilityMode,
+  type GoldenPathImplementationDiagnostic,
+  type GoldenPathImplementationProjection,
+} from "./golden-path-implementation.js";
 
 /** Version of the transport-neutral entry projection. */
 export const GOLDEN_PATH_ENTRY_CONTRACT_VERSION = 1 as const;
@@ -74,7 +84,8 @@ export type GoldenPathEntryDiagnosticCode =
   | "GOLDEN_PATH_CHANGE_INVALID"
   | "GOLDEN_PATH_CHANGE_UNAVAILABLE"
   | "GOLDEN_PATH_CHANGE_NOT_ADMISSIBLE"
-  | "GOLDEN_PATH_EXECUTION_INVALID";
+  | "GOLDEN_PATH_EXECUTION_INVALID"
+  | GoldenPathImplementationDiagnostic["code"];
 
 export interface GoldenPathEntryDiagnostic {
   readonly version: GoldenPathEntryContractVersion;
@@ -124,6 +135,14 @@ export interface GoldenPathEntryProjectionInput {
   /** Set false only after a trusted Change executor has admitted the operation. */
   readonly requireGovernedIssue?: boolean;
   readonly executionOutcome?: ChangeExecutionOutcome;
+  /** Native source Issue and executable Implementation evidence. */
+  readonly sourceIssue?: unknown;
+  readonly implementation?: unknown;
+  readonly implementationAuthorization?: unknown;
+  readonly implementationReadiness?: unknown;
+  readonly implementationConformance?: unknown;
+  readonly compatibility?: GoldenPathImplementationCompatibilityMode;
+  readonly implementationComplete?: boolean;
 }
 
 /** The fields accepted by the pure entry projection (adapter-only fields are excluded). */
@@ -135,6 +154,13 @@ const GOLDEN_PATH_ENTRY_INPUT_KEYS = new Set([
   "preflight",
   "requireGovernedIssue",
   "executionOutcome",
+  "sourceIssue",
+  "implementation",
+  "implementationAuthorization",
+  "implementationReadiness",
+  "implementationConformance",
+  "compatibility",
+  "implementationComplete",
 ]);
 
 export interface GoldenPathEntryAction {
@@ -148,6 +174,7 @@ export interface GoldenPathEntryAction {
  * phase or availability projection. Owner: sibling status projection.
  */
 export interface GoldenPathEntryStatus {
+  readonly implementationStatus?: GoldenPathImplementationProjection["status"];
   readonly changeState?: ChangeState;
   readonly projectionStatus?: ChangeProjectionStatus;
   readonly executionOutcome?: ChangeExecutionOutcome;
@@ -166,6 +193,7 @@ export interface GoldenPathEntryResult {
   readonly valid: boolean;
   readonly subject?: GoldenPathEntrySubject;
   readonly governance?: GoldenPathEntryGovernanceProjection;
+  readonly implementation?: GoldenPathImplementationProjection;
   readonly status: GoldenPathEntryStatus;
   /** The exact existing Change operation and idempotent mode. */
   readonly action?: GoldenPathEntryAction;
@@ -206,13 +234,14 @@ const RESULT_KEYS = new Set([
   "valid",
   "subject",
   "governance",
+  "implementation",
   "status",
   "action",
   "change",
   "projection",
   "diagnostics",
 ]);
-const STATUS_KEYS = new Set(["changeState", "projectionStatus", "executionOutcome"]);
+const STATUS_KEYS = new Set(["implementationStatus", "changeState", "projectionStatus", "executionOutcome"]);
 const ACTION_KEYS = new Set(["operation", "issue", "mode"]);
 const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
 const GOVERNANCE_KEYS = new Set(["kind", "id", "version", "generation"]);
@@ -227,6 +256,16 @@ const GOLDEN_PATH_ENTRY_DIAGNOSTIC_CODE_SET = new Set<string>([
   "GOLDEN_PATH_CHANGE_UNAVAILABLE",
   "GOLDEN_PATH_CHANGE_NOT_ADMISSIBLE",
   "GOLDEN_PATH_EXECUTION_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_REQUIRED",
+  "GOLDEN_PATH_IMPLEMENTATION_IDENTITY_MISMATCH",
+  "GOLDEN_PATH_IMPLEMENTATION_SOURCE_MISMATCH",
+  "GOLDEN_PATH_IMPLEMENTATION_CONTRACT_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_AUTHORIZATION_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_READINESS_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_CONFORMANCE_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_COMPATIBILITY_INVALID",
+  "GOLDEN_PATH_IMPLEMENTATION_CHANGE_INVALID",
 ]);
 
 type RecordValue = Record<string, unknown>;
@@ -652,9 +691,11 @@ function validateSemanticIntent(
 function statusFor(
   projection: ChangeProjectionResult,
   executionOutcome: ChangeExecutionOutcome | undefined,
+  implementation: GoldenPathImplementationProjection | undefined,
 ): GoldenPathEntryStatus {
   const state = projection.change?.state;
   return {
+    ...(implementation === undefined ? {} : { implementationStatus: implementation.status }),
     ...(state === undefined ? {} : { changeState: state }),
     ...(CHANGE_PROJECTION_STATUS_SET.has(projection.status) ? { projectionStatus: projection.status } : {}),
     ...(executionOutcome === undefined ? {} : { executionOutcome }),
@@ -670,12 +711,14 @@ function resultFor(
   valid: boolean,
   subjectOverride: ChangeIdentity | undefined,
   issuanceMode: GoldenPathEntryAction["mode"] | undefined = undefined,
+  implementation?: GoldenPathImplementationProjection,
 ): GoldenPathEntryResult {
   const subject = projectionIdentity(projection) ?? subjectOverride;
   const action =
     valid &&
     projection.valid &&
     (projection.status === "absent" || projection.status === "healthy") &&
+    (implementation === undefined || implementation.status === "authorized" || projection.status === "healthy") &&
     subject !== undefined
       ? {
           operation: "change.issue" as const,
@@ -684,7 +727,7 @@ function resultFor(
         }
       : undefined;
   const normalizedDiagnostics = normalizeDiagnostics(diagnostics);
-  const status = statusFor(projection, executionOutcome);
+  const status = statusFor(projection, executionOutcome, implementation);
   return {
     version: GOLDEN_PATH_ENTRY_CONTRACT_VERSION,
     valid,
@@ -692,6 +735,7 @@ function resultFor(
     ...(governanceProjection(semanticIntent, governedIssue) === undefined
       ? {}
       : { governance: governanceProjection(semanticIntent, governedIssue) }),
+    ...(implementation === undefined ? {} : { implementation }),
     status,
     ...(action === undefined ? {} : { action }),
     ...(projection.change === undefined ? {} : { change: projection.change }),
@@ -736,6 +780,71 @@ export function tryProjectGoldenPathEntry(input: unknown): GoldenPathEntryResult
   const projection = read.projection;
   const identity = projectionIdentity(projection) ?? inputIdentity(rawProjection);
   const diagnostics: GoldenPathEntryUnderlyingDiagnostic[] = [...read.diagnostics, ...validateSubject(identity)];
+  const nativeImplementation = isRecord(input.implementation) ? input.implementation : undefined;
+  const nativeImplementationEvidence =
+    input.sourceIssue !== undefined ||
+    input.implementationAuthorization !== undefined ||
+    input.implementationReadiness !== undefined ||
+    input.implementationConformance !== undefined ||
+    input.compatibility !== undefined ||
+    input.implementationComplete !== undefined ||
+    (nativeImplementation !== undefined &&
+      [
+        "reference",
+        "sourceIssue",
+        "contract",
+        "authorization",
+        "readiness",
+        "conformance",
+        "change",
+        "compatibility",
+        "repositoryHost",
+        "repositoryId",
+        "number",
+      ].some((key) => hasOwn(nativeImplementation, key)));
+  const implementationProjectionResult = nativeImplementationEvidence
+    ? tryProjectGoldenPathImplementation({
+        ...(input.sourceIssue === undefined
+          ? nativeImplementation?.sourceIssue === undefined
+            ? {}
+            : { sourceIssue: nativeImplementation.sourceIssue }
+          : { sourceIssue: input.sourceIssue }),
+        ...(nativeImplementation?.reference === undefined
+          ? nativeImplementation !== undefined &&
+            (hasOwn(nativeImplementation, "repositoryHost") || hasOwn(nativeImplementation, "repositoryId"))
+            ? { implementation: nativeImplementation }
+            : {}
+          : { implementation: nativeImplementation.reference }),
+        ...(nativeImplementation?.contract === undefined ? {} : { contract: nativeImplementation.contract }),
+        ...(input.implementationAuthorization === undefined
+          ? nativeImplementation?.authorization === undefined
+            ? {}
+            : { authorization: nativeImplementation.authorization }
+          : { authorization: input.implementationAuthorization }),
+        ...(input.implementationReadiness === undefined
+          ? nativeImplementation?.readiness === undefined
+            ? {}
+            : { readiness: nativeImplementation.readiness }
+          : { readiness: input.implementationReadiness }),
+        ...(input.implementationConformance === undefined
+          ? nativeImplementation?.conformance === undefined
+            ? {}
+            : { conformance: nativeImplementation.conformance }
+          : { conformance: input.implementationConformance }),
+        changeProjection: projection,
+        ...(input.compatibility === undefined
+          ? nativeImplementation?.compatibility === undefined
+            ? {}
+            : { compatibility: nativeImplementation.compatibility }
+          : { compatibility: input.compatibility }),
+        ...(input.implementationComplete === undefined ? {} : { complete: input.implementationComplete }),
+      })
+    : undefined;
+  const implementationProjection = implementationProjectionResult?.projection;
+  if (implementationProjectionResult !== undefined && !implementationProjectionResult.valid)
+    diagnostics.push(
+      ...implementationProjectionResult.diagnostics.map((entry) => diagnostic(entry.code, entry.path, entry.message)),
+    );
   const explicitRepository = input.repository;
   if (explicitRepository !== undefined && !isRecord(explicitRepository)) {
     diagnostics.push(diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.repository", "Repository identity must be an object."));
@@ -981,7 +1090,11 @@ export function tryProjectGoldenPathEntry(input: unknown): GoldenPathEntryResult
     diagnostics.length === 0 &&
     projection.valid &&
     (projection.status === "absent" || projection.status === "healthy") &&
-    (executionOutcome === undefined || executionOutcome === "verified" || executionOutcome === "returned-existing");
+    (executionOutcome === undefined || executionOutcome === "verified" || executionOutcome === "returned-existing") &&
+    (implementationProjectionResult === undefined || implementationProjectionResult.valid) &&
+    (implementationProjection === undefined ||
+      projection.status === "healthy" ||
+      implementationProjection.status === "authorized");
   // Change Core owns issuance mode. The entry exposes only that mode as its
   // compatibility action and never republishes the full plan.
   return resultFor(
@@ -993,6 +1106,7 @@ export function tryProjectGoldenPathEntry(input: unknown): GoldenPathEntryResult
     valid,
     identity,
     issuancePlan?.mode,
+    implementationProjection,
   );
 }
 
@@ -1027,6 +1141,15 @@ export function validateGoldenPathEntryResult(input: unknown): GoldenPathEntryPr
   }
   if (status.changeState !== undefined && !CHANGE_STATE_SET.has(status.changeState as string)) {
     const diagnostics = [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.status.changeState", "Change state is invalid.")];
+    return { valid: false, diagnostics };
+  }
+  if (
+    status.implementationStatus !== undefined &&
+    !GOLDEN_PATH_IMPLEMENTATION_STATUSES.includes(status.implementationStatus as never)
+  ) {
+    const diagnostics = [
+      diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.status.implementationStatus", "Implementation status is invalid."),
+    ];
     return { valid: false, diagnostics };
   }
   if (status.projectionStatus !== undefined && !CHANGE_PROJECTION_STATUS_SET.has(status.projectionStatus as string)) {
@@ -1118,6 +1241,53 @@ export function validateGoldenPathEntryResult(input: unknown): GoldenPathEntryPr
     ];
     return { valid: false, diagnostics };
   }
+  if (input.implementation !== undefined) {
+    if (!isRecord(input.implementation)) {
+      const diagnostics = [
+        diagnostic(
+          "GOLDEN_PATH_INPUT_INVALID",
+          "$.implementation",
+          "Entry Implementation projection must be an object.",
+        ),
+      ];
+      return { valid: false, diagnostics };
+    }
+    const implementationKeys = new Set([
+      "version",
+      "status",
+      "compatibility",
+      "sourceIssue",
+      "implementation",
+      "authorizationStatus",
+      "readinessClassification",
+      "conformanceStatus",
+      "changeState",
+      "projectionStatus",
+      "diagnostics",
+    ]);
+    const implementationDiagnostics = unknownProperties(input.implementation, implementationKeys, "$.implementation");
+    if (
+      implementationDiagnostics.length > 0 ||
+      input.implementation.version !== GOLDEN_PATH_IMPLEMENTATION_VERSION ||
+      !GOLDEN_PATH_IMPLEMENTATION_STATUSES.includes(input.implementation.status as never) ||
+      !GOLDEN_PATH_IMPLEMENTATION_COMPATIBILITY_MODES.includes(input.implementation.compatibility as never) ||
+      !Array.isArray(input.implementation.diagnostics) ||
+      input.implementation.diagnostics.length > MAX_DIAGNOSTICS ||
+      input.implementation.diagnostics.some((entry) => !isBoundedDiagnostic(entry))
+    ) {
+      const diagnostics =
+        implementationDiagnostics.length > 0
+          ? implementationDiagnostics
+          : [
+              diagnostic(
+                "GOLDEN_PATH_INPUT_INVALID",
+                "$.implementation",
+                "Entry Implementation projection is invalid.",
+              ),
+            ];
+      return { valid: false, diagnostics };
+    }
+  }
   let diagnostics: readonly GoldenPathEntryUnderlyingDiagnostic[];
   if (!Array.isArray(input.diagnostics)) {
     diagnostics = [diagnostic("GOLDEN_PATH_INPUT_INVALID", "$.diagnostics", "Diagnostics must be an array.")];
@@ -1177,12 +1347,39 @@ export interface GoldenPathEntryExecutionInput extends Omit<GoldenPathEntryProje
   readonly projection?: ChangeProjectionInput | ChangeProjectionResult;
   /** Root Issue used for the read port when `projection` is omitted. */
   readonly issue?: number;
+  /** Explicit executable Implementation Issue root for native composition. */
+  readonly implementationIssue?: number;
   readonly executor: ChangeExecutionPort;
   /** Caller-produced Runtime-signed provenance for fresh Change issuance. */
   readonly signedProvenanceRecord?: SignedChangeProvenanceRecord;
 }
 
 export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInput): Promise<GoldenPathEntryResult> {
+  const implementationValue = isRecord(input.implementation) ? input.implementation : undefined;
+  const implementationReferenceValue =
+    implementationValue?.reference ??
+    (implementationValue !== undefined &&
+    (hasOwn(implementationValue, "repositoryHost") || hasOwn(implementationValue, "repositoryId"))
+      ? implementationValue
+      : undefined);
+  const implementationReference =
+    implementationReferenceValue === undefined
+      ? undefined
+      : normalizeIssueReference(implementationReferenceValue).reference;
+  const requestedImplementationIssue = input.implementationIssue ?? implementationReference?.number;
+  if (
+    input.issue !== undefined &&
+    requestedImplementationIssue !== undefined &&
+    input.issue !== requestedImplementationIssue
+  ) {
+    return invalidResult([
+      diagnostic(
+        "GOLDEN_PATH_IMPLEMENTATION_IDENTITY_MISMATCH",
+        "$.issue",
+        "A native Golden Path Change must be requested for the executable Implementation, not its source Issue.",
+      ),
+    ]);
+  }
   if (input.issue !== undefined && input.repository !== undefined && input.issue !== input.repository.rootIssue) {
     return invalidResult([
       diagnostic(
@@ -1194,7 +1391,7 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
   }
   let projection = input.projection;
   if (projection === undefined) {
-    const requestedIssue = input.issue ?? input.repository?.rootIssue;
+    const requestedIssue = requestedImplementationIssue ?? input.issue ?? input.repository?.rootIssue;
     if (typeof requestedIssue !== "number" || !Number.isSafeInteger(requestedIssue) || requestedIssue < 1) {
       return invalidResult([
         diagnostic(
@@ -1241,6 +1438,17 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
     ...(input.preflight === undefined ? {} : { preflight: input.preflight }),
     ...(input.requireGovernedIssue === undefined ? {} : { requireGovernedIssue: input.requireGovernedIssue }),
     ...(input.executionOutcome === undefined ? {} : { executionOutcome: input.executionOutcome }),
+    ...(input.sourceIssue === undefined ? {} : { sourceIssue: input.sourceIssue }),
+    ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
+    ...(input.implementationAuthorization === undefined
+      ? {}
+      : { implementationAuthorization: input.implementationAuthorization }),
+    ...(input.implementationReadiness === undefined ? {} : { implementationReadiness: input.implementationReadiness }),
+    ...(input.implementationConformance === undefined
+      ? {}
+      : { implementationConformance: input.implementationConformance }),
+    ...(input.compatibility === undefined ? {} : { compatibility: input.compatibility }),
+    ...(input.implementationComplete === undefined ? {} : { implementationComplete: input.implementationComplete }),
   };
   const preflight = tryProjectGoldenPathEntry(projectionInput);
   if (!preflight.valid || preflight.action === undefined) return preflight;
@@ -1261,6 +1469,19 @@ export async function executeGoldenPathEntry(input: GoldenPathEntryExecutionInpu
       projection: execution.projection,
       requireGovernedIssue: false,
       ...(execution.evidence?.outcome === undefined ? {} : { executionOutcome: execution.evidence.outcome }),
+      ...(input.sourceIssue === undefined ? {} : { sourceIssue: input.sourceIssue }),
+      ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
+      ...(input.implementationAuthorization === undefined
+        ? {}
+        : { implementationAuthorization: input.implementationAuthorization }),
+      ...(input.implementationReadiness === undefined
+        ? {}
+        : { implementationReadiness: input.implementationReadiness }),
+      ...(input.implementationConformance === undefined
+        ? {}
+        : { implementationConformance: input.implementationConformance }),
+      ...(input.compatibility === undefined ? {} : { compatibility: input.compatibility }),
+      ...(input.implementationComplete === undefined ? {} : { implementationComplete: input.implementationComplete }),
     });
   } catch {
     // The remote boundary owns its detailed error contract. The entry facade

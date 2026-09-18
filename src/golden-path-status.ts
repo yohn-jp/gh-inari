@@ -19,6 +19,16 @@ import {
   validateChange,
 } from "./change.js";
 import { CHANGE_EXECUTION_OUTCOMES, type ChangeExecutionOutcome } from "./change-execution-port.js";
+import {
+  GOLDEN_PATH_IMPLEMENTATION_COMPATIBILITY_MODES,
+  GOLDEN_PATH_IMPLEMENTATION_STATUSES,
+  GOLDEN_PATH_IMPLEMENTATION_VERSION,
+  tryProjectGoldenPathImplementation,
+  type GoldenPathImplementationDiagnosticCode,
+  type GoldenPathImplementationCompatibilityMode,
+  type GoldenPathImplementationProjection,
+  type GoldenPathImplementationStatus,
+} from "./golden-path-implementation.js";
 
 export const GOLDEN_PATH_STATUS_VERSION = 1 as const;
 export type GoldenPathStatusVersion = typeof GOLDEN_PATH_STATUS_VERSION;
@@ -133,12 +143,17 @@ export type GoldenPathAutomaticCleanup = (typeof GOLDEN_PATH_AUTOMATIC_CLEANUP)[
 export interface GoldenPathSubject {
   readonly repositoryHost?: string;
   readonly repositoryId?: string;
+  /** Ordinary source Issue identity; never substituted for the execution root. */
+  readonly sourceIssue?: number;
+  /** First-class executable Implementation identity. */
+  readonly implementation?: number;
   readonly rootIssue?: number;
 }
 
 export interface GoldenPathStatusFields {
   readonly phase: GoldenPathPhase;
   readonly availability: GoldenPathAvailability;
+  readonly implementation?: GoldenPathImplementationStatus;
   readonly changeState?: ChangeState;
   readonly projectionStatus?: ChangeProjectionStatus;
   readonly executionOutcome?: ChangeExecutionOutcome;
@@ -256,7 +271,8 @@ export type GoldenPathDiagnosticCode =
   | "GOLDEN_PATH_EVIDENCE_INCOMPLETE"
   | "GOLDEN_PATH_PROJECTION_INVALID"
   | "GOLDEN_PATH_RECOVERY_INVALID"
-  | "GOLDEN_PATH_RECOVERY_REQUIRED";
+  | "GOLDEN_PATH_RECOVERY_REQUIRED"
+  | GoldenPathImplementationDiagnosticCode;
 
 export interface GoldenPathDiagnostic {
   readonly code: GoldenPathDiagnosticCode;
@@ -268,6 +284,8 @@ export interface GoldenPathDiagnostic {
 export interface GoldenPathStatus {
   readonly version: GoldenPathStatusVersion;
   readonly subject?: GoldenPathSubject;
+  /** First-class Implementation composition; omitted for explicit legacy evidence. */
+  readonly implementation?: GoldenPathImplementationProjection;
   readonly status: GoldenPathStatusFields;
   /** Exactly zero or one action. `null` is canonical for no safe action. */
   readonly nextAction: GoldenPathAdmissibleAction | null;
@@ -321,6 +339,15 @@ export interface GoldenPathImplementationEvidence {
   readonly ready?: boolean;
   readonly complete?: boolean;
   readonly evidence?: boolean;
+  /** Native Implementation composition fields. */
+  readonly reference?: unknown;
+  readonly sourceIssue?: unknown;
+  readonly contract?: unknown;
+  readonly authorization?: unknown;
+  readonly readiness?: unknown;
+  readonly conformance?: unknown;
+  readonly change?: unknown;
+  readonly compatibility?: "implementation-native" | "historical-issue-root";
 }
 
 export interface GoldenPathReadyEvidence {
@@ -346,6 +373,8 @@ export interface GoldenPathStatusInput {
   readonly environment?: GoldenPathEnvironmentEvidence | boolean | "available" | "unavailable" | "unknown";
   readonly governance?: GoldenPathGovernanceEvidence | boolean | "available" | "unavailable" | "unknown";
   readonly issue?: GoldenPathIssueEvidence | boolean | "present" | "absent" | "unavailable" | "unknown";
+  /** Explicit ordinary source Issue evidence for native Implementation composition. */
+  readonly sourceIssue?: unknown;
   /** A full Change snapshot/identity, a bounded Change evidence object, or a projection result. */
   readonly change?: Change | ChangeIdentity | GoldenPathChangeEvidence;
   readonly changeProjection?: ChangeProjectionResult;
@@ -353,6 +382,10 @@ export interface GoldenPathStatusInput {
   readonly executionOutcome?: ChangeExecutionOutcome;
   readonly execution?: { readonly outcome?: ChangeExecutionOutcome };
   readonly implementation?: GoldenPathImplementationEvidence | boolean | "ready" | "in-progress" | "unknown";
+  readonly implementationAuthorization?: unknown;
+  readonly implementationReadiness?: unknown;
+  readonly implementationConformance?: unknown;
+  readonly compatibility?: "implementation-native" | "historical-issue-root";
   readonly ready?: GoldenPathReadyEvidence | boolean | "eligible" | "ineligible" | "unknown";
   readonly review?: GoldenPathReviewEvidence;
   /** Recovery is supplied by the recovery leaf; this projector does not classify it. */
@@ -369,12 +402,17 @@ const TOP_LEVEL_KEYS = new Set([
   "environment",
   "governance",
   "issue",
+  "sourceIssue",
   "change",
   "changeProjection",
   "projection",
   "executionOutcome",
   "execution",
   "implementation",
+  "implementationAuthorization",
+  "implementationReadiness",
+  "implementationConformance",
+  "compatibility",
   "ready",
   "review",
   "recovery",
@@ -388,7 +426,7 @@ const EXECUTION_KEYS = new Set(["outcome"]);
 const IMPLEMENTATION_KEYS = new Set(["status", "ready", "complete", "evidence"]);
 const READY_KEYS = new Set(["status", "eligible", "preconditions", "evidence"]);
 const REVIEW_KEYS = new Set(["status", "action"]);
-const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "rootIssue"]);
+const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "sourceIssue", "implementation", "rootIssue"]);
 const RECOVERY_KEYS = new Set([
   "class",
   "safeAction",
@@ -484,6 +522,12 @@ function parseSubject(
         "Repository id must be a positive decimal identifier.",
       );
     else (result as { repositoryId?: string }).repositoryId = value.repositoryId;
+  }
+  for (const key of ["sourceIssue", "implementation"] as const) {
+    if (!hasOwn(value, key)) continue;
+    if (!Number.isSafeInteger(value[key]) || (value[key] as number) < 1)
+      addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", `${path}.${key}`, `${key} must be a positive integer.`);
+    else (result as { sourceIssue?: number; implementation?: number })[key] = value[key] as number;
   }
   if (hasOwn(value, "rootIssue")) {
     if (!Number.isSafeInteger(value.rootIssue) || (value.rootIssue as number) < 1)
@@ -927,6 +971,8 @@ function scopeSubject(
   const candidate: Record<string, unknown> = {};
   if (hasOwn(value, "repositoryHost")) candidate.repositoryHost = value.repositoryHost;
   if (hasOwn(value, "repositoryId")) candidate.repositoryId = value.repositoryId;
+  if (hasOwn(value, "sourceIssue")) candidate.sourceIssue = value.sourceIssue;
+  if (hasOwn(value, "implementation")) candidate.implementation = value.implementation;
   if (hasOwn(value, "number")) candidate.rootIssue = value.number;
   return Object.keys(candidate).length === 0 ? undefined : parseSubject(candidate, path, diagnostics);
 }
@@ -935,10 +981,16 @@ function mergeSubjects(
   candidates: readonly [GoldenPathSubject | undefined, string][],
   diagnostics: GoldenPathDiagnostic[],
 ): GoldenPathSubject | undefined {
-  const merged: { repositoryHost?: string; repositoryId?: string; rootIssue?: number } = {};
+  const merged: {
+    repositoryHost?: string;
+    repositoryId?: string;
+    sourceIssue?: number;
+    implementation?: number;
+    rootIssue?: number;
+  } = {};
   for (const [candidate, path] of candidates) {
     if (candidate === undefined) continue;
-    for (const key of ["repositoryHost", "repositoryId", "rootIssue"] as const) {
+    for (const key of ["repositoryHost", "repositoryId", "sourceIssue", "implementation", "rootIssue"] as const) {
       const value = candidate[key];
       if (value === undefined) continue;
       if (merged[key] !== undefined && merged[key] !== value)
@@ -950,6 +1002,8 @@ function mergeSubjects(
         );
       else if (key === "repositoryHost") merged.repositoryHost = value as string;
       else if (key === "repositoryId") merged.repositoryId = value as string;
+      else if (key === "sourceIssue") merged.sourceIssue = value as number;
+      else if (key === "implementation") merged.implementation = value as number;
       else merged.rootIssue = value as number;
     }
   }
@@ -991,18 +1045,123 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
   const issue = evidenceAvailability(input.issue, "issue", diagnostics);
   const change = parseProjection(input, diagnostics);
   const executionOutcome = parseExecution(input, diagnostics);
-  const implementationReady = readiness(input.implementation, "implementation", diagnostics);
+  const implementationEvidenceLooksNative =
+    isRecord(input.implementation) &&
+    [
+      "reference",
+      "sourceIssue",
+      "contract",
+      "authorization",
+      "readiness",
+      "conformance",
+      "compatibility",
+      "repositoryHost",
+      "repositoryId",
+      "number",
+    ].some((key) => hasOwn(input.implementation as RecordValue, key));
+  const implementationReady = readiness(
+    implementationEvidenceLooksNative ? undefined : input.implementation,
+    "implementation",
+    diagnostics,
+  );
   const readyEligible = readiness(input.ready, "ready", diagnostics);
   const recovery = parseRecovery(input.recovery, diagnostics);
   const explicitSubject = parseSubject(input.subject, "$.subject", diagnostics);
   const governanceSubject = scopeSubject(input.governance, "$.governance", diagnostics);
   const issueSubject = scopeSubject(input.issue, "$.issue", diagnostics);
+  const nativeImplementation = isRecord(input.implementation) ? input.implementation : undefined;
+  const nativeImplementationEvidence =
+    input.sourceIssue !== undefined ||
+    input.implementationAuthorization !== undefined ||
+    input.implementationReadiness !== undefined ||
+    input.implementationConformance !== undefined ||
+    input.compatibility !== undefined ||
+    (nativeImplementation !== undefined &&
+      [
+        "reference",
+        "sourceIssue",
+        "contract",
+        "authorization",
+        "readiness",
+        "conformance",
+        "change",
+        "compatibility",
+      ].some((key) => hasOwn(nativeImplementation, key)));
+  const implementationProjectionResult = nativeImplementationEvidence
+    ? tryProjectGoldenPathImplementation({
+        ...(input.sourceIssue === undefined
+          ? nativeImplementation?.sourceIssue === undefined
+            ? {}
+            : { sourceIssue: nativeImplementation.sourceIssue }
+          : { sourceIssue: input.sourceIssue }),
+        ...(nativeImplementation?.reference === undefined
+          ? nativeImplementation !== undefined &&
+            (hasOwn(nativeImplementation, "repositoryHost") || hasOwn(nativeImplementation, "repositoryId"))
+            ? { implementation: nativeImplementation }
+            : {}
+          : { implementation: nativeImplementation.reference }),
+        ...(nativeImplementation?.contract === undefined ? {} : { contract: nativeImplementation.contract }),
+        ...(input.implementationAuthorization === undefined
+          ? nativeImplementation?.authorization === undefined
+            ? {}
+            : { authorization: nativeImplementation.authorization }
+          : { authorization: input.implementationAuthorization }),
+        ...(input.implementationReadiness === undefined
+          ? nativeImplementation?.readiness === undefined
+            ? {}
+            : { readiness: nativeImplementation.readiness }
+          : { readiness: input.implementationReadiness }),
+        ...(input.implementationConformance === undefined
+          ? nativeImplementation?.conformance === undefined
+            ? {}
+            : { conformance: nativeImplementation.conformance }
+          : { conformance: input.implementationConformance }),
+        ...(change.projection === undefined
+          ? nativeImplementation?.change === undefined
+            ? input.change === undefined
+              ? {}
+              : { change: input.change }
+            : { change: nativeImplementation.change }
+          : { changeProjection: change.projection }),
+        ...(input.compatibility === undefined
+          ? nativeImplementation?.compatibility === undefined
+            ? {}
+            : { compatibility: nativeImplementation.compatibility }
+          : { compatibility: input.compatibility }),
+        ...(nativeImplementation?.complete === undefined ? {} : { complete: nativeImplementation.complete }),
+      })
+    : undefined;
+  const implementationProjection = implementationProjectionResult?.projection;
+  if (implementationProjectionResult !== undefined && !implementationProjectionResult.valid)
+    diagnostics.push(...implementationProjectionResult.diagnostics);
+  const implementationSubject =
+    implementationProjection === undefined ||
+    (implementationProjection.sourceIssue === undefined && implementationProjection.implementation === undefined)
+      ? undefined
+      : {
+          ...(implementationProjection.sourceIssue === undefined
+            ? {}
+            : {
+                repositoryHost: implementationProjection.sourceIssue.repositoryHost,
+                repositoryId: implementationProjection.sourceIssue.repositoryId,
+                sourceIssue: implementationProjection.sourceIssue.number,
+              }),
+          ...(implementationProjection.implementation === undefined
+            ? {}
+            : {
+                repositoryHost: implementationProjection.implementation.repositoryHost,
+                repositoryId: implementationProjection.implementation.repositoryId,
+                implementation: implementationProjection.implementation.number,
+                rootIssue: implementationProjection.implementation.number,
+              }),
+        };
   const subject = mergeSubjects(
     [
       [explicitSubject, "$.subject"],
       [change.subject, "$.change"],
       [governanceSubject, "$.governance"],
       [issueSubject, "$.issue"],
+      [implementationSubject, "$.implementation"],
     ],
     diagnostics,
   );
@@ -1044,6 +1203,7 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
   if (diagnostics.length > 0) return { valid: false, diagnostics };
 
   const fields: Omit<GoldenPathStatusFields, "phase" | "availability"> = {
+    ...(implementationProjection === undefined ? {} : { implementation: implementationProjection.status }),
     ...(change.state === undefined ? {} : { changeState: change.state }),
     ...(change.projectionStatus === undefined ? {} : { projectionStatus: change.projectionStatus }),
     ...(executionOutcome === undefined ? {} : { executionOutcome }),
@@ -1095,6 +1255,45 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
       "Repository governance evidence is unavailable.",
     );
     status = blockedStatus("GOVERNANCE", fields);
+  } else if (implementationProjection !== undefined) {
+    switch (implementationProjection.status) {
+      case "draft":
+        status = { phase: "ISSUE", availability: "actionable", ...fields };
+        nextAction = normalAction("CREATE_ISSUE");
+        break;
+      case "blocked":
+        status = blockedStatus("ISSUE", fields);
+        break;
+      case "ready-to-authorize":
+        // Authorization is owned by Implementation Core. The Golden Path
+        // exposes the state without inventing a second authorization action.
+        status = blockedStatus("ISSUE", fields);
+        break;
+      case "authorized":
+        status = { phase: "CHANGE", availability: "actionable", ...fields };
+        nextAction = normalAction("ISSUE_CHANGE");
+        break;
+      case "active":
+        status = { phase: "IMPLEMENTATION", availability: "actionable", ...fields };
+        nextAction = normalAction("IMPLEMENT");
+        break;
+      case "conformance-required":
+        status = { phase: "IMPLEMENTATION", availability: "actionable", ...fields };
+        nextAction = normalAction("IMPLEMENT");
+        break;
+      case "ready-change":
+        status = { phase: "READY", availability: "actionable", ...fields };
+        nextAction = normalAction("READY_CHANGE");
+        break;
+      case "review":
+        status = { phase: "REVIEW", availability: "actionable", ...fields };
+        if (isRecord(input.review) && input.review.action === "review") nextAction = normalAction("REVIEW");
+        else nextAction = normalAction("WAIT");
+        break;
+      case "terminal":
+        status = { phase: "TERMINAL", availability: "terminal", ...fields };
+        break;
+    }
   } else if (issue === "missing" && change.state === undefined) {
     status = { phase: "ISSUE", availability: "actionable", ...fields };
     nextAction = normalAction("CREATE_ISSUE");
@@ -1184,6 +1383,7 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
   const projection: GoldenPathStatus = {
     version: GOLDEN_PATH_STATUS_VERSION,
     ...(subject === undefined || Object.keys(subject).length === 0 ? {} : { subject: cloneImmutable(subject) }),
+    ...(implementationProjection === undefined ? {} : { implementation: cloneImmutable(implementationProjection) }),
     status: cloneImmutable(status),
     nextAction: nextAction === null ? null : cloneImmutable(nextAction),
     recovery: outputRecovery === null ? null : cloneImmutable(outputRecovery),
@@ -1210,7 +1410,7 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
     addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$", "Golden Path status must be an object.");
     return diagnostics;
   }
-  const allowed = new Set(["version", "subject", "status", "nextAction", "recovery", "diagnostics"]);
+  const allowed = new Set(["version", "subject", "implementation", "status", "nextAction", "recovery", "diagnostics"]);
   unknownProperties(input, allowed, "$", diagnostics);
   if (input.version !== GOLDEN_PATH_STATUS_VERSION)
     addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.version", "Golden Path status version is unsupported.");
@@ -1222,10 +1422,27 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
     addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.status", "Status phase or availability is invalid.");
   const availability = isRecord(input.status) ? input.status.availability : undefined;
   if (isRecord(input.status)) {
-    const statusKeys = new Set(["phase", "availability", "changeState", "projectionStatus", "executionOutcome"]);
+    const statusKeys = new Set([
+      "phase",
+      "availability",
+      "implementation",
+      "changeState",
+      "projectionStatus",
+      "executionOutcome",
+    ]);
     unknownProperties(input.status, statusKeys, "$.status", diagnostics);
     if (input.status.changeState !== undefined && !CHANGE_STATES.includes(input.status.changeState as ChangeState))
       addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.status.changeState", "Change state is invalid.");
+    if (
+      input.status.implementation !== undefined &&
+      !GOLDEN_PATH_IMPLEMENTATION_STATUSES.includes(input.status.implementation as GoldenPathImplementationStatus)
+    )
+      addDiagnostic(
+        diagnostics,
+        "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+        "$.status.implementation",
+        "Implementation status is invalid.",
+      );
     if (
       input.status.projectionStatus !== undefined &&
       !CHANGE_PROJECTION_STATUSES.includes(input.status.projectionStatus as ChangeProjectionStatus)
@@ -1246,6 +1463,67 @@ function validateStatusShape(input: unknown): GoldenPathDiagnostic[] {
         "$.status.executionOutcome",
         "Execution outcome is invalid.",
       );
+  }
+  if (input.implementation !== undefined) {
+    if (!isRecord(input.implementation))
+      addDiagnostic(
+        diagnostics,
+        "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+        "$.implementation",
+        "Implementation projection must be an object.",
+      );
+    else {
+      unknownProperties(
+        input.implementation,
+        new Set([
+          "version",
+          "status",
+          "compatibility",
+          "sourceIssue",
+          "implementation",
+          "authorizationStatus",
+          "readinessClassification",
+          "conformanceStatus",
+          "changeState",
+          "projectionStatus",
+          "diagnostics",
+        ]),
+        "$.implementation",
+        diagnostics,
+      );
+      if (input.implementation.version !== GOLDEN_PATH_IMPLEMENTATION_VERSION)
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+          "$.implementation.version",
+          "Implementation projection version is unsupported.",
+        );
+      if (!GOLDEN_PATH_IMPLEMENTATION_STATUSES.includes(input.implementation.status as GoldenPathImplementationStatus))
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+          "$.implementation.status",
+          "Implementation projection status is invalid.",
+        );
+      if (
+        !GOLDEN_PATH_IMPLEMENTATION_COMPATIBILITY_MODES.includes(
+          input.implementation.compatibility as GoldenPathImplementationCompatibilityMode,
+        )
+      )
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+          "$.implementation.compatibility",
+          "Implementation compatibility mode is invalid.",
+        );
+      if (!Array.isArray(input.implementation.diagnostics) || input.implementation.diagnostics.length > MAX_DIAGNOSTICS)
+        addDiagnostic(
+          diagnostics,
+          "GOLDEN_PATH_IMPLEMENTATION_INPUT_INVALID",
+          "$.implementation.diagnostics",
+          "Implementation diagnostics are not bounded.",
+        );
+    }
   }
   const action = input.nextAction;
   if (action !== null && !isRecord(action))

@@ -168,6 +168,18 @@ test("an ungoverned root Issue fails closed before issuance", () => {
   assert.ok(result.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_GOVERNED_ISSUE_REQUIRED"));
 });
 
+test("native entry rejects a Change whose root is not the executable Implementation", () => {
+  const result = tryProjectGoldenPathEntry({
+    projection: existingProjection(),
+    requireGovernedIssue: false,
+    sourceIssue: { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId, number: 405 },
+    implementation: { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId, number: 407 },
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.action, undefined);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "GOLDEN_PATH_IMPLEMENTATION_IDENTITY_MISMATCH"));
+});
+
 test("the post-execution governance bypass cannot authorize a new issuance", () => {
   const result = tryProjectGoldenPathEntry({
     projection: projectionInput(),
