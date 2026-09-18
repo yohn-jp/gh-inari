@@ -364,104 +364,6 @@ function repositoryApi(argv, state) {
   throw new Error(`unsupported repository API endpoint: ${endpoint}`);
 }
 
-async function nativeActionsApi(request, response, state, statePath) {
-  const { parsed, parts } = endpointParts(request.url ?? "/");
-  const relative = parts.join("/");
-  if (
-    request.method === "GET" &&
-    relative === "actions/workflows/inari-change-executor.yml/runs" &&
-    parsed.searchParams.get("event") === "workflow_dispatch" &&
-    parsed.searchParams.get("branch") === "main"
-  ) {
-    const page = Number(parsed.searchParams.get("page"));
-    const runs = Array.isArray(state.runs) ? state.runs : [];
-    sendJson(response, 200, { workflow_runs: runs.slice((page - 1) * 100, page * 100) });
-    return;
-  }
-  if (request.method === "POST" && relative === "actions/workflows/inari-change-executor.yml/dispatches") {
-    const input = await jsonRequest(request);
-    const requestJson = input?.inputs?.request;
-    const correlation = input?.inputs?.correlation;
-    if (typeof requestJson !== "string" || typeof correlation !== "string") {
-      sendJson(response, 422, { message: "Actions dispatch fields are incomplete" });
-      return;
-    }
-    const runId = state.nextRunId ?? 1000;
-    const artifactId = state.nextArtifactId ?? 2000;
-    state.nextRunId = runId + 1;
-    state.nextArtifactId = artifactId + 1;
-    const run = {
-      id: runId,
-      status: "completed",
-      conclusion: "failure",
-      event: "workflow_dispatch",
-      head_branch: "main",
-      ref: "refs/heads/main",
-      path: ".github/workflows/inari-change-executor.yml",
-      display_title: `Inari Change ${correlation}`,
-    };
-    state.runs = [run, ...(state.runs ?? [])];
-    const worker = await dispatchWorker(state, statePath, requestJson);
-    const archive = singleEntryZip("result.json", JSON.stringify(worker.result));
-    run.conclusion = worker.success ? "success" : "failure";
-    state.artifacts = [
-      ...(Array.isArray(state.artifacts) ? state.artifacts : []),
-      { correlation, id: artifactId, runId, bytes: archive.toString("base64") },
-    ];
-    stateChanged(statePath, state);
-    sendNoContent(response);
-    return;
-  }
-  const runMatch = /^actions\/runs\/(\d+)$/u.exec(relative);
-  if (request.method === "GET" && runMatch !== null) {
-    const run = (Array.isArray(state.runs) ? state.runs : []).find((candidate) => candidate.id === Number(runMatch[1]));
-    if (run === undefined) sendJson(response, 404, { message: "Actions run not found" });
-    else sendJson(response, 200, run);
-    return;
-  }
-  if (request.method === "GET" && relative === "actions/artifacts") {
-    const name = parsed.searchParams.get("name");
-    const page = Number(parsed.searchParams.get("page"));
-    const correlation = name === null ? undefined : name.replace("inari-change-result-", "");
-    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
-      (candidate) => candidate.correlation === correlation,
-    );
-    sendJson(response, 200, {
-      artifacts:
-        artifact === undefined || page !== 1
-          ? []
-          : [{ id: artifact.id, name, expired: false, workflow_run: { id: artifact.runId, repository_id: 415000001 } }],
-    });
-    return;
-  }
-  const artifactMatch = /^actions\/artifacts\/(\d+)$/u.exec(relative);
-  if (request.method === "GET" && artifactMatch !== null) {
-    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
-      (candidate) => candidate.id === Number(artifactMatch[1]),
-    );
-    if (artifact === undefined) sendJson(response, 404, { message: "Actions artifact not found" });
-    else {
-      sendJson(response, 200, {
-        id: artifact.id,
-        name: `inari-change-result-${artifact.correlation}`,
-        expired: false,
-        workflow_run: { id: artifact.runId, repository_id: 415000001 },
-      });
-    }
-    return;
-  }
-  const archiveMatch = /^actions\/artifacts\/(\d+)\/zip$/u.exec(relative);
-  if (request.method === "GET" && archiveMatch !== null) {
-    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
-      (candidate) => candidate.id === Number(archiveMatch[1]),
-    );
-    if (artifact === undefined) sendJson(response, 404, { message: "Actions artifact not found" });
-    else sendBytes(response, 200, Buffer.from(artifact.bytes, "base64"), "application/zip");
-    return;
-  }
-  throw new Error(`unsupported native Actions API endpoint: ${request.url ?? "/"}`);
-}
-
 function createProviderServer(state, statePath, consumerRoot) {
   const governance = governanceEntries(consumerRoot);
   initializeGitObjects(state, governance);
@@ -542,11 +444,6 @@ function createProviderServer(state, statePath, consumerRoot) {
 
       if (request.method === "GET" && parts.length === 1 && parts[0] === "user") {
         sendJson(response, 200, { login: "packed-certification" });
-        return;
-      }
-
-      if (parts[0] === "actions") {
-        await nativeActionsApi(request, response, state, statePath);
         return;
       }
 

@@ -30,7 +30,10 @@ import {
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { runCli } from "./cli.js";
 import { GitHubAuthenticationError, GitHubAdapter } from "./github/index.js";
-import { createActionsChangeExecutionAdapter } from "./github/actions-change-execution-adapter.js";
+import {
+  createActionsChangeExecutionAdapter,
+  type ActionsChangeExecutionAdapterApi,
+} from "./github/actions-change-execution-adapter.js";
 import { findSkillScenario, SKILL_MODEL_VERSION } from "./skill.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
 import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
@@ -465,34 +468,49 @@ test("GitHub Actions Change wiring never supplies caller-side requester or resol
   // for requester provenance in the Actions execution lane -- see
   // TrustedChangeExecutor.assertRequest(). The caller must not inject GITHUB_ACTOR (or
   // GITHUB_TRIGGERING_ACTOR) as requester, and must not resolve /user either.
-  const calls: Array<{ path: string; method: "GET" | "POST"; fields: Readonly<Record<string, string>> }> = [];
-  let authenticatedUserReads = 0;
-  const adapter = runtimeTrustAdapter({
-    async getAuthenticatedUser() {
-      authenticatedUserReads += 1;
-      throw new Error("/user must not be read in GitHub Actions");
-    },
-    async requestActionsApi(path: string, method: "GET" | "POST", fields: Readonly<Record<string, string>> = {}) {
-      calls.push({ path, method, fields });
-      if (method === "POST") throw new Error("Bearer secret-token");
-      return { workflow_runs: [] };
-    },
+  const calls: Array<{ url: URL; body: unknown }> = [];
+  const token = "actions-wiring-test-token";
+  const originalToken = process.env.GH_TOKEN;
+  process.env.GH_TOKEN = token;
+  const restoreFetch = installFakeFetch((url, body) => {
+    calls.push({ url, body });
+    if (url.pathname === "/repos/acme/inari") return { status: 200, body: { id: identity.repositoryId, fork: false } };
+    if (url.pathname.endsWith(`/actions/workflows/inari-change-executor.yml/runs`)) {
+      return { status: 200, body: { workflow_runs: [] } };
+    }
+    if (url.pathname.endsWith(`/actions/workflows/inari-change-executor.yml/dispatches`)) {
+      return { status: 500, body: { message: "dispatch failed" } };
+    }
+    throw new Error(`unexpected URL ${url}`);
   });
-  const result = await capture(["change", "issue", "42", "--json"], {
-    repositoryRoot: "/workspace/inari",
-    environment: {
-      ...runtimeSignerEnvironment,
-      GITHUB_ACTIONS: "true",
-      GITHUB_ACTOR: "actions-actor",
-      GITHUB_TRIGGERING_ACTOR: "triggering-actor",
-    },
-    createAdapter: () => adapter,
-  });
+  try {
+    const result = await capture(["change", "issue", "42", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/workspace/inari",
+      environment: {
+        ...runtimeSignerEnvironment,
+        GITHUB_ACTIONS: "true",
+        GITHUB_ACTOR: "actions-actor",
+        GITHUB_TRIGGERING_ACTOR: "triggering-actor",
+      },
+      createAdapter: () => runtimeTrustAdapter(),
+    });
 
-  assert.equal(result.exitCode, 3);
-  assert.equal(authenticatedUserReads, 0);
-  const dispatched = JSON.parse(calls[1]?.fields["inputs[request]"] ?? "{}") as Record<string, unknown>;
-  assert.equal("requester" in dispatched, false);
+    assert.equal(result.exitCode, 3);
+    assert.equal((result.output?.error as { code?: string } | undefined)?.code, "CHANGE_REMOTE_DISPATCH_FAILED");
+    assert.equal(
+      calls.some((call) => call.url.pathname === "/user"),
+      false,
+    );
+    const dispatch = calls.find((call) => call.url.pathname.endsWith("/dispatches"));
+    assert.ok(dispatch);
+    const dispatched = dispatch.body as { readonly inputs?: { readonly request?: string } };
+    const request = JSON.parse(dispatched.inputs?.request ?? "{}") as Record<string, unknown>;
+    assert.equal("requester" in request, false);
+  } finally {
+    restoreFetch();
+    if (originalToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = originalToken;
+  }
 });
 
 test("fresh change issue fails before dispatch when the Runtime signer is not configured", async () => {
@@ -673,18 +691,24 @@ test("CLI --json preserves the bounded trusted code and Core diagnostic envelope
 });
 
 test("caller transport authentication failure is distinct from an unconfigured executor", async () => {
-  const adapter = runtimeTrustAdapter({
+  const api: ActionsChangeExecutionAdapterApi = {
+    async getRepositoryContext() {
+      return runtimeTrustAdapter().getRepositoryContext();
+    },
     async requestActionsApi() {
       throw new GitHubAuthenticationError("github.com", "token=secret");
     },
-  });
+    async downloadActionsArtifact() {
+      throw new Error("unreachable");
+    },
+  };
   const authResult = await capture(["change", "issue", "42", "--json"], {
     environment: runtimeSignerEnvironment,
-    createAdapter: () => adapter,
+    createAdapter: () => runtimeTrustAdapter(),
     createChangeExecutor: (options) =>
       createActionsChangeExecutionAdapter({
         ...options,
-        api: adapter,
+        api,
         maxPollAttempts: 1,
         pollIntervalMs: 0,
         sleep: async () => undefined,

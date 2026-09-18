@@ -67,7 +67,6 @@ import {
 } from "./types.js";
 import type { ChangeExecutionDeadline } from "../change-execution-port.js";
 
-const MAX_ACTIONS_ARTIFACT_BYTES = 1_048_576;
 const MAX_PULL_REQUEST_LIST_ITEMS = 100;
 const OPERATIONAL_PAGE_SIZE = 100;
 const OPERATIONAL_MAX_PAGES = 10;
@@ -119,10 +118,8 @@ export interface GitHubAdapterOptions {
   readonly token?: string;
   /** Injectable fetch implementation for deterministic HTTP fixtures. */
   readonly fetch?: typeof globalThis.fetch;
-  /** Explicit REST endpoint override for hosted or controlled GitHub providers. */
-  readonly apiBaseUrl?: string;
-  /** Explicit GraphQL endpoint override paired with `apiBaseUrl`. */
-  readonly graphqlUrl?: string;
+  /** Explicit REST API base override for hosted or controlled GitHub providers. */
+  readonly apiUrl?: string;
   /** Bounded native request timeout in milliseconds. */
   readonly requestTimeoutMs?: number;
   /** Bounded native response size in bytes. */
@@ -147,8 +144,7 @@ export class GitHubAdapter {
   private readonly configuredTransport: GitHubArtifactTransport | undefined;
   private readonly token: string | undefined;
   private readonly fetch: typeof globalThis.fetch | undefined;
-  private readonly apiBaseUrl: string | undefined;
-  private readonly graphqlUrl: string | undefined;
+  private readonly apiUrl: string | undefined;
   private readonly requestTimeoutMs: number | undefined;
   private readonly maxResponseBytes: number | undefined;
   private nativeTransport: GitHubArtifactTransport | undefined;
@@ -166,8 +162,7 @@ export class GitHubAdapter {
     this.configuredTransport = options.transport;
     this.token = options.token;
     this.fetch = options.fetch;
-    this.apiBaseUrl = options.apiBaseUrl ?? process.env.GITHUB_API_URL;
-    this.graphqlUrl = options.graphqlUrl ?? process.env.GITHUB_GRAPHQL_URL;
+    this.apiUrl = options.apiUrl ?? process.env.GITHUB_API_URL;
     this.requestTimeoutMs = options.requestTimeoutMs;
     this.maxResponseBytes = options.maxResponseBytes;
   }
@@ -213,31 +208,6 @@ export class GitHubAdapter {
     return this.resolveRepositoryContext(deadline);
   }
 
-  /**
-   * Request the fixed Actions API surface used by the Change transport.
-   * Callers supply only an adapter-owned relative Actions path and bounded form
-   * fields; repository, host, and authentication remain resolved here.
-   */
-  async requestActionsApi(
-    actionsPath: string,
-    method: "GET" | "POST",
-    fields: Readonly<Record<string, string>> = {},
-    deadline?: ChangeExecutionDeadline,
-  ): Promise<unknown> {
-    assertActionsApiPath(actionsPath);
-    const context = await this.resolveRepositoryContext(deadline);
-    const path = `repos/${context.nameWithOwner}/${actionsPath}`;
-    const query = method === "GET" ? queryFields(fields) : "";
-    return this.runApi(
-      context,
-      `${path}${query}`,
-      method,
-      method === "POST" ? actionsFields(fields) : undefined,
-      "actions.request",
-      deadline,
-    );
-  }
-
   /** Read the bounded repository API surface needed by Change projection. */
   async requestRepositoryApi(
     repositoryPath: string,
@@ -276,41 +246,6 @@ export class GitHubAdapter {
       throw new GitHubApiError(operation, "GitHub repository API request failed.");
     }
     return response;
-  }
-
-  /** Download one bounded Actions artifact archive through the native provider. */
-  async downloadActionsArtifact(artifactId: number, deadline?: ChangeExecutionDeadline): Promise<Uint8Array> {
-    if (!Number.isSafeInteger(artifactId) || artifactId < 1) {
-      throw new ContractViolationError("Actions artifact ID must be a positive integer.", "artifactId");
-    }
-    const context = await this.resolveRepositoryContext(deadline);
-    const transport = this.transportFor(context.hostname);
-    if (transport.requestBinary === undefined) {
-      throw new GitHubTransportError("actions.artifact.download", "The native provider does not support binary reads.");
-    }
-    let result: Awaited<ReturnType<NonNullable<GitHubArtifactTransport["requestBinary"]>>>;
-    try {
-      result = await this.boundedTransportCall(
-        "actions.artifact.download",
-        deadline,
-        () =>
-          transport.requestBinary?.({
-            hostname: context.hostname,
-            method: "GET",
-            path: `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
-            accept: "application/zip",
-          }) ?? Promise.reject(new GitHubTransportError("actions.artifact.download", "Binary reads are unavailable.")),
-      );
-    } catch (error) {
-      throw this.mapProviderError("actions.artifact.download", error);
-    }
-    if (result.status < 200 || result.status >= 300) {
-      throw new GitHubApiError("actions.artifact.download", "GitHub Actions artifact download failed.");
-    }
-    if (result.bytes === undefined || result.bytes.byteLength > MAX_ACTIONS_ARTIFACT_BYTES) {
-      throw new GitHubApiResponseError("actions.artifact.download", "GitHub returned an invalid Actions artifact.");
-    }
-    return new Uint8Array(result.bytes);
   }
 
   /** Read the target repository metadata used to select the trusted governance ref. */
@@ -1295,8 +1230,7 @@ export class GitHubAdapter {
     const native = new GitHubNativeHttpTransport({
       token: credential.token,
       fetch: this.fetch,
-      ...(this.apiBaseUrl === undefined ? {} : { apiBaseUrl: this.apiBaseUrl }),
-      ...(this.graphqlUrl === undefined ? {} : { graphqlUrl: this.graphqlUrl }),
+      ...(this.apiUrl === undefined ? {} : { apiUrl: this.apiUrl }),
       ...(this.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: this.requestTimeoutMs }),
       ...(this.maxResponseBytes === undefined ? {} : { maxResponseBytes: this.maxResponseBytes }),
     });
@@ -1619,38 +1553,6 @@ function assertStringArray(value: unknown, path: string): asserts value is reado
 function assertOptionalBoolean(value: unknown, path: string): asserts value is boolean | undefined {
   if (value !== undefined && typeof value !== "boolean") {
     throw new ContractViolationError(`Artifact field ${path} must be a boolean.`, path);
-  }
-}
-
-function queryFields(fields: Readonly<Record<string, string>>): string {
-  const query = new URLSearchParams();
-  for (const [name, value] of Object.entries(fields)) query.set(name, value);
-  const serialized = query.toString();
-  return serialized.length === 0 ? "" : `?${serialized}`;
-}
-
-function actionsFields(fields: Readonly<Record<string, string>>): GitHubChangeEffectJsonObject {
-  const body: Record<string, unknown> = {};
-  const inputs: Record<string, string> = {};
-  for (const [name, value] of Object.entries(fields)) {
-    const match = /^inputs\[([^\]]+)\]$/u.exec(name);
-    if (match?.[1] !== undefined) inputs[match[1]] = value;
-    else body[name] = value;
-  }
-  if (Object.keys(inputs).length > 0) body.inputs = inputs;
-  return body as GitHubChangeEffectJsonObject;
-}
-
-function assertActionsApiPath(value: string): void {
-  if (
-    value.length === 0 ||
-    value.length > 2048 ||
-    value.startsWith("/") ||
-    value.includes("\u0000") ||
-    value.includes("..") ||
-    !/^actions\//u.test(value)
-  ) {
-    throw new ContractViolationError("Actions API path is invalid.", "actionsPath");
   }
 }
 

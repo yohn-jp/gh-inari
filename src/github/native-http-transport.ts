@@ -286,10 +286,6 @@ export interface GitHubNativeHttpTransportOptions {
   /** Optional fully-qualified REST API base, otherwise derived from hostname. */
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
-  /** Optional explicit REST endpoint used by controlled providers and GitHub-hosted runtimes. */
-  readonly apiBaseUrl?: string;
-  /** Optional explicit GraphQL endpoint paired with `apiBaseUrl`. */
-  readonly graphqlUrl?: string;
   /** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 10s. */
   readonly requestTimeoutMs?: number;
   /** Bounded downward/upward only within the compile-time hard ceiling. Defaults to 1MiB. */
@@ -307,8 +303,6 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   readonly #token: string;
   readonly #apiUrl: string | undefined;
   readonly #fetch: typeof globalThis.fetch;
-  readonly #apiBaseUrl: string | undefined;
-  readonly #graphqlUrl: string | undefined;
   readonly #requestTimeoutMs: number;
   readonly #maxResponseBytes: number;
 
@@ -316,8 +310,6 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     this.#token = boundedToken(options.token);
     this.#apiUrl = boundedEndpoint(options.apiUrl);
     this.#fetch = options.fetch ?? globalThis.fetch;
-    this.#apiBaseUrl = boundedEndpoint(options.apiBaseUrl);
-    this.#graphqlUrl = boundedEndpoint(options.graphqlUrl);
     this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
     this.#maxResponseBytes = normalizedMaxResponseBytes(options.maxResponseBytes);
   }
@@ -332,8 +324,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   }
 
   async requestGraphql(request: GitHubHttpGraphqlRequest): Promise<GitHubNativeHttpResponse> {
-    const url =
-      this.#graphqlUrl ?? (this.#apiUrl === undefined ? githubGraphqlUrl(request.hostname) : `${this.#apiUrl}/graphql`);
+    const url = this.#apiUrl === undefined ? githubGraphqlUrl(request.hostname) : `${this.#apiUrl}/graphql`;
     const { response, bytes } = await this.execute(url, "POST", {
       query: request.query,
       variables: request.variables ?? {},
@@ -360,7 +351,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   }
 
   private restUrl(hostname: string, path: string): string {
-    const base = this.#apiBaseUrl ?? this.#apiUrl ?? githubRestBaseUrl(hostname);
+    const base = this.#apiUrl ?? githubRestBaseUrl(hostname);
     return path.length === 0 ? base : `${base}/${path}`;
   }
 
