@@ -191,6 +191,7 @@ test("implementation-native issuance cannot omit the authorization binding", () 
         runtimeAuthority: authority,
         runtimeKey: key,
         request,
+        implementationSession: true,
         now: new Date("2026-09-18T00:00:00Z"),
       }),
     (error: unknown) =>
@@ -205,6 +206,7 @@ test("implementation-native issuance cannot omit the authorization binding", () 
         runtimeAuthority: authority,
         runtimeKey: key,
         request,
+        implementationSession: true,
         implementationAuthorization: currentAuthorization(),
         now: new Date("2026-09-18T00:00:00Z"),
       }),
@@ -234,6 +236,7 @@ test("managed issuance signs the binding only after current authorization verifi
     runtimeAuthority: authority,
     runtimeKey: key,
     request,
+    implementationSession: true,
     implementationAuthorization: currentAuthorization(),
     now: new Date("2026-09-18T00:00:00Z"),
   });
