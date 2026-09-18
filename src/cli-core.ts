@@ -600,10 +600,7 @@ function runtimeRequirementMessage(
   return requirements.length === 0 ? "runtime requirements are not satisfied" : requirements.join("; ");
 }
 
-function projectRuntimeDiagnostic(
-  invocation: string,
-  diagnostic: RuntimeDiagnostic,
-): Record<string, unknown> {
+function projectRuntimeDiagnostic(invocation: string, diagnostic: RuntimeDiagnostic): Record<string, unknown> {
   return {
     invocation,
     status: diagnostic.status,

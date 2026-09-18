@@ -13,7 +13,7 @@ import {
   type FixtureCommandOptions,
 } from "./github/test-native-transport.test.js";
 import { runCli } from "./cli.js";
-import { COMMAND_CONTRACT_VERSION } from "./command-contract.js";
+import { COMMAND_CONTRACT_VERSION, RUNTIME_CAPABILITIES } from "./command-contract.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -1084,6 +1084,19 @@ test("diagnose reports only the standalone canonical runtime contract", async ()
   try {
     const exitCode = await runCli(["diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          name: "gh-inari",
+          version: "0.3.0",
+          protocol: 1,
+          commandContractVersion: COMMAND_CONTRACT_VERSION,
+          capabilities: [...RUNTIME_CAPABILITIES],
+          invocation: { canonical: "inari" },
+        }),
+        stderr: "",
+      }),
     });
     assert.equal(exitCode, 0);
     const output = JSON.parse(lines[0] ?? "{}") as {
