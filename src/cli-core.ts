@@ -117,6 +117,7 @@ import {
 import { tryProjectImplementationHandoff } from "./change-handoff.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
+import { tryProjectImplementationFrontier } from "./implementation-frontier.js";
 import { projectSelfDogfoodIssueMarker } from "./self-dogfood-marker.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
@@ -2024,11 +2025,41 @@ async function runImplementationCommand(
     command !== "validate" &&
     command !== "authorize" &&
     command !== "inspect" &&
-    command !== "verify"
+    command !== "verify" &&
+    command !== "frontier"
   )
     throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command ?? ""}".`);
   const definition = getCommandForPositionals(["impl", command]);
   if (definition === undefined) throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command}".`);
+  if (command === "frontier") {
+    if (rest.length !== 0) throw new CliError("INVALID_ARGUMENT", "impl frontier does not accept an Issue number.", "$argv");
+    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+    if (unsupported !== undefined) {
+      const option = getOption(unsupported as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by impl frontier.`,
+        "$argv",
+        { command: "impl frontier", option: option.id },
+      );
+    }
+    if (typeof parsed.options.from !== "string")
+      throw new CliError("INPUT_REQUIRED", "Use --from <frontier-input.json>.", "--from");
+    const input = await readJsonValue(parsed.options.from);
+    const frontier = tryProjectImplementationFrontier(input);
+    printImplementationResult(
+      {
+        ok: frontier.valid,
+        valid: frontier.valid,
+        operation: "impl.frontier",
+        ...(frontier.projection === undefined ? {} : { frontier: frontier.projection }),
+        diagnostics: frontier.diagnostics,
+        mutation: false,
+      },
+      json,
+    );
+    return frontier.valid ? 0 : EXIT_VALIDATION;
+  }
   if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("issue", rest[0]);
   const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
   if (unsupported !== undefined) {
