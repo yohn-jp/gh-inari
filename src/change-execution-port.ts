@@ -250,11 +250,7 @@ export function validateChangeRequest(
     }
   }
   if (request.operation === "merge") {
-    if (
-      request.mergeStrategy !== "merge" &&
-      request.mergeStrategy !== "squash" &&
-      request.mergeStrategy !== "rebase"
-    ) {
+    if (request.mergeStrategy !== "merge" && request.mergeStrategy !== "squash" && request.mergeStrategy !== "rebase") {
       throw new ChangeExecutionPortError(
         "CHANGE_REMOTE_REQUEST_INVALID",
         "Change merge requires a supported merge strategy.",

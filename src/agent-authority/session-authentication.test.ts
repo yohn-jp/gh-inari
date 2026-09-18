@@ -336,8 +336,7 @@ test("rejects replay when a bound Implementation authorization is no longer curr
       },
       now: NOW,
     }),
-    (error: unknown) =>
-      error instanceof SessionAuthenticationError && error.reason === "implementation-authorization",
+    (error: unknown) => error instanceof SessionAuthenticationError && error.reason === "implementation-authorization",
   );
 
   await assert.rejects(
@@ -351,8 +350,7 @@ test("rejects replay when a bound Implementation authorization is no longer curr
       },
       now: NOW,
     }),
-    (error: unknown) =>
-      error instanceof SessionAuthenticationError && error.reason === "implementation-authorization",
+    (error: unknown) => error instanceof SessionAuthenticationError && error.reason === "implementation-authorization",
   );
 });
 

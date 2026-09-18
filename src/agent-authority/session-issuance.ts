@@ -402,7 +402,8 @@ function validateCurrentImplementationBinding(
   currentAuthorization: ImplementationAuthorizationVerificationInput | undefined,
   implementationSession: boolean,
 ): void {
-  if (!implementationSession && request.implementationBinding === undefined && currentAuthorization === undefined) return;
+  if (!implementationSession && request.implementationBinding === undefined && currentAuthorization === undefined)
+    return;
   if (request.implementationBinding === undefined || currentAuthorization === undefined) {
     throw new SessionCertificateIssuanceError(
       "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_REQUIRED",

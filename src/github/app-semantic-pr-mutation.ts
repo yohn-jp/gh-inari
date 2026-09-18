@@ -132,9 +132,7 @@ function parsePullRequest(value: unknown): GitHubPullRequest {
     ...(candidate.merge_commit_sha === undefined
       ? {}
       : { mergeCommitSha: candidate.merge_commit_sha === null ? null : optionalSha(candidate.merge_commit_sha) }),
-    ...(candidate.merge_method === undefined
-      ? {}
-      : { mergeMethod: parseStrategy(candidate.merge_method) }),
+    ...(candidate.merge_method === undefined ? {} : { mergeMethod: parseStrategy(candidate.merge_method) }),
   };
 }
 
@@ -219,12 +217,7 @@ class ScopedSemanticPullRequestProvider implements SemanticPullRequestMutationPr
   getAuthenticatedUser = async (): Promise<string> => "inari-issuer[bot]";
 
   readPullRequest = async (pullRequest: number): Promise<GitHubPullRequest> =>
-    parsePullRequest(
-      responseBody(
-        await this.request(`pulls/${numberPath(pullRequest)}`, "GET"),
-        [200],
-      ),
-    );
+    parsePullRequest(responseBody(await this.request(`pulls/${numberPath(pullRequest)}`, "GET"), [200]));
 
   listPullRequestComments = async (_pullRequest: number): Promise<readonly GitHubPullRequestComment[]> => {
     throw new GitHubAppSemanticPullRequestProviderError("provider");
@@ -236,10 +229,7 @@ class ScopedSemanticPullRequestProvider implements SemanticPullRequestMutationPr
 
   listPullRequestReviews = async (pullRequest: number): Promise<readonly GitHubPullRequestReview[]> =>
     parseReviews(
-      responseBody(
-        await this.request(`pulls/${numberPath(pullRequest)}/reviews?per_page=100`, "GET"),
-        [200],
-      ),
+      responseBody(await this.request(`pulls/${numberPath(pullRequest)}/reviews?per_page=100`, "GET"), [200]),
     );
 
   submitPullRequestReview = async (
@@ -265,9 +255,7 @@ class ScopedSemanticPullRequestProvider implements SemanticPullRequestMutationPr
     );
   };
 
-  getPullRequestMergePolicy = async (
-    pullRequest: GitHubPullRequest,
-  ): Promise<GitHubPullRequestMergePolicyEvidence> => {
+  getPullRequestMergePolicy = async (pullRequest: GitHubPullRequest): Promise<GitHubPullRequestMergePolicyEvidence> => {
     const repository = record(responseBody(await this.request("", "GET"), [200]));
     const allowedStrategies = [
       repository.allow_merge_commit === true ? "merge" : undefined,
@@ -311,7 +299,9 @@ class ScopedSemanticPullRequestProvider implements SemanticPullRequestMutationPr
     if (response.status === 404) return undefined;
     const value = record(responseBody(response, [200]));
     const contexts = [
-      ...(Array.isArray(value.contexts) ? value.contexts.filter((item): item is string => typeof item === "string") : []),
+      ...(Array.isArray(value.contexts)
+        ? value.contexts.filter((item): item is string => typeof item === "string")
+        : []),
       ...(Array.isArray(value.checks)
         ? value.checks.flatMap((item) => {
             if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
@@ -357,7 +347,8 @@ class ScopedSemanticPullRequestProvider implements SemanticPullRequestMutationPr
     );
     if (response.status === 404) return undefined;
     const value = record(responseBody(response, [200]));
-    const required = typeof value.required_approving_review_count === "number" ? value.required_approving_review_count : 0;
+    const required =
+      typeof value.required_approving_review_count === "number" ? value.required_approving_review_count : 0;
     if (!Number.isSafeInteger(required) || required < 0) {
       throw new GitHubAppSemanticPullRequestProviderError("provider");
     }
