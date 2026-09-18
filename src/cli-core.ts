@@ -2209,7 +2209,11 @@ async function runArtifactCommand(
   }
   if (command === "observe") {
     if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError(domain, rest[0]);
-    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies);
+    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies, "observe");
+  }
+  if (command === "view") {
+    if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError(domain, rest[0]);
+    return runOperationalObservationCommand(domain, Number(rest[0]), parsed, root, dependencies, "view");
   }
   if (
     command === "check" &&
@@ -2372,6 +2376,7 @@ async function runArtifactCommand(
 
 interface OperationalSemanticOverlay {
   readonly status: "valid" | "invalid" | "unavailable";
+  readonly result?: ReturnType<typeof projectExistingArtifact>;
   readonly diagnostics: readonly unknown[];
   readonly classification?: string;
 }
@@ -2380,6 +2385,7 @@ async function projectOperationalSemanticOverlay(
   domain: "issue" | "pr",
   number: number,
   adapter: GitHubAdapter,
+  includeResult = false,
 ): Promise<OperationalSemanticOverlay> {
   try {
     const read = await readGovernedExistingArtifact(adapter, domain, number);
@@ -2387,6 +2393,7 @@ async function projectOperationalSemanticOverlay(
     const unavailable = new Set(["wrong-template", "unparseable", "ambiguous", "unsupported"]);
     return {
       status: projection.valid ? "valid" : unavailable.has(read.result.classification) ? "unavailable" : "invalid",
+      ...(includeResult ? { result: projection } : {}),
       diagnostics: projection.diagnostics,
       classification: read.result.classification,
     };
@@ -2407,6 +2414,7 @@ async function runOperationalObservationCommand(
   parsed: ParsedArgs,
   root: string,
   dependencies: CliDependencies,
+  operation: "observe" | "view" = "observe",
 ): Promise<number> {
   const unsupported = Object.keys(parsed.options).find((key) => !["json", "repository"].includes(key));
   if (unsupported !== undefined) {
@@ -2445,15 +2453,16 @@ async function runOperationalObservationCommand(
     );
     return EXIT_VALIDATION;
   }
-  const semantic = await projectOperationalSemanticOverlay(domain, number, adapter);
+  const semantic = await projectOperationalSemanticOverlay(domain, number, adapter, operation === "view");
   console.log(
     JSON.stringify({
       ok: true,
       valid: true,
-      operation: `${domain}.observe`,
+      operation: `${domain}.${operation}`,
       kind: domain === "issue" ? "issue" : "pull_request",
       version: observedResult.observation.version,
       number,
+      ...(operation === "view" ? { url: observedResult.observation.url } : {}),
       observed: observedResult.observation,
       semantic,
       mutation: false,

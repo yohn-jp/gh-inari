@@ -111,6 +111,24 @@ test("MCP Issue and PR observation expose the same versioned Core fields", async
     assert.equal((issue.observed as Record<string, unknown>).body, "body");
     assert.equal((pullRequest.observed as Record<string, unknown>).reviewDecision, "approved");
     assert.equal((pullRequest.observed as Record<string, unknown>).mergeability, "unknown");
+
+    const view = (await client.callTool({ name: "inari_issue_view", arguments: { number: 7 } }))
+      .structuredContent as Record<string, unknown>;
+    assert.equal(view.valid, true);
+    assert.equal(view.operation, "issue.view");
+    assert.equal(view.url, "https://github.com/acme/inari/issues/7");
+    assert.equal((view.observed as Record<string, unknown>).body, "body");
+    assert.equal((view.semantic as Record<string, unknown>).status, "unavailable");
+
+    const pullRequestView = (await client.callTool({ name: "inari_pr_view", arguments: { number: 8 } }))
+      .structuredContent as Record<string, unknown>;
+    assert.equal(pullRequestView.valid, true);
+    assert.equal(pullRequestView.operation, "pr.view");
+    assert.equal(pullRequestView.url, "https://github.com/acme/inari/pull/8");
+    assert.equal(
+      ((pullRequestView.observed as Record<string, unknown>).head as Record<string, unknown>).branch,
+      "feat/observe",
+    );
   } finally {
     await client.close();
     await server.close();

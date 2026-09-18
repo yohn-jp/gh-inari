@@ -271,7 +271,12 @@ test("inspect and repair scenarios use the 0.8 remediation paths", () => {
   assert.ok(inspect);
   assert.deepEqual(
     inspect.workflow.map((step) => step.command),
-    ["inari issue check <number>", "inari issue get <number>", "inari issue explain <number>"],
+    [
+      "inari issue view <number>",
+      "inari issue check <number>",
+      "inari issue get <number>",
+      "inari issue explain <number>",
+    ],
   );
 
   const repair = findSkillScenario("repair-invalid-artifact");

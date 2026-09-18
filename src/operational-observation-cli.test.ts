@@ -137,3 +137,13 @@ test("CLI PR observation exposes identity and explicit unknown merge state", asy
   assert.equal(observed.mergeability, "unknown");
   assert.equal(observed.reviewDecision, "approved");
 });
+
+test("CLI PR view keeps provider identity beside unavailable semantic interpretation", async () => {
+  const output = await capture(["pr", "view", "8", "--json"], new CliOperationalAdapter("pr"));
+  assert.equal(output.operation, "pr.view");
+  assert.equal(output.url, "https://github.com/acme/inari/pull/8");
+  const observed = output.observed as Record<string, unknown>;
+  assert.equal(observed.title, "Runtime PR");
+  assert.equal((observed.head as Record<string, unknown>).branch, "feat/runtime");
+  assert.equal((output.semantic as Record<string, unknown>).status, "unavailable");
+});
