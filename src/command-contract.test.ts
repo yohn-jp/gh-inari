@@ -45,7 +45,7 @@ test("retired extension distribution is absent from the public runtime contract"
   assert.equal("compatibility" in AGENT_INVOCATION_CONTRACT, false);
   assert.equal("extensionInstall" in AGENT_INVOCATION_CONTRACT, false);
   assert.equal("extensionUpdate" in AGENT_INVOCATION_CONTRACT, false);
-  assert.equal(RUNTIME_CAPABILITIES.includes("extension-bootstrap" as never), false);
+  assert.equal((RUNTIME_CAPABILITIES as readonly string[]).includes("extension-bootstrap"), false);
 });
 
 test("the shared tokenizer consumes every value-taking option before command identity", () => {
