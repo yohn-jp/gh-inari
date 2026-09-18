@@ -225,7 +225,7 @@ test("Change commands are additions to the existing canonical command authority"
     assert.equal(getCommandForPositionals(definition.path)?.id, id);
     assert.equal(projected.invocation, commandInvocation(id));
     assert.equal(projected.example, commandExample(id));
-    assert.match(commandUsage(definition), /^change (issue|show|handoff|ready|abort|publish) <number>/u);
+    assert.match(commandUsage(definition), /^change (issue|show|handoff|ready|abort|merge|publish) <number>/u);
   }
   assert.deepEqual(
     projectCommandHelp(["change"]).commands.map((entry) => entry.id),
