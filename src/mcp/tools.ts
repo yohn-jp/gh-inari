@@ -445,8 +445,7 @@ function changeExecutorFor(
     ...(repository === undefined ? {} : { repository }),
   };
   if (dependencies.createChangeExecutor !== undefined) return dependencies.createChangeExecutor(options);
-  const adapter = adapterFor(requestRepository, dependencies);
-  return createActionsChangeExecutionAdapter({ ...options, api: adapter });
+  return createActionsChangeExecutionAdapter(options);
 }
 
 /** Resolve the repository Canon through the existing repository/Core boundary. */
