@@ -7,6 +7,7 @@ import {
   type RepositoryRelayDurableObjectState,
   type RepositoryRelayWebSocket,
 } from "./cloudflare-repository-relay.js";
+import { LocalRelayRuntime, type RelayWebSocket } from "./local-runtime.js";
 import {
   createRelayPossessionProofChallenge,
   signRelayPossessionProof,
@@ -31,6 +32,11 @@ class FakeSocket implements RepositoryRelayWebSocket {
   readyState = 1;
   readonly sent: (string | Uint8Array)[] = [];
   attachment: unknown;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { readonly data: unknown }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  sendHook: ((data: string | ArrayBuffer | ArrayBufferView) => void) | undefined;
 
   send(data: string | ArrayBuffer | ArrayBufferView): void {
     this.sent.push(
@@ -42,6 +48,7 @@ class FakeSocket implements RepositoryRelayWebSocket {
             data instanceof ArrayBuffer ? data.byteLength : data.byteLength,
           ),
     );
+    this.sendHook?.(data);
   }
 
   close(): void {
@@ -55,6 +62,28 @@ class FakeSocket implements RepositoryRelayWebSocket {
   deserializeAttachment(): unknown {
     return structuredClone(this.attachment);
   }
+
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.();
+  }
+
+  receive(data: string | ArrayBuffer | ArrayBufferView): void {
+    const value =
+      typeof data === "string"
+        ? data
+        : new Uint8Array(
+            data instanceof ArrayBuffer ? data : data.buffer,
+            data instanceof ArrayBuffer ? 0 : data.byteOffset,
+            data instanceof ArrayBuffer ? data.byteLength : data.byteLength,
+          );
+    this.onmessage?.({ data: value });
+  }
+
+  disconnect(): void {
+    this.readyState = 3;
+    this.onclose?.();
+  }
 }
 
 class FakeWebSocketPair {
@@ -63,13 +92,25 @@ class FakeWebSocketPair {
   [Symbol.iterator](): Iterator<FakeSocket> {
     return [this[0], this[1]][Symbol.iterator]();
   }
+
+  constructor() {
+    latestPair = this;
+  }
 }
+
+let latestPair: FakeWebSocketPair | undefined;
 
 (globalThis as unknown as { WebSocketPair: typeof FakeWebSocketPair }).WebSocketPair = FakeWebSocketPair;
 
 class FakeStorage {
   readonly values = new Map<string, unknown>();
   failNextPut = false;
+  private blockedPut:
+    | {
+        readonly promise: Promise<void>;
+        readonly release: () => void;
+      }
+    | undefined;
   async get<T>(key: string): Promise<T | undefined> {
     return this.values.get(key) as T | undefined;
   }
@@ -78,7 +119,19 @@ class FakeStorage {
       this.failNextPut = false;
       throw new Error("simulated storage failure");
     }
+    const blockedPut = this.blockedPut;
+    this.blockedPut = undefined;
+    if (blockedPut !== undefined) await blockedPut.promise;
     this.values.set(key, structuredClone(value));
+  }
+
+  blockNextPut(): () => void {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.blockedPut = { promise, release };
+    return release;
   }
   async delete(key: string): Promise<boolean> {
     return this.values.delete(key);
@@ -127,6 +180,14 @@ function pairFor(object: RepositoryRelayDurableObject, query: string): FakeSocke
 
 function publicJwk(key: KeyObject): Record<string, string> {
   return key.export({ format: "jwk" }) as Record<string, string>;
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Timed out waiting for relay seam state.");
 }
 
 function signedSessionRequest(
@@ -219,6 +280,112 @@ test("runtime admission stores only bounded public attachment metadata and confi
   assert.deepEqual(state.autoResponse, { request: "relay:ping", response: "relay:pong" });
   assert.equal((attachment.binding as { publicKey: unknown }).publicKey !== undefined, true);
   assert.deepEqual(publicJwk(privateKey).kty, "OKP");
+});
+
+test("production DO admission gates a reconnect retained result until acknowledgement", async () => {
+  const state = new FakeState();
+  const object = new RepositoryRelayDurableObject(
+    state,
+    { repository },
+    {
+      now: () => 10_000,
+      randomNonce: (() => {
+        let count = 0;
+        return () => `nonce-seam-${count++}`;
+      })(),
+    },
+  );
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const pairs: FakeWebSocketPair[] = [];
+  let runtime!: LocalRelayRuntime;
+  let resolveExecution!: (result: { readonly version: 1; readonly status: "succeeded" }) => void;
+  let executionStarted!: () => void;
+  const executionStartedPromise = new Promise<void>((resolve) => {
+    executionStarted = resolve;
+  });
+  const executionResult = new Promise<{ readonly version: 1; readonly status: "succeeded" }>((resolve) => {
+    resolveExecution = resolve;
+  });
+  const webSocketFactory = (): RelayWebSocket => {
+    const connectionId = "runtime-seam";
+    void object.fetch(
+      new Request(
+        `https://relay.test/?repositoryId=${repository.repositoryId}&repositoryHost=${repository.repositoryHost}&role=runtime&connectionId=${connectionId}&delegatorId=delegator-seam`,
+        { headers: { Upgrade: "websocket" } },
+      ),
+    );
+    const pair = latestPair;
+    assert.ok(pair);
+    pairs.push(pair);
+    pair[0].sendHook = (data) => {
+      void object.webSocketMessage(pair[1], data);
+    };
+    pair[1].sendHook = (data) => {
+      pair[0].receive(data);
+    };
+    setImmediate(() => pair[0].open());
+    return pair[0] as unknown as RelayWebSocket;
+  };
+  runtime = new LocalRelayRuntime({
+    relayUrl: "wss://relay.test/",
+    repository,
+    delegatorId: "delegator-seam",
+    privateKey,
+    executor: {
+      async execute() {
+        executionStarted();
+        return executionResult;
+      },
+    },
+    webSocketFactory,
+    now: () => 15_000,
+    connectionId: "runtime-seam",
+    reconnectDelayMs: 0,
+  });
+  runtime.connect();
+  await waitFor(() => runtime.snapshot().possessionProved);
+  assert.equal(pairs.length, 1);
+
+  const client = pairFor(object, "role=client&connectionId=host-seam");
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "runtime-seam",
+    jobId: "job-seam",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(privateKey, privateKey, "delegator-seam"),
+  };
+  await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
+  await executionStartedPromise;
+  const firstClient = pairs[0]![0];
+  const firstServer = pairs[0]![1];
+  firstClient.disconnect();
+  firstServer.disconnect();
+  await object.webSocketClose(firstServer);
+  resolveExecution({ version: 1, status: "succeeded" });
+  await waitFor(() => runtime.delivery("job-seam")?.phase === "possibly-delivered");
+  const retained = await state.storage.get<Record<string, unknown>>("relay:job:job-seam");
+  assert.equal(retained !== undefined, true);
+
+  const releaseAdmissionStorage = state.storage.blockNextPut();
+  await waitFor(() => pairs.length === 2);
+  const secondClient = pairs[1]![0];
+  await waitFor(() =>
+    secondClient.sent.some((entry) => typeof entry === "string" && entry.includes("possession-response")),
+  );
+  assert.equal(
+    secondClient.sent.some((entry) => typeof entry === "string" && entry.includes('"kind":"result"')),
+    false,
+  );
+  assert.equal(runtime.snapshot().possessionProved, false);
+  releaseAdmissionStorage();
+  await waitFor(() => runtime.snapshot().possessionProved);
+  await waitFor(() =>
+    secondClient.sent.some((entry) => typeof entry === "string" && entry.includes('"kind":"result"')),
+  );
+  runtime.shutdown();
 });
 
 test("message rate backpressure closes the connection before parsing a second message", async () => {

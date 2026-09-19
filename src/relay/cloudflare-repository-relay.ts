@@ -805,7 +805,12 @@ export class RepositoryRelayDurableObject {
       };
       webSocket.serializeAttachment?.(authenticatedAttachment);
       webSocket.send(
-        JSON.stringify({ type: "repository-relay-connected", version: 1, connectionId: attachment.connectionId }),
+        JSON.stringify({
+          type: "repository-relay-connected",
+          version: 1,
+          repository: attachment.repository,
+          connectionId: attachment.connectionId,
+        }),
       );
     } catch {
       this.close(webSocket, 1008, "Invalid possession proof.");

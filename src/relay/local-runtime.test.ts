@@ -82,6 +82,15 @@ function challenge(): string {
   });
 }
 
+function connected(connectionId = "connection-820"): string {
+  return JSON.stringify({
+    type: "repository-relay-connected",
+    version: 1,
+    repository,
+    connectionId,
+  });
+}
+
 function job(connectionId: string, jobId = "job-820") {
   return JSON.stringify({
     version: 1,
@@ -129,6 +138,27 @@ test("opens only an outbound socket, proves possession, forwards the unchanged S
     socket.frames.some((frame) => frame.includes("BEGIN PRIVATE KEY")),
     false,
   );
+  assert.equal(runtime.snapshot().possessionProved, false);
+  socket.receive(
+    JSON.stringify({
+      type: "repository-relay-connected",
+      version: 1,
+      repository,
+      connectionId: "connection-other",
+    }),
+  );
+  assert.equal(runtime.snapshot().possessionProved, false);
+  socket.receive(
+    JSON.stringify({
+      type: "repository-relay-connected",
+      version: 1,
+      repository: { ...repository, repositoryId: "1330755861" },
+      connectionId: "connection-820",
+    }),
+  );
+  assert.equal(runtime.snapshot().possessionProved, false);
+  socket.receive(connected());
+  assert.equal(runtime.snapshot().possessionProved, true);
 
   socket.receive(job("connection-820"));
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -164,6 +194,7 @@ test("disconnect marks delivery ambiguous and reconnect never executes the same 
   const first = sockets[0]!;
   first.open();
   first.receive(challenge());
+  first.receive(connected());
   first.receive(job("connection-820", "job-ambiguous"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(first.frames.length, 2);
@@ -176,6 +207,7 @@ test("disconnect marks delivery ambiguous and reconnect never executes the same 
   const second = sockets[1]!;
   second.open();
   second.receive(challenge());
+  second.receive(connected());
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(second.frames.length, 2);
   assert.equal(decodeRelayEnvelope(second.frames[1]!, repository).kind, "result");

@@ -142,6 +142,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isRelayConnectedFrame(data: string): boolean {
+  try {
+    const candidate = JSON.parse(data) as unknown;
+    return isRecord(candidate) && candidate.type === "repository-relay-connected";
+  } catch {
+    return false;
+  }
+}
+
+function decodeRelayConnectedFrame(data: string, repository: RelayRepositoryIdentity, connectionId: string): boolean {
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(data) as unknown;
+  } catch {
+    return false;
+  }
+  if (
+    !isRecord(candidate) ||
+    candidate.type !== "repository-relay-connected" ||
+    candidate.version !== 1 ||
+    candidate.connectionId !== connectionId
+  )
+    return false;
+  try {
+    const acknowledgedRepository = normalizeRelayRepositoryIdentity(candidate.repository);
+    return (
+      acknowledgedRepository.repositoryId === repository.repositoryId &&
+      acknowledgedRepository.repositoryHost === repository.repositoryHost
+    );
+  } catch {
+    return false;
+  }
+}
+
 function decodeRelayChallengeFrame(data: string): ReturnType<typeof decodeRelayPossessionProofChallenge> {
   let candidate: unknown;
   try {
@@ -187,6 +221,7 @@ export class LocalRelayRuntime {
   #socket?: RelayWebSocket;
   #state: LocalRelayRuntimeState = "idle";
   #possessionProved = false;
+  #admissionPendingSocket?: RelayWebSocket;
   #reconnectTimer?: ReturnType<typeof setTimeout>;
   #listeners: Array<{
     readonly type: "open" | "message" | "close" | "error";
@@ -253,6 +288,7 @@ export class LocalRelayRuntime {
     if (this.#state === "shutdown" || this.#socket !== undefined) return;
     this.#state = "connecting";
     this.#possessionProved = false;
+    this.#admissionPendingSocket = undefined;
     const socket = this.#webSocketFactory(this.#options.relayUrl);
     this.#socket = socket;
     this.#listen(socket, "open", () => this.#onOpen(socket));
@@ -315,14 +351,28 @@ export class LocalRelayRuntime {
       if (!validClock(nowMs) || nowMs < challenge.issuedAtMs || nowMs >= challenge.expiresAtMs) return;
       const proof = signRelayPossessionProof(challenge, this.#options.privateKey);
       const encodedProof = JSON.parse(new TextDecoder().decode(encodeRelayPossessionProofResponse(proof))) as unknown;
-      this.#sendRaw(socket, JSON.stringify({ type: RELAY_HANDSHAKE_RESPONSE_KIND, version: 1, proof: encodedProof }));
-      this.#possessionProved = true;
-      this.#flushResults(socket);
+      this.#admissionPendingSocket = socket;
+      try {
+        this.#sendRaw(socket, JSON.stringify({ type: RELAY_HANDSHAKE_RESPONSE_KIND, version: 1, proof: encodedProof }));
+      } catch (error) {
+        this.#admissionPendingSocket = undefined;
+        throw error;
+      }
       return;
     } catch {
       // The same frame may be a relay envelope. Protocol errors are ignored
       // without exposing key material or executor details in diagnostics.
     }
+    if (
+      this.#admissionPendingSocket === socket &&
+      decodeRelayConnectedFrame(data, this.#repository, this.#connectionId)
+    ) {
+      this.#admissionPendingSocket = undefined;
+      this.#possessionProved = true;
+      this.#flushResults(socket);
+      return;
+    }
+    if (isRelayConnectedFrame(data)) return;
     let envelope: RelayEnvelope;
     try {
       envelope = decodeRelayEnvelope(data, this.#repository);
@@ -435,6 +485,7 @@ export class LocalRelayRuntime {
     if (socket !== this.#socket) return;
     this.#socket = undefined;
     this.#possessionProved = false;
+    this.#admissionPendingSocket = undefined;
     for (const job of this.#jobs.values()) {
       if (job.state.phase !== "terminal-result")
         job.state = applyRelayDeliveryEvent(job.state, deliveryEvent(job, "disconnect")).state;
