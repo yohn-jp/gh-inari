@@ -120,6 +120,25 @@ function jsonResponse(value) {
   return { ok: true, status: 200, text: async () => JSON.stringify(value) };
 }
 
+function trackedBody(chunks, { onRead, onCancel } = {}) {
+  let index = 0;
+  return {
+    getReader() {
+      return {
+        async read() {
+          onRead?.();
+          if (index >= chunks.length) return { done: true, value: undefined };
+          return { done: false, value: chunks[index++] };
+        },
+        async cancel() {
+          onCancel?.();
+        },
+        releaseLock() {},
+      };
+    },
+  };
+}
+
 test("parses every required explicit option", () => {
   assert.deepEqual(parseArgs(BASE_ARGS), {
     sourceSha: SOURCE_SHA,
@@ -245,6 +264,24 @@ test("fails closed when retained self-dogfood artifacts have no passing evidence
     }),
     /no retained passing self-dogfood artifact/u,
   );
+});
+
+test("rejects an oversized declared JSON response before consuming its body", async () => {
+  let reads = 0;
+  await assert.rejects(
+    resolveSelfDogfoodWorkflowRun({
+      sourceSha: SOURCE_SHA,
+      environment: { GITHUB_API_URL: "https://api.example.test" },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-length": String(2 * 1024 * 1024 + 1) }),
+        body: trackedBody([new Uint8Array([123])], { onRead: () => (reads += 1) }),
+      }),
+    }),
+    /bounded size limit/u,
+  );
+  assert.equal(reads, 0);
 });
 
 test("runs packed certification with the supplied tarball and never invokes npm pack", () => {
@@ -445,6 +482,43 @@ test("retrieves the explicitly intended unexpired exact-source artifact through 
   );
   assert.match(requests[1].url, /repos\/yohn-jp\/gh-inari\/actions\/artifacts\/42\/zip$/u);
   assert.equal(requests[0].init.headers.authorization, "Bearer bounded-token");
+});
+
+test("cancels an unknown-length oversized artifact stream at the configured bound", async () => {
+  const chunk = new Uint8Array(1024 * 1024);
+  const chunks = Array.from({ length: 32 }, () => chunk);
+  chunks.push(new Uint8Array([0]), new Uint8Array([1]));
+  let reads = 0;
+  let cancelled = false;
+  const artifact = {
+    id: 42,
+    name: selfDogfoodArtifactName(SOURCE_SHA, DOGFOOD_RUN_ID, DOGFOOD_RUN_ATTEMPT),
+    expired: false,
+    created_at: "2025-12-31T00:00:00Z",
+    expires_at: "2026-03-01T00:00:00Z",
+    workflow_run: { id: Number(DOGFOOD_RUN_ID), run_attempt: Number(DOGFOOD_RUN_ATTEMPT), head_sha: SOURCE_SHA },
+  };
+  await assert.rejects(
+    retrieveSelfDogfoodEvidence({
+      sourceSha: SOURCE_SHA,
+      workflowRunId: DOGFOOD_RUN_ID,
+      workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      environment: { GITHUB_API_URL: "https://api.example.test" },
+      now: Date.parse("2026-01-01T00:00:00Z"),
+      fetchImpl: async (url) => {
+        if (url.includes("/actions/artifacts?")) return jsonResponse({ artifacts: [artifact] });
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          body: trackedBody(chunks, { onRead: () => (reads += 1), onCancel: () => (cancelled = true) }),
+        };
+      },
+    }),
+    /bounded size limit/u,
+  );
+  assert.equal(reads, 33);
+  assert.equal(cancelled, true);
 });
 
 test("does not let a newer same-source attempt replace the explicitly intended attempt", async () => {
