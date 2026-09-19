@@ -1,7 +1,7 @@
 {
   "name": "gh-inari",
   "version": "0.13.0",
-  "description": "A deterministic GitHub CLI for compiling, validating, rendering, and creating repository-governed Issues and pull requests.",
+  "description": "Deterministic GitHub governance for repository-governed Issues, Changes, pull requests, and agent workflows.",
   "type": "module",
   "bin": {
     "gh-inari": "dist/index.js",
@@ -250,7 +250,8 @@
     "worker:dev": "wrangler dev",
     "verify": "wireit",
     "prepack": "pnpm run build",
-    "prepublishOnly": "pnpm run typecheck && pnpm test"
+    "prepublishOnly": "pnpm run typecheck && pnpm test",
+    "readme:check": "node scripts/readme-integrity.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -298,7 +299,10 @@
     "pull-request",
     "templates",
     "governance",
-    "repository-governance"
+    "repository-governance",
+    "deterministic",
+    "developer-tools",
+    "ai-agents"
   ],
   "main": "dist/index.js",
   "author": "",
@@ -310,6 +314,7 @@
     "verify": {
       "dependencies": [
         "format:check",
+        "readme:check",
         "lint",
         "test",
         "templates:check",
