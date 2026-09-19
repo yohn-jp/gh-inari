@@ -350,7 +350,7 @@ test("Actions transport accepts no repository projection API and delegates reads
     randomUUID: () => correlation,
     pollIntervalMs: 0,
     sleep: async () => undefined,
-    maxPollAttempts: 2,
+    maxPollAttempts: 3,
   });
 
   assert.deepEqual(await adapter.read(changeReadRequest(42)), source.result);
@@ -360,6 +360,7 @@ test("Actions transport accepts no repository projection API and delegates reads
 test("default Actions transport uses native HTTP for dispatch, runs, artifacts, and binary download", async () => {
   const requests: Array<{ readonly url: string; readonly method: string; readonly body?: unknown }> = [];
   let runReads = 0;
+  let artifactDownloads = 0;
   let dispatchBody: unknown;
   const nativeFetch: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -420,6 +421,13 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
       });
     }
     if (parsed.pathname.endsWith("/actions/artifacts/21/zip") && method === "GET") {
+      artifactDownloads += 1;
+      if (artifactDownloads === 1) {
+        return new Response("not yet visible", {
+          status: 404,
+          headers: { "x-github-request-id": "ARTIFACT:404" },
+        });
+      }
       return new Response(Buffer.from(archive({ projection: projection() })), {
         status: 200,
         headers: { "content-type": "application/zip" },
@@ -461,6 +469,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   assert.ok(requests.some((request) => request.url.includes("/actions/workflows/")));
   assert.ok(requests.some((request) => request.url.includes("/actions/artifacts")));
   assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
+  assert.equal(artifactDownloads, 2);
 });
 
 test("native Actions transport errors remain bounded and never expose the credential", async () => {
