@@ -26,6 +26,7 @@ import type {
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
 import { GitHubChangeEffectAdapter } from "./change-effect-adapter.js";
+import { GitHubHttpTimeoutError } from "./native-http-transport.js";
 import {
   CHANGE_TRANSITION_CONTRACT_VERSION,
   MAX_CHANGE_ARTIFACT_BODY_LENGTH,
@@ -433,6 +434,77 @@ test("repository root read failures retain a bounded repository reason", async (
       error.details?.stage === "repository-evidence" &&
       error.details.reason === "repository-status",
   );
+});
+
+test("Actions evidence wrapper retains bounded provider classifications", async () => {
+  const cases = [
+    {
+      name: "rate limit",
+      response: { status: 429, body: { message: "provider-secret-error-body" } },
+      failure: undefined,
+      reason: "repository-status",
+      providerFailure: { failureClass: "rate-limit", retryable: true, status: 429 },
+    },
+    {
+      name: "server failure",
+      response: { status: 503, body: { message: "provider-secret-error-body" } },
+      failure: undefined,
+      reason: "repository-status",
+      providerFailure: { failureClass: "server", retryable: true, status: 503 },
+    },
+    {
+      name: "provider rejection",
+      response: { status: 400, body: { message: "provider-secret-error-body" } },
+      failure: undefined,
+      reason: "repository-status",
+      providerFailure: { failureClass: "provider-rejection", retryable: false, status: 400 },
+    },
+    {
+      name: "timeout",
+      response: undefined,
+      failure: new GitHubHttpTimeoutError(250),
+      reason: "repository-request",
+      providerFailure: { failureClass: "timeout", retryable: true, timeoutMs: 250 },
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    const fallback = new ReadTransport();
+    const transport = {
+      request: async (request: GitHubChangeEffectRequest) => {
+        if (request.path.endsWith("repos/acme/inari")) {
+          if (testCase.failure !== undefined) throw testCase.failure;
+          return testCase.response;
+        }
+        return fallback.request(request);
+      },
+    };
+    const reader = new GitHubActionsEvidenceReader({
+      repository,
+      identity: { repositoryHost: "github.com", repositoryId: "218000001", rootIssue: 218 },
+      transport,
+    });
+
+    await assert.rejects(
+      () => reader.read(changeMutationRequest("issue", 218)),
+      (error: unknown) => {
+        assert.ok(error instanceof GitHubActionsChangeExecutorError, testCase.name);
+        assert.deepEqual(
+          error.details,
+          {
+            stage: "repository-evidence",
+            reason: testCase.reason,
+            providerFailure: testCase.providerFailure,
+          },
+          testCase.name,
+        );
+        assert.equal(JSON.stringify(error).includes("provider-secret-error-body"), false, testCase.name);
+        assert.equal(JSON.stringify(error).includes("secret-token"), false, testCase.name);
+        return true;
+      },
+      testCase.name,
+    );
+  }
 });
 
 test("Actions evidence reader accepts multiline Issue bodies while preserving single-line validation", async () => {
