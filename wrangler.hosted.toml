@@ -1,0 +1,19 @@
+name = "gh-inari-hosted-relay"
+main = "dist-hosted-worker/hosted-worker.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# No GitHub App, provider, Session, or Runtime credentials are configured here.
+[vars]
+INARI_HOSTED_REPOSITORY_HOST = "github.com"
+
+[[durable_objects.bindings]]
+name = "REPOSITORY_RELAY"
+class_name = "RepositoryRelayDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RepositoryRelayDurableObject"]
