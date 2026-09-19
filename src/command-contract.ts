@@ -23,7 +23,18 @@ export const RUNTIME_CAPABILITIES = [
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number];
 export type CommandDomain =
-  "root" | "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill";
+  | "root"
+  | "issue"
+  | "pr"
+  | "impl"
+  | "branch"
+  | "template"
+  | "change"
+  | "authority"
+  | "session"
+  | "runtime"
+  | "mcp"
+  | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
 export type CommandId =
@@ -112,6 +123,7 @@ export type CommandId =
   | "authority.revoke"
   | "session.issue"
   | "session.inspect"
+  | "runtime.connect"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -127,6 +139,7 @@ export type OptionId =
   | "template"
   | "policy"
   | "repository"
+  | "relayUrl"
   | "title"
   | "head"
   | "base"
@@ -236,6 +249,7 @@ const AUTHORITY_READINESS_OPTIONS = [
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
 const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
+const RUNTIME_OPTIONS = ["help", "json", "repository", "relayUrl", "authorityId", "privateKey"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
 const ISSUE_RELATIONS_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
@@ -345,6 +359,15 @@ export const COMMAND_OPTIONS = {
     "required",
     "GitHub repository override; governed commands use its default-branch governance.",
     "repository",
+  ),
+  relayUrl: option(
+    "relayUrl",
+    "relay-url",
+    ["--relay-url", "--relay-endpoint"],
+    "string",
+    "required",
+    "Local Repository Relay WebSocket endpoint; transport configuration only, never an authority input.",
+    "ws-url",
   ),
   title: option(
     "title",
@@ -1425,6 +1448,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["help", "json", "from"],
   ),
   command(
+    "runtime.connect",
+    "runtime",
+    "connect",
+    ["runtime", "connect"],
+    "Connect a foreground local Runtime to the Repository Relay.",
+    RUNTIME_OPTIONS,
+  ),
+  command(
     "mcp.serve",
     "mcp",
     "serve",
@@ -1625,7 +1656,8 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr", template
 }
 
 export function helpInvocation(
-  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp" | "skill",
+  domain:
+    "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp" | "skill",
 ): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }

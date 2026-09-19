@@ -174,6 +174,11 @@ import {
   sendDirectAppBranchAdvance,
 } from "./agent-authority/direct-app-client.js";
 import {
+  createLocalRuntimeConfig,
+  type LocalRuntimeConfig,
+  type LocalRuntimeConfigInput,
+} from "./relay/local-runtime-config.js";
+import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
 } from "./agent-authority/branch-advance.js";
@@ -304,6 +309,8 @@ export interface CliDependencies {
   readonly createSemanticIssueRelationExecutor?: (
     options: SemanticIssueRelationExecutorOptions,
   ) => SemanticIssueRelationExecutionPort;
+  /** Factory seam for the foreground local Relay Runtime composition. */
+  readonly createLocalRuntimeConfig?: (input: LocalRuntimeConfigInput) => LocalRuntimeConfig;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -350,6 +357,7 @@ const VALUE_OPTIONS = new Set([
   "retry",
   "pullRequest",
   "executionEvidence",
+  "relayUrl",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -435,6 +443,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "session") {
       return await runSessionCommand(command, rest, parsed, root, json);
+    }
+    if (domain === "runtime") {
+      return runRuntimeCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -1205,6 +1216,62 @@ async function runSessionCommand(
     if (output.task !== undefined) console.log(`Task: ${output.task.kind} #${output.task.number}`);
     console.log(`Capabilities: ${output.capabilities.map((claim) => claim.kind).join(", ")}`);
     console.log(`Expires: ${output.expiry.exp}`);
+  }
+  return 0;
+}
+
+function runRuntimeCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): number {
+  if (command !== "connect" || rest.length > 0) {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
+  }
+  const definition = getCommand("runtime.connect");
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime connect.`,
+      "$argv",
+      { command: "runtime connect", option: option.id },
+    );
+  }
+  const createConfig = dependencies.createLocalRuntimeConfig ?? createLocalRuntimeConfig;
+  const configuration = createConfig({
+    root,
+    ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+    ...(typeof parsed.options.relayUrl === "string" ? { relayUrl: parsed.options.relayUrl } : {}),
+    ...(typeof parsed.options.authorityId === "string" ? { delegatorId: parsed.options.authorityId } : {}),
+    ...(typeof parsed.options.privateKey === "string" ? { privateKeyPath: parsed.options.privateKey } : {}),
+    ...(dependencies.environment === undefined ? {} : { environment: dependencies.environment }),
+  });
+  configuration.runtime.connect();
+  const shutdown = (): void => {
+    configuration.runtime.shutdown();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  const output = {
+    ok: true,
+    operation: "runtime.connect" as const,
+    state: configuration.runtime.state,
+    relayEndpoint: configuration.relayUrl,
+    repository: configuration.repository,
+    authorityId: configuration.delegatorId,
+    foreground: true,
+  };
+  if (json) console.log(JSON.stringify(output));
+  else {
+    console.log("Foreground Runtime started for the local Repository Relay.");
+    console.log(`Relay endpoint: ${configuration.relayUrl}`);
+    console.log(`Repository id: ${configuration.repository.repositoryId}`);
+    console.log(`Runtime Authority: ${configuration.delegatorId}`);
   }
   return 0;
 }
@@ -4393,6 +4460,7 @@ function classifyExitCode(error: unknown): number {
   )
     return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_KEY_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("LOCAL_RUNTIME_CONFIG_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("IMPLEMENTATION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
@@ -4410,7 +4478,7 @@ function isSupportedInvocation(positionals: readonly string[]): boolean {
   if (getCommandForPositionals(positionals) !== undefined) return true;
   return (
     positionals.length === 1 &&
-    ["issue", "pr", "impl", "branch", "template", "change", "authority", "session", "mcp"].includes(
+    ["issue", "pr", "impl", "branch", "template", "change", "authority", "session", "runtime", "mcp"].includes(
       positionals[0] ?? "",
     )
   );
@@ -4483,7 +4551,10 @@ async function readStdin(): Promise<string> {
 }
 
 const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
-  Record<"issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp", string>
+  Record<
+    "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp",
+    string
+  >
 > = {
   issue: "issue list",
   pr: "pr checks",
@@ -4493,6 +4564,7 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   change: "change list",
   authority: "authority generate",
   session: "session issue",
+  runtime: "runtime connect",
   mcp: "mcp serve",
 };
 
@@ -4509,6 +4581,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     domain === "change" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "runtime" ||
     domain === "mcp"
   ) {
     const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
@@ -4539,6 +4612,7 @@ Domains:
   change     Semantic Change projection and authoritative lifecycle requests
   authority  Local Runtime Authority key, bootstrap, readiness, and lifecycle operations
   session    Manual short-lived Session credential issuance and inspection
+  runtime    Foreground local Relay Runtime connection
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
@@ -4551,7 +4625,7 @@ Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime che
 }
 
 function printDomainHelp(
-  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp",
+  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp",
 ): void {
   const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
