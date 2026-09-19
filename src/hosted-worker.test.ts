@@ -92,6 +92,39 @@ test("healthz is bounded metadata and does not expose repository or credential s
   assert.deepEqual(ids, []);
 });
 
+test("hosted relay uses the production telemetry sink without Env.telemetry", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const ids: string[] = [];
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const response = await worker.fetch(
+      new Request(
+        "https://hosted.example/v1/relay/connect?repositoryId=1330755860&repositoryHost=github.com&role=runtime&connectionId=runtime-telemetry&delegatorId=runtime-telemetry",
+        { headers: { upgrade: "websocket" } },
+      ),
+      env(
+        relayNamespace(
+          {
+            fetch: async () => ({ status: 101, webSocket: new FakeSocket() }) as unknown as Response,
+          },
+          ids,
+        ),
+      ),
+    );
+    assert.equal(response.status, 101);
+  } finally {
+    console.log = originalLog;
+  }
+  assert.ok(lines.length > 0);
+  assert.ok(lines.every((line) => !line.includes(repository.repositoryId)));
+  assert.ok(lines.every((line) => !line.includes("signedSessionRequest")));
+  assert.ok(lines.every((line) => !line.includes("resultPayload")));
+  assert.ok(lines.some((line) => JSON.parse(line).surface === "hosted-worker"));
+  assert.deepEqual(ids, [repository.repositoryId]);
+});
+
 test("relay ingress validates repository routing and fixes the public role to runtime", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const ids: string[] = [];

@@ -37,6 +37,7 @@ import {
   type RelayDeliveryState,
 } from "./delivery-state.js";
 import {
+  DEFAULT_RELAY_TELEMETRY_SINK,
   createRelayTelemetryEvent,
   recordRelayTelemetry,
   type RelayTelemetryFailureClass,
@@ -439,7 +440,7 @@ export class RepositoryRelayDurableObject {
     this.now = options.now ?? Date.now;
     this.randomNonce = options.randomNonce ?? nonce;
     this.limits = normalizeOperationalLimits(options.limits);
-    this.telemetry = options.telemetry ?? env.telemetry;
+    this.telemetry = options.telemetry ?? env.telemetry ?? DEFAULT_RELAY_TELEMETRY_SINK;
   }
 
   private emitTelemetry(

@@ -56,7 +56,19 @@ Optional telemetry receives only bounded transport facts: a pseudonymous
 repository key, connection/job correlation, surface, timing, delivery state,
 failure class, and resource counters. Request/result bodies, signatures,
 credentials, tokens, and provider responses are not part of the telemetry
-interface. Operational limits are backpressure controls, not authorization.
+interface. With the hosted profile's default sink, each event is emitted as a
+JSON log line through `console.log` and is available in the Cloudflare Workers
+Observability Logs for the `gh-inari-hosted-relay` service. An injected
+`Env.telemetry` sink remains available for deterministic tests; it is not
+required by the deployed Worker or Durable Object. Operational limits are
+backpressure controls, not authorization.
+
+Alert on sustained `failureClass` values of `overloaded`, `rate-limited`, or
+`transport`, and on rising `counters.connections`, `counters.inFlightJobs`,
+`counters.retainedJobs`, or `counters.messagesInWindow`. `cpu-active` event
+`durationMs` and `counters.cpuActiveMs` provide CPU-cost indicators. These
+signals describe transport pressure and runtime cost; they do not contain
+request or result payloads.
 
 ## Build and deploy
 

@@ -26,7 +26,12 @@ import type {
   CapabilityAuthorizedSessionExecutionResult,
   CapabilityAuthorizedSessionExecutor,
 } from "./session-authorized-change-executor.js";
-import { createRelayTelemetryEvent, recordRelayTelemetry, type RelayTelemetrySink } from "./relay/telemetry.js";
+import {
+  DEFAULT_RELAY_TELEMETRY_SINK,
+  createRelayTelemetryEvent,
+  recordRelayTelemetry,
+  type RelayTelemetrySink,
+} from "./relay/telemetry.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -303,7 +308,7 @@ async function dispatchThroughDurableObject(
 
 export function createHostedRelayDispatch(
   namespace: HostedDurableObjectNamespace | undefined,
-  telemetry?: RelayTelemetrySink,
+  telemetry: RelayTelemetrySink = DEFAULT_RELAY_TELEMETRY_SINK,
 ): RepositoryRelayDispatchPort {
   return Object.freeze({
     dispatch: (request: RepositoryRelayDispatchRequest, signal?: AbortSignal) =>
@@ -313,7 +318,7 @@ export function createHostedRelayDispatch(
 
 export function createHostedMcpSessionExecutor(env: Env): CapabilityAuthorizedSessionExecutor {
   const host = repositoryHost(env);
-  const dispatch = createHostedRelayDispatch(env.REPOSITORY_RELAY, env.telemetry);
+  const dispatch = createHostedRelayDispatch(env.REPOSITORY_RELAY, env.telemetry ?? DEFAULT_RELAY_TELEMETRY_SINK);
   return Object.freeze({
     async execute(envelope: unknown): Promise<CapabilityAuthorizedSessionExecutionResult> {
       const repository = sessionRepository(envelope, host);
@@ -386,10 +391,11 @@ async function relayConnect(request: Request, env: Env): Promise<Response> {
   internalUrl.searchParams.set("connectionId", connectionId);
   internalUrl.searchParams.set("delegatorId", delegatorId);
   const startedAtMs = Date.now();
+  const telemetry = env.telemetry ?? DEFAULT_RELAY_TELEMETRY_SINK;
   try {
     const response = await stub.fetch(new Request(internalUrl, { method: "GET", headers: { upgrade: UPGRADE } }));
     emitHostedTelemetry(
-      env.telemetry,
+      telemetry,
       {
         occurredAtMs: Date.now(),
         kind: "cpu-active",
@@ -402,7 +408,7 @@ async function relayConnect(request: Request, env: Env): Promise<Response> {
     return response;
   } catch {
     emitHostedTelemetry(
-      env.telemetry,
+      telemetry,
       {
         occurredAtMs: Date.now(),
         kind: "connection",
