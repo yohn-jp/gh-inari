@@ -15,6 +15,11 @@ const identity: ChangeIdentity = {
   rootIssue: 42,
 };
 const branch = "feat/42-canonical-change";
+const repositoryIdentity = {
+  repositoryHost: identity.repositoryHost,
+  repositoryId: identity.repositoryId,
+  repositoryNameWithOwner: "acme/inari",
+} as const;
 
 function projection(draft = true): ChangeProjectionResult {
   const result = projectChangeFromGitHubEvidence({
@@ -57,9 +62,72 @@ test("healthy DRAFT Change projects to a bounded immutable implementation handof
 });
 
 test("handoff includes the repository locator when the caller supplies one", () => {
-  const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "acme/inari" });
+  const result = tryProjectImplementationHandoff(projection(), {
+    repositoryNameWithOwner: repositoryIdentity.repositoryNameWithOwner,
+    repositoryIdentity,
+  });
   assert.equal(result.valid, true);
   assert.equal(result.handoff?.repositoryNameWithOwner, "acme/inari");
+});
+
+test("handoff omits a caller-supplied repository locator without canonical evidence", () => {
+  const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "acme/inari" });
+  assert.equal(result.valid, true);
+  assert.equal("repositoryNameWithOwner" in (result.handoff ?? {}), false);
+  const revalidated = validateImplementationHandoff({
+    ...projectImplementationHandoff(projection()),
+    repositoryNameWithOwner: "acme/inari",
+  });
+  assert.equal(revalidated.valid, true);
+  assert.equal("repositoryNameWithOwner" in (revalidated.handoff ?? {}), false);
+});
+
+test("handoff rejects a repository locator that conflicts with canonical host, ID, or owner/name evidence", () => {
+  const cases = [
+    {
+      repositoryIdentity: { ...repositoryIdentity, repositoryId: "100000220" },
+      repositoryNameWithOwner: repositoryIdentity.repositoryNameWithOwner,
+    },
+    {
+      repositoryIdentity,
+      repositoryNameWithOwner: "other/repository",
+    },
+  ] as const;
+  for (const options of cases) {
+    const result = tryProjectImplementationHandoff(projection(), options);
+    assert.equal(result.valid, false);
+    assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_PROJECTION_CONFLICT"));
+  }
+});
+
+test("native and historical handoffs bind the repository locator to the same evidence", () => {
+  const implementation = {
+    repositoryHost: identity.repositoryHost,
+    repositoryId: identity.repositoryId,
+    number: 42,
+  } as const;
+  const authorization = {
+    version: 1,
+    kind: "implementation-authorization",
+    implementation,
+    contractVersion: 1,
+    repository: { repositoryHost: implementation.repositoryHost, repositoryId: implementation.repositoryId },
+    base: { branch: "main", revision: "base-revision", freshness: "base-revision" },
+    governedBodyDigest: "c".repeat(64),
+  } as const;
+  const native = tryProjectImplementationHandoff(projection(), {
+    repositoryIdentity,
+    compatibility: "implementation-native",
+    implementation,
+    authorization,
+  });
+  assert.equal(native.valid, true);
+  const historical = tryProjectImplementationHandoff(projection(), {
+    repositoryIdentity,
+    compatibility: "historical-issue-root",
+    sourceIssues: [implementation],
+  });
+  assert.equal(historical.valid, true);
 });
 
 test("native handoff binds the exact Implementation authorization to the Change root", () => {
@@ -119,11 +187,27 @@ test("handoff fails closed on a malformed repository locator", () => {
 });
 
 test("validateImplementationHandoff accepts a transported repositoryNameWithOwner", () => {
-  const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "acme/inari" });
+  const result = tryProjectImplementationHandoff(projection(), {
+    repositoryNameWithOwner: repositoryIdentity.repositoryNameWithOwner,
+    repositoryIdentity,
+  });
   assert.equal(result.valid, true);
-  const revalidated = validateImplementationHandoff(result.handoff);
+  const revalidated = validateImplementationHandoff(result.handoff, repositoryIdentity);
   assert.equal(revalidated.valid, true);
   assert.equal(revalidated.handoff?.repositoryNameWithOwner, "acme/inari");
+});
+
+test("validateImplementationHandoff rejects transported owner/name evidence that conflicts with host and ID", () => {
+  const handoff = projectImplementationHandoff(projection(), {
+    repositoryNameWithOwner: repositoryIdentity.repositoryNameWithOwner,
+    repositoryIdentity,
+  });
+  const revalidated = validateImplementationHandoff(handoff, {
+    ...repositoryIdentity,
+    repositoryId: "100000220",
+  });
+  assert.equal(revalidated.valid, false);
+  assert.ok(revalidated.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_PROJECTION_CONFLICT"));
 });
 
 test("healthy REVIEW evidence is not implementation-admissible", () => {

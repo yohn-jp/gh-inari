@@ -121,7 +121,7 @@ import {
   type ChangeExecutionPortOptions,
   type ChangeMutation,
 } from "./change-execution-port.js";
-import { tryProjectImplementationHandoff } from "./change-handoff.js";
+import { tryProjectImplementationHandoff, type ImplementationHandoffProjectionOptions } from "./change-handoff.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
 import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
@@ -1319,7 +1319,7 @@ function projectChangeCommandResult(
 function projectChangeHandoffCommandResult(
   issue: number,
   projection: Awaited<ReturnType<typeof readChangeProjection>>,
-  options: { readonly repositoryNameWithOwner?: string } = {},
+  options: ImplementationHandoffProjectionOptions = {},
 ): Readonly<Record<string, unknown>> {
   const handoff = tryProjectImplementationHandoff(projection, options);
   return {
@@ -1556,7 +1556,7 @@ async function runChangeCommand(
         );
   const projection = result.projection;
   if (definition.operation === "handoff") {
-    let repositoryNameWithOwner: string | undefined;
+    let repositoryIdentity: ImplementationHandoffProjectionOptions["repositoryIdentity"];
     // Resolve a locator only when an adapter is actually available: either the
     // caller injected one directly, or no changeExecutor override exists (the
     // default path already builds a real adapter). Avoids a spurious `gh`
@@ -1566,12 +1566,20 @@ async function runChangeCommand(
         const context = await createAdapter(dependencies, root, parsed.options.repository, {
           credentialFallback: false,
         }).getRepositoryContext();
-        repositoryNameWithOwner = context.nameWithOwner;
+        if (context.repositoryId !== undefined) {
+          repositoryIdentity = {
+            repositoryHost: context.hostname,
+            repositoryId: context.repositoryId,
+            repositoryNameWithOwner: context.nameWithOwner,
+          };
+        }
       } catch {
-        repositoryNameWithOwner = undefined;
+        repositoryIdentity = undefined;
       }
     }
-    const handoffResult = projectChangeHandoffCommandResult(issue, projection, { repositoryNameWithOwner });
+    const handoffResult = projectChangeHandoffCommandResult(issue, projection, {
+      ...(repositoryIdentity === undefined ? {} : { repositoryIdentity }),
+    });
     console.log(JSON.stringify(handoffResult));
     return handoffResult.ok === true ? 0 : EXIT_VALIDATION;
   }

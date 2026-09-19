@@ -158,6 +158,87 @@ function validNameWithOwner(value: unknown): value is string {
   );
 }
 
+export interface ImplementationHandoffRepositoryIdentity {
+  readonly repositoryHost: string;
+  readonly repositoryId: string;
+  readonly repositoryNameWithOwner: string;
+}
+
+function resolveBoundRepositoryName(
+  changeIdentity: Change["identity"] | undefined,
+  repositoryNameWithOwner: unknown,
+  repositoryIdentity: unknown,
+  diagnostics: ChangeDiagnostic[],
+): string | undefined {
+  if (repositoryNameWithOwner !== undefined && !validNameWithOwner(repositoryNameWithOwner)) {
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_INVALID_PROJECTION",
+        "$.repositoryNameWithOwner",
+        "repositoryNameWithOwner must be an owner/name locator.",
+      ),
+    );
+  }
+  if (repositoryIdentity === undefined || changeIdentity === undefined) {
+    return undefined;
+  }
+  if (!isRecord(repositoryIdentity)) {
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_INVALID_PROJECTION",
+        "$.repositoryIdentity",
+        "Canonical repository identity must be an object.",
+      ),
+    );
+    return undefined;
+  }
+  const evidenceName = repositoryIdentity.repositoryNameWithOwner;
+  if (!validNameWithOwner(evidenceName)) {
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_INVALID_PROJECTION",
+        "$.repositoryIdentity.repositoryNameWithOwner",
+        "Canonical repository identity must include an owner/name locator.",
+      ),
+    );
+  }
+  const evidenceIdentity = validateChangeIdentity({
+    repositoryHost: repositoryIdentity.repositoryHost,
+    repositoryId: repositoryIdentity.repositoryId,
+    rootIssue: changeIdentity.rootIssue,
+  });
+  if (!evidenceIdentity.valid || evidenceIdentity.identity === undefined) {
+    diagnostics.push(...evidenceIdentity.diagnostics);
+    return undefined;
+  }
+  if (
+    evidenceIdentity.identity.repositoryHost !== changeIdentity.repositoryHost ||
+    evidenceIdentity.identity.repositoryId !== changeIdentity.repositoryId
+  ) {
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_PROJECTION_CONFLICT",
+        "$.repositoryIdentity",
+        "Canonical repository host and ID do not match the Change identity.",
+      ),
+    );
+  }
+  if (
+    validNameWithOwner(repositoryNameWithOwner) &&
+    validNameWithOwner(evidenceName) &&
+    repositoryNameWithOwner.toLocaleLowerCase("en-US") !== evidenceName.toLocaleLowerCase("en-US")
+  ) {
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_PROJECTION_CONFLICT",
+        "$.repositoryNameWithOwner",
+        "Repository locator does not match canonical repository evidence.",
+      ),
+    );
+  }
+  return validNameWithOwner(evidenceName) ? evidenceName : undefined;
+}
+
 function validBranch(value: unknown, path: string): value is string {
   return (
     typeof value === "string" &&
@@ -167,7 +248,10 @@ function validBranch(value: unknown, path: string): value is string {
   );
 }
 
-function validateHandoffShape(input: unknown): ImplementationHandoffProjectionResult {
+function validateHandoffShape(
+  input: unknown,
+  repositoryIdentity?: ImplementationHandoffRepositoryIdentity,
+): ImplementationHandoffProjectionResult {
   const diagnostics: ChangeDiagnostic[] = [];
   if (!isRecord(input))
     return invalid([diagnostic("CHANGE_INVALID_PLAN", "$", "Implementation handoff must be an object.")]);
@@ -205,14 +289,12 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
       diagnostic("CHANGE_INVALID_PROJECTION", "$.pullRequest", "pullRequest must be a positive safe integer."),
     );
   const normalizedIdentity = identityResult.identity;
-  if (input.repositoryNameWithOwner !== undefined && !validNameWithOwner(input.repositoryNameWithOwner))
-    diagnostics.push(
-      diagnostic(
-        "CHANGE_INVALID_PROJECTION",
-        "$.repositoryNameWithOwner",
-        "repositoryNameWithOwner must be an owner/name locator.",
-      ),
-    );
+  const boundRepositoryName = resolveBoundRepositoryName(
+    normalizedIdentity,
+    input.repositoryNameWithOwner,
+    repositoryIdentity,
+    diagnostics,
+  );
   const nativeHandoff =
     input.compatibility !== undefined ||
     input.implementation !== undefined ||
@@ -327,9 +409,7 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
     kind: IMPLEMENTATION_HANDOFF_KIND,
     repositoryHost: normalizedIdentity.repositoryHost,
     repositoryId: normalizedIdentity.repositoryId,
-    ...(input.repositoryNameWithOwner === undefined
-      ? {}
-      : { repositoryNameWithOwner: input.repositoryNameWithOwner as string }),
+    ...(boundRepositoryName === undefined ? {} : { repositoryNameWithOwner: boundRepositoryName }),
     rootIssue: normalizedIdentity.rootIssue,
     changeVersion: CHANGE_CONTRACT_VERSION,
     state: "DRAFT",
@@ -347,8 +427,11 @@ function validateHandoffShape(input: unknown): ImplementationHandoffProjectionRe
 }
 
 /** Validate a serialized handoff at a transport/package boundary. */
-export function validateImplementationHandoff(input: unknown): ImplementationHandoffProjectionResult {
-  return validateHandoffShape(input);
+export function validateImplementationHandoff(
+  input: unknown,
+  repositoryIdentity?: ImplementationHandoffRepositoryIdentity,
+): ImplementationHandoffProjectionResult {
+  return validateHandoffShape(input, repositoryIdentity);
 }
 
 /** Alias named after the Change-owned projection. */
@@ -381,6 +464,8 @@ export interface ImplementationHandoffProjectionOptions {
    * This function performs no GitHub I/O and cannot derive it independently.
    */
   readonly repositoryNameWithOwner?: string;
+  /** Canonical repository evidence resolved alongside the owner/name locator. */
+  readonly repositoryIdentity?: ImplementationHandoffRepositoryIdentity;
   /** First-class executable Implementation identity for native handoff. */
   readonly implementation?: unknown;
   /** Exact authorization record bound to the Implementation. */
@@ -426,6 +511,12 @@ export function tryProjectImplementationHandoff(
   if (change === undefined) {
     return invalid([diagnostic("CHANGE_MISSING_PROPERTY", "$.change", "A healthy Change projection is required.")]);
   }
+  const boundRepositoryName = resolveBoundRepositoryName(
+    change.identity,
+    options.repositoryNameWithOwner,
+    options.repositoryIdentity,
+    extraDiagnostics,
+  );
   const nativeHandoff =
     options.compatibility !== undefined ||
     options.implementation !== undefined ||
@@ -644,23 +735,13 @@ export function tryProjectImplementationHandoff(
       );
     }
   }
-  if (options.repositoryNameWithOwner !== undefined && !validNameWithOwner(options.repositoryNameWithOwner))
-    extraDiagnostics.push(
-      diagnostic(
-        "CHANGE_INVALID_PROJECTION",
-        "$.repositoryNameWithOwner",
-        "repositoryNameWithOwner must be an owner/name locator.",
-      ),
-    );
   if (extraDiagnostics.length > 0) return invalid(extraDiagnostics);
   const handoff: ImplementationHandoff = {
     version: IMPLEMENTATION_HANDOFF_CONTRACT_VERSION,
     kind: IMPLEMENTATION_HANDOFF_KIND,
     repositoryHost: change.identity.repositoryHost,
     repositoryId: change.identity.repositoryId,
-    ...(options.repositoryNameWithOwner === undefined
-      ? {}
-      : { repositoryNameWithOwner: options.repositoryNameWithOwner }),
+    ...(boundRepositoryName === undefined ? {} : { repositoryNameWithOwner: boundRepositoryName }),
     rootIssue: change.identity.rootIssue,
     changeVersion: change.version,
     state: "DRAFT",

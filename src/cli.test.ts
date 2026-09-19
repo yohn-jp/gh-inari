@@ -14,6 +14,7 @@ import {
 } from "./github/test-native-transport.test.js";
 import { runCli } from "./cli.js";
 import { COMMAND_CONTRACT_VERSION, RUNTIME_CAPABILITIES } from "./command-contract.js";
+import { projectChangeFromGitHubEvidence } from "./change.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -562,6 +563,57 @@ test("Change output exposes canonical Golden Path recovery for DRAFT, REVIEW, an
     const recovery = outputs[outputs.length - 1] as { state?: string; recovery?: { safeAction?: string } };
     assert.equal(recovery.state, "RECOVERY_REQUIRED");
     assert.equal(recovery.recovery?.safeAction, "MANUAL_REVIEW");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("change handoff binds the owner/name locator to the repository context identity", async () => {
+  const projection = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: "github.com", repositoryId: "123", rootIssue: 741 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "canonical-change" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: 741, state: "open" } },
+      branches: { status: "available", value: [{ name: "feat/741-canonical-change" }] },
+      pullRequests: {
+        status: "available",
+        value: [
+          { number: 142, head: "feat/741-canonical-change", base: "main", state: "open", draft: true, merged: false },
+        ],
+      },
+    },
+  });
+  assert.equal(projection.valid, true);
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: "123",
+  };
+  const lines: Record<string, unknown>[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(JSON.parse(line));
+  try {
+    const exitCode = await runCli(["change", "handoff", "741", "--json"], {
+      changeExecutor: { read: async () => projection, execute: async () => projection },
+      createAdapter: () => ({ getRepositoryContext: async () => context }) as unknown as GitHubAdapter,
+    });
+    assert.equal(exitCode, 0);
+    assert.equal((lines[0]?.handoff as { repositoryNameWithOwner?: string }).repositoryNameWithOwner, "acme/inari");
+
+    lines.length = 0;
+    const conflictingExitCode = await runCli(["change", "handoff", "741", "--json"], {
+      changeExecutor: { read: async () => projection, execute: async () => projection },
+      createAdapter: () =>
+        ({ getRepositoryContext: async () => ({ ...context, repositoryId: "999" }) }) as unknown as GitHubAdapter,
+    });
+    assert.equal(conflictingExitCode, 2);
+    assert.equal((lines[0]?.diagnostics as readonly { code?: string }[])[0]?.code, "CHANGE_PROJECTION_CONFLICT");
   } finally {
     console.log = originalLog;
   }
