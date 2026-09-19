@@ -298,6 +298,47 @@ test("post-admission mutation capability narrows the token to the admitted effec
   });
 });
 
+test("ready mutation uses the provider GraphQL endpoint for github.com and GHES", async () => {
+  const nodeId = "MDExOlB1bGxSZXF1ZXN0OTA=";
+  for (const testCase of [
+    { apiUrl: "https://api.github.com", graphqlUrl: "https://api.github.com/graphql" },
+    { apiUrl: "https://ghe.example.com/api/v3", graphqlUrl: "https://ghe.example.com/api/graphql" },
+  ]) {
+    const calls: string[] = [];
+    const broker = new GitHubAppInstallationCredentialBroker(
+      brokerOptions(
+        async (input) => {
+          calls.push(String(input));
+          if (calls.length === 1) return tokenResponse({}, { contents: "write" });
+          if (calls.length === 2) {
+            return new Response(JSON.stringify({ number: 901, state: "open", draft: true, node_id: nodeId }), {
+              status: 200,
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              data: {
+                markPullRequestReadyForReview: {
+                  pullRequest: { id: nodeId, number: 901, state: "OPEN", isDraft: false },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        },
+        { apiUrl: testCase.apiUrl },
+      ),
+    );
+
+    await broker.withScopedInstallationCredential(mutationRequest(), async (capability) => {
+      await capability.apply({ kind: "MARK_PULL_REQUEST_READY", pullRequest: 901 });
+    });
+
+    assert.equal(calls[1], `${testCase.apiUrl}/repos/acme/inari/pulls/901`);
+    assert.equal(calls[2], testCase.graphqlUrl);
+  }
+});
+
 test("mutation capability rejects read-only evidence permissions and target identity mismatches before minting", async () => {
   let calls = 0;
   const broker = new GitHubAppInstallationCredentialBroker(

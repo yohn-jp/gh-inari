@@ -9,6 +9,8 @@ import {
   MAX_GITHUB_CHANGE_EFFECT_REJECTION_BODY_BYTES,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
+  type GitHubChangeEffectGraphqlRequest,
+  type GitHubChangeEffectGraphqlTransport,
   type GitHubChangeEffectCompareAndDeleteRequest,
   type GitHubChangeEffectCompareAndDeleteOutcome,
   type GitHubChangeEffectTransport,
@@ -25,6 +27,7 @@ type StubResponse = GitHubChangeEffectResponse | Error;
 
 class StubChangeEffectTransport implements GitHubChangeEffectTransport {
   readonly calls: GitHubChangeEffectRequest[] = [];
+  readonly graphqlCalls: GitHubChangeEffectGraphqlRequest[] = [];
   private readonly responses: StubResponse[];
   readonly compareAndDeleteBranch:
     | ((request: GitHubChangeEffectCompareAndDeleteRequest) => Promise<GitHubChangeEffectCompareAndDeleteOutcome>)
@@ -44,6 +47,14 @@ class StubChangeEffectTransport implements GitHubChangeEffectTransport {
     this.calls.push(request);
     const response = this.responses.shift();
     if (response === undefined) throw new Error("unexpected transport call");
+    if (response instanceof Error) throw response;
+    return response;
+  }
+
+  async requestGraphql(request: GitHubChangeEffectGraphqlRequest): Promise<GitHubChangeEffectResponse> {
+    this.graphqlCalls.push(request);
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error("unexpected GraphQL transport call");
     if (response instanceof Error) throw response;
     return response;
   }
@@ -90,7 +101,11 @@ function readyMutationResponse(number: number, nodeId = "MDExOlB1bGxSZXF1ZXN0OTA
 }
 
 function adapter(transport: GitHubChangeEffectTransport): GitHubChangeEffectAdapter {
-  return new GitHubChangeEffectAdapter({ repository, transport });
+  return new GitHubChangeEffectAdapter({
+    repository,
+    transport,
+    graphqlTransport: transport as unknown as GitHubChangeEffectGraphqlTransport,
+  });
 }
 
 function provenanceAdapter(
@@ -355,16 +370,12 @@ test("MARK_PULL_REQUEST_READY uses GitHub's explicit ready-for-review mutation",
       method: "GET",
       path: "repos/acme/inari/pulls/901",
     },
+  ]);
+  assert.deepEqual(transport.graphqlCalls, [
     {
-      hostname: "github.com",
-      method: "POST",
-      path: "graphql",
-      body: {
-        operationName: "PullRequestReadyForReview",
-        query:
-          "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { pullRequest { id number state isDraft } } }",
-        variables: { input: { pullRequestId: "MDExOlB1bGxSZXF1ZXN0OTA=" } },
-      },
+      query:
+        "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { pullRequest { id number state isDraft } } }",
+      variables: { input: { pullRequestId: "MDExOlB1bGxSZXF1ZXN0OTA=" } },
     },
   ]);
   assert.deepEqual(result, {

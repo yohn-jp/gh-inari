@@ -18,6 +18,7 @@ import {
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
+  type GitHubChangeEffectGraphqlTransport,
   type GitHubChangeEffectSuccessEvidence,
   type GitHubChangeProvenanceSignerOptions,
   type GitHubChangeEffectTransport,
@@ -277,7 +278,7 @@ export interface GitHubAppApiTransportOptions {
 }
 
 /** Credential-bound GitHub transport shared by read and mutation capabilities. */
-export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
+export class GitHubAppApiTransport implements GitHubChangeEffectTransport, GitHubChangeEffectGraphqlTransport {
   readonly #apiUrl: string;
   readonly #graphqlApiUrl: string;
   readonly #token: string;
@@ -657,6 +658,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     const adapter = new GitHubChangeEffectAdapter({
       repository: this.#repository,
       transport,
+      graphqlTransport: transport,
       ...(provenance === undefined ? {} : { provenance }),
     });
     const capability: AppScopedMutationCapability = {
