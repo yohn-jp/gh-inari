@@ -37,6 +37,13 @@ import { isChangeTrustedExecutorErrorCode } from "../change-trusted-executor.js"
 import { isGitHubAdapterError } from "./errors.js";
 import { createGitHubChangeReadAdapter, type GitHubChangeProjectionApi } from "./change-state-projector.js";
 import { GitHubNativeHttpTransport } from "./native-http-transport.js";
+import {
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  normalizeGitHubProviderFailureClassification,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
 import { resolveGitHubUserCredential, GitHubUserCredentialError } from "./user-credential.js";
 import { resolveLocalRepositoryContext } from "./local-repository-context.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
@@ -180,6 +187,7 @@ function remoteError(
   reason: string,
   diagnostic?: TrustedActionsFailureDiagnostic,
   stage?: ActionsTransportFailureStage,
+  providerFailure?: GitHubProviderFailureClassification,
 ): ChangeExecutionPortError {
   const messages: Record<string, string> = {
     CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Actions Change executor is unavailable.",
@@ -197,6 +205,7 @@ function remoteError(
       operation,
       reason,
       ...(stage === undefined || diagnostic !== undefined ? {} : { stage }),
+      ...(providerFailure === undefined ? {} : { providerFailure }),
       ...(diagnostic === undefined
         ? {}
         : {
@@ -205,6 +214,7 @@ function remoteError(
             ...(diagnostic.trustedCode === undefined ? {} : { trustedCode: diagnostic.trustedCode }),
             ...(diagnostic.evidence === undefined ? {} : { evidence: diagnostic.evidence }),
             ...(diagnostic.effectFailure === undefined ? {} : { effectFailure: diagnostic.effectFailure }),
+            ...(diagnostic.providerFailure === undefined ? {} : { providerFailure: diagnostic.providerFailure }),
           }),
     },
     diagnostic?.diagnostics,
@@ -227,6 +237,48 @@ function resultValidationError(
   return new ChangeExecutionPortError(error.code, error.message, details, error.diagnostics);
 }
 
+function adapterProviderFailure(error: unknown): GitHubProviderFailureClassification | undefined {
+  const attached = readGitHubProviderFailure(error);
+  if (attached !== undefined) return attached;
+  if (error instanceof GitHubUserCredentialError) {
+    return githubProviderFailure("authentication", { retryable: false });
+  }
+  if (isGitHubAdapterError(error)) {
+    if (error.category === "authentication") {
+      return githubProviderFailure("authentication", { retryable: false });
+    }
+    if (error.category === "timeout") {
+      const timeoutMs =
+        typeof error.details.timeoutMs === "number" && Number.isSafeInteger(error.details.timeoutMs) && error.details.timeoutMs > 0
+          ? error.details.timeoutMs
+          : undefined;
+      return githubProviderFailure("timeout", {
+        retryable: true,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+    }
+    if (error.code === "GITHUB_RESPONSE_LIMIT_EXCEEDED") {
+      const limitBytes =
+        typeof error.details.limitBytes === "number" &&
+        Number.isSafeInteger(error.details.limitBytes) &&
+        error.details.limitBytes > 0
+          ? error.details.limitBytes
+          : undefined;
+      return githubProviderFailure("response-limit", {
+        retryable: false,
+        ...(limitBytes === undefined ? {} : { limitBytes }),
+      });
+    }
+    if (error.code === "GITHUB_API_RESPONSE_INVALID") {
+      return githubProviderFailure("response-invalid", { retryable: false });
+    }
+    if (error.category === "transport") {
+      return githubProviderFailure("transport", { retryable: true });
+    }
+  }
+  return undefined;
+}
+
 function normalizeTransportError(
   error: unknown,
   operation: string,
@@ -238,13 +290,8 @@ function normalizeTransportError(
   stage: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   if (error instanceof ChangeExecutionPortError) return error;
-  if (error instanceof GitHubUserCredentialError) {
-    return remoteError(code, operation, "authentication", undefined, stage);
-  }
-  if (isGitHubAdapterError(error) && error.category === "authentication") {
-    return remoteError(code, operation, "authentication", undefined, stage);
-  }
-  return remoteError(code, operation, "transport", undefined, stage);
+  const providerFailure = adapterProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true });
+  return remoteError(code, operation, providerFailure.failureClass, undefined, stage, providerFailure);
 }
 
 function workflowRunsPath(page: number): string {
@@ -272,7 +319,8 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
   const details = record(value, "result-decode");
   if (
     Object.keys(details).some(
-      (key) => !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure"].includes(key),
+      (key) =>
+        !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure", "providerFailure"].includes(key),
     ) ||
     !isTrustedActionsFailureStage(details.stage) ||
     (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason)) ||
@@ -324,6 +372,18 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
       "result-decode",
     );
   }
+  let providerFailure: GitHubProviderFailureClassification | undefined;
+  try {
+    providerFailure = normalizeGitHubProviderFailureClassification(details.providerFailure);
+  } catch {
+    throw remoteError(
+      "CHANGE_REMOTE_RESULT_INVALID",
+      "actions.result",
+      "invalid-diagnostic",
+      undefined,
+      "result-decode",
+    );
+  }
   return Object.freeze({
     stage: details.stage,
     ...(details.reason === undefined ? {} : { reason: details.reason }),
@@ -331,6 +391,7 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
     ...(diagnostics === undefined ? {} : { diagnostics }),
     ...(evidence === undefined ? {} : { evidence }),
     ...(effectFailure === undefined ? {} : { effectFailure }),
+    ...(providerFailure === undefined ? {} : { providerFailure }),
   });
 }
 
@@ -686,12 +747,14 @@ function isCorrelatedRun(run: WorkflowRun, correlation: string): boolean {
 function isRetryablePollTransportError(error: unknown): error is ChangeExecutionPortError {
   if (!(error instanceof ChangeExecutionPortError) || error.code !== "CHANGE_REMOTE_TRANSPORT_FAILED") return false;
   const details = error.details;
-  return (
-    typeof details === "object" &&
-    details !== null &&
-    !Array.isArray(details) &&
-    (details as { readonly reason?: unknown }).reason === "transport"
-  );
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return false;
+  try {
+    return normalizeGitHubProviderFailureClassification(
+      (details as { readonly providerFailure?: unknown }).providerFailure,
+    )?.retryable === true;
+  } catch {
+    return false;
+  }
 }
 
 const NATIVE_ACTIONS_MAX_RESPONSE_BYTES = 1_048_576;
@@ -699,8 +762,17 @@ const NATIVE_ACTIONS_DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 class NativeActionsApiError extends Error {
   readonly reason: "authentication" | "response" | "timeout";
+  readonly providerFailure: GitHubProviderFailureClassification;
 
-  constructor(reason: "authentication" | "response" | "timeout") {
+  constructor(
+    reason: "authentication" | "response" | "timeout",
+    providerFailure: GitHubProviderFailureClassification =
+      reason === "authentication"
+        ? githubProviderFailure("authentication", { retryable: false })
+        : reason === "timeout"
+          ? githubProviderFailure("timeout", { retryable: true })
+          : githubProviderFailure("response-invalid", { retryable: false }),
+  ) {
     super(
       reason === "authentication"
         ? "GitHub Actions authentication failed."
@@ -710,6 +782,7 @@ class NativeActionsApiError extends Error {
     );
     this.name = "NativeActionsApiError";
     this.reason = reason;
+    this.providerFailure = providerFailure;
   }
 }
 
@@ -773,9 +846,16 @@ function nativeActionsBody(fields: Readonly<Record<string, string>>): GitHubChan
   return body;
 }
 
-function nativeRepositoryResponseStatus(status: number): void {
-  if (status === 401) throw new NativeActionsApiError("authentication");
-  if (status < 200 || status >= 300) throw new NativeActionsApiError("response");
+function nativeRepositoryResponseStatus(
+  status: number,
+  headers?: Readonly<Record<string, string>>,
+): void {
+  if (status >= 200 && status < 300) return;
+  const providerFailure = githubProviderFailureFromStatus(status, headers);
+  throw new NativeActionsApiError(
+    providerFailure.failureClass === "authentication" ? "authentication" : "response",
+    providerFailure,
+  );
 }
 
 function nativeTree(value: unknown): RepositoryTree {
@@ -863,7 +943,7 @@ export class ActionsChangeExecutionNativeHttpApi
       method === "POST" ? nativeActionsBody(fields) : undefined,
       deadline,
     );
-    nativeRepositoryResponseStatus(response.status);
+    nativeRepositoryResponseStatus(response.status, response.headers);
     return response.body;
   }
 
@@ -893,14 +973,14 @@ export class ActionsChangeExecutionNativeHttpApi
       path: `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
       accept: "application/zip",
     });
-    nativeRepositoryResponseStatus(response.status);
+    nativeRepositoryResponseStatus(response.status, response.headers);
     if (response.bytes === undefined) throw new NativeActionsApiError("response");
     return response.bytes;
   }
 
   async getRepositoryDefaultBranch(deadline?: ChangeExecutionDeadline): Promise<string> {
     const response = await this.requestRepositoryApi("", "GET", deadline);
-    nativeRepositoryResponseStatus(response.status);
+    nativeRepositoryResponseStatus(response.status, response.headers);
     return nativeText(
       nativeRecord(response.body, "repository.default_branch").default_branch,
       255,
@@ -914,7 +994,7 @@ export class ActionsChangeExecutionNativeHttpApi
       "GET",
       deadline,
     );
-    nativeRepositoryResponseStatus(response.status);
+    nativeRepositoryResponseStatus(response.status, response.headers);
     return nativeTree(response.body);
   }
 
@@ -924,7 +1004,7 @@ export class ActionsChangeExecutionNativeHttpApi
       "GET",
       deadline,
     );
-    nativeRepositoryResponseStatus(response.status);
+    nativeRepositoryResponseStatus(response.status, response.headers);
     const body = nativeRecord(response.body, "repository.governance.blob");
     if (body.encoding !== "base64") throw new NativeActionsApiError("response");
     if (
@@ -959,7 +1039,7 @@ export class ActionsChangeExecutionNativeHttpApi
       undefined,
       deadline,
     );
-    if (response.status !== 404) nativeRepositoryResponseStatus(response.status);
+    if (response.status !== 404) nativeRepositoryResponseStatus(response.status, response.headers);
     return { status: response.status, body: response.body };
   }
 
@@ -986,7 +1066,12 @@ export class ActionsChangeExecutionNativeHttpApi
 
   private transport(deadline?: ChangeExecutionDeadline): GitHubNativeHttpTransport {
     const remaining = deadline?.remainingMs();
-    if (remaining !== undefined && remaining <= 0) throw new NativeActionsApiError("timeout");
+    if (remaining !== undefined && remaining <= 0) {
+      throw new NativeActionsApiError(
+        "timeout",
+        githubProviderFailure("timeout", { retryable: true }),
+      );
+    }
     const timeout =
       remaining === undefined
         ? this.#requestTimeoutMs
