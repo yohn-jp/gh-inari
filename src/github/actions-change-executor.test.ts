@@ -1384,11 +1384,13 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
   const cases: readonly {
     readonly name: string;
     readonly reason: (typeof REPOSITORY_EVIDENCE_FAILURE_REASONS)[number];
+    readonly providerFailure: Readonly<Record<string, unknown>>;
     readonly fetch: typeof globalThis.fetch;
   }[] = [
     {
       name: "transport request failure",
       reason: "repository-request",
+      providerFailure: { failureClass: "transport", retryable: true },
       fetch: (async () => {
         throw new Error("Authorization: Bearer secret-token; ECONNRESET /private/path");
       }) as unknown as typeof globalThis.fetch,
@@ -1396,6 +1398,7 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
     {
       name: "non-200 status",
       reason: "repository-status",
+      providerFailure: { failureClass: "authorization", retryable: false, status: 403 },
       fetch: (async () =>
         new Response(JSON.stringify({ message: "provider-secret-error-body" }), {
           status: 403,
@@ -1404,12 +1407,14 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
     {
       name: "malformed body",
       reason: "repository-body",
+      providerFailure: { failureClass: "response-invalid", retryable: false },
       fetch: (async () =>
         new Response(JSON.stringify([1, 2, 3]), { status: 200 })) as unknown as typeof globalThis.fetch,
     },
     {
       name: "invalid repository id",
       reason: "repository-id",
+      providerFailure: { failureClass: "response-invalid", retryable: false },
       fetch: (async () =>
         new Response(JSON.stringify({ id: "not-a-number", default_branch: "main", fork: false }), {
           status: 200,
@@ -1418,6 +1423,7 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
     {
       name: "missing fork evidence",
       reason: "repository-fork",
+      providerFailure: { failureClass: "response-invalid", retryable: false },
       fetch: (async () =>
         new Response(JSON.stringify({ id: 218000001, default_branch: "main" }), {
           status: 200,
@@ -1435,7 +1441,15 @@ test("repository-evidence bootstrap failures are distinguishable by bounded fixe
       }),
       (error: unknown) => {
         assert.ok(error instanceof GitHubActionsChangeExecutorError, testCase.name);
-        assert.deepEqual(error.details, { stage: "repository-evidence", reason: testCase.reason }, testCase.name);
+        assert.deepEqual(
+          error.details,
+          {
+            stage: "repository-evidence",
+            reason: testCase.reason,
+            providerFailure: testCase.providerFailure,
+          },
+          testCase.name,
+        );
         assert.equal(JSON.stringify(error).includes("secret-token"), false, testCase.name);
         assert.equal(JSON.stringify(error).includes("provider-secret-error-body"), false, testCase.name);
         assert.equal(JSON.stringify(error).includes("/private/path"), false, testCase.name);
