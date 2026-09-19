@@ -77,6 +77,11 @@ import type { InariIssuerAppIdentity, IssuerRepositoryIdentity } from "./issuer-
 import type { ContractProvenance, CanonicalContract, PullRequestBranchGovernance } from "../contract/ir.js";
 import { TEMPLATE_RESOLUTION_CONFIG_PATH } from "../template-resolver.js";
 import { isGitHubAdapterError } from "./errors.js";
+import {
+  githubProviderFailure,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { parseImplementationIssueBody } from "../implementation-contract.js";
 
@@ -646,6 +651,7 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
 function projectionError(
   code: ConstructorParameters<typeof ChangeExecutionPortError>[0],
   reason: string,
+  providerFailure?: GitHubProviderFailureClassification,
 ): ChangeExecutionPortError {
   const messages: Record<string, string> = {
     CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Change projection source is unavailable.",
@@ -655,6 +661,7 @@ function projectionError(
   return new ChangeExecutionPortError(code, messages[code] ?? "The GitHub Change projection failed.", {
     operation: "change.show",
     reason,
+    ...(providerFailure === undefined ? {} : { providerFailure }),
   });
 }
 
@@ -664,8 +671,13 @@ function normalizeProjectionError(
   reason: string,
 ): ChangeExecutionPortError {
   if (error instanceof ChangeExecutionPortError) return error;
-  if (isGitHubAdapterError(error) && error.category === "authentication") {
-    return projectionError(code, "authentication");
+  const providerFailure =
+    readGitHubProviderFailure(error) ??
+    (isGitHubAdapterError(error) && error.category === "authentication"
+      ? githubProviderFailure("authentication", { retryable: false })
+      : undefined);
+  if (providerFailure !== undefined) {
+    return projectionError(code, providerFailure.failureClass, providerFailure);
   }
   return projectionError(code, reason);
 }

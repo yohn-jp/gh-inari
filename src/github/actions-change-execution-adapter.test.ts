@@ -350,7 +350,7 @@ test("Actions transport accepts no repository projection API and delegates reads
     randomUUID: () => correlation,
     pollIntervalMs: 0,
     sleep: async () => undefined,
-    maxPollAttempts: 2,
+    maxPollAttempts: 3,
   });
 
   assert.deepEqual(await adapter.read(changeReadRequest(42)), source.result);
@@ -360,6 +360,7 @@ test("Actions transport accepts no repository projection API and delegates reads
 test("default Actions transport uses native HTTP for dispatch, runs, artifacts, and binary download", async () => {
   const requests: Array<{ readonly url: string; readonly method: string; readonly body?: unknown }> = [];
   let runReads = 0;
+  let artifactDownloads = 0;
   let dispatchBody: unknown;
   const nativeFetch: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -420,6 +421,13 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
       });
     }
     if (parsed.pathname.endsWith("/actions/artifacts/21/zip") && method === "GET") {
+      artifactDownloads += 1;
+      if (artifactDownloads === 1) {
+        return new Response("not yet visible", {
+          status: 404,
+          headers: { "x-github-request-id": "ARTIFACT:404" },
+        });
+      }
       return new Response(Buffer.from(archive({ projection: projection() })), {
         status: 200,
         headers: { "content-type": "application/zip" },
@@ -461,6 +469,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   assert.ok(requests.some((request) => request.url.includes("/actions/workflows/")));
   assert.ok(requests.some((request) => request.url.includes("/actions/artifacts")));
   assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
+  assert.equal(artifactDownloads, 2);
 });
 
 test("native Actions transport errors remain bounded and never expose the credential", async () => {
@@ -486,6 +495,63 @@ test("native Actions transport errors remain bounded and never expose the creden
     assert.doesNotMatch(JSON.stringify(error), new RegExp(secret, "u"));
     return true;
   });
+});
+
+test("native Actions HTTP rejection classification survives to the Change port and controls retryability", async () => {
+  const cases = [
+    { status: 403, failureClass: "authorization", retryable: false },
+    { status: 429, failureClass: "rate-limit", retryable: true },
+    { status: 503, failureClass: "server", retryable: true },
+  ] as const;
+  for (const testCase of cases) {
+    const nativeFetch: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const method = String(init?.method ?? "GET");
+      if (url.pathname === "/repos/acme/inari") {
+        return nativeJsonResponse({ id: 100000157, fork: false });
+      }
+      if (url.pathname.includes("/actions/workflows/") && url.pathname.endsWith("/runs")) {
+        return nativeJsonResponse({ workflow_runs: [] });
+      }
+      if (url.pathname.includes("/actions/workflows/") && url.pathname.endsWith("/dispatches") && method === "POST") {
+        return new Response(JSON.stringify({ message: "bounded provider rejection" }), {
+          status: testCase.status,
+          headers: {
+            "content-type": "application/json",
+            "x-github-request-id": "ABCD:1234",
+          },
+        });
+      }
+      throw new Error(`unexpected native path ${method} ${url.pathname}`);
+    };
+    const adapter = new ActionsChangeExecutionAdapter({
+      cwd: process.cwd(),
+      repository: "acme/inari",
+      token: "actions-transport-secret",
+      fetch: nativeFetch,
+      read: { read: async () => projection() },
+      randomUUID: () => correlation,
+      maxPollAttempts: 1,
+      pollIntervalMs: 0,
+      sleep: async () => undefined,
+    });
+    await assert.rejects(adapter.execute(changeMutationRequest("issue", 42)), (error: unknown) => {
+      assert.ok(error instanceof ChangeExecutionPortError);
+      assert.equal(error.code, "CHANGE_REMOTE_DISPATCH_FAILED");
+      assert.deepEqual(error.details, {
+        operation: "change.issue",
+        reason: testCase.failureClass,
+        stage: "dispatch",
+        providerFailure: {
+          failureClass: testCase.failureClass,
+          retryable: testCase.retryable,
+          status: testCase.status,
+          requestId: "ABCD:1234",
+        },
+      });
+      return true;
+    });
+  }
 });
 
 test("issue, ready, and abort dispatch the same semantic request through the trusted workflow", async () => {
@@ -1398,6 +1464,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
       readonly reason: string;
       readonly stage: string;
       readonly operation?: string;
+      readonly providerFailure?: Readonly<Record<string, unknown>>;
     },
   ): Promise<void> => {
     await assert.rejects(executor(api).execute(changeMutationRequest("issue", 42)), (error: unknown) => {
@@ -1407,8 +1474,9 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
         operation: expected.operation ?? "change.issue",
         reason: expected.reason,
         stage: expected.stage,
+        ...(expected.providerFailure === undefined ? {} : { providerFailure: expected.providerFailure }),
       });
-      assert.doesNotMatch(JSON.stringify(error), /Bearer|secret|private|provider|token|\/private/iu);
+      assert.doesNotMatch(JSON.stringify(error), /Bearer|secret|private|token|\/private/iu);
       return true;
     });
   };
@@ -1421,6 +1489,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
     code: "CHANGE_REMOTE_EXECUTOR_UNAVAILABLE",
     reason: "transport",
     stage: "repository-context",
+    providerFailure: { failureClass: "transport", retryable: true },
   });
 
   const dispatchApi = new FakeActionsApi();
@@ -1433,6 +1502,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
     code: "CHANGE_REMOTE_DISPATCH_FAILED",
     reason: "transport",
     stage: "dispatch",
+    providerFailure: { failureClass: "transport", retryable: true },
   });
 
   const runApi = new FakeActionsApi();
@@ -1449,6 +1519,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
     code: "CHANGE_REMOTE_TRANSPORT_FAILED",
     reason: "authentication",
     stage: "run-read",
+    providerFailure: { failureClass: "authentication", retryable: false },
   });
 
   const artifactApi = new FakeActionsApi();
@@ -1463,6 +1534,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
     code: "CHANGE_REMOTE_TRANSPORT_FAILED",
     reason: "authentication",
     stage: "artifact-read",
+    providerFailure: { failureClass: "authentication", retryable: false },
   });
 
   const downloadApi = new FakeActionsApi();
@@ -1473,6 +1545,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
     code: "CHANGE_REMOTE_TRANSPORT_FAILED",
     reason: "authentication",
     stage: "artifact-download",
+    providerFailure: { failureClass: "authentication", retryable: false },
   });
 
   const decodeApi = new FakeActionsApi();
@@ -1511,6 +1584,7 @@ test("#615 keeps unknown transport data bounded and preserves semantic port erro
       operation: "change.issue",
       reason: "transport",
       stage: "dispatch",
+      providerFailure: { failureClass: "transport", retryable: true },
     });
     assert.doesNotMatch(JSON.stringify(error), /unknown-secret|\/private\/provider\/body/iu);
     return true;

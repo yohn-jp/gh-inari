@@ -184,12 +184,35 @@ const STRUCTURED_DETAIL_KEYS = new Set([
   "version",
   "recovery",
   "provider",
+  "providerFailure",
   "effectFailure",
   "diagnostics",
   "evidence",
 ]);
 const STRUCTURED_RECOVERY_KEYS = new Set(["state", "action"]);
 const STRUCTURED_PROVIDER_KEYS = new Set(["category", "resource", "field", "code"]);
+const STRUCTURED_PROVIDER_FAILURE_KEYS = new Set([
+  "failureClass",
+  "retryable",
+  "status",
+  "timeoutMs",
+  "limitBytes",
+  "requestId",
+]);
+const STRUCTURED_PROVIDER_FAILURE_CLASSES = new Set([
+  "authentication",
+  "authorization",
+  "not-found",
+  "conflict",
+  "validation",
+  "rate-limit",
+  "server",
+  "timeout",
+  "transport",
+  "response-invalid",
+  "response-limit",
+  "provider-rejection",
+]);
 const STRUCTURED_FAILURE_KEYS = new Set(["kind", "code", "message", "reason", "status", "provider"]);
 const STRUCTURED_EFFECT_KEYS = new Set(["kind", "status", "createdCommitSha"]);
 const STRUCTURED_EXECUTION_EVIDENCE_KEYS = new Set([
@@ -520,6 +543,33 @@ function projectStructuredChangeDiagnostics(value, { allowMissingVersion = false
   return diagnostics;
 }
 
+function projectStructuredProviderFailure(value) {
+  if (
+    !isRecord(value) ||
+    [...Object.keys(value)].some((key) => !STRUCTURED_PROVIDER_FAILURE_KEYS.has(key)) ||
+    !STRUCTURED_PROVIDER_FAILURE_CLASSES.has(value.failureClass) ||
+    typeof value.retryable !== "boolean"
+  )
+    return undefined;
+  const failure = { failureClass: value.failureClass, retryable: value.retryable };
+  if (value.status !== undefined) {
+    if (!Number.isSafeInteger(value.status) || value.status < 100 || value.status > 599) return undefined;
+    failure.status = value.status;
+  }
+  for (const key of ["timeoutMs", "limitBytes"]) {
+    if (value[key] !== undefined) {
+      if (!Number.isSafeInteger(value[key]) || value[key] < 1) return undefined;
+      failure[key] = value[key];
+    }
+  }
+  if (value.requestId !== undefined) {
+    const requestId = safeStructuredText(value.requestId, 128);
+    if (requestId === undefined || !/^[A-Za-z0-9:._-]+$/u.test(requestId)) return undefined;
+    failure.requestId = requestId;
+  }
+  return failure;
+}
+
 function projectStructuredFailure(value) {
   if (!isRecord(value) || [...Object.keys(value)].some((key) => !STRUCTURED_FAILURE_KEYS.has(key))) return undefined;
   const kind = typeof value.kind === "string" && STRUCTURED_EFFECT_KINDS.has(value.kind) ? value.kind : undefined;
@@ -642,6 +692,9 @@ function projectStructuredDetails(value) {
     } else if (key === "provider") {
       const provider = projectStructuredProvider(value[key]);
       if (provider !== undefined) details.provider = provider;
+    } else if (key === "providerFailure") {
+      const providerFailure = projectStructuredProviderFailure(value[key]);
+      if (providerFailure !== undefined) details.providerFailure = providerFailure;
     } else if (key === "effectFailure") {
       const failure = projectStructuredEffectFailure(value[key]);
       if (failure !== undefined) details.effectFailure = failure;

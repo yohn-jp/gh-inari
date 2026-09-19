@@ -78,6 +78,7 @@ import {
 } from "./effect-authorizer.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
+import { readGitHubProviderFailure, type GitHubProviderFailureClassification } from "./provider-failure.js";
 import type { PullRequestBranchGovernance } from "../contract/ir.js";
 
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
@@ -135,6 +136,7 @@ export interface TrustedActionsFailureDiagnostic {
   readonly diagnostics?: readonly ChangeDiagnostic[];
   readonly evidence?: ChangeExecutionEvidence;
   readonly effectFailure?: ChangeEffectFailureClassification;
+  readonly providerFailure?: GitHubProviderFailureClassification;
 }
 
 export function isTrustedActionsFailureStage(value: unknown): value is TrustedActionsFailureStage {
@@ -153,6 +155,7 @@ function failureDiagnostic(
     ...(fields.diagnostics === undefined ? {} : { diagnostics: fields.diagnostics }),
     ...(fields.evidence === undefined ? {} : { evidence: fields.evidence }),
     ...(fields.effectFailure === undefined ? {} : { effectFailure: fields.effectFailure }),
+    ...(fields.providerFailure === undefined ? {} : { providerFailure: fields.providerFailure }),
   });
 }
 
@@ -199,7 +202,10 @@ export class GitHubActionsChangeExecutorError extends Error {
 
 function withFailureStage(error: unknown, stage: TrustedActionsFailureStage): GitHubActionsChangeExecutorError {
   if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) return error;
-  return new GitHubActionsChangeExecutorError(undefined, stage);
+  const providerFailure = readGitHubProviderFailure(error);
+  return new GitHubActionsChangeExecutorError(undefined, stage, undefined, {
+    ...(providerFailure === undefined ? {} : { providerFailure }),
+  });
 }
 
 function atRepositoryEvidenceReason(reason: RepositoryEvidenceFailureReason): (error: unknown) => never {
@@ -208,7 +214,11 @@ function atRepositoryEvidenceReason(reason: RepositoryEvidenceFailureReason): (e
       error instanceof GitHubActionsChangeExecutorError &&
       error.details !== undefined &&
       (error.details.stage !== "repository-evidence" || error.details.reason !== undefined);
-    throw hasOwnReason ? error : new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason);
+    if (hasOwnReason) throw error;
+    const providerFailure = readGitHubProviderFailure(error);
+    throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason, {
+      ...(providerFailure === undefined ? {} : { providerFailure }),
+    });
   };
 }
 
@@ -466,19 +476,35 @@ export function asTrustedActionsFailure(
   issuerStage: TrustedActionsFailureStage | undefined,
 ): GitHubActionsChangeExecutorError {
   const effectFailure = readChangeEffectFailureClassification(error);
+  const providerFailure = readGitHubProviderFailure(error);
   if (error instanceof GitHubActionsChangeExecutorError && error.details !== undefined) {
-    if (effectFailure === undefined || error.details.effectFailure !== undefined) return error;
+    if (
+      (effectFailure === undefined || error.details.effectFailure !== undefined) &&
+      (providerFailure === undefined || error.details.providerFailure !== undefined)
+    ) {
+      return error;
+    }
     return new GitHubActionsChangeExecutorError(undefined, error.details.stage, error.details.reason, {
       trustedCode: error.details.trustedCode,
       diagnostics: error.details.diagnostics,
       evidence: error.details.evidence,
-      effectFailure,
+      ...(error.details.effectFailure !== undefined
+        ? { effectFailure: error.details.effectFailure }
+        : effectFailure === undefined
+          ? {}
+          : { effectFailure }),
+      ...(error.details.providerFailure !== undefined
+        ? { providerFailure: error.details.providerFailure }
+        : providerFailure === undefined
+          ? {}
+          : { providerFailure }),
     });
   }
   const stage = trustedFailureStage(error, issuerStage);
   return new GitHubActionsChangeExecutorError(undefined, stage, undefined, {
     ...(error instanceof ChangeTrustedExecutorError ? trustedFailureFields(error) : {}),
     ...(effectFailure === undefined ? {} : { effectFailure }),
+    ...(providerFailure === undefined ? {} : { providerFailure }),
   });
 }
 
@@ -523,7 +549,10 @@ export async function createGitHubActionsChangeExecutor(
   const resolvedRepository = await resolveGitHubRepository(
     repository,
     bootstrapTransport,
-    (reason) => new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason),
+    (reason, providerFailure) =>
+      new GitHubActionsChangeExecutorError(undefined, "repository-evidence", reason, {
+        ...(providerFailure === undefined ? {} : { providerFailure }),
+      }),
   );
   const { target, repositoryNodeId } = resolvedRepository;
 

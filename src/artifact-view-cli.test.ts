@@ -9,6 +9,7 @@ import {
   type RepositoryContext,
   type RepositoryTree,
 } from "./github/index.js";
+import { attachGitHubProviderFailure, githubProviderFailure } from "./github/provider-failure.js";
 import type {
   GitHubIssue,
   GitHubOperationalCollection,
@@ -343,14 +344,27 @@ test("issue view retains bounded semantic diagnostics for malformed, unmatched, 
 test("issue view reports provider failure as a real view failure", async () => {
   class FailingAdapter extends ViewAdapter {
     override async observeIssue(): Promise<GitHubOperationalIssueEvidence> {
-      throw new GitHubApiError("issue.view", "provider unavailable");
+      throw attachGitHubProviderFailure(
+        new GitHubApiError("issue.view", "provider unavailable"),
+        githubProviderFailure("server", { retryable: true, status: 503, requestId: "VIEW:503" }),
+      );
     }
   }
 
   const result = await capture(new FailingAdapter(issue(7, validBody), []));
   assert.equal(result.exitCode, 3);
   assert.equal(result.output.ok, false);
-  assert.equal((result.output.error as Record<string, unknown>).code, "GITHUB_API_FAILED");
+  const error = result.output.error as {
+    code?: string;
+    details?: { providerFailure?: Record<string, unknown> };
+  };
+  assert.equal(error.code, "GITHUB_API_FAILED");
+  assert.deepEqual(error.details?.providerFailure, {
+    failureClass: "server",
+    retryable: true,
+    status: 503,
+    requestId: "VIEW:503",
+  });
 });
 
 test("PR view preserves runtime evidence for every semantic failure class", async () => {

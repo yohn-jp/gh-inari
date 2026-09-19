@@ -18,6 +18,13 @@ import {
   tryObserveOperationalPullRequest,
   type OperationalPullRequestObservation,
 } from "../operational-observation.js";
+import {
+  attachGitHubProviderFailure,
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
 
 export const REPOSITORY_EVIDENCE_FAILURE_REASONS = Object.freeze([
   "repository-configuration",
@@ -37,11 +44,16 @@ export function isRepositoryEvidenceFailureReason(value: unknown): value is Repo
 export class GitHubRepositoryEvidenceReaderError extends Error {
   readonly code = "GITHUB_REPOSITORY_EVIDENCE_READ_FAILED" as const;
   readonly reason?: RepositoryEvidenceFailureReason;
+  readonly providerFailure?: GitHubProviderFailureClassification;
 
-  constructor(reason?: RepositoryEvidenceFailureReason) {
+  constructor(reason?: RepositoryEvidenceFailureReason, providerFailure?: GitHubProviderFailureClassification) {
     super("GitHub repository evidence read failed closed.");
     this.name = "GitHubRepositoryEvidenceReaderError";
     this.reason = reason;
+    if (providerFailure !== undefined) {
+      this.providerFailure = providerFailure;
+      attachGitHubProviderFailure(this, providerFailure);
+    }
   }
 }
 
@@ -99,8 +111,12 @@ export interface GitHubRepositoryGovernanceTree {
   readonly entries: readonly { readonly path: string; readonly type: "blob" | "tree"; readonly sha: string }[];
 }
 
-function fail(reason?: RepositoryEvidenceFailureReason): never {
-  throw new GitHubRepositoryEvidenceReaderError(reason);
+function fail(reason?: RepositoryEvidenceFailureReason, providerFailure?: GitHubProviderFailureClassification): never {
+  throw new GitHubRepositoryEvidenceReaderError(reason, providerFailure);
+}
+
+function invalidProviderResponse(): GitHubProviderFailureClassification {
+  return githubProviderFailure("response-invalid", { retryable: false });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -108,7 +124,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function record(value: unknown, reason?: RepositoryEvidenceFailureReason): Record<string, unknown> {
-  if (!isRecord(value)) fail(reason);
+  if (!isRecord(value)) fail(reason, invalidProviderResponse());
   return value;
 }
 
@@ -119,7 +135,7 @@ function boundedString(value: unknown, maximum: number, reason?: RepositoryEvide
     value.length > maximum ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    fail(reason);
+    fail(reason, invalidProviderResponse());
   }
   return value;
 }
@@ -133,13 +149,15 @@ function boundedArtifactBody(value: unknown): string | null | undefined {
     value.length > 1_048_576 ||
     /[\u0000-\u0009\u000b-\u000c\u000e-\u001f\u007f]/u.test(value)
   ) {
-    fail();
+    fail(undefined, invalidProviderResponse());
   }
   return value;
 }
 
 function positiveNumber(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) fail();
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    fail(undefined, invalidProviderResponse());
+  }
   return value;
 }
 
@@ -158,7 +176,7 @@ function optionalPullRequestHeadSha(value: unknown): string | undefined {
 function boundedGitHubTimestamp(value: unknown): string {
   const timestamp = boundedString(value, MAX_TIMESTAMP_LENGTH);
   const match = GITHUB_TIMESTAMP_PATTERN.exec(timestamp);
-  if (match === null) fail();
+  if (match === null) fail(undefined, invalidProviderResponse());
   const date = new Date(timestamp);
   const year = Number(match[1]);
   const month = Number(match[2]);
@@ -177,7 +195,7 @@ function boundedGitHubTimestamp(value: unknown): string {
     date.getUTCSeconds() !== seconds ||
     date.getUTCMilliseconds() !== milliseconds
   ) {
-    fail();
+    fail(undefined, invalidProviderResponse());
   }
   return timestamp;
 }
@@ -215,7 +233,9 @@ export class GitHubRepositoryEvidenceReader {
 
   async readRepository(): Promise<{ readonly defaultBranch: string }> {
     const response = await this.request(apiPath(this.#options.repository, ""), "repository-request");
-    if (response.status !== 200) fail("repository-status");
+    if (response.status !== 200) {
+      fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
+    }
     const body = record(response.body, "repository-body");
     if (String(body.id) !== this.#options.repositoryId) fail("repository-id");
     return { defaultBranch: boundedString(body.default_branch, MAX_REPOSITORY_TEXT_LENGTH, "repository-body") };
@@ -226,13 +246,19 @@ export class GitHubRepositoryEvidenceReader {
       apiPath(this.#options.repository, `issues/${issueNumber}`),
       "repository-request",
     );
-    if (response.status !== 200) fail("repository-status");
+    if (response.status !== 200) {
+      fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
+    }
     const issue = record(response.body, "repository-body");
-    if (Object.prototype.hasOwnProperty.call(issue, "pull_request")) fail();
+    if (Object.prototype.hasOwnProperty.call(issue, "pull_request")) {
+      fail("repository-body", invalidProviderResponse());
+    }
     const number = positiveNumber(issue.number);
     const title = boundedString(issue.title, MAX_REPOSITORY_TEXT_LENGTH);
     const state = issue.state === "open" || issue.state === "closed" ? issue.state : undefined;
-    if (state === undefined || issueNumber !== number) fail();
+    if (state === undefined || issueNumber !== number) {
+      fail("repository-body", invalidProviderResponse());
+    }
     return { number, title, state, body: boundedArtifactBody(issue.body) };
   }
 
@@ -242,9 +268,11 @@ export class GitHubRepositoryEvidenceReader {
       "repository-request",
     );
     if (response.status === 404) return undefined;
-    if (response.status !== 200) fail();
+    if (response.status !== 200) {
+      fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
+    }
     const value = record(response.body);
-    if (value.ref !== `refs/heads/${branch}`) fail();
+    if (value.ref !== `refs/heads/${branch}`) fail("repository-body", invalidProviderResponse());
     return {
       name: branch,
       ...(optionalCommitSha(value.object) === undefined ? {} : { sha: optionalCommitSha(value.object) }),
@@ -257,12 +285,17 @@ export class GitHubRepositoryEvidenceReader {
       "repository-request",
     );
     if (response.status === 404) return [];
-    if (response.status !== 200 || !Array.isArray(response.body) || response.body.length >= MAX_BRANCH_MATCHES) fail();
+    if (response.status !== 200) {
+      fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
+    }
+    if (!Array.isArray(response.body) || response.body.length >= MAX_BRANCH_MATCHES) {
+      fail("repository-body", invalidProviderResponse());
+    }
     return response.body.map((candidate) => {
       const value = record(candidate);
       const ref = boundedString(value.ref, 512);
       const prefix = "refs/heads/";
-      if (!ref.startsWith(prefix)) fail();
+      if (!ref.startsWith(prefix)) fail("repository-body", invalidProviderResponse());
       const name = ref.slice(prefix.length);
       const sha = optionalCommitSha(value.object);
       return { name, ...(sha === undefined ? {} : { sha }) };
@@ -284,12 +317,11 @@ export class GitHubRepositoryEvidenceReader {
           ),
           "pull-request-evidence",
         );
-        if (
-          response.status !== 200 ||
-          !Array.isArray(response.body) ||
-          response.body.length >= MAX_CANONICAL_PULL_REQUEST_MATCHES
-        ) {
-          fail("pull-request-evidence");
+        if (response.status !== 200) {
+          fail("pull-request-evidence", githubProviderFailureFromStatus(response.status, response.headers));
+        }
+        if (!Array.isArray(response.body) || response.body.length >= MAX_CANONICAL_PULL_REQUEST_MATCHES) {
+          fail("pull-request-evidence", invalidProviderResponse());
         }
         for (const candidate of response.body) {
           const parsed = this.parsePullRequestEvidence(candidate, branch, false);
@@ -302,7 +334,9 @@ export class GitHubRepositoryEvidenceReader {
           apiPath(this.#options.repository, `pulls/${pullRequestNumber}`),
           "pull-request-evidence",
         );
-        if (response.status !== 200) fail("pull-request-evidence");
+        if (response.status !== 200) {
+          fail("pull-request-evidence", githubProviderFailureFromStatus(response.status, response.headers));
+        }
         const observed = this.parsePullRequestEvidence(response.body, undefined, true);
         if (observed !== undefined && !pullRequests.some((candidate) => candidate.number === observed.number)) {
           pullRequests.push(observed);
@@ -311,15 +345,19 @@ export class GitHubRepositoryEvidenceReader {
       return pullRequests;
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail("pull-request-evidence");
+      fail("pull-request-evidence", readGitHubProviderFailure(error) ?? invalidProviderResponse());
     }
   }
 
   async readPullRequestBody(number: number): Promise<string | null | undefined> {
     const response = await this.request(apiPath(this.#options.repository, `pulls/${number}`), "pull-request-evidence");
-    if (response.status !== 200) fail("pull-request-evidence");
+    if (response.status !== 200) {
+      fail("pull-request-evidence", githubProviderFailureFromStatus(response.status, response.headers));
+    }
     const value = record(response.body);
-    if (positiveNumber(value.number) !== number) fail("pull-request-evidence");
+    if (positiveNumber(value.number) !== number) {
+      fail("pull-request-evidence", invalidProviderResponse());
+    }
     return boundedArtifactBody(value.body);
   }
 
@@ -334,7 +372,7 @@ export class GitHubRepositoryEvidenceReader {
       return await adapter.observePullRequest(number);
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail("pull-request-evidence");
+      fail("pull-request-evidence", readGitHubProviderFailure(error) ?? invalidProviderResponse());
     }
   }
 
@@ -348,7 +386,7 @@ export class GitHubRepositoryEvidenceReader {
       return result.observation;
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail("pull-request-evidence");
+      fail("pull-request-evidence", readGitHubProviderFailure(error) ?? invalidProviderResponse());
     }
   }
 
@@ -357,15 +395,19 @@ export class GitHubRepositoryEvidenceReader {
       apiPath(this.#options.repository, `git/trees/${encodeURIComponent(ref)}?recursive=1`),
       "repository-request",
     );
-    if (response.status !== 200) fail("repository-status");
+    if (response.status !== 200) {
+      fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
+    }
     const value = record(response.body, "repository-body");
     const sha = boundedString(value.sha, MAX_REPOSITORY_TEXT_LENGTH);
-    if (value.truncated !== false || !Array.isArray(value.tree) || value.tree.length > 2048) fail();
+    if (value.truncated !== false || !Array.isArray(value.tree) || value.tree.length > 2048) {
+      fail("repository-body", invalidProviderResponse());
+    }
     const entries = value.tree.map((entry) => {
       const candidate = record(entry);
       const type: "blob" | "tree" | undefined =
         candidate.type === "blob" || candidate.type === "tree" ? candidate.type : undefined;
-      if (type === undefined) fail();
+      if (type === undefined) fail("repository-body", invalidProviderResponse());
       return { path: boundedString(candidate.path, 512), type, sha: boundedString(candidate.sha, 255) };
     });
     return { sha, entries };
@@ -378,8 +420,8 @@ export class GitHubRepositoryEvidenceReader {
         method: "GET",
         path,
       });
-    } catch {
-      fail(reason);
+    } catch (error: unknown) {
+      fail(reason, readGitHubProviderFailure(error));
     }
   }
 

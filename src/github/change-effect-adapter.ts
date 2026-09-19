@@ -22,6 +22,12 @@ import {
 } from "../change.js";
 import { readChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
 import {
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
+import {
   changeProvenanceRecordPath,
   renderChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
@@ -61,6 +67,8 @@ export interface GitHubChangeEffectRequest {
 export interface GitHubChangeEffectResponse {
   readonly status: number;
   readonly body?: unknown;
+  /** Allowlisted, bounded response metadata only; never arbitrary provider headers. */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -312,6 +320,8 @@ export interface GitHubChangeEffectFailureResult {
   readonly effect: ChangeEffect;
   /** This is directly compatible with Core's compensation/recovery input. */
   readonly failure: GitHubChangeEffectFailureEvidence;
+  /** Provider-I/O classification stays outside Core compensation evidence. */
+  readonly providerFailure?: GitHubProviderFailureClassification;
 }
 
 export type GitHubChangeEffectResult = GitHubChangeEffectSuccessResult | GitHubChangeEffectFailureResult;
@@ -340,11 +350,16 @@ export class GitHubChangeEffectConfigurationError extends Error {
 /** Fixed, secret-safe classification for a provider-backed effect failure. */
 export class GitHubChangeEffectFailureError extends Error {
   readonly classification: ChangeEffectFailureClassification;
+  readonly providerFailure?: GitHubProviderFailureClassification;
 
-  constructor(classification: ChangeEffectFailureClassification) {
+  constructor(
+    classification: ChangeEffectFailureClassification,
+    providerFailure?: GitHubProviderFailureClassification,
+  ) {
     super("The GitHub Change effect failed at a bounded provider boundary.");
     this.name = "GitHubChangeEffectFailureError";
     this.classification = normalizeChangeEffectFailureClassification(classification)!;
+    this.providerFailure = providerFailure;
   }
 }
 
@@ -385,10 +400,18 @@ export class GitHubChangeEffectAdapter {
             (error instanceof InvalidGitHubResponseError
               ? { reason: "response-validation" as const }
               : { reason: "transport" as const }));
+      const providerFailure =
+        error instanceof GitHubChangeEffectFailureError
+          ? error.providerFailure
+          : (readGitHubProviderFailure(error) ??
+            (error instanceof InvalidGitHubResponseError
+              ? githubProviderFailure("response-invalid", { retryable: false })
+              : undefined));
       return {
         status: "failed",
         effect: explicitEffect,
         failure: createFailureEvidence(explicitEffect, classification),
+        ...(providerFailure === undefined ? {} : { providerFailure }),
       };
     }
   }
@@ -698,19 +721,28 @@ export class GitHubChangeEffectAdapter {
       });
     } catch (error: unknown) {
       if (error instanceof GitHubChangeEffectFailureError) throw error;
-      throw new GitHubChangeEffectFailureError({ reason: "transport" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "transport" },
+        readGitHubProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true }),
+      );
     }
     if (!isRecord(response) || !isHttpStatus(response.status)) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     if (response.status === 404) return undefined;
     if (response.status !== 200) {
       const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
-      throw new GitHubChangeEffectFailureError({
-        reason: "provider-http",
-        status: response.status,
-        ...(provider === undefined ? {} : { provider }),
-      });
+      throw new GitHubChangeEffectFailureError(
+        {
+          reason: "provider-http",
+          status: response.status,
+          ...(provider === undefined ? {} : { provider }),
+        },
+        githubProviderFailureFromStatus(response.status, response.headers),
+      );
     }
     return parseGitReference(response.body, `refs/heads/${branch}`);
   }
@@ -722,23 +754,35 @@ export class GitHubChangeEffectAdapter {
     try {
       const response = await this.transport.request({ ...request, hostname: this.repository.hostname });
       if (!isRecord(response) || !isHttpStatus(response.status)) {
-        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+        throw new GitHubChangeEffectFailureError(
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
       }
       if (response.status !== expectedStatus) {
         const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
-        throw new GitHubChangeEffectFailureError({
-          reason: "provider-http",
-          status: response.status,
-          ...(provider === undefined ? {} : { provider }),
-        });
+        throw new GitHubChangeEffectFailureError(
+          {
+            reason: "provider-http",
+            status: response.status,
+            ...(provider === undefined ? {} : { provider }),
+          },
+          githubProviderFailureFromStatus(response.status, response.headers),
+        );
       }
       return response.body;
     } catch (error: unknown) {
       if (error instanceof GitHubChangeEffectFailureError) throw error;
       if (error instanceof InvalidGitHubResponseError) {
-        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+        throw new GitHubChangeEffectFailureError(
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
       }
-      throw new GitHubChangeEffectFailureError({ reason: "transport" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "transport" },
+        readGitHubProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true }),
+      );
     }
   }
 

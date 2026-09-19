@@ -56,6 +56,14 @@ import {
   SemanticPullRequestMutationError,
   type SemanticPullRequestMutationExecutionPort,
 } from "../semantic-pr-mutation.js";
+import {
+  attachGitHubProviderFailure,
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  projectGitHubProviderHeaders,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
 
 const DEFAULT_API_URL = "https://api.github.com";
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -106,8 +114,13 @@ export class GitHubAppCredentialBrokerError extends Error {
   readonly reason?: ChangeEffectFailureClassification["reason"];
   readonly status?: number;
   readonly provider?: ChangeEffectFailureClassification["provider"];
+  readonly providerFailure?: GitHubProviderFailureClassification;
 
-  constructor(stage: GitHubAppCredentialFailureStage, classification?: ChangeEffectFailureClassification) {
+  constructor(
+    stage: GitHubAppCredentialFailureStage,
+    classification?: ChangeEffectFailureClassification,
+    providerFailure?: GitHubProviderFailureClassification,
+  ) {
     super("Trusted GitHub App credential operation failed closed.");
     this.name = "GitHubAppCredentialBrokerError";
     this.stage = stage;
@@ -116,6 +129,10 @@ export class GitHubAppCredentialBrokerError extends Error {
       this.reason = classification.reason;
       this.status = classification.status;
       this.provider = classification.provider;
+    }
+    if (providerFailure !== undefined) {
+      this.providerFailure = providerFailure;
+      attachGitHubProviderFailure(this, providerFailure);
     }
   }
 }
@@ -126,10 +143,24 @@ export class GitHubAppCredentialBrokerError extends Error {
  * the other, so a hung provider request fails closed instead of the runtime
  * exiting first. Always call `clear()` once the request settles.
  */
-function boundedRequestSignal(timeoutMs: number): { readonly signal: AbortSignal; readonly clear: () => void } {
+function boundedRequestSignal(timeoutMs: number): {
+  readonly signal: AbortSignal;
+  readonly clear: () => void;
+  readonly timedOut: boolean;
+} {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+  const state = { timedOut: false };
+  const timer = setTimeout(() => {
+    state.timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timer),
+    get timedOut() {
+      return state.timedOut;
+    },
+  };
 }
 
 export interface GitHubAppRepositoryReadTransport {
@@ -169,13 +200,22 @@ export interface GitHubAppResolvedRepository {
 export async function resolveGitHubRepository(
   repository: GitHubChangeEffectRepository,
   transport: Pick<GitHubChangeEffectTransport, "request">,
-  failure?: (reason: GitHubAppRepositoryResolutionFailureReason) => Error,
+  failure?: (
+    reason: GitHubAppRepositoryResolutionFailureReason,
+    providerFailure?: GitHubProviderFailureClassification,
+  ) => Error,
 ): Promise<GitHubAppResolvedRepository> {
-  const fail = (reason: GitHubAppRepositoryResolutionFailureReason): Error => {
+  const fail = (
+    reason: GitHubAppRepositoryResolutionFailureReason,
+    providerFailure?: GitHubProviderFailureClassification,
+  ): Error => {
     try {
-      return failure?.(reason) ?? new GitHubAppCredentialBrokerError("repository-read");
+      return (
+        failure?.(reason, providerFailure) ??
+        new GitHubAppCredentialBrokerError("repository-read", undefined, providerFailure)
+      );
     } catch {
-      return new GitHubAppCredentialBrokerError("repository-read");
+      return new GitHubAppCredentialBrokerError("repository-read", undefined, providerFailure);
     }
   };
   let response: GitHubChangeEffectResponse;
@@ -185,19 +225,25 @@ export async function resolveGitHubRepository(
       method: "GET",
       path: `repos/${repository.owner}/${repository.name}`,
     });
-  } catch {
-    throw fail("repository-request");
+  } catch (error: unknown) {
+    throw fail("repository-request", readGitHubProviderFailure(error));
   }
-  if (response.status !== 200) throw fail("repository-status");
+  if (response.status !== 200) {
+    throw fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
+  }
   let body: Record<string, unknown>;
   try {
     body = record(response.body);
   } catch {
-    throw fail("repository-body");
+    throw fail("repository-body", githubProviderFailure("response-invalid", { retryable: false }));
   }
   const repositoryId = String(body.id);
-  if (!DECIMAL_ID_PATTERN.test(repositoryId)) throw fail("repository-id");
-  if (typeof body.fork !== "boolean") throw fail("repository-fork");
+  if (!DECIMAL_ID_PATTERN.test(repositoryId)) {
+    throw fail("repository-id", githubProviderFailure("response-invalid", { retryable: false }));
+  }
+  if (typeof body.fork !== "boolean") {
+    throw fail("repository-fork", githubProviderFailure("response-invalid", { retryable: false }));
+  }
   const repositoryNodeId =
     typeof body.node_id === "string" &&
     body.node_id.length > 0 &&
@@ -286,14 +332,29 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
           signal: bounded.signal,
         });
       } catch {
-        throw this.safeFailure(this.#failureStage, { reason: "transport" });
+        const providerFailure = bounded.timedOut
+          ? githubProviderFailure("timeout", { retryable: true, timeoutMs: this.#requestTimeoutMs })
+          : githubProviderFailure("transport", { retryable: true });
+        throw this.safeFailure(this.#failureStage, { reason: "transport" }, providerFailure);
       }
       try {
-        return { status: response.status, body: await boundedBody(response) };
+        const headers = projectGitHubProviderHeaders(response.headers);
+        return {
+          status: response.status,
+          body: await boundedBody(response),
+          ...(headers === undefined ? {} : { headers }),
+        };
       } catch (error: unknown) {
+        const providerFailure =
+          error instanceof InvalidGitHubAppResponseError
+            ? githubProviderFailure("response-invalid", { retryable: false })
+            : bounded.timedOut
+              ? githubProviderFailure("timeout", { retryable: true, timeoutMs: this.#requestTimeoutMs })
+              : githubProviderFailure("transport", { retryable: true });
         throw this.safeFailure(
           this.#failureStage,
           error instanceof InvalidGitHubAppResponseError ? { reason: "response-validation" } : { reason: "transport" },
+          providerFailure,
         );
       }
     } finally {
@@ -315,7 +376,10 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
       typeof request.expectedCommitSha !== "string" ||
       !COMMIT_SHA_PATTERN.test(request.expectedCommitSha)
     ) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     const response = await this.requestAt(this.#graphqlApiUrl, {
       hostname: "github.com",
@@ -340,33 +404,53 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
     });
     if (response.status !== 200) {
       const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
-      throw new GitHubChangeEffectFailureError({
-        reason: "provider-http",
-        status: response.status,
-        ...(provider === undefined ? {} : { provider }),
-      });
+      throw new GitHubChangeEffectFailureError(
+        {
+          reason: "provider-http",
+          status: response.status,
+          ...(provider === undefined ? {} : { provider }),
+        },
+        githubProviderFailureFromStatus(response.status, response.headers),
+      );
     }
-    if (!isRecord(response.body)) throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+    if (!isRecord(response.body)) {
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
+    }
     const body = response.body;
     if (body.errors !== undefined) {
       if (!isValidGraphqlErrorList(body.errors)) {
-        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+        throw new GitHubChangeEffectFailureError(
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
       }
       const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, body);
-      throw new GitHubChangeEffectFailureError({
-        reason: "provider-http",
-        status: response.status,
-        ...(provider === undefined ? {} : { provider }),
-      });
+      throw new GitHubChangeEffectFailureError(
+        {
+          reason: "provider-http",
+          status: response.status,
+          ...(provider === undefined ? {} : { provider }),
+        },
+        githubProviderFailure("provider-rejection", { retryable: false, status: response.status }),
+      );
     }
     if (!isRecord(body.data) || !isRecord(body.data.updateRefs)) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     if (
       !Object.prototype.hasOwnProperty.call(body.data.updateRefs, "clientMutationId") ||
       body.data.updateRefs.clientMutationId !== null
     ) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     return "deleted";
   }
@@ -374,19 +458,21 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
   private safeFailure(
     stage: GitHubAppCredentialFailureStage,
     classification?: ChangeEffectFailureClassification,
+    providerFailure?: GitHubProviderFailureClassification,
   ): Error {
     try {
       const error = this.#failure(stage);
       if (error instanceof Error && !errorText(error).includes(this.#token)) {
-        if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
-          return new GitHubAppCredentialBrokerError(stage, classification);
+        if (error instanceof GitHubAppCredentialBrokerError) {
+          return new GitHubAppCredentialBrokerError(stage, classification, providerFailure);
         }
-        return attachChangeEffectFailureClassification(error, classification);
+        const classified = attachChangeEffectFailureClassification(error, classification);
+        return attachGitHubProviderFailure(classified, providerFailure);
       }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError(stage, classification);
+    return new GitHubAppCredentialBrokerError(stage, classification, providerFailure);
   }
 }
 
@@ -577,7 +663,9 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       scope: credential.scope,
       apply: async (effect) => {
         const result = await adapter.execute(effect);
-        if (result.status === "failed") throw this.safeMutationFailure(effect, result.failure);
+        if (result.status === "failed") {
+          throw this.safeMutationFailure(effect, result.failure, result.providerFailure);
+        }
         return result.evidence as GitHubChangeEffectSuccessEvidence;
       },
     };
@@ -712,19 +800,30 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         signal: bounded.signal,
       });
     } catch {
-      throw this.safeFailure("installation-token", { reason: "credential" });
+      const providerFailure = bounded.timedOut
+        ? githubProviderFailure("timeout", { retryable: true, timeoutMs: this.#requestTimeoutMs })
+        : githubProviderFailure("transport", { retryable: true });
+      throw this.safeFailure("installation-token", { reason: "credential" }, providerFailure);
     } finally {
       bounded.clear();
     }
     if (response.status !== 201) {
-      throw this.safeFailure("installation-token", { reason: "credential" });
+      throw this.safeFailure(
+        "installation-token",
+        { reason: "credential" },
+        githubProviderFailureFromStatus(response.status, projectGitHubProviderHeaders(response.headers)),
+      );
     }
 
     let body: Record<string, unknown>;
     try {
       body = record(await boundedBody(response));
     } catch {
-      throw this.safeFailure("installation-token", { reason: "credential" });
+      throw this.safeFailure(
+        "installation-token",
+        { reason: "credential" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     let token: string;
     let expiresAt: string;
@@ -801,6 +900,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
   private safeFailure(
     stage: GitHubAppCredentialFailureStage,
     classification?: ChangeEffectFailureClassification,
+    providerFailure?: GitHubProviderFailureClassification,
   ): Error {
     try {
       const error = this.#failure(stage);
@@ -809,18 +909,23 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         (this.#privateKeyPem === undefined || !errorText(error).includes(this.#privateKeyPem)) &&
         (this.#installationId === undefined || !errorText(error).includes(this.#installationId))
       ) {
-        if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
-          return new GitHubAppCredentialBrokerError(stage, classification);
+        if (error instanceof GitHubAppCredentialBrokerError) {
+          return new GitHubAppCredentialBrokerError(stage, classification, providerFailure);
         }
-        return attachChangeEffectFailureClassification(error, classification);
+        const classified = attachChangeEffectFailureClassification(error, classification);
+        return attachGitHubProviderFailure(classified, providerFailure);
       }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError(stage, classification);
+    return new GitHubAppCredentialBrokerError(stage, classification, providerFailure);
   }
 
-  private safeMutationFailure(effect: ChangeEffect, failure: ChangeIssuanceFailureEvidence): Error {
+  private safeMutationFailure(
+    effect: ChangeEffect,
+    failure: ChangeIssuanceFailureEvidence,
+    providerFailure?: GitHubProviderFailureClassification,
+  ): Error {
     const classification =
       failure.reason === undefined
         ? undefined
@@ -833,19 +938,25 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       const error = this.#mutationFailure(effect);
       if (error instanceof Error && !errorText(error).includes(this.#privateKeyPem)) {
         if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
-          return new GitHubAppCredentialBrokerError("projection-execution", classification);
+          return new GitHubAppCredentialBrokerError("projection-execution", classification, providerFailure);
         }
-        return attachChangeEffectFailureClassification(error, classification);
+        return attachGitHubProviderFailure(
+          attachChangeEffectFailureClassification(error, classification),
+          providerFailure,
+        );
       }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError("projection-execution", classification);
+    return new GitHubAppCredentialBrokerError("projection-execution", classification, providerFailure);
   }
 
   private safeOperationError(error: unknown, token: string, stage: GitHubAppCredentialFailureStage): Error {
     const classification = readChangeEffectFailureClassification(error);
-    if (classification !== undefined) return this.safeFailure(stage, classification);
+    const providerFailure = readGitHubProviderFailure(error);
+    if (classification !== undefined || providerFailure !== undefined) {
+      return this.safeFailure(stage, classification, providerFailure);
+    }
     if (error instanceof EffectAuthorizerError) {
       const serialized = errorText(error);
       if (!serialized.includes(token) && !serialized.includes(this.#privateKeyPem)) return error;

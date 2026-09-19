@@ -38,6 +38,12 @@ import {
 import { resolveAuthenticatedGitHubUser, GitHubUserIdentityError } from "./user-identity.js";
 import type { GitHubChangeEffectJsonObject, GitHubChangeEffectRequest } from "./change-effect-adapter.js";
 import {
+  attachGitHubProviderFailure,
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  readGitHubProviderFailure,
+} from "./provider-failure.js";
+import {
   VALIDATED_RENDERED_PHASE,
   type GitHubIssue,
   type GitHubOperationalActor,
@@ -201,7 +207,10 @@ export class GitHubAdapter {
     await this.ensureAuthenticated(hostname, deadline);
     const response = await this.requestNative({ hostname, method: "GET", path: "user" }, "auth.identity", deadline);
     if (response.status < 200 || response.status >= 300) {
-      throw new GitHubApiError("auth.identity", "GitHub authenticated-user request failed.");
+      throw attachGitHubProviderFailure(
+        new GitHubApiError("auth.identity", "GitHub authenticated-user request failed."),
+        githubProviderFailureFromStatus(response.status, response.headers),
+      );
     }
     const record = responseRecord(response.body, "auth.identity");
     const login = responseString(record.login, "login", "auth.identity");
@@ -267,7 +276,10 @@ export class GitHubAdapter {
       deadline,
     );
     if (response.status !== 404 && (response.status < 200 || response.status >= 300)) {
-      throw new GitHubApiError(operation, "GitHub repository API request failed.");
+      throw attachGitHubProviderFailure(
+        new GitHubApiError(operation, "GitHub repository API request failed."),
+        githubProviderFailureFromStatus(response.status, response.headers),
+      );
     }
     return response;
   }
@@ -1345,9 +1357,12 @@ export class GitHubAdapter {
       deadline,
     );
     if (response.status < 200 || response.status >= 300) {
-      throw new RepositoryResolutionError(
-        "Unable to resolve the GitHub repository database identity. Check the target repository and authentication.",
-        { operation: "repository.resolve" },
+      throw attachGitHubProviderFailure(
+        new RepositoryResolutionError(
+          "Unable to resolve the GitHub repository database identity. Check the target repository and authentication.",
+          { operation: "repository.resolve" },
+        ),
+        githubProviderFailureFromStatus(response.status, response.headers),
       );
     }
     const record = responseRecord(response.body, "repository.resolve");
@@ -1463,7 +1478,10 @@ export class GitHubAdapter {
       deadline,
     );
     if (response.status < 200 || response.status >= 300) {
-      throw new GitHubApiError(operation, `GitHub API request failed during ${operation}.`);
+      throw attachGitHubProviderFailure(
+        new GitHubApiError(operation, `GitHub API request failed during ${operation}.`),
+        githubProviderFailureFromStatus(response.status, response.headers),
+      );
     }
     return response.body;
   }
@@ -1511,18 +1529,32 @@ export class GitHubAdapter {
 
   private mapProviderError(operation: string, error: unknown): GitHubAdapterError {
     if (error instanceof GitHubAdapterError) return error;
-    if (error instanceof GitHubHttpTimeoutError) return new GitHubTimeoutError(operation, error.timeoutMs, error);
-    if (error instanceof GitHubHttpResponseLimitError)
-      return new GitHubResponseLimitError(operation, error.limitBytes, error);
-    if (error instanceof GitHubHttpMalformedResponseError)
-      return new GitHubApiResponseError(operation, "GitHub returned a malformed response.", {}, error);
-    if (error instanceof GitHubHttpTransportError)
-      return new GitHubTransportError(operation, "Unable to complete the native GitHub request.", {}, error);
-    if (error instanceof GitHubUserIdentityError) {
+    const providerFailure = readGitHubProviderFailure(error);
+    let mapped: GitHubAdapterError;
+    if (error instanceof GitHubHttpTimeoutError) mapped = new GitHubTimeoutError(operation, error.timeoutMs, error);
+    else if (error instanceof GitHubHttpResponseLimitError)
+      mapped = new GitHubResponseLimitError(operation, error.limitBytes, error);
+    else if (error instanceof GitHubHttpMalformedResponseError)
+      mapped = new GitHubApiResponseError(operation, "GitHub returned a malformed response.", {}, error);
+    else if (error instanceof GitHubHttpTransportError)
+      mapped = new GitHubTransportError(operation, "Unable to complete the native GitHub request.", {}, error);
+    else if (error instanceof GitHubUserIdentityError) {
       if (error.cause !== undefined) return this.mapProviderError(operation, error.cause);
-      return new GitHubAuthenticationError(undefined, error);
+      mapped = new GitHubAuthenticationError(undefined, error);
+    } else {
+      mapped = new GitHubTransportError(operation, "Unable to complete the native GitHub request.", {}, error);
     }
-    return new GitHubTransportError(operation, "Unable to complete the native GitHub request.", {}, error);
+    return attachGitHubProviderFailure(
+      mapped,
+      providerFailure ??
+        (mapped.category === "authentication"
+          ? githubProviderFailure("authentication", { retryable: false })
+          : mapped.category === "timeout"
+            ? githubProviderFailure("timeout", { retryable: true })
+            : mapped.category === "transport"
+              ? githubProviderFailure("transport", { retryable: true })
+              : undefined),
+    );
   }
 }
 
