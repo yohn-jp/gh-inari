@@ -52,11 +52,21 @@ async function withProviderState(state, run) {
 }
 
 async function downloadArtifact(providerUrl, artifactId) {
-  const response = await fetch(`${providerUrl}/repos/yohn-jp/gh-inari/actions/artifacts/${artifactId}/zip`, {
+  const initial = await fetch(`${providerUrl}/repos/yohn-jp/gh-inari/actions/artifacts/${artifactId}/zip`, {
+    redirect: "manual",
+    headers: { authorization: "Bearer bounded-http-fixture-token" },
+  });
+  const location = initial.headers.get("location");
+  if (initial.status !== 302) {
+    const bytes = Buffer.from(await initial.arrayBuffer());
+    return { initial, status: initial.status, bytes, text: bytes.toString("utf8") };
+  }
+  assert.ok(location);
+  const response = await fetch(new URL(location, providerUrl), {
     headers: { authorization: "Bearer bounded-http-fixture-token" },
   });
   const bytes = Buffer.from(await response.arrayBuffer());
-  return { status: response.status, bytes, text: bytes.toString("utf8") };
+  return { initial, status: response.status, bytes, text: bytes.toString("utf8") };
 }
 
 test("controlled Actions artifact download emits exact ZIP bytes through native HTTP", async () => {
@@ -67,6 +77,10 @@ test("controlled Actions artifact download emits exact ZIP bytes through native 
     },
     async (providerUrl) => {
       const result = await downloadArtifact(providerUrl, 2000);
+      assert.equal(
+        result.initial.headers.get("location"),
+        "/repos/yohn-jp/gh-inari/actions/artifacts/2000/zip?download=1",
+      );
       assert.equal(result.status, 200);
       assert.deepEqual(result.bytes, archive);
       assert.equal(result.text.length, archive.length);

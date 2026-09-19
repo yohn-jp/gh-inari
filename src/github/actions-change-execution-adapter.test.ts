@@ -358,7 +358,12 @@ test("Actions transport accepts no repository projection API and delegates reads
 });
 
 test("default Actions transport uses native HTTP for dispatch, runs, artifacts, and binary download", async () => {
-  const requests: Array<{ readonly url: string; readonly method: string; readonly body?: unknown }> = [];
+  const requests: Array<{
+    readonly url: string;
+    readonly method: string;
+    readonly headers?: HeadersInit;
+    readonly body?: unknown;
+  }> = [];
   let runReads = 0;
   let artifactDownloads = 0;
   let dispatchBody: unknown;
@@ -366,7 +371,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
     const url = String(input);
     const method = init?.method ?? "GET";
     const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
-    requests.push({ url, method, ...(body === undefined ? {} : { body }) });
+    requests.push({ url, method, headers: init?.headers, ...(body === undefined ? {} : { body }) });
     const parsed = new URL(url);
     if (parsed.pathname === "/repos/acme/inari" && method === "GET") {
       return nativeJsonResponse({ id: 100000157, fork: false, default_branch: "main" });
@@ -468,6 +473,9 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   assert.doesNotMatch(JSON.stringify(dispatchBody), /actions-transport-secret|requester|token/iu);
   assert.ok(requests.some((request) => request.url.includes("/repos/acme/inari/actions/workflows/")));
   assert.ok(requests.some((request) => request.url.includes("/repos/acme/inari/actions/artifacts")));
+  const artifactRequest = requests.find((request) => request.url.endsWith("/actions/artifacts/21/zip"));
+  assert.ok(artifactRequest);
+  assert.equal(new Headers(artifactRequest.headers).get("accept"), "application/vnd.github+json");
   assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
   assert.equal(artifactDownloads, 2);
 });

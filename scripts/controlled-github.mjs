@@ -890,6 +890,13 @@ async function actionsHttpApi(request, response, parsed, parts, state, statePath
       sendJson(response, 404, { message: "Actions artifact not found" });
       return;
     }
+    if (parsed.searchParams.get("download") !== "1") {
+      response.writeHead(302, {
+        location: `${parsed.pathname}?download=1`,
+      });
+      response.end();
+      return;
+    }
     const bytes = Buffer.from(artifact.bytes, "base64");
     response.writeHead(200, { "content-type": "application/zip", "content-length": bytes.byteLength });
     response.end(bytes);

@@ -992,7 +992,6 @@ export class ActionsChangeExecutionNativeHttpApi
       hostname: context.hostname,
       method: "GET",
       path: `repos/${context.nameWithOwner}/actions/artifacts/${artifactId}/zip`,
-      accept: "application/zip",
     });
     nativeRepositoryResponseStatus(response.status, response.headers);
     if (response.bytes === undefined) throw new NativeActionsApiError("response");
