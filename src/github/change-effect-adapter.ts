@@ -71,6 +71,16 @@ export interface GitHubChangeEffectResponse {
   readonly headers?: Readonly<Record<string, string>>;
 }
 
+/** Provider-native GraphQL request capability for mutations with no REST path. */
+export interface GitHubChangeEffectGraphqlRequest {
+  readonly query: string;
+  readonly variables: GitHubChangeEffectJsonObject;
+}
+
+export interface GitHubChangeEffectGraphqlTransport {
+  requestGraphql(request: GitHubChangeEffectGraphqlRequest): Promise<GitHubChangeEffectResponse>;
+}
+
 /**
  * Explicit execution boundary for a future App, Actions, or service transport.
  * Credentials and transport errors remain owned by the implementation.
@@ -104,6 +114,8 @@ export type GitHubChangeEffectCompareAndDeleteOutcome =
 export interface GitHubChangeEffectAdapterOptions {
   readonly repository: GitHubChangeEffectRepository;
   readonly transport: GitHubChangeEffectTransport;
+  /** Explicit provider GraphQL endpoint used by GraphQL-only effects. */
+  readonly graphqlTransport?: GitHubChangeEffectGraphqlTransport;
   /** Trusted runtime signing and Git-data capability for the provenance effect. */
   readonly provenance?: GitHubChangeProvenanceExecutionOptions;
 }
@@ -371,6 +383,7 @@ export class GitHubChangeEffectFailureError extends Error {
 export class GitHubChangeEffectAdapter {
   private readonly repository: GitHubChangeEffectRepository;
   private readonly transport: GitHubChangeEffectTransport;
+  private readonly graphqlTransport: GitHubChangeEffectGraphqlTransport | undefined;
   private readonly provenance: GitHubChangeProvenanceExecutionOptions | undefined;
 
   constructor(options: GitHubChangeEffectAdapterOptions) {
@@ -380,6 +393,7 @@ export class GitHubChangeEffectAdapter {
     }
     this.repository = { ...options.repository };
     this.transport = options.transport;
+    this.graphqlTransport = options.graphqlTransport;
     this.provenance = options.provenance;
   }
 
@@ -615,19 +629,13 @@ export class GitHubChangeEffectAdapter {
     }
     const nodeId = responseBoundedString(current.node_id);
 
-    const response = await this.request(
-      {
-        method: "POST",
-        path: "graphql",
-        body: {
-          operationName: "PullRequestReadyForReview",
-          query: READY_FOR_REVIEW_MUTATION,
-          variables: { input: { pullRequestId: nodeId } },
-        },
-      },
-      200,
+    if (this.graphqlTransport === undefined) throw new InvalidGitHubResponseError();
+    const envelope = responseRecord(
+      await this.requestGraphql({
+        query: READY_FOR_REVIEW_MUTATION,
+        variables: { input: { pullRequestId: nodeId } },
+      }),
     );
-    const envelope = responseRecord(response);
     if (envelope.errors !== undefined || !isRecord(envelope.data)) {
       throw new InvalidGitHubResponseError();
     }
@@ -760,6 +768,42 @@ export class GitHubChangeEffectAdapter {
         );
       }
       if (response.status !== expectedStatus) {
+        const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
+        throw new GitHubChangeEffectFailureError(
+          {
+            reason: "provider-http",
+            status: response.status,
+            ...(provider === undefined ? {} : { provider }),
+          },
+          githubProviderFailureFromStatus(response.status, response.headers),
+        );
+      }
+      return response.body;
+    } catch (error: unknown) {
+      if (error instanceof GitHubChangeEffectFailureError) throw error;
+      if (error instanceof InvalidGitHubResponseError) {
+        throw new GitHubChangeEffectFailureError(
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
+      }
+      throw new GitHubChangeEffectFailureError(
+        { reason: "transport" },
+        readGitHubProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true }),
+      );
+    }
+  }
+
+  private async requestGraphql(request: GitHubChangeEffectGraphqlRequest): Promise<unknown> {
+    try {
+      const response = await this.graphqlTransport!.requestGraphql(request);
+      if (!isRecord(response) || !isHttpStatus(response.status)) {
+        throw new GitHubChangeEffectFailureError(
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
+      }
+      if (response.status !== 200) {
         const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
         throw new GitHubChangeEffectFailureError(
           {
