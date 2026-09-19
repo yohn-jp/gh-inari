@@ -1,6 +1,7 @@
 export const CERTIFICATION_EVIDENCE_SCHEMA_VERSION: "1";
 export type CertificationSchemaVersion = typeof CERTIFICATION_EVIDENCE_SCHEMA_VERSION;
 export const CERTIFICATION_KINDS: readonly ["packed-artifact-golden-path", "self-dogfood-golden-path"];
+export const IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND: "implementation-native-lifecycle";
 export type CertificationKind = (typeof CERTIFICATION_KINDS)[number];
 export const CERTIFICATION_RESULTS: readonly ["passed", "failed", "blocked"];
 export type CertificationResult = (typeof CERTIFICATION_RESULTS)[number];
@@ -24,6 +25,10 @@ export const SELF_DOGFOOD_RECOVERY_OPERATION: {
   readonly operation: string;
   readonly outcomes: readonly string[];
 };
+export const IMPLEMENTATION_LIFECYCLE_OPERATION_REQUIREMENTS: readonly {
+  readonly operation: string;
+  readonly outcomes: readonly string[];
+}[];
 export const SELF_DOGFOOD_OUTCOMES: {
   readonly VERIFIED: "verified";
   readonly RETURNED_EXISTING: "returned-existing";
@@ -96,7 +101,12 @@ export type CertificationDiagnosticCode =
   | "DOGFOOD_SCENARIO_INVALID"
   | "DOGFOOD_OPERATION_MISSING"
   | "DOGFOOD_OPERATION_OUTCOME_INVALID"
-  | "DOGFOOD_FINAL_STATE_INVALID";
+  | "DOGFOOD_FINAL_STATE_INVALID"
+  | "LIFECYCLE_IDENTITY_INVALID"
+  | "LIFECYCLE_SESSION_INVALID"
+  | "LIFECYCLE_OPERATION_INVALID"
+  | "LIFECYCLE_OPERATION_MISSING"
+  | "LIFECYCLE_FINAL_STATE_INVALID";
 
 export interface CertificationPackageEvidence {
   readonly name: string;
@@ -160,10 +170,48 @@ export interface SelfDogfoodCertificationEvidence extends CertificationEnvelopeB
   readonly finalState: CertificationFinalStateEvidence;
 }
 
-export type CertificationEvidence = PackedArtifactCertificationEvidence | SelfDogfoodCertificationEvidence;
+export interface CertificationLifecycleImplementationIdentity {
+  readonly issue: number;
+  readonly branch: string;
+  readonly pullRequest: number;
+}
+
+export interface CertificationLifecycleCapability {
+  readonly kind: string;
+  readonly issue?: number;
+  readonly branch?: string;
+  readonly pathPolicy?: string;
+}
+
+export interface CertificationLifecycleSessionEvidence {
+  readonly capabilities: readonly CertificationLifecycleCapability[];
+}
+
+export interface CertificationLifecycleFinalState {
+  readonly implementation: "COMPLETED";
+  readonly change: "MERGED";
+  readonly source: "CLOSED";
+  readonly frontier: "SATISFIED";
+}
+
+export interface ImplementationLifecycleCertificationEvidence extends CertificationEnvelopeBase {
+  readonly certificationKind: "implementation-native-lifecycle";
+  readonly package: CertificationPackageEvidence;
+  readonly repository: CertificationRepositoryIdentity;
+  readonly sourceIssue: number;
+  readonly implementation: CertificationLifecycleImplementationIdentity;
+  readonly session: CertificationLifecycleSessionEvidence;
+  readonly operations: readonly CertificationOperationEvidence[];
+  readonly finalState: CertificationLifecycleFinalState;
+}
+
+export type CertificationEvidence =
+  PackedArtifactCertificationEvidence | SelfDogfoodCertificationEvidence | ImplementationLifecycleCertificationEvidence;
+
+export type CertificationEvidenceKind = CertificationKind | typeof IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND;
 
 export interface CertificationValidationOptions {
-  readonly certificationKind?: CertificationKind;
+  readonly certificationKind?: CertificationEvidenceKind;
   readonly contractVersions?: CertificationContractVersions;
 }
 
@@ -187,6 +235,7 @@ export function validateCertificationEvidence(
   options?: CertificationValidationOptions,
 ): CertificationValidationResult;
 export function validateSelfDogfoodEvidence(value: unknown): CertificationValidationResult;
+export function validateImplementationLifecycleCertificationEvidence(value: unknown): CertificationValidationResult;
 export function validateDisposableGovernedIssue(value: unknown): CertificationValidationStatus;
 
 export interface CertificationValidationStatus {
@@ -196,6 +245,11 @@ export interface CertificationValidationStatus {
 }
 
 export function appendSelfDogfoodOperation(
+  operations: readonly CertificationOperationEvidence[],
+  operation: string,
+  outcome: string,
+): readonly CertificationOperationEvidence[];
+export function appendImplementationLifecycleOperation(
   operations: readonly CertificationOperationEvidence[],
   operation: string,
   outcome: string,

@@ -7,6 +7,8 @@ import fs from "node:fs";
  */
 export const CERTIFICATION_EVIDENCE_SCHEMA_VERSION = "1";
 export const CERTIFICATION_KINDS = Object.freeze(["packed-artifact-golden-path", "self-dogfood-golden-path"]);
+/** Separate lifecycle lane; the older release-bound Golden Path lanes remain unchanged. */
+export const IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND = "implementation-native-lifecycle";
 export const CERTIFICATION_RESULTS = Object.freeze(["passed", "failed", "blocked"]);
 /** Contract fields recorded by a producer; values come from that artifact's authorities. */
 export const CERTIFICATION_CONTRACT_VERSION_KEYS = Object.freeze(["goldenPath", "statusRecovery", "skill"]);
@@ -68,6 +70,27 @@ export const SELF_DOGFOOD_RECOVERY_OPERATION = Object.freeze({
   operation: "change.abort.recovery",
   outcomes: Object.freeze([SELF_DOGFOOD_OUTCOMES.VERIFIED]),
 });
+/** Required, bounded sequence for Issue #689's installed-artifact lifecycle proof. */
+export const IMPLEMENTATION_LIFECYCLE_OPERATION_REQUIREMENTS = Object.freeze([
+  Object.freeze({ operation: "source.issue", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "implementation.authorize", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "session.issue", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "change.issue", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "branch.write", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "conformance.initial", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "ready.first", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "review.rework", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "branch.write.rework", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "conformance.final", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "ready.final", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "change.merge", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "implementation.terminal", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "source.close", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "frontier.ready", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "frontier.satisfied", outcomes: Object.freeze(["verified"]) }),
+  Object.freeze({ operation: "negative.dependency", outcomes: Object.freeze(["fail-closed"]) }),
+  Object.freeze({ operation: "negative.scope", outcomes: Object.freeze(["fail-closed"]) }),
+]);
 export const SELF_DOGFOOD_OPERATIONS = Object.freeze({
   OPT_IN: SELF_DOGFOOD_OPERATION_REQUIREMENTS[0].operation,
   EXECUTABLE: SELF_DOGFOOD_OPERATION_REQUIREMENTS[1].operation,
@@ -86,7 +109,7 @@ export const SELF_DOGFOOD_OPERATIONS = Object.freeze({
 
 const [PACKED_CERTIFICATION_KIND, SELF_DOGFOOD_CERTIFICATION_KIND] = CERTIFICATION_KINDS;
 const [CERTIFICATION_RESULT_PASSED] = CERTIFICATION_RESULTS;
-const CERTIFICATION_KIND_SET = new Set(CERTIFICATION_KINDS);
+const CERTIFICATION_KIND_SET = new Set([...CERTIFICATION_KINDS, IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND]);
 const CERTIFICATION_RESULT_SET = new Set(CERTIFICATION_RESULTS);
 const SELF_DOGFOOD_SCENARIO_SET = new Set(Object.values(SELF_DOGFOOD_SCENARIOS));
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -131,6 +154,16 @@ const DOGFOOD_KEYS = new Set([
   "scenario",
   "rootIssue",
   "change",
+  "operations",
+  "finalState",
+]);
+const LIFECYCLE_KEYS = new Set([
+  ...COMMON_KEYS,
+  "package",
+  "repository",
+  "sourceIssue",
+  "implementation",
+  "session",
   "operations",
   "finalState",
 ]);
@@ -251,6 +284,9 @@ const REPOSITORY_KEYS = new Set(["owner", "name"]);
 const CHANGE_KEYS = new Set(["issue", "branch", "pullRequest"]);
 const OPERATION_KEYS = new Set(["operation", "outcome"]);
 const FINAL_STATE_KEYS = new Set(["status", "recovery"]);
+const LIFECYCLE_SESSION_KEYS = new Set(["capabilities"]);
+const LIFECYCLE_CAPABILITY_KEYS = new Set(["kind", "issue", "branch", "pathPolicy"]);
+const LIFECYCLE_FINAL_STATE_KEYS = new Set(["implementation", "change", "source", "frontier"]);
 const RECOVERY_KEYS = new Set(["state", "action"]);
 const OPERATION_REQUIREMENT_MAP = new Map(
   SELF_DOGFOOD_OPERATION_REQUIREMENTS.map((entry) => [entry.operation, entry.outcomes]),
@@ -259,6 +295,9 @@ const RECOVERY_OPERATION_OUTCOMES = new Set(SELF_DOGFOOD_RECOVERY_OPERATION.outc
 const RECOVERY_NONE_STATES = new Set(["NONE", "none", "NOT_REQUIRED", "not-required"]);
 const RECOVERY_REQUIRED_STATES = new Set(["RECOVERY_REQUIRED", "recovery-required"]);
 const RECOVERY_COMPLETED_STATES = new Set(["COMPLETED", "completed"]);
+const IMPLEMENTATION_LIFECYCLE_OPERATION_MAP = new Map(
+  IMPLEMENTATION_LIFECYCLE_OPERATION_REQUIREMENTS.map((entry) => [entry.operation, entry.outcomes]),
+);
 
 const VALIDATION_DIAGNOSTICS = new WeakMap();
 
@@ -1317,6 +1356,156 @@ function validateDogfoodExtension(value, errors, { strict = false } = {}) {
   );
 }
 
+function validateLifecycleOperationEntries(value, errors, { strict = false } = {}) {
+  if (!Array.isArray(value)) {
+    addValidationError(errors, "LIFECYCLE_OPERATION_INVALID", "$.operations: must be an array");
+    return false;
+  }
+  if (value.length > MAX_OPERATIONS) {
+    addValidationError(
+      errors,
+      "LIFECYCLE_OPERATION_INVALID",
+      `$.operations: must contain at most ${String(MAX_OPERATIONS)} entries`,
+    );
+  }
+  let valid = true;
+  const names = [];
+  for (let index = 0; index < value.length && index < MAX_OPERATIONS; index += 1) {
+    const entry = value[index];
+    const entryPath = `$.operations[${String(index)}]`;
+    if (!isRecord(entry)) {
+      addValidationError(errors, "LIFECYCLE_OPERATION_INVALID", `${entryPath}: must be an object`);
+      valid = false;
+      continue;
+    }
+    rejectUnknownKeys(entry, OPERATION_KEYS, entryPath, errors);
+    const operationValid = validateSafeStructuredString(
+      entry.operation,
+      `${entryPath}.operation`,
+      errors,
+      MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH,
+    );
+    const outcomeValid = validateSafeStructuredString(
+      entry.outcome,
+      `${entryPath}.outcome`,
+      errors,
+      MAX_CERTIFICATION_DIAGNOSTIC_CODE_LENGTH,
+    );
+    if (!operationValid || !outcomeValid) {
+      valid = false;
+      continue;
+    }
+    names.push(entry.operation);
+    const outcomes = IMPLEMENTATION_LIFECYCLE_OPERATION_MAP.get(entry.operation);
+    if (outcomes === undefined || !outcomes.includes(entry.outcome)) {
+      addValidationError(errors, "LIFECYCLE_OPERATION_INVALID", `${entryPath}: unsupported operation outcome`);
+      valid = false;
+    }
+  }
+  if (strict) {
+    const expected = IMPLEMENTATION_LIFECYCLE_OPERATION_REQUIREMENTS.map((entry) => entry.operation);
+    if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) {
+      addValidationError(
+        errors,
+        "LIFECYCLE_OPERATION_MISSING",
+        "$.operations: required Issue #689 sequence is incomplete or out of order",
+      );
+      valid = false;
+    }
+  }
+  return valid;
+}
+
+function validateLifecycleCapabilities(value, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "LIFECYCLE_SESSION_INVALID", "$.session: must be an object");
+    return false;
+  }
+  rejectUnknownKeys(value, LIFECYCLE_SESSION_KEYS, "$.session", errors);
+  if (!Array.isArray(value.capabilities)) {
+    addValidationError(errors, "LIFECYCLE_SESSION_INVALID", "$.session.capabilities: must be an array");
+    return false;
+  }
+  if (value.capabilities.length > 8)
+    addValidationError(errors, "LIFECYCLE_SESSION_INVALID", "$.session.capabilities: too many capabilities");
+  let valid = true;
+  for (let index = 0; index < value.capabilities.length && index < 8; index += 1) {
+    const capability = value.capabilities[index];
+    const capabilityPath = `$.session.capabilities[${String(index)}]`;
+    if (!isRecord(capability)) {
+      addValidationError(errors, "LIFECYCLE_SESSION_INVALID", `${capabilityPath}: must be an object`);
+      valid = false;
+      continue;
+    }
+    rejectUnknownKeys(capability, LIFECYCLE_CAPABILITY_KEYS, capabilityPath, errors);
+    if (!validateSafeStructuredString(capability.kind, `${capabilityPath}.kind`, errors, 64)) valid = false;
+    for (const key of ["issue"]) {
+      if (capability[key] !== undefined && !requirePositiveInteger(capability[key], `${capabilityPath}.${key}`, errors))
+        valid = false;
+    }
+    for (const key of ["branch", "pathPolicy"]) {
+      if (
+        capability[key] !== undefined &&
+        !validateSafeStructuredString(capability[key], `${capabilityPath}.${key}`, errors)
+      )
+        valid = false;
+    }
+  }
+  return valid;
+}
+
+function validateLifecycleFinalState(value, errors) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "LIFECYCLE_FINAL_STATE_INVALID", "$.finalState: must be an object");
+    return false;
+  }
+  rejectUnknownKeys(value, LIFECYCLE_FINAL_STATE_KEYS, "$.finalState", errors);
+  const expected = {
+    implementation: "COMPLETED",
+    change: "MERGED",
+    source: "CLOSED",
+    frontier: "SATISFIED",
+  };
+  let valid = true;
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (value[key] !== expectedValue) {
+      addValidationError(errors, "LIFECYCLE_FINAL_STATE_INVALID", `$.finalState.${key}: must be ${expectedValue}`);
+      valid = false;
+    }
+  }
+  return valid;
+}
+
+function validateLifecycleExtension(value, errors, { strict = false } = {}) {
+  if (!isRecord(value)) {
+    addValidationError(errors, "LIFECYCLE_IDENTITY_INVALID", "$: lifecycle evidence must be an object");
+    return false;
+  }
+  const packageValid = validatePackedExtension(value.package, errors);
+  const repositoryValid = validateRepository(value.repository, errors);
+  const sourceIssueValid = requirePositiveInteger(
+    value.sourceIssue,
+    "$.sourceIssue",
+    errors,
+    "LIFECYCLE_IDENTITY_INVALID",
+  );
+  const implementationValid = validateChangeIdentity(value.implementation, undefined, errors, {
+    allowUnavailable: false,
+  });
+  const sessionValid = validateLifecycleCapabilities(value.session, errors);
+  const operationsValid = validateLifecycleOperationEntries(value.operations, errors, { strict });
+  const finalStateValid = validateLifecycleFinalState(value.finalState, errors);
+  return (
+    packageValid &&
+    repositoryValid &&
+    sourceIssueValid &&
+    implementationValid &&
+    sessionValid &&
+    operationsValid &&
+    finalStateValid
+  );
+}
+
 function validateSharedEnvelope(value, { certificationKind, expectedContractVersions } = {}) {
   const errors = createValidationErrors();
   if (!isRecord(value)) {
@@ -1329,7 +1518,9 @@ function validateSharedEnvelope(value, { certificationKind, expectedContractVers
       ? PACKED_KEYS
       : kind === SELF_DOGFOOD_CERTIFICATION_KIND
         ? DOGFOOD_KEYS
-        : COMMON_KEYS;
+        : kind === IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND
+          ? LIFECYCLE_KEYS
+          : COMMON_KEYS;
   rejectUnknownKeys(value, allowedKeys, "$", errors);
   if (value.schemaVersion !== CERTIFICATION_EVIDENCE_SCHEMA_VERSION)
     addValidationError(
@@ -1378,6 +1569,8 @@ export function validateCertificationEvidence(value, { certificationKind, contra
     validatePackedExtension(value.package, errors);
   } else if (value.certificationKind === SELF_DOGFOOD_CERTIFICATION_KIND) {
     validateDogfoodExtension(value, errors, { strict });
+  } else if (value.certificationKind === IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND) {
+    validateLifecycleExtension(value, errors, { strict });
   }
   if (errors.length > 0) return { valid: false, errors, diagnostics: validationDiagnostics(errors) };
   return {
@@ -1391,6 +1584,11 @@ export function validateCertificationEvidence(value, { certificationKind, contra
 /** Authority entry consumed by the explicit self-dogfood harness. */
 export function validateSelfDogfoodEvidence(value) {
   return validateCertificationEvidence(value, { certificationKind: SELF_DOGFOOD_CERTIFICATION_KIND });
+}
+
+/** Validate retained Issue #689 installed-artifact lifecycle evidence. */
+export function validateImplementationLifecycleCertificationEvidence(value) {
+  return validateCertificationEvidence(value, { certificationKind: IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND });
 }
 
 /**
@@ -1432,6 +1630,37 @@ export function appendSelfDogfoodOperation(operations, operation, operationOutco
       : OPERATION_REQUIREMENT_MAP.get(operation);
     if (allowedOutcomes === undefined || !allowedOutcomes.includes(operationOutcome)) {
       addValidationError(errors, "DOGFOOD_OPERATION_OUTCOME_INVALID", "$.operation: unsupported operation outcome");
+    }
+  }
+  if (errors.length > 0) throw new CertificationEvidenceError(errors);
+  return [...operations, { operation, outcome: operationOutcome }];
+}
+
+/** Append one operation through the exact bounded Issue #689 proof sequence. */
+export function appendImplementationLifecycleOperation(operations, operation, operationOutcome) {
+  const errors = createValidationErrors();
+  if (!Array.isArray(operations)) {
+    addValidationError(errors, "LIFECYCLE_OPERATION_MISSING", "$.operations: must be an array");
+  } else if (operations.length >= MAX_CERTIFICATION_OPERATIONS) {
+    addValidationError(
+      errors,
+      "LIFECYCLE_OPERATION_MISSING",
+      `$.operations: must contain at most ${String(MAX_CERTIFICATION_OPERATIONS - 1)} entries before append`,
+    );
+  }
+  if (typeof operation !== "string" || typeof operationOutcome !== "string") {
+    addValidationError(errors, "LIFECYCLE_OPERATION_INVALID", "$.operation: name and outcome must be strings");
+  } else if (Array.isArray(operations)) {
+    const expected = IMPLEMENTATION_LIFECYCLE_OPERATION_REQUIREMENTS[operations.length];
+    if (expected === undefined || operation !== expected.operation) {
+      addValidationError(
+        errors,
+        "LIFECYCLE_OPERATION_MISSING",
+        `$.operations: expected ${expected?.operation ?? "completion"}, got ${operation}`,
+      );
+    }
+    if (expected === undefined || !expected.outcomes.includes(operationOutcome)) {
+      addValidationError(errors, "LIFECYCLE_OPERATION_INVALID", "$.operation: unsupported operation outcome");
     }
   }
   if (errors.length > 0) throw new CertificationEvidenceError(errors);
@@ -1498,6 +1727,34 @@ export function canonicalizeCertificationEvidence(value, options) {
       name: value.package.name,
       version: value.package.version,
       tarballSha256: value.package.tarballSha256,
+    };
+  } else if (value.certificationKind === IMPLEMENTATION_LIFECYCLE_CERTIFICATION_KIND) {
+    common.package = {
+      name: value.package.name,
+      version: value.package.version,
+      tarballSha256: value.package.tarballSha256,
+    };
+    common.repository = { owner: value.repository.owner, name: value.repository.name };
+    common.sourceIssue = value.sourceIssue;
+    common.implementation = {
+      issue: value.implementation.issue,
+      branch: value.implementation.branch,
+      pullRequest: value.implementation.pullRequest,
+    };
+    common.session = {
+      capabilities: value.session.capabilities.map((capability) => ({
+        kind: capability.kind,
+        ...(capability.issue === undefined ? {} : { issue: capability.issue }),
+        ...(capability.branch === undefined ? {} : { branch: capability.branch }),
+        ...(capability.pathPolicy === undefined ? {} : { pathPolicy: capability.pathPolicy }),
+      })),
+    };
+    common.operations = value.operations.map(({ operation, outcome }) => ({ operation, outcome }));
+    common.finalState = {
+      implementation: value.finalState.implementation,
+      change: value.finalState.change,
+      source: value.finalState.source,
+      frontier: value.finalState.frontier,
     };
   } else {
     common.repository = { owner: value.repository.owner, name: value.repository.name };

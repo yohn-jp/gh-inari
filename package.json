@@ -242,6 +242,7 @@
     "format:check": "prettier --check .",
     "smoke-test": "node scripts/smoke-test.mjs",
     "self-dogfood": "node --import tsx scripts/self-dogfood.mjs",
+    "certify:lifecycle": "node scripts/implementation-lifecycle-certification.mjs",
     "templates:check": "node --import tsx src/index.ts template sync --check",
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "worker:build": "node scripts/build-worker.mjs",
