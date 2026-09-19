@@ -1164,7 +1164,7 @@ function issueElementType(section: SemanticSection): "input" | "textarea" | "dro
 function defaultImportPath(root: string, source: SemanticTemplateSource, base: string): string {
   return source.kind === "issue"
     ? toRepositoryPath(root, path.join(root, SEMANTIC_ISSUE_DIRECTORY, `${base}.json`))
-    : toRepositoryPath(root, path.join(root, SEMANTIC_TEMPLATE_DIRECTORY, "pull-request.json"));
+    : toRepositoryPath(root, path.join(root, SEMANTIC_TEMPLATE_DIRECTORY, "pull-requests", `${base}.json`));
 }
 
 function headingMetadata(section: CanonicalSection): Pick<SemanticSection, "headingLevel" | "label"> {

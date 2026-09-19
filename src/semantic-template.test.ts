@@ -476,6 +476,26 @@ test("native import creates semantic JSON and rejects unsupported semantic sourc
   );
 });
 
+test("native PR import defaults to the canonical plural semantic path and is discoverable", async () => {
+  await withRepository(async (root) => {
+    await mkdir(path.join(root, ".github/PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await writeFile(path.join(root, ".github/PULL_REQUEST_TEMPLATE/release.md"), "## Release\n\nChecklist\n");
+
+    const imported = await importNativeTemplate(root, ".github/PULL_REQUEST_TEMPLATE/release.md");
+    assert.equal(imported.path, ".github/inari/pull-requests/release.json");
+    assert.equal(imported.warning, undefined);
+    assert.deepEqual(await discoverSemanticTemplates(root), [
+      {
+        id: "release",
+        kind: "pull_request",
+        name: "release",
+        sourcePath: ".github/inari/pull-requests/release.json",
+        generatedPath: ".github/PULL_REQUEST_TEMPLATE/release.md",
+      },
+    ]);
+  });
+});
+
 test("native import with an undiscoverable --to destination writes the file but warns", async () => {
   await withRepository(async (root) => {
     await mkdir(path.join(root, ".github/ISSUE_TEMPLATE"), { recursive: true });
