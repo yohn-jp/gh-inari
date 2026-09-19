@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { createPrivateKey } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { register } from "tsx/esm/api";
 
 // The requested certification command is intentionally runnable without a
@@ -43,6 +46,224 @@ const issue = 553;
 const branch = "feat/553-cross-deployment-conformance";
 const pullRequest = 5530;
 const createdCommitSha = "e".repeat(40);
+
+const LIVE_TIMEOUT_MS = 10_000;
+const LIVE_MAX_RESPONSE_BYTES = 64 * 1024;
+const LIVE_MAX_CONFIG_BYTES = 64 * 1024;
+const LIVE_MAX_PRIVATE_KEY_BYTES = 16 * 1024;
+const LIVE_CONFIG_FILE_ENV = "INARI_RELAY_LIVE_CONFIG_FILE";
+const LIVE_CONFIG_FILE_ALIAS = "INARI_RELAY_LIVE_CONFIG";
+const LIVE_FAILURE_MESSAGES = Object.freeze({
+  configuration: "Live configuration is invalid.",
+  deployment: "The configured deployment could not be reached.",
+  protocol: "The configured deployment returned an unexpected protocol response.",
+  timeout: "The configured deployment did not complete within the live bound.",
+  transport: "The configured deployment transport failed.",
+});
+
+class LiveCertificationFailure extends Error {
+  constructor(stage, failureClass) {
+    super(LIVE_FAILURE_MESSAGES[failureClass] ?? LIVE_FAILURE_MESSAGES.transport);
+    this.name = "LiveCertificationFailure";
+    this.stage = stage;
+    this.failureClass = failureClass;
+  }
+}
+
+function liveFailure(stage, failureClass = "transport") {
+  return new LiveCertificationFailure(stage, failureClass);
+}
+
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function liveBaseUrl(value) {
+  const raw = nonEmptyString(value);
+  if (raw === undefined) throw liveFailure("configuration", "configuration");
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw liveFailure("configuration", "configuration");
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw liveFailure("configuration", "configuration");
+  }
+  return parsed;
+}
+
+function readLiveConfiguration(environment) {
+  const fileName = nonEmptyString(environment[LIVE_CONFIG_FILE_ENV] ?? environment[LIVE_CONFIG_FILE_ALIAS]);
+  let fileValues = {};
+  let fileDirectory;
+  if (fileName !== undefined) {
+    let fileText;
+    try {
+      const filePath = path.resolve(fileName);
+      fileDirectory = path.dirname(filePath);
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > LIVE_MAX_CONFIG_BYTES) throw new Error("config-file-bounds");
+      fileText = fs.readFileSync(filePath, "utf8");
+      fileValues = record(JSON.parse(fileText));
+      if (fileValues === undefined) throw new Error("config-file-shape");
+    } catch {
+      return { status: "failed", failure: { stage: "configuration", failureClass: "configuration" } };
+    }
+  }
+
+  const value = (environmentName, fileNameKey) => environment[environmentName] ?? fileValues[fileNameKey];
+  const url = nonEmptyString(value("INARI_RELAY_LIVE_URL", "url"));
+  const repositoryId = nonEmptyString(value("INARI_RELAY_LIVE_REPOSITORY_ID", "repositoryId"));
+  const repositoryHost = (
+    nonEmptyString(value("INARI_RELAY_LIVE_REPOSITORY_HOST", "repositoryHost")) ?? "github.com"
+  ).toLowerCase();
+  const delegatorId = nonEmptyString(environment.INARI_RELAY_DELEGATOR_ID ?? fileValues.delegatorId);
+  const privateKey = nonEmptyString(environment.INARI_RELAY_DELEGATOR_PRIVATE_KEY ?? fileValues.privateKey);
+  const privateKeyFile = nonEmptyString(
+    environment.INARI_RELAY_DELEGATOR_PRIVATE_KEY_FILE ?? fileValues.privateKeyFile,
+  );
+  const missing = [
+    url === undefined ? "url" : undefined,
+    repositoryId === undefined ? "repositoryId" : undefined,
+    delegatorId === undefined ? "delegatorId" : undefined,
+    privateKey === undefined && privateKeyFile === undefined ? "privateKey" : undefined,
+  ].filter((item) => item !== undefined);
+  if (missing.length > 0) {
+    return { status: "pending", reason: "Live configuration is incomplete.", missing };
+  }
+
+  let baseUrl;
+  try {
+    baseUrl = liveBaseUrl(url);
+  } catch (error) {
+    return {
+      status: "failed",
+      failure:
+        error instanceof LiveCertificationFailure
+          ? { stage: error.stage, failureClass: error.failureClass }
+          : { stage: "configuration", failureClass: "configuration" },
+    };
+  }
+  if (!/^[1-9][0-9]{0,19}$/u.test(repositoryId) || !/^[A-Za-z0-9._-]{1,128}$/u.test(delegatorId)) {
+    return { status: "failed", failure: { stage: "configuration", failureClass: "configuration" } };
+  }
+  if (!/^[A-Za-z0-9.-]{1,255}$/u.test(repositoryHost)) {
+    return { status: "failed", failure: { stage: "configuration", failureClass: "configuration" } };
+  }
+
+  let resolvedPrivateKeyFile;
+  let privateKeyPem = privateKey;
+  if (privateKeyPem === undefined && privateKeyFile !== undefined) {
+    resolvedPrivateKeyFile = path.resolve(fileDirectory ?? process.cwd(), privateKeyFile);
+    try {
+      const stat = fs.statSync(resolvedPrivateKeyFile);
+      if (!stat.isFile() || stat.size > LIVE_MAX_PRIVATE_KEY_BYTES) throw new Error("private-key-bounds");
+      privateKeyPem = fs.readFileSync(resolvedPrivateKeyFile, "utf8");
+    } catch {
+      return { status: "failed", failure: { stage: "configuration", failureClass: "configuration" } };
+    }
+  }
+  return {
+    status: "configured",
+    config: Object.freeze({
+      baseUrl,
+      repositoryId,
+      repositoryHost,
+      delegatorId,
+      privateKeyPem,
+      privateKeyFile: resolvedPrivateKeyFile,
+    }),
+  };
+}
+
+function liveEndpoints(baseUrl) {
+  const prefix = baseUrl.pathname === "/" ? "" : baseUrl.pathname.replace(/\/+$/u, "");
+  const endpoint = (suffix) => new URL(`${baseUrl.origin}${prefix}${suffix}`);
+  const websocket = endpoint("/v1/relay/connect");
+  websocket.protocol = baseUrl.protocol === "https:" ? "wss:" : "ws:";
+  return Object.freeze({
+    endpoint: `${baseUrl.origin}${prefix || "/"}`,
+    healthz: endpoint("/healthz"),
+    mcp: endpoint("/mcp"),
+    websocket,
+  });
+}
+
+function liveEvidence(endpoints, checks, contactedDeployment, transportKind) {
+  return {
+    bounded: true,
+    secretSafe: true,
+    rawProviderPayloads: false,
+    contactedDeployment,
+    transport: transportKind,
+    endpoint: endpoints.endpoint,
+    checks,
+  };
+}
+
+function livePending(reason = "Live configuration is unavailable.", missing) {
+  return {
+    version: 1,
+    profile: "relay",
+    mode: "live",
+    certificationStatus: "pending",
+    live: {
+      status: "pending",
+      reason,
+      ...(missing === undefined ? {} : { missing }),
+      evidence: { bounded: true, secretSafe: true, rawProviderPayloads: false, contactedDeployment: false },
+    },
+  };
+}
+
+function liveFailed(failure, endpoints, checks, contactedDeployment, transportKind) {
+  const evidence =
+    endpoints === undefined
+      ? {
+          bounded: true,
+          secretSafe: true,
+          rawProviderPayloads: false,
+          contactedDeployment,
+          transport: transportKind,
+          checks,
+        }
+      : liveEvidence(endpoints, checks, contactedDeployment, transportKind);
+  return {
+    version: 1,
+    profile: "relay",
+    mode: "live",
+    certificationStatus: "failed",
+    live: {
+      status: "failed",
+      failure: { stage: failure.stage, failureClass: failure.failureClass },
+      evidence,
+    },
+  };
+}
+
+function livePassed(endpoints, checks, contactedDeployment, transportKind) {
+  return {
+    version: 1,
+    profile: "relay",
+    mode: "live",
+    certificationStatus: "passed",
+    live: {
+      status: "passed",
+      evidence: liveEvidence(endpoints, checks, contactedDeployment, transportKind),
+    },
+  };
+}
 
 let modulePromise;
 async function loadModules() {
@@ -977,6 +1198,401 @@ async function recoveryRequired(modules) {
   return { result: summary(normalized), providerExecutions: session.provider.executions };
 }
 
+async function readLiveResponseBody(response) {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && /^\d+$/u.test(contentLength) && Number(contentLength) > LIVE_MAX_RESPONSE_BYTES) {
+    throw liveFailure("transport", "protocol");
+  }
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > LIVE_MAX_RESPONSE_BYTES) throw liveFailure("transport", "protocol");
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw liveFailure("transport", "protocol");
+  }
+}
+
+async function requestLiveJson(url, init, stage) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, LIVE_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(url, { ...init, signal: controller.signal });
+  } catch {
+    throw liveFailure(stage, timedOut ? "timeout" : "deployment");
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await readLiveResponseBody(response);
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw liveFailure(stage, "protocol");
+  }
+  return { response, body };
+}
+
+async function liveHealthz(url) {
+  const { response, body } = await requestLiveJson(
+    url,
+    { method: "GET", headers: { accept: "application/json" } },
+    "healthz",
+  );
+  const value = record(body);
+  if (
+    response.status !== 200 ||
+    response.headers.get("content-type")?.toLowerCase().includes("application/json") !== true ||
+    value?.ok !== true ||
+    value.service !== "gh-inari-hosted-relay-worker" ||
+    value.transport !== "mcp-and-repository-relay"
+  ) {
+    throw liveFailure("healthz", response.status === 200 ? "protocol" : "deployment");
+  }
+  return { httpStatus: response.status, ok: true, service: value.service, transport: value.transport };
+}
+
+async function liveMcp(url) {
+  const { response, body } = await requestLiveJson(
+    url,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-03-26",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "inari-relay-certification", version: "1" },
+        },
+      }),
+    },
+    "mcp",
+  );
+  const value = record(body);
+  const result = record(value?.result);
+  const serverInfo = record(result?.serverInfo);
+  if (
+    response.status !== 200 ||
+    response.headers.get("content-type")?.toLowerCase().includes("application/json") !== true ||
+    value?.jsonrpc !== "2.0" ||
+    value.id !== 1 ||
+    serverInfo?.name !== "inari"
+  ) {
+    throw liveFailure("mcp", response.status === 200 ? "protocol" : "deployment");
+  }
+  return { httpStatus: response.status, jsonrpc: value.jsonrpc, serverName: serverInfo.name };
+}
+
+async function liveFrameText(value) {
+  const data = record(value)?.data ?? value;
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(data));
+  if (ArrayBuffer.isView(data)) {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+    );
+  }
+  if (typeof data?.arrayBuffer === "function") {
+    return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(await data.arrayBuffer()));
+  }
+  return undefined;
+}
+
+function relayConnectionFrame(value, config, modules) {
+  if (value?.type !== "repository-relay-connected" || value.version !== 1 || value.connectionId !== config.delegatorId)
+    return false;
+  try {
+    const repository = modules.contract.normalizeRelayRepositoryIdentity(value.repository);
+    return repository.repositoryId === config.repositoryId && repository.repositoryHost === config.repositoryHost;
+  } catch {
+    return false;
+  }
+}
+
+function liveWebSocket(url, config, modules, privateKey) {
+  return new Promise((resolve, reject) => {
+    if (typeof WebSocket !== "function") {
+      reject(liveFailure("relay", "transport"));
+      return;
+    }
+    let socket;
+    let settled = false;
+    let opened = false;
+    let challengeSeen = false;
+    let connected = false;
+    let heartbeat = false;
+    let malformedSent = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        socket?.close?.(1000, "relay-certification-complete");
+      } catch {
+        // The result already contains the bounded failure class.
+      }
+      if (error === undefined) resolve(result);
+      else reject(error);
+    };
+    const timer = setTimeout(() => finish(liveFailure("relay", "timeout")), LIVE_TIMEOUT_MS);
+    const fail = (failure) => finish(failure);
+    try {
+      socket = new WebSocket(url);
+      socket.addEventListener("open", () => {
+        opened = true;
+      });
+      socket.addEventListener("error", () => {
+        if (!settled) fail(liveFailure("relay", opened ? "transport" : "deployment"));
+      });
+      socket.addEventListener("close", (event) => {
+        if (settled) return;
+        if (malformedSent && event.code === 1008) {
+          finish(undefined, {
+            upgrade: opened,
+            possessionHandshake: challengeSeen,
+            connected,
+            heartbeat,
+            boundedMalformedFrame: true,
+            malformedFrameCloseCode: event.code,
+          });
+          return;
+        }
+        fail(liveFailure("relay", opened ? (connected ? "protocol" : "protocol") : "deployment"));
+      });
+      socket.addEventListener("message", (event) => {
+        void (async () => {
+          if (settled) return;
+          let text;
+          try {
+            text = await liveFrameText(event);
+            if (text === undefined || new TextEncoder().encode(text).byteLength > 16_384) {
+              throw liveFailure("relay", "protocol");
+            }
+          } catch (error) {
+            fail(error instanceof LiveCertificationFailure ? error : liveFailure("relay", "protocol"));
+            return;
+          }
+          if (text === "relay:pong" && connected && !heartbeat) {
+            heartbeat = true;
+            malformedSent = true;
+            try {
+              socket.send("{");
+            } catch {
+              fail(liveFailure("relay", "transport"));
+            }
+            return;
+          }
+          let candidate;
+          try {
+            candidate = record(JSON.parse(text));
+          } catch {
+            return;
+          }
+          if (
+            !challengeSeen &&
+            candidate?.type === "repository-relay-possession-challenge" &&
+            candidate.version === 1 &&
+            record(candidate.challenge) !== undefined
+          ) {
+            try {
+              const challenge = modules.connectionProof.decodeRelayPossessionProofChallenge(
+                modules.connectionProof.encodeRelayPossessionProofChallenge(candidate.challenge),
+              );
+              if (challenge.repositoryId !== config.repositoryId || challenge.delegatorId !== config.delegatorId) {
+                throw liveFailure("relay", "protocol");
+              }
+              const proof = modules.connectionProof.signRelayPossessionProof(challenge, privateKey);
+              const encodedProof = JSON.parse(
+                new TextDecoder().decode(modules.connectionProof.encodeRelayPossessionProofResponse(proof)),
+              );
+              challengeSeen = true;
+              socket.send(
+                JSON.stringify({ type: "repository-relay-possession-response", version: 1, proof: encodedProof }),
+              );
+            } catch (error) {
+              fail(error instanceof LiveCertificationFailure ? error : liveFailure("relay", "protocol"));
+            }
+            return;
+          }
+          if (relayConnectionFrame(candidate, config, modules)) {
+            connected = true;
+            try {
+              socket.send("relay:ping");
+            } catch {
+              fail(liveFailure("relay", "transport"));
+            }
+          }
+        })();
+      });
+    } catch {
+      fail(liveFailure("relay", "deployment"));
+    }
+  });
+}
+
+function createLiveTransport(privateKey, modules) {
+  return Object.freeze({
+    healthz: (url) => liveHealthz(url),
+    mcp: (url) => liveMcp(url),
+    relay: (url, config) =>
+      liveWebSocket(
+        (() => {
+          const targetUrl = new URL(url);
+          targetUrl.searchParams.set("repositoryId", config.repositoryId);
+          targetUrl.searchParams.set("repositoryHost", config.repositoryHost);
+          targetUrl.searchParams.set("connectionId", config.delegatorId);
+          targetUrl.searchParams.set("delegatorId", config.delegatorId);
+          targetUrl.searchParams.set("role", "runtime");
+          return targetUrl;
+        })(),
+        config,
+        modules,
+        privateKey,
+      ),
+  });
+}
+
+function normalizeLiveHealthCheck(value) {
+  const check = record(value);
+  if (
+    check === undefined ||
+    !Number.isSafeInteger(check.httpStatus) ||
+    check.ok !== true ||
+    check.service !== "gh-inari-hosted-relay-worker" ||
+    check.transport !== "mcp-and-repository-relay"
+  ) {
+    throw liveFailure("healthz", "protocol");
+  }
+  return {
+    httpStatus: check.httpStatus,
+    ok: true,
+    service: check.service,
+    transport: check.transport,
+  };
+}
+
+function normalizeLiveMcpCheck(value) {
+  const check = record(value);
+  if (
+    check === undefined ||
+    !Number.isSafeInteger(check.httpStatus) ||
+    check.jsonrpc !== "2.0" ||
+    check.serverName !== "inari"
+  ) {
+    throw liveFailure("mcp", "protocol");
+  }
+  return { httpStatus: check.httpStatus, jsonrpc: check.jsonrpc, serverName: check.serverName };
+}
+
+function normalizeLiveRelayCheck(value) {
+  const check = record(value);
+  if (
+    check === undefined ||
+    check.upgrade !== true ||
+    check.possessionHandshake !== true ||
+    check.connected !== true ||
+    check.heartbeat !== true ||
+    check.boundedMalformedFrame !== true ||
+    check.malformedFrameCloseCode !== 1008
+  ) {
+    throw liveFailure("relay", "protocol");
+  }
+  return {
+    upgrade: true,
+    possessionHandshake: true,
+    connected: true,
+    heartbeat: true,
+    boundedMalformedFrame: true,
+    malformedFrameCloseCode: 1008,
+  };
+}
+
+function loadLivePrivateKey(config) {
+  try {
+    const key = createPrivateKey(config.privateKeyPem);
+    if (key.type !== "private" || key.asymmetricKeyType !== "ed25519") throw new Error("key-type");
+    return key;
+  } catch {
+    throw liveFailure("configuration", "configuration");
+  }
+}
+
+export async function runLiveCertification(options = {}) {
+  const resolution = readLiveConfiguration(options.environment ?? process.env);
+  if (resolution.status === "pending") return livePending(resolution.reason, resolution.missing);
+  if (resolution.status === "failed") return liveFailed(resolution.failure, undefined, {}, false, "none");
+
+  const config = resolution.config;
+  const endpoints = liveEndpoints(config.baseUrl);
+  const checks = {};
+  const contactedDeployment = options.transport === undefined;
+  const transportKind = contactedDeployment ? "real-network" : "injected-test-transport";
+  let stage = "healthz";
+  try {
+    let transport = options.transport;
+    if (transport === undefined) {
+      const modules = await loadModules();
+      transport = createLiveTransport(loadLivePrivateKey(config), modules);
+    }
+    checks.healthz = normalizeLiveHealthCheck(
+      await transport.healthz(endpoints.healthz, { timeoutMs: LIVE_TIMEOUT_MS }),
+    );
+    stage = "mcp";
+    checks.mcp = normalizeLiveMcpCheck(await transport.mcp(endpoints.mcp, { timeoutMs: LIVE_TIMEOUT_MS }));
+    stage = "relay";
+    const modules = transport === options.transport ? undefined : await loadModules();
+    checks.relay = normalizeLiveRelayCheck(
+      await transport.relay(
+        endpoints.websocket,
+        {
+          repositoryId: config.repositoryId,
+          repositoryHost: config.repositoryHost,
+          delegatorId: config.delegatorId,
+          ...(modules === undefined ? {} : { privateKey: loadLivePrivateKey(config), modules }),
+        },
+        { timeoutMs: LIVE_TIMEOUT_MS },
+      ),
+    );
+    return livePassed(endpoints, checks, contactedDeployment, transportKind);
+  } catch (error) {
+    const failure =
+      error instanceof LiveCertificationFailure
+        ? { stage: error.stage, failureClass: error.failureClass }
+        : { stage, failureClass: "transport" };
+    return liveFailed(failure, endpoints, checks, contactedDeployment, transportKind);
+  }
+}
+
 function liveStatus() {
   const configured = Boolean(
     process.env.INARI_RELAY_LIVE_URL &&
@@ -1052,8 +1668,13 @@ export async function runControlledCertification() {
 
 async function main() {
   const mode = process.argv[2] === "--mode" ? process.argv[3] : "controlled";
+  if (mode === "live") {
+    console.log(JSON.stringify(await runLiveCertification(), null, 2));
+    return;
+  }
   if (mode !== "controlled") {
-    console.log(JSON.stringify({ version: 1, profile: "relay", mode, live: liveStatus() }, null, 2));
+    console.error("relay certification mode must be controlled or live");
+    process.exitCode = 1;
     return;
   }
   console.log(JSON.stringify(await runControlledCertification(), null, 2));

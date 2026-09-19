@@ -92,3 +92,46 @@ The direct-App deployment remains independent and continues to use:
 pnpm run worker:build
 pnpm exec wrangler deploy --config wrangler.toml
 ```
+
+## Live relay certification
+
+Live certification contacts a deployed Worker and is transport-only. It checks
+`/healthz`, the native `POST /mcp` initialize exchange, the Runtime WebSocket
+upgrade, the production possession handshake, `relay:ping`/`relay:pong`, and a
+bounded malformed-frame close. It does not execute a semantic mutation; the
+controlled certification remains the semantic parity and failure-semantics
+oracle.
+
+The direct environment form uses these inputs. The private key is read from
+the environment or, preferably, from a local file; never put it in argv.
+
+```sh
+export INARI_RELAY_LIVE_URL='https://HOST'
+export INARI_RELAY_LIVE_REPOSITORY_ID='1330755860'
+export INARI_RELAY_LIVE_REPOSITORY_HOST='github.com' # optional
+export INARI_RELAY_DELEGATOR_ID='runtime-id'
+export INARI_RELAY_DELEGATOR_PRIVATE_KEY_FILE='/secure/local/delegator-ed25519.pem'
+node scripts/relay-certification.mjs --mode live
+```
+
+Alternatively, set `INARI_RELAY_LIVE_CONFIG_FILE` to a local JSON file. A
+relative `privateKeyFile` is resolved relative to that file:
+
+```json
+{
+  "url": "https://HOST",
+  "repositoryId": "1330755860",
+  "repositoryHost": "github.com",
+  "delegatorId": "runtime-id",
+  "privateKeyFile": "./delegator-ed25519.pem"
+}
+```
+
+The equivalent environment variable is also accepted as
+`INARI_RELAY_LIVE_CONFIG`. The file and key must be readable by the local
+operator and must remain outside retained certification evidence. The command
+returns `pending` when required configuration is absent, `failed` when a
+configured deployment or protocol check fails, and `passed` only after all
+deployment checks contact the real Worker. Evidence contains only bounded
+status fields and check summaries; it never contains the private key,
+signature, token, or raw provider response.
