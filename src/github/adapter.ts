@@ -1327,7 +1327,10 @@ export class GitHubAdapter {
       throw new RepositoryResolutionError("Unable to resolve the local Git repository context.", {}, error);
     }
 
-    await this.ensureAuthenticated(metadata.hostname, deadline);
+    // Repository-scoped credentials (for example GitHub Actions' installation token)
+    // may be valid for the target repository while intentionally lacking the
+    // authenticated-user endpoint. Prove access with the repository request
+    // itself; reserve GET /user for explicit identity reads.
     const response = await this.requestNative(
       { hostname: metadata.hostname, method: "GET", path: `repos/${metadata.nameWithOwner}` },
       "repository.resolve",
