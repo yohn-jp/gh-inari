@@ -281,11 +281,20 @@ export interface IssueDependencyMarkerExtraction {
   readonly body: string;
 }
 
-function renderTemplateIdentityMarker(contract: CanonicalContract): string {
+function renderTemplateIdentityMarker(contract: CanonicalContract, expectedKind: ArtifactKind): string {
+  if (contract.artifactKind !== expectedKind) {
+    throw new ArtifactInputError(
+      "INPUT_DOCUMENT_INVALID",
+      `A ${expectedKind === "issue" ? "Issue" : "pull request"} contract is required to render its identity marker.`,
+    );
+  }
   const marker: TemplateIdentityMarker = {
     version: TEMPLATE_IDENTITY_MARKER_VERSION,
-    kind: contract.artifactKind,
-    path: contract.templateIdentity.path,
+    kind: expectedKind,
+    path:
+      expectedKind === "pull_request"
+        ? (contract.provenance?.semanticSource?.path ?? contract.templateIdentity.path)
+        : contract.templateIdentity.path,
   };
   return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
 }
@@ -1448,7 +1457,7 @@ function renderIssueBody(
       .join("\n\n");
     blocks.push([`### ${escapeHeading(title)}`, body].filter((part) => part.length > 0).join("\n\n"));
   }
-  const marker = renderTemplateIdentityMarker(contract);
+  const marker = renderTemplateIdentityMarker(contract, "issue");
   const dependencyMarker =
     dependencies !== undefined && (dependencies.blockedBy.length > 0 || dependencies.blocks.length > 0)
       ? `\n${renderIssueDependencyMarker(dependencies)}`
@@ -1475,7 +1484,7 @@ function renderPullRequestBody(contract: CanonicalContract, values: Readonly<Rec
       .filter(Boolean);
     blocks.push([`${"#".repeat(level)} ${escapeHeading(title)}`, ...rendered].join("\n\n"));
   }
-  return `${blocks.join("\n\n")}\n\n${renderTemplateIdentityMarker(contract)}\n`;
+  return `${blocks.join("\n\n")}\n\n${renderTemplateIdentityMarker(contract, "pull_request")}\n`;
 }
 
 function renderDocumentation(section: CanonicalContract["sections"][number], content: string): string {

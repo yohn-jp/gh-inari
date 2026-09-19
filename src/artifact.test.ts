@@ -38,7 +38,7 @@ import {
 } from "./pull-request-template.js";
 import { compileSemanticTemplateSource, normalizeSemanticTemplate } from "./semantic-template.js";
 
-function governedFixture(contract: CanonicalContract): CanonicalContract {
+function governedFixture(contract: CanonicalContract, semanticSourcePath?: string): CanonicalContract {
   return {
     ...contract,
     provenance: {
@@ -57,6 +57,16 @@ function governedFixture(contract: CanonicalContract): CanonicalContract {
         sha: "fixture-template-sha",
         digest: "fixture-template-digest",
       },
+      ...(semanticSourcePath === undefined
+        ? {}
+        : {
+            semanticSource: {
+              path: semanticSourcePath,
+              ref: "main",
+              sha: "fixture-semantic-sha",
+              digest: "fixture-semantic-digest",
+            },
+          }),
     },
   };
 }
@@ -1387,7 +1397,11 @@ test("rendered Issue and PR bodies carry a bounded template identity marker that
     acceptance: ["tests", "docs"],
   });
 
-  const prBody = renderPullRequestArtifact(pullRequestContractFixture, {
+  const governedPullRequestContract = governedFixture(
+    pullRequestContractFixture,
+    ".github/inari/pull-requests/default.json",
+  );
+  const prBody = renderPullRequestArtifact(governedPullRequestContract, {
     summary: "A deterministic summary",
     linked_issue: "Closes #21",
     acceptance: ["tests"],
@@ -1395,7 +1409,7 @@ test("rendered Issue and PR bodies carry a bounded template identity marker that
   });
   assert.ok(
     prBody.endsWith(
-      `<!-- inari:template {"version":"1","kind":"pull_request","path":".github/PULL_REQUEST_TEMPLATE.md"} -->\n`,
+      `<!-- inari:template {"version":"1","kind":"pull_request","path":".github/inari/pull-requests/default.json"} -->\n`,
     ),
   );
   const prMarker = extractTemplateIdentityMarker(prBody);
@@ -1403,9 +1417,10 @@ test("rendered Issue and PR bodies carry a bounded template identity marker that
   assert.deepEqual(prMarker.marker, {
     version: TEMPLATE_IDENTITY_MARKER_VERSION,
     kind: "pull_request",
-    path: pullRequestContractFixture.templateIdentity.path,
+    path: governedPullRequestContract.provenance?.semanticSource?.path,
   });
-  const prParsed = parseExistingPullRequestArtifact(pullRequestContractFixture, prBody);
+  assert.notEqual(prMarker.marker?.kind, "issue");
+  const prParsed = parseExistingPullRequestArtifact(governedPullRequestContract, prBody);
   assert.equal(prParsed.parsed, true);
   assert.deepEqual(prParsed.values, {
     summary: "A deterministic summary",
