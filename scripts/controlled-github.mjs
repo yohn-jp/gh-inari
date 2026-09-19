@@ -52,32 +52,6 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
-function parseFields(argv) {
-  const fields = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const option = argv[index];
-    if (option !== "--raw-field" && option !== "--field" && option !== "-f") continue;
-    const value = argv[index + 1];
-    if (typeof value !== "string") throw new Error(`${option} requires a value`);
-    const separator = value.indexOf("=");
-    if (separator <= 0) throw new Error(`${option} requires name=value`);
-    fields[value.slice(0, separator)] = value.slice(separator + 1);
-    index += 1;
-  }
-  return fields;
-}
-
-function optionValue(argv, option) {
-  const index = argv.indexOf(option);
-  return index < 0 ? undefined : argv[index + 1];
-}
-
-function apiEndpoint(argv) {
-  const index = argv.indexOf("api");
-  if (index < 0 || typeof argv[index + 1] !== "string") throw new Error("gh api endpoint is required");
-  return argv[index + 1];
-}
-
 function repositoryMetadata() {
   return {
     id: Number(REPOSITORY_ID),
@@ -87,10 +61,6 @@ function repositoryMetadata() {
     default_branch: BASE_BRANCH,
     fork: false,
   };
-}
-
-function repositoryContextOutput() {
-  return { nameWithOwner: REPOSITORY, url: `https://${HOST}/${REPOSITORY}` };
 }
 
 function sha1Blob(source) {
@@ -188,6 +158,9 @@ function issueBody(issue) {
     title: issue.title,
     body: issue.body,
     state: issue.state,
+    html_url: `https://${HOST}/${REPOSITORY}/issues/${issue.number}`,
+    labels: issue.labels ?? [],
+    assignees: issue.assignees ?? [],
   };
 }
 
@@ -277,91 +250,6 @@ function findIssue(state, number) {
 
 function stateChanged(statePath, state) {
   writeJson(statePath, state);
-}
-
-function sendRepositoryResponse(argv, status, value) {
-  const body = JSON.stringify(value);
-  if (argv.includes("--include"))
-    process.stdout.write(`HTTP/1.1 ${status} OK\ncontent-type: application/json\n\n${body}\n`);
-  else process.stdout.write(`${body}\n`);
-}
-
-function repositoryApi(argv, state) {
-  const endpoint = apiEndpoint(argv);
-  const { parsed, parts } = endpointParts(endpoint);
-  if (parts.length === 0) {
-    sendRepositoryResponse(argv, 200, repositoryMetadata());
-    return;
-  }
-  if (parts[0] === "issues" && parts.length === 2) {
-    const issue = findIssue(state, Number(parts[1]));
-    sendRepositoryResponse(
-      argv,
-      issue === undefined ? 404 : 200,
-      issue === undefined ? { message: "not found" } : issueBody(issue),
-    );
-    return;
-  }
-  if (parts[0] === "git" && parts[1] === "ref" && parts[2] === "heads") {
-    const branch = parts.slice(3).join("/");
-    const sha = state.branches?.[branch];
-    sendRepositoryResponse(
-      argv,
-      sha === undefined ? 404 : 200,
-      sha === undefined ? { message: "not found" } : branchBody(branch, sha),
-    );
-    return;
-  }
-  if (parts[0] === "git" && parts[1] === "matching-refs") {
-    const refs = Object.entries(state.branches ?? {})
-      .filter(([branch]) => branch !== BASE_BRANCH)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([branch, sha]) => branchBody(branch, sha));
-    sendRepositoryResponse(argv, 200, refs);
-    return;
-  }
-  if (parts[0] === "git" && parts[1] === "trees" && parts.length === 3) {
-    const consumerRoot = requireEnvironment("INARI_PACKED_CONSUMER_ROOT");
-    const governance = governanceEntries(consumerRoot);
-    sendRepositoryResponse(argv, 200, { sha: state.workflowSha, truncated: false, tree: governance.entries });
-    return;
-  }
-  if (parts[0] === "git" && parts[1] === "blobs" && parts.length === 3) {
-    const consumerRoot = requireEnvironment("INARI_PACKED_CONSUMER_ROOT");
-    const source = governanceEntries(consumerRoot).blobs.get(parts[2]);
-    sendRepositoryResponse(
-      argv,
-      source === undefined ? 404 : 200,
-      source === undefined
-        ? { message: "not found" }
-        : { sha: parts[2], encoding: "base64", content: Buffer.from(source).toString("base64") },
-    );
-    return;
-  }
-  if (parts[0] === "pulls" && parts.length === 1) {
-    const head = parsed.searchParams.get("head");
-    const expectedHead = head?.startsWith(`${OWNER}:`) === true ? head.slice(OWNER.length + 1) : undefined;
-    const base = parsed.searchParams.get("base");
-    const values = Object.values(state.pulls ?? {})
-      .filter(
-        (pull) =>
-          (expectedHead === undefined || pull.branch === expectedHead) && (base === null || base === BASE_BRANCH),
-      )
-      .sort((left, right) => left.number - right.number)
-      .map(pullRequestBody);
-    sendRepositoryResponse(argv, 200, values);
-    return;
-  }
-  if (parts[0] === "pulls" && parts.length === 2) {
-    const pull = findPull(state, Number(parts[1]));
-    sendRepositoryResponse(
-      argv,
-      pull === undefined ? 404 : 200,
-      pull === undefined ? { message: "not found" } : pullRequestBody(pull),
-    );
-    return;
-  }
-  throw new Error(`unsupported repository API endpoint: ${endpoint}`);
 }
 
 function createProviderServer(state, statePath, consumerRoot) {
@@ -1010,147 +898,12 @@ async function actionsHttpApi(request, response, parsed, parts, state, statePath
   sendJson(response, 404, { message: "unsupported Actions API endpoint" });
 }
 
-async function actionsApi(argv) {
-  const statePath = requireEnvironment("INARI_PACKED_PROVIDER_STATE");
-  const state = readJson(statePath, undefined);
-  if (!isRecord(state)) throw new Error("provider state is invalid");
-  const endpoint = apiEndpoint(argv);
-  const relativeEndpoint = endpoint.startsWith(`repos/${REPOSITORY}/`)
-    ? endpoint.slice(`repos/${REPOSITORY}/`.length)
-    : endpoint;
-  const method = optionValue(argv, "--method") ?? "GET";
-  const fields = parseFields(argv);
-  if (
-    relativeEndpoint.startsWith("actions/workflows/") &&
-    relativeEndpoint.includes("/runs?event=workflow_dispatch&branch=main&per_page=100&page=")
-  ) {
-    const page = Number(new URL(`https://provider.invalid/${relativeEndpoint}`).searchParams.get("page"));
-    const runs = Array.isArray(state.runs) ? state.runs : [];
-    process.stdout.write(`${JSON.stringify({ workflow_runs: runs.slice((page - 1) * 100, page * 100) })}\n`);
-    return;
-  }
-  if (relativeEndpoint === "actions/workflows/inari-change-executor.yml/dispatches" && method === "POST") {
-    const requestJson = fields["inputs[request]"];
-    const correlation = fields["inputs[correlation]"];
-    if (requestJson === undefined || correlation === undefined)
-      throw new Error("Actions dispatch fields are incomplete");
-    await dispatchActionsRun(state, statePath, requestJson, correlation);
-    return;
-  }
-  if (relativeEndpoint.startsWith("actions/artifacts?name=") && method === "GET") {
-    const requestUrl = new URL(`https://provider.invalid/${relativeEndpoint}`);
-    const name = requestUrl.searchParams.get("name");
-    const page = Number(requestUrl.searchParams.get("page"));
-    const correlation = name === null ? undefined : name.replace("inari-change-result-", "");
-    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
-      (candidate) => candidate.correlation === correlation,
-    );
-    process.stdout.write(
-      `${JSON.stringify({ artifacts: artifact === undefined || page !== 1 ? [] : [{ id: artifact.id, name, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } }] })}\n`,
-    );
-    return;
-  }
-  const exactRunMatch = /^actions\/runs\/(\d+)$/u.exec(relativeEndpoint);
-  if (exactRunMatch !== null && method === "GET") {
-    const runId = Number(exactRunMatch[1]);
-    const run = (Array.isArray(state.runs) ? state.runs : []).find((candidate) => candidate.id === runId);
-    if (run === undefined) throw new Error("Actions run not found");
-    process.stdout.write(`${JSON.stringify(run)}\n`);
-    return;
-  }
-  const exactArtifactMatch = /^actions\/artifacts\/(\d+)$/u.exec(relativeEndpoint);
-  if (exactArtifactMatch !== null && method === "GET") {
-    const artifactId = Number(exactArtifactMatch[1]);
-    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
-      (candidate) => candidate.id === artifactId,
-    );
-    if (artifact === undefined) throw new Error("Actions artifact not found");
-    process.stdout.write(
-      `${JSON.stringify({ id: artifact.id, name: `inari-change-result-${artifact.correlation}`, expired: false, workflow_run: { id: artifact.runId, repository_id: Number(REPOSITORY_ID) } })}\n`,
-    );
-    return;
-  }
-  const artifactMatch = /^repos\/yohn-jp\/gh-inari\/actions\/artifacts\/(\d+)\/zip$/u.exec(endpoint);
-  if (artifactMatch !== null && method === "GET") {
-    const artifact = (Array.isArray(state.artifacts) ? state.artifacts : []).find(
-      (candidate) => candidate.id === Number(artifactMatch[1]),
-    );
-    if (artifact === undefined) throw new Error("Actions artifact not found");
-    process.stdout.write(Buffer.from(artifact.bytes, "base64"));
-    return;
-  }
-  throw new Error(`unsupported Actions API endpoint: ${endpoint}`);
+if (process.argv.slice(2).length !== 1 || process.argv[2] !== "--server") {
+  process.stderr.write("controlled HTTP provider requires the --server option\n");
+  process.exitCode = 2;
+} else {
+  serveProvider().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
 }
-
-async function api(argv) {
-  const endpoint = apiEndpoint(argv);
-  const statePath = requireEnvironment("INARI_PACKED_PROVIDER_STATE");
-  const state = readJson(statePath, undefined);
-  if (!isRecord(state)) throw new Error("provider state is invalid");
-  if (endpoint === "user") {
-    process.stdout.write(`${JSON.stringify({ login: "packed-certification" })}\n`);
-    return;
-  }
-  if (endpoint === `repos/${REPOSITORY}` && optionValue(argv, "--jq") === ".id") {
-    process.stdout.write(`${REPOSITORY_ID}\n`);
-    return;
-  }
-  if (
-    endpoint.startsWith("actions/") ||
-    endpoint.includes("/actions/workflows/") ||
-    endpoint.includes("/actions/artifacts?") ||
-    endpoint.includes("/actions/artifacts/") ||
-    endpoint.includes("/actions/runs/")
-  ) {
-    await actionsApi(argv);
-    return;
-  }
-  if (endpoint.startsWith(`repos/${REPOSITORY}`)) {
-    repositoryApi(argv, state);
-    return;
-  }
-  throw new Error(`unsupported gh api endpoint: ${endpoint}`);
-}
-
-async function main() {
-  const argv = process.argv.slice(2);
-  const first = argv[0];
-  if (first === "--server") {
-    await serveProvider();
-    return;
-  }
-  if (first === "--version") {
-    process.stdout.write("gh version 2.0.0\n");
-    return;
-  }
-  if (first === "auth" && argv[1] === "status") return;
-  if (first === "extension" && argv[1] === "list") {
-    process.stdout.write("gh inari\tcontrolled packed artifact\n");
-    return;
-  }
-  if (first === "repo" && argv[1] === "view") {
-    process.stdout.write(`${JSON.stringify(repositoryContextOutput())}\n`);
-    return;
-  }
-  if (first === "inari") {
-    const entry = requireEnvironment("INARI_PACKED_ENTRY");
-    const result = await spawnWorker(process.execPath, [entry, ...argv.slice(1)], {
-      cwd: process.cwd(),
-      env: process.env,
-    });
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
-    process.exitCode = result.status ?? 1;
-    return;
-  }
-  if (first === "api") {
-    await api(argv);
-    return;
-  }
-  throw new Error(`unsupported controlled gh command: ${argv.join(" ")}`);
-}
-
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
