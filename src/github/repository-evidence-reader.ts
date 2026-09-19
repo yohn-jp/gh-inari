@@ -135,7 +135,7 @@ function boundedString(value: unknown, maximum: number, reason?: RepositoryEvide
     value.length > maximum ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    fail(reason);
+    fail(reason, invalidProviderResponse());
   }
   return value;
 }
@@ -149,13 +149,15 @@ function boundedArtifactBody(value: unknown): string | null | undefined {
     value.length > 1_048_576 ||
     /[\u0000-\u0009\u000b-\u000c\u000e-\u001f\u007f]/u.test(value)
   ) {
-    fail();
+    fail(undefined, invalidProviderResponse());
   }
   return value;
 }
 
 function positiveNumber(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) fail();
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    fail(undefined, invalidProviderResponse());
+  }
   return value;
 }
 
@@ -174,7 +176,7 @@ function optionalPullRequestHeadSha(value: unknown): string | undefined {
 function boundedGitHubTimestamp(value: unknown): string {
   const timestamp = boundedString(value, MAX_TIMESTAMP_LENGTH);
   const match = GITHUB_TIMESTAMP_PATTERN.exec(timestamp);
-  if (match === null) fail();
+  if (match === null) fail(undefined, invalidProviderResponse());
   const date = new Date(timestamp);
   const year = Number(match[1]);
   const month = Number(match[2]);
@@ -193,7 +195,7 @@ function boundedGitHubTimestamp(value: unknown): string {
     date.getUTCSeconds() !== seconds ||
     date.getUTCMilliseconds() !== milliseconds
   ) {
-    fail();
+    fail(undefined, invalidProviderResponse());
   }
   return timestamp;
 }
@@ -248,11 +250,15 @@ export class GitHubRepositoryEvidenceReader {
       fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
     }
     const issue = record(response.body, "repository-body");
-    if (Object.prototype.hasOwnProperty.call(issue, "pull_request")) fail();
+    if (Object.prototype.hasOwnProperty.call(issue, "pull_request")) {
+      fail("repository-body", invalidProviderResponse());
+    }
     const number = positiveNumber(issue.number);
     const title = boundedString(issue.title, MAX_REPOSITORY_TEXT_LENGTH);
     const state = issue.state === "open" || issue.state === "closed" ? issue.state : undefined;
-    if (state === undefined || issueNumber !== number) fail();
+    if (state === undefined || issueNumber !== number) {
+      fail("repository-body", invalidProviderResponse());
+    }
     return { number, title, state, body: boundedArtifactBody(issue.body) };
   }
 
@@ -266,7 +272,7 @@ export class GitHubRepositoryEvidenceReader {
       fail("repository-status", githubProviderFailureFromStatus(response.status, response.headers));
     }
     const value = record(response.body);
-    if (value.ref !== `refs/heads/${branch}`) fail();
+    if (value.ref !== `refs/heads/${branch}`) fail("repository-body", invalidProviderResponse());
     return {
       name: branch,
       ...(optionalCommitSha(value.object) === undefined ? {} : { sha: optionalCommitSha(value.object) }),
@@ -289,7 +295,7 @@ export class GitHubRepositoryEvidenceReader {
       const value = record(candidate);
       const ref = boundedString(value.ref, 512);
       const prefix = "refs/heads/";
-      if (!ref.startsWith(prefix)) fail();
+      if (!ref.startsWith(prefix)) fail("repository-body", invalidProviderResponse());
       const name = ref.slice(prefix.length);
       const sha = optionalCommitSha(value.object);
       return { name, ...(sha === undefined ? {} : { sha }) };
@@ -339,7 +345,10 @@ export class GitHubRepositoryEvidenceReader {
       return pullRequests;
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail("pull-request-evidence");
+      fail(
+        "pull-request-evidence",
+        readGitHubProviderFailure(error) ?? invalidProviderResponse(),
+      );
     }
   }
 
@@ -349,7 +358,9 @@ export class GitHubRepositoryEvidenceReader {
       fail("pull-request-evidence", githubProviderFailureFromStatus(response.status, response.headers));
     }
     const value = record(response.body);
-    if (positiveNumber(value.number) !== number) fail("pull-request-evidence");
+    if (positiveNumber(value.number) !== number) {
+      fail("pull-request-evidence", invalidProviderResponse());
+    }
     return boundedArtifactBody(value.body);
   }
 
@@ -364,7 +375,10 @@ export class GitHubRepositoryEvidenceReader {
       return await adapter.observePullRequest(number);
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail("pull-request-evidence");
+      fail(
+        "pull-request-evidence",
+        readGitHubProviderFailure(error) ?? invalidProviderResponse(),
+      );
     }
   }
 
@@ -378,7 +392,10 @@ export class GitHubRepositoryEvidenceReader {
       return result.observation;
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail("pull-request-evidence");
+      fail(
+        "pull-request-evidence",
+        readGitHubProviderFailure(error) ?? invalidProviderResponse(),
+      );
     }
   }
 
@@ -399,7 +416,7 @@ export class GitHubRepositoryEvidenceReader {
       const candidate = record(entry);
       const type: "blob" | "tree" | undefined =
         candidate.type === "blob" || candidate.type === "tree" ? candidate.type : undefined;
-      if (type === undefined) fail();
+      if (type === undefined) fail("repository-body", invalidProviderResponse());
       return { path: boundedString(candidate.path, 512), type, sha: boundedString(candidate.sha, 255) };
     });
     return { sha, entries };
