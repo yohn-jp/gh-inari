@@ -327,7 +327,7 @@ test("--help exits 0 and prints root usage naming the governed domains", async (
   assert.match(output, /issue/);
   assert.match(output, /\bpr\b/);
   assert.match(output, /template/);
-  assert.match(output, /passed through to gh/);
+  assert.match(output, /unsupported commands are rejected locally/);
 });
 
 test("no arguments prints root usage matching --help", async () => {
@@ -555,17 +555,9 @@ test("skill <scenario> --help prints that scenario's summary, not the full playb
 });
 
 test("skill never falls through to the real gh binary", async () => {
-  const calls: (readonly string[])[] = [];
-  const dependencies = {
-    runGhFallback: (argv: readonly string[]) => {
-      calls.push(argv);
-      return 0;
-    },
-  };
-  await runCli(["skill"], dependencies);
-  await runCli(["skill", "author-issue"], dependencies);
-  await runCli(["skill", "bogus-scenario"], dependencies);
-  assert.deepEqual(calls, []);
+  assert.equal(await runCli(["skill"]), 0);
+  assert.equal(await runCli(["skill", "author-issue"]), 0);
+  assert.equal(await runCli(["skill", "bogus-scenario"]), 2);
 });
 
 test("no arguments exits 1", async () => {
@@ -690,52 +682,25 @@ test("an earlier unrelated invalid option is not relabeled merely because --body
   });
 });
 
-test("an unrecognized top-level domain falls back to the real gh binary with the original argv", async () => {
-  const calls: (readonly string[])[] = [];
-  const exitCode = await runCli(["repo", "view", "--json", "name"], {
-    runGhFallback: (argv) => {
-      calls.push(argv);
-      return 0;
-    },
-  });
-  assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [["repo", "view", "--json", "name"]]);
-});
-
-test("an unrecognized issue/pr subcommand falls back to the real gh binary and propagates its exit code", async () => {
-  const calls: (readonly string[])[] = [];
-  const exitCode = await runCli(["pr", "legacy", "--state", "open"], {
-    runGhFallback: (argv) => {
-      calls.push(argv);
-      return 7;
-    },
-  });
-  assert.equal(exitCode, 7);
-  assert.deepEqual(calls, [["pr", "legacy", "--state", "open"]]);
-});
-
-test("--help on an unowned domain falls back to real gh --help instead of printing Inari's own help", async () => {
-  const calls: (readonly string[])[] = [];
-  const exitCode = await runCli(["repo", "view", "--help"], {
-    runGhFallback: (argv) => {
-      calls.push(argv);
-      return 0;
-    },
-  });
-  assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [["repo", "view", "--help"]]);
-});
-
-test("--help on an unowned issue/pr subcommand falls back to real gh --help", async () => {
-  const calls: (readonly string[])[] = [];
-  const exitCode = await runCli(["pr", "legacy", "--help"], {
-    runGhFallback: (argv) => {
-      calls.push(argv);
-      return 0;
-    },
-  });
-  assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [["pr", "legacy", "--help"]]);
+test("unknown and hostile argv are rejected locally without process delegation", async () => {
+  const cases: readonly (readonly string[])[] = [
+    ["repo", "view", "--json", "name"],
+    ["pr", "legacy", "--state", "open", "--json"],
+    ["repo", "view", "--help", "--json"],
+    ["--unknown-option=$(touch /tmp/inari-should-not-run)", "--json"],
+    ["--json", "--", "repo", "view"],
+  ];
+  for (const argv of cases) {
+    const result = await captureJson(argv);
+    assert.equal(result.exitCode, 1, argv.join(" "));
+    const code = (result.output.error as { code?: string } | undefined)?.code;
+    assert.ok(code === "UNKNOWN_COMMAND" || code === "INVALID_OPTION", argv.join(" "));
+    if (code === "UNKNOWN_COMMAND")
+      assert.match(
+        String((result.output.error as { message?: string } | undefined)?.message),
+        /closed command surface/u,
+      );
+  }
 });
 
 test("invalid issue/pr numbers on get and explain are classified as INVALID_ARTIFACT_NUMBER, not UNKNOWN_COMMAND", async () => {
@@ -4181,7 +4146,7 @@ test("validate excludes a default-backed field from missingFields when other req
   );
 });
 
-test("supported value-taking options before the domain cannot bypass owned routing", async () => {
+test("supported value-taking options before the domain stay on the closed command surface", async () => {
   const cases: readonly (readonly string[])[] = [
     ["--repository", "acme/inari", "issue", "create"],
     ["--repo=acme/inari", "issue", "create"],
@@ -4195,13 +4160,9 @@ test("supported value-taking options before the domain cannot bypass owned routi
     ["--base=main", "pr", "create"],
   ];
   for (const prefix of cases) {
-    const fallbackCalls: string[][] = [];
-    const result = await captureJson([...prefix, "--body", "raw Markdown", "--json"], {
-      runGhFallback: (argv) => (fallbackCalls.push([...argv]), 91),
-    });
+    const result = await captureJson([...prefix, "--body", "raw Markdown", "--json"]);
     assert.equal(result.exitCode, 1, prefix.join(" "));
     assert.equal((result.output.error as { code?: string } | undefined)?.code, "GOVERNED_CREATE_OPTION");
-    assert.deepEqual(fallbackCalls, [], prefix.join(" "));
   }
 
   const afterDomainCases: readonly (readonly string[])[] = [
@@ -4218,34 +4179,18 @@ test("supported value-taking options before the domain cannot bypass owned routi
   ];
   for (const suffix of afterDomainCases) {
     const domain = suffix.some((token) => token.includes("head") || token.includes("base")) ? "pr" : "issue";
-    const fallbackCalls: string[][] = [];
-    const result = await captureJson([domain, "create", ...suffix, "--body", "raw Markdown", "--json"], {
-      runGhFallback: (argv) => (fallbackCalls.push([...argv]), 91),
-    });
+    const result = await captureJson([domain, "create", ...suffix, "--body", "raw Markdown", "--json"]);
     assert.equal(result.exitCode, 1, [domain, "create", ...suffix].join(" "));
     assert.equal((result.output.error as { code?: string } | undefined)?.code, "GOVERNED_CREATE_OPTION");
-    assert.deepEqual(fallbackCalls, [], [domain, "create", ...suffix].join(" "));
   }
 
-  const templateFallbackCalls: string[][] = [];
-  const templateResult = await captureJson(["--to=semantic.json", "template", "import", "--json"], {
-    runGhFallback: (argv) => (templateFallbackCalls.push([...argv]), 91),
-  });
+  const templateResult = await captureJson(["--to=semantic.json", "template", "import", "--json"]);
   assert.equal(templateResult.exitCode, 1);
   assert.equal((templateResult.output.error as { code?: string } | undefined)?.code, "INPUT_REQUIRED");
-  assert.deepEqual(templateFallbackCalls, []);
 
-  const versionFallbackCalls: string[][] = [];
-  const versionResult = await captureJson(["--require-capability=canonical-invocation", "version", "--json"], {
-    runGhFallback: (argv) => (versionFallbackCalls.push([...argv]), 91),
-  });
+  const versionResult = await captureJson(["--require-capability=canonical-invocation", "version", "--json"]);
   assert.equal(versionResult.exitCode, 0);
-  assert.deepEqual(versionFallbackCalls, []);
 
-  const diagnoseFallbackCalls: string[][] = [];
-  const diagnoseResult = await captureJson(["--minimum-version", "999.0.0", "diagnose", "--json"], {
-    runGhFallback: (argv) => (diagnoseFallbackCalls.push([...argv]), 91),
-  });
+  const diagnoseResult = await captureJson(["--minimum-version", "999.0.0", "diagnose", "--json"]);
   assert.equal(diagnoseResult.exitCode, 2);
-  assert.deepEqual(diagnoseFallbackCalls, []);
 });

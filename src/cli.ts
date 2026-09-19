@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { AGENT_INVOCATION_CONTRACT } from "./command-contract.js";
+import { AGENT_INVOCATION_CONTRACT, tokenizeCommandArgv } from "./command-contract.js";
 import { runCli as runCoreCli, type CliDependencies as CoreCliDependencies } from "./cli-core.js";
 
 interface DiagnosticCommandResult {
@@ -27,15 +27,26 @@ interface CanonicalDiagnosticProjection {
 }
 
 export interface CliDependencies extends CoreCliDependencies {
-  /** Test seam for probing the canonical `inari` executable independently from `gh inari`. */
+  /** Test seam for probing the canonical standalone `inari` executable. */
   readonly runCanonicalDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
 }
 
 function isDiagnosticRequest(argv: readonly string[]): boolean {
+  if (argv.some((token) => token === "--help" || token.startsWith("--help="))) return false;
+  const tokenized = tokenizeCommandArgv(argv);
+  if (tokenized.options.some((option) => option.definition === undefined)) return false;
+  const first = tokenized.positionals[0];
   return (
-    argv.some((token) => token === "--diagnose" || token === "--doctor") ||
-    argv[0] === "diagnose" ||
-    argv[0] === "doctor"
+    first === "diagnose" ||
+    first === "doctor" ||
+    (tokenized.positionals.length === 0 &&
+      argv.some(
+        (token) =>
+          token === "--diagnose" ||
+          token.startsWith("--diagnose=") ||
+          token === "--doctor" ||
+          token.startsWith("--doctor="),
+      ))
   );
 }
 
@@ -212,7 +223,7 @@ async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: Cli
 /**
  * Public CLI entrypoint. Diagnostics first prove that the canonical `inari`
  * executable itself is reachable and reports the expected contract; all other
- * behavior remains delegated to the governed CLI core.
+ * behavior is handled by the closed governed CLI core.
  */
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<number> {
   if (!isDiagnosticRequest(argv)) return runCoreCli(argv, dependencies);
