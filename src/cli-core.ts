@@ -33,6 +33,7 @@ import {
   GitHubAdapter,
   isGitHubAdapterError,
 } from "./github/index.js";
+import { readGitHubProviderFailure } from "./github/provider-failure.js";
 import {
   assertPullRequestSyncInputComplete,
   parsePullRequestSyncInput,
@@ -4216,17 +4217,41 @@ function toErrorShape(error: unknown): CliErrorShape {
   if (error instanceof ArtifactPreparationError) {
     return { code: error.code, message: error.message, diagnostics: error.diagnostics };
   }
-  if (isGitHubAdapterError(error)) return { code: error.code, message: error.message, details: error.details };
-  if (isObjectWithCode(error))
+  if (isGitHubAdapterError(error)) {
+    const providerFailure = readGitHubProviderFailure(error);
+    return {
+      code: error.code,
+      message: error.message,
+      details:
+        providerFailure === undefined
+          ? error.details
+          : {
+              ...error.details,
+              providerFailure,
+            },
+    };
+  }
+  if (isObjectWithCode(error)) {
+    const providerFailure = readGitHubProviderFailure(error);
+    const details =
+      typeof error.details === "object" && error.details !== null && !Array.isArray(error.details)
+        ? {
+            ...error.details,
+            ...(providerFailure === undefined ? {} : { providerFailure }),
+          }
+        : providerFailure === undefined
+          ? error.details
+          : { providerFailure };
     return {
       code: error.code,
       message: typeof error.message === "string" ? error.message : "Operation failed.",
       ...(typeof error.path === "string" ? { path: error.path } : {}),
-      ...(typeof error.details === "object" ? { details: error.details } : {}),
+      ...(typeof details === "object" && details !== null ? { details } : {}),
       ...(Array.isArray(error.violations) ? { violations: error.violations } : {}),
       ...(Array.isArray(error.diagnostics) ? { diagnostics: error.diagnostics } : {}),
       ...(typeof error.evidence === "object" && error.evidence !== null ? { evidence: error.evidence } : {}),
     };
+  }
   return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
 }
 
