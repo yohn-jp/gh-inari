@@ -233,11 +233,15 @@ export async function resolveGitHubRepository(
   try {
     body = record(response.body);
   } catch {
-    throw fail("repository-body");
+    throw fail("repository-body", githubProviderFailure("response-invalid", { retryable: false }));
   }
   const repositoryId = String(body.id);
-  if (!DECIMAL_ID_PATTERN.test(repositoryId)) throw fail("repository-id");
-  if (typeof body.fork !== "boolean") throw fail("repository-fork");
+  if (!DECIMAL_ID_PATTERN.test(repositoryId)) {
+    throw fail("repository-id", githubProviderFailure("response-invalid", { retryable: false }));
+  }
+  if (typeof body.fork !== "boolean") {
+    throw fail("repository-fork", githubProviderFailure("response-invalid", { retryable: false }));
+  }
   const repositoryNodeId =
     typeof body.node_id === "string" &&
     body.node_id.length > 0 &&
