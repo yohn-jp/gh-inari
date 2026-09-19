@@ -21,6 +21,10 @@ import type {
   GitHubChangeEffectResponse,
   GitHubChangeEffectTransport,
 } from "./change-effect-adapter.js";
+import {
+  githubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
 
 const DEFAULT_HOSTNAME = "github.com";
 const MAX_HOSTNAME_LENGTH = 255;
@@ -39,11 +43,18 @@ export type GitHubHttpFailureReason = "timeout" | "transport" | "response-limit"
 export class GitHubHttpTransportError extends Error {
   readonly code = "GITHUB_HTTP_TRANSPORT_FAILED" as const;
   readonly reason: GitHubHttpFailureReason;
+  readonly providerFailure: GitHubProviderFailureClassification;
 
-  constructor(reason: GitHubHttpFailureReason, message: string, cause?: unknown) {
+  constructor(
+    reason: GitHubHttpFailureReason,
+    message: string,
+    cause?: unknown,
+    providerFailure: GitHubProviderFailureClassification = githubProviderFailure("transport", { retryable: true }),
+  ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "GitHubHttpTransportError";
     this.reason = reason;
+    this.providerFailure = providerFailure;
   }
 }
 
@@ -51,7 +62,12 @@ export class GitHubHttpTimeoutError extends GitHubHttpTransportError {
   readonly timeoutMs: number;
 
   constructor(timeoutMs: number) {
-    super("timeout", `GitHub HTTP request exceeded its bounded timeout of ${timeoutMs}ms.`);
+    super(
+      "timeout",
+      `GitHub HTTP request exceeded its bounded timeout of ${timeoutMs}ms.`,
+      undefined,
+      githubProviderFailure("timeout", { retryable: true, timeoutMs }),
+    );
     this.name = "GitHubHttpTimeoutError";
     this.timeoutMs = timeoutMs;
   }
@@ -61,7 +77,12 @@ export class GitHubHttpResponseLimitError extends GitHubHttpTransportError {
   readonly limitBytes: number;
 
   constructor(limitBytes: number) {
-    super("response-limit", `GitHub HTTP response exceeded its bounded limit of ${limitBytes} bytes.`);
+    super(
+      "response-limit",
+      `GitHub HTTP response exceeded its bounded limit of ${limitBytes} bytes.`,
+      undefined,
+      githubProviderFailure("response-limit", { retryable: false, limitBytes }),
+    );
     this.name = "GitHubHttpResponseLimitError";
     this.limitBytes = limitBytes;
   }
@@ -69,7 +90,12 @@ export class GitHubHttpResponseLimitError extends GitHubHttpTransportError {
 
 export class GitHubHttpMalformedResponseError extends GitHubHttpTransportError {
   constructor() {
-    super("malformed-response", "GitHub HTTP response body could not be decoded.");
+    super(
+      "malformed-response",
+      "GitHub HTTP response body could not be decoded.",
+      undefined,
+      githubProviderFailure("response-invalid", { retryable: false }),
+    );
     this.name = "GitHubHttpMalformedResponseError";
   }
 }
@@ -256,10 +282,28 @@ function decodeJsonBody(bytes: Uint8Array | undefined): unknown {
   }
 }
 
+function safeResponseHeaders(headers: Headers): Readonly<Record<string, string>> | undefined {
+  const projected: Record<string, string> = {};
+  for (const name of ["link", "x-github-request-id", "retry-after", "x-ratelimit-remaining"] as const) {
+    const value = headers.get(name);
+    if (
+      value !== null &&
+      value.length > 0 &&
+      value.length <= 512 &&
+      !/[\u0000-\u001F\u007F]/u.test(value)
+    ) {
+      projected[name] = value;
+    }
+  }
+  return Object.keys(projected).length === 0 ? undefined : Object.freeze(projected);
+}
+
 export interface GitHubHttpBinaryResponse {
   readonly status: number;
   readonly bytes?: Uint8Array;
   readonly contentType?: string;
+  /** Only bounded, non-secret response headers are exposed to callers. */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /** Native response metadata retained by ordinary artifact observation. */
@@ -343,10 +387,12 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     const url = this.restUrl(request.hostname, path);
     const { response, bytes } = await this.execute(url, request.method, undefined, request.accept);
     const contentType = response.headers.get("content-type");
+    const headers = safeResponseHeaders(response.headers);
     return {
       status: response.status,
       ...(bytes === undefined ? {} : { bytes }),
       ...(contentType === null ? {} : { contentType }),
+      ...(headers === undefined ? {} : { headers }),
     };
   }
 
@@ -356,11 +402,11 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   }
 
   private jsonResponse(response: Response, bytes: Uint8Array | undefined): GitHubNativeHttpResponse {
-    const link = response.headers.get("link");
+    const headers = safeResponseHeaders(response.headers);
     return {
       status: response.status,
       body: decodeJsonBody(bytes),
-      ...(link === null ? {} : { headers: { link } }),
+      ...(headers === undefined ? {} : { headers }),
     };
   }
 
