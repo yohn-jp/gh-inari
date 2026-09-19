@@ -247,7 +247,7 @@
     "worker:build": "node scripts/build-worker.mjs",
     "worker:deploy": "wrangler deploy",
     "worker:dev": "wrangler dev",
-    "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run templates:check && pnpm run worker:build && pnpm run test:package",
+    "verify": "wireit",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test"
   },
@@ -266,7 +266,8 @@
     "tsx": "^4.19.4",
     "typescript": "^6.0.3",
     "typescript-eslint": "8.69.0",
-    "wrangler": "4.131.1"
+    "wrangler": "4.131.1",
+    "wireit": "0.14.13"
   },
   "engines": {
     "node": ">=24"
@@ -303,5 +304,23 @@
   "types": "./dist/index.d.ts",
   "directories": {
     "doc": "docs"
+  },
+  "wireit": {
+    "verify": {
+      "dependencies": [
+        "format:check",
+        "lint",
+        "test",
+        "templates:check",
+        "worker:build",
+        "verify:package"
+      ]
+    },
+    "verify:package": {
+      "command": "pnpm run test:package",
+      "dependencies": [
+        "typecheck"
+      ]
+    }
   }
 }
