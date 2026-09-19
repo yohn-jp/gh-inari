@@ -36,6 +36,12 @@ function structuredCommandError() {
         reason: "workflow-failed",
         stage: "projection-execution",
         trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        providerFailure: {
+          failureClass: "validation",
+          retryable: false,
+          status: 422,
+          requestId: "ABCD:1234",
+        },
         token: "issuer-secret",
         diagnostics: [
           {
@@ -101,6 +107,12 @@ test("projects structured Change errors through the canonical evidence authority
         reason: "workflow-failed",
         stage: "projection-execution",
         trustedCode: "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+        providerFailure: {
+          failureClass: "validation",
+          retryable: false,
+          status: 422,
+          requestId: "ABCD:1234",
+        },
         diagnostics: [
           {
             version: 1,
@@ -192,6 +204,22 @@ test("canonical structured projection fails closed for unknown and unsafe comman
   };
   const unknownProjection = projectStructuredCommandError(withUnknownEvidenceField);
   assert.equal(unknownProjection?.structured.details?.evidence, undefined);
+
+  const withUnsafeProviderFailure = {
+    ...command,
+    error: {
+      ...command.error,
+      details: {
+        ...command.error.details,
+        providerFailure: {
+          ...command.error.details.providerFailure,
+          rawProviderBody: "must never survive",
+        },
+      },
+    },
+  };
+  const unsafeProviderProjection = projectStructuredCommandError(withUnsafeProviderFailure);
+  assert.equal(unsafeProviderProjection?.structured.details?.providerFailure, undefined);
 
   const withUnsafeRequester = {
     ...command,
