@@ -188,6 +188,7 @@ function remoteError(
   diagnostic?: TrustedActionsFailureDiagnostic,
   stage?: ActionsTransportFailureStage,
   providerFailure?: GitHubProviderFailureClassification,
+  transportDiagnostic?: Readonly<Record<string, unknown>>,
 ): ChangeExecutionPortError {
   const messages: Record<string, string> = {
     CHANGE_REMOTE_EXECUTOR_UNAVAILABLE: "The GitHub Actions Change executor is unavailable.",
@@ -206,6 +207,7 @@ function remoteError(
       reason,
       ...(stage === undefined || diagnostic !== undefined ? {} : { stage }),
       ...(providerFailure === undefined ? {} : { providerFailure }),
+      ...(transportDiagnostic === undefined ? {} : { transportDiagnostic }),
       ...(diagnostic === undefined
         ? {}
         : {
@@ -219,6 +221,22 @@ function remoteError(
     },
     diagnostic?.diagnostics,
   );
+}
+
+function boundedTransportDiagnostic(error: ChangeExecutionPortError): Readonly<Record<string, unknown>> {
+  const details =
+    typeof error.details === "object" && error.details !== null && !Array.isArray(error.details)
+      ? (error.details as Record<string, unknown>)
+      : undefined;
+  const providerFailure =
+    details?.providerFailure === undefined
+      ? undefined
+      : normalizeGitHubProviderFailureClassification(details.providerFailure);
+  return Object.freeze({
+    code: error.code,
+    ...(typeof details?.reason === "string" ? { reason: details.reason } : {}),
+    ...(providerFailure === undefined ? {} : { providerFailure }),
+  });
 }
 
 function resultValidationError(
@@ -1419,6 +1437,10 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
     // primary budget.
     let correlatedRun: WorkflowRun | undefined;
     let correlatedArtifact: WorkflowArtifact | undefined;
+    // Job inspection is diagnostic enrichment only. Keep at most one bounded
+    // transport diagnostic so a later authoritative failure can retain the
+    // observation without allowing jobs-read to block artifact retrieval.
+    let jobsReadDiagnostic: Readonly<Record<string, unknown>> | undefined;
     let observationStage: ActionsTransportFailureStage = "run-read";
     for (let attempt = 0; deadline.remainingMs() > 0 && attempt < this.#maxPollAttempts; attempt += 1) {
       const timeRemaining = () => deadline.remainingMs() > 0;
@@ -1487,9 +1509,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
           );
         } catch (error: unknown) {
           const normalized = normalizeTransportError(error, operation, "CHANGE_REMOTE_TRANSPORT_FAILED", "jobs-read");
-          if (!isRetryablePollTransportError(normalized) || !timeRemaining()) throw normalized;
-          await this.#sleep(this.#pollIntervalMs);
-          continue;
+          jobsReadDiagnostic ??= boundedTransportDiagnostic(normalized);
         }
       }
       observationStage = "artifact-read";
@@ -1623,7 +1643,15 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       // never by a second timeout/attempt authority of its own.
       if (timeRemaining()) await this.#sleep(this.#pollIntervalMs);
     }
-    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout", undefined, observationStage);
+    throw remoteError(
+      "CHANGE_REMOTE_RUN_FAILED",
+      operation,
+      "result-timeout",
+      undefined,
+      observationStage,
+      undefined,
+      jobsReadDiagnostic === undefined ? undefined : { jobsRead: jobsReadDiagnostic },
+    );
   }
 
   private async readArtifacts(

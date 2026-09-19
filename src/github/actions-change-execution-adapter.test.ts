@@ -19,7 +19,7 @@ import {
   INARI_CHANGE_EXECUTOR_WORKFLOW,
   type GitHubActionsRemoteApi,
 } from "./actions-change-execution-adapter.js";
-import { GitHubAuthenticationError } from "./errors.js";
+import { GitHubApiError, GitHubAuthenticationError, GitHubTimeoutError } from "./errors.js";
 import {
   attachGitHubProviderFailure,
   githubProviderFailure,
@@ -179,6 +179,7 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
   governanceBlobs = new Map<string, string>();
   governanceReads = 0;
   governanceUnavailable = false;
+  jobInspectionFailure: Error | undefined;
   private runReads = 0;
 
   async getRepositoryContext(deadline?: ChangeExecutionDeadline): Promise<RepositoryContext> {
@@ -321,6 +322,10 @@ class FakeActionsApi implements GitHubActionsRemoteApi {
     if (this.artifactMode === "malformed") return new Uint8Array(Buffer.from("not-a-zip"));
     return archive(this.archiveValue);
   }
+
+  async inspectActionsJobs(_runId: number, _deadline?: ChangeExecutionDeadline): Promise<void> {
+    if (this.jobInspectionFailure !== undefined) throw this.jobInspectionFailure;
+  }
 }
 
 function executor(
@@ -362,7 +367,7 @@ test("Actions transport accepts no repository projection API and delegates reads
   assert.deepEqual(await adapter.execute(changeMutationRequest("issue", 42)), { projection: source.result });
 });
 
-test("default Actions transport uses native HTTP for dispatch, runs, artifacts, and binary download", async () => {
+test("default Actions transport uses native HTTP and tolerates non-authoritative HTTP 403 job inspection", async () => {
   const requests: Array<{
     readonly url: string;
     readonly method: string;
@@ -371,6 +376,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   }> = [];
   let runReads = 0;
   let artifactDownloads = 0;
+  let jobsStatus = 200;
   let dispatchBody: unknown;
   const nativeFetch: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -413,6 +419,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
       return nativeJsonResponse(undefined, 204);
     }
     if (parsed.pathname.endsWith("/actions/runs/11/jobs")) {
+      if (jobsStatus !== 200) return nativeJsonResponse(undefined, jobsStatus);
       return nativeJsonResponse({
         total_count: 1,
         jobs: [{ id: 31, run_id: 11, status: "completed", conclusion: "success" }],
@@ -483,6 +490,14 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   assert.equal(new Headers(artifactRequest.headers).get("accept"), "application/vnd.github+json");
   assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
   assert.equal(artifactDownloads, 2);
+
+  jobsStatus = 403;
+  runReads = 0;
+  artifactDownloads = 0;
+  requests.length = 0;
+  const resultWithForbiddenJobs = await adapter.execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(resultWithForbiddenJobs, { projection: projection() });
+  assert.ok(requests.some((request) => request.url.includes("/actions/runs/11/jobs")));
 });
 
 test("native Actions transport errors remain bounded and never expose the credential", async () => {
@@ -965,6 +980,50 @@ test("native Actions job inspection is paginated and bound to the correlated run
   await api.inspectActionsJobs?.(11);
 
   assert.deepEqual(pages, [1, 2]);
+});
+
+test("non-authoritative Actions job inspection failures do not block a valid correlated result", async () => {
+  const failures = [
+    new GitHubAuthenticationError("github.com"),
+    new GitHubApiError("actions.jobs", "provider rejected the request", { status: 500 }),
+    new GitHubTimeoutError("actions.jobs", 1_000),
+  ];
+
+  for (const failure of failures) {
+    const api = new FakeActionsApi();
+    api.jobInspectionFailure = failure;
+
+    const result = await executor(api).execute(changeMutationRequest("issue", 42));
+
+    assert.deepEqual(result, { projection: api.result });
+    assert.equal(api.artifactDownloads, 1);
+    assert.ok(api.calls.some((call) => call.path.startsWith("actions/artifacts?")));
+  }
+});
+
+test("non-authoritative job failures remain bounded diagnostics when the authoritative result is unavailable", async () => {
+  const api = new FakeActionsApi();
+  api.artifactMode = "missing";
+  api.jobInspectionFailure = new GitHubAuthenticationError("github.com");
+
+  await assert.rejects(
+    executor(api).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({
+          operation: "change.issue",
+          reason: "result-timeout",
+          stage: "artifact-read",
+          transportDiagnostic: {
+            jobsRead: {
+              code: "CHANGE_REMOTE_TRANSPORT_FAILED",
+              reason: "authentication",
+              providerFailure: { failureClass: "authentication", retryable: false },
+            },
+          },
+        }),
+  );
 });
 
 test("a sole unrelated completed executor run is not sufficient evidence and never reports a missing result artifact for this request", async () => {
