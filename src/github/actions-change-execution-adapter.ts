@@ -1029,7 +1029,11 @@ export class ActionsChangeExecutionNativeHttpApi
     repositoryPath: string,
     method: "GET" = "GET",
     deadline?: ChangeExecutionDeadline,
-  ): Promise<{ readonly status: number; readonly body: unknown }> {
+  ): Promise<{
+    readonly status: number;
+    readonly body: unknown;
+    readonly headers?: Readonly<Record<string, string>>;
+  }> {
     assertRepositoryApiPath(repositoryPath);
     const context = await this.getRepositoryContext(deadline);
     const response = await this.request(
