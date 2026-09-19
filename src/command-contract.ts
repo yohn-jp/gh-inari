@@ -1257,7 +1257,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Compose the bounded Implementation Frontier from repository evidence and project it through the authoritative Core.",
     ["help", "json", "repository", "from", "capability"],
     "<number>",
-    "<number> [--from <frontier-evidence.json>]",
+    "--from <frontier-evidence.json>",
   ),
   command(
     "branch.check",
@@ -1816,6 +1816,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
 export function commandUsage(entry: CommandDefinition): string {
   const positionals = entry.positionalSyntax === undefined ? "" : ` ${entry.positionalSyntax}`;
   const options = entry.optionIds
+    .filter((id) => !(entry.id === "impl.frontier" && id === "from"))
     .filter((id) => id !== "help" && id !== "json")
     .map((id) => {
       const optionDefinition = getOption(id);

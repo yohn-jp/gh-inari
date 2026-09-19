@@ -135,6 +135,9 @@ test("every owned command keeps routing, usage, discovery, and Skill references 
         command.id,
       );
     for (const optionId of command.optionIds.filter((id) => id !== "help" && id !== "json")) {
+      // The frontier `--from` form is the separate low-level input mode, not
+      // an option on repository-backed Issue composition.
+      if (command.id === "impl.frontier" && optionId === "from") continue;
       const expectedSyntax =
         command.id === "authority.register" && optionId === "from"
           ? "--from <authority.json>"

@@ -157,7 +157,7 @@ The exact contract usage and option applicability are:
 - `impl authorize <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl inspect <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
 - `impl verify <number> [--repository <repository>] --from <path> [--capability <id> ...] --pr <number> [--execution-evidence <path>]`
-- `impl frontier <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
+- `impl frontier <number> [--repository <repository>] [--capability <id> ...]`
 
 <!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->
 
@@ -165,7 +165,10 @@ The Issue-specific operations and repository-backed `impl frontier` accept a
 positive Issue number. A positional-free `impl frontier --from <path>` remains
 the low-level bounded-evidence mode. The generated
 projection above owns the command IDs, version, contract ID, summaries, usage, and option
-applicability. `--capability` is repeatable. `--from` accepts a JSON input file
+applicability. `--capability` is repeatable. In repository-backed Issue mode,
+current authorization/conformance evidence is read through the repository
+authority seam; caller-supplied `--from` is not supplemental evidence.
+`--from` accepts a JSON input file
 or `-` for stdin; for lifecycle verification it can carry the current
 authorization, base, supersession, or completion evidence accepted by the
 existing Core boundary. `--repository` overrides the repository context for

@@ -9,7 +9,7 @@
  */
 
 import { changeReadRequest, normalizeChangeProjection, type ChangeExecutionPort } from "./change-execution-port.js";
-import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
+import { issueReferenceKey, type IssueReference } from "./contract/issue-reference.js";
 import {
   IMPLEMENTATION_FRONTIER_LIMITS,
   tryProjectImplementationFrontier,
@@ -55,11 +55,13 @@ export interface ImplementationFrontierRepository {
   findBranch(branch: string): Promise<GitHubBranch | undefined>;
   observePullRequest(pullRequestNumber: number): Promise<GitHubOperationalPullRequestEvidence>;
   readChange(issueNumber: number): Promise<unknown>;
-}
-
-export interface ImplementationFrontierCompositionOptions {
-  /** Existing low-level frontier evidence, used only as supplemental raw evidence. */
-  readonly evidence?: unknown;
+  /**
+   * Read raw current Implementation authority inputs from the existing
+   * repository-backed authorization/conformance readers. The values are
+   * re-bound to the freshly observed Issue/base/PR below and re-verified by
+   * the existing Core authorities; projected status flags are not accepted.
+   */
+  readImplementationEvidence?(issueNumber: number): Promise<unknown>;
 }
 
 interface RepositoryIdentity extends ImplementationRepositoryIdentity {
@@ -75,16 +77,12 @@ interface ClosureEntry {
   readonly relation: IssueBlockedByObservation | undefined;
 }
 
-interface SupplementalCandidate {
-  readonly implementation?: Record<string, unknown>;
-}
-
 interface CandidateState {
   readonly entry: ClosureEntry;
   readonly body: string;
   readonly contract?: ImplementationContract;
   readonly implementationCandidate: boolean;
-  readonly supplemental?: SupplementalCandidate;
+  readonly repositoryEvidence?: RecordValue;
   readonly change?: unknown;
   readonly base?: unknown;
   readonly authorizationRecord?: unknown;
@@ -149,19 +147,6 @@ function bodyLooksLikeImplementation(body: string): boolean {
   return /(?:^|\n)###\s+(?:Repository identity|Objective|Execution dependencies)\s*$/u.test(body);
 }
 
-function supplementalCandidates(value: unknown): ReadonlyMap<string, SupplementalCandidate> {
-  if (!isRecord(value) || !Array.isArray(value.candidates)) return new Map();
-  const result = new Map<string, SupplementalCandidate>();
-  for (const candidate of value.candidates) {
-    if (!isRecord(candidate)) continue;
-    const normalized = normalizeIssueReference(candidate.reference);
-    if (!normalized.valid || normalized.reference === undefined) continue;
-    if (!isRecord(candidate.implementation)) continue;
-    result.set(issueReferenceKey(normalized.reference), { implementation: candidate.implementation });
-  }
-  return result;
-}
-
 function authorizationRecord(value: unknown): unknown {
   if (!isRecord(value)) return undefined;
   if (hasOwn(value, "authorization")) return value.authorization;
@@ -170,23 +155,24 @@ function authorizationRecord(value: unknown): unknown {
   return undefined;
 }
 
-function rawImplementationEvidence(candidate: SupplementalCandidate | undefined): RecordValue | undefined {
-  return candidate?.implementation;
+function rawImplementationEvidence(candidate: RecordValue | undefined): RecordValue | undefined {
+  if (candidate === undefined || !isRecord(candidate.implementation)) return undefined;
+  return candidate.implementation;
 }
 
-function rawAuthorizationEvidence(candidate: SupplementalCandidate | undefined): unknown {
+function rawAuthorizationEvidence(candidate: RecordValue | undefined): unknown {
   const implementation = rawImplementationEvidence(candidate);
   return implementation === undefined || !hasOwn(implementation, "authorization")
     ? undefined
     : implementation.authorization;
 }
 
-function rawConformanceEvidence(candidate: SupplementalCandidate | undefined): RecordValue | undefined {
+function rawConformanceEvidence(candidate: RecordValue | undefined): RecordValue | undefined {
   const implementation = rawImplementationEvidence(candidate);
   return implementation !== undefined && isRecord(implementation.conformance) ? implementation.conformance : undefined;
 }
 
-function rawExecutionEvidence(candidate: SupplementalCandidate | undefined): unknown {
+function rawExecutionEvidence(candidate: RecordValue | undefined): unknown {
   const implementation = rawImplementationEvidence(candidate);
   if (implementation !== undefined && hasOwn(implementation, "executionEvidence"))
     return implementation.executionEvidence;
@@ -229,7 +215,10 @@ function readinessEvidence(
       freshness = "stale";
     } else if (dependencyState === undefined || dependencyLifecycle === undefined) {
       status = "missing";
-    } else if (dependencyLifecycle.completion.status === "complete") {
+    } else if (
+      dependencyLifecycle.completion.status === "complete" ||
+      changeState(dependencyState.change) === "MERGED"
+    ) {
       status = "satisfied";
     } else if (dependencyLifecycle.observedState === "open") {
       status = "active";
@@ -268,6 +257,11 @@ async function currentBase(
 function pullRequestNumber(change: unknown): number | undefined {
   if (!isRecord(change) || !isRecord(change.change) || !isRecord(change.change.projection)) return undefined;
   return positiveIssueNumber(change.change.projection.pullRequest) ? change.change.projection.pullRequest : undefined;
+}
+
+function changeState(change: unknown): string | undefined {
+  if (!isRecord(change) || !isRecord(change.change)) return undefined;
+  return typeof change.change.state === "string" ? change.change.state : undefined;
 }
 
 async function observeClosure(
@@ -360,8 +354,8 @@ async function composeCandidate(
   candidates: ReadonlyMap<string, CandidateState>,
   lifecycle: SemanticIssueLifecycleProjection | undefined,
 ): Promise<CandidateState> {
-  const rawAuthorization = rawAuthorizationEvidence(state.supplemental);
-  const rawConformance = rawConformanceEvidence(state.supplemental);
+  const rawAuthorization = rawAuthorizationEvidence(state.repositoryEvidence);
+  const rawConformance = rawConformanceEvidence(state.repositoryEvidence);
   const record = authorizationRecord(rawAuthorization) ?? authorizationRecord(rawConformance?.authorization);
   const base = record === undefined ? undefined : await currentBase(repository, state.contract, record);
   const authorizationInput =
@@ -389,7 +383,7 @@ async function composeCandidate(
     authorizationInput === undefined ? undefined : tryVerifyImplementationAuthorization(authorizationInput);
   const number = pullRequestNumber(state.change);
   let pullRequest: GitHubOperationalPullRequestEvidence | undefined;
-  const wantsConformance = rawConformance !== undefined || rawExecutionEvidence(state.supplemental) !== undefined;
+  const wantsConformance = rawConformance !== undefined || rawExecutionEvidence(state.repositoryEvidence) !== undefined;
   if (record !== undefined && number !== undefined && wantsConformance) {
     try {
       pullRequest = await repository.observePullRequest(number);
@@ -412,9 +406,9 @@ async function composeCandidate(
           pullRequest,
           ...(rawConformance?.supersession === undefined ? {} : { supersession: rawConformance.supersession }),
           ...(rawConformance?.completed === undefined ? {} : { completed: rawConformance.completed }),
-          ...(rawExecutionEvidence(state.supplemental) === undefined
+          ...(rawExecutionEvidence(state.repositoryEvidence) === undefined
             ? {}
-            : { executionEvidence: rawExecutionEvidence(state.supplemental) }),
+            : { executionEvidence: rawExecutionEvidence(state.repositoryEvidence) }),
         };
   const conformanceResult =
     conformanceInput === undefined ? undefined : tryVerifyImplementationConformance(conformanceInput);
@@ -432,7 +426,7 @@ async function composeCandidate(
 }
 
 function implementationEvidence(state: CandidateState): RecordValue | undefined {
-  const raw = rawImplementationEvidence(state.supplemental);
+  const raw = rawImplementationEvidence(state.repositoryEvidence);
   const candidate = state.implementationCandidate || raw !== undefined;
   if (!candidate) return undefined;
   const result: RecordValue = {};
@@ -458,12 +452,10 @@ function candidateInput(state: CandidateState): ImplementationFrontierCandidateI
 export async function composeImplementationFrontier(
   repository: ImplementationFrontierRepository,
   startingIssue: number,
-  options: ImplementationFrontierCompositionOptions = {},
 ): Promise<ImplementationFrontierResult> {
   if (!positiveIssueNumber(startingIssue)) throw new Error("A positive starting Issue number is required.");
   const identity = repositoryIdentity(await repository.getRepositoryContext());
   const closure = await observeClosure(repository, identity, startingIssue);
-  const supplemental = supplementalCandidates(options.evidence);
   const lifecycleInput = {
     scope: closure.scope,
     issues: closure.entries.map((entry) => ({
@@ -480,6 +472,20 @@ export async function composeImplementationFrontier(
     const implementationCandidate =
       parsed.valid || labelMarksImplementation(entry.issue) || bodyLooksLikeImplementation(body);
     const contractResult = parsed.contract === undefined ? undefined : validateImplementationContract(parsed.contract);
+    let repositoryEvidence: RecordValue | undefined;
+    if (repository.readImplementationEvidence !== undefined) {
+      try {
+        const evidence = await repository.readImplementationEvidence(entry.reference.number);
+        if (evidence !== undefined) {
+          repositoryEvidence =
+            isRecord(evidence) && hasOwn(evidence, "implementation") ? evidence : { implementation: evidence };
+        }
+      } catch {
+        // An authority reader that is present but unavailable is evidence
+        // failure, not permission to fall back to caller-supplied JSON.
+        repositoryEvidence = { implementation: { authorization: {} } };
+      }
+    }
     initialStates.push({
       entry,
       body,
@@ -487,9 +493,7 @@ export async function composeImplementationFrontier(
         ? { contract: contractResult.contract }
         : {}),
       implementationCandidate,
-      ...(supplemental.get(issueReferenceKey(entry.reference)) === undefined
-        ? {}
-        : { supplemental: supplemental.get(issueReferenceKey(entry.reference)) }),
+      ...(repositoryEvidence === undefined ? {} : { repositoryEvidence }),
       ...(await (async () => {
         try {
           return { change: await repository.readChange(entry.reference.number) };
@@ -517,6 +521,7 @@ export function createGitHubImplementationFrontierRepository(options: {
   readonly adapter: GitHubAdapter;
   readonly cwd: string;
   readonly changeReader?: Pick<ChangeExecutionPort, "read">;
+  readonly implementationEvidenceReader?: (issueNumber: number) => Promise<unknown>;
 }): ImplementationFrontierRepository {
   const changeReader =
     options.changeReader ?? createGitHubChangeReadAdapter({ cwd: options.cwd, api: options.adapter });
@@ -540,5 +545,8 @@ export function createGitHubImplementationFrontierRepository(options: {
     observePullRequest: (pullRequestNumber) => options.adapter.observePullRequest(pullRequestNumber),
     readChange: async (issueNumber) =>
       normalizeChangeProjection("show", await changeReader.read(changeReadRequest(issueNumber))),
+    ...(options.implementationEvidenceReader === undefined
+      ? {}
+      : { readImplementationEvidence: options.implementationEvidenceReader }),
   };
 }

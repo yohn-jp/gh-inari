@@ -344,6 +344,8 @@ export interface NativeSemanticPullRequestDependencies {
   readonly adapter?: GitHubAdapter;
   /** Factory seam for repository-scoped adapter construction. */
   readonly createAdapter?: (options: GitHubAdapterOptions) => GitHubAdapter;
+  /** Existing repository-backed Implementation authorization/conformance reader. */
+  readonly readImplementationEvidence?: (issueNumber: number) => Promise<unknown>;
 }
 
 /** Shared dependency seam for all read-only semantic artifact catalogs. */
@@ -554,10 +556,6 @@ export const implementationFrontierInputSchema = z
   .strictObject({
     repository: repositorySchema.optional(),
     issue: artifactNumberSchema.optional().describe("Starting Issue number for repository-backed composition."),
-    evidence: z
-      .unknown()
-      .optional()
-      .describe("Optional existing raw frontier evidence supplied as low-level supplemental evidence."),
     frontier: z
       .unknown()
       .optional()
@@ -2271,9 +2269,15 @@ export function registerImplementationTools(
                         ...(input.repository === undefined ? {} : { repository: input.repository }),
                       }));
                 return composeImplementationFrontier(
-                  createGitHubImplementationFrontierRepository({ adapter, cwd, changeReader }),
+                  createGitHubImplementationFrontierRepository({
+                    adapter,
+                    cwd,
+                    changeReader,
+                    ...(dependencies.readImplementationEvidence === undefined
+                      ? {}
+                      : { implementationEvidenceReader: dependencies.readImplementationEvidence }),
+                  }),
                   input.issue as number,
-                  { evidence: input.evidence },
                 );
               })();
         return result(

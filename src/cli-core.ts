@@ -296,6 +296,8 @@ export interface CliDependencies {
   readonly changeExecutor?: ChangeExecutionPort;
   /** Factory seam for a repository-scoped transport implementation. */
   readonly createChangeExecutor?: (options: ChangeExecutionPortOptions) => ChangeExecutionPort;
+  /** Existing repository-backed Implementation authorization/conformance reader. */
+  readonly readImplementationEvidence?: (issueNumber: number) => Promise<unknown>;
   /** Injectable local Semantic PR Executor; it never carries App credentials. */
   readonly semanticPullRequestExecutor?: SemanticPullRequestExecutionPort;
   /** Factory seam for a repository-scoped Semantic PR Executor. */
@@ -2118,6 +2120,12 @@ async function runImplementationCommand(
       throw invalidArtifactNumberError("issue", rest[0]);
     if (rest.length === 0 && typeof parsed.options.from !== "string")
       throw new CliError("INPUT_REQUIRED", "Use impl frontier <issueNumber> or --from <frontier-input.json>.", "$argv");
+    if (rest.length === 1 && parsed.options.from !== undefined)
+      throw new CliError(
+        "INVALID_OPTION",
+        "--from is available only for the low-level impl frontier evidence mode; Issue composition reads repository evidence.",
+        "--from",
+      );
     let frontier;
     if (rest.length === 0) {
       const input = await readJsonValue(parsed.options.from);
@@ -2132,9 +2140,15 @@ async function runImplementationCommand(
               cwd: root,
               ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
             }));
-      const repository = createGitHubImplementationFrontierRepository({ adapter, cwd: root, changeReader });
-      const evidence = parsed.options.from === undefined ? undefined : await readJsonValue(parsed.options.from);
-      frontier = await composeImplementationFrontier(repository, Number(rest[0]), { evidence });
+      const repository = createGitHubImplementationFrontierRepository({
+        adapter,
+        cwd: root,
+        changeReader,
+        ...(dependencies.readImplementationEvidence === undefined
+          ? {}
+          : { implementationEvidenceReader: dependencies.readImplementationEvidence }),
+      });
+      frontier = await composeImplementationFrontier(repository, Number(rest[0]));
     }
     printImplementationResult(
       {
