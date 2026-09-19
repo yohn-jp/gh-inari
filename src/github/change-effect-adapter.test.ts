@@ -373,6 +373,7 @@ test("MARK_PULL_REQUEST_READY uses GitHub's explicit ready-for-review mutation",
   ]);
   assert.deepEqual(transport.graphqlCalls, [
     {
+      operationName: "PullRequestReadyForReview",
       query:
         "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { pullRequest { id number state isDraft } } }",
       variables: { input: { pullRequestId: "MDExOlB1bGxSZXF1ZXN0OTA=" } },

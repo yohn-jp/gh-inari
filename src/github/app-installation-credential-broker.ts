@@ -18,6 +18,7 @@ import {
   type GitHubChangeEffectRepository,
   type GitHubChangeEffectRequest,
   type GitHubChangeEffectResponse,
+  type GitHubChangeEffectGraphqlRequest,
   type GitHubChangeEffectGraphqlTransport,
   type GitHubChangeEffectSuccessEvidence,
   type GitHubChangeProvenanceSignerOptions,
@@ -306,13 +307,21 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport, GitHu
     return this.requestAt(this.#apiUrl, request);
   }
 
-  /** Internal App-only GraphQL seam used solely for conditional ref updates. */
-  async requestGraphql(request: GitDataGraphqlRequest): Promise<GitHubChangeEffectResponse> {
+  /** Shared App GraphQL seam for conditional ref updates and Change effects. */
+  async requestGraphql(
+    request: GitDataGraphqlRequest | GitHubChangeEffectGraphqlRequest,
+  ): Promise<GitHubChangeEffectResponse> {
     return this.requestAt(this.#graphqlApiUrl, {
       hostname: "github.com",
       method: "POST",
       path: "",
-      body: { query: request.query, variables: request.variables },
+      body: {
+        ...("operationName" in request && request.operationName !== undefined
+          ? { operationName: request.operationName }
+          : {}),
+        query: request.query,
+        variables: request.variables,
+      },
     });
   }
 

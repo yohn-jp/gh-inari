@@ -73,6 +73,7 @@ export interface GitHubChangeEffectResponse {
 
 /** Provider-native GraphQL request capability for mutations with no REST path. */
 export interface GitHubChangeEffectGraphqlRequest {
+  readonly operationName?: string;
   readonly query: string;
   readonly variables: GitHubChangeEffectJsonObject;
 }
@@ -632,6 +633,7 @@ export class GitHubChangeEffectAdapter {
     if (this.graphqlTransport === undefined) throw new InvalidGitHubResponseError();
     const envelope = responseRecord(
       await this.requestGraphql({
+        operationName: "PullRequestReadyForReview",
         query: READY_FOR_REVIEW_MUTATION,
         variables: { input: { pullRequestId: nodeId } },
       }),
