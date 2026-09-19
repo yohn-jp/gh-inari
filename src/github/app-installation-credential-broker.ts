@@ -210,8 +210,10 @@ export async function resolveGitHubRepository(
     providerFailure?: GitHubProviderFailureClassification,
   ): Error => {
     try {
-      return failure?.(reason, providerFailure) ??
-        new GitHubAppCredentialBrokerError("repository-read", undefined, providerFailure);
+      return (
+        failure?.(reason, providerFailure) ??
+        new GitHubAppCredentialBrokerError("repository-read", undefined, providerFailure)
+      );
     } catch {
       return new GitHubAppCredentialBrokerError("repository-read", undefined, providerFailure);
     }
