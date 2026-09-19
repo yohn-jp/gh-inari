@@ -336,10 +336,12 @@ test("ready mutation uses the provider GraphQL endpoint for github.com and GHES"
     { apiUrl: "https://ghe.example.com/api/v3", graphqlUrl: "https://ghe.example.com/api/graphql" },
   ]) {
     const calls: string[] = [];
+    const bodies: unknown[] = [];
     const broker = new GitHubAppInstallationCredentialBroker(
       brokerOptions(
-        async (input) => {
+        async (input, init) => {
           calls.push(String(input));
+          bodies.push(init?.body === undefined ? undefined : JSON.parse(String(init.body)));
           if (calls.length === 1) return tokenResponse({}, { contents: "write" });
           if (calls.length === 2) {
             return new Response(JSON.stringify({ number: 901, state: "open", draft: true, node_id: nodeId }), {
@@ -367,6 +369,12 @@ test("ready mutation uses the provider GraphQL endpoint for github.com and GHES"
 
     assert.equal(calls[1], `${testCase.apiUrl}/repos/acme/inari/pulls/901`);
     assert.equal(calls[2], testCase.graphqlUrl);
+    assert.deepEqual(bodies[2], {
+      operationName: "PullRequestReadyForReview",
+      query:
+        "mutation PullRequestReadyForReview($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { pullRequest { id number state isDraft } } }",
+      variables: { input: { pullRequestId: nodeId } },
+    });
   }
 });
 
