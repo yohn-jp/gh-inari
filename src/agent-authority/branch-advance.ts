@@ -12,6 +12,7 @@ import {
   isImplementationScopeProjectionPathDenied,
   type ImplementationScopeProjection,
 } from "../implementation-scope-projection.js";
+import { validateImplementationReworkMarker, type ImplementationReworkMarker } from "../implementation-rework.js";
 import type { ImplementationScopeOperation } from "../implementation-contract.js";
 import {
   GitDataCapabilityError,
@@ -63,6 +64,8 @@ export interface BranchAdvanceSemanticRequest {
   readonly expectedHead: string;
   readonly changes: readonly BranchAdvanceChange[];
   readonly commit: Readonly<{ message: string; author?: Readonly<BranchAdvanceCommitAuthor> }>;
+  /** Required when re-entering from a canonical Change in REVIEW. */
+  readonly rework?: ImplementationReworkMarker;
   readonly agent?: SessionAgentMetadata;
 }
 export interface BranchAdvanceExecutionFailure {
@@ -106,7 +109,7 @@ export interface ExecuteBranchAdvanceOptions {
   readonly now?: Date | number | (() => Date | number);
 }
 
-const KEYS = new Set(["version", "issue", "branch", "expectedHead", "changes", "commit", "agent"]);
+const KEYS = new Set(["version", "issue", "branch", "expectedHead", "changes", "commit", "rework", "agent"]);
 const COMMIT_KEYS = new Set(["message", "author"]);
 const AUTHOR_KEYS = new Set(["name", "email"]);
 const CHANGE_KEYS = new Set(["operation", "path", "mode", "content"]);
@@ -192,6 +195,14 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
   }
   if (!Array.isArray(input.changes) || input.changes.length === 0 || input.changes.length > MAX_CHANGES)
     d.push(diag("$.changes", "Changes must be a bounded non-empty array."));
+  let rework: ImplementationReworkMarker | undefined;
+  if (input.rework !== undefined) {
+    const marker = validateImplementationReworkMarker(input.rework);
+    if (!marker.valid || marker.marker === undefined) {
+      for (const violation of marker.diagnostics)
+        d.push(diag(`$.rework${violation.path === "$" ? "" : violation.path.slice(1)}`, violation.message));
+    } else rework = marker.marker;
+  }
   const changes: BranchAdvanceChange[] = [];
   const paths = new Set<string>();
   if (Array.isArray(input.changes))
@@ -241,6 +252,7 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
           ? {}
           : { author: { name: a.name as string, ...(a.email === undefined ? {} : { email: a.email as string }) } }),
       },
+      ...(rework === undefined ? {} : { rework }),
       ...(input.agent === undefined ? {} : { agent: input.agent as SessionAgentMetadata }),
     }) as unknown as BranchAdvanceSemanticRequest,
   };
@@ -409,6 +421,8 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
   const v = validateBranchAdvanceSemanticRequest(candidate);
   if (!v.valid || !v.value) return fail(undefined, "request", v.diagnostics[0]?.message ?? "Request is invalid.");
   const r = v.value;
+  if (r.rework !== undefined && r.expectedHead !== r.rework.reviewHead)
+    return fail(r, "stale-head", "Rework review head does not match the expected branch head.", "stale");
   const context = options.context;
   if (options.request !== undefined) {
     try {
@@ -447,6 +461,15 @@ export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions)
       "authorization",
       "The supplied admission is not the exact branch.advance admission for this request.",
     );
+  if (r.rework !== undefined) {
+    if (admission.canonical.state !== "REVIEW" || admission.canonical.pullRequest !== r.rework.pullRequest)
+      return fail(r, "authorization", "Rework is not bound to the canonical REVIEW pull request.");
+    const binding = context.implementationBinding;
+    if (binding === undefined || binding.authorization.governedBodyDigest !== r.rework.authorizationDigest)
+      return fail(r, "authorization", "Rework is not bound to the current Implementation authorization.");
+  } else if (admission.canonical.state === "REVIEW") {
+    return fail(r, "authorization", "A REVIEW branch advance requires an explicit bounded rework marker.");
+  }
   const c = admission.capability;
   if (c.kind !== "branch.advance" || c.branch !== r.branch)
     return fail(r, "authorization", "No exact branch.advance capability was admitted.");
