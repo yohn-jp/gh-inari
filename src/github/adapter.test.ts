@@ -471,6 +471,27 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   );
 });
 
+test("createBranch uses the supplied source SHA without rereading the source ref", async () => {
+  const transport = new StubFixtureTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, JSON.stringify({ ref: "refs/heads/feature", object: { type: "commit", sha: "bound-sha" } })),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
+
+  const branch = await adapter.createBranch("feature", "main", "bound-sha");
+
+  assert.equal(branch.sha, "bound-sha");
+  assert.equal(
+    transport.calls.some((call) => call.args.includes("git/ref/heads/main")),
+    false,
+  );
+  const create = transport.calls.find((call) => call.args.includes("repos/acme/inari/git/refs"));
+  assert.ok(create);
+  assert.ok(create.args.includes("sha=bound-sha"));
+});
+
 test("reads the repository root without adding a trailing slash", async () => {
   const transport = new StubFixtureTransport([
     command(0, "gh version 2.0"),

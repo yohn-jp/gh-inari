@@ -1142,17 +1142,23 @@ export class GitHubAdapter {
   }
 
   /** Create exactly the branch and source refs supplied by a trusted Core plan. */
-  async createBranch(branch: string, source: string, deadline?: ChangeExecutionDeadline): Promise<GitHubBranch> {
+  async createBranch(
+    branch: string,
+    source: string,
+    sourceSha: string,
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubBranch> {
     assertPullRequestRef(branch, "branch");
     assertPullRequestRef(source, "source");
-    const base = await this.findBranch(source, deadline);
-    if (base === undefined) throw new GitHubApiError("branch.create", "GitHub branch source ref was not found.");
+    if (sourceSha.trim().length === 0) {
+      throw new ContractViolationError("GitHub branch source SHA must not be empty.", "sourceSha");
+    }
     const context = await this.resolveRepositoryContext(deadline);
     const result = await this.runApi(
       context,
       `repos/${context.nameWithOwner}/git/refs`,
       "POST",
-      { ref: `refs/heads/${branch}`, sha: base.sha },
+      { ref: `refs/heads/${branch}`, sha: sourceSha },
       "branch.create",
       deadline,
     );

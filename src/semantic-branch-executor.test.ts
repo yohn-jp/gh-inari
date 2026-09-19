@@ -87,6 +87,8 @@ class ExecutorTransport implements FixtureCommandTransport {
   private readonly canonPath: string;
   private readonly canonSource: string;
   private readonly treeEntries: readonly { readonly path: string; readonly type: string; readonly sha: string }[];
+  private readonly sourceShas: readonly string[];
+  private sourceReadCount = 0;
   private created = false;
 
   constructor(
@@ -95,12 +97,14 @@ class ExecutorTransport implements FixtureCommandTransport {
       readonly canonPath?: string;
       readonly canonSource?: string;
       readonly treeEntries?: readonly { readonly path: string; readonly type: string; readonly sha: string }[];
+      readonly sourceShas?: readonly string[];
     } = {},
   ) {
     this.targetAlreadyExists = targetAlreadyExists;
     this.canonPath = options.canonPath ?? ".github/inari/branches/default.json";
     this.canonSource = options.canonSource ?? canon;
     this.treeEntries = options.treeEntries ?? [{ path: this.canonPath, type: "blob", sha: "canon-sha" }];
+    this.sourceShas = options.sourceShas ?? ["source-sha"];
   }
 
   async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
@@ -130,7 +134,10 @@ class ExecutorTransport implements FixtureCommandTransport {
         }),
       );
     }
-    if (endpoint.includes("git/ref/heads/main")) return command(included(200, JSON.parse(branchReference("main"))));
+    if (endpoint.includes("git/ref/heads/main")) {
+      const sourceSha = this.sourceShas[Math.min(this.sourceReadCount++, this.sourceShas.length - 1)] ?? "source-sha";
+      return command(included(200, JSON.parse(branchReference("main", sourceSha))));
+    }
     if (endpoint.includes("git/ref/heads/feat%2Fexecute")) {
       if (this.targetAlreadyExists || this.created)
         return command(included(200, JSON.parse(branchReference("feat/execute"))));
@@ -191,6 +198,23 @@ test("local Semantic Branch Executor admits, creates, rereads, and verifies a pl
     transport.calls.filter((args) => args.some((value) => value.includes("git/ref/heads/feat%2Fexecute"))).length,
     2,
   );
+});
+
+test("local Semantic Branch Executor binds creation to the admitted source SHA", async () => {
+  const transport = new ExecutorTransport(false, { sourceShas: ["source-sha", "advanced-source-sha"] });
+  const adapter = new GitHubAdapter({ repository: "acme/repository-b", transport: nativeTestTransport(transport) });
+  const effective = await compileRepositoryEffectiveBranchContract(adapter, "default");
+  const artifact = materializeSemanticArtifact(effective, { type: "feat", slug: "execute" });
+  const plan = planSemanticBranch({ artifact });
+
+  const result = await new LocalSemanticBranchExecutor({ adapter }).execute(
+    request(plan, { type: "feat", slug: "execute" }),
+  );
+
+  assert.equal(result.projection.sha, "source-sha");
+  assert.equal(transport.calls.filter((args) => args.some((value) => value.includes("git/ref/heads/main"))).length, 1);
+  const create = transport.calls.find((args) => args.includes("POST"));
+  assert.ok(create?.includes("sha=source-sha"));
 });
 
 test("local Semantic Branch Executor rejects an existing target before effects", async () => {

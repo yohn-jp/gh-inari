@@ -341,7 +341,7 @@ export class LocalSemanticBranchExecutor implements SemanticBranchExecutionPort 
 
     let created: GitHubBranch;
     try {
-      created = await this.#adapter.createBranch(admittedPlan.desired.name, admittedPlan.desired.source);
+      created = await this.#adapter.createBranch(admittedPlan.desired.name, admittedPlan.desired.source, source.sha);
     } catch {
       throw new SemanticBranchExecutorError(
         "SEMANTIC_BRANCH_EXECUTION_EFFECT_FAILED",
