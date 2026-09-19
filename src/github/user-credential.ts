@@ -1,14 +1,11 @@
 /**
- * Standalone user-context GitHub credential resolution (#662).
+ * Standalone user-context GitHub credential resolution (#662, #715).
  *
- * Inari never reads a `gh` credential store (`gh auth token`, gh config
- * files, or the OS keychain entries gh manages). A standalone credential is
- * either injected explicitly by an embedder/test or resolved from a fixed,
- * deterministic set of environment variables -- the same variables GitHub's
- * own Actions runners and automation tooling already document, so existing
- * CI environments keep working unchanged. There is no persistent Inari
- * credential store: nothing here reads or writes a file, and the resolved
- * token is never cached beyond the caller-held result.
+ * A standalone credential is either injected explicitly by an embedder/test,
+ * resolved from a fixed, deterministic set of environment variables, or
+ * obtained from an explicitly composed optional fallback provider. There is
+ * no persistent Inari credential store: nothing here reads or writes a file,
+ * and the resolved token is never cached beyond the caller-held result.
  */
 
 const DEFAULT_HOSTNAME = "github.com";
@@ -16,7 +13,9 @@ const MAX_TOKEN_LENGTH = 4_096;
 const MAX_HOSTNAME_LENGTH = 255;
 
 export type GitHubUserCredentialSource =
-  "explicit" | "GH_TOKEN" | "GITHUB_TOKEN" | "GH_ENTERPRISE_TOKEN" | "GITHUB_ENTERPRISE_TOKEN";
+  "explicit" | "GH_TOKEN" | "GITHUB_TOKEN" | "GH_ENTERPRISE_TOKEN" | "GITHUB_ENTERPRISE_TOKEN" | "gh auth token";
+
+export type GitHubUserCredentialFallbackProvider = (hostname: string) => string | undefined;
 
 export type GitHubUserCredentialFailureReason = "hostname" | "missing" | "invalid";
 
@@ -42,6 +41,8 @@ export interface ResolveGitHubUserCredentialOptions {
   readonly token?: string;
   /** Defaults to `process.env`. Never mutated. */
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Optional final credential-discovery fallback. Never used after invalid input. */
+  readonly fallbackProvider?: GitHubUserCredentialFallbackProvider;
 }
 
 function isBoundedToken(value: string | undefined): value is string {
@@ -64,9 +65,11 @@ function normalizedHostname(hostname: string | undefined): string {
  * 1. an explicitly injected token (embedder/test wiring)
  * 2. for `github.com`: `GH_TOKEN`, then `GITHUB_TOKEN`
  * 3. for any other (Enterprise) host: `GH_ENTERPRISE_TOKEN`, then `GITHUB_ENTERPRISE_TOKEN`
+ * 4. an explicitly supplied optional fallback provider
  *
  * Fails closed with `GitHubUserCredentialError` when no bounded, well-formed
- * token is available. Never reads gh config or an OS credential store.
+ * token is available. A fallback failure is indistinguishable from missing
+ * credentials and never contributes an error or diagnostic value.
  */
 export function resolveGitHubUserCredential(options: ResolveGitHubUserCredentialOptions = {}): GitHubUserCredential {
   const hostname = normalizedHostname(options.hostname);
@@ -90,6 +93,18 @@ export function resolveGitHubUserCredential(options: ResolveGitHubUserCredential
       throw new GitHubUserCredentialError("invalid", `Environment variable ${source} holds an invalid GitHub token.`);
     }
     return { token: value, source };
+  }
+
+  if (options.fallbackProvider !== undefined) {
+    let fallbackToken: string | undefined;
+    try {
+      fallbackToken = options.fallbackProvider(hostname);
+    } catch {
+      fallbackToken = undefined;
+    }
+    if (isBoundedToken(fallbackToken) && !/\s/u.test(fallbackToken)) {
+      return { token: fallbackToken, source: "gh auth token" };
+    }
   }
 
   throw new GitHubUserCredentialError(
