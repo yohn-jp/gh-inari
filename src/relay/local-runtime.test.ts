@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import { generateKeyPairSync, type KeyObject } from "node:crypto";
+import { test } from "node:test";
+import {
+  createRelayPossessionProofChallenge,
+  encodeRelayPossessionProofChallenge,
+  decodeRelayPossessionProofResponse,
+} from "./connection-proof.js";
+import { decodeRelayEnvelope, encodeRelayEnvelope, type RelayRepositoryIdentity } from "./contract.js";
+import { LocalRelayRuntime, type RelayWebSocket, type RelayWebSocketFactory } from "./local-runtime.js";
+
+const repository: RelayRepositoryIdentity = {
+  repositoryHost: "github.com",
+  repositoryId: "1330755860",
+  repositoryNameWithOwner: "yohn-jp/gh-inari",
+};
+
+class FakeWebSocket implements RelayWebSocket {
+  readonly frames: string[] = [];
+  readyState = 0;
+  onopen: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { readonly data: unknown }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  send(data: string): void {
+    this.frames.push(data);
+  }
+
+  close(): void {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.({});
+  }
+
+  receive(data: string): void {
+    this.onmessage?.({ data });
+  }
+
+  disconnect(): void {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+}
+
+function socketFactory(sockets: FakeWebSocket[]): RelayWebSocketFactory {
+  return () => {
+    const socket = new FakeWebSocket();
+    sockets.push(socket);
+    return socket;
+  };
+}
+
+function keyPair(): { readonly privateKey: KeyObject; readonly publicKey: KeyObject } {
+  return generateKeyPairSync("ed25519");
+}
+
+function signedSessionEnvelope(): string {
+  return Buffer.from(JSON.stringify({ certificate: "canonical", request: { version: 1, issue: 820 } })).toString(
+    "base64url",
+  );
+}
+
+function challenge(): string {
+  return new TextDecoder().decode(
+    encodeRelayPossessionProofChallenge(
+      createRelayPossessionProofChallenge({
+        repositoryId: repository.repositoryId,
+        delegatorId: "runtime-820",
+        nonce: "bm9uY2UtODIw",
+        issuedAtMs: 10_000,
+        expiresAtMs: 20_000,
+      }),
+    ),
+  );
+}
+
+function job(connectionId: string, jobId = "job-820") {
+  return JSON.stringify({
+    version: 1,
+    kind: "job",
+    repository,
+    connectionId,
+    jobId,
+    deliveryState: "pre-delivery",
+    deadlineMs: 30_000,
+    signedSessionRequest: signedSessionEnvelope(),
+  });
+}
+
+test("opens only an outbound socket, proves possession, forwards the unchanged Session envelope, and returns a result", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const pair = keyPair();
+  let received: unknown;
+  const runtime = new LocalRelayRuntime({
+    relayUrl: "wss://relay.example.test/repository",
+    repository,
+    delegatorId: "runtime-820",
+    privateKey: pair.privateKey,
+    executor: {
+      async execute(envelope) {
+        received = envelope;
+        return { version: 1, status: "succeeded" };
+      },
+    },
+    webSocketFactory: socketFactory(sockets),
+    now: () => 15_000,
+    connectionId: "connection-820",
+  });
+
+  runtime.connect();
+  assert.equal(sockets.length, 1);
+  const socket = sockets[0]!;
+  socket.open();
+  const connection = decodeRelayEnvelope(socket.frames[0]!, repository);
+  assert.equal(connection.kind, "connection");
+  socket.receive(challenge());
+  const proof = decodeRelayPossessionProofResponse(socket.frames[1]!);
+  assert.equal(proof.challenge.delegatorId, "runtime-820");
+  assert.equal(
+    socket.frames.some((frame) => frame.includes("BEGIN PRIVATE KEY")),
+    false,
+  );
+
+  socket.receive(job("connection-820"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(received, { certificate: "canonical", request: { version: 1, issue: 820 } });
+  const result = decodeRelayEnvelope(socket.frames[2]!, repository);
+  assert.equal(result.kind, "result");
+  assert.equal(runtime.delivery("job-820")?.phase, "terminal-result");
+  runtime.shutdown();
+});
+
+test("disconnect marks delivery ambiguous and reconnect never executes the same job twice", async () => {
+  const sockets: FakeWebSocket[] = [];
+  const pair = keyPair();
+  let executions = 0;
+  const runtime = new LocalRelayRuntime({
+    relayUrl: "wss://relay.example.test/repository",
+    repository,
+    delegatorId: "runtime-820",
+    privateKey: pair.privateKey,
+    executor: {
+      async execute() {
+        executions += 1;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return { version: 1, status: "succeeded" };
+      },
+    },
+    webSocketFactory: socketFactory(sockets),
+    now: () => 15_000,
+    connectionId: "connection-820",
+    reconnectDelayMs: 0,
+  });
+  runtime.connect();
+  const first = sockets[0]!;
+  first.open();
+  first.receive(challenge());
+  first.receive(job("connection-820", "job-ambiguous"));
+  first.disconnect();
+  assert.equal(runtime.delivery("job-ambiguous")?.phase, "possibly-delivered");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(executions, 1);
+  runtime.shutdown();
+});
