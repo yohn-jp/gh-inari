@@ -285,6 +285,32 @@ test("authenticates from one fresh App read capability and emits only bounded au
   assert.equal(fixture.enter.value, true);
 });
 
+test("Session authentication treats request exp as an exclusive boundary", async () => {
+  const runtime = runtimeAuthority();
+  const request = sessionRequest(runtime.authority, runtime.key);
+  const fixture = capability(runtime.authority);
+  const broker = {
+    async withRepositoryReadCapability<T>(
+      _input: unknown,
+      operation: (value: GitHubAppRepositoryReadCapability) => Promise<T>,
+    ): Promise<T> {
+      return operation(fixture.capability);
+    },
+  };
+  const authenticateAt = (seconds: number) =>
+    authenticateSessionRequest({
+      broker,
+      repository: REPOSITORY,
+      request,
+      now: new Date(seconds * 1000),
+    });
+
+  const beforeExpiry = await authenticateAt(NOW_SECONDS + 59);
+  assert.equal(beforeExpiry.request.expiresAt, NOW_SECONDS + 60);
+  await assert.rejects(() => authenticateAt(NOW_SECONDS + 60), SessionAuthenticationError);
+  await assert.rejects(() => authenticateAt(NOW_SECONDS + 61), SessionAuthenticationError);
+});
+
 test("rejects replay when a bound Implementation authorization is no longer current", async () => {
   const runtime = runtimeAuthority(undefined, { capabilityCeiling: ["change.implement"] });
   const current = currentImplementationAuthorization();
