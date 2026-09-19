@@ -185,12 +185,18 @@ export function attachGitHubProviderFailure<T extends Error>(
 }
 
 export function readGitHubProviderFailure(value: unknown): GitHubProviderFailureClassification | undefined {
-  if (!isRecord(value)) return undefined;
-  try {
-    return normalizeGitHubProviderFailureClassification(
-      value[PROVIDER_FAILURE_PROPERTY] ?? value.providerFailure,
-    );
-  } catch {
-    return undefined;
+  let current = value;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (!isRecord(current)) return undefined;
+    try {
+      const direct = normalizeGitHubProviderFailureClassification(
+        current[PROVIDER_FAILURE_PROPERTY] ?? current.providerFailure,
+      );
+      if (direct !== undefined) return direct;
+    } catch {
+      return undefined;
+    }
+    current = current.cause;
   }
+  return undefined;
 }
