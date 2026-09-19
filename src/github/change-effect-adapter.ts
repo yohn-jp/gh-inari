@@ -61,6 +61,8 @@ export interface GitHubChangeEffectRequest {
 export interface GitHubChangeEffectResponse {
   readonly status: number;
   readonly body?: unknown;
+  /** Allowlisted, bounded response metadata only; never arbitrary provider headers. */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /**
