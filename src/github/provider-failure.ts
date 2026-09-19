@@ -109,12 +109,7 @@ export function projectGitHubProviderHeaders(
   const projected: Record<string, string> = {};
   for (const name of ["link", "x-github-request-id", "retry-after", "x-ratelimit-remaining"] as const) {
     const value = headerValue(headers, name);
-    if (
-      value !== undefined &&
-      value.length > 0 &&
-      value.length <= 512 &&
-      !/[\u0000-\u001F\u007F]/u.test(value)
-    ) {
+    if (value !== undefined && value.length > 0 && value.length <= 512 && !/[\u0000-\u001F\u007F]/u.test(value)) {
       projected[name] = value;
     }
   }
