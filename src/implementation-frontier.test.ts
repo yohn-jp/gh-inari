@@ -459,6 +459,50 @@ test("disagreement between semantic dependencies and the canonical contract depe
   );
 });
 
+test("rejects a contract with the same repository ID on a different host", () => {
+  const reference = { ...issue(92), repositoryHost: "ghe.example.com" };
+  const dependency = { ...repository, number: reference.number + 500 };
+  const result = project(
+    [{ reference, implementation: { contract: contract(reference) } }, { reference: dependency }],
+    [rawNode(reference, "open", [dependency]), rawNode(dependency, "open")],
+  );
+  const candidate = result.projection?.candidates.find((entry) => entry.reference.number === reference.number);
+  assert.equal(result.valid, false);
+  assert.equal(candidate?.classification, "INVALID");
+  assert.ok(
+    candidate?.diagnostics.some(
+      (entry) =>
+        entry.code === "FRONTIER_CONTRADICTORY_EVIDENCE" &&
+        entry.path === "$.candidates[0].implementation.contract.repository",
+    ),
+  );
+});
+
+test("rejects a contract from a different repository", () => {
+  const reference = issue(93);
+  const dependency = { ...repository, number: reference.number + 500 };
+  const result = project(
+    [
+      {
+        reference,
+        implementation: { contract: contract(reference, { repository: { ...repository, repositoryId: "999" } }) },
+      },
+      { reference: dependency },
+    ],
+    [rawNode(reference, "open", [dependency]), rawNode(dependency, "open")],
+  );
+  const candidate = result.projection?.candidates.find((entry) => entry.reference.number === reference.number);
+  assert.equal(result.valid, false);
+  assert.equal(candidate?.classification, "INVALID");
+  assert.ok(
+    candidate?.diagnostics.some(
+      (entry) =>
+        entry.code === "FRONTIER_CONTRADICTORY_EVIDENCE" &&
+        entry.path === "$.candidates[0].implementation.contract.repository",
+    ),
+  );
+});
+
 function validProjection(): ImplementationFrontierProjection {
   const blocked = issue(200);
   const ready = issue(201);
