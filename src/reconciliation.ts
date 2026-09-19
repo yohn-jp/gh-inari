@@ -787,7 +787,10 @@ function resolveExistingArtifactByMarker(
     );
   }
 
-  const contract = contracts.find((candidate) => candidate.templateIdentity.path === marker.path);
+  const contract = contracts.find(
+    (candidate) =>
+      candidate.templateIdentity.path === marker.path || candidate.provenance?.semanticSource?.path === marker.path,
+  );
   if (contract === undefined) {
     const failed = failedTemplates.find((failedTemplate) => failedTemplate.path === marker.path);
     return invalid(

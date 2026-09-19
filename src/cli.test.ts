@@ -15,6 +15,7 @@ import {
 import { runCli } from "./cli.js";
 import { COMMAND_CONTRACT_VERSION, getCommand, getOption, RUNTIME_CAPABILITIES } from "./command-contract.js";
 import { projectChangeFromGitHubEvidence } from "./change.js";
+import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -305,6 +306,34 @@ function remoteArtifactResponses(
     ),
     ...templates.map((template) => blobResponse(template.sha, template.source)),
     ...(policy === undefined ? [] : [blobResponse(policy.sha, policy.source)]),
+    command(JSON.stringify(artifact)),
+  ];
+}
+
+function remoteSemanticArtifactResponses(
+  sourcePath: string,
+  generatedPath: string,
+  sourceInput: Record<string, unknown>,
+  artifact: Record<string, unknown>,
+): FixtureCommandResult[] {
+  const nativeSource = renderSemanticNative(normalizeSemanticTemplate(sourceInput, sourcePath), generatedPath);
+  return [
+    command("gh version 2.0"),
+    command(),
+    command("100000157\n"),
+    command(JSON.stringify({ default_branch: "main" })),
+    command(
+      JSON.stringify({
+        sha: GOVERNANCE_TREE_SHA,
+        truncated: false,
+        tree: [
+          { path: sourcePath, type: "blob", sha: "semantic-sha" },
+          { path: generatedPath, type: "blob", sha: "native-sha" },
+        ],
+      }),
+    ),
+    blobResponse("semantic-sha", JSON.stringify(sourceInput)),
+    blobResponse("native-sha", nativeSource),
     command(JSON.stringify(artifact)),
   ];
 }
@@ -3035,6 +3064,70 @@ test("a valid template identity marker resolves deterministically even when stru
     const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     assert.equal(output.classification, "valid");
     assert.equal((output.template as { path?: string } | undefined)?.path, ".github/ISSUE_TEMPLATE/beta.yml");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("a semantic template marker resolves for issue check and explain without an explicit template", async () => {
+  const sourcePath = ".github/inari/issues/bug.json";
+  const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
+  const source = {
+    version: 1,
+    kind: "issue",
+    id: "bug",
+    name: "Bug",
+    description: "Reproducible defect",
+    sections: [{ id: "summary", type: "textarea", label: "Summary", required: true }],
+  };
+  const artifact = {
+    number: 94,
+    title: "fix: marker resolution",
+    body: `### Summary\n\nA reproducible defect\n\n<!-- inari:template {"version":"1","kind":"issue","path":"${sourcePath}"} -->\n`,
+    state: "open",
+    html_url: "https://github.com/acme/inari/issues/94",
+    labels: [],
+    assignees: [],
+  };
+
+  for (const operation of ["check", "explain"] as const) {
+    const transport = new CliStubTransport(
+      remoteSemanticArtifactResponses(sourcePath, generatedPath, source, artifact),
+    );
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (line: string) => lines.push(line);
+    try {
+      const exitCode = await runCli(["issue", operation, "94", "--repository", "acme/inari"], {
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+      });
+      assert.equal(exitCode, operation === "check" ? 2 : 0, `${operation}: ${lines[0]}`);
+      const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+      assert.equal(output.status, "non-canonical");
+      assert.equal(output.classification, "valid");
+      assert.equal(output.valid, operation === "check" ? false : true);
+      assert.equal(output.normalizable, true);
+    } finally {
+      console.log = originalLog;
+    }
+  }
+
+  const explicitTransport = new CliStubTransport(
+    remoteSemanticArtifactResponses(sourcePath, generatedPath, source, artifact),
+  );
+  const explicitLines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => explicitLines.push(line);
+  try {
+    const exitCode = await runCli(["issue", "check", "94", "--template", "bug", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(explicitTransport) }),
+    });
+    assert.equal(exitCode, 2, explicitLines[0]);
+    const output = JSON.parse(explicitLines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(output.status, "non-canonical");
+    assert.equal(output.classification, "valid");
+    assert.equal(output.valid, false);
+    assert.equal(output.normalizable, true);
   } finally {
     console.log = originalLog;
   }
