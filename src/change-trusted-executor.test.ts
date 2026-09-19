@@ -391,6 +391,38 @@ test("branch-only abort recovery deletes only the canonical branch and is idempo
   );
 });
 
+test("branch-only abort recovery rejects a residual canonical pull request after cleanup", async () => {
+  const reader = new MutableReader(input(evidence([branch])));
+  const issuer = new FakeIssuer(reader);
+  const applyEffects = issuer.applyEffects.bind(issuer);
+  issuer.applyEffects = async (request) => {
+    const result = await applyEffects(request);
+    if (request.effects[0]?.kind === "DELETE_BRANCH") {
+      reader.current = {
+        ...reader.current,
+        evidence: evidence([], { status: "available", value: [closedPullRequest()] }),
+      };
+    }
+    return result;
+  };
+
+  await assert.rejects(
+    executor(reader, issuer).execute({
+      version: CHANGE_TRANSITION_CONTRACT_VERSION,
+      operation: "abort",
+      issue: identity.rootIssue,
+    }),
+    (error: unknown) =>
+      error instanceof ChangeTrustedExecutorError &&
+      error.code === "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED" &&
+      error.diagnostics.some((diagnostic) => diagnostic.message.includes("complete cleanup")),
+  );
+  assert.deepEqual(
+    issuer.effects.map((effect) => effect.kind),
+    ["DELETE_BRANCH"],
+  );
+});
+
 test("branch success and pull-request failure are compensated through a Core recovery plan", async () => {
   const reader = new MutableReader(input(evidence([])));
   const issuer = new FakeIssuer(reader);
