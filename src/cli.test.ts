@@ -1093,6 +1093,52 @@ test("machine-readable version reports the invocation contract and capabilities"
   }
 });
 
+test("minimum-version checks use bounded SemVer precedence in version and diagnose paths", async () => {
+  const cases: readonly {
+    readonly actual: string;
+    readonly minimum: string;
+    readonly expected: boolean;
+  }[] = [
+    { actual: "0.13.0-rc.1", minimum: "0.13.0", expected: false },
+    { actual: "1.0.0-alpha.2", minimum: "1.0.0-alpha.10", expected: false },
+    { actual: "1.0.0-beta.2", minimum: "1.0.0-beta.1", expected: true },
+    { actual: "1.0.0+build.2", minimum: "1.0.0+build.1", expected: true },
+    { actual: "v1.0.0", minimum: "1.0.0", expected: true },
+  ];
+  for (const testCase of cases) {
+    const dependencies = { packageMetadata: { name: "gh-inari", version: testCase.actual, description: "" } };
+    const versionResult = await captureJson(["--minimum-version", testCase.minimum, "version", "--json"], dependencies);
+    const diagnoseResult = await captureJson(["--minimum-version", testCase.minimum, "diagnose", "--json"], {
+      ...dependencies,
+      runCanonicalDiagnosticCommand: () => ({
+        status: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          name: "gh-inari",
+          version: testCase.actual,
+          protocol: 1,
+          commandContractVersion: COMMAND_CONTRACT_VERSION,
+          capabilities: [...RUNTIME_CAPABILITIES],
+          invocation: { canonical: "inari" },
+        }),
+        stderr: "",
+      }),
+    });
+    assert.equal(versionResult.exitCode === 0, testCase.expected, `version: ${testCase.actual} >= ${testCase.minimum}`);
+    assert.equal(
+      diagnoseResult.exitCode === 0,
+      testCase.expected,
+      `diagnose: ${testCase.actual} >= ${testCase.minimum}`,
+    );
+  }
+
+  const invalid = await captureJson(["--minimum-version", "1.0.0-", "version", "--json"], {
+    packageMetadata: { name: "gh-inari", version: "1.0.0", description: "" },
+  });
+  assert.equal(invalid.exitCode, 1);
+  assert.equal((invalid.output.error as { code?: string } | undefined)?.code, "INVALID_OPTION");
+});
+
 test("diagnose reports only the standalone canonical runtime contract", async () => {
   const lines: string[] = [];
   const originalLog = console.log;
