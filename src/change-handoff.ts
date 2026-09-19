@@ -180,7 +180,7 @@ function resolveBoundRepositoryName(
     );
   }
   if (repositoryIdentity === undefined || changeIdentity === undefined) {
-    return validNameWithOwner(repositoryNameWithOwner) ? repositoryNameWithOwner : undefined;
+    return undefined;
   }
   if (!isRecord(repositoryIdentity)) {
     diagnostics.push(
@@ -289,7 +289,12 @@ function validateHandoffShape(
       diagnostic("CHANGE_INVALID_PROJECTION", "$.pullRequest", "pullRequest must be a positive safe integer."),
     );
   const normalizedIdentity = identityResult.identity;
-  resolveBoundRepositoryName(normalizedIdentity, input.repositoryNameWithOwner, repositoryIdentity, diagnostics);
+  const boundRepositoryName = resolveBoundRepositoryName(
+    normalizedIdentity,
+    input.repositoryNameWithOwner,
+    repositoryIdentity,
+    diagnostics,
+  );
   const nativeHandoff =
     input.compatibility !== undefined ||
     input.implementation !== undefined ||
@@ -404,9 +409,7 @@ function validateHandoffShape(
     kind: IMPLEMENTATION_HANDOFF_KIND,
     repositoryHost: normalizedIdentity.repositoryHost,
     repositoryId: normalizedIdentity.repositoryId,
-    ...(input.repositoryNameWithOwner === undefined
-      ? {}
-      : { repositoryNameWithOwner: input.repositoryNameWithOwner as string }),
+    ...(boundRepositoryName === undefined ? {} : { repositoryNameWithOwner: boundRepositoryName }),
     rootIssue: normalizedIdentity.rootIssue,
     changeVersion: CHANGE_CONTRACT_VERSION,
     state: "DRAFT",

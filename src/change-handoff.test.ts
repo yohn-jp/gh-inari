@@ -70,10 +70,16 @@ test("handoff includes the repository locator when the caller supplies one", () 
   assert.equal(result.handoff?.repositoryNameWithOwner, "acme/inari");
 });
 
-test("handoff preserves a valid caller-supplied repository locator without extra evidence", () => {
+test("handoff omits a caller-supplied repository locator without canonical evidence", () => {
   const result = tryProjectImplementationHandoff(projection(), { repositoryNameWithOwner: "acme/inari" });
   assert.equal(result.valid, true);
-  assert.equal(result.handoff?.repositoryNameWithOwner, "acme/inari");
+  assert.equal("repositoryNameWithOwner" in (result.handoff ?? {}), false);
+  const revalidated = validateImplementationHandoff({
+    ...projectImplementationHandoff(projection()),
+    repositoryNameWithOwner: "acme/inari",
+  });
+  assert.equal(revalidated.valid, true);
+  assert.equal("repositoryNameWithOwner" in (revalidated.handoff ?? {}), false);
 });
 
 test("handoff rejects a repository locator that conflicts with canonical host, ID, or owner/name evidence", () => {
