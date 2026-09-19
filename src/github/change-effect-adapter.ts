@@ -403,7 +403,10 @@ export class GitHubChangeEffectAdapter {
       const providerFailure =
         error instanceof GitHubChangeEffectFailureError
           ? error.providerFailure
-          : readGitHubProviderFailure(error);
+          : (readGitHubProviderFailure(error) ??
+            (error instanceof InvalidGitHubResponseError
+              ? githubProviderFailure("response-invalid", { retryable: false })
+              : undefined));
       return {
         status: "failed",
         effect: explicitEffect,
