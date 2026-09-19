@@ -103,6 +103,24 @@ export function normalizeGitHubProviderFailureClassification(
   });
 }
 
+export function projectGitHubProviderHeaders(
+  headers: Headers | Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> | undefined {
+  const projected: Record<string, string> = {};
+  for (const name of ["link", "x-github-request-id", "retry-after", "x-ratelimit-remaining"] as const) {
+    const value = headerValue(headers, name);
+    if (
+      value !== undefined &&
+      value.length > 0 &&
+      value.length <= 512 &&
+      !/[\u0000-\u001F\u007F]/u.test(value)
+    ) {
+      projected[name] = value;
+    }
+  }
+  return Object.keys(projected).length === 0 ? undefined : Object.freeze(projected);
+}
+
 export function githubProviderFailureFromStatus(
   status: number,
   headers?: Headers | Readonly<Record<string, string>>,
