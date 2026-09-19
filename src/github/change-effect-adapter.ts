@@ -22,6 +22,12 @@ import {
 } from "../change.js";
 import { readChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
 import {
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
+import {
   changeProvenanceRecordPath,
   renderChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
@@ -387,10 +393,15 @@ export class GitHubChangeEffectAdapter {
             (error instanceof InvalidGitHubResponseError
               ? { reason: "response-validation" as const }
               : { reason: "transport" as const }));
+      const providerFailure =
+        error instanceof GitHubChangeEffectFailureError
+          ? error.providerFailure
+          : readGitHubProviderFailure(error);
       return {
         status: "failed",
         effect: explicitEffect,
         failure: createFailureEvidence(explicitEffect, classification),
+        ...(providerFailure === undefined ? {} : { providerFailure }),
       };
     }
   }
@@ -700,19 +711,28 @@ export class GitHubChangeEffectAdapter {
       });
     } catch (error: unknown) {
       if (error instanceof GitHubChangeEffectFailureError) throw error;
-      throw new GitHubChangeEffectFailureError({ reason: "transport" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "transport" },
+        readGitHubProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true }),
+      );
     }
     if (!isRecord(response) || !isHttpStatus(response.status)) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     if (response.status === 404) return undefined;
     if (response.status !== 200) {
       const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
-      throw new GitHubChangeEffectFailureError({
-        reason: "provider-http",
-        status: response.status,
-        ...(provider === undefined ? {} : { provider }),
-      });
+      throw new GitHubChangeEffectFailureError(
+        {
+          reason: "provider-http",
+          status: response.status,
+          ...(provider === undefined ? {} : { provider }),
+        },
+        githubProviderFailureFromStatus(response.status, response.headers),
+      );
     }
     return parseGitReference(response.body, `refs/heads/${branch}`);
   }
@@ -724,7 +744,10 @@ export class GitHubChangeEffectAdapter {
     try {
       const response = await this.transport.request({ ...request, hostname: this.repository.hostname });
       if (!isRecord(response) || !isHttpStatus(response.status)) {
-        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+        throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
       }
       if (response.status !== expectedStatus) {
         const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
@@ -738,9 +761,15 @@ export class GitHubChangeEffectAdapter {
     } catch (error: unknown) {
       if (error instanceof GitHubChangeEffectFailureError) throw error;
       if (error instanceof InvalidGitHubResponseError) {
-        throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+        throw new GitHubChangeEffectFailureError(
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
       }
-      throw new GitHubChangeEffectFailureError({ reason: "transport" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "transport" },
+        readGitHubProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true }),
+      );
     }
   }
 
