@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { AGENT_INVOCATION_CONTRACT, tokenizeCommandArgv } from "./command-contract.js";
-import { runCli as runCoreCli, type CliDependencies as CoreCliDependencies } from "./cli-core.js";
+import { runCli as runCoreCli, versionAtLeast, type CliDependencies as CoreCliDependencies } from "./cli-core.js";
 
 interface DiagnosticCommandResult {
   readonly status: number | null;
@@ -71,22 +71,6 @@ function runCanonicalDiagnosticCommand(args: readonly string[]): DiagnosticComma
       error: error instanceof Error ? error.message : "unable to execute inari",
     };
   }
-}
-
-function parseVersion(value: string): readonly [number, number, number] | undefined {
-  const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(value);
-  if (match === null) return undefined;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function versionAtLeast(actual: string, minimum: string): boolean {
-  const actualParts = parseVersion(actual);
-  const minimumParts = parseVersion(minimum);
-  if (actualParts === undefined || minimumParts === undefined) return false;
-  for (let index = 0; index < actualParts.length; index += 1) {
-    if (actualParts[index] !== minimumParts[index]) return (actualParts[index] ?? 0) > (minimumParts[index] ?? 0);
-  }
-  return true;
 }
 
 function detailFrom(result: DiagnosticCommandResult): string | undefined {

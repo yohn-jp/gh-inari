@@ -619,20 +619,62 @@ function runtimeDiagnosticMessage(diagnostic: RuntimeDiagnostic, subject: string
   return `the ${subject} is ready`;
 }
 
-function parseVersion(value: string): readonly [number, number, number] | undefined {
-  const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(value);
-  if (match === null) return undefined;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+interface ParsedVersion {
+  readonly core: readonly [string, string, string];
+  readonly prerelease: readonly string[];
 }
 
-function versionAtLeast(actual: string, minimum: string): boolean {
-  const actualParts = parseVersion(actual);
-  const minimumParts = parseVersion(minimum);
-  if (actualParts === undefined || minimumParts === undefined) return false;
-  for (let index = 0; index < actualParts.length; index += 1) {
-    if (actualParts[index] !== minimumParts[index]) return actualParts[index] > minimumParts[index];
+function parseVersion(value: string): ParsedVersion | undefined {
+  const match =
+    /^(?:v)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(
+      value,
+    );
+  if (match === null) return undefined;
+  const prerelease = match[4] === undefined ? [] : match[4].split(".");
+  if (prerelease.some((identifier) => /^\d+$/u.test(identifier) && identifier.length > 1 && identifier.startsWith("0")))
+    return undefined;
+  return {
+    core: [match[1], match[2], match[3]],
+    prerelease,
+  };
+}
+
+function compareNumericIdentifiers(left: string, right: string): number {
+  if (left.length !== right.length) return left.length > right.length ? 1 : -1;
+  if (left === right) return 0;
+  return left > right ? 1 : -1;
+}
+
+function comparePrereleaseIdentifiers(left: string, right: string): number {
+  const leftNumeric = /^\d+$/u.test(left);
+  const rightNumeric = /^\d+$/u.test(right);
+  if (leftNumeric && rightNumeric) return compareNumericIdentifiers(left, right);
+  if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+  if (left === right) return 0;
+  return left > right ? 1 : -1;
+}
+
+function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
+  for (let index = 0; index < left.core.length; index += 1) {
+    const comparison = compareNumericIdentifiers(left.core[index], right.core[index]);
+    if (comparison !== 0) return comparison;
   }
-  return true;
+  const leftStable = left.prerelease.length === 0;
+  const rightStable = right.prerelease.length === 0;
+  if (leftStable !== rightStable) return leftStable ? 1 : -1;
+  for (let index = 0; index < Math.min(left.prerelease.length, right.prerelease.length); index += 1) {
+    const comparison = comparePrereleaseIdentifiers(left.prerelease[index], right.prerelease[index]);
+    if (comparison !== 0) return comparison;
+  }
+  if (left.prerelease.length === right.prerelease.length) return 0;
+  return left.prerelease.length > right.prerelease.length ? 1 : -1;
+}
+
+export function versionAtLeast(actual: string, minimum: string): boolean {
+  const actualVersion = parseVersion(actual);
+  const minimumVersion = parseVersion(minimum);
+  if (actualVersion === undefined || minimumVersion === undefined) return false;
+  return compareVersions(actualVersion, minimumVersion) >= 0;
 }
 
 class CliError extends Error {
