@@ -19,6 +19,7 @@ import {
 } from "./github/index.js";
 import {
   GITHUB_ISSUE_PROJECTION_CAPABILITIES,
+  normalizeSemanticIssueCapabilities,
   SEMANTIC_ISSUE_MUTATION_PLAN_VERSION,
   serializeSemanticIssueMutationPlan,
   tryPlanSemanticIssue,
@@ -202,11 +203,12 @@ function executionEvidence(
 }
 
 function relationCapabilities(capabilities: readonly string[]): IssueRelationCapabilities {
+  const normalized = normalizeSemanticIssueCapabilities(capabilities) ?? [];
   return {
-    parent: capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation),
+    parent: normalized.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation),
     blockedBy:
-      capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeBlockedByRelation) ||
-      capabilities.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation),
+      normalized.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeBlockedByRelation) ||
+      normalized.includes(GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation),
   };
 }
 
@@ -260,7 +262,13 @@ function validCapabilities(value: unknown): value is readonly string[] {
 }
 
 function compareCapabilities(left: readonly string[], right: readonly string[]): boolean {
-  return stableSerialize([...left].sort()) === stableSerialize([...right].sort());
+  const normalizedLeft = normalizeSemanticIssueCapabilities(left);
+  const normalizedRight = normalizeSemanticIssueCapabilities(right);
+  return (
+    normalizedLeft !== undefined &&
+    normalizedRight !== undefined &&
+    stableSerialize(normalizedLeft) === stableSerialize(normalizedRight)
+  );
 }
 
 function effectiveGeneration(effective: EffectiveArtifactContract): Readonly<Record<string, unknown>> {
