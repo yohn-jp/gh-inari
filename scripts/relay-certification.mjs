@@ -1013,9 +1013,9 @@ export async function runControlledCertification() {
     reconnect: lifecycle.reconnect,
     "late-result": {
       transition: lifecycle.late,
-      ...(lifecycle.late === "applied"
-        ? { productionFailure: "Expired delivery state accepted a late terminal result." }
-        : {}),
+      ...(lifecycle.late === "late-event-ignored"
+        ? {}
+        : { productionFailure: "Expired delivery state did not ignore a late terminal result." }),
     },
     "duplicate-result": lifecycle.duplicate,
     "hibernation-reconstruction": hibernation,

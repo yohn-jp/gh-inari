@@ -24,19 +24,16 @@ test("relay profile certifies semantic parity and bounded transport failures", a
 
   assert.equal(report.profile, "relay");
   assert.equal(report.profiles.includes("relay"), true);
-  // Durable invariant: certificationStatus always follows observed outcomes.
-  // It must never be pinned to a fixed value, or the contract would have to
-  // be manually rewritten the moment the production defects it reports on
-  // are fixed.
-  assert.equal(report.certificationStatus, report.productionFailures.length === 0 ? "passed" : "blocked");
+  // Durable certification oracle: the relay profile must reach semantic
+  // parity with the trusted-local profile, and controlled certification must
+  // report passed. This is the desired end state, not today's state — a
+  // separate production fix is expected to make this assertion pass.
   assert.equal(report.semanticParity.expected.status, "succeeded");
-  if (report.semanticParity.status === "blocked") {
-    assert.equal(report.semanticParity.actual.status, "failed");
-    assert.equal(report.semanticParity.productionFailure.code, "RELAY_HANDSHAKE_INCOMPATIBLE");
-  } else {
-    assert.equal(report.semanticParity.status, "passed");
-    assert.equal(report.semanticParity.actual.status, "succeeded");
-  }
+  assert.equal(report.semanticParity.actual.status, "succeeded");
+  assert.equal(report.semanticParity.status, "passed");
+  assert.equal(report.semanticParity.productionFailure, undefined);
+  assert.deepEqual(report.productionFailures, []);
+  assert.equal(report.certificationStatus, "passed");
   assert.equal(report.scenarios["cross-repository-route"].relayCode, "RELAY_SESSION_REPOSITORY_MISMATCH");
   assert.equal(report.scenarios["cross-repository-route"].dispatches, 0);
   assert.equal(report.scenarios["wrong-delegator-key"].denied, true);
@@ -55,15 +52,10 @@ test("relay profile certifies semantic parity and bounded transport failures", a
   assert.equal(report.scenarios["lost-result"].recovery, "recovery-required");
   assert.equal(report.scenarios["lost-result"].automaticRetry, "forbidden");
   assert.equal(report.scenarios.reconnect.phase, "possibly-delivered");
-  // Durable invariant: an expired delivery state must ignore a late terminal
-  // result, never apply it (unsafe replay). Report the current defect as
-  // evidence, but do not require it to be "applied" going forward.
-  assert.ok(["applied", "ignored"].includes(report.scenarios["late-result"].transition));
-  if (report.scenarios["late-result"].transition === "applied") {
-    assert.match(report.scenarios["late-result"].productionFailure, /late terminal result/);
-  } else {
-    assert.equal(report.scenarios["late-result"].productionFailure, undefined);
-  }
+  // Durable certification oracle: an expired delivery state must ignore a
+  // late terminal result (no unsafe replay), never apply it.
+  assert.equal(report.scenarios["late-result"].transition, "late-event-ignored");
+  assert.equal(report.scenarios["late-result"].productionFailure, undefined);
   assert.equal(report.scenarios["duplicate-result"], "duplicate-result-ignored");
   assert.equal(report.scenarios["hibernation-reconstruction"].preserved, true);
   assert.equal(report.scenarios["hibernation-reconstruction"].replayFramesAfterReconstruction, 0);
