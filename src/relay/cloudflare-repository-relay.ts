@@ -767,11 +767,17 @@ export class RepositoryRelayDurableObject {
     return `${repository.repositoryHost}\u0000${repository.repositoryId}\u0000${delegatorId}\u0000${connectionId}`;
   }
 
-  private nextRuntimeGeneration(
+  private async nextRuntimeGeneration(
     repository: RelayRepositoryIdentity,
     connectionId: string,
     delegatorId: string,
-  ): number {
+  ): Promise<number> {
+    // A retained delivery record is durable transport state: it can still
+    // receive a result/control/close event for the generation that received
+    // the job. Include those records before allocating so a reconstructed DO
+    // cannot reuse a generation after its old socket has disappeared.
+    const now = this.now();
+    const retainedRecords = await this.records();
     const key = this.runtimeIdentityKey(repository, connectionId, delegatorId);
     let highest = this.generationReservations.get(key) ?? 0;
     for (const socket of this.state.getWebSockets("runtime")) {
@@ -785,6 +791,18 @@ export class RepositoryRelayDurableObject {
         continue;
       }
       highest = Math.max(highest, attachment.generation);
+    }
+    for (const record of retainedRecords) {
+      if (
+        record.retainedUntilMs <= now ||
+        record.targetConnectionId !== connectionId ||
+        record.repository.repositoryId !== repository.repositoryId ||
+        record.repository.repositoryHost !== repository.repositoryHost ||
+        record.targetGeneration === undefined
+      ) {
+        continue;
+      }
+      highest = Math.max(highest, record.targetGeneration);
     }
     if (highest >= MAX_RUNTIME_GENERATION) {
       throw new RelayOperationalLimitError(
@@ -910,7 +928,7 @@ export class RepositoryRelayDurableObject {
       const usedNonces = new Set(activeNonceRecords.map((entry) => entry.nonce));
       const result = verifyRelayPossessionProof(attachment.challenge, response, { nowMs: this.now(), usedNonces });
       if (!result.valid || result.value === undefined) return this.close(webSocket, 1008, "Invalid possession proof.");
-      const generation = this.nextRuntimeGeneration(
+      const generation = await this.nextRuntimeGeneration(
         attachment.repository,
         attachment.connectionId,
         attachment.delegatorId,

@@ -178,6 +178,19 @@ function pairFor(object: RepositoryRelayDurableObject, query: string): FakeSocke
   return state.sockets.at(-1) as FakeSocket;
 }
 
+async function admitRuntime(
+  object: RepositoryRelayDurableObject,
+  runtime: FakeSocket,
+  privateKey: KeyObject,
+): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+  const challenge = (runtime.attachment as { challenge: RelayPossessionProofChallenge }).challenge;
+  await object.webSocketMessage(
+    runtime,
+    encodeRelayPossessionProofResponse(signRelayPossessionProof(challenge, privateKey)),
+  );
+}
+
 function publicJwk(key: KeyObject): Record<string, string> {
   return key.export({ format: "jwk" }) as Record<string, string>;
 }
@@ -522,9 +535,7 @@ test("generation reconstruction does not reuse a generation referenced by a reta
   const removedSocketIndex = state.sockets.indexOf(runtime);
   assert.notEqual(removedSocketIndex, -1);
   state.sockets.splice(removedSocketIndex, 1);
-  const retainedAfterDisconnect = await state.storage.get<Record<string, unknown>>(
-    "relay:job:job-retained-generation",
-  );
+  const retainedAfterDisconnect = await state.storage.get<Record<string, unknown>>("relay:job:job-retained-generation");
   assert.equal((retainedAfterDisconnect ?? {}).targetGeneration, 1);
   assert.equal(((retainedAfterDisconnect ?? {}).state as { phase?: string }).phase, "possibly-delivered");
 
@@ -561,9 +572,7 @@ test("generation reconstruction does not reuse a generation referenced by a reta
       repository,
     ),
   );
-  const afterCollisionAttempts = await state.storage.get<Record<string, unknown>>(
-    "relay:job:job-retained-generation",
-  );
+  const afterCollisionAttempts = await state.storage.get<Record<string, unknown>>("relay:job:job-retained-generation");
   assert.equal(((afterCollisionAttempts ?? {}).state as { phase?: string }).phase, "possibly-delivered");
   assert.equal(
     client.sent.filter(
