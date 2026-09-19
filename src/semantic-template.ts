@@ -798,7 +798,16 @@ function renderIssueNative(source: SemanticTemplateSource): string {
           }
           return index;
         });
-        attributes.default = section.multiple === true ? indexes : indexes[0];
+        if (section.multiple === true && indexes.length > 1) {
+          throw new SemanticTemplateError([
+            {
+              code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+              path: `$.sections.${section.id}.defaultValue`,
+              message: "Issue Form dropdowns cannot represent multiple selected defaults.",
+            },
+          ]);
+        }
+        attributes.default = indexes[0];
       }
     }
     if (type === "checkboxes") {

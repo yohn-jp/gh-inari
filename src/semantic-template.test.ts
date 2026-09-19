@@ -133,6 +133,9 @@ test("semantic Issue projections preserve option values and multi-select default
       },
     ],
   });
+  const native = renderSemanticNative(source, ".github/ISSUE_TEMPLATE/preferences.yml");
+  assert.match(native, /default: 1/u);
+  assert.doesNotMatch(native, /default: \[/u);
   const contract = compileSemanticTemplateSource(source, ".github/ISSUE_TEMPLATE/preferences.yml");
   const fields = contract.sections.flatMap((section) => section.fields);
   const priority = fields.find((field) => field.id === "priority");
@@ -159,6 +162,34 @@ test("semantic Issue projections preserve option values and multi-select default
     );
     assert.deepEqual(areas.defaultValue, ["be"]);
   }
+});
+
+test("semantic multi-select projections reject multiple defaults unsupported by Issue Forms", () => {
+  assert.throws(
+    () =>
+      compileSemanticTemplateSource(
+        normalizeSemanticTemplate({
+          version: 1,
+          kind: "issue",
+          id: "areas",
+          name: "Areas",
+          description: "Area selections",
+          sections: [
+            {
+              id: "areas",
+              type: "array",
+              label: "Areas",
+              multiple: true,
+              options: ["Frontend", "Backend"],
+              defaultValue: ["Frontend", "Backend"],
+            },
+          ],
+        }),
+        ".github/ISSUE_TEMPLATE/areas.yml",
+      ),
+    (error: unknown) =>
+      error instanceof SemanticTemplateError && /cannot represent multiple selected defaults/u.test(error.message),
+  );
 });
 
 test("Issue Form checkboxes fail explicitly when semantic checked defaults are not representable", () => {

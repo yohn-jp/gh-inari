@@ -530,40 +530,27 @@ function compileDropdown(
     diagnostics,
     multiple,
   );
-  const defaultIndexes = optionalDropdownDefaults(
-    attributes,
-    "default",
-    `${pathPrefix}.attributes`,
-    multiple,
-    diagnostics,
-  );
-  let defaultOptions: readonly string[] | undefined;
-  if (defaultIndexes !== undefined && optionValues !== undefined) {
-    const resolved: string[] = [];
-    for (const defaultIndex of defaultIndexes) {
-      if (defaultIndex < 0 || defaultIndex >= optionValues.length) {
+  const defaultIndex = optionalSafeInteger(attributes, "default", `${pathPrefix}.attributes`, diagnostics);
+  let defaultOption: string | undefined;
+  if (defaultIndex !== undefined) {
+    if (optionValues !== undefined && (defaultIndex < 0 || defaultIndex >= optionValues.length)) {
+      diagnostics.add(
+        "ISSUE_FORM_INVALID_VALUE",
+        `${pathPrefix}.attributes.default`,
+        "Dropdown default must be a valid option index.",
+      );
+    } else if (optionValues !== undefined) {
+      defaultOption = optionValues[defaultIndex];
+      if (defaultOption !== undefined && isReservedEmptyOption(defaultOption)) {
         diagnostics.add(
           "ISSUE_FORM_INVALID_VALUE",
           `${pathPrefix}.attributes.default`,
-          "Dropdown default must be a valid option index.",
+          'A dropdown with a default cannot contain the native empty option "None" or "n/a".',
         );
-        continue;
-      }
-      const defaultOption = optionValues[defaultIndex];
-      if (defaultOption !== undefined) {
-        if (isReservedEmptyOption(defaultOption)) {
-          diagnostics.add(
-            "ISSUE_FORM_INVALID_VALUE",
-            `${pathPrefix}.attributes.default`,
-            'A dropdown with a default cannot contain the native empty option "None" or "n/a".',
-          );
-        }
-        resolved.push(defaultOption);
       }
     }
-    defaultOptions = resolved;
   }
-  const defaultValue = defaultOptions === undefined ? undefined : multiple ? defaultOptions : defaultOptions[0];
+  const defaultValue = defaultOption === undefined ? undefined : multiple ? [defaultOption] : defaultOption;
   const options = optionValues?.map((option) => ({ value: option, label: option })) ?? [];
   const nativeOptions: readonly NativeOptionMetadata[] = options.map((option) => ({ value: option.value }));
   const nativeMetadata: NativeFieldMetadata = {
@@ -599,9 +586,7 @@ function compileDropdown(
     type: "enum",
     required: common.required,
     options,
-    ...(defaultValue === undefined
-      ? {}
-      : { defaultValue: Array.isArray(defaultValue) ? defaultValue[0] : defaultValue }),
+    ...(defaultOption === undefined ? {} : { defaultValue: defaultOption }),
     render: { order: 0 },
     nativeMetadata,
   };
@@ -899,32 +884,23 @@ function optionalBoolean(
   return value;
 }
 
-function optionalDropdownDefaults(
+function optionalSafeInteger(
   record: UnknownRecord,
   key: string,
   pathPrefix: string,
-  multiple: boolean,
   diagnostics: Diagnostics,
-): readonly number[] | undefined {
+): number | undefined {
   if (!hasOwn(record, key)) return undefined;
   const value = record[key];
-  const values = Array.isArray(value) ? value : [value];
-  if (!multiple && Array.isArray(value)) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     diagnostics.add(
       "ISSUE_FORM_INVALID_VALUE",
       `${pathPrefix}.${key}`,
-      "Single-select dropdown defaults must be a safe integer.",
-    );
-  }
-  if (values.some((entry) => typeof entry !== "number" || !Number.isSafeInteger(entry))) {
-    diagnostics.add(
-      "ISSUE_FORM_INVALID_VALUE",
-      `${pathPrefix}.${key}`,
-      multiple ? "Dropdown defaults must be safe integer indices." : "Dropdown default must be a safe integer.",
+      `Property "${key}" must be a safe integer when present.`,
     );
     return undefined;
   }
-  return values as number[];
+  return value;
 }
 
 function requiredArray(
