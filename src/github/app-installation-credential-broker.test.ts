@@ -550,6 +550,35 @@ function neverRespondingFetch(): typeof globalThis.fetch {
   }) as typeof globalThis.fetch;
 }
 
+function headersThenStalledBodyFetch(): typeof globalThis.fetch {
+  return (async (_input, init) => {
+    const signal = (init as RequestInit | undefined)?.signal;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              JSON.stringify({
+                token: "installation-token-secret",
+                expires_at: "2026-09-05T00:10:00.000Z",
+                permissions: GITHUB_APP_REPOSITORY_READ_PERMISSIONS,
+                repositories: [{ id: Number(target.repositoryId), full_name: target.nameWithOwner }],
+              }),
+            ),
+          );
+          const abort = () => controller.error(new DOMException("The operation was aborted.", "AbortError"));
+          if (signal?.aborted) {
+            abort();
+          } else {
+            signal?.addEventListener("abort", abort, { once: true });
+          }
+        },
+      }),
+      { status: 201 },
+    );
+  }) as typeof globalThis.fetch;
+}
+
 test("a hung installation-token request fails closed after the bounded deadline", async () => {
   const broker = new GitHubAppInstallationCredentialBroker(
     brokerOptions(neverRespondingFetch(), { requestTimeoutMs: 5 }),
@@ -566,6 +595,24 @@ test("a hung installation-token request fails closed after the bounded deadline"
     },
   );
   assert.ok(Date.now() - start < 5_000, "the hung request must fail well before an unbounded wait");
+});
+
+test("a stalled installation-token response body fails closed after the bounded deadline", async () => {
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(headersThenStalledBodyFetch(), { requestTimeoutMs: 5 }),
+  );
+  const start = Date.now();
+  await assert.rejects(
+    broker.withRepositoryReadCapability({}, async () => undefined),
+    (error: unknown) => {
+      assert.ok(error instanceof GitHubAppCredentialBrokerError);
+      assert.equal(error.stage, "installation-token");
+      assert.deepEqual(error.providerFailure, { failureClass: "timeout", retryable: true, timeoutMs: 5 });
+      assert.equal(JSON.stringify(error).includes(privateKey), false);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - start < 5_000, "the stalled body must fail well before an unbounded wait");
 });
 
 test("a hung provider read request fails closed after the bounded deadline once credentialed", async () => {
