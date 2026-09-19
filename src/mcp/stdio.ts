@@ -37,7 +37,7 @@ export function parseStdioArgs(argv: readonly string[]): ParsedStdioArgs {
       version = true;
       continue;
     }
-    if (argument === "--repo" || argument === "--repository" || argument === "--repository-root") {
+    if (argument === "--repo" || argument === "--repository" || argument === "-R" || argument === "--repository-root") {
       const value = argv[index + 1];
       if (value === undefined || value.length === 0 || value.startsWith("-")) {
         throw new Error(`${argument} requires a value.`);

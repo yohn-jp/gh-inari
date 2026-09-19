@@ -3,11 +3,13 @@ import { test } from "node:test";
 import { parseStdioArgs } from "./stdio.js";
 
 test("direct MCP stdio uses --repo as the canonical GitHub repository alias", () => {
-  assert.deepEqual(parseStdioArgs(["--repo", "acme/inari"]), {
-    help: false,
-    version: false,
-    repository: "acme/inari",
-  });
+  for (const alias of ["--repo", "-R"]) {
+    assert.deepEqual(parseStdioArgs([alias, "acme/inari"]), {
+      help: false,
+      version: false,
+      repository: "acme/inari",
+    });
+  }
 });
 
 test("direct MCP stdio accepts an explicit local repository root", () => {
