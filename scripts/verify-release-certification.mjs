@@ -266,9 +266,8 @@ function githubHeaders(environment) {
 
 async function readGitHubJson(response, label, errorCode = "ARTIFACT_LOOKUP_FAILED") {
   if (!response?.ok) throw workflowError(errorCode, `${label} returned HTTP ${String(response?.status)}`);
-  const text = await response.text();
-  if (Buffer.byteLength(text, "utf8") > MAX_GITHUB_RESPONSE_BYTES)
-    throw workflowError(errorCode, `${label} response exceeded the bounded size limit`);
+  const bytes = await readBoundedResponseBytes(response, MAX_GITHUB_RESPONSE_BYTES, label, errorCode);
+  const text = bytes.toString("utf8");
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -277,6 +276,67 @@ async function readGitHubJson(response, label, errorCode = "ARTIFACT_LOOKUP_FAIL
       `${label} did not return JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+function responseContentLength(response) {
+  const value = response?.headers?.get?.("content-length");
+  if (value === null || value === undefined || value === "") return undefined;
+  if (!/^\d+$/u.test(value)) return undefined;
+  return BigInt(value);
+}
+
+async function readBoundedResponseBytes(response, limit, label, errorCode) {
+  const declaredLength = responseContentLength(response);
+  if (declaredLength !== undefined && declaredLength > BigInt(limit))
+    throw workflowError(errorCode, `${label} response exceeded the bounded size limit`);
+
+  const chunks = [];
+  let totalLength = 0;
+  const rejectOversized = () => workflowError(errorCode, `${label} response exceeded the bounded size limit`);
+  const appendChunk = (chunk) => {
+    const bytes = Buffer.from(chunk);
+    totalLength += bytes.length;
+    if (totalLength > limit) throw rejectOversized();
+    chunks.push(bytes);
+  };
+
+  if (typeof response?.body?.getReader === "function") {
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        appendChunk(value);
+      }
+    } catch (error) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Preserve the bounded-read error when cancellation itself fails.
+      }
+      throw error;
+    } finally {
+      reader.releaseLock?.();
+    }
+    return Buffer.concat(chunks, totalLength);
+  }
+
+  if (typeof response?.body?.[Symbol.asyncIterator] === "function") {
+    try {
+      for await (const chunk of response.body) appendChunk(chunk);
+    } catch (error) {
+      throw error;
+    }
+    return Buffer.concat(chunks, totalLength);
+  }
+
+  // Keep compatibility with the minimal response doubles used by callers that
+  // do not expose a Fetch body stream. Real fetch responses take the bounded
+  // streaming paths above.
+  if (typeof response?.arrayBuffer === "function") appendChunk(await response.arrayBuffer());
+  else if (typeof response?.text === "function") appendChunk(Buffer.from(await response.text(), "utf8"));
+  else throw workflowError(errorCode, `${label} response body could not be read`);
+  return Buffer.concat(chunks, totalLength);
 }
 
 function compareNumericStringsDescending(left, right) {
@@ -597,15 +657,18 @@ export async function retrieveSelfDogfoodEvidence({
     );
   let archiveBytes;
   try {
-    archiveBytes = Buffer.from(await archiveResponse.arrayBuffer());
+    archiveBytes = await readBoundedResponseBytes(
+      archiveResponse,
+      MAX_ARTIFACT_ARCHIVE_BYTES,
+      "Actions artifact archive",
+      "ARTIFACT_DOWNLOAD_FAILED",
+    );
   } catch (error) {
     throw workflowError(
       "ARTIFACT_DOWNLOAD_FAILED",
       `Actions artifact bytes could not be read: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (archiveBytes.length > MAX_ARTIFACT_ARCHIVE_BYTES)
-    throw workflowError("ARTIFACT_DOWNLOAD_FAILED", "Actions artifact archive exceeded the bounded size limit");
 
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "inari-dogfood-artifact-"));
   const archivePath = path.join(temporaryDirectory, "artifact.zip");
