@@ -383,9 +383,16 @@ function certifyInstalledRuntime(consumerDirectory, installedPackageDirectory, e
       env: environment,
     }),
     "native HTTP Issue check",
+    2,
   );
-  if (check.status !== "valid-current" || check.normalizable !== false || "disposableMarker" in check)
-    fail("installed package did not classify the native HTTP Issue fixture as current");
+  if (
+    check.status !== "non-canonical" ||
+    check.classification !== "valid" ||
+    check.valid !== false ||
+    check.normalizable !== true ||
+    "disposableMarker" in check
+  )
+    fail("installed package did not accept the native HTTP Issue fixture as a compatible governed artifact");
 
   const inspected = jsonOutput(
     invoke(launcher, ["issue", "get", "667", "--repository", "yohn-jp/gh-inari", "--json"], {
