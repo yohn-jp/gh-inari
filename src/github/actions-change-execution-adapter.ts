@@ -281,6 +281,23 @@ function adapterProviderFailure(error: unknown): GitHubProviderFailureClassifica
   return undefined;
 }
 
+function applyActionsRetryPolicy(
+  providerFailure: GitHubProviderFailureClassification,
+  stage: ActionsTransportFailureStage,
+): GitHubProviderFailureClassification {
+  // GitHub can list an Actions artifact before its blob download has converged.
+  // #577 established 404/425 at this exact read-after-list boundary as a
+  // retryable observation state. The same statuses remain non-retryable at
+  // unrelated stages.
+  if (stage === "artifact-download" && (providerFailure.status === 404 || providerFailure.status === 425)) {
+    return normalizeGitHubProviderFailureClassification({
+      ...providerFailure,
+      retryable: true,
+    })!;
+  }
+  return providerFailure;
+}
+
 function normalizeTransportError(
   error: unknown,
   operation: string,
@@ -292,7 +309,10 @@ function normalizeTransportError(
   stage: ActionsTransportFailureStage,
 ): ChangeExecutionPortError {
   if (error instanceof ChangeExecutionPortError) return error;
-  const providerFailure = adapterProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true });
+  const providerFailure = applyActionsRetryPolicy(
+    adapterProviderFailure(error) ?? githubProviderFailure("transport", { retryable: true }),
+    stage,
+  );
   return remoteError(code, operation, providerFailure.failureClass, undefined, stage, providerFailure);
 }
 
