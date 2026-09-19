@@ -26,7 +26,12 @@ import {
   SemanticValidationError,
 } from "./contract/index.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
-import { createActionsChangeExecutionAdapter, GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
+import {
+  createActionsChangeExecutionAdapter,
+  createGitHubChangeReadAdapter,
+  GitHubAdapter,
+  isGitHubAdapterError,
+} from "./github/index.js";
 import {
   assertPullRequestSyncInputComplete,
   parsePullRequestSyncInput,
@@ -119,6 +124,10 @@ import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
 import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
 import { tryProjectImplementationFrontier } from "./implementation-frontier.js";
+import {
+  composeImplementationFrontier,
+  createGitHubImplementationFrontierRepository,
+} from "./implementation-frontier-composition.js";
 import { projectSelfDogfoodIssueMarker } from "./self-dogfood-marker.js";
 import type { TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
@@ -272,6 +281,8 @@ export interface CliDependencies {
   readonly changeExecutor?: ChangeExecutionPort;
   /** Factory seam for a repository-scoped transport implementation. */
   readonly createChangeExecutor?: (options: ChangeExecutionPortOptions) => ChangeExecutionPort;
+  /** Existing repository-backed Implementation authorization/conformance reader. */
+  readonly readImplementationEvidence?: (issueNumber: number) => Promise<unknown>;
   /** Injectable local Semantic PR Executor; it never carries App credentials. */
   readonly semanticPullRequestExecutor?: SemanticPullRequestExecutionPort;
   /** Factory seam for a repository-scoped Semantic PR Executor. */
@@ -1911,8 +1922,6 @@ async function runImplementationCommand(
   const definition = getCommandForPositionals(["impl", command]);
   if (definition === undefined) throw new CliError("UNKNOWN_COMMAND", `Unknown Implementation command "${command}".`);
   if (command === "frontier") {
-    if (rest.length !== 0)
-      throw new CliError("INVALID_ARGUMENT", "impl frontier does not accept an Issue number.", "$argv");
     const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
     if (unsupported !== undefined) {
       const option = getOption(unsupported as OptionId);
@@ -1923,10 +1932,40 @@ async function runImplementationCommand(
         { command: "impl frontier", option: option.id },
       );
     }
-    if (typeof parsed.options.from !== "string")
-      throw new CliError("INPUT_REQUIRED", "Use --from <frontier-input.json>.", "--from");
-    const input = await readJsonValue(parsed.options.from);
-    const frontier = tryProjectImplementationFrontier(input);
+    if (rest.length > 1 || (rest.length === 1 && !isPositiveInteger(rest[0])))
+      throw invalidArtifactNumberError("issue", rest[0]);
+    if (rest.length === 0 && typeof parsed.options.from !== "string")
+      throw new CliError("INPUT_REQUIRED", "Use impl frontier <issueNumber> or --from <frontier-input.json>.", "$argv");
+    if (rest.length === 1 && parsed.options.from !== undefined)
+      throw new CliError(
+        "INVALID_OPTION",
+        "--from is available only for the low-level impl frontier evidence mode; Issue composition reads repository evidence.",
+        "--from",
+      );
+    let frontier;
+    if (rest.length === 0) {
+      const input = await readJsonValue(parsed.options.from);
+      frontier = tryProjectImplementationFrontier(input);
+    } else {
+      const adapter = createAdapter(dependencies, root, parsed.options.repository);
+      const changeReader =
+        dependencies.changeExecutor ??
+        (dependencies.createChangeExecutor === undefined
+          ? createGitHubChangeReadAdapter({ cwd: root, api: adapter })
+          : dependencies.createChangeExecutor({
+              cwd: root,
+              ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+            }));
+      const repository = createGitHubImplementationFrontierRepository({
+        adapter,
+        cwd: root,
+        changeReader,
+        ...(dependencies.readImplementationEvidence === undefined
+          ? {}
+          : { implementationEvidenceReader: dependencies.readImplementationEvidence }),
+      });
+      frontier = await composeImplementationFrontier(repository, Number(rest[0]));
+    }
     printImplementationResult(
       {
         ok: frontier.valid,

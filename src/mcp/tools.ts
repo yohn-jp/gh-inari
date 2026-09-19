@@ -52,6 +52,7 @@ import { projectGoldenPathRecovery } from "../golden-path-recovery.js";
 import { tryProjectGoldenPathStatus } from "../golden-path-status.js";
 import {
   createActionsChangeExecutionAdapter,
+  createGitHubChangeReadAdapter,
   GitHubAdapter,
   GitHubIssueRelationObservationAdapter,
   isGitHubAdapterError,
@@ -73,6 +74,10 @@ import type {
 import { tryProjectImplementationHandoff } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { tryProjectImplementationFrontier } from "../implementation-frontier.js";
+import {
+  composeImplementationFrontier,
+  createGitHubImplementationFrontierRepository,
+} from "../implementation-frontier-composition.js";
 import {
   tryVerifyImplementationAuthorization,
   validateImplementationAuthorizationRecord,
@@ -339,6 +344,8 @@ export interface NativeSemanticPullRequestDependencies {
   readonly adapter?: GitHubAdapter;
   /** Factory seam for repository-scoped adapter construction. */
   readonly createAdapter?: (options: GitHubAdapterOptions) => GitHubAdapter;
+  /** Existing repository-backed Implementation authorization/conformance reader. */
+  readonly readImplementationEvidence?: (issueNumber: number) => Promise<unknown>;
 }
 
 /** Shared dependency seam for all read-only semantic artifact catalogs. */
@@ -545,11 +552,19 @@ export const goldenPathStatusOutputSchema = z
 
 export type GoldenPathStatusMcpOutput = z.infer<typeof goldenPathStatusOutputSchema>;
 
-export const implementationFrontierInputSchema = z.strictObject({
-  frontier: z
-    .unknown()
-    .describe("Bounded authoritative evidence consumed by the Implementation Frontier Core projector."),
-});
+export const implementationFrontierInputSchema = z
+  .strictObject({
+    repository: repositorySchema.optional(),
+    issue: artifactNumberSchema.optional().describe("Starting Issue number for repository-backed composition."),
+    frontier: z
+      .unknown()
+      .optional()
+      .describe("Existing bounded authoritative evidence consumed directly by the Core projector."),
+  })
+  .refine((input) => (input.issue === undefined) === (input.frontier !== undefined), {
+    message: "Provide exactly one of issue or frontier.",
+    path: ["issue"],
+  });
 
 export const implementationFrontierOutputSchema = z
   .object({
@@ -2223,30 +2238,66 @@ export function registerSemanticBranchTools(
 }
 
 /** Register the transport-neutral Implementation Frontier projection. */
-export function registerImplementationTools(server: McpServer): readonly RegisteredTool[] {
+export function registerImplementationTools(
+  server: McpServer,
+  dependencies: NativeChangeDependencies = {},
+): readonly RegisteredTool[] {
   const frontier = server.registerTool(
     "inari_impl_frontier",
     {
       title: "Project Implementation Frontier",
       description:
-        "Project READY, BLOCKED, ACTIVE, SATISFIED, and INVALID Implementation candidates through the single Core frontier authority without mutation.",
+        "Compose a starting Issue's bounded repository dependency closure and project READY, BLOCKED, ACTIVE, SATISFIED, and INVALID Implementation candidates through the single Core frontier authority without mutation; explicit raw frontier evidence remains available as a low-level path.",
       inputSchema: implementationFrontierInputSchema,
       outputSchema: implementationFrontierOutputSchema,
       annotations: READ_ONLY,
     },
     async (input: ImplementationFrontierMcpInput) => {
-      const projected = tryProjectImplementationFrontier(input.frontier);
-      return result(
-        {
-          ok: projected.valid,
-          valid: projected.valid,
-          operation: "impl.frontier",
-          ...(projected.projection === undefined ? {} : { frontier: projected.projection }),
-          diagnostics: projected.diagnostics,
-          mutation: false,
-        },
-        projected.valid ? "Projected the current Implementation Frontier." : "Implementation Frontier failed closed.",
-      );
+      try {
+        const projected =
+          input.frontier !== undefined
+            ? tryProjectImplementationFrontier(input.frontier)
+            : await (async () => {
+                const adapter = adapterFor(input.repository, dependencies);
+                const cwd = dependencies.repositoryRoot ?? process.cwd();
+                const changeReader =
+                  dependencies.changeExecutor ??
+                  (dependencies.createChangeExecutor === undefined
+                    ? createGitHubChangeReadAdapter({ cwd, api: adapter })
+                    : dependencies.createChangeExecutor({
+                        cwd,
+                        ...(input.repository === undefined ? {} : { repository: input.repository }),
+                      }));
+                return composeImplementationFrontier(
+                  createGitHubImplementationFrontierRepository({
+                    adapter,
+                    cwd,
+                    changeReader,
+                    ...(dependencies.readImplementationEvidence === undefined
+                      ? {}
+                      : { implementationEvidenceReader: dependencies.readImplementationEvidence }),
+                  }),
+                  input.issue as number,
+                );
+              })();
+        return result(
+          {
+            ok: projected.valid,
+            valid: projected.valid,
+            operation: "impl.frontier",
+            ...(projected.projection === undefined ? {} : { frontier: projected.projection }),
+            diagnostics: projected.diagnostics,
+            mutation: false,
+          },
+          projected.valid ? "Projected the current Implementation Frontier." : "Implementation Frontier failed closed.",
+        );
+      } catch (error: unknown) {
+        const diagnostics = diagnosticsForError(error);
+        return result(
+          { ok: false, valid: false, operation: "impl.frontier", diagnostics, mutation: false },
+          "Implementation Frontier repository evidence was unavailable; the projection failed closed.",
+        );
+      }
     },
   );
   return Object.freeze([frontier]);

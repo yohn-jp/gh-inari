@@ -21,6 +21,7 @@ export * from "./implementation-conformance.js";
 export * from "./implementation-lifecycle.js";
 export * from "./implementation-change-identity.js";
 export * from "./implementation-frontier.js";
+export * from "./implementation-frontier-composition.js";
 export * from "./github/index.js";
 export * from "./pull-request-template.js";
 export * from "./semantic-template.js";

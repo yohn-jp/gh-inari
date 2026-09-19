@@ -309,7 +309,10 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
         "Verify a pull request and its authoritative diff against the current authorized Implementation.",
         "impl.verify",
       ],
-      ["Project the bounded Implementation Frontier before selecting runnable Implementation work.", "impl.frontier"],
+      [
+        "Compose the starting Issue's transitive dependency closure from repository evidence and project the bounded Implementation Frontier through the existing Core authority.",
+        "impl.frontier",
+      ],
     ],
     invariants: [
       "The ordinary Issue remains the problem, request, or decision record; this scenario keeps one-session detail in the Implementation.",
@@ -317,7 +320,7 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
       "`impl.validate` is read-only. `impl.show` and `impl.inspect` project current evidence without mutation.",
       "`impl.authorize` requires the current canonical body and authoritative base evidence, then emits Core authorization evidence without a GitHub mutation.",
       "`impl.verify` requires current authorization and verifies the pull request and diff against that bounded Implementation.",
-      "`impl.frontier` consumes the single Core frontier projection; READY/BLOCKED/ACTIVE/SATISFIED/INVALID must never be reconstructed in the Skill.",
+      "`impl.frontier <number>` uses the repository-backed composition shared by CLI and MCP; the low-level `--from` evidence path remains available, and READY/BLOCKED/ACTIVE/SATISFIED/INVALID must never be reconstructed in the Skill.",
       "Use native parent/sub-issue provider evidence where supported; prose `Parent:` is compatibility guidance for older artifacts and never triggers bulk reparenting.",
       IMPLEMENTATION_COMMAND_CONTRACT_INVARIANT,
       HELP_DISCLAIMER,
