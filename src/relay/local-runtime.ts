@@ -11,11 +11,11 @@ import { createHash, randomBytes, type KeyObject } from "node:crypto";
 import { base64UrlDecodeToBytes, base64UrlEncodeBytes } from "../agent-authority/codec.js";
 import {
   decodeRelayPossessionProofChallenge,
+  encodeRelayPossessionProofChallenge,
   encodeRelayPossessionProofResponse,
   signRelayPossessionProof,
 } from "./connection-proof.js";
 import {
-  MAX_RELAY_DEADLINE_MS,
   MAX_RELAY_IN_FLIGHT_JOBS,
   decodeRelayEnvelope,
   encodeRelayEnvelope,
@@ -100,6 +100,8 @@ const OPEN_READY_STATE = 1;
 const DEFAULT_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
+const RELAY_HANDSHAKE_KIND = "repository-relay-possession-challenge";
+const RELAY_HANDSHAKE_RESPONSE_KIND = "repository-relay-possession-response";
 
 function textFromFrame(data: unknown): string | undefined {
   if (typeof data === "string") return data;
@@ -134,6 +136,32 @@ function jsonResult(result: CapabilityAuthorizedSessionExecutionResult): string 
 
 function resultDigest(payload: string): string {
   return `sha256-${createHash("sha256").update(base64UrlDecodeToBytes(payload)).digest("hex")}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeRelayChallengeFrame(data: string): ReturnType<typeof decodeRelayPossessionProofChallenge> {
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(data) as unknown;
+  } catch {
+    return decodeRelayPossessionProofChallenge(data);
+  }
+  if (
+    isRecord(candidate) &&
+    candidate.type === RELAY_HANDSHAKE_KIND &&
+    candidate.version === 1 &&
+    isRecord(candidate.challenge)
+  ) {
+    return decodeRelayPossessionProofChallenge(
+      encodeRelayPossessionProofChallenge(
+        candidate.challenge as unknown as Parameters<typeof encodeRelayPossessionProofChallenge>[0],
+      ),
+    );
+  }
+  return decodeRelayPossessionProofChallenge(data);
 }
 
 function deliveryEvent(job: RuntimeJob, type: RelayDeliveryEvent["type"], digest?: string): RelayDeliveryEvent {
@@ -265,14 +293,6 @@ export class LocalRelayRuntime {
   #onOpen(socket: RelayWebSocket): void {
     if (socket !== this.#socket || this.#state === "shutdown") return;
     this.#state = "connected";
-    this.#send(socket, {
-      version: 1,
-      kind: "connection",
-      repository: this.#repository,
-      connectionId: this.#connectionId,
-      maxInFlightJobs: MAX_RELAY_IN_FLIGHT_JOBS,
-      deadlineMs: MAX_RELAY_DEADLINE_MS,
-    });
   }
 
   #onMessage(socket: RelayWebSocket, event: unknown): void {
@@ -285,7 +305,7 @@ export class LocalRelayRuntime {
     }
     if (data === undefined) return;
     try {
-      const challenge = decodeRelayPossessionProofChallenge(data);
+      const challenge = decodeRelayChallengeFrame(data);
       if (
         challenge.repositoryId !== this.#repository.repositoryId ||
         challenge.delegatorId !== this.#options.delegatorId
@@ -294,7 +314,8 @@ export class LocalRelayRuntime {
       const nowMs = this.#now();
       if (!validClock(nowMs) || nowMs < challenge.issuedAtMs || nowMs >= challenge.expiresAtMs) return;
       const proof = signRelayPossessionProof(challenge, this.#options.privateKey);
-      this.#sendRaw(socket, new TextDecoder().decode(encodeRelayPossessionProofResponse(proof)));
+      const encodedProof = JSON.parse(new TextDecoder().decode(encodeRelayPossessionProofResponse(proof))) as unknown;
+      this.#sendRaw(socket, JSON.stringify({ type: RELAY_HANDSHAKE_RESPONSE_KIND, version: 1, proof: encodedProof }));
       this.#possessionProved = true;
       this.#flushResults(socket);
       return;

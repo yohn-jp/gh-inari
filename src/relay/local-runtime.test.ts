@@ -66,17 +66,20 @@ function signedSessionEnvelope(): string {
 }
 
 function challenge(): string {
-  return new TextDecoder().decode(
-    encodeRelayPossessionProofChallenge(
-      createRelayPossessionProofChallenge({
-        repositoryId: repository.repositoryId,
-        delegatorId: "runtime-820",
-        nonce: "bm9uY2UtODIw",
-        issuedAtMs: 10_000,
-        expiresAtMs: 20_000,
-      }),
-    ),
-  );
+  const challenge = createRelayPossessionProofChallenge({
+    repositoryId: repository.repositoryId,
+    delegatorId: "runtime-820",
+    nonce: "bm9uY2UtODIw",
+    issuedAtMs: 10_000,
+    expiresAtMs: 20_000,
+  });
+  return JSON.stringify({
+    type: "repository-relay-possession-challenge",
+    version: 1,
+    repository,
+    connectionId: "connection-820",
+    challenge: JSON.parse(new TextDecoder().decode(encodeRelayPossessionProofChallenge(challenge))),
+  });
 }
 
 function job(connectionId: string, jobId = "job-820") {
@@ -116,10 +119,11 @@ test("opens only an outbound socket, proves possession, forwards the unchanged S
   assert.equal(sockets.length, 1);
   const socket = sockets[0]!;
   socket.open();
-  const connection = decodeRelayEnvelope(socket.frames[0]!, repository);
-  assert.equal(connection.kind, "connection");
+  assert.equal(socket.frames.length, 0);
   socket.receive(challenge());
-  const proof = decodeRelayPossessionProofResponse(socket.frames[1]!);
+  const handshake = JSON.parse(socket.frames[0]!) as { readonly proof: unknown; readonly type: string };
+  assert.equal(handshake.type, "repository-relay-possession-response");
+  const proof = decodeRelayPossessionProofResponse(JSON.stringify(handshake.proof));
   assert.equal(proof.challenge.delegatorId, "runtime-820");
   assert.equal(
     socket.frames.some((frame) => frame.includes("BEGIN PRIVATE KEY")),
@@ -129,7 +133,7 @@ test("opens only an outbound socket, proves possession, forwards the unchanged S
   socket.receive(job("connection-820"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(received, { certificate: "canonical", request: { version: 1, issue: 820 } });
-  const result = decodeRelayEnvelope(socket.frames[2]!, repository);
+  const result = decodeRelayEnvelope(socket.frames[1]!, repository);
   assert.equal(result.kind, "result");
   assert.equal(runtime.delivery("job-820")?.phase, "delivered");
   runtime.shutdown();
@@ -162,7 +166,7 @@ test("disconnect marks delivery ambiguous and reconnect never executes the same 
   first.receive(challenge());
   first.receive(job("connection-820", "job-ambiguous"));
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(first.frames.length, 3);
+  assert.equal(first.frames.length, 2);
   first.disconnect();
   assert.equal(runtime.delivery("job-ambiguous")?.phase, "possibly-delivered");
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -173,7 +177,7 @@ test("disconnect marks delivery ambiguous and reconnect never executes the same 
   second.open();
   second.receive(challenge());
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(second.frames.length, 3);
-  assert.equal(decodeRelayEnvelope(second.frames[2]!, repository).kind, "result");
+  assert.equal(second.frames.length, 2);
+  assert.equal(decodeRelayEnvelope(second.frames[1]!, repository).kind, "result");
   runtime.shutdown();
 });

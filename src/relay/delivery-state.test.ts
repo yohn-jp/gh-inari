@@ -67,6 +67,9 @@ test("disconnect and expiry after delivery never claim rollback or safe replay",
   assert.equal(preDeliveryExpiry.deliveryEvidence, "not-delivered");
   assert.equal(isRelayDeliveryRetryable(preDeliveryExpiry), false);
   assert.equal(reduceRelayDeliveryState(preDeliveryExpiry, event("deliver")).phase, "expired");
+  const lateResult = applyRelayDeliveryEvent(preDeliveryExpiry, result("sha256-late-result"));
+  assert.equal(lateResult.transition, "late-event-ignored");
+  assert.deepEqual(lateResult.state, preDeliveryExpiry);
 
   const cancelled = reduceRelayDeliveryState(createRelayDeliveryState(job), event("cancel"));
   assert.equal(cancelled.phase, "cancelled");
