@@ -16,8 +16,7 @@ renders canonical Markdown, and mutates GitHub only after contract,
 input, and rendered artifact have all passed validation.
 
 `inari` is the canonical executable for agents and humans. `gh-inari` is the
-direct npm package alias and `npx --yes gh-inari` is the deterministic
-fallback.
+direct npm package alias; both resolve to the standalone Inari entrypoint.
 
 ## When to use
 
@@ -34,11 +33,11 @@ Prefer `inari` over raw `gh` for:
 - Issuing, inspecting, reviewing, or stopping a governed Change through the
   semantic Change command surface.
 
-Raw `gh` remains fine for anything outside that surface (e.g. project
-searching, commenting, or other operations Inari does not govern). For bounded
-Issue/PR discovery, use Inari's `issue list` and `pr list` commands. Inari
-itself falls through to real `gh` for any command it does not own, so it is
-always safe to prefer `inari` first.
+Raw `gh` remains the direct tool for anything outside that surface (e.g.
+project searching, commenting, or other operations Inari does not govern).
+For bounded Issue/PR discovery, use Inari's `issue list` and `pr list`
+commands. Inari rejects commands it does not own and never forwards caller
+argv to another executable.
 
 ## Issue versus Implementation
 

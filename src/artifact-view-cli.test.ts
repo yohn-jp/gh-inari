@@ -263,20 +263,15 @@ class PullRequestViewAdapter extends GitHubAdapter {
 async function capture(
   adapter: GitHubAdapter,
   argv: readonly string[] = ["issue", "view", "7", "--json"],
-): Promise<{ readonly exitCode: number; readonly output: Record<string, unknown>; readonly fallbacks: string[][] }> {
+): Promise<{ readonly exitCode: number; readonly output: Record<string, unknown> }> {
   const lines: string[] = [];
-  const fallbacks: string[][] = [];
   const originalLog = console.log;
   try {
     console.log = (line: string) => lines.push(line);
     const exitCode = await runCli([...argv], {
       createAdapter: () => adapter,
-      runGhFallback: (args) => {
-        fallbacks.push([...args]);
-        return 0;
-      },
     });
-    return { exitCode, output: JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>, fallbacks };
+    return { exitCode, output: JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown> };
   } finally {
     console.log = originalLog;
   }
@@ -295,7 +290,6 @@ test("issue view keeps readable provider content when semantic template resoluti
   assert.equal(observed.title, "Observed Issue");
   assert.equal(observed.body, "Legacy body");
   assert.equal((result.output.semantic as Record<string, unknown>).status, "legacy-artifact");
-  assert.deepEqual(result.fallbacks, []);
 });
 
 test("issue view retains bounded semantic diagnostics for malformed, unmatched, ambiguous, legacy, and valid artifacts", async () => {
@@ -411,7 +405,6 @@ test("PR view preserves runtime evidence for every semantic failure class", asyn
     assert.deepEqual(observed.head, { branch: "feat/snapshot", sha: "head-sha" }, testCase.name);
     assert.deepEqual(observed.base, { branch: "main", sha: "base-sha" }, testCase.name);
     assert.equal((result.output.semantic as Record<string, unknown>).status, testCase.status, testCase.name);
-    assert.deepEqual(result.fallbacks, [], testCase.name);
   }
 });
 

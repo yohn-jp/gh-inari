@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { open, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -268,7 +267,6 @@ export interface CliDependencies {
   readonly environment?: NodeJS.ProcessEnv;
   readonly createAdapter?: (options: ConstructorParameters<typeof GitHubAdapter>[0]) => GitHubAdapter;
   readonly packageMetadata?: PackageMetadata;
-  readonly runGhFallback?: (argv: readonly string[]) => number;
   readonly templateResolver?: TemplateResolverDependencies;
   /** Injectable semantic executor; it never carries App credentials. */
   readonly changeExecutor?: ChangeExecutionPort;
@@ -370,7 +368,6 @@ interface CliErrorShape {
 /** The installed gh-inari executable entrypoint. */
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<number> {
   const metadata = dependencies.packageMetadata ?? readPackageMetadata();
-  if (!isOwnedInvocation(argv)) return runGhFallback(argv, dependencies);
   let parsed: ParsedArgs;
   try {
     parsed = parseArguments(argv);
@@ -386,18 +383,19 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     return classifyExitCode(reportedError);
   }
   const diagnosticRequested =
-    parsed.options.diagnose === true ||
-    parsed.options.doctor === true ||
+    (parsed.positionals.length === 0 && (parsed.options.diagnose === true || parsed.options.doctor === true)) ||
     parsed.positionals[0] === "diagnose" ||
     parsed.positionals[0] === "doctor";
-  const versionRequested = parsed.options.version === true || parsed.positionals[0] === "version";
+  const versionRequested =
+    (parsed.positionals.length === 0 && parsed.options.version === true) || parsed.positionals[0] === "version";
   const helpRequested = parsed.options.help !== undefined && parsed.options.help !== false;
-  if (helpRequested || (parsed.positionals.length === 0 && !versionRequested && !diagnosticRequested)) {
-    printHelpFor(parsed.positionals, parsed.options.help);
-    return parsed.positionals.length === 0 && !helpRequested ? EXIT_USAGE : 0;
-  }
   const json = parsed.options.json === true;
   try {
+    if (!isSupportedInvocation(parsed.positionals)) throw unknownCommandError();
+    if (helpRequested || (parsed.positionals.length === 0 && !versionRequested && !diagnosticRequested)) {
+      printHelpFor(parsed.positionals, parsed.options.help);
+      return parsed.positionals.length === 0 && !helpRequested ? EXIT_USAGE : 0;
+    }
     if (versionRequested) return runVersion(metadata, parsed.options, json);
     if (diagnosticRequested) return runDiagnostic(metadata, parsed.options, json);
 
@@ -573,18 +571,6 @@ function diagnoseCanonicalRuntime(
     };
   }
   return { status: "ready", version: info.version, capabilities: info.capabilities, recovery: FALLBACK_COMMAND };
-}
-
-/** Delegates argv outside Inari's owned command surface to the real `gh` binary. */
-function runGhFallback(argv: readonly string[], dependencies: CliDependencies): number {
-  const execute = dependencies.runGhFallback ?? runGhPassthroughCommand;
-  return execute(argv);
-}
-
-function runGhPassthroughCommand(argv: readonly string[]): number {
-  const result = spawnSync("gh", [...argv], { stdio: "inherit" });
-  if (result.error) throw new CliError("GH_FALLBACK_FAILED", `Cannot execute gh: ${result.error.message}.`);
-  return result.status ?? EXIT_INTERNAL;
 }
 
 function runtimeRequirementMessage(
@@ -4276,33 +4262,23 @@ function classifyExitCode(error: unknown): number {
 }
 
 /**
- * True when argv targets a command Inari implements; false means it must fall
- * back to the real `gh` binary. The same tokenizer is used by parseArguments,
- * so supported option values cannot become routing positionals.
+ * The command contract is closed: only a known command or a known domain help
+ * prefix may enter dispatch. Unknown argv is rejected locally and never
+ * becomes an invocation of another executable.
  */
-function isOwnedInvocation(argv: readonly string[]): boolean {
-  const { positionals } = tokenizeCommandArgv(argv);
-  const first = positionals[0];
-  if (first === undefined) return true;
-  if (first === "diagnose" || first === "doctor" || first === "version" || first === "help") return true;
-  if (first === "skill") return true;
-  if (argv.includes("--version") || argv.includes("--diagnose") || argv.includes("--doctor")) return true;
-  const helpRequested = argv.some((token) => token === "--help" || token.startsWith("--help="));
-  if (
-    helpRequested &&
-    (first === "issue" ||
-      first === "pr" ||
-      first === "impl" ||
-      first === "branch" ||
-      first === "template" ||
-      first === "change" ||
-      first === "authority" ||
-      first === "session" ||
-      first === "mcp") &&
-    positionals.length === 1
-  )
-    return true;
-  return getCommandForPositionals(positionals) !== undefined;
+function isSupportedInvocation(positionals: readonly string[]): boolean {
+  if (positionals.length === 0 || positionals[0] === "help") return true;
+  if (getCommandForPositionals(positionals) !== undefined) return true;
+  return (
+    positionals.length === 1 &&
+    ["issue", "pr", "impl", "branch", "template", "change", "authority", "session", "mcp"].includes(
+      positionals[0] ?? "",
+    )
+  );
+}
+
+function unknownCommandError(): CliError {
+  return new CliError("UNKNOWN_COMMAND", 'Unsupported command. Run "inari --help" for the closed command surface.');
 }
 
 function isMachineCommand(positionals: readonly string[]): boolean {
@@ -4367,7 +4343,7 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-const DOMAIN_PASSTHROUGH_EXAMPLE: Readonly<
+const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   Record<"issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "mcp", string>
 > = {
   issue: "issue list",
@@ -4412,9 +4388,8 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
 function printRootHelp(): void {
   console.log(`Usage: inari <command> [...]
 
-A governed GitHub CLI. Issue and PR commands under governed templates run
-through Inari; every other command passes through to the real gh binary
-with the original argv and exit status.
+A governed GitHub CLI with a closed, versioned command surface. Supported
+commands run through Inari; unsupported commands are rejected locally.
 
 Domains:
   issue      Governed Issue schema, validation, rendering, and lifecycle
@@ -4428,7 +4403,8 @@ Domains:
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
-All other commands (e.g. repo, auth, pr list, issue view) are passed through to gh.
+Use the GitHub CLI directly for commands outside this list (for example,
+repo or auth operations).
 
 Run \`inari <domain> --help\` for that domain's operations.
 Run \`inari --help=full\` for the complete command and option reference.
@@ -4444,7 +4420,8 @@ function printDomainHelp(
 Operations:
 ${lines.join("\n")}
 
-Commands outside this list under "${domain}" (e.g. \`${DOMAIN_PASSTHROUGH_EXAMPLE[domain]}\`) pass through to gh.
+Only commands in this list are supported under "${domain}". Use the GitHub CLI
+directly for other operations (for example, \`${DOMAIN_EXTERNAL_EXAMPLE[domain]}\`).
 
 Run \`inari ${domain} <command> --help\` for that command's inputs and an example.`);
 }
@@ -4511,7 +4488,8 @@ Create always validates and renders before invoking gh. Schema, validate, render
 Edit is the primary patch path: it preserves omitted fields and metadata, validates the complete result, and renders canonical Markdown before mutation. Normalize preserves existing semantic values; issue sync preserves omitted current values; pr sync reconciles a complete desired semantic state.
 Change commands request semantic lifecycle operations through the configured remote executor; transport and privileged credentials are not CLI inputs. Existing issue/pr artifact commands remain available as migration-compatible direct mutation paths.
 
-All other commands pass through to the real gh binary unchanged.
+Unsupported commands are rejected locally; use the GitHub CLI directly for
+operations outside this command surface.
 
 Canonical invocation: inari
 Direct npm alias: gh-inari

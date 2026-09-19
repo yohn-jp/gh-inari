@@ -1,6 +1,6 @@
 # Inari
 
-Inari (`inari`, packaged as `gh-inari`) is a governed GitHub CLI focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation. Every command Inari does not govern passes through to the real `gh` binary unchanged.
+Inari (`inari`, packaged as `gh-inari`) is a governed GitHub CLI focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation. Its command surface is closed and versioned; unsupported commands are rejected locally.
 
 Migrated repositories can author semantic template contracts under `.github/inari/` and regenerate the committed GitHub-native projections with `inari template sync`; see [Semantic template authority](docs/SEMANTIC_TEMPLATES.md).
 
@@ -12,10 +12,9 @@ Vocabulary](docs/ARCHITECTURE.md).
 ## Install and invoke
 
 The canonical agent- and human-facing surface is the `inari` executable from
-the `gh-inari` npm package. It is a strict superset of `gh`: commands Inari
-governs (Issue and PR schema/validate/render/create/explain/get/check/edit/
-normalize/sync) run under governance, and every other command falls through
-to the real `gh` binary with the original argv and exit status preserved.
+the `gh-inari` npm package. Only commands in Inari's versioned command
+contract run through Inari. Unsupported or unowned commands fail
+deterministically; invoke `gh` directly for those operations.
 
 ```bash
 npm install --global gh-inari
@@ -33,18 +32,9 @@ npx --yes gh-inari --version --json
 `pnpm dlx gh-inari ...` is equivalent when pnpm is the session's package
 runner.
 
-Agent execution hooks (Codex, Claude Code, Mottainai-style) that rewrite
-outbound `gh` invocations should normalize only the executable name:
-
-```text
-argv[0] == "gh"  ->  argv[0] = "inari"
-```
-
-The hook must not maintain its own table of which subcommands are governed
-(e.g. `gh pr create -> inari`, `gh issue edit -> inari`) — Inari is the sole
-authority for that routing decision, and every unowned command already
-delegates to real `gh` unchanged. The hook's only job is the executable
-boundary, not the command tree.
+Call `inari` explicitly for commands in the contract and call `gh` directly
+for operations outside it. Inari never forwards unknown argv to another
+executable.
 
 The package name is `gh-inari`; its npm executables are `gh-inari` and
 `inari` is the canonical executable and `gh-inari` is a normal npm bin alias;
@@ -62,9 +52,9 @@ npm install --global gh-inari@latest
 npm uninstall --global gh-inari
 ```
 
-The bounded diagnostic path checks the install without touching repository
-files. It reports a short, actionable recovery command for a missing or
-stale install:
+The bounded diagnostic path checks the standalone runtime without touching
+repository files. It reports a short, actionable recovery command for a
+missing or stale install:
 
 ```bash
 inari --diagnose --json
@@ -319,7 +309,7 @@ Issue Form top-level `title` is a fixed native prefix for create validation, but
 
 ## Scope
 
-Inari owns repository-governed GitHub mutations: it reads repository-native governance, exposes it as machine-readable contracts, validates structured input against that governance, renders the canonical artifact, and performs the corresponding `gh` operation — or rejects it with actionable feedback.
+Inari owns repository-governed GitHub mutations: it reads repository-native governance, exposes it as machine-readable contracts, validates structured input against that governance, renders the canonical artifact, and performs the corresponding provider operation — or rejects it with actionable feedback.
 
 Inari is not a general GitHub CLI wrapper. Generic read/query operations such as diff/search summarization or token-efficient GitHub inspection remain out of scope; the governed `view` surface is bounded and composes provider evidence with semantic interpretation, while `get` only reconstructs artifacts that match the repository-governed canonical contract.
 

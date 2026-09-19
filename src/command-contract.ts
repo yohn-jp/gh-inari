@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.13.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.14.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -191,7 +191,6 @@ export interface CommandDefinition {
   readonly argumentExample?: string;
   readonly summary: string;
   readonly optionIds: readonly OptionId[];
-  readonly passthrough: boolean;
 }
 
 const ROOT_OPTIONS = ["help", "json"] as const;
@@ -306,7 +305,7 @@ export const COMMAND_OPTIONS = {
     ["--diagnose"],
     "boolean",
     "none",
-    "Check canonical runtime readiness and optional extension compatibility.",
+    "Check standalone runtime readiness and optional version requirements.",
   ),
   doctor: option("doctor", "doctor", ["--doctor"], "boolean", "none", "Alias for --diagnose."),
   from: option("from", "from", ["--from"], "string", "required", "JSON input file, or - for stdin.", "path"),
@@ -691,7 +690,6 @@ const command = (
   ...(argumentExample === undefined ? {} : { argumentExample }),
   summary,
   optionIds,
-  passthrough: false,
 });
 
 export const INARI_COMMANDS: readonly CommandDefinition[] = [
@@ -707,7 +705,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "root",
     "diagnose",
     ["diagnose"],
-    "Check canonical runtime readiness and extension compatibility.",
+    "Check standalone runtime readiness and optional version requirements.",
     ["help", "json", "requireCapability", "minimumVersion"],
   ),
   command("root.doctor", "root", "doctor", ["doctor"], "Alias for diagnose.", [

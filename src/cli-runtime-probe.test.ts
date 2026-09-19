@@ -61,7 +61,7 @@ test("diagnose reports ready only after probing the canonical executable contrac
   assert.equal(canonical.version, "0.9.0");
 });
 
-test("diagnose rejects a stale canonical executable independently of extension health", async () => {
+test("diagnose rejects a stale canonical executable from its standalone contract", async () => {
   const stale = JSON.parse(versionOutput("0.8.0")) as Record<string, unknown>;
   stale.commandContractVersion = "0.9.0";
   const result = await captureJson(() => ({ status: 0, stdout: JSON.stringify(stale), stderr: "" }));
@@ -70,4 +70,22 @@ test("diagnose rejects a stale canonical executable independently of extension h
   const canonical = result.output.canonical as Record<string, unknown>;
   assert.equal(canonical.status, "stale");
   assert.match(String(canonical.detail), /command contract/u);
+});
+
+test("unknown diagnostic-looking argv is rejected without probing another process", async () => {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["repo", "view", "--diagnose", "--json"], {
+      packageMetadata: { name: "gh-inari", version: "0.9.0", description: "" },
+      runCanonicalDiagnosticCommand: () => {
+        throw new Error("diagnostic probe must not run for an unsupported command");
+      },
+    });
+    assert.equal(exitCode, 1);
+    assert.equal((JSON.parse(lines[0] ?? "{}") as { error?: { code?: string } }).error?.code, "UNKNOWN_COMMAND");
+  } finally {
+    console.log = originalLog;
+  }
 });

@@ -75,16 +75,11 @@ class CliDiscoveryAdapter extends GitHubAdapter {
 async function capture(argv: string[]): Promise<Record<string, unknown>> {
   const lines: string[] = [];
   const originalLog = console.log;
-  let fallbackCalls = 0;
   try {
     console.log = (line: string) => lines.push(line);
     assert.equal(
       await runCli(argv, {
         createAdapter: () => new CliDiscoveryAdapter(),
-        runGhFallback: () => {
-          fallbackCalls += 1;
-          throw new Error("raw gh fallback must never be reachable for owned discovery commands");
-        },
       }),
       0,
       lines.join("\n"),
@@ -92,7 +87,6 @@ async function capture(argv: string[]): Promise<Record<string, unknown>> {
   } finally {
     console.log = originalLog;
   }
-  assert.equal(fallbackCalls, 0);
   return JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
 }
 
@@ -127,7 +121,7 @@ test("CLI PR list passes exact head and base filters to the provider seam", asyn
   });
 });
 
-test("owned Issue and PR discovery never reach the raw gh process fallback", async () => {
+test("owned Issue and PR discovery stay within the local command dispatch", async () => {
   await capture(["issue", "list", "--limit", "1", "--json"]);
   await capture(["pr", "list", "--limit", "1", "--json"]);
 });
