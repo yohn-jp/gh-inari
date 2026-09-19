@@ -28,6 +28,7 @@ import {
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import {
   createActionsChangeExecutionAdapter,
+  createGhAuthTokenCredentialProvider,
   createGitHubChangeReadAdapter,
   GitHubAdapter,
   isGitHubAdapterError,
@@ -1506,7 +1507,9 @@ async function runChangeCommand(
         privateKey: environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
       });
     } else {
-      runtimeTrustAdapter = createAdapter(dependencies, root, parsed.options.repository);
+      runtimeTrustAdapter = createAdapter(dependencies, root, parsed.options.repository, {
+        credentialFallback: false,
+      });
       signedProvenanceRecord = await createDelegatorSignedChangeProvenanceRecord(runtimeTrustAdapter, issue, {
         authorityId: environment.INARI_RUNTIME_AUTHORITY_ID,
         privateKey: environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY,
@@ -1546,7 +1549,9 @@ async function runChangeCommand(
     // call when a caller/test stubs only the Change transport.
     if (dependencies.createAdapter !== undefined || dependencies.changeExecutor === undefined) {
       try {
-        const context = await createAdapter(dependencies, root, parsed.options.repository).getRepositoryContext();
+        const context = await createAdapter(dependencies, root, parsed.options.repository, {
+          credentialFallback: false,
+        }).getRepositoryContext();
         repositoryNameWithOwner = context.nameWithOwner;
       } catch {
         repositoryNameWithOwner = undefined;
@@ -3786,9 +3791,16 @@ function createAdapter(
   dependencies: CliDependencies,
   root: string,
   repository: string | boolean | undefined,
+  options: { readonly credentialFallback?: boolean } = {},
 ): GitHubAdapter {
-  const factory = dependencies.createAdapter ?? ((options) => new GitHubAdapter(options));
-  return factory({ cwd: root, ...(typeof repository === "string" ? { repository } : {}) });
+  const adapterOptions = { cwd: root, ...(typeof repository === "string" ? { repository } : {}) };
+  if (dependencies.createAdapter !== undefined) return dependencies.createAdapter(adapterOptions);
+  return new GitHubAdapter({
+    ...adapterOptions,
+    ...(options.credentialFallback === false
+      ? {}
+      : { credentialFallbackProvider: createGhAuthTokenCredentialProvider() }),
+  });
 }
 
 async function readInputDocument(

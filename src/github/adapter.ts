@@ -24,7 +24,11 @@ import {
   GitHubNativeHttpTransport,
   type GitHubNativeHttpResponse,
 } from "./native-http-transport.js";
-import { resolveGitHubUserCredential, GitHubUserCredentialError } from "./user-credential.js";
+import {
+  resolveGitHubUserCredential,
+  GitHubUserCredentialError,
+  type GitHubUserCredentialFallbackProvider,
+} from "./user-credential.js";
 import {
   parseRepositoryLocator,
   RepositoryContextResolutionError,
@@ -123,6 +127,8 @@ export interface GitHubAdapterOptions {
   readonly transport?: GitHubArtifactTransport;
   /** Explicit standalone user credential; environment resolution is used otherwise. */
   readonly token?: string;
+  /** Optional final standalone credential-discovery fallback. */
+  readonly credentialFallbackProvider?: GitHubUserCredentialFallbackProvider;
   /** Injectable fetch implementation for deterministic HTTP fixtures. */
   readonly fetch?: typeof globalThis.fetch;
   /** Explicit REST API base override for hosted or controlled GitHub providers. */
@@ -159,6 +165,7 @@ export class GitHubAdapter {
   private readonly hostname: string | undefined;
   private readonly configuredTransport: GitHubArtifactTransport | undefined;
   private readonly token: string | undefined;
+  private readonly credentialFallbackProvider: GitHubUserCredentialFallbackProvider | undefined;
   private readonly fetch: typeof globalThis.fetch | undefined;
   private readonly apiUrl: string | undefined;
   private readonly requestTimeoutMs: number | undefined;
@@ -177,6 +184,7 @@ export class GitHubAdapter {
     this.hostname = options.hostname;
     this.configuredTransport = options.transport;
     this.token = options.token;
+    this.credentialFallbackProvider = options.credentialFallbackProvider;
     this.fetch = options.fetch;
     this.apiUrl = options.apiUrl ?? process.env.GITHUB_API_URL;
     this.requestTimeoutMs = options.requestTimeoutMs;
@@ -1374,7 +1382,11 @@ export class GitHubAdapter {
     if (this.nativeTransport !== undefined) return this.nativeTransport;
     let credential: ReturnType<typeof resolveGitHubUserCredential>;
     try {
-      credential = resolveGitHubUserCredential({ hostname, token: this.token });
+      credential = resolveGitHubUserCredential({
+        hostname,
+        token: this.token,
+        ...(this.credentialFallbackProvider === undefined ? {} : { fallbackProvider: this.credentialFallbackProvider }),
+      });
     } catch (error) {
       if (error instanceof GitHubUserCredentialError) throw new GitHubAuthenticationError(hostname, error);
       throw error;

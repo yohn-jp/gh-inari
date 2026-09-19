@@ -30,5 +30,6 @@ export * from "./effect-authorizer.js";
 export * from "./types.js";
 export * from "./native-http-transport.js";
 export * from "./user-credential.js";
+export * from "./gh-auth-credential.js";
 export * from "./user-identity.js";
 export * from "./local-repository-context.js";

@@ -85,3 +85,102 @@ test("this module never reads process.env when an env override is supplied", () 
     else process.env.GH_TOKEN = previous;
   }
 });
+
+test("the optional fallback is last and receives a normalized github.com hostname", () => {
+  const hosts: string[] = [];
+  const credential = resolveGitHubUserCredential({
+    hostname: " GitHub.COM ",
+    env: {},
+    fallbackProvider: (hostname) => {
+      hosts.push(hostname);
+      return "gh-auth-token";
+    },
+  });
+
+  assert.deepEqual(credential, { token: "gh-auth-token", source: "gh auth token" });
+  assert.deepEqual(hosts, ["github.com"]);
+});
+
+test("the enterprise fallback receives the normalized GHES hostname", () => {
+  const hosts: string[] = [];
+  const credential = resolveGitHubUserCredential({
+    hostname: " GHE.Example.COM ",
+    env: {},
+    fallbackProvider: (hostname) => {
+      hosts.push(hostname);
+      return "enterprise-gh-auth-token";
+    },
+  });
+
+  assert.deepEqual(credential, { token: "enterprise-gh-auth-token", source: "gh auth token" });
+  assert.deepEqual(hosts, ["ghe.example.com"]);
+});
+
+test("higher-priority credentials prevent the fallback", () => {
+  let calls = 0;
+  const fallbackProvider = () => {
+    calls += 1;
+    return "fallback-token";
+  };
+
+  assert.deepEqual(
+    resolveGitHubUserCredential({ token: "explicit-token", env: { GH_TOKEN: "env-token" }, fallbackProvider }),
+    { token: "explicit-token", source: "explicit" },
+  );
+  assert.deepEqual(
+    resolveGitHubUserCredential({ env: { GH_TOKEN: "gh-token", GITHUB_TOKEN: "github-token" }, fallbackProvider }),
+    { token: "gh-token", source: "GH_TOKEN" },
+  );
+  assert.equal(calls, 0);
+});
+
+test("invalid higher-priority credentials fail closed without invoking the fallback", () => {
+  let calls = 0;
+  assert.throws(
+    () =>
+      resolveGitHubUserCredential({
+        token: "",
+        fallbackProvider: () => {
+          calls += 1;
+          return "fallback-token";
+        },
+      }),
+    (error: unknown) => error instanceof GitHubUserCredentialError && error.reason === "invalid",
+  );
+  assert.throws(
+    () =>
+      resolveGitHubUserCredential({
+        env: { GH_TOKEN: "invalid\u0000token" },
+        fallbackProvider: () => {
+          calls += 1;
+          return "fallback-token";
+        },
+      }),
+    (error: unknown) => error instanceof GitHubUserCredentialError && error.reason === "invalid",
+  );
+  assert.equal(calls, 0);
+});
+
+test("fallback failures and malformed or oversized output resolve as ordinary missing credentials", () => {
+  const secret = "fallback-secret";
+  const fallbacks = [
+    () => undefined,
+    () => {
+      throw new Error(`provider failed with ${secret}`);
+    },
+    () => `${secret}\nsecond-line`,
+    () => "x".repeat(4_097),
+  ];
+
+  for (const fallbackProvider of fallbacks) {
+    assert.throws(
+      () => resolveGitHubUserCredential({ env: {}, fallbackProvider }),
+      (error: unknown) => {
+        assert.equal(error instanceof GitHubUserCredentialError, true);
+        assert.equal((error as GitHubUserCredentialError).reason, "missing");
+        assert.doesNotMatch(JSON.stringify(error), /fallback-secret/iu);
+        return true;
+      },
+    );
+  }
+});
