@@ -60,21 +60,21 @@ The normative end-to-end model lives in [Inari Golden Path Architecture](./docs/
 
 ## Design principles
 
-| Principle | Contract |
-| --- | --- |
-| **Canonical** | One governed semantic input produces one canonical projection. Native GitHub artifacts remain interoperable, while ambiguity fails closed. |
-| **Deterministic** | Resolution, validation, rendering, reconciliation, and lifecycle decisions are explicit and reproducible. |
-| **Machine-verifiable** | Schemas, structured diagnostics, bounded JSON projections, and lifecycle evidence are designed for both humans and agents. |
+| Principle              | Contract                                                                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Canonical**          | One governed semantic input produces one canonical projection. Native GitHub artifacts remain interoperable, while ambiguity fails closed. |
+| **Deterministic**      | Resolution, validation, rendering, reconciliation, and lifecycle decisions are explicit and reproducible.                                  |
+| **Machine-verifiable** | Schemas, structured diagnostics, bounded JSON projections, and lifecycle evidence are designed for both humans and agents.                 |
 
 ## Core workflows
 
-| Surface | Purpose | Start here |
-| --- | --- | --- |
-| Templates | Discover and synchronize repository governance | `inari template list`, `inari template sync` |
-| Issues | Schema, validate, render, create, read, observe, and reconcile governed Issues | `inari issue --help` |
-| Pull requests | Apply the same semantic pipeline to governed PRs | `inari pr --help` |
-| Change | Enter and inspect the governed execution lifecycle | `inari change --help` |
-| Diagnostics | Verify the installed runtime and required capabilities | `inari --diagnose --json` |
+| Surface       | Purpose                                                                        | Start here                                   |
+| ------------- | ------------------------------------------------------------------------------ | -------------------------------------------- |
+| Templates     | Discover and synchronize repository governance                                 | `inari template list`, `inari template sync` |
+| Issues        | Schema, validate, render, create, read, observe, and reconcile governed Issues | `inari issue --help`                         |
+| Pull requests | Apply the same semantic pipeline to governed PRs                               | `inari pr --help`                            |
+| Change        | Enter and inspect the governed execution lifecycle                             | `inari change --help`                        |
+| Diagnostics   | Verify the installed runtime and required capabilities                         | `inari --diagnose --json`                    |
 
 Typical structured preparation remains explicit:
 
@@ -119,12 +119,12 @@ Inari also exposes MCP-facing capabilities backed by the same Core contracts and
 
 The README is an entry point, not a second architecture authority. Use these documents for normative detail:
 
-| Authority | Scope |
-| --- | --- |
-| [Golden Path Architecture](./docs/GOLDEN_PATH_ARCHITECTURE.md) | End-to-end governed lifecycle and composition |
-| [Architecture Vocabulary](./docs/ARCHITECTURE.md) | Canonical provider, credential, principal, and observation vocabulary |
-| [Semantic Templates](./docs/SEMANTIC_TEMPLATES.md) | Semantic template authority and GitHub-native projections |
-| [Implementation Contract](./docs/IMPLEMENTATION_CONTRACT.md) | Bounded implementation-session contract and scope model |
+| Authority                                                      | Scope                                                                 |
+| -------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [Golden Path Architecture](./docs/GOLDEN_PATH_ARCHITECTURE.md) | End-to-end governed lifecycle and composition                         |
+| [Architecture Vocabulary](./docs/ARCHITECTURE.md)              | Canonical provider, credential, principal, and observation vocabulary |
+| [Semantic Templates](./docs/SEMANTIC_TEMPLATES.md)             | Semantic template authority and GitHub-native projections             |
+| [Implementation Contract](./docs/IMPLEMENTATION_CONTRACT.md)   | Bounded implementation-session contract and scope model               |
 
 ## Safety model
 
