@@ -99,13 +99,15 @@ function repositoryHost(env: Env): string {
   return normalizeRelayRepositoryIdentity({ repositoryId: "1", repositoryHost: configured }).repositoryHost;
 }
 
-function repositoryFromRelayUrl(url: URL): RelayRepositoryIdentity | undefined {
+function repositoryFromRelayUrl(url: URL, configuredHost: string): RelayRepositoryIdentity | undefined {
   const repositoryId = url.searchParams.get("repositoryId");
   if (repositoryId === null) return undefined;
+  const requestedHost = url.searchParams.get("repositoryHost");
+  if (requestedHost !== null && requestedHost.toLowerCase() !== configuredHost) return undefined;
   try {
     return normalizeRelayRepositoryIdentity({
       repositoryId,
-      repositoryHost: url.searchParams.get("repositoryHost") ?? DEFAULT_REPOSITORY_HOST,
+      repositoryHost: configuredHost,
     });
   } catch {
     return undefined;
@@ -350,7 +352,16 @@ async function relayConnect(request: Request, env: Env): Promise<Response> {
     });
   }
   const url = new URL(request.url);
-  const repository = repositoryFromRelayUrl(url);
+  let configuredHost: string;
+  try {
+    configuredHost = repositoryHost(env);
+  } catch {
+    return new Response("Invalid Repository Relay connection.", {
+      status: 400,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+  const repository = repositoryFromRelayUrl(url, configuredHost);
   const connectionId = stringParam(url, "connectionId", IDENTIFIER_PATTERN);
   const delegatorId = stringParam(url, "delegatorId", DELEGATOR_PATTERN);
   const role = url.searchParams.get("role");

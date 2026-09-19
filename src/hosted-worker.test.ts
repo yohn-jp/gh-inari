@@ -134,6 +134,36 @@ test("relay ingress validates repository routing and fixes the public role to ru
   assert.equal(missing.status, 400);
 });
 
+test("relay ingress enforces the configured provider host before selecting a repository DO", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const ids: string[] = [];
+  const stub: HostedDurableObjectStub = {
+    async fetch() {
+      return { status: 101, webSocket: new FakeSocket() } as unknown as Response;
+    },
+  };
+  const binding = relayNamespace(stub, ids);
+  const mismatched = await worker.fetch(
+    new Request(
+      "https://hosted.example/v1/relay/connect?repositoryId=1330755860&repositoryHost=github.com&role=runtime&connectionId=runtime-ghe&delegatorId=runtime-ghe",
+      { headers: { upgrade: "websocket" } },
+    ),
+    { ...env(binding), INARI_HOSTED_REPOSITORY_HOST: "ghe.example.com" },
+  );
+  assert.equal(mismatched.status, 400);
+  assert.deepEqual(ids, []);
+
+  const accepted = await worker.fetch(
+    new Request(
+      "https://hosted.example/v1/relay/connect?repositoryId=1330755860&repositoryHost=ghe.example.com&role=runtime&connectionId=runtime-ghe&delegatorId=runtime-ghe",
+      { headers: { upgrade: "websocket" } },
+    ),
+    { ...env(binding), INARI_HOSTED_REPOSITORY_HOST: "ghe.example.com" },
+  );
+  assert.equal(accepted.status, 101);
+  assert.deepEqual(ids, [repository.repositoryId]);
+});
+
 test("hosted MCP exposes the native catalog and internal dispatch targets the immutable DO name", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const ids: string[] = [];
