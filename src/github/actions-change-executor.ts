@@ -78,10 +78,7 @@ import {
 } from "./effect-authorizer.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import { parsePullRequestPolicyOverlay } from "../pr-policy.js";
-import {
-  readGitHubProviderFailure,
-  type GitHubProviderFailureClassification,
-} from "./provider-failure.js";
+import { readGitHubProviderFailure, type GitHubProviderFailureClassification } from "./provider-failure.js";
 import type { PullRequestBranchGovernance } from "../contract/ir.js";
 
 const POLICY_PATHS = [".github/inari/pr-policy.yml", ".inari/pr-policy.yml"] as const;
