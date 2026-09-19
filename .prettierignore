@@ -5,3 +5,4 @@ dist/
 # their upstream canonical formatting.
 .github/inari/
 scripts/validate-action-pins.mjs
+.inari/provenance/*.json
