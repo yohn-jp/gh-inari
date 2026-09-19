@@ -23,6 +23,7 @@ import type {
 } from "./change-effect-adapter.js";
 import {
   githubProviderFailure,
+  projectGitHubProviderHeaders,
   type GitHubProviderFailureClassification,
 } from "./provider-failure.js";
 
@@ -282,22 +283,6 @@ function decodeJsonBody(bytes: Uint8Array | undefined): unknown {
   }
 }
 
-function safeResponseHeaders(headers: Headers): Readonly<Record<string, string>> | undefined {
-  const projected: Record<string, string> = {};
-  for (const name of ["link", "x-github-request-id", "retry-after", "x-ratelimit-remaining"] as const) {
-    const value = headers.get(name);
-    if (
-      value !== null &&
-      value.length > 0 &&
-      value.length <= 512 &&
-      !/[\u0000-\u001F\u007F]/u.test(value)
-    ) {
-      projected[name] = value;
-    }
-  }
-  return Object.keys(projected).length === 0 ? undefined : Object.freeze(projected);
-}
-
 export interface GitHubHttpBinaryResponse {
   readonly status: number;
   readonly bytes?: Uint8Array;
@@ -387,7 +372,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
     const url = this.restUrl(request.hostname, path);
     const { response, bytes } = await this.execute(url, request.method, undefined, request.accept);
     const contentType = response.headers.get("content-type");
-    const headers = safeResponseHeaders(response.headers);
+    const headers = projectGitHubProviderHeaders(response.headers);
     return {
       status: response.status,
       ...(bytes === undefined ? {} : { bytes }),
@@ -402,7 +387,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   }
 
   private jsonResponse(response: Response, bytes: Uint8Array | undefined): GitHubNativeHttpResponse {
-    const headers = safeResponseHeaders(response.headers);
+    const headers = projectGitHubProviderHeaders(response.headers);
     return {
       status: response.status,
       body: decodeJsonBody(bytes),
