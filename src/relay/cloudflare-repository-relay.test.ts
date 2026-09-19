@@ -69,10 +69,15 @@ class FakeWebSocketPair {
 
 class FakeStorage {
   readonly values = new Map<string, unknown>();
+  failNextPut = false;
   async get<T>(key: string): Promise<T | undefined> {
     return this.values.get(key) as T | undefined;
   }
   async put<T>(key: string, value: T): Promise<void> {
+    if (this.failNextPut) {
+      this.failNextPut = false;
+      throw new Error("simulated storage failure");
+    }
     this.values.set(key, structuredClone(value));
   }
   async list<T>(options?: { readonly prefix?: string; readonly limit?: number }): Promise<Map<string, T>> {
@@ -311,4 +316,47 @@ test("does not deliver when the canonical certificate signer does not match the 
     runtime.sent.some((entry) => typeof entry === "string" && entry.includes("job-mismatch")),
     false,
   );
+});
+
+test("reports delivered ambiguity when storage fails after the Runtime send", async () => {
+  const state = new FakeState();
+  const object = new RepositoryRelayDurableObject(
+    state,
+    { repository },
+    { now: () => 10_000, randomNonce: () => "nonce-storage" },
+  );
+  const runtime = pairFor(object, "role=runtime&connectionId=runtime-storage&delegatorId=delegator-storage");
+  await new Promise((resolve) => setImmediate(resolve));
+  const challenge = (runtime.attachment as { challenge: RelayPossessionProofChallenge }).challenge;
+  const { privateKey } = generateKeyPairSync("ed25519");
+  await object.webSocketMessage(
+    runtime,
+    encodeRelayPossessionProofResponse(signRelayPossessionProof(challenge, privateKey)),
+  );
+  const client = pairFor(object, "role=client&connectionId=host-storage");
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "runtime-storage",
+    jobId: "job-storage",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(privateKey, privateKey, "delegator-storage"),
+  };
+  state.storage.failNextPut = true;
+  await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
+  const sourceMessages = client.sent
+    .filter((entry): entry is Uint8Array => typeof entry !== "string")
+    .map((entry) => new TextDecoder().decode(entry));
+  assert.equal(
+    sourceMessages.some((entry) => entry.includes('"deliveryState":"unavailable"')),
+    false,
+  );
+  assert.equal(
+    sourceMessages.some((entry) => entry.includes('"deliveryState":"delivered-ambiguous"')),
+    true,
+  );
+  const persisted = await state.storage.get<Record<string, unknown>>("relay:job:job-storage");
+  assert.equal(((persisted ?? {}).state as { phase?: string }).phase, "possibly-delivered");
 });

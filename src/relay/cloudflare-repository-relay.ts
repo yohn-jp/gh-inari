@@ -496,38 +496,68 @@ export class RepositoryRelayDurableObject {
       state: initial,
     };
     if (target === undefined || !isOpen(target)) {
-      await this.saveRecord({
-        ...record,
-        state: applyRelayDeliveryEvent(initial, {
-          version: initial.version,
-          type: "disconnect",
-          connectionId: initial.connectionId,
-          jobId: initial.jobId,
-        }).state,
-      });
+      try {
+        await this.saveRecord({
+          ...record,
+          state: applyRelayDeliveryEvent(initial, {
+            version: initial.version,
+            type: "disconnect",
+            connectionId: initial.connectionId,
+            jobId: initial.jobId,
+          }).state,
+        });
+      } catch {
+        // The send never started, so this remains a non-delivery outcome even
+        // when the durable record itself cannot be written.
+      }
       this.sendControl(source, job, "unavailable", "not-delivered");
       return;
     }
+    let delivered: RelayDeliveryState;
     try {
       target.send(new TextDecoder().decode(encodeRelayEnvelope(job, sourceAttachment.repository)));
-      const delivered = applyRelayDeliveryEvent(initial, {
+      delivered = applyRelayDeliveryEvent(initial, {
         version: initial.version,
         type: "deliver",
         connectionId: initial.connectionId,
         jobId: initial.jobId,
       }).state;
+    } catch {
+      try {
+        await this.saveRecord({
+          ...record,
+          state: applyRelayDeliveryEvent(initial, {
+            version: initial.version,
+            type: "disconnect",
+            connectionId: initial.connectionId,
+            jobId: initial.jobId,
+          }).state,
+        });
+      } catch {
+        // No send occurred, so failure to persist cannot turn this into a
+        // delivered exchange.
+      }
+      this.sendControl(source, job, "unavailable", "not-delivered");
+      return;
+    }
+    try {
       await this.saveRecord({ ...record, state: delivered });
     } catch {
-      await this.saveRecord({
-        ...record,
-        state: applyRelayDeliveryEvent(initial, {
-          version: initial.version,
-          type: "disconnect",
-          connectionId: initial.connectionId,
-          jobId: initial.jobId,
-        }).state,
-      });
-      this.sendControl(source, job, "unavailable", "not-delivered");
+      // A successful WebSocket send is irrevocably ambiguous if durable
+      // delivery evidence cannot be recorded. Never report it as retryable.
+      const ambiguous = applyRelayDeliveryEvent(delivered, {
+        version: delivered.version,
+        type: "disconnect",
+        connectionId: delivered.connectionId,
+        jobId: delivered.jobId,
+      }).state;
+      try {
+        await this.saveRecord({ ...record, state: ambiguous });
+      } catch {
+        // The source still receives an ambiguity signal even if recovery state
+        // cannot be persisted during the same storage outage.
+      }
+      this.sendControl(source, job, "delivered-ambiguous", "delivered-ambiguous");
     }
   }
 
