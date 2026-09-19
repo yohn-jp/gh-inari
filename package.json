@@ -239,7 +239,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts' 'scripts/**/*.mjs' 'test/**/*.mjs' 'eslint.config.mjs'",
     "format": "prettier --write .",
-    "format:check": "prettier --write src/github/actions-change-execution-adapter.ts src/github/actions-change-executor.ts src/github/app-installation-credential-broker.ts src/github/app-repository-evidence-reader.ts src/github/change-effect-adapter.ts src/github/provider-failure.ts src/github/repository-evidence-reader.ts && echo __INARI_PRETTIER_DIFF_BEGIN__ && git diff --no-ext-diff --unified=3 -- src/github/actions-change-execution-adapter.ts src/github/actions-change-executor.ts src/github/app-installation-credential-broker.ts src/github/app-repository-evidence-reader.ts src/github/change-effect-adapter.ts src/github/provider-failure.ts src/github/repository-evidence-reader.ts && echo __INARI_PRETTIER_DIFF_END__ && exit 1",
+    "format:check": "prettier --check .",
     "smoke-test": "node scripts/smoke-test.mjs",
     "self-dogfood": "node --import tsx scripts/self-dogfood.mjs",
     "certify:lifecycle": "node scripts/implementation-lifecycle-certification.mjs",
