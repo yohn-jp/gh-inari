@@ -138,6 +138,37 @@ test("pre-admission read capability requests the minimum read ceiling and expose
   assert.match(String(calls[0]?.headers && JSON.stringify(calls[0]?.headers)), /^.*Bearer [^.]+\.[^.]+\.[^.]+.*$/u);
 });
 
+test("broker-injected clock controls App JWT iat and exp", async () => {
+  const injectedNow = new Date("2040-02-03T04:05:06.789Z");
+  let clockCalls = 0;
+  let authorization = "";
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(
+      async (_input, init) => {
+        authorization = new Headers(init?.headers).get("authorization") ?? "";
+        return tokenResponse({ expires_at: "2040-02-03T04:15:06.000Z" });
+      },
+      {
+        now: () => {
+          clockCalls += 1;
+          return injectedNow;
+        },
+      },
+    ),
+  );
+
+  await broker.withRepositoryReadCapability({}, async () => undefined);
+
+  const jwt = authorization.slice("Bearer ".length).split(".");
+  assert.equal(jwt.length, 3);
+  assert.deepEqual(JSON.parse(Buffer.from(jwt[1] ?? "", "base64url").toString("utf8")), {
+    iat: Math.floor(injectedNow.getTime() / 1000) - 60,
+    exp: Math.floor(injectedNow.getTime() / 1000) - 60 + 540,
+    iss: app.appId,
+  });
+  assert.equal(clockCalls, 1);
+});
+
 test("Git-data capability keeps the App credential private and binds the immutable repository", async () => {
   const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
   const broker = new GitHubAppInstallationCredentialBroker(

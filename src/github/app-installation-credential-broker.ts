@@ -782,6 +782,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     const apiUrl = this.#apiUrl;
+    const requestNow = this.#now();
     let response: Response;
     const bounded = boundedRequestSignal(this.#requestTimeoutMs);
     try {
@@ -789,7 +790,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         method: "POST",
         headers: {
           Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${createAppJwt(this.#app.appId, this.#privateKeyPem)}`,
+          Authorization: `Bearer ${createAppJwt(this.#app.appId, this.#privateKeyPem, requestNow.getTime())}`,
           "Content-Type": "application/json",
           "X-GitHub-Api-Version": "2022-11-28",
         },
@@ -835,7 +836,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     } catch {
       throw this.safeFailure("installation-token", { reason: "credential" });
     }
-    if (!isFutureGitHubTimestamp(expiresAt, this.#now())) {
+    if (!isFutureGitHubTimestamp(expiresAt, requestNow)) {
       throw this.safeFailure("installation-scope", { reason: "scope" });
     }
     if (
@@ -877,7 +878,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       app: request.app,
       ...(request.kind === "mutation" ? { target: scopeRepository } : {}),
       requiredPermissions: request.permissions,
-      now: this.#now(),
+      now: requestNow,
     });
     if (!scopeResult.valid || scopeResult.value === undefined) {
       throw this.safeFailure("installation-scope", { reason: "scope" });
@@ -972,7 +973,7 @@ function base64Url(value: string): string {
   return Buffer.from(value, "utf8").toString("base64url");
 }
 
-function createAppJwt(appId: string, privateKeyPem: string, now = Date.now()): string {
+function createAppJwt(appId: string, privateKeyPem: string, now: number): string {
   const issuedAt = Math.floor(now / 1000) - 60;
   const payload = { iat: issuedAt, exp: issuedAt + 540, iss: appId };
   const encodedHeader = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
