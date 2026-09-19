@@ -1,332 +1,165 @@
+<p align="center">
+  <img src="./docs/assets/readme/inari-hero.webp" alt="INARI — Deterministic GitHub Governance. Issue → Change → PR → Merge. Canonical · Deterministic · Machine-verifiable." width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/yohn-jp/gh-inari/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yohn-jp/gh-inari/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://www.npmjs.com/package/gh-inari"><img alt="npm" src="https://img.shields.io/npm/v/gh-inari"></a>
+  <a href="https://www.npmjs.com/package/gh-inari"><img alt="Node" src="https://img.shields.io/node/v/gh-inari"></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/npm/l/gh-inari"></a>
+</p>
+
 # Inari
 
-Inari (`inari`, packaged as `gh-inari`) is a governed GitHub CLI focused on repository governance: it turns a repository's native Issue Forms and pull request templates into deterministic typed contracts. It validates structured JSON, renders canonical Markdown, and performs GitHub mutations only after the contract, input, and rendered artifact have all passed validation. Its command surface is closed and versioned; unsupported commands are rejected locally.
+**Deterministic GitHub Governance**
 
-Migrated repositories can author semantic template contracts under `.github/inari/` and regenerate the committed GitHub-native projections with `inari template sync`; see [Semantic template authority](docs/SEMANTIC_TEMPLATES.md).
+Inari (`inari`, published as `gh-inari`) turns repository-governed GitHub workflows into typed, deterministic contracts. It compiles repository-native Issue Forms and pull request templates, validates semantic input, renders canonical artifacts, and mediates governed work from **Issue → Change → PR → Merge**.
 
-The normative end-to-end composition over those authorities is defined in [Inari Golden Path Architecture](docs/GOLDEN_PATH_ARCHITECTURE.md).
-The canonical architecture vocabulary for provider principals, credential
-domains, and operational observation is defined in [Inari Architecture
-Vocabulary](docs/ARCHITECTURE.md).
+Inari is intentionally not a general `gh` wrapper. Governed operations run through a closed, versioned command surface; unsupported or ambiguous behavior fails closed.
 
-## Install and invoke
+## Quick start
 
-The canonical agent- and human-facing surface is the `inari` executable from
-the `gh-inari` npm package. Only commands in Inari's versioned command
-contract run through Inari. Unsupported or unowned commands fail
-deterministically; invoke `gh` directly for those operations.
+Requires Node.js 24 or newer.
 
 ```bash
 npm install --global gh-inari
+
 inari --version --json
+inari template list
+inari issue schema feature --json
 ```
 
-For an ephemeral or PATH-independent session, use `npx` directly — the
-deterministic fallback when no global install is present or the npm bin
-directory is not on `PATH`:
+For an ephemeral or PATH-independent invocation:
 
 ```bash
 npx --yes gh-inari --version --json
 ```
 
-`pnpm dlx gh-inari ...` is equivalent when pnpm is the session's package
-runner.
+Inari uses the current GitHub authentication and repository context. Use `--repository owner/name` when the target is not the current checkout.
 
-Call `inari` explicitly for commands in the contract and call `gh` directly
-for operations outside it. Inari never forwards unknown argv to another
-executable.
+## The governed path
 
-The package name is `gh-inari`; its npm executables are `gh-inari` and
-`inari` is the canonical executable and `gh-inari` is a normal npm bin alias;
-both resolve to the same entrypoint.
+```text
+Issue  →  Change  →  PR  →  Merge
+ intent    governed   review   explicit
+           execution            outcome
+```
 
-Global npm bin directories are environment-specific; use `npx --yes gh-inari`
-instead of repairing shell startup files when `inari` is not found.
+A repository defines the contracts. Inari resolves those authorities, validates structured intent, produces canonical GitHub artifacts, and keeps lifecycle transitions bounded by explicit semantics rather than free-form CLI mutation.
 
-## Update, uninstall, and diagnostics
+The Change surface exposes bounded lifecycle operations:
 
-For a global npm install:
+```bash
+inari change issue <number> --json
+inari change show <number> --json
+inari change ready <number> --json
+inari change abort <number> --json
+```
+
+The normative end-to-end model lives in [Inari Golden Path Architecture](./docs/GOLDEN_PATH_ARCHITECTURE.md).
+
+## Design principles
+
+| Principle | Contract |
+| --- | --- |
+| **Canonical** | One governed semantic input produces one canonical projection. Native GitHub artifacts remain interoperable, while ambiguity fails closed. |
+| **Deterministic** | Resolution, validation, rendering, reconciliation, and lifecycle decisions are explicit and reproducible. |
+| **Machine-verifiable** | Schemas, structured diagnostics, bounded JSON projections, and lifecycle evidence are designed for both humans and agents. |
+
+## Core workflows
+
+| Surface | Purpose | Start here |
+| --- | --- | --- |
+| Templates | Discover and synchronize repository governance | `inari template list`, `inari template sync` |
+| Issues | Schema, validate, render, create, read, observe, and reconcile governed Issues | `inari issue --help` |
+| Pull requests | Apply the same semantic pipeline to governed PRs | `inari pr --help` |
+| Change | Enter and inspect the governed execution lifecycle | `inari change --help` |
+| Diagnostics | Verify the installed runtime and required capabilities | `inari --diagnose --json` |
+
+Typical structured preparation remains explicit:
+
+```bash
+inari issue schema feature --json
+inari issue validate --template feature --from issue.json
+inari issue render --template feature --from issue.json
+inari issue create --template feature --from issue.json
+```
+
+Use `--from -` to read JSON from stdin. Use `inari <domain> --help` for the exact versioned command contract rather than relying on a duplicated command catalog in this README.
+
+## Repository governance
+
+Repository-native governance remains the interoperability boundary. Issue Forms under `.github/ISSUE_TEMPLATE/**` and supported pull request templates are compiled into typed contracts. Repositories using Inari's semantic template authority can define contracts under `.github/inari/` and regenerate their GitHub-native projections with:
+
+```bash
+inari template sync
+```
+
+See [Semantic template authority](./docs/SEMANTIC_TEMPLATES.md) for the authority and projection rules.
+
+Existing artifacts use the same compiler-owned semantic pipeline for validation and remediation. `get`, `view`, and `observe` deliberately expose different bounded projections; `check`, `edit`, `normalize`, and `sync` preserve explicit semantic intent and fail closed when preservation cannot be proven.
+
+## Implementation contracts
+
+One bounded execution session can be represented as a versioned `Implementation` contract. It records the objective, architecture decision, explicit `READONLY` / `WRITE` / `CREATE` / `DELETE` / `DENY` scopes, verification requirements, and base binding.
+
+`WRITE` is fail-closed and never implies `CREATE` or `DELETE`.
+
+The normative contract is documented in [Implementation Contract](./docs/IMPLEMENTATION_CONTRACT.md).
+
+## Agents, Codex Plugin, and MCP
+
+The published `gh-inari` package also contains the Codex Plugin manifest and bundled Inari Skill. There is no second package artifact. Codex plugin activation remains explicit; a normal npm install does not silently activate the plugin for an agent.
+
+The bundled Skill stays deliberately thin: it routes governed workflows to `inari skill`, scenario-specific guidance, and the CLI's versioned help rather than duplicating operational policy.
+
+Inari also exposes MCP-facing capabilities backed by the same Core contracts and bounded projections used by the CLI. MCP is not a raw GitHub API pass-through.
+
+## Architecture
+
+The README is an entry point, not a second architecture authority. Use these documents for normative detail:
+
+| Authority | Scope |
+| --- | --- |
+| [Golden Path Architecture](./docs/GOLDEN_PATH_ARCHITECTURE.md) | End-to-end governed lifecycle and composition |
+| [Architecture Vocabulary](./docs/ARCHITECTURE.md) | Canonical provider, credential, principal, and observation vocabulary |
+| [Semantic Templates](./docs/SEMANTIC_TEMPLATES.md) | Semantic template authority and GitHub-native projections |
+| [Implementation Contract](./docs/IMPLEMENTATION_CONTRACT.md) | Bounded implementation-session contract and scope model |
+
+## Safety model
+
+Inari keeps mutation behind validated semantic boundaries:
+
+```text
+resolve authority
+→ compile contract
+→ validate semantic input
+→ render canonical artifact
+→ verify round-trip
+→ perform the governed provider operation
+```
+
+Schema, validation, rendering, observation, and dry-run paths do not become implicit mutation paths. Unsupported, ambiguous, unparseable, or semantically invalid state fails closed before provider mutation.
+
+Inari does not maintain a second credential store. Provider credentials and authority remain explicit parts of the architecture; see [Architecture Vocabulary](./docs/ARCHITECTURE.md).
+
+## Installation and diagnostics
+
+Update or remove a global installation with npm:
 
 ```bash
 npm install --global gh-inari@latest
 npm uninstall --global gh-inari
 ```
 
-The bounded diagnostic path checks the standalone runtime without touching
-repository files. It reports a short, actionable recovery command for a
-missing or stale install:
+Run the bounded standalone diagnostic without changing repository files:
 
 ```bash
 inari --diagnose --json
 npx --yes gh-inari --diagnose --json
 ```
 
-`--version --json` is the machine-readable self-check. Its stable fields are
-`name`, `version`, `protocol`, `capabilities`, and `invocation`; use
-`--require-capability <id>` and `--minimum-version <version>` for a
-mutation-sensitive preflight. A failed check exits `2` and includes one
-recovery command. The current capability identifiers are
-`canonical-invocation`, `machine-readable-version`, and
-`capability-diagnostics`.
-
-The `inari` executable is canonical. The direct package executable
-`gh-inari` is a normal npm alias with the same governed command semantics;
-prefer `inari` for agent and human-facing commands:
-
-```bash
-inari issue schema feature --json
-gh-inari issue schema feature --json
-```
-
-For a prerelease or local packed artifact, select the package explicitly
-without adding it to a consumer manifest:
-
-```bash
-npx --yes gh-inari@next --version --json
-npm pack
-npx --yes --package=./gh-inari-&lt;version&gt;.tgz gh-inari --version --json
-```
-
-Inari uses the current `gh` authentication and repository context. It does not maintain a second credential store. Use `--repository owner/name` when the target repository is not the current checkout.
-
-## Codex Plugin
-
-The same published `gh-inari` package is also a valid Codex Plugin — no
-second install artifact is needed. Installing or unpacking `gh-inari` (any
-of the paths above) ships `.codex-plugin/plugin.json` and
-`skills/inari/SKILL.md` alongside the CLI. Codex requires explicit
-marketplace registration and installation via Codex plugin commands to
-activate the skill; standard `npm install` alone does not automatically
-surface the plugin to Codex-aware agents.
-
-To discover and install it from this repository's marketplace:
-
-```bash
-codex plugin marketplace add .
-```
-
-In Codex, run `/plugins`, select the `gh-inari` marketplace, and install
-`inari`. Start a new Codex session after installation so the bundled Skill
-is available.
-
-The Skill is deliberately thin: it identifies governed GitHub Issue/PR/
-template workflows as Inari-owned and routes agents to `inari skill` /
-`inari skill <scenario>` for the actual operational playbooks, and to
-`inari <domain> --help` for exact command syntax. It does not duplicate
-scenario content, so it stays correct as `inari skill` evolves. Raw `gh`
-remains available for anything outside Inari's governed surface; use Inari's
-bounded `issue list` and `pr list` commands for Issue/PR discovery.
-
-## Commands
-
-```bash
-inari template list
-inari issue schema <template> --json
-inari issue validate --template <template> --from issue.json
-inari issue render --template <template> --from issue.json
-inari issue create --template <template> --from issue.json
-inari pr schema <template> --json
-inari pr validate --template <template> --from pr.json
-inari pr render --template <template> --from pr.json
-inari pr create --template <template> --from pr.json
-inari issue validate <number> --template <template> --json
-inari pr validate <number> --template <template> --json
-inari issue explain <number> --template <template> --json
-inari pr explain <number> --template <template> --json
-inari issue get <number> [--template <template>] --json
-inari pr get <number> [--template <template>] --json
-inari issue view <number> --json
-inari pr view <number> --json
-inari issue observe <number> --json
-inari pr observe <number> --json
-inari issue list [--state <open|closed|all>] [--limit <number>] [--page <number>]
-inari pr list [--state <open|closed|all>] [--head <branch>] [--base <branch>] [--limit <number>] [--page <number>]
-inari issue check <number> [--template <template>]
-inari pr check <number> [--template <template>]
-inari issue edit <number> [--from patch.json] [--field name=value] [--title title] [--dry-run]
-inari pr edit <number> [--from patch.json] [--field name=value] [--title title] [--base branch] [--maintainer-can-modify] [--dry-run]
-inari issue normalize <number> [--dry-run]
-inari pr normalize <number> [--dry-run]
-inari issue sync <number> --from desired.json [--dry-run]
-inari pr sync <number> --from desired.json [--dry-run]
-inari change issue <number> [--repository <owner/name>] --json
-inari change show <number> [--repository <owner/name>] --json
-inari change ready <number> [--repository <owner/name>] --json
-inari change abort <number> [--repository <owner/name>] --json
-```
-
-`--from -` reads JSON from stdin. Create input uses an envelope when mutation metadata is needed:
-
-```json
-{
-  "fields": { "summary": "A reproducible defect" },
-  "title": "fix: correct the parser",
-  "labels": ["bug"]
-}
-```
-
-The `fields` object is the semantic input contract shown by `schema`; the same schema output exposes the separate required create metadata schema. Issue creation also accepts `assignees`; pull request creation accepts `head`, `base`, `draft`, and `maintainerCanModify`. Caller-supplied `title` metadata is required for both create commands, and `--title`, `--head`, and `--base` override envelope metadata. Existing `edit` commands use the remote artifact as their patch base: `--title` is supported for Issues and pull requests, while pull requests also support `--base` and `--maintainer-can-modify`; `--draft` is rejected for edit because pull-request PATCH does not accept it. Omitted values are preserved and unsupported or immutable metadata is rejected.
-
-`pr sync --from` accepts a complete pull-request desired-state envelope. Use
-`inari pr sync --help` for the top-level contract, or
-`inari pr schema <template> --json` for its machine-readable `syncInput.schema`
-and a valid `syncInput.minimalExample`.
-`issue sync --from` overlays supplied semantic fields and metadata onto the
-current artifact, preserving values omitted from the input.
-
-Change commands use the semantic Change contract and return bounded JSON
-projections. Mutation commands request a configured Change execution port; workflow
-names, dispatch inputs, Actions jobs, and privileged App credentials are not
-CLI inputs. `change show` is read-only. Existing Issue/PR artifact-level
-commands remain available as explicit migration-compatible direct mutation
-paths while the Change workflow is rolled out.
-
-Schema and validation output is JSON. `--json` makes render and create output JSON as well. Validation failures return exit status `2`; usage errors return `1`; GitHub/transport failures return `3`. Error objects contain stable `code`, `path` where applicable, and ordered `violations`.
-
-`issue get` and `pr get` are canonical-only v1 reads. They resolve the target
-repository's default-branch governance, select the supported native template,
-parse the existing artifact with the same parser and semantic validator as
-`validate`/`explain`, and emit only canonical `fields` plus minimal artifact
-metadata. Successful reads report `projection: "canonical"`; wrong-template,
-unparseable, ambiguous, and semantically invalid artifacts report structured
-diagnostics with `projection: "unavailable"` and never return guessed fields.
-When `--template` is omitted, Inari first looks for the bounded invisible
-template identity marker every rendered artifact now carries. A valid marker
-resolves the contract directly; an unknown, stale, or wrong-kind marker fails
-closed with a diagnostic instead of guessing another template. Artifacts
-without a marker fall back to evaluating all supported candidates
-deterministically; multiple structural matches fail closed. Native template
-boilerplate and raw Markdown are intentionally absent from successful output.
-
-`issue observe` and `pr observe` are the read-only Operational Observation
-surface. They return the versioned (`version: 1`) normalized GitHub runtime
-state, including Issue/PR body and metadata; PR observations also include
-head/base identity, merge and review state, bounded checks, reviews, comments,
-inline review comments, and deterministic changed-file metadata. Each
-collection reports availability and pagination/truncation explicitly. The
-optional `semantic` overlay reports `valid`, `invalid`, or `unavailable`, but
-never promotes observed body text into semantic fields. Thus a wrong,
-legacy, ambiguous, or invalid template remains observable while `get`,
-materialization, and Change lifecycle authority remain fail-closed and
-unchanged. MCP tools `inari_issue_observe` and `inari_pr_observe` project this
-same Core observation model; observation is read-only and is not a GitHub API
-pass-through.
-
-`issue view` and `pr view` are the ordinary composed read surface. They return
-the same bounded provider observation with the existing semantic status,
-result, and diagnostics beside it, so invalid, legacy, ambiguous, or unknown
-templates cannot hide readable title/body/state. Use `get` for semantic JSON
-only and `observe` when explicit Operational Observation evidence is needed.
-MCP tools `inari_issue_view` and `inari_pr_view` project the same composed
-result.
-
-Existing artifact remediation uses one semantic pipeline for both Issues and
-pull requests. `check` is read-only and classifies an artifact as
-`valid-current`, `non-canonical`, `semantically-invalid`, `unsupported`, or
-`ambiguous`. `edit` applies an explicit semantic/metadata patch from JSON or
-direct CLI options; it never accepts raw Markdown as the mutation contract. `normalize` re-renders a
-parseable, semantically valid artifact and fails closed when preservation is
-not proven. `issue sync` overlays its input onto the current canonical state,
-while `pr sync` treats its input as the complete desired semantic state; both
-reconcile the canonical projection deterministically. A successful no-op is
-reported explicitly, and `--dry-run` returns a bounded semantic/rendered diff
-plus the validated resulting fields, metadata, and canonical body without
-calling a GitHub mutation.
-
-## Source of truth and supported semantics
-
-### Implementation contracts
-
-Inari keeps ordinary Issues lightweight and represents one bounded execution
-session as a versioned `Implementation` contract. The v1 GitHub Issue Form is
-`.github/ISSUE_TEMPLATE/implementation.yml`; its canonical body contains the
-objective, design, explicit non-goals, independent `READONLY`/`WRITE`/
-`CREATE`/`DELETE`/`DENY` scopes, constraints, verification, and base binding.
-`WRITE` is fail-closed and defaults to none. Issue metadata outside the body
-does not participate in the canonical contract identity. The lifecycle CLI
-uses the `impl` namespace as later lifecycle capabilities are added; the Core
-contract is documented in
-[`docs/IMPLEMENTATION_CONTRACT.md`](./docs/IMPLEMENTATION_CONTRACT.md).
-
-After explicit authorization, the Core can project the current contract into
-the versioned, transport-neutral `implementation-scope-projection` package
-entry point. That projection contains only the authorization identity and
-digest, repository/base binding, and the five explicit scope lists; it does
-not expose architecture prose or depend on an enforcement runtime's types.
-
-`.github/ISSUE_TEMPLATE/**` remains the Issue source of truth. For pull requests, Inari discovers GitHub's supported repository locations: `pull_request_template` files under the repository root, `docs/`, or `.github/`, plus `PULL_REQUEST_TEMPLATE/` directories under each location. Native PR template filenames and the `.md`/`.txt` extensions supported by Inari are matched case-insensitively. Other PR-template extension surfaces are intentionally unsupported in v1 and fail closed. Inari discovers and compiles those files; it does not replace them with a proprietary body schema. Supported Issue Form nodes are `input`, `textarea` (including native `render` code fences), single- and multi-select `dropdown`, `checkboxes`, and `markdown`. Browser-only or ambiguous behavior, such as uploads or unsupported textarea rendering modes, fails closed. Markdown nodes are retained for contract/schema explainability but never emitted into an Issue body.
-
-Issue dependencies are a separate, template-independent semantic object. Structured Issue envelopes may provide `dependencies.blockedBy` and `dependencies.blocks`; each reference is the canonical `{ "repositoryHost": "github.com", "repositoryId": "<decimal REST repository database id>", "repository": "owner/name", "number": N }` identity. `repositoryHost` plus `repositoryId` is authoritative: the host/install boundary prevents IDs from different GH_HOST/GHES installations colliding. Within one host, rename/transfer preserves the repository identity tuple and changes only the optional locator; cross-host migration is a different identity. The GitHub adapter obtains this decimal ID from the REST repository endpoint through `gh api`, including for repository overrides through a read-only identity lookup; a context that cannot obtain it does not synthesize one from owner/name. Inari sorts and validates these references (including duplicate, self, malformed, and contradictory declarations) before rendering. Non-empty dependencies are preserved in a bounded reserved body marker and projected back as normalized JSON; ordinary Markdown and GitHub-native dependency metadata are never inferred as semantic input. GitHub-native dependency state is not currently mutated by Inari, so there is no competing authority or implicit drift reconciliation.
-
-Native PR Markdown expresses structure but not policy. A small versioned overlay may add constraints unavailable in Markdown without changing section order or content. The supported v1 form is:
-
-```yaml
-version: 1
-template: default
-sections:
-  - section: linked_issue
-    linkedIssue: true
-  - section: summary
-    required: true
-    minLength: 20
-  - section: acceptance
-    checklist:
-      minCompleted: 1
-      requireComplete: false
-```
-
-One repository policy file can bind several native PR templates with `templates`; every entry in a multi-template policy must identify one template by stable `id`, `path`, or unique `name`:
-
-```yaml
-version: 1
-templates:
-  - template: default
-    sections: []
-  - template:
-      path: .github/PULL_REQUEST_TEMPLATE/release.md
-    sections: []
-```
-
-Template and section bindings are deterministic. Stale, unknown, or ambiguous template/section references fail closed. `linkedIssue: true` means that the field contains a GitHub closing reference: `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, or `resolved`, followed by `#ISSUE-NUMBER` or `OWNER/REPOSITORY#ISSUE-NUMBER`, with an optional colon and case-insensitive keyword. This validates syntax only; GitHub applies automatic linking/closure only under its own contextual rules, including the target default branch.
-
-When `issue create` or `pr create` omits `--template`, the shared resolver uses
-the repository's optional `.github/inari/template-resolution.yml` authority:
-
-```yaml
-version: 1
-defaults:
-  issue: feature
-  pr: default
-```
-
-The precedence is explicit selector, configured default, sole candidate,
-interactive TTY selection, then bounded failure. Non-interactive execution never
-guesses among multiple candidates. An invalid or unavailable configured default
-also fails closed. Candidate identifiers and an explicit `--template` recovery
-action are included in structured ambiguity diagnostics.
-
-Issue Form top-level `title` is a fixed native prefix for create validation, but it does not satisfy the caller's required title metadata by itself. An explicit caller title is used as supplied without inferred prefix concatenation or automatic generation. Top-level `labels` are repository-governed defaults and are always retained; caller-supplied labels are appended in order with duplicates removed. Top-level `assignees`, `projects`, and `type`, and upload fields remain unsupported and fail closed rather than being approximated.
-
-## Scope
-
-Inari owns repository-governed GitHub mutations: it reads repository-native governance, exposes it as machine-readable contracts, validates structured input against that governance, renders the canonical artifact, and performs the corresponding provider operation — or rejects it with actionable feedback.
-
-Inari is not a general GitHub CLI wrapper. Generic read/query operations such as diff/search summarization or token-efficient GitHub inspection remain out of scope; the governed `view` surface is bounded and composes provider evidence with semantic interpretation, while `get` only reconstructs artifacts that match the repository-governed canonical contract.
-
-## Safety and existing artifacts
-
-Every create path is:
-
-```text
-resolve template -> compile contract -> validate semantic JSON
--> render canonical Markdown -> construct validated-rendered artifact -> call gh
-```
-
-`prepareIssueArtifact` and `preparePullRequestArtifact` are the trusted preparation boundary for library callers. Each reparses the exact rendered body with the same compiled contract, revalidates the reconstructed values, and compares them deterministically with the validated/materialized source values before producing an opaque, frozen capability carrying the target repository/ref provenance. The public `phase: "validated-rendered"` string is informational; a caller-created or spread object is rejected by the mutation adapter, and there is no public marker helper.
-
-Schema, validate, render, check, and every `--dry-run` remediation path never call a remote mutation. Invalid, ambiguous, unparseable, or unsupported pre-flight state cannot reach the mutation adapter. Existing Issue and PR validation and remediation fetch artifacts through the typed `gh` adapter, reconstruct semantic values, and call the same compiler-owned parser, validator, renderer, and freshness/reconciliation boundary. Renderer/parser drift fails with the typed `ARTIFACT_ROUND_TRIP_INVALID` preparation error; normalization never invents missing intent.
-
-The public compiler, contract, validation, rendering, and adapter boundaries are library APIs. Future Actions or App adapters can use them without invoking or scraping CLI output.
+`inari --version --json` is the machine-readable self-check. The canonical executable is `inari`; `gh-inari` is an npm bin alias resolving to the same entry point.
 
 ## Development
 
@@ -335,6 +168,8 @@ pnpm install --frozen-lockfile
 pnpm run verify
 ```
 
+`pnpm run verify` is the repository's authoritative local verification entry point.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](./LICENSE).
