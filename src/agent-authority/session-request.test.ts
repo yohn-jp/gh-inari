@@ -227,7 +227,7 @@ test("verification rejects field tampering, key/signature substitution, and cert
   assert.equal(tampered({ expiresAt: EXPIRES_AT + 1 }), false);
 });
 
-test("verification rejects expired/future requests and bounded-window violations", () => {
+test("verification treats request exp as exclusive and rejects future requests or oversized windows", () => {
   const make = (issuedAt: number, expiresAt: number) =>
     signSessionRequest({
       session: managedSession(),
@@ -238,7 +238,10 @@ test("verification rejects expired/future requests and bounded-window violations
       issuedAt,
       expiresAt,
     });
-  assert.equal(verifySessionRequest(make(ISSUED_AT, EXPIRES_AT), { now: EXPIRES_AT }).valid, false);
+  const envelope = make(ISSUED_AT, EXPIRES_AT);
+  assert.equal(verifySessionRequest(envelope, { now: EXPIRES_AT - 1 }).valid, true);
+  assert.equal(verifySessionRequest(envelope, { now: EXPIRES_AT }).valid, false);
+  assert.equal(verifySessionRequest(envelope, { now: EXPIRES_AT + 1 }).valid, false);
   assert.equal(verifySessionRequest(make(NOW + 10, NOW + 20), { now: NOW }).valid, false);
   assert.throws(() => make(ISSUED_AT, ISSUED_AT + 301), /signing fields are invalid/i);
 });

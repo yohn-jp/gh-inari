@@ -94,6 +94,7 @@ export interface SessionCertificatePayload {
   readonly capabilities: readonly CapabilityClaim[];
   readonly iat: number;
   readonly nbf: number;
+  /** Exclusive expiry boundary: the certificate is valid only while nowSeconds < exp. */
   readonly exp: number;
 }
 
@@ -866,7 +867,8 @@ export function evaluateSessionCertificateAgainstDelegator(
       message: "Certificate is not yet valid.",
     });
   }
-  if (nowSeconds > payload.exp) {
+  // All Session authorities interpret exp as an exclusive upper boundary.
+  if (nowSeconds >= payload.exp) {
     diagnostics.push({
       code: "SESSION_CERTIFICATE_EXPIRED",
       path: "$.payload.exp",

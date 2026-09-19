@@ -250,6 +250,22 @@ test("evaluateSessionCertificateAgainstRuntimeAuthority rejects a TTL that excee
   assert.ok(result.diagnostics.some((d) => d.code === "SESSION_CERTIFICATE_TTL_EXCEEDS_RUNTIME_CEILING"));
 });
 
+test("Session Certificate exp is exclusive while nbf remains inclusive", () => {
+  const h = header() as unknown as SessionCertificateHeader;
+  const p = payload() as unknown as SessionCertificatePayload;
+  const evaluateAt = (seconds: number) =>
+    evaluateSessionCertificateAgainstRuntimeAuthority(
+      { header: h, payload: p },
+      { runtimeAuthority: runtimeAuthority(), expectedRepositoryId: "123456789", now: new Date(seconds * 1000) },
+    );
+
+  assert.equal(evaluateAt(p.exp - 1).admitted, true);
+  assert.equal(evaluateAt(p.exp).admitted, false);
+  assert.equal(evaluateAt(p.exp + 1).admitted, false);
+  assert.equal(evaluateAt(p.nbf - 1).admitted, false);
+  assert.equal(evaluateAt(p.nbf).admitted, true);
+});
+
 test("evaluateSessionCertificateAgainstRuntimeAuthority rejects a capability outside the Runtime ceiling", () => {
   const h = header() as unknown as SessionCertificateHeader;
   const p = payload({ capabilities: [{ kind: "change.abort", issue: 364 }] }) as unknown as SessionCertificatePayload;
