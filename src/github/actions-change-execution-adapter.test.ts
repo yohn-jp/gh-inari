@@ -367,7 +367,7 @@ test("Actions transport accepts no repository projection API and delegates reads
   assert.deepEqual(await adapter.execute(changeMutationRequest("issue", 42)), { projection: source.result });
 });
 
-test("default Actions transport uses native HTTP for dispatch, runs, artifacts, and binary download", async () => {
+test("default Actions transport uses native HTTP and tolerates non-authoritative HTTP 403 job inspection", async () => {
   const requests: Array<{
     readonly url: string;
     readonly method: string;
@@ -376,6 +376,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   }> = [];
   let runReads = 0;
   let artifactDownloads = 0;
+  let jobsStatus = 200;
   let dispatchBody: unknown;
   const nativeFetch: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -418,6 +419,7 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
       return nativeJsonResponse(undefined, 204);
     }
     if (parsed.pathname.endsWith("/actions/runs/11/jobs")) {
+      if (jobsStatus !== 200) return nativeJsonResponse(undefined, jobsStatus);
       return nativeJsonResponse({
         total_count: 1,
         jobs: [{ id: 31, run_id: 11, status: "completed", conclusion: "success" }],
@@ -488,6 +490,14 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
   assert.equal(new Headers(artifactRequest.headers).get("accept"), "application/vnd.github+json");
   assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
   assert.equal(artifactDownloads, 2);
+
+  jobsStatus = 403;
+  runReads = 0;
+  artifactDownloads = 0;
+  requests.length = 0;
+  const resultWithForbiddenJobs = await adapter.execute(changeMutationRequest("issue", 42));
+  assert.deepEqual(resultWithForbiddenJobs, { projection: projection() });
+  assert.ok(requests.some((request) => request.url.includes("/actions/runs/11/jobs")));
 });
 
 test("native Actions transport errors remain bounded and never expose the credential", async () => {
