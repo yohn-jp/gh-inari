@@ -9,10 +9,7 @@ import {
   type RepositoryContext,
   type RepositoryTree,
 } from "./github/index.js";
-import {
-  attachGitHubProviderFailure,
-  githubProviderFailure,
-} from "./github/provider-failure.js";
+import { attachGitHubProviderFailure, githubProviderFailure } from "./github/provider-failure.js";
 import type {
   GitHubIssue,
   GitHubOperationalCollection,

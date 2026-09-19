@@ -345,10 +345,7 @@ export class GitHubRepositoryEvidenceReader {
       return pullRequests;
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail(
-        "pull-request-evidence",
-        readGitHubProviderFailure(error) ?? invalidProviderResponse(),
-      );
+      fail("pull-request-evidence", readGitHubProviderFailure(error) ?? invalidProviderResponse());
     }
   }
 
@@ -375,10 +372,7 @@ export class GitHubRepositoryEvidenceReader {
       return await adapter.observePullRequest(number);
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail(
-        "pull-request-evidence",
-        readGitHubProviderFailure(error) ?? invalidProviderResponse(),
-      );
+      fail("pull-request-evidence", readGitHubProviderFailure(error) ?? invalidProviderResponse());
     }
   }
 
@@ -392,10 +386,7 @@ export class GitHubRepositoryEvidenceReader {
       return result.observation;
     } catch (error: unknown) {
       if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
-      fail(
-        "pull-request-evidence",
-        readGitHubProviderFailure(error) ?? invalidProviderResponse(),
-      );
+      fail("pull-request-evidence", readGitHubProviderFailure(error) ?? invalidProviderResponse());
     }
   }
 
