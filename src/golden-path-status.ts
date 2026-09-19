@@ -62,6 +62,7 @@ export const GOLDEN_PATH_NORMAL_ACTION_KINDS = Object.freeze([
   "ISSUE_CHANGE",
   "IMPLEMENT",
   "READY_CHANGE",
+  "REWORK",
   "REVIEW",
   "WAIT",
 ] as const);
@@ -109,6 +110,7 @@ export const GOLDEN_PATH_REASON_CODES = Object.freeze([
   "ABORT_CLEANUP_REQUIRED",
   "RECOVERY_ACTION_REQUIRED",
   "MANUAL_RECOVERY_REVIEW_REQUIRED",
+  "REWORK_REQUESTED",
   "WAIT_FOR_REPOSITORY_REVIEW",
 ] as const);
 export type GoldenPathReasonCode = (typeof GOLDEN_PATH_REASON_CODES)[number];
@@ -124,6 +126,7 @@ export const GOLDEN_PATH_NORMAL_ACTION_METADATA = Object.freeze({
   ISSUE_CHANGE: { owner: "inari", reasonCode: "CHANGE_ISSUANCE_REQUIRED" },
   IMPLEMENT: { owner: "worker", reasonCode: "CHANGE_ISSUED" },
   READY_CHANGE: { owner: "inari", reasonCode: "READY_PRECONDITIONS_REQUIRED" },
+  REWORK: { owner: "worker", reasonCode: "REWORK_REQUESTED" },
   REVIEW: { owner: "repository", reasonCode: "REVIEW_ADMITTED" },
   WAIT: { owner: "repository", reasonCode: "WAIT_FOR_REPOSITORY_REVIEW" },
 } as const);
@@ -359,7 +362,9 @@ export interface GoldenPathReadyEvidence {
 
 export interface GoldenPathReviewEvidence {
   readonly status?: "required" | "waiting" | "complete" | "unavailable" | "unknown";
-  readonly action?: "review" | "wait";
+  readonly action?: "review" | "rework" | "wait";
+  /** Explicit projection classification; it is not a lifecycle state. */
+  readonly classification?: "REWORK_REQUESTED" | "NO_REWORK";
 }
 
 export interface GoldenPathChangeEvidence {
@@ -425,7 +430,7 @@ const CHANGE_EVIDENCE_KEYS = new Set(["projection", "state", "projectionStatus",
 const EXECUTION_KEYS = new Set(["outcome"]);
 const IMPLEMENTATION_KEYS = new Set(["status", "ready", "complete", "evidence"]);
 const READY_KEYS = new Set(["status", "eligible", "preconditions", "evidence"]);
-const REVIEW_KEYS = new Set(["status", "action"]);
+const REVIEW_KEYS = new Set(["status", "action", "classification"]);
 const SUBJECT_KEYS = new Set(["repositoryHost", "repositoryId", "sourceIssue", "implementation", "rootIssue"]);
 const RECOVERY_KEYS = new Set([
   "class",
@@ -1220,8 +1225,31 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
       !["required", "waiting", "complete", "unavailable", "unknown"].includes(review.status)
     )
       addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.review.status", "Review evidence status is invalid.");
-    if (review.action !== undefined && review.action !== "review" && review.action !== "wait")
+    if (
+      review.action !== undefined &&
+      review.action !== "review" &&
+      review.action !== "rework" &&
+      review.action !== "wait"
+    )
       addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.review.action", "Review evidence action is invalid.");
+    if (
+      review.classification !== undefined &&
+      review.classification !== "REWORK_REQUESTED" &&
+      review.classification !== "NO_REWORK"
+    )
+      addDiagnostic(
+        diagnostics,
+        "GOLDEN_PATH_INPUT_INVALID",
+        "$.review.classification",
+        "Review rework classification is invalid.",
+      );
+    if (review.classification === "REWORK_REQUESTED" && review.action !== undefined && review.action !== "rework")
+      addDiagnostic(
+        diagnostics,
+        "GOLDEN_PATH_EVIDENCE_CONTRADICTORY",
+        "$.review.action",
+        "A rework-requested review must expose the bounded rework action.",
+      );
   } else if (input.review !== undefined)
     addDiagnostic(diagnostics, "GOLDEN_PATH_INPUT_INVALID", "$.review", "Review evidence must be an object.");
   if (recovery !== undefined && recovery !== null && change.state !== "RECOVERY_REQUIRED")
@@ -1287,7 +1315,9 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
         break;
       case "review":
         status = { phase: "REVIEW", availability: "actionable", ...fields };
-        if (isRecord(input.review) && input.review.action === "review") nextAction = normalAction("REVIEW");
+        if (isRecord(input.review) && input.review.classification === "REWORK_REQUESTED")
+          nextAction = normalAction("REWORK");
+        else if (isRecord(input.review) && input.review.action === "review") nextAction = normalAction("REVIEW");
         else nextAction = normalAction("WAIT");
         break;
       case "terminal":
@@ -1350,7 +1380,9 @@ function parseAndProject(input: unknown): GoldenPathStatusProjectionResult {
     }
   } else if (change.state === "REVIEW") {
     status = { phase: "REVIEW", availability: "actionable", ...fields };
-    if (isRecord(input.review) && input.review.action === "review") nextAction = normalAction("REVIEW");
+    if (isRecord(input.review) && input.review.classification === "REWORK_REQUESTED")
+      nextAction = normalAction("REWORK");
+    else if (isRecord(input.review) && input.review.action === "review") nextAction = normalAction("REVIEW");
     else nextAction = normalAction("WAIT");
   } else {
     status = { phase: "TERMINAL", availability: "terminal", ...fields };

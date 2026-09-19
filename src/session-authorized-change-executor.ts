@@ -163,6 +163,8 @@ export interface CapabilityAuthorizedSessionExecutorOptions {
   readonly app?: AppProvenance;
   /** #466 owns branch validation and Git tree/ref execution. */
   readonly branchAdvance?: (input: CapabilityAuthorizedBranchAdvanceInput) => Promise<BranchAdvanceSemanticResult>;
+  /** Existing Operational Observation authority used for REVIEW rework admission. */
+  readonly reviewEvidenceReader?: (input: { readonly issue: number; readonly pullRequest: number }) => Promise<unknown>;
 }
 
 /** Public transport-neutral executor seam for one authenticated Session envelope. */
@@ -782,6 +784,19 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "evidence", authenticated, "Current Change evidence could not be read.");
     }
 
+    let reviewEvidence: unknown;
+    if (fields.request.rework !== undefined) {
+      const pullRequest = projection.change?.projection?.pullRequest;
+      if (pullRequest === undefined || this.#options.reviewEvidenceReader === undefined) {
+        return failure(operation, "evidence", authenticated, "Current pull-request review evidence could not be read.");
+      }
+      try {
+        reviewEvidence = await this.#options.reviewEvidenceReader({ issue, pullRequest });
+      } catch {
+        return failure(operation, "evidence", authenticated, "Current pull-request review evidence could not be read.");
+      }
+    }
+
     let admission: AdmittedSessionCapability;
     try {
       admission = admitAuthenticatedSessionCapability({
@@ -790,6 +805,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
         subject: { kind: "branch", issue, branch: fields.request.branch },
         projection,
         treeDelta: fields.treeDelta,
+        ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
       });
     } catch (error: unknown) {
       if (error instanceof CapabilityAdmissionError) {

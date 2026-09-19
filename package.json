@@ -44,6 +44,10 @@
       "types": "./dist/implementation-change-identity.d.ts",
       "import": "./dist/implementation-change-identity.js"
     },
+    "./implementation-rework": {
+      "types": "./dist/implementation-rework.d.ts",
+      "import": "./dist/implementation-rework.js"
+    },
     "./implementation-frontier": {
       "types": "./dist/implementation-frontier.d.ts",
       "import": "./dist/implementation-frontier.js"

@@ -10,6 +10,7 @@
 import type { GitHubAppRepositoryReadTransport } from "./app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository, GitHubChangeEffectResponse } from "./change-effect-adapter.js";
 import type { ChangePullRequestEvidence } from "../change.js";
+import type { GitHubOperationalPullRequestEvidence } from "./types.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import type { InariIssuerAppIdentity } from "./issuer-authority.js";
 import { GitHubAdapter, type GitHubArtifactTransport } from "./adapter.js";
@@ -322,15 +323,27 @@ export class GitHubRepositoryEvidenceReader {
     return boundedArtifactBody(value.body);
   }
 
-  /** Read the full Operational Observation used by Implementation conformance. */
-  async readOperationalPullRequest(number: number): Promise<OperationalPullRequestObservation> {
+  /** Read normalized provider evidence used by review-bound authorities. */
+  async readOperationalPullRequestEvidence(number: number): Promise<GitHubOperationalPullRequestEvidence> {
     try {
       const adapter = new GitHubAdapter({
         repository: `${this.#options.repository.owner}/${this.#options.repository.name}`,
         hostname: this.#options.repository.hostname,
         transport: this.#options.transport as unknown as GitHubArtifactTransport,
       });
-      const result = tryObserveOperationalPullRequest({ pullRequest: await adapter.observePullRequest(number) });
+      return await adapter.observePullRequest(number);
+    } catch (error: unknown) {
+      if (error instanceof GitHubRepositoryEvidenceReaderError && error.reason !== undefined) throw error;
+      fail("pull-request-evidence");
+    }
+  }
+
+  /** Read the full Operational Observation used by Implementation conformance. */
+  async readOperationalPullRequest(number: number): Promise<OperationalPullRequestObservation> {
+    try {
+      const result = tryObserveOperationalPullRequest({
+        pullRequest: await this.readOperationalPullRequestEvidence(number),
+      });
       if (!result.valid || result.observation === undefined) fail("pull-request-evidence");
       return result.observation;
     } catch (error: unknown) {

@@ -33,6 +33,11 @@ import {
   validateImplementationSessionAuthorizationBinding,
   type ImplementationSessionAuthorizationBinding,
 } from "../implementation-session-binding.js";
+import {
+  isCurrentImplementationReworkReview,
+  validateImplementationReworkMarker,
+  type ImplementationReworkMarker,
+} from "../implementation-rework.js";
 
 export const CAPABILITY_ADMISSION_CONTRACT_VERSION = 1 as const;
 
@@ -73,6 +78,8 @@ export interface CapabilityAdmissionRequest {
   readonly subject: CapabilityAdmissionSubject;
   readonly projection: ChangeProjectionResult;
   readonly treeDelta?: DelegatedTreeDelta;
+  /** Fresh Operational Observation for a REVIEW rework admission. */
+  readonly reviewEvidence?: unknown;
 }
 
 export interface AdmittedSessionCapability {
@@ -140,7 +147,14 @@ export class CapabilityAdmissionError extends Error {
 const MAX_CONTEXT_TEXT_LENGTH = 1_024;
 const MAX_CONTEXT_SHA_LENGTH = 128;
 const SAFE_CONTEXT_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
-const CAPABILITY_ADMISSION_REQUEST_KEYS = new Set(["context", "operation", "subject", "projection", "treeDelta"]);
+const CAPABILITY_ADMISSION_REQUEST_KEYS = new Set([
+  "context",
+  "operation",
+  "subject",
+  "projection",
+  "treeDelta",
+  "reviewEvidence",
+]);
 
 function deny(reason: CapabilityAdmissionFailureReason): never {
   throw new CapabilityAdmissionError(reason);
@@ -554,7 +568,13 @@ function requireSubjectShape(operation: CapabilityAdmissionOperation, subject: C
   if (operation === "pullRequest.create" && subject.kind !== "pullRequest") deny("canonical-identity");
 }
 
-function requireCanonicalState(operation: CapabilityAdmissionOperation, canonical: CanonicalProjection): void {
+function requireCanonicalState(
+  operation: CapabilityAdmissionOperation,
+  canonical: CanonicalProjection,
+  context: AuthenticatedSessionContext,
+  rework: ImplementationReworkMarker | undefined,
+  reviewEvidence: unknown,
+): void {
   const { projection, change, pullRequest } = canonical;
   switch (operation) {
     case "change.issue":
@@ -631,9 +651,14 @@ function requireCanonicalState(operation: CapabilityAdmissionOperation, canonica
       }
       return;
     case "branch.advance":
-      if (projection.status !== "healthy" || change.state !== "DRAFT" || pullRequest === undefined) {
+      if (projection.status !== "healthy" || pullRequest === undefined) {
         deny("canonical-state");
       }
+      if (change.state === "DRAFT") {
+        if (rework !== undefined) deny("canonical-state");
+        return;
+      }
+      requireReviewRework(canonical, context, rework, reviewEvidence);
       return;
     case "pullRequest.create":
       if (projection.status !== "healthy" && !(projection.status === "partial" && canonicalBranchOnly(canonical))) {
@@ -641,6 +666,39 @@ function requireCanonicalState(operation: CapabilityAdmissionOperation, canonica
       }
       return;
   }
+}
+
+function requireReviewRework(
+  canonical: CanonicalProjection,
+  context: AuthenticatedSessionContext,
+  rework: ImplementationReworkMarker | undefined,
+  reviewEvidence: unknown,
+): void {
+  if (canonical.change.state !== "REVIEW" || rework === undefined) deny("canonical-state");
+  const marker = validateImplementationReworkMarker(rework);
+  if (!marker.valid || marker.marker === undefined) deny("canonical-identity");
+  if (canonical.pullRequest !== marker.marker.pullRequest) deny("canonical-identity");
+  const current = canonical.projection.candidates.pullRequests.find(
+    (candidate) =>
+      candidate.classification === "canonical" && candidate.candidate.number === marker.marker?.pullRequest,
+  )?.candidate;
+  if (current?.headSha === undefined || current.headSha !== marker.marker.reviewHead) deny("stale-evidence");
+  if (
+    canonical.pullRequest === undefined ||
+    !isCurrentImplementationReworkReview({
+      marker: marker.marker,
+      reviewEvidence,
+      repository: context.repository,
+      branch: canonical.branch,
+      base: canonical.base,
+      pullRequest: canonical.pullRequest,
+    })
+  ) {
+    deny("stale-evidence");
+  }
+  const binding = context.implementationBinding;
+  if (binding === undefined || binding.authorization.governedBodyDigest !== marker.marker.authorizationDigest)
+    deny("session-capability");
 }
 
 function canonicalBranchOnly(canonical: CanonicalProjection): boolean {
@@ -704,6 +762,18 @@ export function admitAuthenticatedSessionCapability(input: CapabilityAdmissionRe
     deny("operation");
   }
   const operation = input.operation as CapabilityAdmissionOperation;
+  const signedRequest =
+    isRecord(input.context.verifiedRequest) && isRecord(input.context.verifiedRequest.envelope)
+      ? input.context.verifiedRequest.envelope.request
+      : undefined;
+  const reworkValue = operation === "branch.advance" && isRecord(signedRequest) ? signedRequest.rework : undefined;
+  let rework: ImplementationReworkMarker | undefined;
+  if (reworkValue !== undefined) {
+    const marker = validateImplementationReworkMarker(reworkValue);
+    if (!marker.valid || marker.marker === undefined) deny("canonical-identity");
+    rework = marker.marker;
+  }
+  const reviewEvidence = operation === "branch.advance" && rework !== undefined ? input.reviewEvidence : undefined;
   const subject = validateSubject(input.subject);
   requireSubjectShape(operation, subject);
 
@@ -718,7 +788,7 @@ export function admitAuthenticatedSessionCapability(input: CapabilityAdmissionRe
   }
 
   const capability = claimForOperation(operation, subject, validatedContext.claims);
-  requireCanonicalState(operation, canonical);
+  requireCanonicalState(operation, canonical, validatedContext.context, rework, reviewEvidence);
   admitTreeDelta(operation, subject, capability, input.treeDelta);
 
   const result: AdmittedSessionCapability = {
