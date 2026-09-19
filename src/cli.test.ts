@@ -13,7 +13,7 @@ import {
   type FixtureCommandOptions,
 } from "./github/test-native-transport.test.js";
 import { runCli } from "./cli.js";
-import { COMMAND_CONTRACT_VERSION, RUNTIME_CAPABILITIES } from "./command-contract.js";
+import { COMMAND_CONTRACT_VERSION, getCommand, getOption, RUNTIME_CAPABILITIES } from "./command-contract.js";
 import { projectChangeFromGitHubEvidence } from "./change.js";
 
 class CliStubTransport implements FixtureCommandTransport {
@@ -922,6 +922,11 @@ test("--repo and -R behave as aliases for --repository on governed commands", as
   } finally {
     console.log = originalLog;
   }
+});
+
+test("the MCP command uses the canonical repository option aliases", () => {
+  assert.deepEqual(getCommand("mcp.serve").optionIds, ["help", "repository"]);
+  assert.deepEqual(getOption("repository").aliases, ["--repository", "--repo", "-R"]);
 });
 
 test("malformed JSON is a validation error without opaque cause details", async () => {

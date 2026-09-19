@@ -15,14 +15,14 @@ export interface InariMcpStdioOptions extends InariMcpServerOptions {
   readonly repository?: string;
 }
 
-interface ParsedStdioArgs {
+export interface ParsedStdioArgs {
   readonly help: boolean;
   readonly version: boolean;
   readonly repositoryRoot?: string;
   readonly repository?: string;
 }
 
-function parseStdioArgs(argv: readonly string[]): ParsedStdioArgs {
+export function parseStdioArgs(argv: readonly string[]): ParsedStdioArgs {
   let help = false;
   let version = false;
   let repositoryRoot: string | undefined;
@@ -37,12 +37,12 @@ function parseStdioArgs(argv: readonly string[]): ParsedStdioArgs {
       version = true;
       continue;
     }
-    if (argument === "--repo" || argument === "--repository") {
+    if (argument === "--repo" || argument === "--repository" || argument === "--repository-root") {
       const value = argv[index + 1];
       if (value === undefined || value.length === 0 || value.startsWith("-")) {
-        throw new Error(`${argument} requires a repository value.`);
+        throw new Error(`${argument} requires a value.`);
       }
-      if (argument === "--repo") repositoryRoot = value;
+      if (argument === "--repository-root") repositoryRoot = value;
       else repository = value;
       index += 1;
       continue;
@@ -69,7 +69,7 @@ function packageVersion(): string {
 
 function printHelp(): void {
   process.stdout.write(
-    "Inari native MCP server\n\nUsage:\n  inari mcp serve [--repo <path>] [--repository <owner/name>]\n\nTransport:\n  MCP stdio (the semantic tool catalog is transport-neutral)\n",
+    "Inari native MCP server\n\nUsage:\n  inari mcp serve [--repository <owner/name>] [--repository-root <path>]\n\nOptions:\n  --repository, --repo, -R <owner/name>  Default GitHub repository target\n  --repository-root <path>               Local repository working directory\n\nTransport:\n  MCP stdio (the semantic tool catalog is transport-neutral)\n",
   );
 }
 
