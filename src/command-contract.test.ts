@@ -86,6 +86,17 @@ test("unknown upstream command trees stay outside the owned command contract", (
   assert.equal(getCommandForPositionals(["repo", "view"]), undefined);
 });
 
+test("command matching rejects surplus positionals while preserving declared slots", () => {
+  assert.equal(getCommandForPositionals(["version", "extra"]), undefined);
+  assert.equal(getCommandForPositionals(["template", "list", "extra"]), undefined);
+  assert.equal(getCommandForPositionals(["skill", "author-issue", "extra"]), undefined);
+  assert.equal(getCommandForPositionals(["issue", "get", "1", "extra"]), undefined);
+
+  assert.equal(getCommandForPositionals(["issue", "schema", "feature"])?.id, "issue.schema");
+  assert.equal(getCommandForPositionals(["skill", "author-issue"])?.id, "skill.scenario");
+  assert.equal(getCommandForPositionals(["issue", "get", "1"])?.id, "issue.get");
+});
+
 test("pr sync exposes only its complete --from input mode", () => {
   const command = getCommandForPositionals(["pr", "sync"]);
   assert.ok(command);

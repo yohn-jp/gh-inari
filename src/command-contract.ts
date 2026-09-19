@@ -1457,13 +1457,24 @@ export function getCommand(id: CommandId): CommandDefinition {
 }
 
 export function getCommandForPositionals(positionals: readonly string[]): CommandDefinition | undefined {
-  if (positionals[0] === "skill" && positionals.length > 1) return getCommand("skill.scenario");
+  // Command examples are also consumed directly by contract/Skill projections;
+  // tolerate their option tokens while matching only the command path and slots.
+  const commandPositionals = positionals.some((token) => token.startsWith("-"))
+    ? tokenizeCommandArgv(positionals).positionals
+    : positionals;
+  if (commandPositionals[0] === "skill" && commandPositionals.length > 2) return undefined;
+  if (commandPositionals[0] === "skill" && commandPositionals.length > 1) return getCommand("skill.scenario");
   const exact = INARI_COMMANDS.find(
-    (entry) => entry.path.length > 0 && entry.path.every((part, index) => positionals[index] === part),
+    (entry) =>
+      entry.path.length > 0 &&
+      entry.path.every((part, index) => commandPositionals[index] === part) &&
+      (entry.positionalSyntax === undefined
+        ? commandPositionals.length === entry.path.length
+        : commandPositionals.length <= entry.path.length + 1),
   );
   if (exact !== undefined) return exact;
-  if (positionals[0] === "skill") return getCommand("skill.index");
-  if (positionals.length === 0) return getCommand("root.help");
+  if (commandPositionals[0] === "skill") return getCommand("skill.index");
+  if (commandPositionals.length === 0) return getCommand("root.help");
   return undefined;
 }
 

@@ -754,6 +754,23 @@ test("unknown and hostile argv are rejected locally without process delegation",
   }
 });
 
+test("surplus positionals are rejected across root, template, skill, and machine commands", async () => {
+  const cases: readonly (readonly string[])[] = [
+    ["version", "extra", "--json"],
+    ["template", "list", "extra", "--json"],
+    ["skill", "author-issue", "extra", "--json"],
+    ["issue", "get", "1", "extra", "--json"],
+  ];
+  for (const argv of cases) {
+    const result = await captureJson(argv);
+    assert.equal(result.exitCode, 1, argv.join(" "));
+    assert.deepEqual(result.output.error, {
+      code: "UNKNOWN_COMMAND",
+      message: 'Unsupported command. Run "inari --help" for the closed command surface.',
+    });
+  }
+});
+
 test("invalid issue/pr numbers on get and explain are classified as INVALID_ARTIFACT_NUMBER, not UNKNOWN_COMMAND", async () => {
   const invalidNumbers = ["0", "-5", "1.5", "abc"];
   const lines: string[] = [];
