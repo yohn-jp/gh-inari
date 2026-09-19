@@ -253,13 +253,14 @@ function liveFailed(failure, endpoints, checks, contactedDeployment, transportKi
 }
 
 function livePassed(endpoints, checks, contactedDeployment, transportKind) {
+  const status = contactedDeployment ? "passed" : "verified";
   return {
     version: 1,
     profile: "relay",
     mode: "live",
-    certificationStatus: "passed",
+    certificationStatus: status,
     live: {
-      status: "passed",
+      status,
       evidence: liveEvidence(endpoints, checks, contactedDeployment, transportKind),
     },
   };

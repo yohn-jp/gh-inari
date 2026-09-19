@@ -132,6 +132,10 @@ The equivalent environment variable is also accepted as
 operator and must remain outside retained certification evidence. The command
 returns `pending` when required configuration is absent, `failed` when a
 configured deployment or protocol check fails, and `passed` only after all
-deployment checks contact the real Worker. Evidence contains only bounded
-status fields and check summaries; it never contains the private key,
-signature, token, or raw provider response.
+deployment checks contact the real Worker over the network. An injected test
+transport (used only by this script's own unit tests) can complete the same
+normalized checks but is reported as `verified`, never `passed` — that status
+is reserved for the real-network path so downstream consumers cannot mistake
+a fixture run for a deployed proof. Evidence contains only bounded status
+fields and check summaries; it never contains the private key, signature,
+token, or raw provider response.

@@ -59,11 +59,13 @@ test("configured live transport failures are failed, not pending", async () => {
   assert.doesNotMatch(JSON.stringify(report), /fixture-private-key/u);
 });
 
-test("only a complete live runner sequence is classified as passed", async () => {
+test("an injected test transport completes normalized checks but never claims passed", async () => {
   const report = await runLiveCertification({ environment: configuredEnvironment, transport: passedTransport });
 
-  assert.equal(report.certificationStatus, "passed");
-  assert.equal(report.live.status, "passed");
+  assert.equal(report.certificationStatus, "verified");
+  assert.equal(report.live.status, "verified");
+  assert.notEqual(report.certificationStatus, "passed");
+  assert.notEqual(report.live.status, "passed");
   assert.equal(report.live.evidence.contactedDeployment, false);
   assert.equal(report.live.evidence.transport, "injected-test-transport");
   assert.deepEqual(report.live.evidence.checks.relay, {
