@@ -352,6 +352,7 @@ export function applyRelayDeliveryEvent(
   if (event.connectionId !== state.connectionId || event.jobId !== state.jobId) {
     throw new RelayDeliveryStateError("RELAY_DELIVERY_MISMATCHED_JOB", "Relay delivery event belongs to another job.");
   }
+  if (state.phase === "expired") return { state, transition: "late-event-ignored" };
   if (isTerminal(state)) return transitionForTerminal(state, event);
   const phase = nextPhase(state, event);
   if (phase === state.phase) return { state, transition: "late-event-ignored" };

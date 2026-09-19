@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  createCloudflareRelayTelemetrySink,
   createRelayTelemetryEvent,
   recordRelayTelemetry,
   relayTelemetryRepositoryKey,
@@ -59,4 +60,40 @@ test("telemetry sink failures cannot affect relay behavior", async () => {
     }),
   );
   assert.equal(events.length, 1);
+});
+
+test("Cloudflare sink emits only the normalized relay event as a JSON log line", () => {
+  const lines: string[] = [];
+  const sink = createCloudflareRelayTelemetrySink({
+    log(line) {
+      lines.push(line);
+    },
+  });
+  const event = createRelayTelemetryEvent({
+    occurredAtMs: 10,
+    kind: "job",
+    surface: "hosted-worker",
+    repository,
+    connectionId: "runtime-1",
+    jobId: "job-1",
+    counters: { connections: 1, inFlightJobs: 2, retainedJobs: 3, messagesInWindow: 4 },
+  });
+
+  sink.record(event);
+
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]!), event);
+  assert.equal(lines[0]!.includes(repository.repositoryId), false);
+  assert.equal(lines[0]!.includes("signedSessionRequest"), false);
+  assert.equal(lines[0]!.includes("resultPayload"), false);
+  assert.deepEqual(Object.keys(JSON.parse(lines[0]!)).sort(), [
+    "connectionId",
+    "counters",
+    "jobId",
+    "kind",
+    "occurredAtMs",
+    "repositoryKey",
+    "surface",
+    "version",
+  ]);
 });
