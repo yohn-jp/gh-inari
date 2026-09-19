@@ -68,15 +68,22 @@ ABORTED
 RECOVERY_REQUIRED
 ```
 
-The currently executable semantic operations remain:
+The currently executable semantic operations are:
 
 ```text
 issue
 ready
 abort
+merge
 ```
 
-`merge` remains reserved/non-executable until separately governed implementation exists.
+`merge` is an explicit Change transition composed over the existing governed
+Semantic PR merge authority. Change admission binds the canonical PR and its
+current head/base; Semantic PR owns merge-policy admission and provider
+mutation; the Change executor performs an authoritative reread and only then
+projects `MERGED`. XState remains the Lifecycle Controller and does not become
+the repository merge-policy or provider-mutation Authority. Inari never merges
+without explicit caller intent.
 
 ### 2.3 Lifecycle Controller implementation
 
@@ -90,6 +97,7 @@ executable control flow only:
 - compensation routing;
 - recovery routing;
 - required reread and postcondition-verification sequencing;
+- Change-level coordination around the governed Semantic PR merge authority;
 - final typed machine outcome selection.
 
 It is not an Authority or state store. It does not decide canonical names,
@@ -175,7 +183,11 @@ DRAFT
 
 REVIEW
   ready -> REVIEW       # idempotent retry
+  merge -> MERGED       # governed Semantic PR merge composition
   abort -> ABORTED
+
+ACCEPTED
+  merge -> MERGED       # governed Semantic PR merge composition
 
 ABORTED
   abort -> ABORTED      # idempotent retry
@@ -184,7 +196,12 @@ RECOVERY_REQUIRED
   abort -> ABORTED      # governed cleanup retry when admitted by recovery semantics
 ```
 
-`ACCEPTED` and `MERGED` are currently observation-derived states. They are accepted as authoritative initialized/projection states but are not converted into synthetic mutation events merely for statechart symmetry.
+`ACCEPTED` and `MERGED` remain observation-derived states. `ACCEPTED` admits an
+explicit governed `merge` event; `MERGED` is terminal. A merge event is not a
+synthetic mutation for statechart symmetry: the trusted Change execution path
+must first admit the canonical projection, delegate policy and provider
+mutation to Semantic PR, reread authoritative evidence, and verify the Change
+projection before reporting `MERGED`.
 
 ### 4.2 Initialization
 
@@ -218,6 +235,9 @@ The internal lifecycle event vocabulary should map directly to semantic operatio
 {
   type: "ABORT";
 }
+{
+  type: "MERGE";
+}
 ```
 
 Event names are internal implementation details, but there must be a one-to-one semantic mapping to public operations. Machine-local events must not become a competing command vocabulary.
@@ -231,7 +251,6 @@ For every combination, the machine must prove one of:
 - legal transition with identical resulting public state;
 - legal idempotent self-transition/no-op;
 - deterministic rejection with compatible bounded semantics;
-- unsupported/reserved operation.
 
 No transition semantics may change incidentally during the migration.
 
@@ -248,11 +267,15 @@ trusted request
        -> issue actor
        -> ready actor
        -> abort actor
+       -> merge coordination -> governed Semantic PR merge authority
   -> map final internal outcome
   -> existing trusted/public result contract
 ```
 
-The dispatcher does not re-decide semantic legality. It selects the operation actor and provides trusted dependencies/context.
+The dispatcher does not re-decide semantic legality. It selects the operation
+actor or merge coordinator and provides trusted dependencies/context. Merge
+coordination does not duplicate Semantic PR merge admission or provider
+mutation.
 
 ## 6. Machine context contract
 
@@ -682,6 +705,16 @@ independent Change dogfood/abort-cleanup gate, and #553 remains the open
 cross-deployment semantic conformance follow-up. Neither is made complete by
 the machine migration or by this documentation update.
 
+### Post-migration — #687 Change merge composition (complete)
+
+Change `merge` is an explicit lifecycle operation over the existing governed
+Semantic PR merge authority (#521). Change admission binds the canonical PR,
+repository identity, and fresh head/base evidence; Semantic PR performs merge
+policy admission and provider mutation; the Change execution path rereads
+authoritative evidence and verifies the canonical Change projection as
+`MERGED`. This composition does not introduce a second merge policy or effect
+engine.
+
 ## 19. Explicit non-goals
 
 This architecture does not:
@@ -690,7 +723,7 @@ This architecture does not:
 - add a Change database;
 - persist XState actor snapshots as repository truth;
 - change public Change state names;
-- make `merge` executable;
+- autonomously merge a Change or introduce a second merge-policy/effect engine;
 - move Semantic Artifact rules into machine guards/actions;
 - move GitHub response normalization into XState;
 - redesign Actions transport;
@@ -710,6 +743,10 @@ An implementation PR in #347-#352 should be rejected if it does any of the follo
 - exposes XState implementation types through public package contracts;
 - creates operation-specific lifecycle rules that diverge from the canonical lifecycle machine;
 - converts ACCEPTED/MERGED into invented mutation events without separate governance;
+- performs merge-policy admission or provider mutation inside XState instead of
+  delegating to the governed Semantic PR merge authority;
+- reports Change `MERGED` without an authoritative reread and projection
+  verification;
 - adds workflow/adapter policy that competes with Core semantic Roles or the
   Lifecycle Controller;
 - silently treats #263 or #343 as solved by the XState migration.
@@ -720,6 +757,8 @@ The migration is complete when:
 
 - one pure lifecycle machine is the executable transition authority;
 - issue/ready/abort trusted sequencing is machine-driven;
+- governed Change merge composes the canonical Semantic PR merge authority and
+  verifies the resulting `MERGED` projection;
 - recovery and compensation paths are explicit and covered;
 - all mutation success paths reread and verify authoritative projection;
 - `TrustedChangeExecutor` no longer contains a competing imperative state machine;

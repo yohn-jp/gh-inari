@@ -782,7 +782,9 @@ repository merge policy
 merge admission
 ```
 
-A future `change merge` semantic operation may coordinate merge, but it must not bypass repository-native admission policy.
+The governed `change merge` semantic operation coordinates the canonical Change
+PR through the existing Semantic PR merge authority, but it must not bypass
+repository-native admission policy.
 
 ## 25. Product boundaries
 
