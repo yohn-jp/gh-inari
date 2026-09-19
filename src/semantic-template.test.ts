@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   compileSemanticTemplate,
+  compileSemanticTemplateSource,
   discoverSemanticTemplates,
   GENERATED_TEMPLATE_NOTICE,
   importNativeTemplate,
@@ -98,6 +99,92 @@ test("semantic multi-select options reject comma-containing labels", () => {
       assert.equal(error.path, "$.sections[0].options[0].label");
       return true;
     },
+  );
+});
+
+test("semantic Issue projections preserve option values and multi-select defaults", () => {
+  const source = normalizeSemanticTemplate({
+    version: 1,
+    kind: "issue",
+    id: "preferences",
+    name: "Preferences",
+    description: "Preference selections",
+    sections: [
+      {
+        id: "priority",
+        type: "enum",
+        label: "Priority",
+        options: [
+          { id: "low", value: "p1", label: "Low" },
+          { id: "high", value: "p2", label: "High" },
+        ],
+        defaultValue: "p2",
+      },
+      {
+        id: "areas",
+        type: "array",
+        label: "Areas",
+        multiple: true,
+        options: [
+          { id: "frontend", value: "fe", label: "Frontend" },
+          { id: "backend", value: "be", label: "Backend" },
+        ],
+        defaultValue: ["be"],
+      },
+    ],
+  });
+  const contract = compileSemanticTemplateSource(source, ".github/ISSUE_TEMPLATE/preferences.yml");
+  const fields = contract.sections.flatMap((section) => section.fields);
+  const priority = fields.find((field) => field.id === "priority");
+  const areas = fields.find((field) => field.id === "areas");
+  assert.equal(priority?.type, "enum");
+  if (priority?.type === "enum") {
+    assert.deepEqual(
+      priority.options.map((option) => [option.value, option.label]),
+      [
+        ["p1", "Low"],
+        ["p2", "High"],
+      ],
+    );
+    assert.equal(priority.defaultValue, "p2");
+  }
+  assert.equal(areas?.type, "array");
+  if (areas?.type === "array") {
+    assert.deepEqual(
+      areas.items.options?.map((option) => [option.value, option.label]),
+      [
+        ["fe", "Frontend"],
+        ["be", "Backend"],
+      ],
+    );
+    assert.deepEqual(areas.defaultValue, ["be"]);
+  }
+});
+
+test("Issue Form checkboxes fail explicitly when semantic checked defaults are not representable", () => {
+  assert.throws(
+    () =>
+      compileSemanticTemplateSource(
+        normalizeSemanticTemplate({
+          version: 1,
+          kind: "issue",
+          id: "checklist",
+          name: "Checklist",
+          description: "Checklist selections",
+          sections: [
+            {
+              id: "checks",
+              type: "checklist",
+              label: "Checks",
+              options: [{ id: "tests", label: "Tests" }],
+              defaultValue: ["tests"],
+            },
+          ],
+        }),
+        ".github/ISSUE_TEMPLATE/checklist.yml",
+      ),
+    (error: unknown) =>
+      error instanceof SemanticTemplateError && /cannot represent checked defaults/u.test(error.message),
   );
 });
 
@@ -260,6 +347,59 @@ test("PR semantic source preserves fixed documentation, placeholders, and checkl
   };
   assert.equal((compact.fields.summary as { label: string }).label, "Summary");
   assert.deepEqual(compact.required, []);
+});
+
+test("PR semantic projections preserve enum, array, and checked checklist semantics", () => {
+  const source = normalizeSemanticTemplate({
+    version: 1,
+    kind: "pull_request",
+    id: "default",
+    name: "Default",
+    sections: [
+      {
+        id: "status",
+        type: "enum",
+        label: "Status",
+        options: [
+          { id: "ready", value: "r", label: "Ready" },
+          { id: "blocked", value: "b", label: "Blocked" },
+        ],
+        defaultValue: "b",
+      },
+      {
+        id: "areas",
+        type: "array",
+        label: "Areas",
+        multiple: true,
+        options: [
+          { id: "frontend", value: "fe", label: "Frontend" },
+          { id: "docs", value: "docs", label: "Docs" },
+        ],
+        defaultValue: ["docs"],
+      },
+      {
+        id: "checks",
+        type: "checklist",
+        label: "Checks",
+        options: [
+          { id: "tests", label: "Tests" },
+          { id: "docs", label: "Docs" },
+        ],
+        defaultValue: ["tests"],
+      },
+    ],
+  });
+  const native = renderSemanticNative(source, ".github/PULL_REQUEST_TEMPLATE.md");
+  assert.match(native, /- \[x\] Tests/u);
+  assert.match(native, /- \[ \] Docs/u);
+  const contract = compileSemanticTemplateSource(source, ".github/PULL_REQUEST_TEMPLATE.md");
+  const fields = contract.sections.flatMap((section) => section.fields);
+  assert.equal(fields.find((field) => field.id === "status")?.type, "enum");
+  assert.equal(fields.find((field) => field.id === "areas")?.type, "array");
+  assert.equal(fields.find((field) => field.id === "checks")?.type, "checklist");
+  assert.equal(fields.find((field) => field.id === "status")?.defaultValue, "b");
+  assert.deepEqual(fields.find((field) => field.id === "areas")?.defaultValue, ["docs"]);
+  assert.deepEqual(fields.find((field) => field.id === "checks")?.defaultValue, ["tests"]);
 });
 
 test("native import creates semantic JSON and rejects unsupported semantic source", async () => {

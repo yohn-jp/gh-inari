@@ -667,7 +667,7 @@ function renderSection(section: CanonicalSection): string {
 
   const blocks = [`${"#".repeat(level)} ${section.title}`];
   section.fields.forEach((field) => {
-    if (field.type === "string") {
+    if (field.type === "string" || field.type === "enum" || field.type === "array") {
       appendOptionalBlock(blocks, field.nativeMetadata.placeholder);
       return;
     }
@@ -679,7 +679,7 @@ function renderSection(section: CanonicalSection): string {
     }
     throw new PullRequestTemplateError(
       "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
-      `Field type "${field.type}" cannot be rendered by the PR-template compiler.`,
+      "This field cannot be rendered by the PR-template compiler.",
       { construct: "non-structural PR field" },
     );
   });
