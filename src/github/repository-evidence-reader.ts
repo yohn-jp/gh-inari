@@ -111,10 +111,7 @@ export interface GitHubRepositoryGovernanceTree {
   readonly entries: readonly { readonly path: string; readonly type: "blob" | "tree"; readonly sha: string }[];
 }
 
-function fail(
-  reason?: RepositoryEvidenceFailureReason,
-  providerFailure?: GitHubProviderFailureClassification,
-): never {
+function fail(reason?: RepositoryEvidenceFailureReason, providerFailure?: GitHubProviderFailureClassification): never {
   throw new GitHubRepositoryEvidenceReaderError(reason, providerFailure);
 }
 
