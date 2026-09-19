@@ -158,7 +158,7 @@ function phaseMetadata(
     case "possibly-delivered":
       return { deliveryEvidence: "delivered-ambiguous", automaticRetry: "forbidden", recovery: "recovery-required" };
     case "expired":
-      return { deliveryEvidence: "not-delivered", automaticRetry: "allowed", recovery: "none" };
+      return { deliveryEvidence: "not-delivered", automaticRetry: "forbidden", recovery: "none" };
     case "cancelled":
       return { deliveryEvidence: "not-delivered", automaticRetry: "forbidden", recovery: "none" };
   }
@@ -314,13 +314,9 @@ function transitionForTerminal(state: RelayDeliveryState, event: RelayDeliveryEv
 function nextPhase(state: RelayDeliveryState, event: RelayDeliveryEvent): RelayDeliveryPhase {
   switch (event.type) {
     case "deliver":
-      return state.phase === "queued" || state.phase === "unavailable" || state.phase === "expired"
-        ? "delivered"
-        : state.phase;
+      return state.phase === "queued" || state.phase === "unavailable" ? "delivered" : state.phase;
     case "acknowledge":
-      return state.phase === "queued" || state.phase === "delivered" || state.phase === "possibly-delivered"
-        ? "acknowledged"
-        : state.phase;
+      return state.phase === "queued" || state.phase === "delivered" ? "acknowledged" : state.phase;
     case "result":
       return "terminal-result";
     case "disconnect":

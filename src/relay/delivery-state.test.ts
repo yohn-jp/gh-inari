@@ -52,7 +52,7 @@ test("delivery, acknowledgement, timeout, and reconnect preserve ambiguity and p
   assert.equal(isRelayDeliveryRetryable(ambiguous), false);
   assert.equal(reduceRelayDeliveryState(ambiguous, event("reconnect")).phase, "possibly-delivered");
   assert.equal(reduceRelayDeliveryState(ambiguous, event("disconnect")).phase, "possibly-delivered");
-  assert.equal(reduceRelayDeliveryState(ambiguous, event("acknowledge")).phase, "acknowledged");
+  assert.equal(reduceRelayDeliveryState(ambiguous, event("acknowledge")).phase, "possibly-delivered");
 });
 
 test("disconnect and expiry after delivery never claim rollback or safe replay", () => {
@@ -65,7 +65,8 @@ test("disconnect and expiry after delivery never claim rollback or safe replay",
   const preDeliveryExpiry = reduceRelayDeliveryState(createRelayDeliveryState(job), event("expire"));
   assert.equal(preDeliveryExpiry.phase, "expired");
   assert.equal(preDeliveryExpiry.deliveryEvidence, "not-delivered");
-  assert.equal(isRelayDeliveryRetryable(preDeliveryExpiry), true);
+  assert.equal(isRelayDeliveryRetryable(preDeliveryExpiry), false);
+  assert.equal(reduceRelayDeliveryState(preDeliveryExpiry, event("deliver")).phase, "expired");
 
   const cancelled = reduceRelayDeliveryState(createRelayDeliveryState(job), event("cancel"));
   assert.equal(cancelled.phase, "cancelled");
