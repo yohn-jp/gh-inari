@@ -803,14 +803,15 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         signal: bounded.signal,
       });
     } catch {
-      const providerFailure = bounded.timedOut
+      const timedOut = bounded.timedOut;
+      bounded.clear();
+      const providerFailure = timedOut
         ? githubProviderFailure("timeout", { retryable: true, timeoutMs: this.#requestTimeoutMs })
         : githubProviderFailure("transport", { retryable: true });
       throw this.safeFailure("installation-token", { reason: "credential" }, providerFailure);
-    } finally {
-      bounded.clear();
     }
     if (response.status !== 201) {
+      bounded.clear();
       throw this.safeFailure(
         "installation-token",
         { reason: "credential" },
@@ -822,11 +823,12 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     try {
       body = record(await boundedBody(response));
     } catch {
-      throw this.safeFailure(
-        "installation-token",
-        { reason: "credential" },
-        githubProviderFailure("response-invalid", { retryable: false }),
-      );
+      const providerFailure = bounded.timedOut
+        ? githubProviderFailure("timeout", { retryable: true, timeoutMs: this.#requestTimeoutMs })
+        : githubProviderFailure("response-invalid", { retryable: false });
+      throw this.safeFailure("installation-token", { reason: "credential" }, providerFailure);
+    } finally {
+      bounded.clear();
     }
     let token: string;
     let expiresAt: string;
