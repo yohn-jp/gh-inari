@@ -927,9 +927,19 @@ export class ActionsChangeExecutionNativeHttpApi
     nativeRepositoryResponseStatus(response.status);
     const body = nativeRecord(response.body, "repository.governance.blob");
     if (body.encoding !== "base64") throw new NativeActionsApiError("response");
-    const content = nativeText(body.content, NATIVE_ACTIONS_MAX_RESPONSE_BYTES, "repository.governance.blob");
+    if (
+      typeof body.content !== "string" ||
+      body.content.length === 0 ||
+      body.content.length > NATIVE_ACTIONS_MAX_RESPONSE_BYTES
+    ) {
+      throw new NativeActionsApiError("response");
+    }
+    const content = body.content.replace(/[ \t\r\n]+/gu, "");
+    if (content.length === 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(content)) {
+      throw new NativeActionsApiError("response");
+    }
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(content.replace(/\s+/gu, ""), "base64"));
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(content, "base64"));
     } catch {
       throw new NativeActionsApiError("response");
     }

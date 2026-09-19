@@ -822,6 +822,40 @@ test("#617 stops absent workflow-run discovery at the bounded page limit", async
   );
 });
 
+test("native Actions governance blob decoder accepts wrapped base64 and rejects malformed content", async () => {
+  const policy = branchPolicySource("^feat/[0-9]+-[a-z0-9-]+$");
+  const encoded = Buffer.from(policy, "utf8").toString("base64");
+  const wrapped = encoded.replace(/(.{20})/gu, "$1\n");
+
+  function fetchBlob(content: string): typeof fetch {
+    return async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/repos/acme/inari") {
+        return nativeJsonResponse({ id: 100000157, fork: false });
+      }
+      if (url.pathname === "/repos/acme/inari/git/blobs/policy-sha") {
+        return nativeJsonResponse({ encoding: "base64", content });
+      }
+      throw new Error(`unexpected native URL ${url}`);
+    };
+  }
+
+  const api = new ActionsChangeExecutionNativeHttpApi({
+    cwd: process.cwd(),
+    repository: "acme/inari",
+    token: "actions-transport-secret",
+    fetch: fetchBlob(wrapped),
+  });
+  assert.equal(await api.getRepositoryBlob("policy-sha"), policy);
+
+  const malformed = new ActionsChangeExecutionNativeHttpApi({
+    cwd: process.cwd(),
+    repository: "acme/inari",
+    token: "actions-transport-secret",
+    fetch: fetchBlob("not-base64!"),
+  });
+  await assert.rejects(malformed.getRepositoryBlob("policy-sha"));
+});
 test("native Actions job inspection is paginated and bound to the correlated run", async () => {
   const pages: number[] = [];
   const nativeFetch: typeof fetch = async (input) => {
