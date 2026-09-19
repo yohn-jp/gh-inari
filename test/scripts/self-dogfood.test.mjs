@@ -423,10 +423,10 @@ if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: 
 else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
 else if (show && showCount === 0) output = ${JSON.stringify(freshChangePreflight())};
-else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
-else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
-else if (show) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" } };
-else if (ready) output = { ok: true, state: "REVIEW", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: readyCount === 0 ? "verified" : "returned-existing" } };
+else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: null, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
+else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: null, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
+else if (show) output = { ok: true, state: "REVIEW", ...common, recovery: null };
+else if (ready) output = { ok: true, state: "REVIEW", ...common, recovery: null, evidence: { outcome: readyCount === 0 ? "verified" : "returned-existing" } };
 else output = { ok: false };
 console.log(JSON.stringify(output));
 `,
@@ -535,8 +535,8 @@ if (args.includes("--version")) output = { ok: true, name: "gh-inari", version: 
 else if (args.includes("skill")) output = { id: "golden-path", version: "1.1.0", contractVersions: { goldenPath: "1", statusRecovery: "1" }, workflow: [] };
 else if (args.includes("check")) output = { valid: true, governance: { valid: true }, disposableMarker: { version: 1, kind: "self-dogfood" } };
 else if (show && showCount === 0) output = ${JSON.stringify(freshChangePreflight())};
-else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
-else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: { state: "none", action: "none" }, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
+else if (issue) output = { ok: true, state: "DRAFT", ...common, recovery: null, evidence: { outcome: issueCount === 0 ? "verified" : "returned-existing" } };
+else if (args.includes("handoff")) output = { ok: true, state: "DRAFT", ...common, recovery: null, handoff: { version: 1, kind: "implementation-handoff", repositoryHost: "github.com", repositoryId: "123239", rootIssue: 239, state: "DRAFT", branch: common.branch, baseBranch: "main", pullRequest: common.pullRequest, changeVersion: 1 } };
 else if (ready) {
   console.log(JSON.stringify({
     ok: false,

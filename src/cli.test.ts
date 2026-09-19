@@ -516,6 +516,57 @@ test("skill golden-path prints the canonical Golden Path playbook", async () => 
   assert.match(output, /golden-path-recovery\.recovery/);
 });
 
+test("Change output exposes canonical Golden Path recovery for DRAFT, REVIEW, and RECOVERY_REQUIRED", async () => {
+  const identity = { repositoryHost: "github.com", repositoryId: "123", rootIssue: 741 };
+  const projectionFor = (state: "DRAFT" | "REVIEW" | "RECOVERY_REQUIRED") => ({
+    valid: state !== "RECOVERY_REQUIRED",
+    status: state === "RECOVERY_REQUIRED" ? ("partial" as const) : ("healthy" as const),
+    candidates: { branches: [], pullRequests: [] },
+    change: { version: 1 as const, identity, state, provenance: {} },
+    diagnostics: [],
+  });
+  const execute = async (state: "DRAFT" | "REVIEW" | "RECOVERY_REQUIRED") => {
+    const projection = projectionFor(state);
+    return state === "RECOVERY_REQUIRED"
+      ? {
+          projection,
+          evidence: {
+            version: 1 as const,
+            operation: "ready" as const,
+            outcome: "recovery-required" as const,
+            effects: [],
+          },
+        }
+      : projection;
+  };
+  const outputs: Record<string, unknown>[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => outputs.push(JSON.parse(line));
+  try {
+    for (const state of ["DRAFT", "REVIEW"] as const) {
+      const exitCode = await runCli(["change", "show", "741", "--json"], {
+        changeExecutor: { read: async () => projectionFor(state), execute: async () => execute(state) },
+      });
+      assert.equal(exitCode, 0);
+      const output = outputs[outputs.length - 1];
+      assert.equal(output?.state, state);
+      assert.equal(output?.recovery, null);
+    }
+    const recoveryExitCode = await runCli(["change", "ready", "741", "--json"], {
+      changeExecutor: {
+        read: async () => projectionFor("RECOVERY_REQUIRED"),
+        execute: async () => execute("RECOVERY_REQUIRED"),
+      },
+    });
+    assert.equal(recoveryExitCode, 2);
+    const recovery = outputs[outputs.length - 1] as { state?: string; recovery?: { safeAction?: string } };
+    assert.equal(recovery.state, "RECOVERY_REQUIRED");
+    assert.equal(recovery.recovery?.safeAction, "MANUAL_REVIEW");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
 test("skill <scenario> --json prints the same playbook as a versioned JSON projection", async () => {
   const { exitCode, output } = await captureOutput(["skill", "author-issue", "--json"]);
   assert.equal(exitCode, 0);

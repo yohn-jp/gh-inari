@@ -387,6 +387,13 @@ function authoritativeRecovery(value) {
   if (
     recovery !== null &&
     typeof recovery === "object" &&
+    recovery.owner === "recovery" &&
+    typeof recovery.safeAction === "string"
+  )
+    return { state: "RECOVERY_REQUIRED", action: recovery.safeAction };
+  if (
+    recovery !== null &&
+    typeof recovery === "object" &&
     typeof recovery.state === "string" &&
     (typeof recovery.action === "string" || recovery.action === null)
   )
