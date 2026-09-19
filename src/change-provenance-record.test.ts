@@ -146,3 +146,22 @@ test("the existing Runtime key PEM mechanism round-trips the signing key", () =>
   assert.equal(typeof pem, "string");
   assert.deepEqual(exportRuntimeAuthorityPublicKey(importRuntimeAuthorityPrivateKey(pem as string)), pair.publicKeyJwk);
 });
+
+test("canonical provenance records remain canonical when formatted as repository artifacts", () => {
+  const pair = generateRuntimeAuthorityKeyPair();
+  const trusted = authority(pair);
+  const record = createChangeProvenanceRecord({
+    rootIssue: 742,
+    runtimeAuthority: trusted,
+    runtimeKey: pair,
+    now: NOW,
+  });
+  const rendered = renderChangeProvenanceRecord(record);
+
+  assert.equal(rendered, `${JSON.stringify(JSON.parse(rendered))}\n`);
+  assert.deepEqual(verifyChangeProvenanceRecord(rendered, trusted), {
+    version: CHANGE_PROVENANCE_RECORD_VERSION,
+    rootIssue: 742,
+    operation: CHANGE_PROVENANCE_RECORD_OPERATION,
+  });
+});
