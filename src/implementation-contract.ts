@@ -804,7 +804,7 @@ function normalizeContract(input: unknown): ImplementationContractValidationResu
   const dependencies =
     executionInput === undefined
       ? undefined
-      : normalizeReferences(executionInput.dependencies ?? [], "$.execution.dependencies", violations, true);
+      : normalizeReferences(executionInput.dependencies ?? [], "$.execution.dependencies", violations, false);
   if (baseBranch !== undefined && !BRANCH_PATTERN.test(baseBranch))
     addViolation(
       violations,
@@ -1448,7 +1448,7 @@ export const IMPLEMENTATION_CONTRACT_SCHEMA: ImplementationSchemaDocument = {
         branch: stringSchema,
         dependencies: { type: "array", items: referenceSchema, uniqueItems: true },
       },
-      required: ["baseBranch", "dependencies"],
+      required: ["baseBranch"],
       additionalProperties: false,
     },
   },
