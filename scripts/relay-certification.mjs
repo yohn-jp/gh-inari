@@ -82,6 +82,17 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function readBoundedFile(filePath, maxBytes) {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error("file-bounds");
+    return fs.readFileSync(fd, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function liveBaseUrl(value) {
   const raw = nonEmptyString(value);
   if (raw === undefined) throw liveFailure("configuration", "configuration");
@@ -112,9 +123,7 @@ function readLiveConfiguration(environment) {
     try {
       const filePath = path.resolve(fileName);
       fileDirectory = path.dirname(filePath);
-      const stat = fs.statSync(filePath);
-      if (!stat.isFile() || stat.size > LIVE_MAX_CONFIG_BYTES) throw new Error("config-file-bounds");
-      fileText = fs.readFileSync(filePath, "utf8");
+      fileText = readBoundedFile(filePath, LIVE_MAX_CONFIG_BYTES);
       fileValues = record(JSON.parse(fileText));
       if (fileValues === undefined) throw new Error("config-file-shape");
     } catch {
@@ -167,9 +176,7 @@ function readLiveConfiguration(environment) {
   if (privateKeyPem === undefined && privateKeyFile !== undefined) {
     resolvedPrivateKeyFile = path.resolve(fileDirectory ?? process.cwd(), privateKeyFile);
     try {
-      const stat = fs.statSync(resolvedPrivateKeyFile);
-      if (!stat.isFile() || stat.size > LIVE_MAX_PRIVATE_KEY_BYTES) throw new Error("private-key-bounds");
-      privateKeyPem = fs.readFileSync(resolvedPrivateKeyFile, "utf8");
+      privateKeyPem = readBoundedFile(resolvedPrivateKeyFile, LIVE_MAX_PRIVATE_KEY_BYTES);
     } catch {
       return { status: "failed", failure: { stage: "configuration", failureClass: "configuration" } };
     }
