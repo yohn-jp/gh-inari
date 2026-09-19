@@ -309,7 +309,8 @@ test("repository context accepts repository-scoped credentials without requiring
     transport: {
       request: async (request) => {
         paths.push(request.path);
-        if (request.path === "user") return { status: 403, body: { message: "Resource not accessible by integration" } };
+        if (request.path === "user")
+          return { status: 403, body: { message: "Resource not accessible by integration" } };
         if (request.path === "repos/acme/inari") return { status: 200, body: { id: 100000157 } };
         throw new Error(`Unexpected request: ${request.method} ${request.path}`);
       },
