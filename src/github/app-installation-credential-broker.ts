@@ -1202,8 +1202,30 @@ function isRepositoryReadPath(
     request.path.length <= MAX_PATH_LENGTH &&
     !/[\u0000-\u001F\u007F]/u.test(request.path) &&
     !request.path.includes("..") &&
+    !hasEncodedRepositoryPathAmbiguity(request.path) &&
     (request.path === prefix || request.path.startsWith(`${prefix}/`))
   );
+}
+
+function hasEncodedRepositoryPathAmbiguity(path: string): boolean {
+  const pathWithoutQuery = path.split(/[?#]/u, 1)[0] ?? path;
+  let candidate = pathWithoutQuery;
+  for (let pass = 0; pass <= MAX_PATH_LENGTH; pass += 1) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(candidate);
+    } catch {
+      return true;
+    }
+    if (countPathSeparators(decoded) > countPathSeparators(candidate)) return true;
+    if (decoded === candidate) return false;
+    candidate = decoded;
+  }
+  return true;
+}
+
+function countPathSeparators(path: string): number {
+  return (path.match(/[.\\/]/gu) ?? []).length;
 }
 
 function sameConfiguredRepository(target: RepositoryIdentity, repository: GitHubChangeEffectRepository): boolean {

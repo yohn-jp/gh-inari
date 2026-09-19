@@ -227,6 +227,43 @@ test("read capability binds host and repository path independently of owner/name
   assert.equal(calls.length, 1);
 });
 
+test("read capability rejects encoded traversal and separator ambiguity", async () => {
+  const calls: Array<RequestInfo | URL> = [];
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(async (input) => {
+      calls.push(input);
+      return calls.length === 1 ? tokenResponse() : new Response(JSON.stringify({ number: 1 }), { status: 200 });
+    }),
+  );
+
+  await broker.withRepositoryReadCapability({}, async (capability) => {
+    for (const path of [
+      "repos/acme/inari/issues/%2e%2e/secret",
+      "repos/acme/inari/issues/%2E%2E/secret",
+      "repos/acme/inari/issues/%2fsecret",
+      "repos/acme/inari/issues/%2Fsecret",
+      "repos/acme/inari/issues/%5csecret",
+      "repos/acme/inari/issues/%5Csecret",
+      "repos/acme/inari/issues/%252e%252e/secret",
+      "repos/acme/inari/issues/%252fsecret",
+      "repos/acme/inari/issues/%255csecret",
+    ]) {
+      await assert.rejects(
+        capability.transport.request({ hostname: "github.com", method: "GET", path }),
+        (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "repository-read",
+      );
+    }
+
+    const response = await capability.transport.request({
+      hostname: "github.com",
+      method: "GET",
+      path: "repos/acme/inari/issues?search=hello%20world",
+    });
+    assert.deepEqual(response.body, { number: 1 });
+  });
+  assert.equal(calls.length, 2);
+});
+
 test("post-admission mutation capability narrows the token to the admitted effect", async () => {
   const calls: RequestInit[] = [];
   const broker = new GitHubAppInstallationCredentialBroker(
