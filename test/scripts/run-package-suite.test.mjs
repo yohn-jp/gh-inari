@@ -6,11 +6,8 @@ import test from "node:test";
 import { exportsTargetPaths, validateCodexPluginMetadata } from "../../scripts/run-package-suite.mjs";
 import {
   CERTIFICATION_ENTRY_COMMANDS,
-  EXPECTED_FORGED_REQUESTER_REJECTION,
-  MAX_SECURITY_SMOKE_OUTPUT_BYTES,
   REQUIRED_BIN_NAMES,
   freshEnvironment,
-  validateForgedRequesterSecuritySmoke,
   validatePreflightOutput,
   validateSkillIndex,
   validateVersionOutput,
@@ -168,46 +165,29 @@ test("packed certification rejects runtime, preflight, and Skill contract drift"
 });
 
 test("packed certification has no checked-out source execution path", () => {
-  const script = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "scripts", "smoke-test.mjs"), "utf8");
+  const script = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "scripts", "package-runtime-certification.mjs"),
+    "utf8",
+  );
   assert.match(script, /run\("npm", \["pack"/u);
   assert.match(script, /--omit=dev/u);
   assert.match(script, /--diagnose/u);
   assert.doesNotMatch(script, /src[\\/]index\.ts|sourceEntry|workspace:\s/u);
 });
 
-test("complete certification uses the installed Golden Path and provider boundary", () => {
-  const smokeScript = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "scripts", "smoke-test.mjs"), "utf8");
-  assert.match(smokeScript, /executing the complete Golden Path through the installed package/u);
-  assert.match(smokeScript, /change.*issue/u);
-  assert.match(smokeScript, /inari_golden_path_status/u);
-  assert.match(smokeScript, /inari_change_handoff/u);
-  assert.match(smokeScript, /INARI_PACKED_PROVIDER_STATE/u);
-  assert.doesNotMatch(smokeScript, /GOLDEN_PATH_CERTIFICATION_AUTHORITY_UNAVAILABLE|certification.*blocked/u);
-  assert.doesNotMatch(smokeScript, /packed-golden-path-runner/u);
-});
-
-test("forged-requester security smoke accepts only the expected bounded rejection", () => {
-  const expectedResult = {
-    status: 1,
-    stdout: `${JSON.stringify(EXPECTED_FORGED_REQUESTER_REJECTION)}\n`,
-    stderr: "",
-  };
-  assert.deepEqual(validateForgedRequesterSecuritySmoke(expectedResult), EXPECTED_FORGED_REQUESTER_REJECTION);
-  assert.equal(MAX_SECURITY_SMOKE_OUTPUT_BYTES, 64 * 1024);
-
-  assert.throws(() => validateForgedRequesterSecuritySmoke({ ...expectedResult, status: 0 }), /unexpectedly accepted/u);
-  for (const mutation of [{ code: "CHANGE_REMOTE_REQUEST_INVALID" }, { stage: "repository-evidence" }]) {
-    const error = { ...EXPECTED_FORGED_REQUESTER_REJECTION.error, ...mutation };
-    if (mutation.stage !== undefined) error.details = { stage: mutation.stage };
-    assert.throws(
-      () =>
-        validateForgedRequesterSecuritySmoke({
-          ...expectedResult,
-          stdout: `${JSON.stringify({ ...EXPECTED_FORGED_REQUESTER_REJECTION, error })}\n`,
-        }),
-      /unexpected rejection/u,
-    );
-  }
+test("package certification uses an HTTP provider and excludes Change/Golden Path authority", () => {
+  const runtimeScript = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "scripts", "package-runtime-certification.mjs"),
+    "utf8",
+  );
+  assert.match(runtimeScript, /controlled-github\.mjs/u);
+  assert.match(runtimeScript, /spawn\(process\.execPath, \[providerScript, "--server"\]/u);
+  assert.match(runtimeScript, /issue", "check"/u);
+  assert.match(runtimeScript, /issue", "get"/u);
+  assert.match(runtimeScript, /PACKED_POISON_GH_INVOKED/u);
+  assert.match(runtimeScript, /gh must be unavailable/u);
+  assert.doesNotMatch(runtimeScript, /installControlledGh|certifyCompleteGoldenPath|inari_golden_path_/u);
+  assert.doesNotMatch(runtimeScript, /\["change",/u);
 });
 
 test("packed certification isolates ambient GitHub Actions requester context", () => {

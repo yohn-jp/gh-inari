@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Package-content validation: confirms `npm pack` includes exactly the files
 // package.json's "files" field promises (no more, no less), then delegates
-// install/exec verification to smoke-test.mjs against the same tarball.
+// runtime verification to the standalone package certification against the
+// installed tarball.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -625,10 +626,10 @@ async function main() {
   await validateCodexPlugin(packageJson, packedFiles);
 
   console.log(
-    `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable; delegating complete Golden Path certification to the installed-artifact harness.`,
+    `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable; delegating package/runtime certification to the installed-artifact harness.`,
   );
 
-  run(process.execPath, ["scripts/smoke-test.mjs"], { stdio: "inherit" });
+  run(process.execPath, ["scripts/package-runtime-certification.mjs"], { stdio: "inherit" });
 }
 
 if (process.argv[1]?.endsWith("run-package-suite.mjs")) main();
