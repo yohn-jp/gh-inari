@@ -466,8 +466,8 @@ test("default Actions transport uses native HTTP for dispatch, runs, artifacts, 
     },
   });
   assert.doesNotMatch(JSON.stringify(dispatchBody), /actions-transport-secret|requester|token/iu);
-  assert.ok(requests.some((request) => request.url.includes("/actions/workflows/")));
-  assert.ok(requests.some((request) => request.url.includes("/actions/artifacts")));
+  assert.ok(requests.some((request) => request.url.includes("/repos/acme/inari/actions/workflows/")));
+  assert.ok(requests.some((request) => request.url.includes("/repos/acme/inari/actions/artifacts")));
   assert.ok(requests.some((request) => request.url.endsWith("/actions/artifacts/21/zip")));
   assert.equal(artifactDownloads, 2);
 });
@@ -927,7 +927,7 @@ test("native Actions job inspection is paginated and bound to the correlated run
   const nativeFetch: typeof fetch = async (input) => {
     const url = new URL(String(input));
     if (url.pathname === "/repos/acme/inari") return nativeJsonResponse({ id: 100000157, fork: false });
-    if (url.pathname.endsWith("/actions/runs/11/jobs")) {
+    if (url.pathname === "/repos/acme/inari/actions/runs/11/jobs") {
       const page = Number(url.searchParams.get("page"));
       pages.push(page);
       return nativeJsonResponse({
