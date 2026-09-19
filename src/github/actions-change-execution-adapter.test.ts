@@ -20,6 +20,11 @@ import {
   type GitHubActionsRemoteApi,
 } from "./actions-change-execution-adapter.js";
 import { GitHubAuthenticationError } from "./errors.js";
+import {
+  attachGitHubProviderFailure,
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+} from "./provider-failure.js";
 import type { RepositoryContext, RepositoryTree } from "./types.js";
 import { createChangeProvenanceRecord } from "../change-provenance-record.js";
 import { assertRuntimeAuthority } from "../agent-authority/runtime-authority.js";
@@ -1118,6 +1123,56 @@ test("retries one transient run or artifact poll failure before observing succes
     assert.deepEqual(result, { projection: api.result });
     assert.equal(failed, true);
   }
+});
+
+test("retries retryable provider failures during the pre-dispatch baseline read", async () => {
+  const failures = [
+    githubProviderFailureFromStatus(429),
+    githubProviderFailureFromStatus(503),
+    githubProviderFailure("timeout", { retryable: true, timeoutMs: 100 }),
+  ];
+
+  for (const failure of failures) {
+    const api = new FakeActionsApi();
+    const originalRequestActionsApi = api.requestActionsApi.bind(api);
+    let baselineRead = true;
+    api.requestActionsApi = async (path, method, fields = {}) => {
+      if (method === "GET" && path.startsWith("actions/workflows/") && baselineRead) {
+        baselineRead = false;
+        throw attachGitHubProviderFailure(new Error("transient baseline failure"), failure);
+      }
+      return originalRequestActionsApi(path, method, fields);
+    };
+
+    const result = await executor(api).execute(changeMutationRequest("issue", 42));
+
+    assert.deepEqual(result, { projection: api.result });
+  }
+});
+
+test("fails closed on a non-retryable pre-dispatch baseline provider failure", async () => {
+  const api = new FakeActionsApi();
+  const failure = githubProviderFailureFromStatus(401);
+  api.requestActionsApi = async (path, method) => {
+    if (method === "GET" && path.startsWith("actions/workflows/")) {
+      throw attachGitHubProviderFailure(new Error("non-retryable baseline failure"), failure);
+    }
+    throw new Error(`unexpected API path ${path}`);
+  };
+
+  await assert.rejects(
+    executor(api).execute(changeMutationRequest("issue", 42)),
+    (error: unknown) =>
+      error instanceof ChangeExecutionPortError &&
+      error.code === "CHANGE_REMOTE_TRANSPORT_FAILED" &&
+      JSON.stringify(error.details) ===
+        JSON.stringify({
+          operation: "change.issue",
+          reason: "authentication",
+          stage: "run-read",
+          providerFailure: { failureClass: "authentication", retryable: false, status: 401 },
+        }),
+  );
 });
 
 test("retries one transient result artifact download failure before accepting success", async () => {

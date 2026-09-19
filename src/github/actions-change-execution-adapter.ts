@@ -1244,7 +1244,7 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
         "repository-context",
       );
     }
-    const baseline = await this.readRuns(operation, deadline);
+    const baseline = await this.readBaselineRuns(operation, deadline);
     const artifactName = `inari-change-result-${correlation}`;
     const semanticRequest = {
       version: CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
@@ -1329,6 +1329,23 @@ export class ActionsChangeExecutionAdapter implements ChangeExecutionPort {
       },
       "run-read",
     );
+  }
+
+  private async readBaselineRuns(
+    operation: string,
+    deadline: ChangeExecutionDeadline,
+  ): Promise<readonly WorkflowRun[]> {
+    for (let attempt = 0; deadline.remainingMs() > 0 && attempt < this.#maxPollAttempts; attempt += 1) {
+      try {
+        return await this.readRuns(operation, deadline);
+      } catch (error: unknown) {
+        if (!isRetryablePollTransportError(error) || deadline.remainingMs() <= 0) throw error;
+        if (attempt + 1 < this.#maxPollAttempts && deadline.remainingMs() > 0) {
+          await this.#sleep(this.#pollIntervalMs);
+        }
+      }
+    }
+    throw remoteError("CHANGE_REMOTE_RUN_FAILED", operation, "result-timeout", undefined, "run-read");
   }
 
   private async readExactRun(
