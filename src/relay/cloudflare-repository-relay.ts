@@ -15,11 +15,14 @@ import {
   type RelayJobEnvelope,
   type RelayRepositoryIdentity,
 } from "./contract.js";
+import { base64UrlDecodeToBytes } from "../agent-authority/codec.js";
+import { validateSessionRequestEnvelope } from "../agent-authority/session-request.js";
 import {
   createRelayPossessionProofChallenge,
   decodeRelayPossessionProofResponse,
   encodeRelayPossessionProofChallenge,
   verifyRelayPossessionProof,
+  verifySessionCertificateConnectionBinding,
   type RelayConnectionKeyBinding,
   type RelayPossessionProofChallenge,
 } from "./connection-proof.js";
@@ -246,6 +249,18 @@ function jobKey(jobId: string): string {
   return `${JOB_PREFIX}${jobId}`;
 }
 
+function sessionCertificateFromJob(job: RelayJobEnvelope): string | undefined {
+  try {
+    const envelope = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(base64UrlDecodeToBytes(job.signedSessionRequest)),
+    ) as unknown;
+    const validated = validateSessionRequestEnvelope(envelope);
+    return validated.valid ? validated.value?.certificate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function isOpen(webSocket: RepositoryRelayWebSocket): boolean {
   return webSocket.readyState === undefined || webSocket.readyState === 1;
 }
@@ -456,6 +471,7 @@ export class RepositoryRelayDurableObject {
     // A repeated job ID is never an implicit permission to replay an exchange.
     // The caller must use the delivery/recovery authority outside this adapter.
     if (await this.record(job.jobId)) return;
+    const certificate = sessionCertificateFromJob(job);
     const runtimes = this.state.getWebSockets("runtime");
     const target = runtimes.find((candidate) => {
       const attachment = this.attachmentOf(candidate);
@@ -464,7 +480,10 @@ export class RepositoryRelayDurableObject {
         attachment.authenticated &&
         attachment.connectionId === job.connectionId &&
         attachment.repository.repositoryId === job.repository.repositoryId &&
-        attachment.repository.repositoryHost === job.repository.repositoryHost
+        attachment.repository.repositoryHost === job.repository.repositoryHost &&
+        certificate !== undefined &&
+        attachment.binding !== undefined &&
+        verifySessionCertificateConnectionBinding(certificate, attachment.binding).valid
       );
     });
     const initial = createRelayDeliveryState({ connectionId: job.connectionId, jobId: job.jobId });
@@ -529,9 +548,11 @@ export class RepositoryRelayDurableObject {
       jobId: record.state.jobId,
       resultDigest: digest,
     };
-    const next = applyRelayDeliveryEvent(record.state, event).state;
-    await this.saveRecord({ ...record, state: next });
-    this.forwardToSource(record, encodeRelayEnvelope(resultEnvelope, record.repository));
+    const reduction = applyRelayDeliveryEvent(record.state, event);
+    await this.saveRecord({ ...record, state: reduction.state });
+    if (reduction.transition === "applied") {
+      this.forwardToSource(record, encodeRelayEnvelope(resultEnvelope, record.repository));
+    }
   }
 
   private async receiveControl(

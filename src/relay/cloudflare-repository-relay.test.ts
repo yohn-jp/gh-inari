@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { generateKeyPairSync, type KeyObject } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, sign as ed25519Sign, type KeyObject } from "node:crypto";
 import {
   RepositoryRelayDurableObject,
   repositoryRelayDurableObjectName,
@@ -14,6 +14,15 @@ import {
   type RelayPossessionProofChallenge,
 } from "./connection-proof.js";
 import { encodeRelayEnvelope } from "./contract.js";
+import {
+  SESSION_CERTIFICATE_ALG,
+  SESSION_CERTIFICATE_CONTRACT_VERSION,
+  SESSION_CERTIFICATE_TYP,
+  encodeSessionCertificateCompact,
+  sessionCertificateSigningInput,
+  type SessionCertificateHeader,
+  type SessionCertificatePayload,
+} from "../agent-authority/session-certificate.js";
 
 const repository = { repositoryHost: "github.com", repositoryId: "1330755860" } as const;
 const encoder = new TextEncoder();
@@ -112,6 +121,49 @@ function publicJwk(key: KeyObject): Record<string, string> {
   return key.export({ format: "jwk" }) as Record<string, string>;
 }
 
+function signedSessionRequest(
+  signer: KeyObject,
+  certificateSigner: KeyObject = signer,
+  delegatorId = "delegator-819",
+): string {
+  const header: SessionCertificateHeader = {
+    alg: SESSION_CERTIFICATE_ALG,
+    typ: SESSION_CERTIFICATE_TYP,
+    kid: delegatorId,
+  };
+  const payload: SessionCertificatePayload = {
+    ver: SESSION_CERTIFICATE_CONTRACT_VERSION,
+    iss: `runtime:${delegatorId}`,
+    sub: "session:01HXRELAY81900000000000000",
+    jti: "01HXRELAY81900000000000001",
+    repository: { id: repository.repositoryId, name: "yohn-jp/gh-inari" },
+    sessionKey: publicJwk(createPublicKey(signer)) as unknown as SessionCertificatePayload["sessionKey"],
+    task: { kind: "issue", number: 819 },
+    capabilities: [{ kind: "change.implement", issue: 819 }],
+    iat: 1_757_347_200,
+    nbf: 1_757_347_200,
+    exp: 1_757_354_400,
+  };
+  const { signingInput } = sessionCertificateSigningInput(header, payload);
+  const certificateSignature = ed25519Sign(null, Buffer.from(signingInput), certificateSigner).toString("base64url");
+  const certificate = encodeSessionCertificateCompact(header, payload, certificateSignature);
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      alg: "EdDSA",
+      certificate,
+      request: { kind: "relay" },
+      certificateJti: payload.jti,
+      repositoryId: repository.repositoryId,
+      operation: "relay.execute",
+      requestId: "request-819",
+      issuedAt: 1_757_347_201,
+      expiresAt: 1_757_347_301,
+      signature: Buffer.alloc(64).toString("base64url"),
+    }),
+  ).toString("base64url");
+}
+
 test("uses one deterministic DO name per immutable repository id", () => {
   assert.equal(repositoryRelayDurableObjectName(repository), repository.repositoryId);
 });
@@ -165,7 +217,7 @@ test("routes only to an authenticated matching runtime and persists digest-only 
     jobId: "job-819",
     deliveryState: "pre-delivery" as const,
     deadlineMs: 1_000,
-    signedSessionRequest: "AQ",
+    signedSessionRequest: signedSessionRequest(privateKey, privateKey, "delegator-2"),
   };
   await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
   assert.ok(runtime.sent.some((entry) => typeof entry === "string" && entry.includes("job-819")));
@@ -184,6 +236,13 @@ test("routes only to an authenticated matching runtime and persists digest-only 
   await object.webSocketMessage(runtime, encoder.encode(JSON.stringify(result)));
   const terminal = await state.storage.get<Record<string, unknown>>("relay:job:job-819");
   assert.equal(((terminal ?? {}).state as { phase?: string }).phase, "terminal-result");
+  const resultCount = () =>
+    client.sent.filter(
+      (entry) => typeof entry !== "string" && new TextDecoder().decode(entry).includes('"kind":"result"'),
+    ).length;
+  assert.equal(resultCount(), 1);
+  await object.webSocketMessage(runtime, encoder.encode(JSON.stringify({ ...result, resultPayload: "Aw" })));
+  assert.equal(resultCount(), 1);
 });
 
 test("does not replay a delivered job after runtime disconnect", async () => {
@@ -210,7 +269,7 @@ test("does not replay a delivered job after runtime disconnect", async () => {
     jobId: "job-ambiguous",
     deliveryState: "pre-delivery" as const,
     deadlineMs: 1_000,
-    signedSessionRequest: "AQ",
+    signedSessionRequest: signedSessionRequest(privateKey, privateKey, "delegator-3"),
   };
   await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
   const before = runtime.sent.length;
@@ -218,4 +277,38 @@ test("does not replay a delivered job after runtime disconnect", async () => {
   const stateAfter = await state.storage.get<Record<string, unknown>>("relay:job:job-ambiguous");
   assert.equal(((stateAfter ?? {}).state as { phase?: string }).phase, "possibly-delivered");
   assert.equal(runtime.sent.length, before);
+});
+
+test("does not deliver when the canonical certificate signer does not match the proved runtime key", async () => {
+  const state = new FakeState();
+  const object = new RepositoryRelayDurableObject(
+    state,
+    { repository },
+    { now: () => 10_000, randomNonce: () => "nonce-mismatch" },
+  );
+  const runtime = pairFor(object, "role=runtime&connectionId=runtime-mismatch&delegatorId=delegator-819");
+  await new Promise((resolve) => setImmediate(resolve));
+  const challenge = (runtime.attachment as { challenge: RelayPossessionProofChallenge }).challenge;
+  const { privateKey } = generateKeyPairSync("ed25519");
+  await object.webSocketMessage(
+    runtime,
+    encodeRelayPossessionProofResponse(signRelayPossessionProof(challenge, privateKey)),
+  );
+  const client = pairFor(object, "role=client&connectionId=host-mismatch");
+  const wrongCertificateKey = generateKeyPairSync("ed25519").privateKey;
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "runtime-mismatch",
+    jobId: "job-mismatch",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(wrongCertificateKey),
+  };
+  await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
+  assert.equal(
+    runtime.sent.some((entry) => typeof entry === "string" && entry.includes("job-mismatch")),
+    false,
+  );
 });
