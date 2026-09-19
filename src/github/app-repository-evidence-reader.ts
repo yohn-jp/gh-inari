@@ -109,7 +109,9 @@ export function createRepositoryEvidenceReader(
     resolveRepositoryContext: async () => context,
     getRepositoryDefaultBranch: async () => {
       const body = await readProvider(transport, repository, repositoryPath(repository));
-      if (!isBoundedProviderText(body.default_branch, MAX_REPOSITORY_REF_LENGTH)) fail();
+      if (!isBoundedProviderText(body.default_branch, MAX_REPOSITORY_REF_LENGTH)) {
+        fail(invalidProviderResponse());
+      }
       return body.default_branch;
     },
     findBranch: async (branch: string): Promise<GitHubBranch | undefined> => {
