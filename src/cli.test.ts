@@ -3069,7 +3069,7 @@ test("a valid template identity marker resolves deterministically even when stru
   }
 });
 
-test("a semantic template marker resolves for issue check and explain without an explicit template", async () => {
+test("a semantic template marker is canonical for issue check and explain without an explicit template", async () => {
   const sourcePath = ".github/inari/issues/bug.json";
   const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
   const source = {
@@ -3101,12 +3101,12 @@ test("a semantic template marker resolves for issue check and explain without an
       const exitCode = await runCli(["issue", operation, "94", "--repository", "acme/inari"], {
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       });
-      assert.equal(exitCode, operation === "check" ? 2 : 0, `${operation}: ${lines[0]}`);
+      assert.equal(exitCode, 0, `${operation}: ${lines[0]}`);
       const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
-      assert.equal(output.status, "non-canonical");
+      assert.equal(output.status, "valid-current");
       assert.equal(output.classification, "valid");
-      assert.equal(output.valid, operation === "check" ? false : true);
-      assert.equal(output.normalizable, true);
+      assert.equal(output.valid, true);
+      assert.equal(output.normalizable, false);
     } finally {
       console.log = originalLog;
     }
@@ -3122,12 +3122,12 @@ test("a semantic template marker resolves for issue check and explain without an
     const exitCode = await runCli(["issue", "check", "94", "--template", "bug", "--repository", "acme/inari"], {
       createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(explicitTransport) }),
     });
-    assert.equal(exitCode, 2, explicitLines[0]);
+    assert.equal(exitCode, 0, explicitLines[0]);
     const output = JSON.parse(explicitLines[0] ?? "{}") as Record<string, unknown>;
-    assert.equal(output.status, "non-canonical");
+    assert.equal(output.status, "valid-current");
     assert.equal(output.classification, "valid");
-    assert.equal(output.valid, false);
-    assert.equal(output.normalizable, true);
+    assert.equal(output.valid, true);
+    assert.equal(output.normalizable, false);
   } finally {
     console.log = originalLog;
   }

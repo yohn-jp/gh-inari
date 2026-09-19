@@ -291,10 +291,7 @@ function renderTemplateIdentityMarker(contract: CanonicalContract, expectedKind:
   const marker: TemplateIdentityMarker = {
     version: TEMPLATE_IDENTITY_MARKER_VERSION,
     kind: expectedKind,
-    path:
-      expectedKind === "pull_request"
-        ? (contract.provenance?.semanticSource?.path ?? contract.templateIdentity.path)
-        : contract.templateIdentity.path,
+    path: contract.provenance?.semanticSource?.path ?? contract.templateIdentity.path,
   };
   return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
 }

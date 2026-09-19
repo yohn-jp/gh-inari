@@ -1369,13 +1369,14 @@ test("HTML comment removal is linear and fails closed on unterminated comments",
   assert.equal(removeHtmlComments("<!--unterminated<!--nested"), "");
 });
 
-test("rendered Issue and PR bodies carry a bounded template identity marker that round-trips invisibly", () => {
-  const issueBody = renderIssueArtifact(issueContractFixture, {
+test("native-only Issues keep native markers while governed Issues and PRs emit semantic markers", () => {
+  const issueInput = {
     problem: "A useful problem statement",
     category: "feature",
     affected_areas: ["contracts"],
     acceptance: ["tests", "docs"],
-  });
+  };
+  const issueBody = renderIssueArtifact(issueContractFixture, issueInput);
   assert.ok(
     issueBody.endsWith(
       `<!-- inari:template {"version":"1","kind":"issue","path":".github/ISSUE_TEMPLATE/feature.yml"} -->\n`,
@@ -1396,6 +1397,24 @@ test("rendered Issue and PR bodies carry a bounded template identity marker that
     affected_areas: ["contracts"],
     acceptance: ["tests", "docs"],
   });
+
+  const governedIssueContract = governedFixture(issueContractFixture, ".github/inari/issues/feature.json");
+  const governedIssueBody = renderIssueArtifact(governedIssueContract, issueInput);
+  assert.ok(
+    governedIssueBody.endsWith(
+      `<!-- inari:template {"version":"1","kind":"issue","path":".github/inari/issues/feature.json"} -->\n`,
+    ),
+  );
+  const governedIssueMarker = extractTemplateIdentityMarker(governedIssueBody);
+  assert.equal(governedIssueMarker.status, "valid");
+  assert.deepEqual(governedIssueMarker.marker, {
+    version: TEMPLATE_IDENTITY_MARKER_VERSION,
+    kind: "issue",
+    path: governedIssueContract.provenance?.semanticSource?.path,
+  });
+  const governedIssueParsed = parseExistingIssueArtifact(governedIssueContract, governedIssueBody);
+  assert.equal(governedIssueParsed.parsed, true);
+  assert.deepEqual(governedIssueParsed.values, issueInput);
 
   const governedPullRequestContract = governedFixture(
     pullRequestContractFixture,
@@ -1428,6 +1447,29 @@ test("rendered Issue and PR bodies carry a bounded template identity marker that
     acceptance: ["tests"],
     scope: "Small and explicit",
   });
+});
+
+test("governed Issue readers accept native and semantic markers without weakening structural validation", () => {
+  const semanticSourcePath = ".github/inari/issues/feature.json";
+  const contract = governedFixture(issueContractFixture, semanticSourcePath);
+  const canonicalBody = renderIssueArtifact(contract, {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests", "docs"],
+  });
+
+  for (const markerPath of [semanticSourcePath, contract.templateIdentity.path]) {
+    const body = canonicalBody.replace(semanticSourcePath, markerPath);
+    const marker = extractTemplateIdentityMarker(body);
+    assert.equal(marker.status, "valid");
+    assert.equal(marker.marker?.path, markerPath);
+    assert.equal(validateExistingIssueArtifact(contract, body).valid, true);
+    assert.equal(
+      validateExistingIssueArtifact(contract, body.replace("### Problem", "### Wrong heading")).valid,
+      false,
+    );
+  }
 });
 
 test("template identity marker extraction fails closed on malformed and unsupported-version markers", () => {
