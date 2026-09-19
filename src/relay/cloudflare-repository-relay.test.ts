@@ -388,6 +388,191 @@ test("production DO admission gates a reconnect retained result until acknowledg
   runtime.shutdown();
 });
 
+test("replacement assigns one deterministic current generation and isolates stale delivery state", async () => {
+  const state = new FakeState();
+  let nonceNumber = 0;
+  const object = new RepositoryRelayDurableObject(
+    state,
+    { repository },
+    { now: () => 10_000, randomNonce: () => `nonce-replacement-${++nonceNumber}` },
+  );
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const first = pairFor(object, "role=runtime&connectionId=runtime-replacement&delegatorId=delegator-replacement");
+  const replacement = pairFor(
+    object,
+    "role=runtime&connectionId=runtime-replacement&delegatorId=delegator-replacement",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstChallenge = (first.attachment as { challenge: RelayPossessionProofChallenge }).challenge;
+  const replacementChallenge = (replacement.attachment as { challenge: RelayPossessionProofChallenge }).challenge;
+  await Promise.all([
+    object.webSocketMessage(
+      first,
+      encodeRelayPossessionProofResponse(signRelayPossessionProof(firstChallenge, privateKey)),
+    ),
+    object.webSocketMessage(
+      replacement,
+      encodeRelayPossessionProofResponse(signRelayPossessionProof(replacementChallenge, privateKey)),
+    ),
+  ]);
+  assert.equal((first.attachment as { generation?: number }).generation, 1);
+  assert.equal((replacement.attachment as { generation?: number }).generation, 2);
+  assert.equal(first.readyState, 3);
+
+  const client = pairFor(object, "role=client&connectionId=host-replacement");
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "runtime-replacement",
+    jobId: "job-replacement",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(privateKey, privateKey, "delegator-replacement"),
+  };
+  await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
+  assert.equal(first.sent.filter((entry) => typeof entry === "string" && entry.includes("job-replacement")).length, 0);
+  assert.equal(
+    replacement.sent.filter((entry) => typeof entry === "string" && entry.includes("job-replacement")).length,
+    1,
+  );
+  const persisted = await state.storage.get<Record<string, unknown>>("relay:job:job-replacement");
+  assert.equal((persisted ?? {}).targetGeneration, 2);
+
+  await object.webSocketClose(first);
+  const beforeStaleResult = await state.storage.get<Record<string, unknown>>("relay:job:job-replacement");
+  assert.equal(((beforeStaleResult ?? {}).state as { phase?: string }).phase, "delivered");
+  await object.webSocketClose(replacement);
+  const afterCurrentClose = await state.storage.get<Record<string, unknown>>("relay:job:job-replacement");
+  assert.equal(((afterCurrentClose ?? {}).state as { phase?: string }).phase, "possibly-delivered");
+});
+
+test("generation reconstruction leaves distinct Runtime identities independently routable", async () => {
+  const state = new FakeState();
+  let nonceNumber = 0;
+  const options = { now: () => 10_000, randomNonce: () => `nonce-reconstruct-${++nonceNumber}` };
+  const object = new RepositoryRelayDurableObject(state, { repository }, options);
+  const firstKeys = generateKeyPairSync("ed25519");
+  const first = pairFor(object, "role=runtime&connectionId=runtime-reconstruct&delegatorId=delegator-reconstruct");
+  await admitRuntime(object, first, firstKeys.privateKey);
+
+  // A fresh object instance represents a Hibernation wake-up. The persisted
+  // attachment is the only source used to allocate the replacement generation.
+  const hibernatedObject = new RepositoryRelayDurableObject(state, { repository }, options);
+  const replacement = pairFor(
+    hibernatedObject,
+    "role=runtime&connectionId=runtime-reconstruct&delegatorId=delegator-reconstruct",
+  );
+  await admitRuntime(hibernatedObject, replacement, firstKeys.privateKey);
+  assert.equal((replacement.attachment as { generation?: number }).generation, 2);
+  assert.equal(first.readyState, 3);
+
+  const secondKeys = generateKeyPairSync("ed25519");
+  const distinct = pairFor(
+    hibernatedObject,
+    "role=runtime&connectionId=runtime-distinct&delegatorId=delegator-distinct",
+  );
+  await admitRuntime(hibernatedObject, distinct, secondKeys.privateKey);
+  assert.equal((distinct.attachment as { generation?: number }).generation, 1);
+  const client = pairFor(hibernatedObject, "role=client&connectionId=host-distinct");
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "runtime-distinct",
+    jobId: "job-distinct",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(secondKeys.privateKey, secondKeys.privateKey, "delegator-distinct"),
+  };
+  await hibernatedObject.webSocketMessage(client, encodeRelayEnvelope(job, repository));
+  assert.equal(distinct.sent.filter((entry) => typeof entry === "string" && entry.includes("job-distinct")).length, 1);
+  assert.equal(
+    replacement.sent.filter((entry) => typeof entry === "string" && entry.includes("job-distinct")).length,
+    0,
+  );
+});
+
+test("generation reconstruction does not reuse a generation referenced by a retained job", async () => {
+  const state = new FakeState();
+  let nonceNumber = 0;
+  const options = { now: () => 10_000, randomNonce: () => `nonce-retained-${++nonceNumber}` };
+  const object = new RepositoryRelayDurableObject(state, { repository }, options);
+  const keys = generateKeyPairSync("ed25519");
+  const runtime = pairFor(object, "role=runtime&connectionId=runtime-retained&delegatorId=delegator-retained");
+  await admitRuntime(object, runtime, keys.privateKey);
+  const client = pairFor(object, "role=client&connectionId=host-retained");
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "runtime-retained",
+    jobId: "job-retained-generation",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(keys.privateKey, keys.privateKey, "delegator-retained"),
+  };
+  await object.webSocketMessage(client, encodeRelayEnvelope(job, repository));
+  const retainedBeforeDisconnect = await state.storage.get<Record<string, unknown>>(
+    "relay:job:job-retained-generation",
+  );
+  assert.equal((retainedBeforeDisconnect ?? {}).targetGeneration, 1);
+
+  await object.webSocketClose(runtime);
+  const removedSocketIndex = state.sockets.indexOf(runtime);
+  assert.notEqual(removedSocketIndex, -1);
+  state.sockets.splice(removedSocketIndex, 1);
+  const retainedAfterDisconnect = await state.storage.get<Record<string, unknown>>(
+    "relay:job:job-retained-generation",
+  );
+  assert.equal((retainedAfterDisconnect ?? {}).targetGeneration, 1);
+  assert.equal(((retainedAfterDisconnect ?? {}).state as { phase?: string }).phase, "possibly-delivered");
+
+  const reconstructedObject = new RepositoryRelayDurableObject(state, { repository }, options);
+  const replacement = pairFor(
+    reconstructedObject,
+    "role=runtime&connectionId=runtime-retained&delegatorId=delegator-retained",
+  );
+  await admitRuntime(reconstructedObject, replacement, keys.privateKey);
+  assert.equal((replacement.attachment as { generation?: number }).generation, 2);
+
+  const result = {
+    version: 1,
+    kind: "result" as const,
+    repository,
+    connectionId: "runtime-retained",
+    jobId: "job-retained-generation",
+    deliveryState: "terminal-result" as const,
+    resultPayload: "Ag",
+  };
+  await reconstructedObject.webSocketMessage(replacement, encodeRelayEnvelope(result, repository));
+  await reconstructedObject.webSocketMessage(
+    replacement,
+    encodeRelayEnvelope(
+      {
+        version: 1,
+        kind: "control" as const,
+        repository,
+        connectionId: "runtime-retained",
+        jobId: "job-retained-generation",
+        deliveryState: "expired" as const,
+        deliveryCertainty: "not-delivered" as const,
+      },
+      repository,
+    ),
+  );
+  const afterCollisionAttempts = await state.storage.get<Record<string, unknown>>(
+    "relay:job:job-retained-generation",
+  );
+  assert.equal(((afterCollisionAttempts ?? {}).state as { phase?: string }).phase, "possibly-delivered");
+  assert.equal(
+    client.sent.filter(
+      (entry) => typeof entry !== "string" && new TextDecoder().decode(entry).includes("job-retained-generation"),
+    ).length,
+    0,
+  );
+});
+
 test("message rate backpressure closes the connection before parsing a second message", async () => {
   const state = new FakeState();
   const object = new RepositoryRelayDurableObject(

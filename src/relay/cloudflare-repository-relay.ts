@@ -56,6 +56,7 @@ const MAX_RELAY_MESSAGES_PER_WINDOW = 256;
 const MAX_RELAY_MESSAGE_WINDOW_MS = 60_000;
 const MAX_RELAY_CONNECTION_TTL_MS = 86_400_000;
 const MAX_RELAY_JOB_RETENTION_MS = 120_000;
+const MAX_RUNTIME_GENERATION = Number.MAX_SAFE_INTEGER;
 const CONNECTION_ATTACHMENT_VERSION = 1 as const;
 const JOB_RECORD_VERSION = 1 as const;
 const RELAY_HANDSHAKE_KIND = "repository-relay-possession-challenge";
@@ -167,6 +168,8 @@ interface RuntimeConnectionAttachment {
   readonly delegatorId?: string;
   readonly challenge?: RelayPossessionProofChallenge;
   readonly binding?: RelayConnectionKeyBinding;
+  /** Monotonic transport instance identity for an admitted Runtime. */
+  readonly generation?: number;
   readonly authenticated: boolean;
   readonly openedAtMs: number;
   readonly expiresAtMs: number;
@@ -179,6 +182,8 @@ interface StoredJobRecord {
   readonly repository: RelayRepositoryIdentity;
   readonly sourceConnectionId: string;
   readonly targetConnectionId: string;
+  /** The admitted Runtime transport instance that received the job. */
+  readonly targetGeneration?: number;
   readonly deadlineAtMs: number;
   readonly retainedUntilMs: number;
   readonly state: RelayDeliveryState;
@@ -422,6 +427,7 @@ export class RepositoryRelayDurableObject {
   private readonly randomNonce: () => string;
   private readonly limits: RelayOperationalLimits;
   private readonly telemetry?: RelayTelemetrySink;
+  private readonly generationReservations = new Map<string, number>();
 
   constructor(
     private readonly state: RepositoryRelayDurableObjectState,
@@ -649,10 +655,18 @@ export class RepositoryRelayDurableObject {
 
   async webSocketClose(webSocket: RepositoryRelayWebSocket): Promise<void> {
     const attachment = this.attachmentOf(webSocket);
-    if (attachment === undefined) return;
+    if (
+      attachment === undefined ||
+      attachment.role !== "runtime" ||
+      !attachment.authenticated ||
+      attachment.generation === undefined
+    ) {
+      return;
+    }
     const records = await this.records();
     for (const record of records) {
-      if (record.targetConnectionId !== attachment.connectionId) continue;
+      if (record.targetConnectionId !== attachment.connectionId || record.targetGeneration !== attachment.generation)
+        continue;
       await this.applyEvent(record, {
         version: record.state.version,
         type: "disconnect",
@@ -713,6 +727,11 @@ export class RepositoryRelayDurableObject {
           ? { challenge: value.challenge as unknown as RelayPossessionProofChallenge }
           : {}),
         ...(isRecord(value.binding) ? { binding: value.binding as unknown as RelayConnectionKeyBinding } : {}),
+        ...(Number.isSafeInteger(value.generation) &&
+        (value.generation as number) >= 1 &&
+        (value.generation as number) <= MAX_RUNTIME_GENERATION
+          ? { generation: value.generation as number }
+          : {}),
         authenticated: value.authenticated === true,
         openedAtMs: Number.isSafeInteger(value.openedAtMs) ? (value.openedAtMs as number) : 0,
         expiresAtMs: Number.isSafeInteger(value.expiresAtMs) ? (value.expiresAtMs as number) : Number.POSITIVE_INFINITY,
@@ -726,6 +745,107 @@ export class RepositoryRelayDurableObject {
       };
     } catch {
       return undefined;
+    }
+  }
+
+  private sameRuntimeIdentity(
+    attachment: RuntimeConnectionAttachment,
+    repository: RelayRepositoryIdentity,
+    connectionId: string,
+    delegatorId: string | undefined,
+  ): boolean {
+    return (
+      attachment.role === "runtime" &&
+      attachment.repository.repositoryId === repository.repositoryId &&
+      attachment.repository.repositoryHost === repository.repositoryHost &&
+      attachment.connectionId === connectionId &&
+      attachment.delegatorId === delegatorId
+    );
+  }
+
+  private runtimeIdentityKey(repository: RelayRepositoryIdentity, connectionId: string, delegatorId: string): string {
+    return `${repository.repositoryHost}\u0000${repository.repositoryId}\u0000${delegatorId}\u0000${connectionId}`;
+  }
+
+  private nextRuntimeGeneration(
+    repository: RelayRepositoryIdentity,
+    connectionId: string,
+    delegatorId: string,
+  ): number {
+    const key = this.runtimeIdentityKey(repository, connectionId, delegatorId);
+    let highest = this.generationReservations.get(key) ?? 0;
+    for (const socket of this.state.getWebSockets("runtime")) {
+      const attachment = this.attachmentOf(socket);
+      if (
+        attachment === undefined ||
+        !this.sameRuntimeIdentity(attachment, repository, connectionId, delegatorId) ||
+        !attachment.authenticated ||
+        attachment.generation === undefined
+      ) {
+        continue;
+      }
+      highest = Math.max(highest, attachment.generation);
+    }
+    if (highest >= MAX_RUNTIME_GENERATION) {
+      throw new RelayOperationalLimitError(
+        "RELAY_RETENTION_LIMIT",
+        "Runtime transport generation exhausted its bounded ceiling.",
+      );
+    }
+    const generation = highest + 1;
+    this.generationReservations.set(key, generation);
+    return generation;
+  }
+
+  private isCurrentRuntime(webSocket: RepositoryRelayWebSocket, attachment: RuntimeConnectionAttachment): boolean {
+    if (!attachment.authenticated || attachment.generation === undefined || !isOpen(webSocket)) return false;
+    let highest = 0;
+    let currentCount = 0;
+    for (const candidate of this.state.getWebSockets("runtime")) {
+      const candidateAttachment = this.attachmentOf(candidate);
+      if (
+        candidateAttachment === undefined ||
+        !candidateAttachment.authenticated ||
+        candidateAttachment.generation === undefined ||
+        !this.sameRuntimeIdentity(
+          candidateAttachment,
+          attachment.repository,
+          attachment.connectionId,
+          attachment.delegatorId,
+        ) ||
+        !isOpen(candidate)
+      ) {
+        continue;
+      }
+      if (candidateAttachment.generation > highest) {
+        highest = candidateAttachment.generation;
+        currentCount = 1;
+      } else if (candidateAttachment.generation === highest) {
+        currentCount += 1;
+      }
+    }
+    return currentCount === 1 && attachment.generation === highest;
+  }
+
+  private supersedeRuntime(currentSocket: RepositoryRelayWebSocket, attachment: RuntimeConnectionAttachment): void {
+    if (attachment.generation === undefined) return;
+    for (const candidate of this.state.getWebSockets("runtime")) {
+      if (candidate === currentSocket || !isOpen(candidate)) continue;
+      const candidateAttachment = this.attachmentOf(candidate);
+      if (
+        candidateAttachment === undefined ||
+        !candidateAttachment.authenticated ||
+        !this.sameRuntimeIdentity(
+          candidateAttachment,
+          attachment.repository,
+          attachment.connectionId,
+          attachment.delegatorId,
+        ) ||
+        (candidateAttachment.generation !== undefined && candidateAttachment.generation >= attachment.generation)
+      ) {
+        continue;
+      }
+      this.close(candidate, 1000, "Runtime connection replaced.");
     }
   }
 
@@ -790,6 +910,11 @@ export class RepositoryRelayDurableObject {
       const usedNonces = new Set(activeNonceRecords.map((entry) => entry.nonce));
       const result = verifyRelayPossessionProof(attachment.challenge, response, { nowMs: this.now(), usedNonces });
       if (!result.valid || result.value === undefined) return this.close(webSocket, 1008, "Invalid possession proof.");
+      const generation = this.nextRuntimeGeneration(
+        attachment.repository,
+        attachment.connectionId,
+        attachment.delegatorId,
+      );
       await this.state.storage.put(
         NONCE_KEY,
         [
@@ -801,9 +926,11 @@ export class RepositoryRelayDurableObject {
       const authenticatedAttachment: RuntimeConnectionAttachment = {
         ...attachment,
         binding: result.value,
+        generation,
         authenticated: true,
       };
       webSocket.serializeAttachment?.(authenticatedAttachment);
+      this.supersedeRuntime(webSocket, authenticatedAttachment);
       webSocket.send(
         JSON.stringify({
           type: "repository-relay-connected",
@@ -898,7 +1025,7 @@ export class RepositoryRelayDurableObject {
       },
     });
     const runtimes = this.state.getWebSockets("runtime");
-    const target = runtimes.find((candidate) => {
+    const eligible = runtimes.filter((candidate) => {
       const attachment = this.attachmentOf(candidate);
       return (
         attachment?.role === "runtime" &&
@@ -911,12 +1038,34 @@ export class RepositoryRelayDurableObject {
         verifySessionCertificateConnectionBinding(certificate, attachment.binding).valid
       );
     });
+    let target: RepositoryRelayWebSocket | undefined;
+    let targetAttachment: RuntimeConnectionAttachment | undefined;
+    let targetGeneration = 0;
+    let targetCount = 0;
+    for (const candidate of eligible) {
+      const candidateAttachment = this.attachmentOf(candidate);
+      if (candidateAttachment === undefined || !this.isCurrentRuntime(candidate, candidateAttachment)) continue;
+      if (candidateAttachment.generation === undefined) continue;
+      if (candidateAttachment.generation > targetGeneration) {
+        target = candidate;
+        targetAttachment = candidateAttachment;
+        targetGeneration = candidateAttachment.generation;
+        targetCount = 1;
+      } else if (candidateAttachment.generation === targetGeneration) {
+        targetCount += 1;
+      }
+    }
+    if (targetCount !== 1) {
+      target = undefined;
+      targetAttachment = undefined;
+    }
     const initial = createRelayDeliveryState({ connectionId: job.connectionId, jobId: job.jobId });
     const record: StoredJobRecord = {
       version: JOB_RECORD_VERSION,
       repository: sourceAttachment.repository,
       sourceConnectionId: sourceAttachment.connectionId,
       targetConnectionId: job.connectionId,
+      ...(targetAttachment?.generation === undefined ? {} : { targetGeneration: targetAttachment.generation }),
       deadlineAtMs: now + job.deadlineMs,
       retainedUntilMs: now + job.deadlineMs + this.limits.jobRetentionMs,
       state: initial,
@@ -992,10 +1141,19 @@ export class RepositoryRelayDurableObject {
     attachment: RuntimeConnectionAttachment,
     resultEnvelope: Extract<RelayEnvelope, { kind: "result" }>,
   ): Promise<void> {
-    if (!attachment.authenticated || attachment.connectionId !== resultEnvelope.connectionId)
+    if (
+      !attachment.authenticated ||
+      attachment.connectionId !== resultEnvelope.connectionId ||
+      !this.isCurrentRuntime(runtime, attachment)
+    )
       return this.close(runtime, 1008, "Runtime binding mismatch.");
     const record = await this.record(resultEnvelope.jobId);
-    if (record === undefined || record.targetConnectionId !== attachment.connectionId) return;
+    if (
+      record === undefined ||
+      record.targetConnectionId !== attachment.connectionId ||
+      record.targetGeneration !== attachment.generation
+    )
+      return;
     const digest = await digestPayload(resultEnvelope.resultPayload);
     const event: RelayDeliveryEvent = {
       version: record.state.version,
@@ -1025,10 +1183,19 @@ export class RepositoryRelayDurableObject {
     attachment: RuntimeConnectionAttachment,
     control: Extract<RelayEnvelope, { kind: "control" }>,
   ): Promise<void> {
-    if (!attachment.authenticated || attachment.connectionId !== control.connectionId)
+    if (
+      !attachment.authenticated ||
+      attachment.connectionId !== control.connectionId ||
+      !this.isCurrentRuntime(runtime, attachment)
+    )
       return this.close(runtime, 1008, "Runtime binding mismatch.");
     const record = await this.record(control.jobId);
-    if (record === undefined || record.targetConnectionId !== attachment.connectionId) return;
+    if (
+      record === undefined ||
+      record.targetConnectionId !== attachment.connectionId ||
+      record.targetGeneration !== attachment.generation
+    )
+      return;
     await this.applyEvent(record, eventForControl(record.state, control));
     this.emitTelemetry({
       occurredAtMs: this.now(),
@@ -1160,6 +1327,11 @@ export class RepositoryRelayDurableObject {
         repository: normalizeRelayRepositoryIdentity(value.repository),
         sourceConnectionId: String(value.sourceConnectionId),
         targetConnectionId: String(value.targetConnectionId),
+        ...(Number.isSafeInteger(value.targetGeneration) &&
+        (value.targetGeneration as number) >= 1 &&
+        (value.targetGeneration as number) <= MAX_RUNTIME_GENERATION
+          ? { targetGeneration: value.targetGeneration as number }
+          : {}),
         deadlineAtMs: Number(value.deadlineAtMs),
         retainedUntilMs:
           Number.isSafeInteger(value.retainedUntilMs) && (value.retainedUntilMs as number) > 0
@@ -1192,6 +1364,7 @@ export class RepositoryRelayDurableObject {
       repository: record.repository,
       sourceConnectionId: record.sourceConnectionId,
       targetConnectionId: record.targetConnectionId,
+      ...(record.targetGeneration === undefined ? {} : { targetGeneration: record.targetGeneration }),
       deadlineAtMs: record.deadlineAtMs,
       retainedUntilMs: record.retainedUntilMs,
       state: JSON.parse(serializeRelayDeliveryState(record.state)) as RelayDeliveryState,
