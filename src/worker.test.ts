@@ -38,6 +38,25 @@ test("/healthz reports not-ready when a required secret is missing, without leak
   assert.equal(body.ok, false);
 });
 
+test("/healthz accepts only GET without resolving the runtime for unsupported methods", async () => {
+  const { INARI_GITHUB_APP_PRIVATE_KEY: _omitted, ...incomplete } = VALID_ENV;
+
+  for (const method of ["HEAD", "POST", "PUT", "DELETE"]) {
+    const worker = await freshWorkerModule();
+    const response = await worker.default.fetch(
+      new Request("https://worker.example/healthz", { method }),
+      incomplete as Env,
+    );
+    assert.equal(response.status, 405, method);
+    assert.equal(response.headers.get("allow"), "GET");
+    if (method !== "HEAD") {
+      const body = (await response.json()) as { ok: boolean; error: { code: string } };
+      assert.equal(body.ok, false);
+      assert.equal(body.error.code, "METHOD_NOT_ALLOWED");
+    }
+  }
+});
+
 test("missing configuration fails closed for /v1/execute with a secret-safe error", async () => {
   const worker = await freshWorkerModule();
   const { INARI_GITHUB_APP_PRIVATE_KEY: _omitted, ...incomplete } = VALID_ENV;
