@@ -33,11 +33,12 @@ import {
 } from "../session-authorized-change-executor.js";
 import { executeBranchAdvance } from "../agent-authority/branch-advance.js";
 import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
-import type {
-  ChangeExecutionResult,
-  ChangeExecutionPort,
-  ChangeMutationRequest,
-  ChangeReadRequest,
+import {
+  changeReadRequest,
+  type ChangeExecutionResult,
+  type ChangeExecutionPort,
+  type ChangeMutationRequest,
+  type ChangeReadRequest,
 } from "../change-execution-port.js";
 
 /** Deployment configuration for one stateless direct-App Session executor. */
@@ -150,6 +151,15 @@ export function createDirectAppSessionExecutor(
           return projectChangeFromCapability(capability, config, capability.scope.repository, request);
         }),
     },
+    reviewEvidenceReader: ({ issue, pullRequest }) =>
+      broker.withRepositoryReadCapability({}, async (capability) => {
+        establishedApp = Object.freeze({
+          ...capability.scope.app,
+          installationId: capability.scope.installation.installationId,
+        });
+        const reader = buildReader(capability, config, capability.scope.repository, changeReadRequest(issue));
+        return reader.readOperationalPullRequestEvidence(pullRequest);
+      }),
     createChangeExecutor: async (
       input: CapabilityAuthorizedChangeExecutorFactoryInput,
     ): Promise<CapabilityAuthorizedChangeExecutorFactoryResult> => {

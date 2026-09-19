@@ -268,6 +268,35 @@ test("a current review without request-changes exposes explicit NO_REWORK and no
   assert.equal(result.projection?.rework, undefined);
 });
 
+test("a later approval supersedes a historical request-changes review", () => {
+  const result = tryProjectImplementationReviewRework(
+    input({
+      pullRequest: pullRequest({
+        reviewDecision: "APPROVED",
+        reviews: collection([
+          {
+            id: 91,
+            body: "request changes",
+            author: { login: "reviewer" },
+            state: "CHANGES_REQUESTED",
+            commitId: head,
+          },
+          {
+            id: 92,
+            body: "approved after rework",
+            author: { login: "reviewer" },
+            state: "APPROVED",
+            commitId: head,
+          },
+        ]),
+      }),
+    }),
+  );
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.projection?.classification, "NO_REWORK");
+  assert.equal(result.projection?.rework, undefined);
+});
+
 test("Golden Path exposes bounded REWORK as a projection over REVIEW", async () => {
   const { projectGoldenPathStatus } = await import("./golden-path-status.js");
   const result = projectGoldenPathStatus({

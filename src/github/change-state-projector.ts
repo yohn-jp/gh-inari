@@ -172,6 +172,11 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
     this.requiresGovernedIssueValidation = options.cwd !== undefined || options.remoteGovernance !== undefined;
   }
 
+  /** Read normalized provider evidence for the existing Operational Observation authority. */
+  async readOperationalPullRequestEvidence(number: number) {
+    return this.#reader.readOperationalPullRequestEvidence(number);
+  }
+
   async read(request: ChangeMutationRequest | ChangeReadRequest): Promise<ChangeProjectionInput> {
     try {
       return await this.readInternal(request);

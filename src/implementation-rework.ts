@@ -21,7 +21,11 @@ import {
   tryVerifyImplementationAuthorization,
   type ImplementationAuthorizationRecord,
 } from "./implementation-authorization.js";
-import { tryObserveOperationalPullRequest, type OperationalPullRequestObservation } from "./operational-observation.js";
+import {
+  tryObserveOperationalPullRequest,
+  type OperationalPullRequestObservation,
+  type OperationalReview,
+} from "./operational-observation.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 
 export const IMPLEMENTATION_REWORK_VERSION = 1 as const;
@@ -313,6 +317,17 @@ function reviewState(value: string): string {
   return value.toLowerCase().replace(/-/gu, "_");
 }
 
+function latestCurrentRequestChangesReview(
+  observation: OperationalPullRequestObservation,
+  head: string,
+): OperationalReview | undefined {
+  if (observation.reviewDecision !== "changes_requested") return undefined;
+  const current = observation.reviews.items.filter(
+    (review) => reviewState(review.state) === "changes_requested" && review.commitId?.toLowerCase() === head,
+  );
+  return [...current].sort((left, right) => right.id - left.id)[0];
+}
+
 function freshReview(
   observation: OperationalPullRequestObservation,
   head: string,
@@ -327,14 +342,11 @@ function freshReview(
     );
     return undefined;
   }
-  const requested = observation.reviews.items.filter((review) => reviewState(review.state) === "changes_requested");
-  const current = requested.filter((review) => review.commitId?.toLowerCase() === head);
-  if (current.length > 0) {
-    const review = [...current].sort((left, right) => right.id - left.id)[0];
-    if (review === undefined) return undefined;
+  const review = latestCurrentRequestChangesReview(observation, head);
+  if (review !== undefined) {
     return { id: review.id, state: "changes_requested", head };
   }
-  if (requested.length > 0 || observation.reviewDecision === "changes_requested") {
+  if (observation.reviewDecision === "changes_requested") {
     diagnostic(
       diagnostics,
       "IMPLEMENTATION_REWORK_STALE_HEAD",
@@ -343,6 +355,41 @@ function freshReview(
     );
   }
   return undefined;
+}
+
+/**
+ * Verify the body-free marker against the current provider review authority.
+ * The aggregate review decision is required in addition to the referenced
+ * review so an older request-changes review cannot survive a later approval.
+ */
+export function isCurrentImplementationReworkReview(input: {
+  readonly marker: ImplementationReworkMarker;
+  readonly reviewEvidence: unknown;
+  readonly repository: { readonly repositoryHost: string; readonly repositoryId: string };
+  readonly branch: string;
+  readonly base: string;
+  readonly pullRequest: number;
+}): boolean {
+  const observationResult = tryObserveOperationalPullRequest({ pullRequest: input.reviewEvidence });
+  if (!observationResult.valid || observationResult.observation === undefined) return false;
+  const observation = observationResult.observation;
+  if (
+    observation.number !== input.pullRequest ||
+    observation.repository.host.toLowerCase() !== input.repository.repositoryHost.toLowerCase() ||
+    observation.repository.repositoryId !== input.repository.repositoryId ||
+    observation.state !== "open" ||
+    observation.draft === true ||
+    observation.head.branch !== input.branch ||
+    observation.base.branch !== input.base ||
+    observation.head.sha !== input.marker.reviewHead ||
+    observation.reviewDecision !== "changes_requested" ||
+    observation.reviews.status !== "available" ||
+    observation.reviews.pagination.truncated
+  ) {
+    return false;
+  }
+  const review = latestCurrentRequestChangesReview(observation, input.marker.reviewHead);
+  return review !== undefined && review.id === input.marker.reviewId;
 }
 
 function authorizationAndSession(

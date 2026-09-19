@@ -32,6 +32,7 @@ import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
 import type { ChangeState } from "../change.js";
 import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
+import type { GitHubOperationalCollection, GitHubOperationalPullRequestEvidence } from "../github/types.js";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends <Value>() => Value extends Right ? 1 : 2 ? true : false;
@@ -61,6 +62,7 @@ type ExpectedCapabilityAdmissionRequest = {
   readonly subject: ExpectedCapabilityAdmissionSubject;
   readonly projection: ChangeProjectionResult;
   readonly treeDelta?: DelegatedTreeDelta;
+  readonly reviewEvidence?: unknown;
 };
 type ExpectedAdmittedSessionCapability = {
   readonly version: 1;
@@ -128,6 +130,71 @@ const BLOB_SHA = "c".repeat(40);
 const BRANCH_SHA = "d".repeat(40);
 const CANONICAL_BRANCH = "feat/375-semantic-capability-admission";
 const BASE_BRANCH = "main";
+
+function operationalCollection<T>(items: readonly T[]): GitHubOperationalCollection<T> {
+  return {
+    status: "available",
+    items,
+    pagination: { perPage: 100, pages: 1, returned: items.length, truncated: false },
+    diagnostics: [],
+  };
+}
+
+const IMPLEMENTATION_BINDING: ImplementationSessionAuthorizationBinding = {
+  version: 1,
+  kind: "implementation-session-binding",
+  authorization: {
+    version: 1,
+    kind: "implementation-authorization",
+    contractVersion: 1,
+    implementation: {
+      repositoryHost: "github.com",
+      repositoryId: REPOSITORY_ID,
+      repository: "acme/inari",
+      number: 375,
+    },
+    governedBodyDigest: "f".repeat(64),
+  },
+  repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID, repository: "acme/inari" },
+  base: { branch: BASE_BRANCH, revision: "e".repeat(40), freshness: "base-freshness" },
+  task: { kind: "issue", number: 375 },
+};
+
+function reviewEvidence(reviewDecision: string): GitHubOperationalPullRequestEvidence {
+  return {
+    repository: { host: "github.com", nameWithOwner: "acme/inari", repositoryId: REPOSITORY_ID },
+    number: 5375,
+    title: "review",
+    body: null,
+    state: "open",
+    author: null,
+    head: { ref: CANONICAL_BRANCH, sha: BRANCH_SHA },
+    base: { ref: BASE_BRANCH, sha: "e".repeat(40) },
+    draft: false,
+    mergeable: true,
+    mergeState: "clean",
+    reviewDecision,
+    merged: false,
+    labels: [],
+    assignees: [],
+    url: "https://github.com/acme/inari/pull/5375",
+    checks: operationalCollection([]),
+    requiredCheckBindings: operationalCollection([]),
+    reviews: operationalCollection([
+      {
+        id: 91,
+        body: "request changes",
+        author: null,
+        state: "CHANGES_REQUESTED",
+        commitId: BRANCH_SHA,
+      },
+    ]),
+    comments: operationalCollection([]),
+    inlineReviewComments: operationalCollection([]),
+    changedFiles: operationalCollection([]),
+    provenance: { provider: "github", endpoints: ["pulls/5375", "pulls/5375/reviews"] },
+  };
+}
 
 function runtimeAuthority(key = generateRuntimeAuthorityKeyPair()): {
   readonly authority: RuntimeAuthority;
@@ -280,6 +347,7 @@ function projection(
             {
               number: 5375,
               head: `feat/${issue}-semantic-capability-admission`,
+              headSha: BRANCH_SHA,
               base: BASE_BRANCH,
               state: state === "aborted" || state === "recovery" ? "closed" : "open",
               draft: state === "draft",
@@ -314,6 +382,7 @@ function admission(
   requestSubject: CapabilityAdmissionSubject,
   currentProjection: ChangeProjectionResult,
   treeDelta?: CapabilityAdmissionRequest["treeDelta"],
+  reviewEvidence?: unknown,
 ) {
   return admitAuthenticatedSessionCapability({
     context,
@@ -321,6 +390,7 @@ function admission(
     subject: requestSubject,
     projection: currentProjection,
     ...(treeDelta === undefined ? {} : { treeDelta }),
+    ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
   });
 }
 
@@ -572,6 +642,55 @@ test("fails closed for an unresolved named path policy and never treats it as wi
         changes: [{ operation: "modify", path: "src/implementation.ts" }],
       }),
     "path-policy",
+  );
+});
+
+test("requires current effective request-changes evidence for REVIEW branch advance", async () => {
+  const runtime = runtimeAuthority();
+  const reviewHeadMarker = {
+    version: 1,
+    kind: "implementation-review-rework",
+    intent: "request-changes",
+    pullRequest: 5375,
+    reviewId: 91,
+    reviewHead: BRANCH_SHA,
+    authorizationDigest: IMPLEMENTATION_BINDING.authorization.governedBodyDigest,
+  };
+  const authenticated = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.advance",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH, rework: reviewHeadMarker },
+    [{ kind: "branch.advance", branch: CANONICAL_BRANCH }],
+  );
+  const context = { ...authenticated, implementationBinding: IMPLEMENTATION_BINDING } as AuthenticatedSessionContext;
+  const delta = { changes: [{ operation: "modify" as const, path: "src/implementation.ts" }] };
+
+  const admitted = admission(
+    context,
+    "branch.advance",
+    subject("branch"),
+    projection(375, "review"),
+    delta,
+    reviewEvidence("CHANGES_REQUESTED"),
+  );
+  assert.equal(admitted.canonical.state, "REVIEW");
+
+  assertDenied(
+    () => admission(context, "branch.advance", subject("branch"), projection(375, "review"), delta),
+    "stale-evidence",
+  );
+  assertDenied(
+    () =>
+      admission(
+        context,
+        "branch.advance",
+        subject("branch"),
+        projection(375, "review"),
+        delta,
+        reviewEvidence("APPROVED"),
+      ),
+    "stale-evidence",
   );
 });
 
