@@ -37,6 +37,9 @@ export const RELAY_DELIVERY_STATES = Object.freeze([
 ] as const);
 export type RelayDeliveryState = (typeof RELAY_DELIVERY_STATES)[number];
 
+export const RELAY_DELIVERY_CERTAINTIES = Object.freeze(["not-delivered", "delivered-ambiguous"] as const);
+export type RelayDeliveryCertainty = (typeof RELAY_DELIVERY_CERTAINTIES)[number];
+
 const CONTROL_DELIVERY_STATES = Object.freeze(["delivered-ambiguous", "expired", "unavailable"] as const);
 type RelayControlDeliveryState = (typeof CONTROL_DELIVERY_STATES)[number];
 
@@ -53,7 +56,7 @@ const UNSAFE_TEXT_PATTERN = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u20
 export interface RelayRepositoryIdentity {
   /** Immutable provider repository ID used for routing and cross-repository checks. */
   readonly repositoryId: string;
-  /** Deployment/provider host is routing metadata, never a mutable name binding. */
+  /** Immutable provider host partition used with repositoryId for routing. */
   readonly repositoryHost: string;
   /** Optional diagnostic metadata; it is not part of repository authority. */
   readonly repositoryNameWithOwner?: string;
@@ -98,11 +101,13 @@ export interface RelayControlEnvelope {
   readonly connectionId: string;
   readonly jobId: string;
   readonly deliveryState: RelayControlDeliveryState;
+  /** Transport proof needed to distinguish safe retry from ambiguity. */
+  readonly deliveryCertainty: RelayDeliveryCertainty;
 }
 
 export type RelayEnvelope = RelayConnectionEnvelope | RelayJobEnvelope | RelayResultEnvelope | RelayControlEnvelope;
 
-export type RelayExpectedRepository = string | RelayRepositoryIdentity;
+export type RelayExpectedRepository = RelayRepositoryIdentity;
 
 export type RelayContractErrorCode =
   | "RELAY_INVALID_ROOT"
@@ -308,7 +313,12 @@ export function relayRepositoriesMatch(
   right: RelayRepositoryIdentity | unknown,
 ): boolean {
   try {
-    return normalizeRelayRepositoryIdentity(left).repositoryId === normalizeRelayRepositoryIdentity(right).repositoryId;
+    const normalizedLeft = normalizeRelayRepositoryIdentity(left);
+    const normalizedRight = normalizeRelayRepositoryIdentity(right);
+    return (
+      normalizedLeft.repositoryHost === normalizedRight.repositoryHost &&
+      normalizedLeft.repositoryId === normalizedRight.repositoryId
+    );
   } catch {
     return false;
   }
@@ -319,12 +329,12 @@ function assertExpectedRepository(
   expected: RelayExpectedRepository | undefined,
 ): void {
   if (expected === undefined) return;
-  const expectedId =
-    typeof expected === "string"
-      ? normalizeRepositoryId(expected, "$.expectedRepositoryId")
-      : normalizeRelayRepositoryIdentity(expected).repositoryId;
-  if (repository.repositoryId !== expectedId) {
-    fail("RELAY_CROSS_REPOSITORY", "$.repository.repositoryId", "Relay envelope belongs to another repository.");
+  const expectedIdentity = normalizeRelayRepositoryIdentity(expected);
+  if (
+    repository.repositoryHost !== expectedIdentity.repositoryHost ||
+    repository.repositoryId !== expectedIdentity.repositoryId
+  ) {
+    fail("RELAY_CROSS_REPOSITORY", "$.repository", "Relay envelope belongs to another repository.");
   }
 }
 
@@ -399,11 +409,27 @@ function normalizeResult(value: Record<string, unknown>): RelayResultEnvelope {
 }
 
 function normalizeControl(value: Record<string, unknown>): RelayControlEnvelope {
-  assertClosedObject(value, ["connectionId", "deliveryState", "jobId", "kind", "repository", "version"], "$");
+  assertClosedObject(
+    value,
+    ["connectionId", "deliveryCertainty", "deliveryState", "jobId", "kind", "repository", "version"],
+    "$",
+  );
   normalizeEnvelopeBase(value, "$");
   if (value.kind !== "control") fail("RELAY_INVALID_KIND", "$.kind", "Relay envelope kind does not match its schema.");
-  if (!CONTROL_DELIVERY_STATES.includes(value.deliveryState as RelayControlDeliveryState)) {
+  const deliveryState = value.deliveryState as RelayControlDeliveryState;
+  const deliveryCertainty = value.deliveryCertainty as RelayDeliveryCertainty;
+  if (!CONTROL_DELIVERY_STATES.includes(deliveryState)) {
     fail("RELAY_INVALID_DELIVERY_STATE", "$.deliveryState", "Control delivery state is not supported.");
+  }
+  if (!RELAY_DELIVERY_CERTAINTIES.includes(deliveryCertainty)) {
+    fail("RELAY_INVALID_DELIVERY_STATE", "$.deliveryCertainty", "Control delivery certainty is not supported.");
+  }
+  if (deliveryState === "delivered-ambiguous" && deliveryCertainty !== "delivered-ambiguous") {
+    fail(
+      "RELAY_INVALID_DELIVERY_STATE",
+      "$.deliveryCertainty",
+      "A delivered-ambiguous control must carry delivered-ambiguous certainty.",
+    );
   }
   return Object.freeze({
     version: RELAY_CONTRACT_VERSION,
@@ -411,7 +437,8 @@ function normalizeControl(value: Record<string, unknown>): RelayControlEnvelope 
     repository: normalizeRelayRepositoryIdentity(value.repository),
     connectionId: normalizeIdentifier(value.connectionId, "$.connectionId"),
     jobId: normalizeIdentifier(value.jobId, "$.jobId"),
-    deliveryState: value.deliveryState as RelayControlDeliveryState,
+    deliveryState,
+    deliveryCertainty,
   });
 }
 
