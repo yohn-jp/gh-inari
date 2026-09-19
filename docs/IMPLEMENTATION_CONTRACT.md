@@ -136,7 +136,7 @@ evidence fails closed.
 
 <!-- BEGIN GENERATED IMPLEMENTATION COMMAND SURFACE -->
 
-The current command contract is version `1.12.0` (`urn:inari:command-contract:1.12.0`).
+The current command contract is version `1.13.0` (`urn:inari:command-contract:1.13.0`).
 The `impl` namespace projects these operations from the command contract:
 
 | Command                         | Command ID       | Metadata summary                                                                                            |

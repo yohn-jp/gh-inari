@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   AGENT_INVOCATION_CONTRACT,
+  RUNTIME_CAPABILITIES,
   COMMAND_CONTRACT_ID,
   COMMAND_CONTRACT_VERSION,
   INARI_COMMANDS,
@@ -24,7 +25,9 @@ test("the command contract is versioned and projects every Inari-owned command",
   assert.equal(projection.id, COMMAND_CONTRACT_ID);
   assert.equal(projection.version, COMMAND_CONTRACT_VERSION);
   assert.equal(projection.invocation.canonical, "inari");
-  assert.equal(projection.invocation.compatibility, "gh inari");
+  assert.equal("compatibility" in projection.invocation, false);
+  assert.equal("extensionInstall" in projection.invocation, false);
+  assert.equal("extensionUpdate" in projection.invocation, false);
   assert.deepEqual(
     projection.commands.map((entry) => entry.id),
     INARI_COMMANDS.map((entry) => entry.id),
@@ -36,6 +39,13 @@ test("the command contract is versioned and projects every Inari-owned command",
     assert.equal(projected.options.length, command.optionIds.length);
     assert.equal(commandUsage(command).startsWith(command.path.join(" ")), true);
   }
+});
+
+test("retired extension distribution is absent from the public runtime contract", () => {
+  assert.equal("compatibility" in AGENT_INVOCATION_CONTRACT, false);
+  assert.equal("extensionInstall" in AGENT_INVOCATION_CONTRACT, false);
+  assert.equal("extensionUpdate" in AGENT_INVOCATION_CONTRACT, false);
+  assert.equal((RUNTIME_CAPABILITIES as readonly string[]).includes("extension-bootstrap"), false);
 });
 
 test("the shared tokenizer consumes every value-taking option before command identity", () => {

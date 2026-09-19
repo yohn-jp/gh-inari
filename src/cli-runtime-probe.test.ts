@@ -30,7 +30,6 @@ async function captureJson(
     const exitCode = await runCli(["diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.9.0", description: "" },
       runCanonicalDiagnosticCommand,
-      runDiagnosticCommand: () => ({ status: 0, stdout: "", stderr: "" }),
     });
     return { exitCode, output: JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown> };
   } finally {

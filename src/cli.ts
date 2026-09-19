@@ -205,15 +205,6 @@ async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: Cli
       console.error(`${canonical.invocation}: ${canonical.detail ?? `the canonical runtime is ${canonical.status}`}`);
       console.error(`Action: ${canonical.recovery}`);
     }
-    const compatibility = output.compatibility as Record<string, unknown> | undefined;
-    if (compatibility !== undefined && compatibility.status !== "ready") {
-      console.error(
-        `${String(compatibility.invocation ?? AGENT_INVOCATION_CONTRACT.compatibility)} (compatibility): ${String(
-          compatibility.detail ?? `the extension is ${String(compatibility.status)}`,
-        )}`,
-      );
-      if (typeof compatibility.recovery === "string") console.error(`Action: ${compatibility.recovery}`);
-    }
   }
   return canonical.status === "ready" ? 0 : 2;
 }
