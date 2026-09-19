@@ -800,7 +800,9 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         signal: bounded.signal,
       });
     } catch {
-      const providerFailure = bounded.timedOut
+      const timedOut = bounded.timedOut;
+      bounded.clear();
+      const providerFailure = timedOut
         ? githubProviderFailure("timeout", { retryable: true, timeoutMs: this.#requestTimeoutMs })
         : githubProviderFailure("transport", { retryable: true });
       throw this.safeFailure("installation-token", { reason: "credential" }, providerFailure);
