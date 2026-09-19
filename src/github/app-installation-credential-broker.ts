@@ -634,7 +634,9 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       scope: credential.scope,
       apply: async (effect) => {
         const result = await adapter.execute(effect);
-        if (result.status === "failed") throw this.safeMutationFailure(effect, result.failure);
+        if (result.status === "failed") {
+          throw this.safeMutationFailure(effect, result.failure, result.providerFailure);
+        }
         return result.evidence as GitHubChangeEffectSuccessEvidence;
       },
     };
@@ -890,7 +892,11 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     return new GitHubAppCredentialBrokerError(stage, classification, providerFailure);
   }
 
-  private safeMutationFailure(effect: ChangeEffect, failure: ChangeIssuanceFailureEvidence): Error {
+  private safeMutationFailure(
+    effect: ChangeEffect,
+    failure: ChangeIssuanceFailureEvidence,
+    providerFailure?: GitHubProviderFailureClassification,
+  ): Error {
     const classification =
       failure.reason === undefined
         ? undefined
@@ -903,14 +909,17 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       const error = this.#mutationFailure(effect);
       if (error instanceof Error && !errorText(error).includes(this.#privateKeyPem)) {
         if (error instanceof GitHubAppCredentialBrokerError && classification !== undefined) {
-          return new GitHubAppCredentialBrokerError("projection-execution", classification);
+          return new GitHubAppCredentialBrokerError("projection-execution", classification, providerFailure);
         }
-        return attachChangeEffectFailureClassification(error, classification);
+        return attachGitHubProviderFailure(
+          attachChangeEffectFailureClassification(error, classification),
+          providerFailure,
+        );
       }
     } catch {
       // Fall through to the fixed safe error.
     }
-    return new GitHubAppCredentialBrokerError("projection-execution", classification);
+    return new GitHubAppCredentialBrokerError("projection-execution", classification, providerFailure);
   }
 
   private safeOperationError(error: unknown, token: string, stage: GitHubAppCredentialFailureStage): Error {
