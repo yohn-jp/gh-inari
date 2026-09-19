@@ -1464,7 +1464,10 @@ export class GitHubAdapter {
       if (error instanceof GitHubAuthenticationError) throw error;
       const mapped = this.mapProviderError("auth.identity", error);
       if (mapped instanceof GitHubAuthenticationError) {
-        throw new GitHubAuthenticationError(hostname, error);
+        throw attachGitHubProviderFailure(
+          new GitHubAuthenticationError(hostname, error),
+          readGitHubProviderFailure(mapped),
+        );
       }
       throw mapped;
     }

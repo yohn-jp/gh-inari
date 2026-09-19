@@ -21,7 +21,8 @@ import {
   type FixtureCommandResult,
   type FixtureCommandTransport,
 } from "./test-native-transport.test.js";
-import { GitHubHttpResponseLimitError } from "./native-http-transport.js";
+import { GitHubHttpResponseLimitError, GitHubHttpTimeoutError } from "./native-http-transport.js";
+import { readGitHubProviderFailure } from "./provider-failure.js";
 import { prepareIssueArtifact, preparePullRequestArtifact } from "../artifact.js";
 import { issueContractFixture, pullRequestContractFixture } from "../contract/fixtures.js";
 import type { CanonicalContract } from "../contract/ir.js";
@@ -344,6 +345,69 @@ test("returns a typed failure when the native provider is not authenticated", as
       error instanceof GitHubAuthenticationError &&
       error.code === "GITHUB_AUTHENTICATION_FAILED" &&
       error.category === "authentication",
+  );
+});
+
+test("preserves authentication provider failure classification through the typed wrapper", async () => {
+  const adapter = new GitHubAdapter({
+    transport: {
+      request: async () => ({ status: 401, body: { message: "provider response" } }),
+    },
+  });
+
+  await assert.rejects(
+    adapter.checkAuthentication(),
+    (error: unknown) =>
+      error instanceof GitHubAuthenticationError &&
+      readGitHubProviderFailure(error)?.failureClass === "authentication" &&
+      readGitHubProviderFailure(error)?.retryable === false,
+  );
+});
+
+test("preserves bounded status classifications for authenticated-user failures", async () => {
+  const cases = [
+    { status: 429, failureClass: "rate-limit", retryable: true },
+    { status: 500, failureClass: "server", retryable: true },
+    { status: 400, failureClass: "provider-rejection", retryable: false },
+  ] as const;
+
+  for (const expected of cases) {
+    const responses = [
+      { status: 200, body: { login: "octocat" } },
+      { status: expected.status, body: { message: "provider response" } },
+    ];
+    const adapter = new GitHubAdapter({
+      transport: { request: async () => responses.shift() ?? { status: 500, body: undefined } },
+    });
+
+    await assert.rejects(
+      adapter.getAuthenticatedUser(),
+      (error: unknown) =>
+        error instanceof GitHubApiError &&
+        readGitHubProviderFailure(error)?.failureClass === expected.failureClass &&
+        readGitHubProviderFailure(error)?.retryable === expected.retryable &&
+        readGitHubProviderFailure(error)?.status === expected.status,
+      `status ${expected.status}`,
+    );
+  }
+});
+
+test("preserves timeout provider classification through authentication", async () => {
+  const adapter = new GitHubAdapter({
+    transport: {
+      request: async () => {
+        throw new GitHubHttpTimeoutError(250);
+      },
+    },
+  });
+
+  await assert.rejects(
+    adapter.checkAuthentication(),
+    (error: unknown) =>
+      error instanceof GitHubTimeoutError &&
+      readGitHubProviderFailure(error)?.failureClass === "timeout" &&
+      readGitHubProviderFailure(error)?.retryable === true &&
+      readGitHubProviderFailure(error)?.timeoutMs === 250,
   );
 });
 

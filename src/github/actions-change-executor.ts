@@ -348,7 +348,10 @@ export class GitHubActionsEvidenceReader extends GitHubChangeStateProjector {
       ...options,
       onReadFailure: (error: unknown): never => {
         if (error instanceof GitHubRepositoryEvidenceReaderError) {
-          throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", error.reason);
+          const providerFailure = readGitHubProviderFailure(error);
+          throw new GitHubActionsChangeExecutorError(undefined, "repository-evidence", error.reason, {
+            ...(providerFailure === undefined ? {} : { providerFailure }),
+          });
         }
         throw withFailureStage(error, "repository-evidence");
       },
