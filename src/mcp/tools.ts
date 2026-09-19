@@ -71,7 +71,7 @@ import type {
   CapabilityAuthorizedSessionExecutionResult,
   CapabilityAuthorizedSessionExecutor,
 } from "../session-authorized-change-executor.js";
-import { tryProjectImplementationHandoff } from "../change-handoff.js";
+import { tryProjectImplementationHandoff, type ImplementationHandoffProjectionOptions } from "../change-handoff.js";
 import { tryProjectGoldenPathEntry } from "../golden-path-entry.js";
 import { tryProjectImplementationFrontier } from "../implementation-frontier.js";
 import {
@@ -831,13 +831,7 @@ function operationalViewFailure(
 function projectChangeHandoffResult(
   issue: number,
   projection: Awaited<ReturnType<typeof readChangeProjection>>,
-  options: {
-    readonly repositoryNameWithOwner?: string;
-    readonly implementation?: unknown;
-    readonly authorization?: unknown;
-    readonly sourceIssues?: readonly unknown[];
-    readonly compatibility?: "implementation-native" | "historical-issue-root";
-  } = {},
+  options: ImplementationHandoffProjectionOptions = {},
 ): Record<string, unknown> {
   const change = projection.change;
   const changeProjection = change?.projection;
@@ -867,7 +861,7 @@ async function handleImplementationHandoff(
   try {
     const executor = changeExecutorFor(input.repository, dependencies);
     const projection = await readChangeProjection(executor, changeReadRequest(input.issue));
-    let repositoryNameWithOwner: string | undefined;
+    let repositoryIdentity: ImplementationHandoffProjectionOptions["repositoryIdentity"];
     // Resolve a locator only when an adapter is actually available: either the
     // caller injected one directly, or no changeExecutor override exists (the
     // default path already builds a real adapter). Avoids a spurious `gh`
@@ -879,9 +873,15 @@ async function handleImplementationHandoff(
     ) {
       try {
         const context = await adapterFor(input.repository, dependencies).getRepositoryContext();
-        repositoryNameWithOwner = context.nameWithOwner;
+        if (context.repositoryId !== undefined) {
+          repositoryIdentity = {
+            repositoryHost: context.hostname,
+            repositoryId: context.repositoryId,
+            repositoryNameWithOwner: context.nameWithOwner,
+          };
+        }
       } catch {
-        repositoryNameWithOwner = undefined;
+        repositoryIdentity = undefined;
       }
     }
     // The caller may identify which authorization to hand off, but it never
@@ -904,7 +904,7 @@ async function handleImplementationHandoff(
         : undefined;
     return result(
       projectChangeHandoffResult(input.issue, projection, {
-        repositoryNameWithOwner,
+        ...(repositoryIdentity === undefined ? {} : { repositoryIdentity }),
         ...(input.implementation === undefined ? {} : { implementation: input.implementation }),
         ...(currentAuthorizationRecord === undefined ? {} : { authorization: currentAuthorizationRecord }),
         ...(input.sourceIssues === undefined ? {} : { sourceIssues: input.sourceIssues }),

@@ -688,6 +688,45 @@ test("native MCP implementation handoff includes the repository locator when an 
   }
 });
 
+test("native MCP implementation handoff omits the repository locator when repository identity is unavailable", async () => {
+  const server = createInariMcpServer({
+    changeExecutor: {
+      async execute() {
+        throw new Error("handoff must not mutate");
+      },
+      async read() {
+        return changeHandoffProjection() as never;
+      },
+    },
+    createAdapter: () =>
+      ({
+        async getRepositoryContext() {
+          return {
+            hostname: "github.com",
+            host: "github.com",
+            owner: "acme",
+            name: "inari",
+            nameWithOwner: "acme/inari",
+            url: "https://github.com/acme/inari",
+          };
+        },
+      }) as never,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "inari-mcp-change-unbound-test", version: "1" }, { capabilities: {} });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const handoff = await client.callTool({ name: "inari_change_handoff", arguments: { issue: 42 } });
+    const content = structuredContent(handoff.structuredContent);
+    assert.equal(content.ok, true);
+    assert.equal("repositoryNameWithOwner" in (content.handoff as Record<string, unknown>), false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("native MCP implementation handoff fails closed for REVIEW evidence", async () => {
   const server = createInariMcpServer({
     changeExecutor: {
