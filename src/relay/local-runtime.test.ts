@@ -131,7 +131,7 @@ test("opens only an outbound socket, proves possession, forwards the unchanged S
   assert.deepEqual(received, { certificate: "canonical", request: { version: 1, issue: 820 } });
   const result = decodeRelayEnvelope(socket.frames[2]!, repository);
   assert.equal(result.kind, "result");
-  assert.equal(runtime.delivery("job-820")?.phase, "terminal-result");
+  assert.equal(runtime.delivery("job-820")?.phase, "delivered");
   runtime.shutdown();
 });
 
@@ -161,10 +161,19 @@ test("disconnect marks delivery ambiguous and reconnect never executes the same 
   first.open();
   first.receive(challenge());
   first.receive(job("connection-820", "job-ambiguous"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(first.frames.length, 3);
   first.disconnect();
   assert.equal(runtime.delivery("job-ambiguous")?.phase, "possibly-delivered");
   await new Promise<void>((resolve) => setImmediate(resolve));
   await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
   assert.equal(executions, 1);
+  const second = sockets[1]!;
+  second.open();
+  second.receive(challenge());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(second.frames.length, 3);
+  assert.equal(decodeRelayEnvelope(second.frames[2]!, repository).kind, "result");
   runtime.shutdown();
 });

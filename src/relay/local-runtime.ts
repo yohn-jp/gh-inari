@@ -92,6 +92,7 @@ interface RuntimeJob {
   executing: boolean;
   resultPayload?: string;
   resultDigest?: string;
+  resultSentOnSocket?: RelayWebSocket;
   expiryTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -375,8 +376,7 @@ export class LocalRelayRuntime {
   }
 
   #flushJobResult(socket: RelayWebSocket, job: RuntimeJob): void {
-    if (job.resultPayload === undefined || job.resultDigest === undefined || job.state.phase === "terminal-result")
-      return;
+    if (job.resultPayload === undefined || job.resultDigest === undefined || job.resultSentOnSocket === socket) return;
     if (socket !== this.#socket || !isWebSocketOpen(socket) || !this.#possessionProved) return;
     try {
       this.#send(socket, {
@@ -388,8 +388,9 @@ export class LocalRelayRuntime {
         deliveryState: "terminal-result",
         resultPayload: job.resultPayload,
       });
-      job.state = applyRelayDeliveryEvent(job.state, deliveryEvent(job, "result", job.resultDigest)).state;
-      if (job.expiryTimer !== undefined) clearTimeout(job.expiryTimer);
+      // WebSocket.send only queues bytes locally. Keep the computed result
+      // retryable until the relay lifecycle supplies terminal evidence.
+      job.resultSentOnSocket = socket;
     } catch {
       // A failed send leaves the delivery state ambiguous and therefore never
       // triggers an executor replay.
