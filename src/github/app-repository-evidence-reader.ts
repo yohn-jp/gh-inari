@@ -15,7 +15,10 @@ import type {
   GitHubAppRepositoryReadCapability,
   GitHubAppRepositoryReadTransport,
 } from "./app-installation-credential-broker.js";
-import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
+import type {
+  GitHubChangeEffectRepository,
+  GitHubChangeEffectResponse,
+} from "./change-effect-adapter.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "./types.js";
 import type { DelegatorSourceReader } from "../agent-authority/delegator-trust.js";
 import type { AppPrincipalIdentity, RepositoryIdentity } from "./effect-authorizer.js";
