@@ -62,6 +62,10 @@ test("challenge and response are bounded, canonical, and prove only key possessi
   const replay = verifyRelayPossessionProof(proofChallenge, response, { nowMs: 15_000, usedNonces });
   assert.equal(replay.valid, false);
   assert.equal(replay.diagnostics[0]?.code, "RELAY_PROOF_REPLAYED_NONCE");
+
+  const missingReplayState = verifyRelayPossessionProof(proofChallenge, response, undefined as never);
+  assert.equal(missingReplayState.valid, false);
+  assert.equal(missingReplayState.diagnostics[0]?.code, "RELAY_PROOF_REPLAY_STATE_REQUIRED");
 });
 
 test("wrong key, challenge binding, expiry, malformed key, and malformed signature fail deterministically", () => {
@@ -71,17 +75,21 @@ test("wrong key, challenge binding, expiry, malformed key, and malformed signatu
   const response = signRelayPossessionProof(proofChallenge, first.privateKey);
 
   const wrongKey = { ...response, publicKey: publicJwk(second.publicKey) };
-  const wrongKeyResult = verifyRelayPossessionProof(proofChallenge, wrongKey, { nowMs: 15_000 });
+  const wrongKeyResult = verifyRelayPossessionProof(proofChallenge, wrongKey, {
+    nowMs: 15_000,
+    usedNonces: new Set(),
+  });
   assert.equal(wrongKeyResult.valid, false);
   assert.equal(wrongKeyResult.diagnostics[0]?.code, "RELAY_PROOF_INVALID_SIGNATURE");
 
   const wrongRepository = verifyRelayPossessionProof(challenge({ repositoryId: "1330755861" }), response, {
     nowMs: 15_000,
+    usedNonces: new Set(),
   });
   assert.equal(wrongRepository.valid, false);
   assert.equal(wrongRepository.diagnostics[0]?.code, "RELAY_PROOF_CHALLENGE_MISMATCH");
 
-  const expired = verifyRelayPossessionProof(proofChallenge, response, { nowMs: 20_000 });
+  const expired = verifyRelayPossessionProof(proofChallenge, response, { nowMs: 20_000, usedNonces: new Set() });
   assert.equal(expired.valid, false);
   assert.equal(expired.diagnostics[0]?.code, "RELAY_PROOF_EXPIRED");
 
@@ -92,7 +100,7 @@ test("wrong key, challenge binding, expiry, malformed key, and malformed signatu
       publicKey: { kty: "OKP", crv: "Ed25519", x: "bad" },
       signature: "bad",
     },
-    { nowMs: 15_000 },
+    { nowMs: 15_000, usedNonces: new Set() },
   );
   assert.equal(malformed.valid, false);
   assert.ok(malformed.diagnostics.some((entry) => entry.code === "RELAY_PROOF_INVALID_KEY"));

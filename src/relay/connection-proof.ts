@@ -83,7 +83,8 @@ export type RelayPossessionProofDiagnosticCode =
   | "RELAY_PROOF_DELEGATOR_MISMATCH"
   | "RELAY_PROOF_CERTIFICATE_INVALID"
   | "RELAY_PROOF_CERTIFICATE_REPOSITORY_MISMATCH"
-  | "RELAY_PROOF_CERTIFICATE_DELEGATOR_MISMATCH";
+  | "RELAY_PROOF_CERTIFICATE_DELEGATOR_MISMATCH"
+  | "RELAY_PROOF_REPLAY_STATE_REQUIRED";
 
 export interface RelayPossessionProofDiagnostic {
   readonly code: RelayPossessionProofDiagnosticCode;
@@ -100,8 +101,8 @@ export interface RelayPossessionProofValidationResult<T> {
 export interface VerifyRelayPossessionProofOptions {
   /** Wall-clock time in milliseconds, injected for deterministic verification. */
   readonly nowMs?: number;
-  /** Nonce cache owned by the relay connection layer. Successful proofs consume a nonce. */
-  readonly usedNonces?: Set<string>;
+  /** Required nonce cache owned by the relay connection layer. Successful proofs consume a nonce. */
+  readonly usedNonces: Set<string>;
 }
 
 export interface VerifySessionCertificateConnectionBindingResult {
@@ -398,8 +399,20 @@ export function decodeRelayPossessionProofResponse(input: string | Uint8Array): 
 export function verifyRelayPossessionProof(
   expectedChallenge: RelayPossessionProofChallenge,
   response: unknown,
-  options: VerifyRelayPossessionProofOptions = {},
+  options: VerifyRelayPossessionProofOptions,
 ): RelayPossessionProofValidationResult<RelayConnectionKeyBinding> {
+  if (!(options?.usedNonces instanceof Set)) {
+    return {
+      valid: false,
+      diagnostics: [
+        diagnostic(
+          "RELAY_PROOF_REPLAY_STATE_REQUIRED",
+          "$.usedNonces",
+          "Replay-state participation is required for possession-proof admission.",
+        ),
+      ],
+    };
+  }
   const diagnostics: RelayPossessionProofDiagnostic[] = [];
   const expected = normalizeChallenge(expectedChallenge);
   diagnostics.push(...expected.diagnostics);
@@ -418,7 +431,7 @@ export function verifyRelayPossessionProof(
       diagnostics.push(diagnostic("RELAY_PROOF_NOT_YET_VALID", "$.challenge.issuedAtMs", "Proof is not yet valid."));
     else if (nowMs >= expected.value.expiresAtMs)
       diagnostics.push(diagnostic("RELAY_PROOF_EXPIRED", "$.challenge.expiresAtMs", "Proof has expired."));
-    if (options.usedNonces?.has(expected.value.nonce))
+    if (options.usedNonces.has(expected.value.nonce))
       diagnostics.push(
         diagnostic("RELAY_PROOF_REPLAYED_NONCE", "$.challenge.nonce", "Proof nonce was already consumed."),
       );
@@ -445,7 +458,7 @@ export function verifyRelayPossessionProof(
         diagnostics.push(diagnostic("RELAY_PROOF_INVALID_SIGNATURE", "$.signature", "Signature verification failed."));
       }
     }
-    if (diagnostics.length === 0) options.usedNonces?.add(expected.value.nonce);
+    if (diagnostics.length === 0) options.usedNonces.add(expected.value.nonce);
   }
   if (diagnostics.length > 0 || expected.value === undefined || actual.value === undefined)
     return { valid: false, diagnostics };
