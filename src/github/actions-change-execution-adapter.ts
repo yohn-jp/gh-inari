@@ -960,7 +960,7 @@ export class ActionsChangeExecutionNativeHttpApi
     const response = await this.request(
       context,
       method,
-      `actions/${actionsPath.slice("actions/".length)}`,
+      `repos/${context.nameWithOwner}/actions/${actionsPath.slice("actions/".length)}`,
       method === "POST" ? nativeActionsBody(fields) : undefined,
       deadline,
     );
