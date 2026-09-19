@@ -438,13 +438,19 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport {
       );
     }
     if (!isRecord(body.data) || !isRecord(body.data.updateRefs)) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     if (
       !Object.prototype.hasOwnProperty.call(body.data.updateRefs, "clientMutationId") ||
       body.data.updateRefs.clientMutationId !== null
     ) {
-      throw new GitHubChangeEffectFailureError({ reason: "response-validation" });
+      throw new GitHubChangeEffectFailureError(
+        { reason: "response-validation" },
+        githubProviderFailure("response-invalid", { retryable: false }),
+      );
     }
     return "deleted";
   }
