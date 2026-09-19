@@ -35,6 +35,29 @@ The Runtime still proves possession of its own key and executes the signed
 Session request locally. The hosted Worker never receives a GitHub App key,
 provider token, Runtime private key, or Session authority state.
 
+## Operational envelope
+
+The Repository Relay applies compile-time contract ceilings and narrower
+operational defaults for each Durable Object: 64 open connections, 16
+in-flight jobs, 120 messages per one-second window, a 30-second job deadline,
+32 retained job records, and a one-hour connection lifetime. Deployments may
+lower these values through the Durable Object options, but cannot raise the
+contract ceilings. Overload closes a WebSocket with a typed operational
+backpressure outcome or returns `503`; a job rejected before Runtime send is
+reported as `unavailable`/`not-delivered`.
+
+Job records, possession nonces, and connection attachments have deterministic
+deadline/retention cleanup. A send followed by disconnect or storage failure
+remains `possibly-delivered` and is never converted into an automatic retry.
+Hibernation heartbeat uses the Workers auto-response pair (`relay:ping` /
+`relay:pong`) and does not enter the message-rate path.
+
+Optional telemetry receives only bounded transport facts: a pseudonymous
+repository key, connection/job correlation, surface, timing, delivery state,
+failure class, and resource counters. Request/result bodies, signatures,
+credentials, tokens, and provider responses are not part of the telemetry
+interface. Operational limits are backpressure controls, not authorization.
+
 ## Build and deploy
 
 ```sh

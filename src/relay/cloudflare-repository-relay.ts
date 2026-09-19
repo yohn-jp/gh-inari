@@ -10,6 +10,7 @@
 import {
   decodeRelayEnvelope,
   encodeRelayEnvelope,
+  MAX_RELAY_DEADLINE_MS,
   normalizeRelayRepositoryIdentity,
   type RelayEnvelope,
   type RelayJobEnvelope,
@@ -21,6 +22,7 @@ import {
   createRelayPossessionProofChallenge,
   decodeRelayPossessionProofResponse,
   encodeRelayPossessionProofChallenge,
+  MAX_RELAY_POSSESSION_PROOF_TTL_MS,
   verifyRelayPossessionProof,
   verifySessionCertificateConnectionBinding,
   type RelayConnectionKeyBinding,
@@ -30,11 +32,16 @@ import {
   applyRelayDeliveryEvent,
   createRelayDeliveryState,
   deserializeRelayDeliveryState,
-  isRelayDeliveryRetryable,
   serializeRelayDeliveryState,
   type RelayDeliveryEvent,
   type RelayDeliveryState,
 } from "./delivery-state.js";
+import {
+  createRelayTelemetryEvent,
+  recordRelayTelemetry,
+  type RelayTelemetryFailureClass,
+  type RelayTelemetrySink,
+} from "./telemetry.js";
 
 /** Cloudflare provides this global in a Worker; it is absent from Node types. */
 declare const WebSocketPair: new () => [WebSocket, WebSocket];
@@ -44,6 +51,11 @@ const JSON_DECODER = new TextDecoder("utf-8", { fatal: true });
 const MAX_STORED_JOBS = 32;
 const MAX_USED_NONCES = 128;
 const MAX_MESSAGE_BYTES = 65_536;
+const MAX_RELAY_CONNECTIONS = 128;
+const MAX_RELAY_MESSAGES_PER_WINDOW = 256;
+const MAX_RELAY_MESSAGE_WINDOW_MS = 60_000;
+const MAX_RELAY_CONNECTION_TTL_MS = 86_400_000;
+const MAX_RELAY_JOB_RETENTION_MS = 120_000;
 const CONNECTION_ATTACHMENT_VERSION = 1 as const;
 const JOB_RECORD_VERSION = 1 as const;
 const RELAY_HANDSHAKE_KIND = "repository-relay-possession-challenge";
@@ -54,6 +66,57 @@ const JOB_PREFIX = "relay:job:";
 const NONCE_KEY = "relay:used-nonces";
 
 type RelayRole = "runtime" | "client";
+
+export interface RelayOperationalLimits {
+  readonly maxConnections: number;
+  readonly maxInFlightJobs: number;
+  readonly maxMessagesPerWindow: number;
+  readonly messageWindowMs: number;
+  readonly maxDeadlineMs: number;
+  readonly jobRetentionMs: number;
+  readonly connectionTtlMs: number;
+  readonly maxRetainedJobs: number;
+}
+
+export const RELAY_OPERATIONAL_HARD_LIMITS: RelayOperationalLimits = Object.freeze({
+  maxConnections: MAX_RELAY_CONNECTIONS,
+  maxInFlightJobs: 32,
+  maxMessagesPerWindow: MAX_RELAY_MESSAGES_PER_WINDOW,
+  messageWindowMs: MAX_RELAY_MESSAGE_WINDOW_MS,
+  maxDeadlineMs: MAX_RELAY_DEADLINE_MS,
+  jobRetentionMs: MAX_RELAY_JOB_RETENTION_MS,
+  connectionTtlMs: MAX_RELAY_CONNECTION_TTL_MS,
+  maxRetainedJobs: MAX_STORED_JOBS,
+});
+
+export const DEFAULT_RELAY_OPERATIONAL_LIMITS: RelayOperationalLimits = Object.freeze({
+  maxConnections: 64,
+  maxInFlightJobs: 16,
+  maxMessagesPerWindow: 120,
+  messageWindowMs: 1_000,
+  maxDeadlineMs: MAX_RELAY_DEADLINE_MS,
+  jobRetentionMs: 60_000,
+  connectionTtlMs: 3_600_000,
+  maxRetainedJobs: MAX_STORED_JOBS,
+});
+
+export type RelayOperationalLimitCode =
+  | "RELAY_CONNECTION_LIMIT"
+  | "RELAY_IN_FLIGHT_LIMIT"
+  | "RELAY_MESSAGE_RATE_LIMIT"
+  | "RELAY_DEADLINE_LIMIT"
+  | "RELAY_RETENTION_LIMIT"
+  | "RELAY_CONNECTION_EXPIRED";
+
+export class RelayOperationalLimitError extends Error {
+  readonly code: RelayOperationalLimitCode;
+
+  constructor(code: RelayOperationalLimitCode, message: string) {
+    super(message);
+    this.name = "RelayOperationalLimitError";
+    this.code = code;
+  }
+}
 
 /** The subset of the Workers Hibernation API used by this adapter. */
 export interface RepositoryRelayWebSocket {
@@ -84,6 +147,7 @@ export interface RepositoryRelayDurableObjectEnvironment {
   /** Optional immutable identity supplied by the Worker binding. */
   readonly repository?: RelayRepositoryIdentity;
   readonly REPOSITORY?: RelayRepositoryIdentity;
+  readonly telemetry?: RelayTelemetrySink;
 }
 
 export interface RepositoryRelayDurableObjectOptions {
@@ -91,6 +155,8 @@ export interface RepositoryRelayDurableObjectOptions {
   readonly repository?: RelayRepositoryIdentity;
   readonly now?: () => number;
   readonly randomNonce?: () => string;
+  readonly limits?: Partial<RelayOperationalLimits>;
+  readonly telemetry?: RelayTelemetrySink;
 }
 
 interface RuntimeConnectionAttachment {
@@ -102,6 +168,10 @@ interface RuntimeConnectionAttachment {
   readonly challenge?: RelayPossessionProofChallenge;
   readonly binding?: RelayConnectionKeyBinding;
   readonly authenticated: boolean;
+  readonly openedAtMs: number;
+  readonly expiresAtMs: number;
+  readonly messageWindowStartedAtMs: number;
+  readonly messageCount: number;
 }
 
 interface StoredJobRecord {
@@ -110,7 +180,13 @@ interface StoredJobRecord {
   readonly sourceConnectionId: string;
   readonly targetConnectionId: string;
   readonly deadlineAtMs: number;
+  readonly retainedUntilMs: number;
   readonly state: RelayDeliveryState;
+}
+
+interface StoredNonceRecord {
+  readonly nonce: string;
+  readonly expiresAtMs: number;
 }
 
 interface RelayRequestContext {
@@ -145,6 +221,62 @@ function safeJson(value: unknown): string | undefined {
   }
 }
 
+function positiveBoundedInteger(value: number, name: keyof RelayOperationalLimits, maximum: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new RelayOperationalLimitError(
+      "RELAY_RETENTION_LIMIT",
+      `${name} must be a positive integer within the relay operational ceiling.`,
+    );
+  }
+  return value;
+}
+
+function normalizeOperationalLimits(input: Partial<RelayOperationalLimits> | undefined): RelayOperationalLimits {
+  const configured = { ...DEFAULT_RELAY_OPERATIONAL_LIMITS, ...(input ?? {}) };
+  return Object.freeze({
+    maxConnections: positiveBoundedInteger(
+      configured.maxConnections,
+      "maxConnections",
+      RELAY_OPERATIONAL_HARD_LIMITS.maxConnections,
+    ),
+    maxInFlightJobs: positiveBoundedInteger(
+      configured.maxInFlightJobs,
+      "maxInFlightJobs",
+      RELAY_OPERATIONAL_HARD_LIMITS.maxInFlightJobs,
+    ),
+    maxMessagesPerWindow: positiveBoundedInteger(
+      configured.maxMessagesPerWindow,
+      "maxMessagesPerWindow",
+      RELAY_OPERATIONAL_HARD_LIMITS.maxMessagesPerWindow,
+    ),
+    messageWindowMs: positiveBoundedInteger(
+      configured.messageWindowMs,
+      "messageWindowMs",
+      RELAY_OPERATIONAL_HARD_LIMITS.messageWindowMs,
+    ),
+    maxDeadlineMs: positiveBoundedInteger(
+      configured.maxDeadlineMs,
+      "maxDeadlineMs",
+      RELAY_OPERATIONAL_HARD_LIMITS.maxDeadlineMs,
+    ),
+    jobRetentionMs: positiveBoundedInteger(
+      configured.jobRetentionMs,
+      "jobRetentionMs",
+      RELAY_OPERATIONAL_HARD_LIMITS.jobRetentionMs,
+    ),
+    connectionTtlMs: positiveBoundedInteger(
+      configured.connectionTtlMs,
+      "connectionTtlMs",
+      RELAY_OPERATIONAL_HARD_LIMITS.connectionTtlMs,
+    ),
+    maxRetainedJobs: positiveBoundedInteger(
+      configured.maxRetainedJobs,
+      "maxRetainedJobs",
+      RELAY_OPERATIONAL_HARD_LIMITS.maxRetainedJobs,
+    ),
+  });
+}
+
 function bytesOfMessage(message: string | ArrayBuffer | ArrayBufferView): Uint8Array {
   if (typeof message === "string") return JSON_ENCODER.encode(message);
   if (message instanceof ArrayBuffer) return new Uint8Array(message);
@@ -163,6 +295,13 @@ function asText(message: string | ArrayBuffer | ArrayBufferView): string | undef
 
 function isUpgrade(request: Request): boolean {
   return request.method === "GET" && request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+}
+
+function overloadedResponse(): Response {
+  return new Response(JSON.stringify({ ok: false, error: { code: "RELAY_OVERLOADED" } }), {
+    status: 503,
+    headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 function badRequest(message = "Invalid relay request."): Response {
@@ -281,6 +420,8 @@ export class RepositoryRelayDurableObject {
   private readonly repository?: RelayRepositoryIdentity;
   private readonly now: () => number;
   private readonly randomNonce: () => string;
+  private readonly limits: RelayOperationalLimits;
+  private readonly telemetry?: RelayTelemetrySink;
 
   constructor(
     private readonly state: RepositoryRelayDurableObjectState,
@@ -291,6 +432,59 @@ export class RepositoryRelayDurableObject {
     this.repository = configured === undefined ? undefined : normalizeRelayRepositoryIdentity(configured);
     this.now = options.now ?? Date.now;
     this.randomNonce = options.randomNonce ?? nonce;
+    this.limits = normalizeOperationalLimits(options.limits);
+    this.telemetry = options.telemetry ?? env.telemetry;
+  }
+
+  private emitTelemetry(
+    input: Omit<Parameters<typeof createRelayTelemetryEvent>[0], "repository"> & {
+      readonly repository?: RelayRepositoryIdentity;
+      readonly failureClass?: RelayTelemetryFailureClass;
+    },
+  ): void {
+    const repository = input.repository ?? this.repository;
+    if (repository === undefined) return;
+    const event = createRelayTelemetryEvent({ ...input, repository });
+    const pending = recordRelayTelemetry(this.telemetry, event);
+    if (pending !== undefined) this.state.waitUntil?.(pending);
+  }
+
+  private activeConnectionCount(): number {
+    try {
+      return this.state.getWebSockets().filter((socket) => isOpen(socket)).length;
+    } catch {
+      return this.limits.maxConnections;
+    }
+  }
+
+  private connectionCounters(): {
+    readonly connections: number;
+    readonly inFlightJobs: number;
+    readonly retainedJobs: number;
+    readonly messagesInWindow: number;
+  } {
+    let messagesInWindow = 0;
+    const now = this.now();
+    try {
+      for (const socket of this.state.getWebSockets()) {
+        const attachment = this.attachmentOf(socket);
+        if (
+          attachment !== undefined &&
+          now >= attachment.messageWindowStartedAtMs &&
+          now - attachment.messageWindowStartedAtMs < this.limits.messageWindowMs
+        ) {
+          messagesInWindow += attachment.messageCount;
+        }
+      }
+    } catch {
+      messagesInWindow = 0;
+    }
+    return {
+      connections: this.activeConnectionCount(),
+      inFlightJobs: 0,
+      retainedJobs: 0,
+      messagesInWindow,
+    };
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -304,6 +498,18 @@ export class RepositoryRelayDurableObject {
     if (role === "runtime" && (delegatorId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(delegatorId))) {
       return badRequest("Runtime connections require a bounded delegatorId.");
     }
+    if (this.activeConnectionCount() >= this.limits.maxConnections) {
+      this.emitTelemetry({
+        occurredAtMs: this.now(),
+        kind: "connection",
+        surface: "durable-object",
+        repository,
+        failureClass: "overloaded",
+        counters: this.connectionCounters(),
+      });
+      return overloadedResponse();
+    }
+    const openedAtMs = this.now();
     const pair = new WebSocketPair();
     const client = pair[0] as unknown as RepositoryRelayWebSocket;
     const server = pair[1] as unknown as RepositoryRelayWebSocket;
@@ -314,10 +520,23 @@ export class RepositoryRelayDurableObject {
       connectionId,
       ...(delegatorId === undefined ? {} : { delegatorId }),
       authenticated: role === "client",
+      openedAtMs,
+      expiresAtMs: openedAtMs + this.limits.connectionTtlMs,
+      messageWindowStartedAtMs: openedAtMs,
+      messageCount: 0,
     };
     this.state.acceptWebSocket(server, [role]);
     server.serializeAttachment?.(attachment);
     this.state.setWebSocketAutoResponse?.({ request: RELAY_HEARTBEAT_REQUEST, response: RELAY_HEARTBEAT_RESPONSE });
+    await this.scheduleNextAlarm();
+    this.emitTelemetry({
+      occurredAtMs: openedAtMs,
+      kind: "connection",
+      surface: "durable-object",
+      repository,
+      connectionId,
+      counters: this.connectionCounters(),
+    });
     if (role === "runtime") {
       const challenge = createRelayPossessionProofChallenge({
         repositoryId: repository.repositoryId,
@@ -353,21 +572,79 @@ export class RepositoryRelayDurableObject {
   ): Promise<void> {
     const attachment = this.attachmentOf(webSocket);
     if (attachment === undefined || !isOpen(webSocket)) return;
-    const text = asText(message);
-    if (text === undefined) return this.close(webSocket, 1009, "Message exceeds relay bounds.");
-    if (attachment.role === "runtime" && !attachment.authenticated) {
-      return this.admitRuntime(webSocket, attachment, text);
-    }
-    let envelope: RelayEnvelope;
     try {
-      envelope = decodeRelayEnvelope(text, attachment.repository);
-    } catch {
-      return this.close(webSocket, 1008, "Malformed relay envelope.");
+      this.consumeMessage(webSocket, attachment);
+    } catch (error) {
+      if (error instanceof RelayOperationalLimitError) {
+        this.emitTelemetry({
+          occurredAtMs: this.now(),
+          kind: "message",
+          surface: "durable-object",
+          repository: attachment.repository,
+          connectionId: attachment.connectionId,
+          failureClass:
+            error.code === "RELAY_MESSAGE_RATE_LIMIT"
+              ? "rate-limited"
+              : error.code === "RELAY_CONNECTION_EXPIRED"
+                ? "expired"
+                : "overloaded",
+          counters: this.connectionCounters(),
+        });
+        return this.close(
+          webSocket,
+          error.code === "RELAY_CONNECTION_EXPIRED" ? 1001 : 1013,
+          error.code === "RELAY_CONNECTION_EXPIRED" ? "Relay connection expired." : "Relay operational limit reached.",
+        );
+      }
+      throw error;
     }
-    if (envelope.kind === "job") return this.receiveJob(webSocket, attachment, envelope);
-    if (envelope.kind === "result") return this.receiveResult(webSocket, attachment, envelope);
-    if (envelope.kind === "control") return this.receiveControl(webSocket, attachment, envelope);
-    this.close(webSocket, 1008, "Unsupported relay message.");
+    const startedAtMs = this.now();
+    const text = asText(message);
+    if (text === undefined) {
+      this.emitTelemetry({
+        occurredAtMs: startedAtMs,
+        kind: "message",
+        surface: "durable-object",
+        repository: attachment.repository,
+        connectionId: attachment.connectionId,
+        failureClass: "malformed",
+      });
+      return this.close(webSocket, 1009, "Message exceeds relay bounds.");
+    }
+    try {
+      if (attachment.role === "runtime" && !attachment.authenticated) {
+        await this.admitRuntime(webSocket, attachment, text);
+        return;
+      }
+      let envelope: RelayEnvelope;
+      try {
+        envelope = decodeRelayEnvelope(text, attachment.repository);
+      } catch {
+        this.emitTelemetry({
+          occurredAtMs: startedAtMs,
+          kind: "message",
+          surface: "durable-object",
+          repository: attachment.repository,
+          connectionId: attachment.connectionId,
+          failureClass: "malformed",
+        });
+        return this.close(webSocket, 1008, "Malformed relay envelope.");
+      }
+      if (envelope.kind === "job") return await this.receiveJob(webSocket, attachment, envelope);
+      if (envelope.kind === "result") return await this.receiveResult(webSocket, attachment, envelope);
+      if (envelope.kind === "control") return await this.receiveControl(webSocket, attachment, envelope);
+      this.close(webSocket, 1008, "Unsupported relay message.");
+    } finally {
+      this.emitTelemetry({
+        occurredAtMs: startedAtMs,
+        kind: "cpu-active",
+        surface: "durable-object",
+        repository: attachment.repository,
+        connectionId: attachment.connectionId,
+        durationMs: Math.max(0, this.now() - startedAtMs),
+        counters: this.connectionCounters(),
+      });
+    }
   }
 
   async webSocketClose(webSocket: RepositoryRelayWebSocket): Promise<void> {
@@ -383,6 +660,15 @@ export class RepositoryRelayDurableObject {
         jobId: record.state.jobId,
       });
     }
+    this.emitTelemetry({
+      occurredAtMs: this.now(),
+      kind: "connection",
+      surface: "durable-object",
+      repository: attachment.repository,
+      connectionId: attachment.connectionId,
+      failureClass: "disconnected",
+      counters: this.connectionCounters(),
+    });
   }
 
   async webSocketError(webSocket: RepositoryRelayWebSocket): Promise<void> {
@@ -391,16 +677,23 @@ export class RepositoryRelayDurableObject {
 
   async alarm(): Promise<void> {
     const now = this.now();
-    for (const record of await this.records()) {
-      if (record.deadlineAtMs > now) continue;
-      const event: RelayDeliveryEvent = {
-        version: record.state.version,
-        type: "expire",
-        connectionId: record.state.connectionId,
-        jobId: record.state.jobId,
-      };
-      await this.applyEvent(record, event);
+    for (const socket of this.state.getWebSockets()) {
+      const attachment = this.attachmentOf(socket);
+      if (attachment === undefined || attachment.expiresAtMs > now) continue;
+      await this.webSocketClose(socket);
+      this.close(socket, 1001, "Relay connection expired.");
+      this.emitTelemetry({
+        occurredAtMs: now,
+        kind: "cleanup",
+        surface: "durable-object",
+        repository: attachment.repository,
+        connectionId: attachment.connectionId,
+        failureClass: "expired",
+      });
     }
+    await this.reapNonces(now);
+    await this.reapJobs(now);
+    await this.scheduleNextAlarm();
   }
 
   private attachmentOf(webSocket: RepositoryRelayWebSocket): RuntimeConnectionAttachment | undefined {
@@ -421,10 +714,39 @@ export class RepositoryRelayDurableObject {
           : {}),
         ...(isRecord(value.binding) ? { binding: value.binding as unknown as RelayConnectionKeyBinding } : {}),
         authenticated: value.authenticated === true,
+        openedAtMs: Number.isSafeInteger(value.openedAtMs) ? (value.openedAtMs as number) : 0,
+        expiresAtMs: Number.isSafeInteger(value.expiresAtMs) ? (value.expiresAtMs as number) : Number.POSITIVE_INFINITY,
+        messageWindowStartedAtMs: Number.isSafeInteger(value.messageWindowStartedAtMs)
+          ? (value.messageWindowStartedAtMs as number)
+          : 0,
+        messageCount:
+          Number.isSafeInteger(value.messageCount) && (value.messageCount as number) >= 0
+            ? (value.messageCount as number)
+            : 0,
       };
     } catch {
       return undefined;
     }
+  }
+
+  private consumeMessage(webSocket: RepositoryRelayWebSocket, attachment: RuntimeConnectionAttachment): void {
+    const now = this.now();
+    if (now >= attachment.expiresAtMs) {
+      throw new RelayOperationalLimitError("RELAY_CONNECTION_EXPIRED", "Relay connection metadata expired.");
+    }
+    const reset =
+      now < attachment.messageWindowStartedAtMs ||
+      now - attachment.messageWindowStartedAtMs >= this.limits.messageWindowMs;
+    const windowStartedAtMs = reset ? now : attachment.messageWindowStartedAtMs;
+    const messageCount = reset ? 0 : attachment.messageCount;
+    if (messageCount >= this.limits.maxMessagesPerWindow) {
+      throw new RelayOperationalLimitError("RELAY_MESSAGE_RATE_LIMIT", "Relay message rate limit reached.");
+    }
+    webSocket.serializeAttachment?.({
+      ...attachment,
+      messageWindowStartedAtMs: windowStartedAtMs,
+      messageCount: messageCount + 1,
+    } satisfies RuntimeConnectionAttachment);
   }
 
   private async admitRuntime(
@@ -445,10 +767,37 @@ export class RepositoryRelayDurableObject {
     try {
       if (isRecord(candidate) && typeof candidate.response === "object") candidate = candidate.response;
       const response = decodeRelayPossessionProofResponse(JSON.stringify(candidate));
-      const usedNonces = new Set((await this.state.storage.get<string[]>(NONCE_KEY)) ?? []);
+      const now = this.now();
+      const storedNonces = await this.state.storage.get<StoredNonceRecord[] | string[]>(NONCE_KEY);
+      const activeNonceRecords: StoredNonceRecord[] = Array.isArray(storedNonces)
+        ? storedNonces
+            .map((entry): StoredNonceRecord | undefined => {
+              if (typeof entry === "string")
+                return { nonce: entry, expiresAtMs: now + MAX_RELAY_POSSESSION_PROOF_TTL_MS };
+              if (
+                isRecord(entry) &&
+                typeof entry.nonce === "string" &&
+                Number.isSafeInteger(entry.expiresAtMs) &&
+                (entry.expiresAtMs as number) > now
+              ) {
+                return { nonce: entry.nonce, expiresAtMs: entry.expiresAtMs as number };
+              }
+              return undefined;
+            })
+            .filter((entry): entry is StoredNonceRecord => entry !== undefined)
+            .slice(-MAX_USED_NONCES)
+        : [];
+      const usedNonces = new Set(activeNonceRecords.map((entry) => entry.nonce));
       const result = verifyRelayPossessionProof(attachment.challenge, response, { nowMs: this.now(), usedNonces });
       if (!result.valid || result.value === undefined) return this.close(webSocket, 1008, "Invalid possession proof.");
-      await this.state.storage.put(NONCE_KEY, [...usedNonces].slice(-MAX_USED_NONCES));
+      await this.state.storage.put(
+        NONCE_KEY,
+        [
+          ...activeNonceRecords,
+          { nonce: attachment.challenge.nonce, expiresAtMs: attachment.challenge.expiresAtMs },
+        ].slice(-MAX_USED_NONCES),
+      );
+      await this.scheduleNextAlarm();
       const authenticatedAttachment: RuntimeConnectionAttachment = {
         ...attachment,
         binding: result.value,
@@ -471,7 +820,78 @@ export class RepositoryRelayDurableObject {
     // A repeated job ID is never an implicit permission to replay an exchange.
     // The caller must use the delivery/recovery authority outside this adapter.
     if (await this.record(job.jobId)) return;
+    if (job.deadlineMs > this.limits.maxDeadlineMs) {
+      this.emitTelemetry({
+        occurredAtMs: this.now(),
+        kind: "job",
+        surface: "durable-object",
+        repository: job.repository,
+        connectionId: job.connectionId,
+        jobId: job.jobId,
+        failureClass: "overloaded",
+      });
+      return this.sendControl(source, job, "unavailable", "not-delivered");
+    }
+    await this.reapJobs(this.now());
+    const retained = await this.records();
+    const now = this.now();
+    const retainedCount = retained.filter((record) => record.retainedUntilMs > now).length;
+    const inFlightCount = retained.filter(
+      (record) =>
+        record.retainedUntilMs > now &&
+        record.state.phase !== "terminal-result" &&
+        record.state.phase !== "expired" &&
+        record.state.phase !== "cancelled" &&
+        record.state.phase !== "unavailable",
+    ).length;
+    const connectionInFlightCount = retained.filter(
+      (record) =>
+        record.targetConnectionId === job.connectionId &&
+        record.retainedUntilMs > now &&
+        record.state.phase !== "terminal-result" &&
+        record.state.phase !== "expired" &&
+        record.state.phase !== "cancelled" &&
+        record.state.phase !== "unavailable",
+    ).length;
+    if (
+      retainedCount >= this.limits.maxRetainedJobs ||
+      inFlightCount >= this.limits.maxInFlightJobs ||
+      connectionInFlightCount >= this.limits.maxInFlightJobs
+    ) {
+      const code: RelayOperationalLimitCode =
+        retainedCount >= this.limits.maxRetainedJobs ? "RELAY_RETENTION_LIMIT" : "RELAY_IN_FLIGHT_LIMIT";
+      this.emitTelemetry({
+        occurredAtMs: now,
+        kind: "job",
+        surface: "durable-object",
+        repository: job.repository,
+        connectionId: job.connectionId,
+        jobId: job.jobId,
+        failureClass: "overloaded",
+        counters: {
+          connections: this.activeConnectionCount(),
+          inFlightJobs: Math.max(inFlightCount, connectionInFlightCount),
+          retainedJobs: retainedCount,
+          messagesInWindow: 0,
+        },
+      });
+      return this.sendControl(source, job, "unavailable", "not-delivered");
+    }
     const certificate = sessionCertificateFromJob(job);
+    this.emitTelemetry({
+      occurredAtMs: now,
+      kind: "job",
+      surface: "durable-object",
+      repository: job.repository,
+      connectionId: job.connectionId,
+      jobId: job.jobId,
+      counters: {
+        connections: this.activeConnectionCount(),
+        inFlightJobs: inFlightCount + 1,
+        retainedJobs: retainedCount + 1,
+        messagesInWindow: this.connectionCounters().messagesInWindow,
+      },
+    });
     const runtimes = this.state.getWebSockets("runtime");
     const target = runtimes.find((candidate) => {
       const attachment = this.attachmentOf(candidate);
@@ -492,7 +912,8 @@ export class RepositoryRelayDurableObject {
       repository: sourceAttachment.repository,
       sourceConnectionId: sourceAttachment.connectionId,
       targetConnectionId: job.connectionId,
-      deadlineAtMs: this.now() + job.deadlineMs,
+      deadlineAtMs: now + job.deadlineMs,
+      retainedUntilMs: now + job.deadlineMs + this.limits.jobRetentionMs,
       state: initial,
     };
     if (target === undefined || !isOpen(target)) {
@@ -580,6 +1001,15 @@ export class RepositoryRelayDurableObject {
     };
     const reduction = applyRelayDeliveryEvent(record.state, event);
     await this.saveRecord({ ...record, state: reduction.state });
+    this.emitTelemetry({
+      occurredAtMs: this.now(),
+      kind: "delivery",
+      surface: "durable-object",
+      repository: record.repository,
+      connectionId: record.targetConnectionId,
+      jobId: record.state.jobId,
+      deliveryState: reduction.state.phase,
+    });
     if (reduction.transition === "applied") {
       this.forwardToSource(record, encodeRelayEnvelope(resultEnvelope, record.repository));
     }
@@ -595,12 +1025,124 @@ export class RepositoryRelayDurableObject {
     const record = await this.record(control.jobId);
     if (record === undefined || record.targetConnectionId !== attachment.connectionId) return;
     await this.applyEvent(record, eventForControl(record.state, control));
+    this.emitTelemetry({
+      occurredAtMs: this.now(),
+      kind: "delivery",
+      surface: "durable-object",
+      repository: record.repository,
+      connectionId: record.targetConnectionId,
+      jobId: record.state.jobId,
+      deliveryState: control.deliveryState === "delivered-ambiguous" ? "possibly-delivered" : control.deliveryState,
+      failureClass:
+        control.deliveryState === "delivered-ambiguous"
+          ? "disconnected"
+          : control.deliveryState === "expired"
+            ? "expired"
+            : "none",
+    });
     this.forwardToSource(record, encodeRelayEnvelope(control, record.repository));
   }
 
   private async applyEvent(record: StoredJobRecord, event: RelayDeliveryEvent): Promise<void> {
     const reduction = applyRelayDeliveryEvent(record.state, event);
     await this.saveRecord({ ...record, state: reduction.state });
+  }
+
+  private async reapNonces(now: number): Promise<void> {
+    const storedNonces = await this.state.storage.get<StoredNonceRecord[] | string[]>(NONCE_KEY);
+    if (!Array.isArray(storedNonces)) return;
+    const active = storedNonces
+      .map((entry): StoredNonceRecord | undefined => {
+        if (typeof entry === "string") return undefined;
+        if (
+          !isRecord(entry) ||
+          typeof entry.nonce !== "string" ||
+          !Number.isSafeInteger(entry.expiresAtMs) ||
+          (entry.expiresAtMs as number) <= now
+        ) {
+          return undefined;
+        }
+        return { nonce: entry.nonce, expiresAtMs: entry.expiresAtMs as number };
+      })
+      .filter((entry): entry is StoredNonceRecord => entry !== undefined)
+      .slice(-MAX_USED_NONCES);
+    if (active.length === 0) await this.state.storage.delete?.(NONCE_KEY);
+    else await this.state.storage.put(NONCE_KEY, active);
+    if (active.length !== storedNonces.length) {
+      this.emitTelemetry({
+        occurredAtMs: now,
+        kind: "cleanup",
+        surface: "durable-object",
+        repository: this.repository,
+        failureClass: "expired",
+      });
+    }
+  }
+
+  private async reapJobs(now: number): Promise<void> {
+    for (const record of await this.records()) {
+      if (now >= record.retainedUntilMs) {
+        await this.state.storage.delete?.(jobKey(record.state.jobId));
+        this.emitTelemetry({
+          occurredAtMs: now,
+          kind: "cleanup",
+          surface: "durable-object",
+          repository: record.repository,
+          connectionId: record.targetConnectionId,
+          jobId: record.state.jobId,
+          deliveryState: record.state.phase,
+          counters: {
+            connections: this.activeConnectionCount(),
+            inFlightJobs: 0,
+            retainedJobs: 0,
+            messagesInWindow: 0,
+          },
+        });
+        continue;
+      }
+      if (record.deadlineAtMs > now) continue;
+      if (
+        record.state.phase !== "queued" &&
+        record.state.phase !== "delivered" &&
+        record.state.phase !== "acknowledged" &&
+        record.state.phase !== "unavailable"
+      ) {
+        continue;
+      }
+      await this.applyEvent(record, {
+        version: record.state.version,
+        type: "expire",
+        connectionId: record.state.connectionId,
+        jobId: record.state.jobId,
+      });
+      this.emitTelemetry({
+        occurredAtMs: now,
+        kind: "cleanup",
+        surface: "durable-object",
+        repository: record.repository,
+        connectionId: record.targetConnectionId,
+        jobId: record.state.jobId,
+        deliveryState: record.state.phase,
+        failureClass: "expired",
+      });
+    }
+  }
+
+  private async scheduleNextAlarm(): Promise<void> {
+    if (this.state.storage.setAlarm === undefined) return;
+    let next = Number.POSITIVE_INFINITY;
+    for (const socket of this.state.getWebSockets()) {
+      const attachment = this.attachmentOf(socket);
+      if (attachment !== undefined) next = Math.min(next, attachment.expiresAtMs);
+    }
+    for (const record of await this.records()) next = Math.min(next, record.retainedUntilMs, record.deadlineAtMs);
+    const storedNonces = await this.state.storage.get<StoredNonceRecord[]>(NONCE_KEY);
+    for (const entry of storedNonces ?? []) {
+      if (isRecord(entry) && Number.isSafeInteger(entry.expiresAtMs)) {
+        next = Math.min(next, entry.expiresAtMs as number);
+      }
+    }
+    if (Number.isFinite(next)) await this.state.storage.setAlarm(next);
   }
 
   private async record(jobId: string): Promise<StoredJobRecord | undefined> {
@@ -614,6 +1156,10 @@ export class RepositoryRelayDurableObject {
         sourceConnectionId: String(value.sourceConnectionId),
         targetConnectionId: String(value.targetConnectionId),
         deadlineAtMs: Number(value.deadlineAtMs),
+        retainedUntilMs:
+          Number.isSafeInteger(value.retainedUntilMs) && (value.retainedUntilMs as number) > 0
+            ? (value.retainedUntilMs as number)
+            : Number(value.deadlineAtMs) + this.limits.jobRetentionMs,
         state,
       };
     } catch {
@@ -623,7 +1169,10 @@ export class RepositoryRelayDurableObject {
 
   private async records(): Promise<StoredJobRecord[]> {
     if (this.state.storage.list === undefined) return [];
-    const listed = await this.state.storage.list<StoredJobRecord>({ prefix: JOB_PREFIX, limit: MAX_STORED_JOBS });
+    const listed = await this.state.storage.list<StoredJobRecord>({
+      prefix: JOB_PREFIX,
+      limit: Math.min(MAX_STORED_JOBS + 1, this.limits.maxRetainedJobs + 1),
+    });
     const records: StoredJobRecord[] = [];
     for (const value of listed.values()) {
       const parsed = await this.record(value.state?.jobId ?? "");
@@ -639,6 +1188,7 @@ export class RepositoryRelayDurableObject {
       sourceConnectionId: record.sourceConnectionId,
       targetConnectionId: record.targetConnectionId,
       deadlineAtMs: record.deadlineAtMs,
+      retainedUntilMs: record.retainedUntilMs,
       state: JSON.parse(serializeRelayDeliveryState(record.state)) as RelayDeliveryState,
     } satisfies StoredJobRecord);
     await this.state.storage.setAlarm?.(record.deadlineAtMs);
@@ -649,7 +1199,8 @@ export class RepositoryRelayDurableObject {
       const attachment = this.attachmentOf(candidate);
       return (
         attachment?.connectionId === record.sourceConnectionId &&
-        attachment.repository.repositoryId === record.repository.repositoryId
+        attachment.repository.repositoryId === record.repository.repositoryId &&
+        attachment.repository.repositoryHost === record.repository.repositoryHost
       );
     });
     if (source !== undefined && isOpen(source)) source.send(payload);
