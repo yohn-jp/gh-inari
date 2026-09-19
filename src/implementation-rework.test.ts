@@ -251,6 +251,22 @@ test("stale head, cross-PR, stale authorization, and review substitution fail cl
   assert.equal(substitutedReview.valid, false);
 });
 
+test("same repository ID on a different host fails closed", () => {
+  const result = tryProjectImplementationReviewRework(
+    input({
+      pullRequest: pullRequest({
+        repository: {
+          host: "gitlab.com",
+          nameWithOwner: repository.repository!,
+          repositoryId: repository.repositoryId,
+        },
+      }),
+    }),
+  );
+  assert.equal(result.valid, false);
+  assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_REWORK_CANONICAL_PR_MISMATCH"));
+});
+
 test("a current review without request-changes exposes explicit NO_REWORK and no write marker", () => {
   const result = tryProjectImplementationReviewRework(
     input({

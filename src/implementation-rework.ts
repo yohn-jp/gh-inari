@@ -218,11 +218,16 @@ function sameReference(left: IssueReference, right: IssueReference): boolean {
 }
 
 function sameRepository(
-  left: { readonly repositoryHost: string; readonly repositoryId: string },
-  right: { readonly repositoryHost: string; readonly repositoryId: string },
+  left: { readonly repositoryHost: string | undefined; readonly repositoryId: string | undefined },
+  right: { readonly repositoryHost: string | undefined; readonly repositoryId: string | undefined },
 ): boolean {
   return (
-    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() && left.repositoryId === right.repositoryId
+    typeof left.repositoryHost === "string" &&
+    typeof right.repositoryHost === "string" &&
+    typeof left.repositoryId === "string" &&
+    typeof right.repositoryId === "string" &&
+    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() &&
+    left.repositoryId === right.repositoryId
   );
 }
 
@@ -538,7 +543,10 @@ export function tryProjectImplementationReviewRework(input: unknown): Implementa
   if (
     !positiveInteger(canonical.pullRequest) ||
     observation.number !== canonical.pullRequest ||
-    observation.repository.repositoryId !== change.identity.repositoryId ||
+    !sameRepository(
+      { repositoryHost: observation.repository.host, repositoryId: observation.repository.repositoryId },
+      change.identity,
+    ) ||
     observation.head.branch !== canonical.branch ||
     observation.base.branch !== projection.canonicalBaseBranch
   ) {
