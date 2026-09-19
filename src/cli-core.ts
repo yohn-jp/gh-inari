@@ -124,7 +124,8 @@ import {
 import { tryProjectImplementationHandoff } from "./change-handoff.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
-import { GOLDEN_PATH_STATUS_VERSION } from "./golden-path-status.js";
+import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
+import { GOLDEN_PATH_STATUS_VERSION, tryProjectGoldenPathStatus } from "./golden-path-status.js";
 import { tryProjectImplementationFrontier } from "./implementation-frontier.js";
 import {
   composeImplementationFrontier,
@@ -1282,6 +1283,17 @@ function projectChangeCommandResult(
 ): Readonly<Record<string, unknown>> {
   const change = projection.change;
   const changeProjection = change?.projection;
+  const recovery = projectGoldenPathRecovery({
+    projection,
+    ...(evidence === undefined ? {} : { evidence }),
+  });
+  const statusRecovery = tryProjectGoldenPathStatus({
+    environment: "available",
+    governance: "available",
+    changeProjection: projection,
+    ...(evidence?.outcome === undefined ? {} : { executionOutcome: evidence.outcome }),
+    ...(recovery === null ? {} : { recovery }),
+  });
   return {
     ok: projection.valid,
     operation: `change.${operation}`,
@@ -1298,6 +1310,7 @@ function projectChangeCommandResult(
       statusRecovery: String(GOLDEN_PATH_STATUS_VERSION),
       skill: SKILL_MODEL_VERSION,
     },
+    recovery: statusRecovery.projection?.recovery ?? recovery,
     ...(evidence === undefined ? {} : { evidence }),
     projection,
   };
