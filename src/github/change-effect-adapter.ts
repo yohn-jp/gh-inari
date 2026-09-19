@@ -320,6 +320,8 @@ export interface GitHubChangeEffectFailureResult {
   readonly effect: ChangeEffect;
   /** This is directly compatible with Core's compensation/recovery input. */
   readonly failure: GitHubChangeEffectFailureEvidence;
+  /** Provider-I/O classification stays outside Core compensation evidence. */
+  readonly providerFailure?: GitHubProviderFailureClassification;
 }
 
 export type GitHubChangeEffectResult = GitHubChangeEffectSuccessResult | GitHubChangeEffectFailureResult;
@@ -348,11 +350,16 @@ export class GitHubChangeEffectConfigurationError extends Error {
 /** Fixed, secret-safe classification for a provider-backed effect failure. */
 export class GitHubChangeEffectFailureError extends Error {
   readonly classification: ChangeEffectFailureClassification;
+  readonly providerFailure?: GitHubProviderFailureClassification;
 
-  constructor(classification: ChangeEffectFailureClassification) {
+  constructor(
+    classification: ChangeEffectFailureClassification,
+    providerFailure?: GitHubProviderFailureClassification,
+  ) {
     super("The GitHub Change effect failed at a bounded provider boundary.");
     this.name = "GitHubChangeEffectFailureError";
     this.classification = normalizeChangeEffectFailureClassification(classification)!;
+    this.providerFailure = providerFailure;
   }
 }
 
@@ -745,17 +752,20 @@ export class GitHubChangeEffectAdapter {
       const response = await this.transport.request({ ...request, hostname: this.repository.hostname });
       if (!isRecord(response) || !isHttpStatus(response.status)) {
         throw new GitHubChangeEffectFailureError(
-        { reason: "response-validation" },
-        githubProviderFailure("response-invalid", { retryable: false }),
-      );
+          { reason: "response-validation" },
+          githubProviderFailure("response-invalid", { retryable: false }),
+        );
       }
       if (response.status !== expectedStatus) {
         const provider = normalizeGitHubChangeEffectProviderDiagnostic(response.status, response.body);
-        throw new GitHubChangeEffectFailureError({
-          reason: "provider-http",
-          status: response.status,
-          ...(provider === undefined ? {} : { provider }),
-        });
+        throw new GitHubChangeEffectFailureError(
+          {
+            reason: "provider-http",
+            status: response.status,
+            ...(provider === undefined ? {} : { provider }),
+          },
+          githubProviderFailureFromStatus(response.status, response.headers),
+        );
       }
       return response.body;
     } catch (error: unknown) {
