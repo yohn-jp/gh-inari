@@ -26,6 +26,7 @@ import type {
   CapabilityAuthorizedSessionExecutionResult,
   CapabilityAuthorizedSessionExecutor,
 } from "./session-authorized-change-executor.js";
+import { createRelayTelemetryEvent, recordRelayTelemetry, type RelayTelemetrySink } from "./relay/telemetry.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -47,6 +48,7 @@ export interface Env {
   readonly REPOSITORY_RELAY?: HostedDurableObjectNamespace;
   /** Non-secret provider host partition; the default is GitHub.com. */
   readonly INARI_HOSTED_REPOSITORY_HOST?: string;
+  readonly telemetry?: RelayTelemetrySink;
 }
 
 type HostedWebSocket = RepositoryRelayWebSocket & {
@@ -78,6 +80,14 @@ function methodNotAllowed(allow: string): Response {
 
 function serviceUnavailable(): Response {
   return jsonResponse(503, { ok: false, error: { code: "HOSTED_WORKER_UNAVAILABLE" } });
+}
+
+function emitHostedTelemetry(
+  sink: RelayTelemetrySink | undefined,
+  input: Omit<Parameters<typeof createRelayTelemetryEvent>[0], "repository">,
+  repository: RelayRepositoryIdentity,
+): void {
+  void recordRelayTelemetry(sink, createRelayTelemetryEvent({ ...input, repository }));
 }
 
 function hasRelayBinding(namespace: Env["REPOSITORY_RELAY"]): namespace is HostedDurableObjectNamespace {
@@ -170,6 +180,7 @@ async function dispatchThroughDurableObject(
   namespace: HostedDurableObjectNamespace | undefined,
   request: RepositoryRelayDispatchRequest,
   signal?: AbortSignal,
+  telemetry?: RelayTelemetrySink,
 ): Promise<RelayEnvelope> {
   if (!hasRelayBinding(namespace)) throw new Error("Repository Relay binding is unavailable.");
   const repository = normalizeRelayRepositoryIdentity(request.repository);
@@ -177,6 +188,10 @@ async function dispatchThroughDurableObject(
   const stub = namespace.get(objectId);
   const sourceConnectionId = randomIdentifier("mcp");
   const jobId = randomIdentifier("job");
+  const emit = (input: Omit<Parameters<typeof createRelayTelemetryEvent>[0], "repository">): void => {
+    const pending = recordRelayTelemetry(telemetry, createRelayTelemetryEvent({ ...input, repository }));
+    void pending;
+  };
   const serialized = JSON.stringify(request.signedSessionEnvelope);
   if (serialized === undefined) throw new Error("Session envelope is not serializable.");
   const job: RelayJobEnvelope = {
@@ -191,6 +206,13 @@ async function dispatchThroughDurableObject(
     deadlineMs: MAX_RELAY_DEADLINE_MS,
     signedSessionRequest: base64UrlEncodeText(serialized),
   };
+  emit({
+    occurredAtMs: Date.now(),
+    kind: "job",
+    surface: "hosted-worker",
+    connectionId: sourceConnectionId,
+    jobId,
+  });
   const internalUrl = new URL("https://inari-relay.internal/v1/relay/connect");
   internalUrl.searchParams.set("repositoryId", repository.repositoryId);
   internalUrl.searchParams.set("repositoryHost", repository.repositoryHost);
@@ -211,6 +233,29 @@ async function dispatchThroughDurableObject(
       settled = true;
       for (const cleanup of cleanups) cleanup();
       socket.close?.(1000, "dispatch-complete");
+      if (envelope !== undefined) {
+        emit({
+          occurredAtMs: Date.now(),
+          kind: "delivery",
+          surface: "hosted-worker",
+          connectionId: sourceConnectionId,
+          jobId,
+          deliveryState:
+            envelope.kind === "result"
+              ? "terminal-result"
+              : envelope.kind === "control"
+                ? envelope.deliveryState === "delivered-ambiguous"
+                  ? "possibly-delivered"
+                  : envelope.deliveryState
+                : undefined,
+          failureClass:
+            envelope.kind === "control" && envelope.deliveryState === "delivered-ambiguous"
+              ? "disconnected"
+              : envelope.kind === "control" && envelope.deliveryState === "expired"
+                ? "expired"
+                : "none",
+        });
+      }
       if (error !== undefined) reject(error);
       else if (envelope !== undefined) resolve(envelope);
       else reject(new Error("Repository Relay closed before a result."));
@@ -256,16 +301,17 @@ async function dispatchThroughDurableObject(
 
 export function createHostedRelayDispatch(
   namespace: HostedDurableObjectNamespace | undefined,
+  telemetry?: RelayTelemetrySink,
 ): RepositoryRelayDispatchPort {
   return Object.freeze({
     dispatch: (request: RepositoryRelayDispatchRequest, signal?: AbortSignal) =>
-      dispatchThroughDurableObject(namespace, request, signal),
+      dispatchThroughDurableObject(namespace, request, signal, telemetry),
   });
 }
 
 export function createHostedMcpSessionExecutor(env: Env): CapabilityAuthorizedSessionExecutor {
   const host = repositoryHost(env);
-  const dispatch = createHostedRelayDispatch(env.REPOSITORY_RELAY);
+  const dispatch = createHostedRelayDispatch(env.REPOSITORY_RELAY, env.telemetry);
   return Object.freeze({
     async execute(envelope: unknown): Promise<CapabilityAuthorizedSessionExecutionResult> {
       const repository = sessionRepository(envelope, host);
@@ -328,9 +374,34 @@ async function relayConnect(request: Request, env: Env): Promise<Response> {
   internalUrl.searchParams.set("role", RUNTIME_ROLE);
   internalUrl.searchParams.set("connectionId", connectionId);
   internalUrl.searchParams.set("delegatorId", delegatorId);
+  const startedAtMs = Date.now();
   try {
-    return await stub.fetch(new Request(internalUrl, { method: "GET", headers: { upgrade: UPGRADE } }));
+    const response = await stub.fetch(new Request(internalUrl, { method: "GET", headers: { upgrade: UPGRADE } }));
+    emitHostedTelemetry(
+      env.telemetry,
+      {
+        occurredAtMs: Date.now(),
+        kind: "cpu-active",
+        surface: "hosted-worker",
+        connectionId,
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+      },
+      repository,
+    );
+    return response;
   } catch {
+    emitHostedTelemetry(
+      env.telemetry,
+      {
+        occurredAtMs: Date.now(),
+        kind: "connection",
+        surface: "hosted-worker",
+        connectionId,
+        failureClass: "transport",
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+      },
+      repository,
+    );
     return serviceUnavailable();
   }
 }
