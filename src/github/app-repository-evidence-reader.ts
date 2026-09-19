@@ -19,6 +19,13 @@ import type { GitHubChangeEffectRepository } from "./change-effect-adapter.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry, GitHubBranch } from "./types.js";
 import type { DelegatorSourceReader } from "../agent-authority/delegator-trust.js";
 import type { AppPrincipalIdentity, RepositoryIdentity } from "./effect-authorizer.js";
+import {
+  attachGitHubProviderFailure,
+  githubProviderFailure,
+  githubProviderFailureFromStatus,
+  readGitHubProviderFailure,
+  type GitHubProviderFailureClassification,
+} from "./provider-failure.js";
 
 const MAX_REPOSITORY_REF_LENGTH = 255;
 const MAX_REPOSITORY_SHA_LENGTH = 128;
@@ -28,10 +35,15 @@ const BASE64_CONTENT_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Z
 
 export class AppRepositoryEvidenceReaderError extends Error {
   readonly code = "APP_REPOSITORY_EVIDENCE_READ_FAILED" as const;
+  readonly providerFailure?: GitHubProviderFailureClassification;
 
-  constructor() {
+  constructor(providerFailure?: GitHubProviderFailureClassification) {
     super("Trusted App repository evidence read failed closed.");
     this.name = "AppRepositoryEvidenceReaderError";
+    if (providerFailure !== undefined) {
+      this.providerFailure = providerFailure;
+      attachGitHubProviderFailure(this, providerFailure);
+    }
   }
 }
 
@@ -40,8 +52,12 @@ export interface AppRepositoryEvidenceReader extends DelegatorSourceReader {
   readonly providerPrincipal: AppPrincipalIdentity;
 }
 
-function fail(): never {
-  throw new AppRepositoryEvidenceReaderError();
+function fail(providerFailure?: GitHubProviderFailureClassification): never {
+  throw new AppRepositoryEvidenceReaderError(providerFailure);
+}
+
+function invalidProviderResponse(): GitHubProviderFailureClassification {
+  return githubProviderFailure("response-invalid", { retryable: false });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,10 +76,13 @@ async function readProvider(
   let response: { readonly status: number; readonly body?: unknown };
   try {
     response = await transport.request({ hostname: repository.hostname, method: "GET", path });
-  } catch {
-    fail();
+  } catch (error: unknown) {
+    fail(readGitHubProviderFailure(error));
   }
-  if (response.status !== 200 || !isRecord(response.body)) fail();
+  if (response.status !== 200) {
+    fail(githubProviderFailureFromStatus(response.status, response.headers));
+  }
+  if (!isRecord(response.body)) fail(invalidProviderResponse());
   return response.body;
 }
 
@@ -102,11 +121,12 @@ export function createRepositoryEvidenceReader(
           method: "GET",
           path: repositoryPath(repository, `git/ref/heads/${encodeURIComponent(branch)}`),
         });
-      } catch {
-        fail();
+      } catch (error: unknown) {
+        fail(readGitHubProviderFailure(error));
       }
       if (response.status === 404) return undefined;
-      if (response.status !== 200 || !isRecord(response.body)) fail();
+      if (response.status !== 200) fail(githubProviderFailureFromStatus(response.status, response.headers));
+      if (!isRecord(response.body)) fail(invalidProviderResponse());
       const body = response.body;
       if (
         body.ref !== `refs/heads/${branch}` ||
@@ -114,7 +134,7 @@ export function createRepositoryEvidenceReader(
         body.object.type !== "commit" ||
         !isBoundedProviderText(body.object.sha, MAX_REPOSITORY_SHA_LENGTH)
       ) {
-        fail();
+        fail(invalidProviderResponse());
       }
       return { name: branch, ref: body.ref, sha: body.object.sha };
     },
@@ -125,8 +145,10 @@ export function createRepositoryEvidenceReader(
         repository,
         repositoryPath(repository, `git/trees/${encodeURIComponent(ref)}?recursive=1`),
       );
-      if (body.truncated !== false || !isBoundedProviderText(body.sha, MAX_REPOSITORY_SHA_LENGTH)) fail();
-      if (!Array.isArray(body.tree)) fail();
+      if (body.truncated !== false || !isBoundedProviderText(body.sha, MAX_REPOSITORY_SHA_LENGTH)) {
+        fail(invalidProviderResponse());
+      }
+      if (!Array.isArray(body.tree)) fail(invalidProviderResponse());
       const entries: RepositoryTreeEntry[] = body.tree.map((entry: unknown) => {
         if (
           !isRecord(entry) ||
@@ -134,7 +156,7 @@ export function createRepositoryEvidenceReader(
           !isBoundedProviderText(entry.sha, MAX_REPOSITORY_SHA_LENGTH) ||
           (entry.type !== "blob" && entry.type !== "tree")
         ) {
-          fail();
+          fail(invalidProviderResponse());
         }
         return { path: entry.path, type: entry.type, sha: entry.sha };
       });
@@ -153,14 +175,14 @@ export function createRepositoryEvidenceReader(
         typeof body.content !== "string" ||
         body.content.length > MAX_BLOB_CONTENT_LENGTH
       ) {
-        fail();
+        fail(invalidProviderResponse());
       }
       const content = body.content.replace(/\s/gu, "");
-      if (!BASE64_CONTENT_PATTERN.test(content)) fail();
+      if (!BASE64_CONTENT_PATTERN.test(content)) fail(invalidProviderResponse());
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(content, "base64"));
       } catch {
-        fail();
+        fail(invalidProviderResponse());
       }
     },
   };
