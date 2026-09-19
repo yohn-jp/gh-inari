@@ -50,6 +50,8 @@ const MAX_HOST_LENGTH = 255;
 const MAX_OWNER_OR_NAME_LENGTH = 255;
 const MAX_API_URL_LENGTH = 2_048;
 const MAX_PRIVATE_KEY_LENGTH = 16_384;
+/** `/healthz` intentionally accepts GET only; HEAD is not part of its contract. */
+const HEALTHZ_METHOD = "GET";
 
 /** Stable, deliberately non-sensitive failure raised for invalid Worker configuration. */
 class WorkerConfigurationError extends Error {
@@ -154,6 +156,23 @@ function healthzResponse(env: Env): Response {
   });
 }
 
+function healthzMethodFailureResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      version: DIRECT_APP_HTTP_CONTRACT_VERSION,
+      ok: false,
+      error: { code: "METHOD_NOT_ALLOWED", message: "Only GET is supported for this endpoint." },
+    }),
+    {
+      status: 405,
+      headers: {
+        allow: HEALTHZ_METHOD,
+        "content-type": "application/json; charset=utf-8",
+      },
+    },
+  );
+}
+
 function safePathname(url: string): string | undefined {
   try {
     return new URL(url).pathname;
@@ -164,7 +183,10 @@ function safePathname(url: string): string | undefined {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (safePathname(request.url) === "/healthz") return healthzResponse(env);
+    if (safePathname(request.url) === "/healthz") {
+      if (request.method !== HEALTHZ_METHOD) return healthzMethodFailureResponse();
+      return healthzResponse(env);
+    }
     const resolution = resolveRuntime(env);
     if (!resolution.ok) return configurationFailureResponse();
     return resolution.runtime.handler(request);
