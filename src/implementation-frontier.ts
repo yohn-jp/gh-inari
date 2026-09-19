@@ -325,6 +325,11 @@ function sameReference(left: IssueReference, right: IssueReference): boolean {
   return issueReferenceKey(left) === issueReferenceKey(right);
 }
 
+function sameRepository(left: ImplementationContract["repository"], right: IssueReference): boolean {
+  if (left.repositoryHost !== right.repositoryHost || left.repositoryId !== right.repositoryId) return false;
+  return left.repository === undefined || right.repository === undefined || left.repository === right.repository;
+}
+
 function normalizeState(
   value: unknown,
   path: string,
@@ -562,7 +567,18 @@ function normalizeImplementation(
         `${path}.contract`,
         "Implementation contract is invalid.",
       );
-    else contract = result.contract;
+    else {
+      contract = result.contract;
+      if (!sameRepository(contract.repository, reference))
+        addDiagnostic(
+          local,
+          "FRONTIER_CONTRADICTORY_EVIDENCE",
+          `${path}.contract.repository`,
+          "Implementation contract repository does not match the frontier candidate repository.",
+          reference,
+          contract.repository,
+        );
+    }
   }
 
   let authorizationInspection: ImplementationAuthorizationInspectionResult | undefined;
