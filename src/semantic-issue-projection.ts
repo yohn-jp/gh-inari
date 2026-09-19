@@ -261,6 +261,18 @@ const CAPABILITY_ALIASES = {
   ]),
 } as const;
 
+const CAPABILITY_ALIAS_TO_CANONICAL = new Map<string, string>([
+  ...[...CAPABILITY_ALIASES.nativeParent].map(
+    (alias) => [alias, GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeParentRelation] as const,
+  ),
+  ...[...CAPABILITY_ALIASES.nativeDependsOn].map(
+    (alias) => [alias, GITHUB_ISSUE_PROJECTION_CAPABILITIES.nativeDependsOnRelation] as const,
+  ),
+  ...[...CAPABILITY_ALIASES.fallback].map(
+    (alias) => [alias, GITHUB_ISSUE_PROJECTION_CAPABILITIES.bodyRelationFallback] as const,
+  ),
+]);
+
 function isRecord(value: unknown): value is RecordValue {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -460,7 +472,12 @@ function normalizeCapabilities(
         );
         return;
       }
-      values.push(entry);
+      const canonical = CAPABILITY_ALIAS_TO_CANONICAL.get(entry);
+      if (canonical === undefined) {
+        addViolation(violations, "CAPABILITIES_INVALID", `$.capabilities[${index}]`, "Capability is unsupported.");
+        return;
+      }
+      values.push(canonical);
     });
   } else if (isRecord(input)) {
     unknownProperties(input, CAPABILITY_FLAG_KEYS, "$.capabilities", violations, "CAPABILITIES_INVALID");
@@ -488,6 +505,13 @@ function normalizeCapabilities(
     return undefined;
   }
   return [...new Set(values)].sort(compareStrings);
+}
+
+/** Normalize all supported capability aliases to the executor contract. */
+export function normalizeSemanticIssueCapabilities(input: unknown): readonly string[] | undefined {
+  const violations: SemanticIssueProjectionViolation[] = [];
+  const normalized = normalizeCapabilities(input, violations);
+  return violations.length === 0 ? normalized : undefined;
 }
 
 function hasCapability(capabilities: readonly string[], kind: keyof typeof CAPABILITY_ALIASES): boolean {
@@ -1372,7 +1396,14 @@ export function validateSemanticIssueMutationPlan(input: unknown): SemanticIssue
       });
   }
   if (violations.length > 0) return invalidPlanResult(violations);
-  return { valid: true, plan: cloneImmutable(input as unknown as SemanticIssueMutationPlan), violations: [] };
+  return {
+    valid: true,
+    plan: cloneImmutable({
+      ...(input as unknown as SemanticIssueMutationPlan),
+      capabilities,
+    }),
+    violations: [],
+  };
 }
 
 export function deserializeSemanticIssueMutationPlan(serialized: string): SemanticIssueMutationPlan {

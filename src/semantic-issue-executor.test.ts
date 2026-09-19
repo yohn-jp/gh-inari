@@ -17,7 +17,7 @@ import {
   SemanticIssueExecutorError,
   type SemanticIssueExecutionRequest,
 } from "./semantic-issue-executor.js";
-import { planSemanticIssue } from "./semantic-issue-projection.js";
+import { planSemanticIssue, validateSemanticIssueMutationPlan } from "./semantic-issue-projection.js";
 
 function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
@@ -271,5 +271,34 @@ test("plan-only admission rejects tampered Issue plans", async () => {
     executor.execute(request),
     (error: unknown) =>
       error instanceof SemanticIssueExecutorError && error.code === "SEMANTIC_ISSUE_EXECUTION_PLAN_INVALID",
+  );
+});
+
+test("Semantic Issue capability aliases normalize to the canonical executor capabilities", () => {
+  const { artifact } = createPlan();
+  const aliases = [
+    ["github.issue.parent.native", "github.issue.parent.native"],
+    ["issue.parent.native", "github.issue.parent.native"],
+    ["github.issue.blocked-by.native", "github.issue.blocked-by.native"],
+    ["github.issue.blocked_by.native", "github.issue.blocked-by.native"],
+    ["github.issue.dependencies.native", "github.issue.blocked-by.native"],
+    ["issue.depends-on.native", "github.issue.blocked-by.native"],
+    ["github.issue.relations.body-fallback", "github.issue.relations.body-fallback"],
+    ["github.issue.parent.body-fallback", "github.issue.relations.body-fallback"],
+    ["github.issue.depends-on.body-fallback", "github.issue.relations.body-fallback"],
+    ["issue.relations.body-fallback", "github.issue.relations.body-fallback"],
+  ] as const;
+
+  for (const [alias, canonical] of aliases) {
+    const plan = planSemanticIssue({ artifact, capabilities: [alias] });
+    assert.deepEqual(plan.capabilities, [canonical]);
+    const admitted = validateSemanticIssueMutationPlan({ ...plan, capabilities: [alias] });
+    assert.equal(admitted.valid, true);
+    assert.deepEqual(admitted.plan?.capabilities, [canonical]);
+  }
+
+  assert.throws(
+    () => planSemanticIssue({ artifact, capabilities: ["github.issue.unknown"] }),
+    /Capability is unsupported/,
   );
 });
