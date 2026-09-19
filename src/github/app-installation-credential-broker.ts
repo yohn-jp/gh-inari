@@ -1202,14 +1202,15 @@ function isRepositoryReadPath(
     request.path.length <= MAX_PATH_LENGTH &&
     !/[\u0000-\u001F\u007F]/u.test(request.path) &&
     !request.path.includes("..") &&
-    !hasEncodedRepositoryPathAmbiguity(request.path) &&
+    !hasEncodedRepositoryPathAmbiguity(request.path, prefix) &&
     (request.path === prefix || request.path.startsWith(`${prefix}/`))
   );
 }
 
-function hasEncodedRepositoryPathAmbiguity(path: string): boolean {
+function hasEncodedRepositoryPathAmbiguity(path: string, prefix: string): boolean {
   const pathWithoutQuery = path.split(/[?#]/u, 1)[0] ?? path;
   let candidate = pathWithoutQuery;
+  let decodePasses = 0;
   for (let pass = 0; pass <= MAX_PATH_LENGTH; pass += 1) {
     let decoded: string;
     try {
@@ -1217,11 +1218,23 @@ function hasEncodedRepositoryPathAmbiguity(path: string): boolean {
     } catch {
       return true;
     }
-    if (countPathSeparators(decoded) > countPathSeparators(candidate)) return true;
+    if (decoded !== candidate) decodePasses += 1;
+    if (
+      decoded.includes("\\") ||
+      decoded.split("/").some((segment) => segment === "." || segment === "..") ||
+      !isRepositoryPath(decoded, prefix) ||
+      (decodePasses > 1 && countPathSeparators(decoded) > countPathSeparators(candidate))
+    ) {
+      return true;
+    }
     if (decoded === candidate) return false;
     candidate = decoded;
   }
   return true;
+}
+
+function isRepositoryPath(path: string, prefix: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
 }
 
 function countPathSeparators(path: string): number {

@@ -240,12 +240,12 @@ test("read capability rejects encoded traversal and separator ambiguity", async 
     for (const path of [
       "repos/acme/inari/issues/%2e%2e/secret",
       "repos/acme/inari/issues/%2E%2E/secret",
-      "repos/acme/inari/issues/%2fsecret",
-      "repos/acme/inari/issues/%2Fsecret",
+      "repos/acme/inari/issues/%2e%2fsecret",
+      "repos/acme/inari/issues/%2E%2Fsecret",
       "repos/acme/inari/issues/%5csecret",
       "repos/acme/inari/issues/%5Csecret",
       "repos/acme/inari/issues/%252e%252e/secret",
-      "repos/acme/inari/issues/%252fsecret",
+      "repos/acme/inari/issues/%252e%252fsecret",
       "repos/acme/inari/issues/%255csecret",
     ]) {
       await assert.rejects(
@@ -254,6 +254,13 @@ test("read capability rejects encoded traversal and separator ambiguity", async 
       );
     }
 
+    const refResponse = await capability.transport.request({
+      hostname: "github.com",
+      method: "GET",
+      path: "repos/acme/inari/git/ref/heads/feat%2F218-execute-change-plans-safely",
+    });
+    assert.deepEqual(refResponse.body, { number: 1 });
+
     const response = await capability.transport.request({
       hostname: "github.com",
       method: "GET",
@@ -261,7 +268,7 @@ test("read capability rejects encoded traversal and separator ambiguity", async 
     });
     assert.deepEqual(response.body, { number: 1 });
   });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 test("post-admission mutation capability narrows the token to the admitted effect", async () => {
