@@ -767,20 +767,64 @@ function renderIssueNative(source: SemanticTemplateSource): string {
     if (type === "dropdown") {
       attributes.options = (section.options ?? []).map((option) => option.label);
       if (section.multiple === true) attributes.multiple = true;
-      const defaultValue = Array.isArray(section.defaultValue) ? section.defaultValue[0] : section.defaultValue;
-      const index =
-        defaultValue === undefined
+      const defaults =
+        section.defaultValue === undefined
           ? undefined
-          : (section.options ?? []).findIndex(
-              (option) => option.value === defaultValue || option.id === defaultValue || option.label === defaultValue,
-            );
-      if (index !== undefined && index >= 0) attributes.default = index;
+          : Array.isArray(section.defaultValue)
+            ? section.defaultValue
+            : [section.defaultValue];
+      if (defaults !== undefined) {
+        if (section.multiple !== true && defaults.length > 1) {
+          throw new SemanticTemplateError([
+            {
+              code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+              path: `$.sections.${section.id}.defaultValue`,
+              message: "Single-select dropdown defaults must contain one value.",
+            },
+          ]);
+        }
+        const indexes = defaults.map((defaultValue) => {
+          const index = (section.options ?? []).findIndex(
+            (option) => option.value === defaultValue || option.id === defaultValue || option.label === defaultValue,
+          );
+          if (index < 0) {
+            throw new SemanticTemplateError([
+              {
+                code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+                path: `$.sections.${section.id}.defaultValue`,
+                message: `Dropdown default "${defaultValue}" must match a declared option value.`,
+              },
+            ]);
+          }
+          return index;
+        });
+        if (section.multiple === true && indexes.length > 1) {
+          throw new SemanticTemplateError([
+            {
+              code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+              path: `$.sections.${section.id}.defaultValue`,
+              message: "Issue Form dropdowns cannot represent multiple selected defaults.",
+            },
+          ]);
+        }
+        attributes.default = indexes[0];
+      }
     }
-    if (type === "checkboxes")
+    if (type === "checkboxes") {
+      if (section.defaultValue !== undefined) {
+        throw new SemanticTemplateError([
+          {
+            code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+            path: `$.sections.${section.id}.defaultValue`,
+            message: "Issue Form checkboxes cannot represent checked defaults.",
+          },
+        ]);
+      }
       attributes.options = (section.options ?? []).map((option) => ({
         label: option.label,
         ...(option.required === undefined ? {} : { required: option.required }),
       }));
+    }
     return {
       type,
       id: section.id,
@@ -810,7 +854,18 @@ function renderPullRequestProvisional(source: SemanticTemplateSource): string {
     const heading = `${"#".repeat(headingLevel)} ${section.label ?? section.id}`;
     if (section.type === "checklist") {
       const placeholder = section.placeholder === undefined ? [] : [section.placeholder];
-      const items = (section.options ?? []).map((option) => `- [ ] ${option.label}`);
+      const defaults = Array.isArray(section.defaultValue)
+        ? section.defaultValue
+        : section.defaultValue === undefined
+          ? []
+          : [section.defaultValue];
+      const items = (section.options ?? []).map((option) => {
+        const optionValue = option.value ?? option.id ?? option.label;
+        const checked = defaults.some(
+          (defaultValue) => defaultValue === optionValue || defaultValue === option.id || defaultValue === option.label,
+        );
+        return `- [${checked ? "x" : " "}] ${option.label}`;
+      });
       return [heading, ...placeholder, items.join("\n")].filter((entry) => entry.length > 0).join("\n\n");
     }
     return [heading, section.placeholder ?? ""].join("\n\n");
@@ -899,99 +954,147 @@ function applySemanticIdentityAndConstraints(
 }
 
 function rebindField(field: CanonicalField, source: SemanticSection): CanonicalField {
-  const nativeMetadata = { ...field.nativeMetadata, sourceId: source.id };
-  if (field.type === "checklist") {
-    const options = source.options ?? [];
-    const items = field.items.map((item, index) => {
-      const option = options[index];
-      return option === undefined
-        ? item
-        : {
-            ...item,
-            id: option.id ?? option.value ?? checklistIdentifier(option.label, index),
-            label: option.label,
-            required: option.required ?? item.required,
-          };
-    });
-    return {
-      ...field,
-      id: source.id,
-      ...(source.label === undefined ? {} : { label: source.label }),
-      ...(source.description === undefined ? {} : { description: source.description }),
-      nativeMetadata: {
-        ...nativeMetadata,
-        options: items.map((item) => ({ value: item.id, label: item.label, required: item.required })),
-      },
-      items,
-    };
-  }
-  if (field.type === "enum") {
-    const options = field.options.map((option, index) => {
-      const sourceOption = source.options?.[index];
-      return sourceOption === undefined
-        ? option
-        : {
-            ...option,
-            value: sourceOption.value ?? sourceOption.id ?? sourceOption.label,
-            label: sourceOption.label,
-            ...(sourceOption.description === undefined ? {} : { description: sourceOption.description }),
-          };
-    });
-    return {
-      ...field,
-      id: source.id,
-      ...(source.label === undefined ? {} : { label: source.label }),
-      ...(source.description === undefined ? {} : { description: source.description }),
-      nativeMetadata: {
-        ...nativeMetadata,
-        options: options.map((option) => ({
-          value: option.value,
-          label: option.label,
-          ...(option.description === undefined ? {} : { description: option.description }),
-        })),
-      },
-      options,
-    };
-  }
-  if (field.type === "array") {
-    const options = field.items.options?.map((option, index) => {
-      const sourceOption = source.options?.[index];
-      return sourceOption === undefined
-        ? option
-        : {
-            ...option,
-            value: sourceOption.value ?? sourceOption.id ?? sourceOption.label,
-            label: sourceOption.label,
-            ...(sourceOption.description === undefined ? {} : { description: sourceOption.description }),
-          };
-    });
-    return {
-      ...field,
-      id: source.id,
-      ...(source.label === undefined ? {} : { label: source.label }),
-      ...(source.description === undefined ? {} : { description: source.description }),
-      nativeMetadata: {
-        ...nativeMetadata,
-        ...(options === undefined
-          ? {}
-          : {
-              options: options.map((option) => ({
-                value: option.value,
-                label: option.label,
-                ...(option.description === undefined ? {} : { description: option.description }),
-              })),
-            }),
-      },
-      items: { ...field.items, ...(options === undefined ? {} : { options }) },
-    };
-  }
-  return {
+  const base = {
     ...field,
     id: source.id,
     ...(source.label === undefined ? {} : { label: source.label }),
     ...(source.description === undefined ? {} : { description: source.description }),
-    nativeMetadata,
   };
+  const options = source.options ?? [];
+
+  if (source.type === "enum") {
+    const { defaultValue: _fieldDefault, nativeMetadata: fieldNativeMetadata, ...withoutDefaults } = base;
+    const enumOptions = options.map((option) => ({
+      value: semanticOptionValue(option),
+      label: option.label,
+      ...(option.description === undefined ? {} : { description: option.description }),
+    }));
+    const defaultValue = semanticDefaultValue(source, options, false);
+    const { defaultValue: _nativeDefault, ...nativeMetadata } = {
+      ...fieldNativeMetadata,
+      sourceId: source.id,
+      options: enumOptions.map((option) => ({
+        value: option.value,
+        label: option.label,
+        ...(option.description === undefined ? {} : { description: option.description }),
+      })),
+    };
+    return {
+      ...withoutDefaults,
+      type: "enum",
+      options: enumOptions,
+      ...(defaultValue === undefined ? {} : { defaultValue }),
+      nativeMetadata: { ...nativeMetadata, ...(defaultValue === undefined ? {} : { defaultValue }) },
+    };
+  }
+
+  if (source.type === "array") {
+    const { defaultValue: _fieldDefault, nativeMetadata: fieldNativeMetadata, ...withoutDefaults } = base;
+    const arrayOptions = options.map((option) => ({
+      value: semanticOptionValue(option),
+      label: option.label,
+      ...(option.description === undefined ? {} : { description: option.description }),
+    }));
+    const defaultValue = semanticDefaultValue(source, options, true);
+    const { defaultValue: _nativeDefault, ...nativeMetadata } = {
+      ...fieldNativeMetadata,
+      sourceId: source.id,
+      ...(arrayOptions.length === 0
+        ? {}
+        : {
+            options: arrayOptions.map((option) => ({
+              value: option.value,
+              label: option.label,
+              ...(option.description === undefined ? {} : { description: option.description }),
+            })),
+          }),
+    };
+    return {
+      ...withoutDefaults,
+      type: "array",
+      selection: source.multiple === true ? "multi_select" : "list",
+      items: { type: "string", ...(arrayOptions.length === 0 ? {} : { options: arrayOptions }) },
+      ...(defaultValue === undefined ? {} : { defaultValue }),
+      nativeMetadata: { ...nativeMetadata, ...(defaultValue === undefined ? {} : { defaultValue }) },
+    };
+  }
+
+  if (source.type === "checklist") {
+    const { defaultValue: _fieldDefault, nativeMetadata: fieldNativeMetadata, ...withoutDefaults } = base;
+    const parsedItems = field.type === "checklist" ? field.items : [];
+    const items = options.map((option, index) => ({
+      id: semanticOptionValue(option),
+      label: option.label,
+      required: option.required ?? parsedItems[index]?.required ?? false,
+    }));
+    const defaultValue = semanticDefaultValue(source, options, true);
+    const { defaultValue: _nativeDefault, ...nativeMetadata } = {
+      ...fieldNativeMetadata,
+      sourceId: source.id,
+      options: items.map((item) => ({ value: item.id, label: item.label, required: item.required })),
+    };
+    return {
+      ...withoutDefaults,
+      type: "checklist",
+      items,
+      ...(defaultValue === undefined ? {} : { defaultValue }),
+      nativeMetadata: { ...nativeMetadata, ...(defaultValue === undefined ? {} : { defaultValue }) },
+    };
+  }
+
+  const { nativeMetadata: _fieldNativeMetadata, ...withoutNativeMetadata } = base;
+  return {
+    ...withoutNativeMetadata,
+    nativeMetadata: { ...field.nativeMetadata, sourceId: source.id },
+  };
+}
+
+function semanticOptionValue(option: SemanticOption): string {
+  return option.value ?? option.id ?? option.label;
+}
+
+function semanticDefaultValue(
+  source: SemanticSection,
+  options: readonly SemanticOption[],
+  array: false,
+): string | undefined;
+function semanticDefaultValue(
+  source: SemanticSection,
+  options: readonly SemanticOption[],
+  array: true,
+): readonly string[] | undefined;
+function semanticDefaultValue(
+  source: SemanticSection,
+  options: readonly SemanticOption[],
+  array: boolean,
+): string | readonly string[] | undefined {
+  if (source.defaultValue === undefined) return undefined;
+  const values = Array.isArray(source.defaultValue) ? source.defaultValue : [source.defaultValue];
+  if (array === false && values.length !== 1) {
+    throw new SemanticTemplateError([
+      {
+        code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+        path: `$.sections.${source.id}.defaultValue`,
+        message: "Single-value fields must have one default value.",
+      },
+    ]);
+  }
+  const resolved = values.map((value) => {
+    const option = options.find(
+      (candidate) => candidate.value === value || candidate.id === value || candidate.label === value,
+    );
+    if (option === undefined) {
+      throw new SemanticTemplateError([
+        {
+          code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+          path: `$.sections.${source.id}.defaultValue`,
+          message: `Default "${value}" must match a declared option value.`,
+        },
+      ]);
+    }
+    return semanticOptionValue(option);
+  });
+  return array ? resolved : resolved[0];
 }
 
 function semanticSourceFromField(field: CanonicalField, section: CanonicalSection): SemanticSection {

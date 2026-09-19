@@ -550,6 +550,7 @@ function compileDropdown(
       }
     }
   }
+  const defaultValue = defaultOption === undefined ? undefined : multiple ? [defaultOption] : defaultOption;
   const options = optionValues?.map((option) => ({ value: option, label: option })) ?? [];
   const nativeOptions: readonly NativeOptionMetadata[] = options.map((option) => ({ value: option.value }));
   const nativeMetadata: NativeFieldMetadata = {
@@ -557,7 +558,7 @@ function compileDropdown(
     sourceId: id,
     ...(Object.prototype.hasOwnProperty.call(attributes, "multiple") ? { multiple } : {}),
     ...(optionValues === undefined ? {} : { options: nativeOptions }),
-    ...(defaultOption === undefined ? {} : { defaultValue: multiple ? [defaultOption] : defaultOption }),
+    ...(defaultValue === undefined ? {} : { defaultValue }),
   };
 
   if (multiple) {
@@ -569,7 +570,9 @@ function compileDropdown(
       selection: "multi_select",
       required: common.required,
       items: { type: "string", options },
-      ...(defaultOption === undefined ? {} : { defaultValue: [defaultOption] }),
+      ...(defaultValue === undefined
+        ? {}
+        : { defaultValue: Array.isArray(defaultValue) ? defaultValue : [defaultValue] }),
       render: { order: 0 },
       nativeMetadata,
     };
