@@ -365,7 +365,17 @@ function verifyProjection(plan: PlannedChange, projection: ChangeProjectionResul
   const expected = expectedProjection(plan);
   const actual = projection.change;
   const diagnostics: ChangeDiagnostic[] = [];
-  const cleanBranchOnlyAbort = isBranchOnlyAbortRecoveryPlan(plan) && isChangeAbortCleanupComplete(projection);
+  const branchOnlyAbort = isBranchOnlyAbortRecoveryPlan(plan);
+  const cleanBranchOnlyAbort = branchOnlyAbort && isChangeAbortCleanupComplete(projection);
+  if (branchOnlyAbort && !cleanBranchOnlyAbort) {
+    diagnostics.push(
+      diagnostic(
+        "CHANGE_INVALID_PLAN",
+        "$.projection",
+        "Branch-only abort recovery requires complete cleanup with no pull-request candidate.",
+      ),
+    );
+  }
   if ((!projection.valid || projection.status !== "healthy") && !cleanBranchOnlyAbort) {
     diagnostics.push(
       diagnostic("CHANGE_INVALID_PLAN", "$.projection", "Post-effect projection is not a healthy canonical Change."),
