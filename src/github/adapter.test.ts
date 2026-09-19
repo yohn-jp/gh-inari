@@ -302,6 +302,35 @@ test("coalesces concurrent native repository resolutions onto one in-flight call
   );
 });
 
+test("repository context accepts repository-scoped credentials without requiring GET /user", async () => {
+  const paths: string[] = [];
+  const adapter = new GitHubAdapter({
+    repository: "acme/inari",
+    transport: {
+      request: async (request) => {
+        paths.push(request.path);
+        if (request.path === "user")
+          return { status: 403, body: { message: "Resource not accessible by integration" } };
+        if (request.path === "repos/acme/inari") return { status: 200, body: { id: 100000157 } };
+        throw new Error(`Unexpected request: ${request.method} ${request.path}`);
+      },
+    },
+  });
+
+  const context = await adapter.resolveRepositoryContext();
+  assert.equal(context.repositoryId, "100000157");
+  assert.deepEqual(paths, ["repos/acme/inari"]);
+
+  await assert.rejects(
+    adapter.getAuthenticatedUser(),
+    (error: unknown) =>
+      error instanceof GitHubAuthenticationError &&
+      error.code === "GITHUB_AUTHENTICATION_FAILED" &&
+      error.category === "authentication",
+  );
+  assert.deepEqual(paths, ["repos/acme/inari", "user"]);
+});
+
 test("returns a typed failure when the native provider is not authenticated", async () => {
   const transport = new StubFixtureTransport([
     command(0, "gh version 2.0"),
