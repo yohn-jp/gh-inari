@@ -73,7 +73,7 @@ async function readProvider(
   repository: GitHubChangeEffectRepository,
   path: string,
 ): Promise<Record<string, unknown>> {
-  let response: { readonly status: number; readonly body?: unknown };
+  let response: GitHubChangeEffectResponse;
   try {
     response = await transport.request({ hostname: repository.hostname, method: "GET", path });
   } catch (error: unknown) {
@@ -114,7 +114,7 @@ export function createRepositoryEvidenceReader(
     },
     findBranch: async (branch: string): Promise<GitHubBranch | undefined> => {
       if (!isBoundedProviderText(branch, MAX_REPOSITORY_REF_LENGTH)) fail();
-      let response: { readonly status: number; readonly body?: unknown };
+      let response: GitHubChangeEffectResponse;
       try {
         response = await transport.request({
           hostname: repository.hostname,
