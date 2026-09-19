@@ -590,52 +590,64 @@ async function main() {
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
-  const packResult = run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"]);
+  const packResult = run("npm", ["pack", "--json", "--ignore-scripts"]);
   const parsedPackInfo = JSON.parse(packResult.stdout);
   const packInfo = Array.isArray(parsedPackInfo)
     ? parsedPackInfo[0]
     : (parsedPackInfo[packageJson.name] ?? parsedPackInfo);
-  const packedFiles = packInfo.files.map((entry) => entry.path);
-  const expected = [...EXPECTED_PACKED_FILES].sort();
-  const actual = [...packedFiles].sort();
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`packed file set mismatch:\nexpected:\n${expected.join("\n")}\nactual:\n${actual.join("\n")}`);
+  if (typeof packInfo?.filename !== "string") throw new Error("npm pack did not return an artifact filename");
+
+  const tarballPath = path.resolve(repoRoot, packInfo.filename);
+  if (!tarballPath.endsWith(".tgz") || !fs.statSync(tarballPath).isFile()) {
+    throw new Error("npm pack did not produce a tarball");
   }
 
-  // Every "exports" map target must ship inside the packed tarball: an entry
-  // pointing at a file the manifest doesn't carry would break consumers at
-  // resolution time even though `npm pack` and `test:package` file-set checks
-  // pass independently of each other.
-  const exportTargets = exportsTargetPaths(packageJson);
-  if (exportTargets.length === 0) throw new Error('package.json "exports" map is empty or missing');
-  for (const target of exportTargets) {
-    if (!packedFiles.includes(target)) {
-      throw new Error(`exports map target "${target}" is not included in the packed tarball`);
+  try {
+    const packedFiles = packInfo.files.map((entry) => entry.path);
+    const expected = [...EXPECTED_PACKED_FILES].sort();
+    const actual = [...packedFiles].sort();
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(`packed file set mismatch:\nexpected:\n${expected.join("\n")}\nactual:\n${actual.join("\n")}`);
     }
-    if (!fs.existsSync(path.join(repoRoot, target))) {
-      throw new Error(`exports map target "${target}" does not exist in the built dist output`);
+
+    // Every "exports" map target must ship inside the packed tarball: an entry
+    // pointing at a file the manifest doesn't carry would break consumers at
+    // resolution time even though package-content checks pass.
+    const exportTargets = exportsTargetPaths(packageJson);
+    if (exportTargets.length === 0) throw new Error('package.json "exports" map is empty or missing');
+    for (const target of exportTargets) {
+      if (!packedFiles.includes(target)) {
+        throw new Error(`exports map target "${target}" is not included in the packed tarball`);
+      }
+      if (!fs.existsSync(path.join(repoRoot, target))) {
+        throw new Error(`exports map target "${target}" does not exist in the built dist output`);
+      }
     }
+
+    const executableBinPaths = Object.values(packageJson.bin ?? {});
+    for (const binPath of executableBinPaths) {
+      if (!packedFiles.includes(binPath)) {
+        throw new Error(`bin entry "${binPath}" is not included in the packed tarball`);
+      }
+      const stat = fs.statSync(path.join(repoRoot, binPath));
+      const isExecutableByOwner = (stat.mode & 0o100) !== 0;
+      if (!isExecutableByOwner) {
+        throw new Error(`bin entry "${binPath}" is not executable (chmod +x it, or check build step file perms)`);
+      }
+    }
+
+    await validateCodexPlugin(packageJson, packedFiles);
+
+    console.log(
+      `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable; delegating the same packed artifact to runtime certification.`,
+    );
+
+    run(process.execPath, ["scripts/package-runtime-certification.mjs", "--tarball", tarballPath], {
+      stdio: "inherit",
+    });
+  } finally {
+    fs.rmSync(tarballPath, { force: true });
   }
-
-  const executableBinPaths = Object.values(packageJson.bin ?? {});
-  for (const binPath of executableBinPaths) {
-    if (!packedFiles.includes(binPath)) {
-      throw new Error(`bin entry "${binPath}" is not included in the packed tarball`);
-    }
-    const stat = fs.statSync(path.join(repoRoot, binPath));
-    const isExecutableByOwner = (stat.mode & 0o100) !== 0;
-    if (!isExecutableByOwner) {
-      throw new Error(`bin entry "${binPath}" is not executable (chmod +x it, or check build step file perms)`);
-    }
-  }
-
-  await validateCodexPlugin(packageJson, packedFiles);
-
-  console.log(
-    `package contents verified: ${packedFiles.length} file(s), ${exportTargets.length} export target(s), all bin targets present and executable; delegating package/runtime certification to the installed-artifact harness.`,
-  );
-
-  run(process.execPath, ["scripts/package-runtime-certification.mjs"], { stdio: "inherit" });
 }
 
 if (process.argv[1]?.endsWith("run-package-suite.mjs")) main();

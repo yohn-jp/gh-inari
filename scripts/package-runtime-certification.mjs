@@ -398,22 +398,40 @@ function certifyInstalledRuntime(consumerDirectory, installedPackageDirectory, e
     fail("installed package exposed an invalid or raw provider Issue projection");
 }
 
-function packArtifact() {
-  const result = run("npm", ["pack", "--json", "--ignore-scripts"]);
-  const parsed = JSON.parse(result.stdout);
-  const info = Array.isArray(parsed) ? parsed[0] : (parsed[packageJson.name] ?? parsed);
-  if (typeof info?.filename !== "string") fail("npm pack did not return an artifact filename");
-  const tarballPath = path.resolve(repoRoot, info.filename);
-  if (!tarballPath.endsWith(".tgz") || !fs.statSync(tarballPath).isFile()) fail("npm pack did not produce a tarball");
+function suppliedTarballPath(args) {
+  if (args.length !== 2 || args[0] !== "--tarball" || args[1].length === 0) {
+    fail("usage: package-runtime-certification.mjs --tarball <artifact.tgz>");
+  }
+  const tarballPath = path.resolve(args[1]);
+  if (!tarballPath.endsWith(".tgz")) fail("supplied package artifact must be a .tgz file");
+  if (!fs.existsSync(tarballPath) || !fs.statSync(tarballPath).isFile()) {
+    fail("supplied package artifact does not exist or is not a file");
+  }
   return tarballPath;
 }
 
+function certifyPoisonGhBoundary(consumerDirectory, environment) {
+  const launcher = path.join(consumerDirectory, "node_modules", ".bin", "inari");
+  const inspected = jsonOutput(
+    invoke(launcher, ["issue", "get", "667", "--repository", "yohn-jp/gh-inari", "--json"], {
+      cwd: consumerDirectory,
+      env: environment,
+    }),
+    "poison gh native HTTP Issue get",
+  );
+  if (inspected.valid !== true || inspected.classification !== "valid" || "body" in inspected) {
+    fail("poison gh boundary did not preserve the native HTTP Issue projection");
+  }
+}
+
 async function main() {
-  const tarballPath = packArtifact();
+  const tarballPath = suppliedTarballPath(process.argv.slice(2));
   const certificationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gh-inari-package-runtime-"));
   let provider;
   try {
     const { consumerDirectory, packageFile, packageContents } = createConsumer(certificationRoot);
+    if (isPathInside(consumerDirectory, tarballPath))
+      fail("supplied package artifact must remain outside the consumer");
     const installEnv = installEnvironment(certificationRoot);
     const npm = run("which", ["npm"]).stdout.trim();
     run(
@@ -473,7 +491,7 @@ async function main() {
     console.log(`gh unavailable package runtime passed: ${packageJson.name}@${packageJson.version}`);
 
     const poison = runtimeEnvironment(certificationRoot, consumerDirectory, "poison", provider.url);
-    certifyInstalledRuntime(consumerDirectory, installedPackageDirectory, poison);
+    certifyPoisonGhBoundary(consumerDirectory, poison);
     if (fs.existsSync(poison.INARI_POISON_GH_LOG)) fail(`product executed poison gh: ${POISON_GH_SENTINEL}`);
     console.log("poison gh guard passed: no product invocation was observed");
     console.log(
@@ -485,7 +503,6 @@ async function main() {
       await new Promise((resolve) => provider.child.once("exit", resolve));
     }
     fs.rmSync(certificationRoot, { recursive: true, force: true });
-    fs.rmSync(tarballPath, { force: true });
   }
 }
 

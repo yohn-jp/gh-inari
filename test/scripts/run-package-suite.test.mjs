@@ -164,15 +164,34 @@ test("packed certification rejects runtime, preflight, and Skill contract drift"
   assert.throws(() => validateSkillIndex({ version: "1", scenarios: [] }));
 });
 
-test("packed certification has no checked-out source execution path", () => {
-  const script = fs.readFileSync(
+test("package certification uses one supplied packed artifact and no checked-out source execution path", () => {
+  const packageSuite = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "scripts", "run-package-suite.mjs"),
+    "utf8",
+  );
+  const runtimeScript = fs.readFileSync(
     path.join(import.meta.dirname, "..", "..", "scripts", "package-runtime-certification.mjs"),
     "utf8",
   );
-  assert.match(script, /run\("npm", \["pack"/u);
-  assert.match(script, /--omit=dev/u);
-  assert.match(script, /--diagnose/u);
-  assert.doesNotMatch(script, /src[\\/]index\.ts|sourceEntry|workspace:\s/u);
+  assert.match(packageSuite, /run\("npm", \["pack", "--json", "--ignore-scripts"\]\)/u);
+  assert.doesNotMatch(packageSuite, /--dry-run/u);
+  assert.match(packageSuite, /package-runtime-certification\.mjs", "--tarball", tarballPath/u);
+  assert.doesNotMatch(runtimeScript, /run\("npm", \["pack"/u);
+  assert.match(runtimeScript, /suppliedTarballPath\(process\.argv\.slice\(2\)\)/u);
+  assert.match(runtimeScript, /--omit=dev/u);
+  assert.match(runtimeScript, /--diagnose/u);
+  assert.doesNotMatch(runtimeScript, /src[\\/]index\.ts|sourceEntry|workspace:\s/u);
+});
+
+test("poison gh guard uses the provider boundary without replaying the full runtime suite", () => {
+  const runtimeScript = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "scripts", "package-runtime-certification.mjs"),
+    "utf8",
+  );
+  assert.match(runtimeScript, /function certifyPoisonGhBoundary/u);
+  assert.match(runtimeScript, /certifyInstalledRuntime\(consumerDirectory, installedPackageDirectory, unavailable\)/u);
+  assert.match(runtimeScript, /certifyPoisonGhBoundary\(consumerDirectory, poison\)/u);
+  assert.match(runtimeScript, /poison gh native HTTP Issue get/u);
 });
 
 test("package certification uses an HTTP provider and excludes Change/Golden Path authority", () => {
