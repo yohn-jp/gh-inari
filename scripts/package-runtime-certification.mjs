@@ -430,7 +430,8 @@ async function main() {
   let provider;
   try {
     const { consumerDirectory, packageFile, packageContents } = createConsumer(certificationRoot);
-    if (isPathInside(consumerDirectory, tarballPath)) fail("supplied package artifact must remain outside the consumer");
+    if (isPathInside(consumerDirectory, tarballPath))
+      fail("supplied package artifact must remain outside the consumer");
     const installEnv = installEnvironment(certificationRoot);
     const npm = run("which", ["npm"]).stdout.trim();
     run(
