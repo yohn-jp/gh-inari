@@ -24,13 +24,11 @@ test("relay profile certifies semantic parity and bounded transport failures", a
 
   assert.equal(report.profile, "relay");
   assert.equal(report.profiles.includes("relay"), true);
-  assert.equal(
-    report.certificationStatus,
-    report.productionFailures.length === 0 ? "passed" : "blocked",
-  );
-  // Both currently-known production defects are unrepaired; the certification
-  // profile is expected to report blocked until they are fixed elsewhere.
-  assert.equal(report.certificationStatus, "blocked");
+  // Durable invariant: certificationStatus always follows observed outcomes.
+  // It must never be pinned to a fixed value, or the contract would have to
+  // be manually rewritten the moment the production defects it reports on
+  // are fixed.
+  assert.equal(report.certificationStatus, report.productionFailures.length === 0 ? "passed" : "blocked");
   assert.equal(report.semanticParity.expected.status, "succeeded");
   if (report.semanticParity.status === "blocked") {
     assert.equal(report.semanticParity.actual.status, "failed");
@@ -57,11 +55,13 @@ test("relay profile certifies semantic parity and bounded transport failures", a
   assert.equal(report.scenarios["lost-result"].recovery, "recovery-required");
   assert.equal(report.scenarios["lost-result"].automaticRetry, "forbidden");
   assert.equal(report.scenarios.reconnect.phase, "possibly-delivered");
-  // The late-result defect is also currently unrepaired: an expired delivery
-  // state still applies a late terminal result instead of ignoring it.
-  assert.equal(report.scenarios["late-result"].transition, "applied");
-  assert.match(report.scenarios["late-result"].productionFailure, /late terminal result/);
-  if (report.scenarios["late-result"].transition === "ignored") {
+  // Durable invariant: an expired delivery state must ignore a late terminal
+  // result, never apply it (unsafe replay). Report the current defect as
+  // evidence, but do not require it to be "applied" going forward.
+  assert.ok(["applied", "ignored"].includes(report.scenarios["late-result"].transition));
+  if (report.scenarios["late-result"].transition === "applied") {
+    assert.match(report.scenarios["late-result"].productionFailure, /late terminal result/);
+  } else {
     assert.equal(report.scenarios["late-result"].productionFailure, undefined);
   }
   assert.equal(report.scenarios["duplicate-result"], "duplicate-result-ignored");

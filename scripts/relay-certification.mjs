@@ -1022,7 +1022,9 @@ export async function runControlledCertification() {
     "ambiguous-effect-recovery": await recoveryRequired(modules),
   };
   const productionFailures = [
-    positive.productionFailure === undefined ? undefined : { scenario: "semantic-parity", ...positive.productionFailure },
+    positive.productionFailure === undefined
+      ? undefined
+      : { scenario: "semantic-parity", ...positive.productionFailure },
     scenarios["late-result"].productionFailure === undefined
       ? undefined
       : { scenario: "late-result", code: "LATE_RESULT_ACCEPTED", evidence: scenarios["late-result"].productionFailure },
