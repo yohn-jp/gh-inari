@@ -630,9 +630,12 @@ function parseVersion(value: string): ParsedVersion | undefined {
       value,
     );
   if (match === null) return undefined;
+  const prerelease = match[4] === undefined ? [] : match[4].split(".");
+  if (prerelease.some((identifier) => /^\d+$/u.test(identifier) && identifier.length > 1 && identifier.startsWith("0")))
+    return undefined;
   return {
     core: [match[1], match[2], match[3]],
-    prerelease: match[4] === undefined ? [] : match[4].split("."),
+    prerelease,
   };
 }
 
@@ -667,7 +670,7 @@ function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
   return left.prerelease.length > right.prerelease.length ? 1 : -1;
 }
 
-function versionAtLeast(actual: string, minimum: string): boolean {
+export function versionAtLeast(actual: string, minimum: string): boolean {
   const actualVersion = parseVersion(actual);
   const minimumVersion = parseVersion(minimum);
   if (actualVersion === undefined || minimumVersion === undefined) return false;

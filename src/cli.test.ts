@@ -1104,6 +1104,7 @@ test("minimum-version checks use bounded SemVer precedence in version and diagno
     { actual: "1.0.0-beta.2", minimum: "1.0.0-beta.1", expected: true },
     { actual: "1.0.0+build.2", minimum: "1.0.0+build.1", expected: true },
     { actual: "v1.0.0", minimum: "1.0.0", expected: true },
+    { actual: "1.0.0-alpha.01", minimum: "1.0.0-alpha.1", expected: false },
   ];
   for (const testCase of cases) {
     const dependencies = { packageMetadata: { name: "gh-inari", version: testCase.actual, description: "" } };
@@ -1132,11 +1133,13 @@ test("minimum-version checks use bounded SemVer precedence in version and diagno
     );
   }
 
-  const invalid = await captureJson(["--minimum-version", "1.0.0-", "version", "--json"], {
-    packageMetadata: { name: "gh-inari", version: "1.0.0", description: "" },
-  });
-  assert.equal(invalid.exitCode, 1);
-  assert.equal((invalid.output.error as { code?: string } | undefined)?.code, "INVALID_OPTION");
+  for (const invalidMinimum of ["1.0.0-", "1.0.0-01", "1.0.0-alpha.01"]) {
+    const invalid = await captureJson(["--minimum-version", invalidMinimum, "version", "--json"], {
+      packageMetadata: { name: "gh-inari", version: "1.0.0", description: "" },
+    });
+    assert.equal(invalid.exitCode, 1, invalidMinimum);
+    assert.equal((invalid.output.error as { code?: string } | undefined)?.code, "INVALID_OPTION", invalidMinimum);
+  }
 });
 
 test("diagnose reports only the standalone canonical runtime contract", async () => {
