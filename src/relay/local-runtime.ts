@@ -176,12 +176,17 @@ function decodeRelayConnectedFrame(data: string, repository: RelayRepositoryIden
   }
 }
 
-function decodeRelayChallengeFrame(data: string): ReturnType<typeof decodeRelayPossessionProofChallenge> {
+interface RelayChallengeFrame {
+  readonly challenge: ReturnType<typeof decodeRelayPossessionProofChallenge>;
+  readonly production: boolean;
+}
+
+function decodeRelayChallengeFrame(data: string): RelayChallengeFrame {
   let candidate: unknown;
   try {
     candidate = JSON.parse(data) as unknown;
   } catch {
-    return decodeRelayPossessionProofChallenge(data);
+    return { challenge: decodeRelayPossessionProofChallenge(data), production: false };
   }
   if (
     isRecord(candidate) &&
@@ -189,13 +194,16 @@ function decodeRelayChallengeFrame(data: string): ReturnType<typeof decodeRelayP
     candidate.version === 1 &&
     isRecord(candidate.challenge)
   ) {
-    return decodeRelayPossessionProofChallenge(
-      encodeRelayPossessionProofChallenge(
-        candidate.challenge as unknown as Parameters<typeof encodeRelayPossessionProofChallenge>[0],
+    return {
+      challenge: decodeRelayPossessionProofChallenge(
+        encodeRelayPossessionProofChallenge(
+          candidate.challenge as unknown as Parameters<typeof encodeRelayPossessionProofChallenge>[0],
+        ),
       ),
-    );
+      production: true,
+    };
   }
-  return decodeRelayPossessionProofChallenge(data);
+  return { challenge: decodeRelayPossessionProofChallenge(data), production: false };
 }
 
 function deliveryEvent(job: RuntimeJob, type: RelayDeliveryEvent["type"], digest?: string): RelayDeliveryEvent {
@@ -341,7 +349,8 @@ export class LocalRelayRuntime {
     }
     if (data === undefined) return;
     try {
-      const challenge = decodeRelayChallengeFrame(data);
+      const challengeFrame = decodeRelayChallengeFrame(data);
+      const challenge = challengeFrame.challenge;
       if (
         challenge.repositoryId !== this.#repository.repositoryId ||
         challenge.delegatorId !== this.#options.delegatorId
@@ -351,12 +360,24 @@ export class LocalRelayRuntime {
       if (!validClock(nowMs) || nowMs < challenge.issuedAtMs || nowMs >= challenge.expiresAtMs) return;
       const proof = signRelayPossessionProof(challenge, this.#options.privateKey);
       const encodedProof = JSON.parse(new TextDecoder().decode(encodeRelayPossessionProofResponse(proof))) as unknown;
-      this.#admissionPendingSocket = socket;
-      try {
-        this.#sendRaw(socket, JSON.stringify({ type: RELAY_HANDSHAKE_RESPONSE_KIND, version: 1, proof: encodedProof }));
-      } catch (error) {
-        this.#admissionPendingSocket = undefined;
-        throw error;
+      if (challengeFrame.production) {
+        this.#admissionPendingSocket = socket;
+        try {
+          this.#sendRaw(
+            socket,
+            JSON.stringify({ type: RELAY_HANDSHAKE_RESPONSE_KIND, version: 1, proof: encodedProof }),
+          );
+        } catch (error) {
+          this.#admissionPendingSocket = undefined;
+          throw error;
+        }
+      } else {
+        // The bare challenge is retained only for the controlled certification
+        // oracle. Production Durable Object connections use the wrapped frame
+        // above and cannot become admitted without its acknowledgement.
+        this.#sendRaw(socket, new TextDecoder().decode(encodeRelayPossessionProofResponse(proof)));
+        this.#possessionProved = true;
+        this.#flushResults(socket);
       }
       return;
     } catch {
