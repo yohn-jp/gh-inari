@@ -50,6 +50,11 @@ export interface RelayTelemetrySink {
   record(event: RelayTelemetryEvent): void | Promise<void>;
 }
 
+/** The small logging surface used by the Cloudflare Observability adapter. */
+export interface RelayTelemetryLogger {
+  log(line: string): void;
+}
+
 export interface RelayTelemetryEventInput {
   readonly occurredAtMs: number;
   readonly kind: RelayTelemetryKind;
@@ -123,6 +128,24 @@ export function createRelayTelemetryEvent(input: RelayTelemetryEventInput): Rela
     ...(counters === undefined ? {} : { counters }),
   });
 }
+
+/**
+ * Emit bounded relay events as JSON lines for Cloudflare Workers Observability.
+ *
+ * The logger is injectable so production wiring can be exercised without
+ * relying on the ambient console in deterministic tests. Only the already
+ * normalized RelayTelemetryEvent crosses this boundary.
+ */
+export function createCloudflareRelayTelemetrySink(logger: RelayTelemetryLogger = console): RelayTelemetrySink {
+  return Object.freeze({
+    record(event: RelayTelemetryEvent): void {
+      logger.log(JSON.stringify(event));
+    },
+  });
+}
+
+/** Default sink for the hosted Worker and Repository Relay Durable Object. */
+export const DEFAULT_RELAY_TELEMETRY_SINK: RelayTelemetrySink = createCloudflareRelayTelemetrySink();
 
 /** Telemetry must never be able to change transport behavior. */
 export function recordRelayTelemetry(
