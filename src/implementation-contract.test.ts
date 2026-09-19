@@ -257,8 +257,41 @@ test("the public schema is versioned and defaults do not grant WRITE", () => {
   assert.equal(IMPLEMENTATION_CONTRACT_SCHEMA.$id, "urn:inari:implementation-contract:1.0.0");
   assert.deepEqual(projectImplementationSchema(), IMPLEMENTATION_CONTRACT_SCHEMA);
   assert.deepEqual(IMPLEMENTATION_CONTRACT_SCHEMA.properties?.scope?.required, ["readOnly"]);
+  assert.deepEqual(IMPLEMENTATION_CONTRACT_SCHEMA.properties?.execution?.required, ["baseBranch"]);
   const omittedWrite = validContract({ scope: { readOnly: ["src/**"] } });
   assert.equal(parseImplementationContract(omittedWrite).scope.write.length, 0);
+});
+
+test("execution dependencies are optional with canonical empty-list semantics", () => {
+  const dependencyFree = validContract();
+  delete (dependencyFree.execution as Record<string, unknown>).dependencies;
+
+  const validated = validateImplementationContract(dependencyFree);
+  assert.equal(validated.valid, true);
+  assert.deepEqual(validated.contract?.execution.dependencies, []);
+
+  const fields = implementationIssueFieldsFromContract(validated.contract);
+  assert.equal(fields.dependencies, undefined);
+  const fromFields = implementationContractFromIssueFields(fields);
+  assert.equal(fromFields.valid, true);
+  assert.deepEqual(fromFields.contract?.execution.dependencies, []);
+
+  const body = renderImplementationIssueBody(validated.contract);
+  const parsed = parseImplementationIssueBody(body);
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.contract?.execution.dependencies, []);
+  assert.equal(serializeImplementationContract(parsed.contract), serializeImplementationContract(validated.contract));
+
+  const withDependency = validContract();
+  const dependencyFields = implementationIssueFieldsFromContract(withDependency);
+  assert.notEqual(dependencyFields.dependencies, undefined);
+  const dependencyRoundTrip = implementationContractFromIssueFields(dependencyFields);
+  assert.equal(dependencyRoundTrip.valid, true);
+  assert.deepEqual(dependencyRoundTrip.contract?.execution.dependencies, [SOURCE]);
+  assert.equal(
+    serializeImplementationContract(dependencyRoundTrip.contract),
+    serializeImplementationContract(withDependency),
+  );
 });
 
 test("schema-facing and production validation agree on an omitted mutation scope", () => {
