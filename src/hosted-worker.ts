@@ -11,6 +11,7 @@ import {
   type RelayRepositoryIdentity,
 } from "./relay/contract.js";
 import {
+  RepositoryRelayDurableObject,
   repositoryRelayDurableObjectId,
   type RepositoryRelayWebSocket,
   type RelayDurableObjectNamespaceLike,
@@ -351,3 +352,5 @@ export default {
     return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
   },
 };
+
+export { RepositoryRelayDurableObject };
