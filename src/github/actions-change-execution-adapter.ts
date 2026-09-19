@@ -249,7 +249,9 @@ function adapterProviderFailure(error: unknown): GitHubProviderFailureClassifica
     }
     if (error.category === "timeout") {
       const timeoutMs =
-        typeof error.details.timeoutMs === "number" && Number.isSafeInteger(error.details.timeoutMs) && error.details.timeoutMs > 0
+        typeof error.details.timeoutMs === "number" &&
+        Number.isSafeInteger(error.details.timeoutMs) &&
+        error.details.timeoutMs > 0
           ? error.details.timeoutMs
           : undefined;
       return githubProviderFailure("timeout", {
@@ -320,7 +322,9 @@ function parseFailureDiagnostic(value: unknown, operation: string): TrustedActio
   if (
     Object.keys(details).some(
       (key) =>
-        !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure", "providerFailure"].includes(key),
+        !["stage", "reason", "trustedCode", "diagnostics", "evidence", "effectFailure", "providerFailure"].includes(
+          key,
+        ),
     ) ||
     !isTrustedActionsFailureStage(details.stage) ||
     (details.reason !== undefined && !isRepositoryEvidenceFailureReason(details.reason)) ||
@@ -749,9 +753,10 @@ function isRetryablePollTransportError(error: unknown): error is ChangeExecution
   const details = error.details;
   if (typeof details !== "object" || details === null || Array.isArray(details)) return false;
   try {
-    return normalizeGitHubProviderFailureClassification(
-      (details as { readonly providerFailure?: unknown }).providerFailure,
-    )?.retryable === true;
+    return (
+      normalizeGitHubProviderFailureClassification((details as { readonly providerFailure?: unknown }).providerFailure)
+        ?.retryable === true
+    );
   } catch {
     return false;
   }
@@ -766,12 +771,11 @@ class NativeActionsApiError extends Error {
 
   constructor(
     reason: "authentication" | "response" | "timeout",
-    providerFailure: GitHubProviderFailureClassification =
-      reason === "authentication"
-        ? githubProviderFailure("authentication", { retryable: false })
-        : reason === "timeout"
-          ? githubProviderFailure("timeout", { retryable: true })
-          : githubProviderFailure("response-invalid", { retryable: false }),
+    providerFailure: GitHubProviderFailureClassification = reason === "authentication"
+      ? githubProviderFailure("authentication", { retryable: false })
+      : reason === "timeout"
+        ? githubProviderFailure("timeout", { retryable: true })
+        : githubProviderFailure("response-invalid", { retryable: false }),
   ) {
     super(
       reason === "authentication"
@@ -846,10 +850,7 @@ function nativeActionsBody(fields: Readonly<Record<string, string>>): GitHubChan
   return body;
 }
 
-function nativeRepositoryResponseStatus(
-  status: number,
-  headers?: Readonly<Record<string, string>>,
-): void {
+function nativeRepositoryResponseStatus(status: number, headers?: Readonly<Record<string, string>>): void {
   if (status >= 200 && status < 300) return;
   const providerFailure = githubProviderFailureFromStatus(status, headers);
   throw new NativeActionsApiError(
@@ -1071,10 +1072,7 @@ export class ActionsChangeExecutionNativeHttpApi
   private transport(deadline?: ChangeExecutionDeadline): GitHubNativeHttpTransport {
     const remaining = deadline?.remainingMs();
     if (remaining !== undefined && remaining <= 0) {
-      throw new NativeActionsApiError(
-        "timeout",
-        githubProviderFailure("timeout", { retryable: true }),
-      );
+      throw new NativeActionsApiError("timeout", githubProviderFailure("timeout", { retryable: true }));
     }
     const timeout =
       remaining === undefined
