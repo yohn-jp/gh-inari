@@ -1467,7 +1467,7 @@ test("#615 preserves a bounded transport stage at each Actions boundary", async 
         stage: expected.stage,
         ...(expected.providerFailure === undefined ? {} : { providerFailure: expected.providerFailure }),
       });
-      assert.doesNotMatch(JSON.stringify(error), /Bearer|secret|private|provider|token|\/private/iu);
+      assert.doesNotMatch(JSON.stringify(error), /Bearer|secret|private|token|\/private/iu);
       return true;
     });
   };
