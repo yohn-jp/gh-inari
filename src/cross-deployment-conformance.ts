@@ -27,7 +27,13 @@ import type { CapabilityAuthorizedSessionExecutionResult } from "./session-autho
 
 export const CROSS_DEPLOYMENT_CONFORMANCE_VERSION = 1 as const;
 
-export const CROSS_DEPLOYMENT_PROFILES = Object.freeze(["trusted-local", "actions", "direct-app", "mcp"] as const);
+export const CROSS_DEPLOYMENT_PROFILES = Object.freeze([
+  "trusted-local",
+  "actions",
+  "direct-app",
+  "mcp",
+  "relay",
+] as const);
 export type CrossDeploymentProfile = (typeof CROSS_DEPLOYMENT_PROFILES)[number];
 
 export type CrossDeploymentOperation = ChangeMutation | "show";
