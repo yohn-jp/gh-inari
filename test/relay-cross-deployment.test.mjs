@@ -23,12 +23,22 @@ test("relay profile certifies semantic parity and bounded transport failures", a
   ];
 
   assert.equal(report.profile, "relay");
-  assert.equal(report.certificationStatus, "blocked");
   assert.equal(report.profiles.includes("relay"), true);
-  assert.equal(report.semanticParity.status, "blocked");
+  assert.equal(
+    report.certificationStatus,
+    report.productionFailures.length === 0 ? "passed" : "blocked",
+  );
+  // Both currently-known production defects are unrepaired; the certification
+  // profile is expected to report blocked until they are fixed elsewhere.
+  assert.equal(report.certificationStatus, "blocked");
   assert.equal(report.semanticParity.expected.status, "succeeded");
-  assert.equal(report.semanticParity.actual.status, "failed");
-  assert.equal(report.semanticParity.productionFailure.code, "RELAY_HANDSHAKE_INCOMPATIBLE");
+  if (report.semanticParity.status === "blocked") {
+    assert.equal(report.semanticParity.actual.status, "failed");
+    assert.equal(report.semanticParity.productionFailure.code, "RELAY_HANDSHAKE_INCOMPATIBLE");
+  } else {
+    assert.equal(report.semanticParity.status, "passed");
+    assert.equal(report.semanticParity.actual.status, "succeeded");
+  }
   assert.equal(report.scenarios["cross-repository-route"].relayCode, "RELAY_SESSION_REPOSITORY_MISMATCH");
   assert.equal(report.scenarios["cross-repository-route"].dispatches, 0);
   assert.equal(report.scenarios["wrong-delegator-key"].denied, true);
@@ -47,8 +57,13 @@ test("relay profile certifies semantic parity and bounded transport failures", a
   assert.equal(report.scenarios["lost-result"].recovery, "recovery-required");
   assert.equal(report.scenarios["lost-result"].automaticRetry, "forbidden");
   assert.equal(report.scenarios.reconnect.phase, "possibly-delivered");
+  // The late-result defect is also currently unrepaired: an expired delivery
+  // state still applies a late terminal result instead of ignoring it.
   assert.equal(report.scenarios["late-result"].transition, "applied");
   assert.match(report.scenarios["late-result"].productionFailure, /late terminal result/);
+  if (report.scenarios["late-result"].transition === "ignored") {
+    assert.equal(report.scenarios["late-result"].productionFailure, undefined);
+  }
   assert.equal(report.scenarios["duplicate-result"], "duplicate-result-ignored");
   assert.equal(report.scenarios["hibernation-reconstruction"].preserved, true);
   assert.equal(report.scenarios["hibernation-reconstruction"].replayFramesAfterReconstruction, 0);

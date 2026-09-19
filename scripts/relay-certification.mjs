@@ -660,19 +660,24 @@ async function positiveParity(modules) {
     runtimeCloseCode: network.runtimeProxies[0]?.closeCode,
   };
   runtime.shutdown();
+  const parity = modules.conformance.areCrossDeploymentResultsEquivalent(expected, actual);
   return {
-    status: "blocked",
+    status: parity ? "passed" : "blocked",
     expected: summary(expected),
     actual: summary(actual),
     providerExecutions: relay.provider.executions,
-    productionFailure: {
-      code: "RELAY_HANDSHAKE_INCOMPATIBLE",
-      runtimeState: handshake.runtimeState,
-      possessionProved: handshake.possessionProved,
-      runtimeCloseCode: handshake.runtimeCloseCode,
-      evidence:
-        "Local Runtime sends a connection envelope before possession proof; Hosted Relay expects proof first and sends a wrapped challenge the Runtime decoder does not accept.",
-    },
+    ...(parity
+      ? {}
+      : {
+          productionFailure: {
+            code: "RELAY_HANDSHAKE_INCOMPATIBLE",
+            runtimeState: handshake.runtimeState,
+            possessionProved: handshake.possessionProved,
+            runtimeCloseCode: handshake.runtimeCloseCode,
+            evidence:
+              "Local Runtime sends a connection envelope before possession proof; Hosted Relay expects proof first and sends a wrapped challenge the Runtime decoder does not accept.",
+          },
+        }),
   };
 }
 
@@ -1016,14 +1021,21 @@ export async function runControlledCertification() {
     "hibernation-reconstruction": hibernation,
     "ambiguous-effect-recovery": await recoveryRequired(modules),
   };
+  const productionFailures = [
+    positive.productionFailure === undefined ? undefined : { scenario: "semantic-parity", ...positive.productionFailure },
+    scenarios["late-result"].productionFailure === undefined
+      ? undefined
+      : { scenario: "late-result", code: "LATE_RESULT_ACCEPTED", evidence: scenarios["late-result"].productionFailure },
+  ].filter((failure) => failure !== undefined);
   const result = {
     version: 1,
     profile: "relay",
     mode: "controlled",
-    certificationStatus: "blocked",
+    certificationStatus: productionFailures.length === 0 ? "passed" : "blocked",
     profiles: modules.conformance.CROSS_DEPLOYMENT_PROFILES,
     semanticParity: positive,
     scenarios,
+    productionFailures,
     evidence: {
       bounded: true,
       secretSafe: true,
@@ -1033,8 +1045,6 @@ export async function runControlledCertification() {
     live: liveStatus(),
   };
   assert.equal(result.profiles.includes("relay"), true);
-  assert.equal(result.semanticParity.status, "blocked");
-  assert.equal(result.semanticParity.productionFailure.code, "RELAY_HANDSHAKE_INCOMPATIBLE");
   return result;
 }
 
