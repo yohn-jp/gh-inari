@@ -340,6 +340,13 @@ export class RelayBackedSessionExecutor implements CapabilityAuthorizedSessionEx
       return mapRelayResponse(response, this.#repository) as RelaySessionExecutionResult;
     } catch (error) {
       if (error instanceof RelaySessionExecutorError) {
+        if (error.code === "RELAY_SESSION_TIMEOUT") {
+          return failure(
+            "RELAY_SESSION_AMBIGUOUS_DELIVERY",
+            "recovery-required",
+            "Repository Relay timed out after dispatch; delivery certainty requires recovery.",
+          );
+        }
         const phase = error.code === "RELAY_SESSION_AMBIGUOUS_DELIVERY" ? "recovery-required" : "execution";
         return failure(error.code, phase, error.message);
       }

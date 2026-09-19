@@ -160,10 +160,15 @@ test("maps unavailable, timeout, and malformed Runtime results to bounded failur
     timeoutMs: 1,
     dispatch: {
       async dispatch() {
+        dispatchStarted = true;
         await new Promise((resolve) => setTimeout(resolve, 20));
         return resultEnvelope({ version: 1, status: "succeeded" });
       },
     },
   });
-  assert.equal((await timeout.execute(sessionEnvelope())).failure?.relayCode, "RELAY_SESSION_TIMEOUT");
+  let dispatchStarted = false;
+  const timeoutResult = await timeout.execute(sessionEnvelope());
+  assert.equal(dispatchStarted, true);
+  assert.equal(timeoutResult.failure?.relayCode, "RELAY_SESSION_AMBIGUOUS_DELIVERY");
+  assert.equal(timeoutResult.failure?.phase, "recovery-required");
 });
