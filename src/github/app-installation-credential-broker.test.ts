@@ -386,6 +386,7 @@ test("mutation failures retain distinct bounded provider classifications without
     readonly name: string;
     readonly expectedReason: "credential" | "scope" | "transport" | "provider-http" | "response-validation";
     readonly expectedStage: "installation-token" | "installation-scope" | "projection-execution";
+    readonly expectedProviderFailure?: Readonly<Record<string, unknown>>;
     readonly fetch: typeof globalThis.fetch;
     readonly status?: number;
     readonly expectedProvider?: {
@@ -399,6 +400,7 @@ test("mutation failures retain distinct bounded provider classifications without
       name: "installation-token rejection",
       expectedReason: "credential",
       expectedStage: "installation-token",
+      expectedProviderFailure: { failureClass: "server", retryable: true, status: 503 },
       fetch: async () => new Response("provider-token-secret", { status: 503 }),
     },
     {
@@ -411,6 +413,7 @@ test("mutation failures retain distinct bounded provider classifications without
       name: "provider transport failure",
       expectedReason: "transport",
       expectedStage: "projection-execution",
+      expectedProviderFailure: { failureClass: "transport", retryable: true },
       fetch: (async (_input, init) => {
         if ((init?.body as string | undefined)?.includes('"permissions"')) {
           return tokenResponse({}, { contents: "write" });
@@ -422,6 +425,7 @@ test("mutation failures retain distinct bounded provider classifications without
       name: "provider HTTP rejection",
       expectedReason: "provider-http",
       expectedStage: "projection-execution",
+      expectedProviderFailure: { failureClass: "validation", retryable: false, status: 422 },
       status: 422,
       expectedProvider: {
         category: "validation-failed",
@@ -453,6 +457,7 @@ test("mutation failures retain distinct bounded provider classifications without
       name: "provider response validation",
       expectedReason: "response-validation",
       expectedStage: "projection-execution",
+      expectedProviderFailure: { failureClass: "response-invalid", retryable: false },
       fetch: (async (_input, init) => {
         if ((init?.body as string | undefined)?.includes('"permissions"')) {
           return tokenResponse({}, { contents: "write" });
@@ -474,6 +479,7 @@ test("mutation failures retain distinct bounded provider classifications without
         assert.equal(error.reason, testCase.expectedReason, testCase.name);
         assert.equal(error.status, testCase.status, testCase.name);
         assert.deepEqual(error.provider, testCase.expectedProvider, testCase.name);
+        assert.deepEqual(error.providerFailure, testCase.expectedProviderFailure, testCase.name);
         assert.doesNotMatch(
           JSON.stringify(error),
           /provider-token-secret|provider-transport-secret|provider-body-secret|private\/provider|authorization/iu,
@@ -510,6 +516,7 @@ test("a hung installation-token request fails closed after the bounded deadline"
     (error: unknown) => {
       assert.ok(error instanceof GitHubAppCredentialBrokerError);
       assert.equal(error.stage, "installation-token");
+      assert.deepEqual(error.providerFailure, { failureClass: "timeout", retryable: true, timeoutMs: 5 });
       assert.equal(JSON.stringify(error).includes(privateKey), false);
       return true;
     },
@@ -537,6 +544,7 @@ test("a hung provider read request fails closed after the bounded deadline once 
     (error: unknown) => {
       assert.ok(error instanceof GitHubAppCredentialBrokerError);
       assert.equal(error.stage, "repository-read");
+      assert.deepEqual(error.providerFailure, { failureClass: "timeout", retryable: true, timeoutMs: 5 });
       assert.equal(JSON.stringify(error).includes(privateKey), false);
       return true;
     },
