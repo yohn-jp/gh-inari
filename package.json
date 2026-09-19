@@ -223,6 +223,9 @@
   },
   "files": [
     "dist",
+    "!dist/relay/cloudflare-repository-relay.d.ts",
+    "!dist/relay/cloudflare-repository-relay.js",
+    "!dist/relay/cloudflare-repository-relay.js.map",
     "branch-naming-authority.mjs",
     "branch-naming-authority.d.mts",
     "README.md",
