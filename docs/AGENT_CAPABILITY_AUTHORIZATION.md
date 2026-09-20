@@ -478,6 +478,30 @@ repository/task bounded, and treated as compromised when the manual session ends
 This weaker bootstrap changes **who generated the Session key**, not the App-side
 verification protocol. App verification remains identical to the managed flow.
 
+### 8.2.1 Client-side bootstrap and MCP handoff boundary
+
+Both approved bootstrap profiles are client-side composition profiles. In the
+Session-configured profile, the client creates the managed Session, sends only
+the public issuance request across the Runtime boundary, accepts the returned
+certificate, and binds that Session signer to a configured MCP call port. In the
+preconfigured-handoff profile, the client receives one short-lived credential
+bundle and constructs the bundle-backed signer locally before Agent use. The
+bundle private key remains local to that signer construction.
+
+In either profile, the configured client creates the canonical signed Session
+envelope immediately before invoking `inari_change_execute` and sends only
+`{ envelope }` through the MCP call port. Session private-key custody and
+bootstrap therefore end at the client-side signer boundary. The Session signer,
+client, and any bundle are discarded with the Session lifetime; none is a
+server-side credential store.
+
+MCP server and Relay remain authentication-free protocol/transport adapters in
+the Inari authority model. They forward the canonical envelope and do not issue,
+hold, or replace Session authority. Existing Session request verification is the
+proof oracle, while the GitHub App remains the authentication and provider
+effect boundary. ChatGPT compatibility is a separate follow-up and is not part
+of these bootstrap profiles.
+
 ### 8.3 Agent implementation identity vs security principal
 
 `claude-web`, `codex`, `cursor`, `luna`, or another product name is provenance metadata,
