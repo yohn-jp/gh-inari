@@ -12,6 +12,7 @@ export * from "./session-issuance.js";
 export * from "./session-request.js";
 export * from "./session-signer.js";
 export * from "./session-bundle.js";
+export * from "./session-bundle-signer.js";
 export * from "./session-authentication.js";
 export * from "./capability-admission.js";
 export * from "./capability-provenance.js";
