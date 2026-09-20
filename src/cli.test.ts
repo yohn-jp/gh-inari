@@ -473,6 +473,66 @@ test("pr schema projects the canonical sync input and a valid minimal example", 
   assert.ok(syncInput.minimalExample.base.length > 0);
 });
 
+test("PR schema defaults to the default template while explicit selection and Issue resolution stay unchanged", async () => {
+  const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "gh-inari-pr-template-default-"));
+  try {
+    await mkdir(path.join(repositoryRoot, ".github", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await mkdir(path.join(repositoryRoot, ".github", "ISSUE_TEMPLATE"), { recursive: true });
+    await writeFile(path.join(repositoryRoot, ".github", "PULL_REQUEST_TEMPLATE", "default.md"), REMOTE_PR_TEMPLATE);
+    await writeFile(path.join(repositoryRoot, ".github", "PULL_REQUEST_TEMPLATE", "release.md"), REMOTE_PR_TEMPLATE);
+    await writeFile(path.join(repositoryRoot, ".github", "ISSUE_TEMPLATE", "bug.yml"), REMOTE_BUG_TEMPLATE);
+    await writeFile(path.join(repositoryRoot, ".github", "ISSUE_TEMPLATE", "feature.yml"), REMOTE_BUG_TEMPLATE);
+
+    const implicit = await captureJson(["pr", "schema", "--json"], { repositoryRoot });
+    const explicit = await captureJson(["pr", "schema", "--template", "release", "--json"], { repositoryRoot });
+    const issue = await captureJson(["issue", "schema", "--json"], { repositoryRoot });
+
+    assert.equal(implicit.exitCode, 0);
+    assert.equal((implicit.output.template as { path: string }).path, ".github/PULL_REQUEST_TEMPLATE/default.md");
+    assert.equal(explicit.exitCode, 0);
+    assert.equal((explicit.output.template as { path: string }).path, ".github/PULL_REQUEST_TEMPLATE/release.md");
+    assert.equal(issue.exitCode, 2);
+    assert.equal((issue.output.error as { code: string }).code, "TEMPLATE_RESOLUTION_AMBIGUOUS");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("implicit PR default uses the explicit default failure contract when missing or invalid", async () => {
+  const missingRoot = await mkdtemp(path.join(os.tmpdir(), "gh-inari-pr-template-missing-"));
+  try {
+    await mkdir(path.join(missingRoot, ".github", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await writeFile(path.join(missingRoot, ".github", "PULL_REQUEST_TEMPLATE", "release.md"), REMOTE_PR_TEMPLATE);
+
+    const implicit = await captureJson(["pr", "schema", "--json"], { repositoryRoot: missingRoot });
+    const explicit = await captureJson(["pr", "schema", "--template", "default", "--json"], {
+      repositoryRoot: missingRoot,
+    });
+    assert.equal(implicit.exitCode, 2);
+    assert.equal(explicit.exitCode, 2);
+    assert.deepEqual(implicit.output.error, explicit.output.error);
+  } finally {
+    await rm(missingRoot, { recursive: true, force: true });
+  }
+
+  const invalidRoot = await mkdtemp(path.join(os.tmpdir(), "gh-inari-pr-template-invalid-"));
+  try {
+    await mkdir(path.join(invalidRoot, ".github", "PULL_REQUEST_TEMPLATE"), { recursive: true });
+    await writeFile(path.join(invalidRoot, ".github", "PULL_REQUEST_TEMPLATE", "default.md"), "\n");
+    await writeFile(path.join(invalidRoot, ".github", "PULL_REQUEST_TEMPLATE", "release.md"), REMOTE_PR_TEMPLATE);
+
+    const implicit = await captureJson(["pr", "schema", "--json"], { repositoryRoot: invalidRoot });
+    const explicit = await captureJson(["pr", "schema", "--template", "default", "--json"], {
+      repositoryRoot: invalidRoot,
+    });
+    assert.equal(implicit.exitCode, 2);
+    assert.equal(explicit.exitCode, 2);
+    assert.deepEqual(implicit.output.error, explicit.output.error);
+  } finally {
+    await rm(invalidRoot, { recursive: true, force: true });
+  }
+});
+
 test("issue schema exposes required title metadata without making title a semantic field", async () => {
   const result = await captureJson(["issue", "schema", "feature", "--json"]);
   assert.equal(result.exitCode, 0);
@@ -2870,7 +2930,7 @@ test("check classifies ambiguous, unsupported, and semantically-invalid existing
       templates: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
       policy: { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
       expectedStatus: "semantically-invalid",
-      expectedRecoveryKind: "edit",
+      expectedRecoveryKind: "sync-required",
     },
   ];
 
