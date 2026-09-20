@@ -243,6 +243,81 @@ export async function compileLocalIssueFormContracts(root: string): Promise<read
   return Promise.all(discovery.issueTemplates.map((template) => compileIssueFormTemplate(discovery, template.id)));
 }
 
+/**
+ * Compile every repository-native template for a read-only schema discovery.
+ *
+ * This deliberately does not resolve a selector or configured default. The
+ * caller reaches this path only after the normal resolver reports an
+ * unselected, non-interactive ambiguity; mutating operations continue to use
+ * compileLocalGovernedContract and therefore remain fail-closed.
+ */
+export async function compileLocalGovernedContracts(
+  domain: GovernedArtifactDomain,
+  root: string,
+  policyPath?: string | boolean,
+): Promise<readonly CompiledTemplateOutcome[]> {
+  const discovery = await discoverTemplates(root);
+  const semanticTemplates = (await discoverSemanticTemplates(root)).filter(
+    (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
+  );
+  const selectedPolicy = domain === "pr" ? await resolveLocalPolicyPath(root, policyPath) : undefined;
+  const outcomes: CompiledTemplateOutcome[] = [];
+
+  if (semanticTemplates.length > 0) {
+    for (const identity of semanticTemplates) {
+      try {
+        let contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, identity));
+        if (selectedPolicy !== undefined) {
+          contract = await compilePullRequestPolicyFile(contract, selectedPolicy, {
+            templateIdentities: discovery.pullRequestTemplates,
+          });
+        }
+        outcomes.push({ status: "compiled", contract });
+      } catch (error: unknown) {
+        const failure = classifyTemplateCompilationFailure(error);
+        outcomes.push({
+          status: "failed",
+          path: identity.sourcePath,
+          message: error instanceof Error ? error.message : String(error),
+          failureKind: failure.kind,
+          ...(failure.code === undefined ? {} : { failureCode: failure.code }),
+        });
+      }
+    }
+    return outcomes;
+  }
+
+  const templates =
+    domain === "issue"
+      ? discovery.issueTemplates.filter((template) => template.type === "issue-form")
+      : discovery.pullRequestTemplates;
+  if (templates.length === 0) throw new TemplateNotFoundError(undefined, templates);
+  for (const template of templates) {
+    try {
+      let contract =
+        domain === "issue"
+          ? await compileIssueFormTemplate(discovery, template.id)
+          : await compilePullRequestTemplate(root, template.id);
+      if (selectedPolicy !== undefined) {
+        contract = await compilePullRequestPolicyFile(contract, selectedPolicy, {
+          templateIdentities: discovery.pullRequestTemplates,
+        });
+      }
+      outcomes.push({ status: "compiled", contract });
+    } catch (error: unknown) {
+      const failure = classifyTemplateCompilationFailure(error);
+      outcomes.push({
+        status: "failed",
+        path: template.path,
+        message: error instanceof Error ? error.message : String(error),
+        failureKind: failure.kind,
+        ...(failure.code === undefined ? {} : { failureCode: failure.code }),
+      });
+    }
+  }
+  return outcomes;
+}
+
 async function resolveLocalPolicyPath(
   root: string,
   policyPath: string | boolean | undefined,

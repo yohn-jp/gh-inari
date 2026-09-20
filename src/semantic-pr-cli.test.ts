@@ -17,19 +17,21 @@ class SemanticPrTransport implements FixtureCommandTransport {
   private readonly responses: FixtureCommandResult[];
 
   constructor(source: string, treeEntries: readonly { readonly path: string; readonly sha: string }[]) {
+    const treeResponse = command(
+      JSON.stringify({
+        sha: "tree-sha-semantic-cli",
+        truncated: false,
+        tree: treeEntries.map((entry) => ({ ...entry, type: "blob" })),
+      }),
+    );
     this.responses = [
       command("gh version 2.0"),
       command(),
       command("100000200\n"),
       command(JSON.stringify({ default_branch: "main" })),
-      command(
-        JSON.stringify({
-          sha: "tree-sha-semantic-cli",
-          truncated: false,
-          tree: treeEntries.map((entry) => ({ ...entry, type: "blob" })),
-        }),
-      ),
-      blobResponse(treeEntries[0]?.sha ?? "canon-sha", source),
+      treeResponse,
+      ...(treeEntries.length > 1 ? [command(JSON.stringify({ default_branch: "main" })), treeResponse] : []),
+      ...treeEntries.map((entry) => blobResponse(entry.sha, source)),
     ];
   }
 

@@ -47,6 +47,44 @@ class SemanticIssueTransport implements FixtureCommandTransport {
   }
 }
 
+class AmbiguousSemanticContractTransport implements FixtureCommandTransport {
+  private readonly responses: FixtureCommandResult[];
+
+  constructor(kind: "issue" | "pull_request", sources: readonly { id: string; source: string }[]) {
+    const directory = kind === "issue" ? ".github/inari/issues" : ".github/inari/pull-requests";
+    const entries = sources.map(({ id }) => ({
+      path: `${directory}/${id}.json`,
+      type: "blob",
+      sha: `${id}-sha`,
+    }));
+    const tree = JSON.stringify({ sha: "tree-sha-semantic-ambiguous", truncated: false, tree: entries });
+    this.responses = [
+      command("gh version 2.0"),
+      command(),
+      command("100000201\n"),
+      command(JSON.stringify({ default_branch: "main" })),
+      command(tree),
+      command(JSON.stringify({ default_branch: "main" })),
+      command(tree),
+      ...sources.map(({ id, source }) =>
+        command(
+          JSON.stringify({
+            sha: `${id}-sha`,
+            encoding: "base64",
+            content: Buffer.from(source, "utf8").toString("base64"),
+          }),
+        ),
+      ),
+    ];
+  }
+
+  async run(args: readonly string[], _options?: FixtureCommandOptions): Promise<FixtureCommandResult> {
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error(`Unexpected gh call: ${args.join(" ")}`);
+    return response;
+  }
+}
+
 function command(stdout = "", exitCode = 0, stderr = ""): FixtureCommandResult {
   return { stdout, exitCode, stderr };
 }
@@ -141,4 +179,60 @@ test("Issue CLI delegates contract, materialization, and plan preview to Core", 
     first.calls.some((args) => args.some((arg) => ["POST", "PATCH", "PUT", "DELETE"].includes(arg))),
     false,
   );
+});
+
+test("read-only semantic contract discovery returns every ambiguous Issue and PR Canon", async () => {
+  for (const [domain, kind] of [
+    ["issue", "issue"],
+    ["pr", "pull_request"],
+  ] as const) {
+    const makeSource = (id: string) => {
+      const source = JSON.parse(issueCanon) as Record<string, unknown>;
+      source.kind = kind;
+      source.id = id;
+      if (kind === "pull_request") {
+        source.properties = {
+          title: {
+            presence: "required",
+            authority: { kind: "derived", derive: { op: "format", template: "{type}: {slug}" } },
+          },
+          head: {
+            presence: "required",
+            authority: { kind: "derived", derive: { op: "format", template: "{type}/{slug}" } },
+          },
+          base: { presence: "required", authority: { kind: "fixed", value: "main" } },
+          type: { presence: "required", authority: { kind: "supplied" }, constraints: { values: ["feat", "fix"] } },
+          implements: { presence: "required", authority: { kind: "supplied" } },
+        };
+      }
+      return JSON.stringify(source);
+    };
+    const transport = new AmbiguousSemanticContractTransport(kind, [
+      { id: "bug", source: makeSource("bug") },
+      { id: "feature", source: makeSource("feature") },
+    ]);
+    const lines: string[] = [];
+    const originalLog = console.log;
+    try {
+      console.log = (line: string) => lines.push(line);
+      const exitCode = await runCli([domain, "contract", "--repository", "acme/repository-b", "--json"], {
+        repositoryRoot: "/tmp",
+        createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+      });
+      assert.equal(exitCode, 0, domain);
+      const output = JSON.parse(lines.at(-1) ?? "{}") as {
+        templates?: readonly { status?: string; id?: string; template?: { id?: string } }[];
+      };
+      assert.deepEqual(
+        output.templates?.map((entry) => [entry.status, entry.id, entry.template?.id]),
+        [
+          ["compiled", "bug", "bug"],
+          ["compiled", "feature", "feature"],
+        ],
+        domain,
+      );
+    } finally {
+      console.log = originalLog;
+    }
+  }
 });

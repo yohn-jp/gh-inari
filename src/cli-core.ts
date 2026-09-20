@@ -15,9 +15,12 @@ import {
   type ArtifactInputDocument,
 } from "./artifact.js";
 import {
+  ArtifactContractResolutionError,
+  compileRepositoryEffectiveArtifactContracts,
   compileRepositoryEffectiveIssueContract,
   compileRepositoryEffectiveBranchContract,
   compileRepositoryEffectivePullRequestContract,
+  type EffectiveArtifactContractOutcome,
 } from "./artifact-contract-governance.js";
 import {
   effectiveFieldConstraints,
@@ -42,7 +45,10 @@ import {
 } from "./pr-sync-input.js";
 import {
   compileLocalGovernedContract,
+  compileLocalGovernedContracts,
   compileRepositoryGovernedContract,
+  compileRepositoryGovernedContracts,
+  type CompiledTemplateOutcome,
   createGovernedIssue,
   createGovernedPullRequest,
   discoverRepositoryTemplates,
@@ -132,7 +138,7 @@ import {
   createGitHubImplementationFrontierRepository,
 } from "./implementation-frontier-composition.js";
 import { projectSelfDogfoodIssueMarker } from "./self-dogfood-marker.js";
-import type { TemplateResolverDependencies } from "./template-resolver.js";
+import { TemplateResolutionError, type TemplateResolverDependencies } from "./template-resolver.js";
 import { tryPlanSemanticPullRequest, tryProjectSemanticPullRequest } from "./semantic-pr-projection.js";
 import {
   GITHUB_ISSUE_PROJECTION_CAPABILITIES,
@@ -1284,6 +1290,105 @@ function invalidArtifactNumberError(domain: "issue" | "pr", value: string | unde
   return new CliError("INVALID_ARTIFACT_NUMBER", message, "$argv[0]", { domain, value });
 }
 
+function isReadOnlyTemplateAmbiguity(error: unknown): boolean {
+  if (error instanceof TemplateResolutionError) return error.code === "TEMPLATE_RESOLUTION_AMBIGUOUS";
+  if (!(error instanceof ArtifactContractResolutionError) || error.code !== "ARTIFACT_CONTRACT_SELECTOR_AMBIGUOUS")
+    return false;
+  const details = error.details ?? {};
+  return (
+    !Object.prototype.hasOwnProperty.call(details, "selector") &&
+    !Object.prototype.hasOwnProperty.call(details, "configuredDefault")
+  );
+}
+
+function projectNativeSchemaOutcome(
+  outcome: CompiledTemplateOutcome,
+  domain: "issue" | "pr",
+  compact: boolean,
+): Readonly<Record<string, unknown>> {
+  if (outcome.status === "failed") {
+    return {
+      status: outcome.status,
+      template: { path: outcome.path },
+      message: outcome.message,
+      failureKind: outcome.failureKind,
+      ...(outcome.failureCode === undefined ? {} : { failureCode: outcome.failureCode }),
+    };
+  }
+  const contract = outcome.contract;
+  const projection = projectContract(contract);
+  const syncInput = domain === "pr" ? projectPullRequestSyncInput(contract) : undefined;
+  if (compact) {
+    return {
+      status: outcome.status,
+      template: contract.templateIdentity,
+      schema: renderSemanticCompactSchema(contract),
+      metadata: projection.metadata,
+      ...(syncInput === undefined ? {} : { syncInput }),
+    };
+  }
+  return {
+    status: outcome.status,
+    contract,
+    template: contract.templateIdentity,
+    ...projection,
+    directFields: projectDirectFieldUsage(contract),
+    ...(syncInput === undefined ? {} : { syncInput }),
+  };
+}
+
+function projectEffectiveContract(contract: {
+  readonly version: string;
+  readonly artifactContractVersion: string;
+  readonly kind: string;
+  readonly id: string;
+  readonly contract: unknown;
+  readonly inputSchema: unknown;
+  readonly properties: unknown;
+  readonly fields?: readonly unknown[];
+  readonly derivations: readonly unknown[];
+  readonly dependencyGraph: unknown;
+  readonly evaluationOrder: readonly string[];
+  readonly provenance: unknown;
+  readonly generation: unknown;
+  readonly capabilities: readonly string[];
+}): Readonly<Record<string, unknown>> {
+  return {
+    ok: true,
+    version: contract.version,
+    artifactContractVersion: contract.artifactContractVersion,
+    kind: contract.kind,
+    id: contract.id,
+    contract: contract.contract,
+    effectiveContract: contract,
+    inputSchema: contract.inputSchema,
+    properties: contract.properties,
+    ...(contract.fields === undefined ? {} : { fields: contract.fields }),
+    derivations: contract.derivations,
+    dependencyGraph: contract.dependencyGraph,
+    evaluationOrder: contract.evaluationOrder,
+    provenance: contract.provenance,
+    generation: contract.generation,
+    capabilities: contract.capabilities,
+  };
+}
+
+function projectEffectiveContractOutcome(outcome: EffectiveArtifactContractOutcome): Readonly<Record<string, unknown>> {
+  if (outcome.status === "failed") {
+    return {
+      status: outcome.status,
+      template: outcome.identity,
+      message: outcome.message,
+      ...(outcome.failureCode === undefined ? {} : { failureCode: outcome.failureCode }),
+    };
+  }
+  return {
+    status: outcome.status,
+    template: outcome.identity,
+    ...projectEffectiveContract(outcome.contract),
+  };
+}
+
 async function runTemplateList(
   root: string,
   repository: string | boolean | undefined,
@@ -2345,22 +2450,45 @@ async function runArtifactCommand(
     );
   }
   if (command === "schema") {
+    const selector = templateSelector(parsed, rest[0], domain);
     let contract: CanonicalContract;
-    if (typeof parsed.options.repository === "string") {
-      rejectGovernedPolicyOverride(parsed.options.policy);
-      const adapter = createAdapter(dependencies, root, parsed.options.repository);
-      await adapter.resolveRepositoryContext();
-      contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0], domain), {
-        templateResolver: dependencies.templateResolver,
-      });
-    } else {
-      contract = await compileLocalGovernedContract(
-        domain,
-        root,
-        templateSelector(parsed, rest[0], domain),
-        parsed.options.policy,
-        { templateResolver: dependencies.templateResolver },
-      );
+    let repositoryAdapter: GitHubAdapter | undefined;
+    try {
+      if (typeof parsed.options.repository === "string") {
+        rejectGovernedPolicyOverride(parsed.options.policy);
+        repositoryAdapter = createAdapter(dependencies, root, parsed.options.repository);
+        await repositoryAdapter.resolveRepositoryContext();
+        contract = await compileRepositoryGovernedContract(repositoryAdapter, domain, selector, {
+          templateResolver: dependencies.templateResolver,
+        });
+      } else {
+        contract = await compileLocalGovernedContract(domain, root, selector, parsed.options.policy, {
+          templateResolver: dependencies.templateResolver,
+        });
+      }
+    } catch (error: unknown) {
+      if (!isReadOnlyTemplateAmbiguity(error)) throw error;
+      if (typeof parsed.options.repository === "string") {
+        if (repositoryAdapter === undefined) throw error;
+        const outcomes = await compileRepositoryGovernedContracts(repositoryAdapter, domain);
+        console.log(
+          JSON.stringify({
+            templates: outcomes.map((outcome) =>
+              projectNativeSchemaOutcome(outcome, domain, parsed.options.compact === true),
+            ),
+          }),
+        );
+      } else {
+        const outcomes = await compileLocalGovernedContracts(domain, root, parsed.options.policy);
+        console.log(
+          JSON.stringify({
+            templates: outcomes.map((outcome) =>
+              projectNativeSchemaOutcome(outcome, domain, parsed.options.compact === true),
+            ),
+          }),
+        );
+      }
+      return 0;
     }
     const projection = projectContract(contract);
     const syncInput = domain === "pr" ? projectPullRequestSyncInput(contract) : undefined;
@@ -2706,27 +2834,20 @@ async function runSemanticIssueCommand(
   }
   const selector = templateSelector(parsed, rest[0], "issue");
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
-  const effectiveContract = await compileRepositoryEffectiveIssueContract(adapter, selector, {
-    capabilities: parsed.capabilities,
-  });
-  const contractProjection = {
-    ok: true,
-    version: effectiveContract.version,
-    artifactContractVersion: effectiveContract.artifactContractVersion,
-    kind: effectiveContract.kind,
-    id: effectiveContract.id,
-    contract: effectiveContract.contract,
-    effectiveContract,
-    inputSchema: effectiveContract.inputSchema,
-    properties: effectiveContract.properties,
-    ...(effectiveContract.fields === undefined ? {} : { fields: effectiveContract.fields }),
-    derivations: effectiveContract.derivations,
-    dependencyGraph: effectiveContract.dependencyGraph,
-    evaluationOrder: effectiveContract.evaluationOrder,
-    provenance: effectiveContract.provenance,
-    generation: effectiveContract.generation,
-    capabilities: effectiveContract.capabilities,
-  };
+  let effectiveContract: Awaited<ReturnType<typeof compileRepositoryEffectiveIssueContract>>;
+  try {
+    effectiveContract = await compileRepositoryEffectiveIssueContract(adapter, selector, {
+      capabilities: parsed.capabilities,
+    });
+  } catch (error: unknown) {
+    if (operation !== "contract" || !isReadOnlyTemplateAmbiguity(error)) throw error;
+    const outcomes = await compileRepositoryEffectiveArtifactContracts(adapter, "issue", {
+      capabilities: parsed.capabilities,
+    });
+    console.log(JSON.stringify({ ok: true, templates: outcomes.map(projectEffectiveContractOutcome) }));
+    return 0;
+  }
+  const contractProjection = projectEffectiveContract(effectiveContract);
   if (operation === "contract") {
     console.log(JSON.stringify(contractProjection));
     return 0;
@@ -3298,27 +3419,20 @@ async function runSemanticPullRequestCommand(
   }
   const selector = templateSelector(parsed, rest[0], "pr");
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
-  const effectiveContract = await compileRepositoryEffectivePullRequestContract(adapter, selector, {
-    capabilities: parsed.capabilities,
-  });
-  const contractProjection = {
-    ok: true,
-    version: effectiveContract.version,
-    artifactContractVersion: effectiveContract.artifactContractVersion,
-    kind: effectiveContract.kind,
-    id: effectiveContract.id,
-    contract: effectiveContract.contract,
-    effectiveContract,
-    inputSchema: effectiveContract.inputSchema,
-    properties: effectiveContract.properties,
-    ...(effectiveContract.fields === undefined ? {} : { fields: effectiveContract.fields }),
-    derivations: effectiveContract.derivations,
-    dependencyGraph: effectiveContract.dependencyGraph,
-    evaluationOrder: effectiveContract.evaluationOrder,
-    provenance: effectiveContract.provenance,
-    generation: effectiveContract.generation,
-    capabilities: effectiveContract.capabilities,
-  };
+  let effectiveContract: Awaited<ReturnType<typeof compileRepositoryEffectivePullRequestContract>>;
+  try {
+    effectiveContract = await compileRepositoryEffectivePullRequestContract(adapter, selector, {
+      capabilities: parsed.capabilities,
+    });
+  } catch (error: unknown) {
+    if (operation !== "contract" || !isReadOnlyTemplateAmbiguity(error)) throw error;
+    const outcomes = await compileRepositoryEffectiveArtifactContracts(adapter, "pull_request", {
+      capabilities: parsed.capabilities,
+    });
+    console.log(JSON.stringify({ ok: true, templates: outcomes.map(projectEffectiveContractOutcome) }));
+    return 0;
+  }
+  const contractProjection = projectEffectiveContract(effectiveContract);
   if (operation === "contract") {
     console.log(JSON.stringify(contractProjection));
     return 0;

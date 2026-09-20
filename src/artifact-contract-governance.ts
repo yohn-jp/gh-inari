@@ -17,11 +17,16 @@ import {
   parseArtifactContract,
   type ArtifactContract,
   compileEffectiveArtifactContract,
+  EffectiveArtifactContractCompilationError,
   type EffectiveArtifactContract,
   type ArtifactContractProvenance,
 } from "./contract/index.js";
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
-import { resolveRemoteArtifactContractIdentity, type RepositoryArtifactContractIdentity } from "./governance.js";
+import {
+  createRemoteArtifactContractIdentities,
+  resolveRemoteArtifactContractIdentity,
+  type RepositoryArtifactContractIdentity,
+} from "./governance.js";
 import {
   parseTemplateResolutionConfig,
   TEMPLATE_RESOLUTION_CONFIG_PATH,
@@ -69,6 +74,19 @@ export class ArtifactContractResolutionError extends Error {
 export interface RepositoryEffectiveArtifactContractOptions {
   readonly capabilities?: readonly string[];
 }
+
+export type EffectiveArtifactContractOutcome =
+  | {
+      readonly status: "compiled";
+      readonly identity: RepositoryArtifactContractIdentity;
+      readonly contract: EffectiveArtifactContract;
+    }
+  | {
+      readonly status: "failed";
+      readonly identity: RepositoryArtifactContractIdentity;
+      readonly message: string;
+      readonly failureCode?: string;
+    };
 
 /**
  * Resolve the authoritative Artifact Contract Canon identity using the same
@@ -256,6 +274,53 @@ export async function compileRepositoryEffectiveArtifactContract(
   const contract = parseCanonSource(source, entry.path, kind);
   const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
   return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
+}
+
+/**
+ * Compile every repository-owned Artifact Contract Canon for read-only
+ * discovery after an unselected, non-interactive ambiguity. Mutating and
+ * materialization commands continue to use the single-contract resolver.
+ */
+export async function compileRepositoryEffectiveArtifactContracts(
+  adapter: GitHubAdapter,
+  kind: RepositoryEffectiveArtifactKind,
+  options: RepositoryEffectiveArtifactContractOptions = {},
+): Promise<readonly EffectiveArtifactContractOutcome[]> {
+  const context = await adapter.resolveRepositoryContext();
+  const ref = await adapter.getRepositoryDefaultBranch();
+  const tree = await adapter.getRepositoryTree(ref);
+  const identities = createRemoteArtifactContractIdentities(tree.entries).filter((identity) => identity.kind === kind);
+  const outcomes: EffectiveArtifactContractOutcome[] = [];
+  for (const identity of identities) {
+    try {
+      const entry = findCanonEntry(tree.entries, identity, context, ref);
+      const source = await adapter.getRepositoryBlob(entry.sha);
+      const contract = parseCanonSource(source, entry.path, kind);
+      const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
+      outcomes.push({
+        status: "compiled",
+        identity,
+        contract: compileEffectiveArtifactContract(contract, {
+          provenance,
+          capabilities: options.capabilities,
+        }),
+      });
+    } catch (error: unknown) {
+      if (
+        !(error instanceof ArtifactContractResolutionError) &&
+        !(error instanceof ArtifactContractValidationError) &&
+        !(error instanceof EffectiveArtifactContractCompilationError)
+      )
+        throw error;
+      outcomes.push({
+        status: "failed",
+        identity,
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof ArtifactContractResolutionError ? { failureCode: error.code } : {}),
+      });
+    }
+  }
+  return outcomes;
 }
 
 /** Resolve and compile a pull-request Artifact Contract from the repository Canon. */
