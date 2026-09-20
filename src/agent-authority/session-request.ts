@@ -20,8 +20,27 @@ import {
   type DecodedSessionCertificate,
   type SessionCertificatePayload,
 } from "./session-certificate.js";
+import type { Ed25519PublicJwk } from "./ed25519-jwk.js";
 import { MAX_MANAGED_SESSION_SIGN_INPUT_BYTES } from "./session-issuance.js";
-import type { ManagedSession, ManagedSessionCertificate } from "./session-issuance.js";
+import type { ManagedSessionCertificate } from "./session-issuance.js";
+
+/**
+ * The smallest Session-owned capability needed to produce a request proof.
+ *
+ * This is intentionally structural: ManagedSession satisfies it without
+ * exporting or copying the module-owned private key, while later signer
+ * implementations can provide the same request authority from another
+ * bounded credential source.
+ */
+export interface SessionSigningPrincipal {
+  readonly sessionId: string;
+  readonly publicKey: Ed25519PublicJwk;
+  readonly certificate: DecodedSessionCertificate | undefined;
+  sign(bytes: Uint8Array): Uint8Array;
+}
+
+/** Compatibility spelling for callers that name the seam after requests. */
+export type SessionRequestSigningPrincipal = SessionSigningPrincipal;
 
 export const SESSION_REQUEST_ENVELOPE_VERSION = 1 as const;
 export type SessionRequestEnvelopeVersion = typeof SESSION_REQUEST_ENVELOPE_VERSION;
@@ -106,7 +125,7 @@ export interface SessionRequestSigningInput {
 }
 
 export interface SignSessionRequestOptions {
-  readonly session: ManagedSession;
+  readonly session: SessionSigningPrincipal;
   /** Defaults to the certificate accepted by session. */
   readonly certificate?: ManagedSessionCertificate;
   readonly request: SemanticSessionRequest;
@@ -410,7 +429,10 @@ function compactFromDecoded(certificate: DecodedSessionCertificate): string {
   return encodeSessionCertificateCompact(certificate.header, certificate.payload, certificate.signature);
 }
 
-function publicKeysMatch(left: SessionCertificatePayload["sessionKey"], right: ManagedSession["publicKey"]): boolean {
+function publicKeysMatch(
+  left: SessionCertificatePayload["sessionKey"],
+  right: SessionSigningPrincipal["publicKey"],
+): boolean {
   return left.kty === right.kty && left.crv === right.crv && left.x === right.x;
 }
 
@@ -458,7 +480,7 @@ function decodeCertificate(
 }
 
 function signerCertificate(
-  session: ManagedSession,
+  session: SessionSigningPrincipal,
   provided: ManagedSessionCertificate | undefined,
 ): { readonly compact: string; readonly certificate: DecodedSessionCertificate } {
   let compact: string;
@@ -498,7 +520,7 @@ function signerCertificate(
   return decoded;
 }
 
-/** Construct and sign a V1 envelope using only ManagedSession.sign(bytes). */
+/** Construct and sign a V1 envelope using only the Session signing principal. */
 export function signSessionRequest(options: SignSessionRequestOptions): SessionRequestEnvelope {
   const { compact, certificate } = signerCertificate(options.session, options.certificate);
   if (options.certificateJti !== undefined && options.certificateJti !== certificate.payload.jti) {
