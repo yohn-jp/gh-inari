@@ -194,12 +194,14 @@ export async function compileLocalGovernedContract(
   );
   const resolutionConfig = selector === undefined ? await readTemplateResolutionConfig(root) : undefined;
   const configuredDefault = resolutionConfig?.defaults[domain];
+  const implicitDefaultName = domain === "pr" ? "default" : undefined;
   let contract: CanonicalContract;
   if (semanticCandidates.length > 0) {
     const semanticIdentity = await resolveTemplate({
       candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
       selector,
       configuredDefault,
+      implicitDefaultName,
       dependencies: options.templateResolver,
     });
     contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, semanticIdentity));
@@ -216,6 +218,7 @@ export async function compileLocalGovernedContract(
       candidates: discovery.pullRequestTemplates.map(nativeTemplateResolutionCandidate),
       selector,
       configuredDefault,
+      implicitDefaultName,
       dependencies: options.templateResolver,
     });
     contract = await compilePullRequestTemplate(root, identity.id);
@@ -241,6 +244,81 @@ export async function compileLocalIssueFormContracts(root: string): Promise<read
   }
   const discovery = await discoverTemplates(root);
   return Promise.all(discovery.issueTemplates.map((template) => compileIssueFormTemplate(discovery, template.id)));
+}
+
+/**
+ * Compile every repository-native template for a read-only schema discovery.
+ *
+ * This deliberately does not resolve a selector or configured default. The
+ * caller reaches this path only after the normal resolver reports an
+ * unselected, non-interactive ambiguity; mutating operations continue to use
+ * compileLocalGovernedContract and therefore remain fail-closed.
+ */
+export async function compileLocalGovernedContracts(
+  domain: GovernedArtifactDomain,
+  root: string,
+  policyPath?: string | boolean,
+): Promise<readonly CompiledTemplateOutcome[]> {
+  const discovery = await discoverTemplates(root);
+  const semanticTemplates = (await discoverSemanticTemplates(root)).filter(
+    (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
+  );
+  const selectedPolicy = domain === "pr" ? await resolveLocalPolicyPath(root, policyPath) : undefined;
+  const outcomes: CompiledTemplateOutcome[] = [];
+
+  if (semanticTemplates.length > 0) {
+    for (const identity of semanticTemplates) {
+      try {
+        let contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, identity));
+        if (selectedPolicy !== undefined) {
+          contract = await compilePullRequestPolicyFile(contract, selectedPolicy, {
+            templateIdentities: discovery.pullRequestTemplates,
+          });
+        }
+        outcomes.push({ status: "compiled", contract });
+      } catch (error: unknown) {
+        const failure = classifyTemplateCompilationFailure(error);
+        outcomes.push({
+          status: "failed",
+          path: identity.sourcePath,
+          message: error instanceof Error ? error.message : String(error),
+          failureKind: failure.kind,
+          ...(failure.code === undefined ? {} : { failureCode: failure.code }),
+        });
+      }
+    }
+    return outcomes;
+  }
+
+  const templates =
+    domain === "issue"
+      ? discovery.issueTemplates.filter((template) => template.type === "issue-form")
+      : discovery.pullRequestTemplates;
+  if (templates.length === 0) throw new TemplateNotFoundError(undefined, templates);
+  for (const template of templates) {
+    try {
+      let contract =
+        domain === "issue"
+          ? await compileIssueFormTemplate(discovery, template.id)
+          : await compilePullRequestTemplate(root, template.id);
+      if (selectedPolicy !== undefined) {
+        contract = await compilePullRequestPolicyFile(contract, selectedPolicy, {
+          templateIdentities: discovery.pullRequestTemplates,
+        });
+      }
+      outcomes.push({ status: "compiled", contract });
+    } catch (error: unknown) {
+      const failure = classifyTemplateCompilationFailure(error);
+      outcomes.push({
+        status: "failed",
+        path: template.path,
+        message: error instanceof Error ? error.message : String(error),
+        failureKind: failure.kind,
+        ...(failure.code === undefined ? {} : { failureCode: failure.code }),
+      });
+    }
+  }
+  return outcomes;
 }
 
 async function resolveLocalPolicyPath(
@@ -273,6 +351,7 @@ export async function compileRepositoryGovernedContract(
   const source = await readRepositoryGovernanceSource(adapter);
   const resolution = await readRepositoryTemplateResolutionConfig(adapter, source, selector === undefined);
   const configuredDefault = resolution?.config?.defaults[domain];
+  const implicitDefaultName = domain === "pr" ? "default" : undefined;
   const semanticCandidates = source.semanticTemplates.filter(
     (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
   );
@@ -281,6 +360,7 @@ export async function compileRepositoryGovernedContract(
       candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
       selector,
       configuredDefault,
+      implicitDefaultName,
       dependencies: options.templateResolver,
     });
     return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity, resolution?.source);
@@ -292,6 +372,7 @@ export async function compileRepositoryGovernedContract(
     ),
     selector,
     configuredDefault,
+    implicitDefaultName,
     dependencies: options.templateResolver,
   });
   return compileRepositoryGovernedContractFromSource(
@@ -1042,7 +1123,12 @@ export async function resolveRemoteArtifactContractIdentity(
   const candidates = createRemoteArtifactContractIdentities(tree)
     .filter((identity) => identity.kind === kind)
     .map(repositoryArtifactContractResolutionCandidate);
-  return resolveTemplate({ candidates, selector, configuredDefault });
+  return resolveTemplate({
+    candidates,
+    selector,
+    configuredDefault,
+    implicitDefaultName: kind === "pull_request" ? "default" : undefined,
+  });
 }
 
 function repositoryArtifactContractResolutionCandidate(

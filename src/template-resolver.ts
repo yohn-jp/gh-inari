@@ -45,6 +45,15 @@ export interface ResolveTemplateRequest<T> {
   readonly candidates: readonly TemplateResolutionCandidate<T>[];
   readonly selector?: string | TemplateSelector;
   readonly configuredDefault?: string | TemplateSelector;
+  /**
+   * When no explicit selector and no configured default resolve the
+   * candidate, try this implicit name (e.g. "default") as a last
+   * deterministic tier. Unlike `configuredDefault`, a miss here falls
+   * through to the ambiguous/interactive path instead of failing closed,
+   * since it reflects an implicit convention rather than an explicit
+   * repository choice.
+   */
+  readonly implicitDefaultName?: string;
   readonly dependencies?: TemplateResolverDependencies;
 }
 
@@ -129,7 +138,12 @@ export function semanticTemplateResolutionCandidate(
 /** Resolve the same precedence asynchronously for CLI and repository-backed callers. */
 export async function resolveTemplate<T>(request: ResolveTemplateRequest<T>): Promise<T> {
   const candidates = sortCandidates(request.candidates);
-  const deterministic = resolveDeterministically(candidates, request.selector, request.configuredDefault);
+  const deterministic = resolveDeterministically(
+    candidates,
+    request.selector,
+    request.configuredDefault,
+    request.implicitDefaultName,
+  );
   if (deterministic !== undefined) return deterministic.value;
 
   const isInteractive = request.dependencies?.isInteractive?.() ?? defaultIsInteractive();
@@ -142,7 +156,12 @@ export async function resolveTemplate<T>(request: ResolveTemplateRequest<T>): Pr
 /** Synchronous counterpart for compatibility APIs that cannot provide interactive input. */
 export function resolveTemplateSync<T>(request: ResolveTemplateRequest<T>): T {
   const candidates = sortCandidates(request.candidates);
-  const deterministic = resolveDeterministically(candidates, request.selector, request.configuredDefault);
+  const deterministic = resolveDeterministically(
+    candidates,
+    request.selector,
+    request.configuredDefault,
+    request.implicitDefaultName,
+  );
   if (deterministic !== undefined) return deterministic.value;
   throw ambiguousError(candidates);
 }
@@ -224,6 +243,7 @@ function resolveDeterministically<T>(
   candidates: readonly TemplateResolutionCandidate<T>[],
   selector: string | TemplateSelector | undefined,
   configuredDefault: string | TemplateSelector | undefined,
+  implicitDefaultName?: string,
 ): TemplateResolutionCandidate<T> | undefined {
   if (selector !== undefined) return resolveExplicit(candidates, selector);
   if (candidates.length === 0) throw noCandidatesError(candidates);
@@ -235,6 +255,14 @@ function resolveDeterministically<T>(
     if (match.matches.length > 1)
       throw defaultAmbiguousError(configuredDefault, candidates, match.matchKind ?? "selector");
     return match.matches[0] as TemplateResolutionCandidate<T>;
+  }
+  if (implicitDefaultName !== undefined) {
+    const match = matchCandidates(candidates, implicitDefaultName);
+    if (match.valid && match.matches.length === 1) return match.matches[0] as TemplateResolutionCandidate<T>;
+    if (match.valid && match.matches.length > 1)
+      throw selectorAmbiguousError(implicitDefaultName, candidates, match.matchKind ?? "selector");
+    if (candidates.length > 1) return undefined;
+    throw selectorNotFoundError(implicitDefaultName, candidates, match.matchKind ?? "none");
   }
   if (candidates.length === 1) return candidates[0] as TemplateResolutionCandidate<T>;
   return undefined;

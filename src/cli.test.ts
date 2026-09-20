@@ -485,14 +485,21 @@ test("PR schema defaults to the default template while explicit selection and Is
 
     const implicit = await captureJson(["pr", "schema", "--json"], { repositoryRoot });
     const explicit = await captureJson(["pr", "schema", "--template", "release", "--json"], { repositoryRoot });
-    const issue = await captureJson(["issue", "schema", "--json"], { repositoryRoot });
+    const issue = await captureJson(["issue", "schema", "--json"], {
+      repositoryRoot,
+      templateResolver: { isInteractive: () => false },
+    });
 
     assert.equal(implicit.exitCode, 0);
     assert.equal((implicit.output.template as { path: string }).path, ".github/PULL_REQUEST_TEMPLATE/default.md");
     assert.equal(explicit.exitCode, 0);
     assert.equal((explicit.output.template as { path: string }).path, ".github/PULL_REQUEST_TEMPLATE/release.md");
-    assert.equal(issue.exitCode, 2);
-    assert.equal((issue.output.error as { code: string }).code, "TEMPLATE_RESOLUTION_AMBIGUOUS");
+    assert.equal(issue.exitCode, 0);
+    const issueTemplates = issue.output.templates as readonly { template: { path: string } }[];
+    assert.deepEqual(
+      issueTemplates.map((entry) => entry.template.path),
+      [".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/feature.yml"],
+    );
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -546,6 +553,103 @@ test("issue schema exposes required title metadata without making title a semant
   assert.equal(metadata.properties.title?.type, "string");
   assert.equal(metadata.properties.title?.pattern, "\\S");
   assert.equal("title" in schema.properties, false);
+});
+
+test("read-only schema discovery returns every ambiguous local template without a selector", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gh-inari-schema-discovery-"));
+  try {
+    await mkdir(path.join(directory, ".github/ISSUE_TEMPLATE"), { recursive: true });
+    await mkdir(path.join(directory, ".github/PULL_REQUEST_TEMPLATE"), { recursive: true });
+    const issueTemplate = [
+      "name: Feature",
+      "description: Feature request",
+      "body:",
+      "  - type: textarea",
+      "    id: summary",
+      "    attributes:",
+      "      label: Summary",
+      "    validations:",
+      "      required: true",
+      "",
+    ].join("\n");
+    await writeFile(path.join(directory, ".github/ISSUE_TEMPLATE/bug.yml"), issueTemplate, "utf8");
+    await writeFile(path.join(directory, ".github/ISSUE_TEMPLATE/feature.yml"), issueTemplate, "utf8");
+    await writeFile(path.join(directory, ".github/PULL_REQUEST_TEMPLATE/bug.md"), "## Summary\n\nBug\n", "utf8");
+    await writeFile(
+      path.join(directory, ".github/PULL_REQUEST_TEMPLATE/feature.md"),
+      "## Summary\n\nFeature\n",
+      "utf8",
+    );
+
+    for (const [domain, expectedPaths] of [
+      ["issue", [".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/feature.yml"]],
+      ["pr", [".github/PULL_REQUEST_TEMPLATE/bug.md", ".github/PULL_REQUEST_TEMPLATE/feature.md"]],
+    ] as const) {
+      const result = await captureJson([domain, "schema", "--json"], {
+        repositoryRoot: directory,
+        templateResolver: { isInteractive: () => false },
+      });
+      assert.equal(result.exitCode, 0, domain);
+      const templates = result.output.templates as readonly {
+        status: string;
+        template: { path: string };
+        schema?: unknown;
+      }[];
+      assert.deepEqual(
+        templates.map((entry) => entry.template.path),
+        expectedPaths,
+        domain,
+      );
+      assert.ok(
+        templates.every((entry) => entry.status === "compiled" && entry.schema !== undefined),
+        domain,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("read-only remote schema discovery returns every ambiguous native template", async () => {
+  for (const [domain, templates] of [
+    [
+      "issue",
+      [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", sha: "bug-sha", source: REMOTE_ISSUE_TEMPLATE },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", sha: "feature-sha", source: REMOTE_ISSUE_TEMPLATE },
+      ],
+    ],
+    [
+      "pr",
+      [
+        { path: ".github/PULL_REQUEST_TEMPLATE/bug.md", sha: "bug-sha", source: REMOTE_PR_TEMPLATE },
+        { path: ".github/PULL_REQUEST_TEMPLATE/feature.md", sha: "feature-sha", source: REMOTE_PR_TEMPLATE },
+      ],
+    ],
+  ] as const) {
+    const tree = templates.map(({ path: templatePath, sha }) => ({ path: templatePath, type: "blob", sha }));
+    const transport = new CliStubTransport([
+      command("gh version 2.0"),
+      command(),
+      command("100000158\n"),
+      command(JSON.stringify({ default_branch: "main" })),
+      command(JSON.stringify({ sha: GOVERNANCE_TREE_SHA, truncated: false, tree })),
+      command(JSON.stringify({ default_branch: "main" })),
+      command(JSON.stringify({ sha: GOVERNANCE_TREE_SHA, truncated: false, tree })),
+      ...templates.map(({ sha, source }) => blobResponse(sha, source)),
+    ]);
+    const result = await captureJson([domain, "schema", "--repository", "acme/inari", "--json"], {
+      repositoryRoot: "/tmp",
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+    });
+    assert.equal(result.exitCode, 0, domain);
+    const discovered = result.output.templates as readonly { status: string; template: { path: string } }[];
+    assert.deepEqual(
+      discovered.map((entry) => [entry.status, entry.template.path]),
+      templates.map(({ path: templatePath }) => ["compiled", templatePath]),
+      domain,
+    );
+  }
 });
 
 async function captureOutput(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
