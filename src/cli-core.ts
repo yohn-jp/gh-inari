@@ -2350,14 +2350,14 @@ async function runArtifactCommand(
       rejectGovernedPolicyOverride(parsed.options.policy);
       const adapter = createAdapter(dependencies, root, parsed.options.repository);
       await adapter.resolveRepositoryContext();
-      contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]), {
+      contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0], domain), {
         templateResolver: dependencies.templateResolver,
       });
     } else {
       contract = await compileLocalGovernedContract(
         domain,
         root,
-        templateSelector(parsed, rest[0]),
+        templateSelector(parsed, rest[0], domain),
         parsed.options.policy,
         { templateResolver: dependencies.templateResolver },
       );
@@ -2400,14 +2400,14 @@ async function runArtifactCommand(
         rejectGovernedPolicyOverride(parsed.options.policy);
         const adapter = createAdapter(dependencies, root, parsed.options.repository);
         await adapter.resolveRepositoryContext();
-        contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]), {
+        contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0], domain), {
           templateResolver: dependencies.templateResolver,
         });
       } else {
         contract = await compileLocalGovernedContract(
           domain,
           root,
-          templateSelector(parsed, rest[0]),
+          templateSelector(parsed, rest[0], domain),
           parsed.options.policy,
           { templateResolver: dependencies.templateResolver },
         );
@@ -2446,9 +2446,14 @@ async function runArtifactCommand(
     rejectGovernedPolicyOverride(parsed.options.policy);
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
     await adapter.resolveRepositoryContext();
-    const contract = await compileRepositoryGovernedContract(adapter, domain, templateSelector(parsed, rest[0]), {
-      templateResolver: dependencies.templateResolver,
-    });
+    const contract = await compileRepositoryGovernedContract(
+      adapter,
+      domain,
+      templateSelector(parsed, rest[0], domain),
+      {
+        templateResolver: dependencies.templateResolver,
+      },
+    );
     const document = await resolveArtifactInputDocument(parsed, contract);
     const preparedDocument = mergeOptionMetadata(document, parsed.options);
     if (domain === "issue") {
@@ -2699,7 +2704,7 @@ async function runSemanticIssueCommand(
     if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("issue", rest[0]);
     return runSemanticObservationCheckCommand("issue", Number(rest[0]), parsed, root, dependencies);
   }
-  const selector = templateSelector(parsed, rest[0]);
+  const selector = templateSelector(parsed, rest[0], "issue");
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   const effectiveContract = await compileRepositoryEffectiveIssueContract(adapter, selector, {
     capabilities: parsed.capabilities,
@@ -3291,7 +3296,7 @@ async function runSemanticPullRequestCommand(
     if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("pr", rest[0]);
     return runSemanticObservationCheckCommand("pr", Number(rest[0]), parsed, root, dependencies);
   }
-  const selector = templateSelector(parsed, rest[0]);
+  const selector = templateSelector(parsed, rest[0], "pr");
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   const effectiveContract = await compileRepositoryEffectivePullRequestContract(adapter, selector, {
     capabilities: parsed.capabilities,
@@ -3434,7 +3439,7 @@ async function runSemanticObservationCheckCommand(
 ): Promise<number> {
   const input = await readJsonValue(parsed.options.from);
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
-  const selector = templateSelector(parsed, undefined);
+  const selector = templateSelector(parsed, undefined, domain);
   const effectiveContract =
     domain === "issue"
       ? await compileRepositoryEffectiveIssueContract(adapter, selector, { capabilities: parsed.capabilities })
@@ -3660,7 +3665,7 @@ async function runExistingValidation(
   rejectGovernedPolicyOverride(parsed.options.policy);
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   await adapter.resolveRepositoryContext();
-  const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
+  const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined, domain));
   const { remote, result } = read;
   const assessment = assessExistingArtifact(domain, read);
   const projection = projectExistingArtifact(result);
@@ -3695,7 +3700,7 @@ async function runExistingGet(
     adapter,
     domain,
     number,
-    templateSelector(parsed, undefined),
+    templateSelector(parsed, undefined, domain),
   );
   const projection = projectExistingArtifact(result);
   const output = {
@@ -3731,7 +3736,7 @@ async function runExistingRemediation(
   rejectGovernedPolicyOverride(parsed.options.policy);
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   await adapter.resolveRepositoryContext();
-  const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined));
+  const read = await readGovernedExistingArtifact(adapter, domain, number, templateSelector(parsed, undefined, domain));
   const assessment = assessExistingArtifact(domain, read);
   const disposableMarker = domain === "issue" ? projectSelfDogfoodIssueMarker(read.remote.body) : undefined;
   const base = {
@@ -4241,8 +4246,14 @@ async function resolveArtifactInputDocument(
   return requirePullRequestSyncInput ? assertPullRequestSyncInputComplete(merged) : merged;
 }
 
-function templateSelector(parsed: ParsedArgs, positional: string | undefined): string | undefined {
-  return typeof parsed.options.template === "string" ? parsed.options.template : positional;
+function templateSelector(
+  parsed: ParsedArgs,
+  positional: string | undefined,
+  domain?: "issue" | "pr",
+): string | undefined {
+  if (typeof parsed.options.template === "string") return parsed.options.template;
+  if (positional !== undefined) return positional;
+  return domain === "pr" ? "default" : undefined;
 }
 
 function parseArguments(argv: readonly string[]): ParsedArgs {
