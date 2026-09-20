@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/assets/readme/inari-hero.webp" alt="INARI — Deterministic GitHub Governance. Issue → Change → PR → Merge. Canonical · Deterministic · Machine-verifiable." width="100%">
+  <img src="./docs/assets/readme/inari-hero.webp" alt="Inari — GitHub Governance CLI. Standardize your workflow. Keep your project healthy." width="100%">
 </p>
 
 <p align="center">
