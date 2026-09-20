@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "inari-hosted": {
+      "type": "http",
+      "url": "https://mcp-inari.yohn.jp/mcp"
+    }
+  }
+}
