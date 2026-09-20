@@ -194,12 +194,14 @@ export async function compileLocalGovernedContract(
   );
   const resolutionConfig = selector === undefined ? await readTemplateResolutionConfig(root) : undefined;
   const configuredDefault = resolutionConfig?.defaults[domain];
+  const implicitDefaultName = domain === "pr" ? "default" : undefined;
   let contract: CanonicalContract;
   if (semanticCandidates.length > 0) {
     const semanticIdentity = await resolveTemplate({
       candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
       selector,
       configuredDefault,
+      implicitDefaultName,
       dependencies: options.templateResolver,
     });
     contract = await compileSemanticTemplate(root, await readSemanticTemplate(root, semanticIdentity));
@@ -216,6 +218,7 @@ export async function compileLocalGovernedContract(
       candidates: discovery.pullRequestTemplates.map(nativeTemplateResolutionCandidate),
       selector,
       configuredDefault,
+      implicitDefaultName,
       dependencies: options.templateResolver,
     });
     contract = await compilePullRequestTemplate(root, identity.id);
@@ -348,6 +351,7 @@ export async function compileRepositoryGovernedContract(
   const source = await readRepositoryGovernanceSource(adapter);
   const resolution = await readRepositoryTemplateResolutionConfig(adapter, source, selector === undefined);
   const configuredDefault = resolution?.config?.defaults[domain];
+  const implicitDefaultName = domain === "pr" ? "default" : undefined;
   const semanticCandidates = source.semanticTemplates.filter(
     (template) => template.kind === (domain === "issue" ? "issue" : "pull_request"),
   );
@@ -356,6 +360,7 @@ export async function compileRepositoryGovernedContract(
       candidates: semanticCandidates.map(semanticTemplateResolutionCandidate),
       selector,
       configuredDefault,
+      implicitDefaultName,
       dependencies: options.templateResolver,
     });
     return compileRepositorySemanticContractFromSource(adapter, source, semanticIdentity, resolution?.source);
@@ -367,6 +372,7 @@ export async function compileRepositoryGovernedContract(
     ),
     selector,
     configuredDefault,
+    implicitDefaultName,
     dependencies: options.templateResolver,
   });
   return compileRepositoryGovernedContractFromSource(
@@ -1117,7 +1123,12 @@ export async function resolveRemoteArtifactContractIdentity(
   const candidates = createRemoteArtifactContractIdentities(tree)
     .filter((identity) => identity.kind === kind)
     .map(repositoryArtifactContractResolutionCandidate);
-  return resolveTemplate({ candidates, selector, configuredDefault });
+  return resolveTemplate({
+    candidates,
+    selector,
+    configuredDefault,
+    implicitDefaultName: kind === "pull_request" ? "default" : undefined,
+  });
 }
 
 function repositoryArtifactContractResolutionCandidate(

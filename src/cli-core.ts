@@ -2450,7 +2450,7 @@ async function runArtifactCommand(
     );
   }
   if (command === "schema") {
-    const selector = templateSelector(parsed, rest[0], domain);
+    const selector = templateSelector(parsed, rest[0]);
     let contract: CanonicalContract;
     let repositoryAdapter: GitHubAdapter | undefined;
     try {
@@ -3417,7 +3417,8 @@ async function runSemanticPullRequestCommand(
     if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidArtifactNumberError("pr", rest[0]);
     return runSemanticObservationCheckCommand("pr", Number(rest[0]), parsed, root, dependencies);
   }
-  const selector = templateSelector(parsed, rest[0], "pr");
+  const selector =
+    operation === "contract" ? templateSelector(parsed, rest[0]) : templateSelector(parsed, rest[0], "pr");
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   let effectiveContract: Awaited<ReturnType<typeof compileRepositoryEffectivePullRequestContract>>;
   try {

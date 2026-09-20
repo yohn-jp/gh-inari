@@ -485,14 +485,21 @@ test("PR schema defaults to the default template while explicit selection and Is
 
     const implicit = await captureJson(["pr", "schema", "--json"], { repositoryRoot });
     const explicit = await captureJson(["pr", "schema", "--template", "release", "--json"], { repositoryRoot });
-    const issue = await captureJson(["issue", "schema", "--json"], { repositoryRoot });
+    const issue = await captureJson(["issue", "schema", "--json"], {
+      repositoryRoot,
+      templateResolver: { isInteractive: () => false },
+    });
 
     assert.equal(implicit.exitCode, 0);
     assert.equal((implicit.output.template as { path: string }).path, ".github/PULL_REQUEST_TEMPLATE/default.md");
     assert.equal(explicit.exitCode, 0);
     assert.equal((explicit.output.template as { path: string }).path, ".github/PULL_REQUEST_TEMPLATE/release.md");
-    assert.equal(issue.exitCode, 2);
-    assert.equal((issue.output.error as { code: string }).code, "TEMPLATE_RESOLUTION_AMBIGUOUS");
+    assert.equal(issue.exitCode, 0);
+    const issueTemplates = issue.output.templates as readonly { template: { path: string } }[];
+    assert.deepEqual(
+      issueTemplates.map((entry) => entry.template.path),
+      [".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/feature.yml"],
+    );
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }

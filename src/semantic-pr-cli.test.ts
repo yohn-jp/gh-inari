@@ -287,7 +287,7 @@ test("CLI fails closed when no repository Canon exists at any recognized locatio
   assert.equal(error.code, "ARTIFACT_CONTRACT_NOT_FOUND");
 });
 
-test("CLI resolves omitted PR Canon selection as the default template", async () => {
+test("CLI enumerates every Canon on an unselected read-only contract discovery", async () => {
   const result = await invokeWithTree(
     [
       { path: ".github/inari/pull-requests/one.json", sha: "canon-sha-one" },
@@ -296,9 +296,18 @@ test("CLI resolves omitted PR Canon selection as the default template", async ()
     undefined,
     derivedCanon,
   );
-  assert.equal(result.exitCode, 2);
-  const error = result.output.error as Record<string, unknown>;
-  assert.equal(error.code, "ARTIFACT_CONTRACT_NOT_FOUND");
+  assert.equal(result.exitCode, 0);
+  const templates = result.output.templates as readonly {
+    readonly status: string;
+    readonly template: { readonly id: string };
+  }[];
+  assert.deepEqual(
+    templates.map((entry) => [entry.status, entry.template.id]),
+    [
+      ["compiled", "one"],
+      ["compiled", "two"],
+    ],
+  );
 });
 
 test("CLI ignores non-canonical Canon aliases such as .inari and underscore variants", async () => {
