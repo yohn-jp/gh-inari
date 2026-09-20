@@ -9,7 +9,7 @@
       "source": {
         "source": "npm",
         "package": "gh-inari",
-        "version": "^0.14.0",
+        "version": "^0.14.1",
         "registry": "https://registry.npmjs.org"
       },
       "policy": {
