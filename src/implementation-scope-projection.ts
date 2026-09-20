@@ -681,7 +681,7 @@ export function implementationScopeProjectionPaths(
   return projection.scope.deny;
 }
 
-function globRegex(pattern: string): RegExp {
+function implementationScopeSelectorRegex(pattern: string): RegExp {
   let source = "^";
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index] as string;
@@ -695,15 +695,27 @@ function globRegex(pattern: string): RegExp {
   return new RegExp(`${source}$`, "u");
 }
 
-function safePath(value: string): string | undefined {
-  return validateImplementationGitPathIdentity(value);
+/**
+ * Evaluate one authored/projected selector against an observed Git path.
+ * Selectors use the canonical repository-relative syntax, while observed
+ * paths retain their exact Git identity and are never normalized here.
+ * `*` and `?` stay within one `/`-delimited segment; `**` may cross `/`.
+ * Invalid selectors and paths fail closed.
+ */
+export function matchesImplementationScopeSelector(selector: unknown, path: unknown): boolean {
+  const canonicalSelector = canonicalizeImplementationScopePath(selector);
+  const exactPath = validateImplementationGitPathIdentity(path);
+  return (
+    canonicalSelector !== undefined &&
+    exactPath !== undefined &&
+    implementationScopeSelectorRegex(canonicalSelector).test(exactPath)
+  );
 }
 
 /** Return whether DENY excludes a path in the projection. */
 export function isImplementationScopeProjectionPathDenied(input: unknown, path: string): boolean {
   const projection = parseImplementationScopeProjection(input);
-  const normalized = safePath(path);
-  return normalized !== undefined && projection.scope.deny.some((entry) => globRegex(entry).test(normalized));
+  return projection.scope.deny.some((entry) => matchesImplementationScopeSelector(entry, path));
 }
 
 /** Evaluate one repository-relative path against an explicit operation scope. */
@@ -713,9 +725,10 @@ export function isImplementationScopeProjectionPathAllowed(
   path: string,
 ): boolean {
   const projection = parseImplementationScopeProjection(input);
-  const normalized = safePath(path);
-  if (normalized === undefined || isImplementationScopeProjectionPathDenied(projection, normalized)) return false;
-  return implementationScopeProjectionPaths(projection, operation).some((entry) => globRegex(entry).test(normalized));
+  if (isImplementationScopeProjectionPathDenied(projection, path)) return false;
+  return implementationScopeProjectionPaths(projection, operation).some((entry) =>
+    matchesImplementationScopeSelector(entry, path),
+  );
 }
 
 const stringSchema: JsonSchema = { type: "string", minLength: 1 };
