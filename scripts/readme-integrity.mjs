@@ -16,7 +16,6 @@ const requiredText = [
 
 const requiredFiles = [
   "docs/assets/readme/inari-hero.webp",
-  "docs/assets/readme/inari-social-preview.webp",
   "docs/GOLDEN_PATH_ARCHITECTURE.md",
   "docs/ARCHITECTURE.md",
   "docs/SEMANTIC_TEMPLATES.md",
@@ -34,8 +33,7 @@ for (const relativePath of requiredFiles) {
   await access(resolve(root, relativePath));
 }
 
-const linkedFiles = requiredFiles.filter((path) => path !== "docs/assets/readme/inari-social-preview.webp");
-for (const relativePath of linkedFiles) {
+for (const relativePath of requiredFiles) {
   const markdownRef = `./${relativePath}`;
   if (!readme.includes(markdownRef)) {
     throw new Error(`README is missing required local reference: ${markdownRef}`);
