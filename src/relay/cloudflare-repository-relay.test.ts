@@ -102,6 +102,17 @@ let latestPair: FakeWebSocketPair | undefined;
 
 (globalThis as unknown as { WebSocketPair: typeof FakeWebSocketPair }).WebSocketPair = FakeWebSocketPair;
 
+class FakeWebSocketRequestResponsePair {
+  constructor(
+    readonly request: string,
+    readonly response: string,
+  ) {}
+}
+
+(
+  globalThis as unknown as { WebSocketRequestResponsePair: typeof FakeWebSocketRequestResponsePair }
+).WebSocketRequestResponsePair = FakeWebSocketRequestResponsePair;
+
 class FakeStorage {
   readonly values = new Map<string, unknown>();
   failNextPut = false;
@@ -290,7 +301,8 @@ test("runtime admission stores only bounded public attachment metadata and confi
   const attachment = socket.attachment as Record<string, unknown>;
   assert.equal(attachment.authenticated, true);
   assert.equal("privateKey" in attachment, false);
-  assert.deepEqual(state.autoResponse, { request: "relay:ping", response: "relay:pong" });
+  assert.ok(state.autoResponse instanceof FakeWebSocketRequestResponsePair);
+  assert.deepEqual(state.autoResponse, new FakeWebSocketRequestResponsePair("relay:ping", "relay:pong"));
   assert.equal((attachment.binding as { publicKey: unknown }).publicKey !== undefined, true);
   assert.deepEqual(publicJwk(privateKey).kty, "OKP");
 });

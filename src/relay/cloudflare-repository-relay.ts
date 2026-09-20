@@ -47,6 +47,12 @@ import {
 /** Cloudflare provides this global in a Worker; it is absent from Node types. */
 declare const WebSocketPair: new () => [WebSocket, WebSocket];
 
+function createWebSocketAutoResponsePair(request: string, response: string): unknown {
+  const ctor = (globalThis as { WebSocketRequestResponsePair?: new (request: string, response: string) => unknown })
+    .WebSocketRequestResponsePair;
+  return ctor === undefined ? { request, response } : new ctor(request, response);
+}
+
 const JSON_ENCODER = new TextEncoder();
 const JSON_DECODER = new TextDecoder("utf-8", { fatal: true });
 const MAX_STORED_JOBS = 32;
@@ -141,7 +147,7 @@ export interface RepositoryRelayDurableObjectState {
   readonly storage: RepositoryRelayStorage;
   acceptWebSocket(webSocket: RepositoryRelayWebSocket, tags?: string[]): void;
   getWebSockets(tag?: string): RepositoryRelayWebSocket[];
-  setWebSocketAutoResponse?(pair: { readonly request: string; readonly response: string } | null): void;
+  setWebSocketAutoResponse?(pair: unknown | null): void;
   waitUntil?(promise: Promise<unknown>): void;
 }
 
@@ -534,7 +540,9 @@ export class RepositoryRelayDurableObject {
     };
     this.state.acceptWebSocket(server, [role]);
     server.serializeAttachment?.(attachment);
-    this.state.setWebSocketAutoResponse?.({ request: RELAY_HEARTBEAT_REQUEST, response: RELAY_HEARTBEAT_RESPONSE });
+    this.state.setWebSocketAutoResponse?.(
+      createWebSocketAutoResponsePair(RELAY_HEARTBEAT_REQUEST, RELAY_HEARTBEAT_RESPONSE),
+    );
     await this.scheduleNextAlarm();
     this.emitTelemetry({
       occurredAtMs: openedAtMs,
@@ -564,9 +572,7 @@ export class RepositoryRelayDurableObject {
       );
     }
     try {
-      const response = new Response(null, { status: 101 }) as Response & { webSocket?: WebSocket };
-      response.webSocket = pair[0];
-      return response;
+      return new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit & { webSocket: WebSocket });
     } catch {
       // Node's Response rejects status 101; Workers accepts the upgrade response.
       return { status: 101, webSocket: pair[0] } as unknown as Response;
