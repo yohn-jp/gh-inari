@@ -39,6 +39,10 @@ export type ImplementationScopeProjectionVersion = typeof IMPLEMENTATION_SCOPE_P
 export const IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_VERSION = "1.0.0" as const;
 export type ImplementationScopeProjectionSchemaVersion = typeof IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_VERSION;
 
+/** Stable identity of the public projection schema. */
+export const IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_ID =
+  `urn:inari:implementation-scope-projection:${IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_VERSION}` as const;
+
 /** Stable discriminator for this projection, independent of enforcement runtimes. */
 export const IMPLEMENTATION_SCOPE_PROJECTION_KIND = "implementation-execution-scope" as const;
 
@@ -748,7 +752,7 @@ const scopePathArraySchema: JsonSchema = {
 /** Public machine-readable schema for the execution-scope projection. */
 export const IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA: JsonSchemaDocument = {
   $schema: JSON_SCHEMA_DIALECT,
-  $id: "urn:inari:implementation-scope-projection:1.0.0",
+  $id: IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_ID,
   title: "Implementation execution scope",
   description: "Versioned, transport-neutral execution authority derived from a current Implementation authorization.",
   type: "object",
@@ -769,6 +773,7 @@ export const IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA: JsonSchemaDocument = {
     },
     repository: repositorySchema,
     base: baseSchema,
+    branch: { ...stringSchema, pattern: BRANCH_PATTERN.source },
     scope: {
       type: "object",
       properties: {

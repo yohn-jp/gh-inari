@@ -13,6 +13,7 @@ import {
 } from "./implementation-authorization.js";
 import {
   IMPLEMENTATION_SCOPE_PROJECTION_KIND,
+  IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_ID,
   IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA,
   IMPLEMENTATION_SCOPE_PROJECTION_VERSION,
   deserializeImplementationScopeProjection,
@@ -324,6 +325,12 @@ test("projection output is deterministic, canonical, and schema-versioned", () =
   );
   assert.deepEqual(deserializeImplementationScopeProjection(firstSerialized), first);
   assert.equal(IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA.$id, "urn:inari:implementation-scope-projection:1.0.0");
+  assert.equal(IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA.$id, IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA_ID);
+  assert.deepEqual(IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA.properties?.branch, {
+    type: "string",
+    minLength: 1,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+  });
   assert.deepEqual(projectImplementationScopeSchema(), IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA);
   assert.deepEqual(IMPLEMENTATION_SCOPE_PROJECTION_SCHEMA.properties?.scope?.required, [
     "readOnly",
@@ -337,6 +344,22 @@ test("projection output is deterministic, canonical, and schema-versioned", () =
   (tampered.scope as Record<string, unknown>).write = ["**"];
   assert.equal(validateImplementationScopeProjection(tampered).valid, true);
   assert.notEqual(serializeImplementationScopeProjection(tampered), firstSerialized);
+});
+
+test("unsupported versions and noncanonical serialized artifacts fail closed", () => {
+  const serialized = serializeImplementationScopeProjection(projectImplementationScope(projectionInput()));
+  const unsupported = JSON.parse(serialized) as Record<string, unknown>;
+  unsupported.version = 2;
+  assert.throws(
+    () => deserializeImplementationScopeProjection(JSON.stringify(unsupported)),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "IMPLEMENTATION_SCOPE_PROJECTION_UNSUPPORTED_VERSION",
+  );
+  assert.throws(
+    () => deserializeImplementationScopeProjection(` ${serialized}`),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "IMPLEMENTATION_SCOPE_PROJECTION_NONCANONICAL",
+  );
 });
 
 test("omitted mutation lists stay empty and cannot become inferred authority", () => {
