@@ -17,6 +17,7 @@ export * from "./implementation-session-binding.js";
 export * from "./implementation-readiness.js";
 export * from "./implementation-execution-evidence.js";
 export * from "./implementation-scope-projection.js";
+export * from "./implementation-scope-applicability.js";
 export * from "./implementation-conformance.js";
 export * from "./implementation-lifecycle.js";
 export * from "./implementation-change-identity.js";
