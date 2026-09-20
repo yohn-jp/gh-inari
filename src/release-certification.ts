@@ -107,10 +107,10 @@ export interface ReleaseCertificationVerificationInput {
   readonly expectedTarballSha256: string;
   readonly expectedRepositoryOwner: string;
   readonly expectedRepositoryName: string;
-  readonly expectedDogfoodWorkflowRunId: string;
-  readonly expectedDogfoodWorkflowRunAttempt: string;
+  readonly expectedDogfoodWorkflowRunId?: string;
+  readonly expectedDogfoodWorkflowRunAttempt?: string;
   readonly packedEvidence: unknown;
-  readonly dogfoodEvidence: unknown;
+  readonly dogfoodEvidence?: unknown;
 }
 
 export type ReleaseCertificationDiagnosticCode = CertificationDiagnosticCode;
@@ -133,6 +133,7 @@ function pushDiagnostic(
 }
 
 function validExpectedIdentity(input: ReleaseCertificationVerificationInput): boolean {
+  const hasDogfoodEvidence = input.dogfoodEvidence !== undefined && input.dogfoodEvidence !== null;
   return (
     isCertificationSourceCommitSha(input.expectedReleaseSourceCommitSha) &&
     isCertificationPackageName(input.expectedPackageName) &&
@@ -140,8 +141,9 @@ function validExpectedIdentity(input: ReleaseCertificationVerificationInput): bo
     isCertificationTarballSha256(input.expectedTarballSha256) &&
     isCertificationRepositoryPart(input.expectedRepositoryOwner) &&
     isCertificationRepositoryPart(input.expectedRepositoryName) &&
-    isCertificationWorkflowRunId(input.expectedDogfoodWorkflowRunId) &&
-    isCertificationWorkflowRunAttempt(input.expectedDogfoodWorkflowRunAttempt)
+    (!hasDogfoodEvidence ||
+      (isCertificationWorkflowRunId(input.expectedDogfoodWorkflowRunId) &&
+        isCertificationWorkflowRunAttempt(input.expectedDogfoodWorkflowRunAttempt)))
   );
 }
 
@@ -247,12 +249,14 @@ function verifyEvidence(
     }
     return valid;
   }
+  // Reached only when dogfoodEvidence was supplied, which requires
+  // validExpectedIdentity to have already confirmed both run identifiers.
   return verifySelfDogfoodIdentityValue(
     evidence as SelfDogfoodCertificationEvidence,
     expected.expectedRepositoryOwner,
     expected.expectedRepositoryName,
-    expected.expectedDogfoodWorkflowRunId,
-    expected.expectedDogfoodWorkflowRunAttempt,
+    expected.expectedDogfoodWorkflowRunId as string,
+    expected.expectedDogfoodWorkflowRunAttempt as string,
     diagnostics,
   );
 }
@@ -275,9 +279,10 @@ export function verifyReleaseCertification(
   } else {
     verifyEvidence(input.packedEvidence, CERTIFICATION_KINDS[0], input, diagnostics);
   }
-  if (input.dogfoodEvidence === undefined || input.dogfoodEvidence === null) {
-    pushDiagnostic(diagnostics, "EVIDENCE_MISSING", "Self-dogfood certification evidence is required.");
-  } else {
+  // Self-dogfood evidence is verified when supplied (e.g. from a manual
+  // self-dogfood-certification.yml dispatch), but it is no longer a required
+  // release-certification lane: see Issue #897.
+  if (input.dogfoodEvidence !== undefined && input.dogfoodEvidence !== null) {
     verifyEvidence(input.dogfoodEvidence, CERTIFICATION_KINDS[1], input, diagnostics);
   }
   return { passed: diagnostics.length === 0, diagnostics };

@@ -91,13 +91,24 @@ test("accepts both complete, source- and artifact-bound certification lanes", ()
   assert.deepEqual(result, { passed: true, diagnostics: [] });
 });
 
-test("requires both evidence lanes and reports missing evidence deterministically", () => {
+test("requires packed evidence and reports it missing deterministically", () => {
   const result = verifyReleaseCertification(input({ packedEvidence: undefined, dogfoodEvidence: undefined }));
   assert.equal(result.passed, false);
   assert.deepEqual(
     result.diagnostics.map((diagnostic) => diagnostic.code),
-    ["EVIDENCE_MISSING", "EVIDENCE_MISSING"],
+    ["EVIDENCE_MISSING"],
   );
+});
+
+test("passes on packed evidence alone when self-dogfood evidence is not supplied", () => {
+  const result = verifyReleaseCertification(
+    input({
+      dogfoodEvidence: undefined,
+      expectedDogfoodWorkflowRunId: undefined,
+      expectedDogfoodWorkflowRunAttempt: undefined,
+    }),
+  );
+  assert.deepEqual(result, { passed: true, diagnostics: [] });
 });
 
 test("rejects #399 entry-only evidence even when it has a matching source SHA", () => {

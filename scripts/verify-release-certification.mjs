@@ -732,25 +732,40 @@ export async function runWorkflowCertification({
       evidencePath: path.join(temporaryDirectory, "packed-evidence.json"),
       repositoryRoot,
     });
-    const dogfoodWorkflowRun = await workflowRunResolver({
-      sourceSha: context.sourceSha,
-      repositoryOwner: context.repositoryOwner,
-      repositoryName: context.repositoryName,
-      environment,
-      fetchImpl,
-      now,
-      candidateEvidenceRetriever,
-    });
-    const dogfoodEvidence = await dogfoodEvidenceRetriever({
-      sourceSha: context.sourceSha,
-      workflowRunId: dogfoodWorkflowRun.workflowRunId,
-      workflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
-      repositoryOwner: context.repositoryOwner,
-      repositoryName: context.repositoryName,
-      environment,
-      fetchImpl,
-      now,
-    });
+
+    // Self-dogfood certification is verified when a retained artifact for
+    // this exact source SHA exists, but it is no longer a required release
+    // gate: see Issue #897. A missing or unresolvable dogfood run does not
+    // fail the release; a dogfood run that exists and fails still does.
+    let dogfoodWorkflowRun;
+    try {
+      dogfoodWorkflowRun = await workflowRunResolver({
+        sourceSha: context.sourceSha,
+        repositoryOwner: context.repositoryOwner,
+        repositoryName: context.repositoryName,
+        environment,
+        fetchImpl,
+        now,
+        candidateEvidenceRetriever,
+      });
+    } catch (error) {
+      if (isRecord(error) && error.code === "SELF_DOGFOOD_WORKFLOW_RUN_MISSING") dogfoodWorkflowRun = undefined;
+      else throw error;
+    }
+    const dogfoodEvidence =
+      dogfoodWorkflowRun === undefined
+        ? undefined
+        : await dogfoodEvidenceRetriever({
+            sourceSha: context.sourceSha,
+            workflowRunId: dogfoodWorkflowRun.workflowRunId,
+            workflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
+            repositoryOwner: context.repositoryOwner,
+            repositoryName: context.repositoryName,
+            environment,
+            fetchImpl,
+            now,
+          });
+
     return verifyReleaseCertification({
       expectedReleaseSourceCommitSha: context.sourceSha,
       expectedPackageName: metadata.name,
@@ -758,8 +773,12 @@ export async function runWorkflowCertification({
       expectedTarballSha256,
       expectedRepositoryOwner: context.repositoryOwner,
       expectedRepositoryName: context.repositoryName,
-      expectedDogfoodWorkflowRunId: dogfoodWorkflowRun.workflowRunId,
-      expectedDogfoodWorkflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
+      ...(dogfoodWorkflowRun === undefined
+        ? {}
+        : {
+            expectedDogfoodWorkflowRunId: dogfoodWorkflowRun.workflowRunId,
+            expectedDogfoodWorkflowRunAttempt: dogfoodWorkflowRun.workflowRunAttempt,
+          }),
       packedEvidence,
       dogfoodEvidence,
     });
