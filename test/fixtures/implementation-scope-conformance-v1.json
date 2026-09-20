@@ -1,0 +1,491 @@
+{
+  "version": 1,
+  "kind": "implementation-execution-scope-conformance",
+  "fixtures": [
+    {
+      "version": 1,
+      "name": "canonical-operation-separation",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": {
+            "repositoryHost": "github.com",
+            "repositoryId": "1330755860",
+            "repository": "yohn-jp/gh-inari",
+            "number": 861
+          },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": {
+          "repositoryHost": "github.com",
+          "repositoryId": "1330755860",
+          "repository": "yohn-jp/gh-inari"
+        },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "branch": "feat/861-execution-scope-conformance",
+        "scope": {
+          "readOnly": ["AGENTS.md", "docs/**/*.md"],
+          "write": ["src/*/index.ts", "src/github/**"],
+          "create": ["src/implementation-scope-conformance.ts"],
+          "delete": ["test/fixtures/**"],
+          "deny": ["src/github/**", "src/**/secret.ts"]
+        }
+      },
+      "current": {
+        "repository": {
+          "repositoryHost": "github.com",
+          "repositoryId": "1330755860",
+          "repository": "yohn-jp/gh-inari"
+        },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": {
+            "repositoryHost": "github.com",
+            "repositoryId": "1330755860",
+            "repository": "yohn-jp/gh-inari",
+            "number": 861
+          },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [
+        { "operation": "READONLY", "path": "AGENTS.md" },
+        { "operation": "READONLY", "path": "docs/guides/index.md" },
+        { "operation": "READONLY", "path": "docs/index.md" },
+        { "operation": "WRITE", "path": "src/lib/index.ts" },
+        { "operation": "WRITE", "path": "src/lib/deep/index.ts" },
+        { "operation": "WRITE", "path": "src/implementation-scope-conformance.ts" },
+        { "operation": "CREATE", "path": "src/implementation-scope-conformance.ts" },
+        { "operation": "CREATE", "path": "src/lib/index.ts" },
+        { "operation": "DELETE", "path": "test/fixtures/old.json" },
+        { "operation": "DELETE", "path": "docs/guides/index.md" },
+        { "operation": "WRITE", "path": "src/github/client.ts" },
+        { "operation": "DENY", "path": "src/github/client.ts" },
+        { "operation": "WRITE", "path": "src\\lib\\index.ts" },
+        { "operation": "WRITE", "path": "./src/lib/index.ts" },
+        { "operation": "WRITE", "path": "src//lib/index.ts" },
+        { "operation": "WRITE", "path": "C:/src/lib/index.ts" },
+        { "operation": "WRITE", "path": null }
+      ],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "canonical-operation-separation",
+        "applicability": { "valid": true, "applicable": true, "status": "current" },
+        "decisions": [
+          { "operation": "READONLY", "path": "AGENTS.md", "matched": true, "denied": false, "allowed": true },
+          {
+            "operation": "READONLY",
+            "path": "docs/guides/index.md",
+            "matched": true,
+            "denied": false,
+            "allowed": true
+          },
+          { "operation": "READONLY", "path": "docs/index.md", "matched": false, "denied": false, "allowed": false },
+          { "operation": "WRITE", "path": "src/lib/index.ts", "matched": true, "denied": false, "allowed": true },
+          {
+            "operation": "WRITE",
+            "path": "src/lib/deep/index.ts",
+            "matched": false,
+            "denied": false,
+            "allowed": false
+          },
+          {
+            "operation": "WRITE",
+            "path": "src/implementation-scope-conformance.ts",
+            "matched": false,
+            "denied": false,
+            "allowed": false
+          },
+          {
+            "operation": "CREATE",
+            "path": "src/implementation-scope-conformance.ts",
+            "matched": true,
+            "denied": false,
+            "allowed": true
+          },
+          { "operation": "CREATE", "path": "src/lib/index.ts", "matched": false, "denied": false, "allowed": false },
+          {
+            "operation": "DELETE",
+            "path": "test/fixtures/old.json",
+            "matched": true,
+            "denied": false,
+            "allowed": true
+          },
+          {
+            "operation": "DELETE",
+            "path": "docs/guides/index.md",
+            "matched": false,
+            "denied": false,
+            "allowed": false
+          },
+          { "operation": "WRITE", "path": "src/github/client.ts", "matched": true, "denied": true, "allowed": false },
+          { "operation": "DENY", "path": "src/github/client.ts", "matched": true, "denied": true, "allowed": false },
+          { "operation": "WRITE", "path": "src\\lib\\index.ts", "matched": false, "denied": false, "allowed": false },
+          { "operation": "WRITE", "path": "./src/lib/index.ts", "matched": false, "denied": false, "allowed": false },
+          { "operation": "WRITE", "path": "src//lib/index.ts", "matched": false, "denied": false, "allowed": false },
+          { "operation": "WRITE", "path": "C:/src/lib/index.ts", "matched": false, "denied": false, "allowed": false },
+          { "operation": "WRITE", "path": null, "matched": false, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "noncanonical-selector-rejected",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": {
+            "repositoryHost": "github.com",
+            "repositoryId": "1330755860",
+            "number": 861
+          },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": {
+          "readOnly": [],
+          "write": ["src/**", "src\\**"],
+          "create": [],
+          "delete": [],
+          "deny": []
+        }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [
+        { "operation": "WRITE", "path": "src/index.ts" },
+        { "operation": "DENY", "path": "src/index.ts" }
+      ],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "noncanonical-selector-rejected",
+        "applicability": { "valid": false, "applicable": false, "status": "unsupported" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": false, "denied": false, "allowed": false },
+          { "operation": "DENY", "path": "src/index.ts", "matched": false, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "repository-mismatch",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": { "readOnly": [], "write": ["src/**"], "create": [], "delete": [], "deny": [] }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755861" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [{ "operation": "WRITE", "path": "src/index.ts" }],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "repository-mismatch",
+        "applicability": { "valid": false, "applicable": false, "status": "mismatch" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": true, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "base-branch-mismatch",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": { "readOnly": [], "write": ["src/**"], "create": [], "delete": [], "deny": [] }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "release",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [{ "operation": "WRITE", "path": "src/index.ts" }],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "base-branch-mismatch",
+        "applicability": { "valid": false, "applicable": false, "status": "mismatch" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": true, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "base-revision-stale",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": { "readOnly": [], "write": ["src/**"], "create": [], "delete": [], "deny": [] }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [{ "operation": "WRITE", "path": "src/index.ts" }],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "base-revision-stale",
+        "applicability": { "valid": false, "applicable": false, "status": "stale" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": true, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "base-freshness-stale",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": { "readOnly": [], "write": ["src/**"], "create": [], "delete": [], "deny": [] }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [{ "operation": "WRITE", "path": "src/index.ts" }],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "base-freshness-stale",
+        "applicability": { "valid": false, "applicable": false, "status": "stale" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": true, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "authorization-stale",
+      "artifact": {
+        "version": 1,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": { "readOnly": [], "write": ["src/**"], "create": [], "delete": [], "deny": [] }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "probes": [{ "operation": "WRITE", "path": "src/index.ts" }],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "authorization-stale",
+        "applicability": { "valid": false, "applicable": false, "status": "mismatch" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": true, "denied": false, "allowed": false }
+        ]
+      }
+    },
+    {
+      "version": 1,
+      "name": "unsupported-artifact-version",
+      "artifact": {
+        "version": 2,
+        "kind": "implementation-execution-scope",
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scope": { "readOnly": [], "write": ["src/**"], "create": [], "delete": [], "deny": [] }
+      },
+      "current": {
+        "repository": { "repositoryHost": "github.com", "repositoryId": "1330755860" },
+        "base": {
+          "branch": "main",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "freshness": "main@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "authorization": {
+          "version": 1,
+          "kind": "implementation-authorization",
+          "contractVersion": 1,
+          "implementation": { "repositoryHost": "github.com", "repositoryId": "1330755860", "number": 861 },
+          "governedBodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "probes": [{ "operation": "WRITE", "path": "src/index.ts" }],
+      "expected": {
+        "version": 1,
+        "kind": "implementation-execution-scope-conformance-result",
+        "name": "unsupported-artifact-version",
+        "applicability": { "valid": false, "applicable": false, "status": "unsupported" },
+        "decisions": [
+          { "operation": "WRITE", "path": "src/index.ts", "matched": false, "denied": false, "allowed": false }
+        ]
+      }
+    }
+  ]
+}
