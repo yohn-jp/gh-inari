@@ -20,6 +20,7 @@ import {
   implementationScopeProjectionPaths,
   isImplementationScopeProjectionPathAllowed,
   isImplementationScopeProjectionPathDenied,
+  matchesImplementationScopeSelector,
   projectImplementationScope,
   projectImplementationScopeSchema,
   serializeImplementationScopeProjection,
@@ -253,6 +254,26 @@ test("does not widen authorization and applies DENY before every operation allow
       (violation) => violation.code === "IMPLEMENTATION_AUTHORIZATION_UNKNOWN_PROPERTY",
     ),
   );
+});
+
+test("v1 selector matching is deterministic for *, **, ?, and exact Git paths", () => {
+  assert.equal(matchesImplementationScopeSelector("src/*.ts", "src/index.ts"), true);
+  assert.equal(matchesImplementationScopeSelector("src/*.ts", "src/lib/index.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src/index.ts"), true);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src/lib/index.ts"), true);
+  assert.equal(matchesImplementationScopeSelector("src/???.ts", "src/app.ts"), true);
+  assert.equal(matchesImplementationScopeSelector("src/???.ts", "src/apps.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/[ab].ts", "src/a.ts"), false);
+
+  assert.equal(matchesImplementationScopeSelector(" src\\** ", "src/index.ts"), true);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src\\index.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src/index.ts "), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src/ｉndex.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "./src/index.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src//index.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src/../index.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/../**", "src/index.ts"), false);
+  assert.equal(matchesImplementationScopeSelector("src/**", "src/normal file.ts"), true);
 });
 
 test("projection scope validation reuses the authored path canonicalization rule", () => {
