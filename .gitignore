@@ -1,26 +1,36 @@
+# Dependencies
 node_modules/
 .wireit/
+
+# Build output
 *.tsbuildinfo
 /dist/
 /dist-worker/
+/dist-hosted-worker/
 .wrangler/
 
-.DS_Store
-*.local
+# Logs
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 *.log
 
+# Env / secrets
 .env
 .env.*
 !.env.example
 
+# Editors
 .vscode/*
 !.vscode/extensions.json
 .idea/
+.DS_Store
+*.local
 
+# Test output
 coverage/
 
+# Local tooling
 .mottainai
+.codegraph
