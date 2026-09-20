@@ -397,6 +397,55 @@ test("composes a successful workflow result from exact-artifact and exact-source
   }
 });
 
+test("passes on packed evidence alone when no self-dogfood artifact is retained for the source SHA", async () => {
+  const fixture = temporaryArtifact();
+  try {
+    let dogfoodRetrieverCalled = false;
+    const result = await runWorkflowCertification({
+      environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
+      currentSourceSha: SOURCE_SHA,
+      packageMetadata: PACKAGE,
+      packedEvidenceGenerator: async () =>
+        packedEvidence({ package: { ...PACKAGE, tarballSha256: `sha256:${fixture.artifactSha256}` } }),
+      workflowRunResolver: async () => {
+        throw Object.assign(new Error("no retained self-dogfood artifact was found"), {
+          code: "SELF_DOGFOOD_WORKFLOW_RUN_MISSING",
+        });
+      },
+      dogfoodEvidenceRetriever: async () => {
+        dogfoodRetrieverCalled = true;
+        return dogfoodEvidence();
+      },
+    });
+    assert.deepEqual(result, { passed: true, diagnostics: [] });
+    assert.equal(dogfoodRetrieverCalled, false);
+  } finally {
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("still fails the release when a retained self-dogfood run exists but did not pass", async () => {
+  const fixture = temporaryArtifact();
+  try {
+    const result = await runWorkflowCertification({
+      environment: workflowEnvironment(fixture.artifactPath, fixture.artifactSha256),
+      currentSourceSha: SOURCE_SHA,
+      packageMetadata: PACKAGE,
+      packedEvidenceGenerator: async () =>
+        packedEvidence({ package: { ...PACKAGE, tarballSha256: `sha256:${fixture.artifactSha256}` } }),
+      workflowRunResolver: async () => ({
+        workflowRunId: DOGFOOD_RUN_ID,
+        workflowRunAttempt: DOGFOOD_RUN_ATTEMPT,
+      }),
+      dogfoodEvidenceRetriever: async () => dogfoodEvidence({ repository: { owner: "other", name: "repo" } }),
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.diagnostics[0].code, "REPOSITORY_MISMATCH");
+  } finally {
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("delegates failed, malformed, package-mismatched, and repository-mismatched evidence to canonical composition", async () => {
   const fixture = temporaryArtifact();
   try {

@@ -82,6 +82,19 @@ the release tag.
    `.github/workflows/publish.yml`** (npm publish). The workflow uses
    npm Trusted Publishing and certifies the exact packed artifact before
    publication.
+
+   Certification (`scripts/verify-release-certification.mjs`) always
+   requires a passing packed-artifact certification of the exact tarball
+   that gets published. It additionally verifies a self-dogfood
+   certification lane (a real create-through-review Golden Path run
+   against the installed, packed artifact) _when_ a retained
+   `self-dogfood-golden-path-<sourceSha>-*` Actions artifact exists for
+   the release's exact source SHA; a dogfood run that exists and fails
+   still fails the release. Producing that artifact requires manually
+   dispatching `.github/workflows/self-dogfood-certification.yml` for the
+   release SHA with a fresh disposable Issue — this is optional extra
+   assurance, not a required step of the sequence below (see #897).
+
 6. **Automated pipeline runs, in order, and stops at the first failure:**
    - `pnpm install --frozen-lockfile`
    - `pnpm run typecheck`
