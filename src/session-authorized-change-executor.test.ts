@@ -68,7 +68,7 @@ function runtimeAuthority(): {
       notBefore: "2026-01-01T00:00:00Z",
       notAfter: null,
       maxSessionTtlSeconds: 3_600,
-      capabilityCeiling: ["change.implement", "change.ready", "change.abort", "branch.advance"],
+      capabilityCeiling: ["change.implement", "change.ready", "change.abort", "branch.advance", "pullRequest.create"],
     }),
   };
 }
@@ -162,7 +162,9 @@ function signedEnvelope(
   };
 }
 
-function projection(kind: "absent" | "draft" | "review" | "aborted" | "duplicate"): ChangeProjectionResult {
+function projection(
+  kind: "absent" | "branch-only" | "draft" | "review" | "aborted" | "duplicate",
+): ChangeProjectionResult {
   const evidence: ChangeGitHubEvidence = {
     issue: { status: "available", value: { number: ISSUE, state: "open" } },
     branches:
@@ -175,45 +177,47 @@ function projection(kind: "absent" | "draft" | "review" | "aborted" | "duplicate
     pullRequests:
       kind === "absent"
         ? { status: "absent" }
-        : kind === "duplicate"
-          ? {
-              status: "available",
-              value: [
-                {
-                  number: 4650,
-                  head: BRANCH,
-                  base: "main",
-                  state: "open",
-                  draft: true,
-                  merged: false,
-                  rootIssue: ISSUE,
-                },
-                {
-                  number: 4651,
-                  head: BRANCH,
-                  base: "main",
-                  state: "open",
-                  draft: true,
-                  merged: false,
-                  rootIssue: ISSUE,
-                },
-              ],
-            }
-          : {
-              status: "available",
-              value: [
-                {
-                  number: 4650,
-                  head: BRANCH,
-                  base: "main",
-                  state: kind === "aborted" ? "closed" : "open",
-                  draft: kind === "draft",
-                  merged: false,
-                  rootIssue: ISSUE,
-                  provenance: { issuer: INARI_ISSUER_PRINCIPAL },
-                },
-              ],
-            },
+        : kind === "branch-only"
+          ? { status: "available", value: [] }
+          : kind === "duplicate"
+            ? {
+                status: "available",
+                value: [
+                  {
+                    number: 4650,
+                    head: BRANCH,
+                    base: "main",
+                    state: "open",
+                    draft: true,
+                    merged: false,
+                    rootIssue: ISSUE,
+                  },
+                  {
+                    number: 4651,
+                    head: BRANCH,
+                    base: "main",
+                    state: "open",
+                    draft: true,
+                    merged: false,
+                    rootIssue: ISSUE,
+                  },
+                ],
+              }
+            : {
+                status: "available",
+                value: [
+                  {
+                    number: 4650,
+                    head: BRANCH,
+                    base: "main",
+                    state: kind === "aborted" ? "closed" : "open",
+                    draft: kind === "draft",
+                    merged: false,
+                    rootIssue: ISSUE,
+                    provenance: { issuer: INARI_ISSUER_PRINCIPAL },
+                  },
+                ],
+              },
   };
   return projectChangeFromGitHubEvidence({
     change: { repositoryHost: REPOSITORY.hostname, repositoryId: REPOSITORY_ID, rootIssue: ISSUE },
@@ -299,6 +303,39 @@ function directRequest(operation: string, extra: Record<string, unknown> = {}): 
   return { version: 1, issue: ISSUE, ...extra };
 }
 
+function publicationRequest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const repository = { repositoryHost: REPOSITORY.hostname, repositoryId: REPOSITORY_ID, repository: "acme/inari" };
+  const implementation = { ...repository, number: ISSUE };
+  return {
+    version: 1,
+    issue: ISSUE,
+    publication: {
+      version: 1,
+      kind: "pr-publication",
+      repository,
+      workIdentity: { implementation },
+      routing: {
+        version: 1,
+        kind: "integration-routing",
+        mode: "standalone",
+        role: "implementation",
+        implementation,
+        relationships: {},
+        branches: {
+          default: "main",
+          implementation: BRANCH,
+        },
+        head: BRANCH,
+        base: "main",
+      },
+      headRevision: "d".repeat(40),
+      title: "feat: publish governed work",
+      body: `Closes #${ISSUE}`,
+      ...overrides,
+    },
+  };
+}
+
 test("executes change.issue/show/ready/abort through the frozen composition sequence", async () => {
   const cases = [
     {
@@ -343,6 +380,72 @@ test("executes change.issue/show/ready/abort through the frozen composition sequ
       item.operation === "change.show" ? ["read", "read"] : ["read", "factory", "execute", "read"],
     );
   }
+});
+
+test("pullRequest.publish requires the existing exact pullRequest.create capability", async () => {
+  const executor = new FakeChangeExecutor(projection("branch-only"), projection("branch-only"));
+  const missing = optionsFor(
+    "pullRequest.publish",
+    publicationRequest(),
+    [{ kind: "change.implement", issue: ISSUE }],
+    executor,
+  );
+  const denied = await createCapabilityAuthorizedSessionExecutor(missing.options).execute(missing.envelope);
+  assert.equal(denied.status, "failed");
+  assert.equal(denied.failure?.phase, "authorization");
+  assert.deepEqual(executor.events, ["read"]);
+
+  const accepted = optionsFor(
+    "pullRequest.publish",
+    publicationRequest(),
+    [{ kind: "pullRequest.create", head: BRANCH, base: "main", max: 1 }],
+    new FakeChangeExecutor(projection("branch-only"), projection("branch-only")),
+  );
+  const acceptedExecutor = accepted.options.changeExecutor as FakeChangeExecutor;
+  const result = await createCapabilityAuthorizedSessionExecutor({
+    ...accepted.options,
+    app: APP,
+    publishPullRequest: async () => ({
+      publication: {
+        version: 1,
+        kind: "pr-publication",
+        ok: true,
+        classification: "created",
+        outcome: "created",
+        pullRequest: { number: 42, url: "https://github.com/acme/inari/pull/42" },
+        diagnostics: [],
+        effects: [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }],
+      },
+      app: APP,
+    }),
+  }).execute(accepted.envelope);
+  assert.equal(result.status, "succeeded", JSON.stringify(result));
+  assert.equal(result.operation, "pullRequest.publish");
+  assert.equal(result.publication?.classification, "created");
+  assert.equal(result.provenance?.capability?.kind, "pullRequest.create");
+  assert.deepEqual(acceptedExecutor.events, ["read"]);
+});
+
+test("pullRequest.publish rejects a publication repository mismatch before delegated mutation", async () => {
+  const executor = new FakeChangeExecutor(projection("branch-only"), projection("branch-only"));
+  const configured = optionsFor(
+    "pullRequest.publish",
+    publicationRequest({ repository: { repositoryHost: "github.com", repositoryId: "999", repository: "acme/inari" } }),
+    [{ kind: "pullRequest.create", head: BRANCH, base: "main", max: 1 }],
+    executor,
+  );
+  let delegated = false;
+  const result = await createCapabilityAuthorizedSessionExecutor({
+    ...configured.options,
+    publishPullRequest: async () => {
+      delegated = true;
+      throw new Error("must not run");
+    },
+  }).execute(configured.envelope);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.phase, "request");
+  assert.equal(delegated, false);
+  assert.deepEqual(executor.events, []);
 });
 
 test("authentication failure returns before evidence or privileged execution and retains no provenance", async () => {

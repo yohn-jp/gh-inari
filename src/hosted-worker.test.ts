@@ -324,6 +324,7 @@ test("hosted MCP serves the stable Issue MCP App resource while preserving the n
     );
 
   const listed = await (await call(2, "tools/list")).json();
+  assert.ok(listed.result.tools.some((tool: { name: string }) => tool.name === "inari_pr_publish"));
   const issueView = listed.result.tools.find((tool: { name: string }) => tool.name === "inari_issue_view");
   assert.deepEqual(issueView._meta.ui, { resourceUri: "ui://inari/issue-view.html" });
   assert.equal(issueView.annotations.readOnlyHint, true);

@@ -47,6 +47,11 @@ import {
 import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import type { ChangeDiagnostic, ChangeProjectionResult } from "./change.js";
 import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
+import {
+  tryValidatePrPublicationRequest,
+  type NormalizedPrPublicationRequest,
+  type PrPublicationResult,
+} from "./pr-publication.js";
 
 export const CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION = 1 as const;
 
@@ -57,6 +62,7 @@ export const CAPABILITY_AUTHORIZED_SESSION_OPERATIONS = Object.freeze([
   "change.abort",
   "change.merge",
   "branch.advance",
+  "pullRequest.publish",
 ] as const);
 export type CapabilityAuthorizedSessionOperation = (typeof CAPABILITY_AUTHORIZED_SESSION_OPERATIONS)[number];
 
@@ -112,6 +118,7 @@ export interface CapabilityAuthorizedSessionExecutionResult {
   readonly projection?: ChangeProjectionResult;
   readonly execution?: ChangeExecutionResult;
   readonly branchAdvance?: BranchAdvanceSemanticResult;
+  readonly publication?: PrPublicationResult;
   /** Present only after #376 has established bounded provenance. */
   readonly provenance?: CapabilityExecutionProvenance;
   readonly failure?: CapabilityAuthorizedSessionExecutionFailure;
@@ -165,6 +172,23 @@ export interface CapabilityAuthorizedSessionExecutorOptions {
   readonly branchAdvance?: (input: CapabilityAuthorizedBranchAdvanceInput) => Promise<BranchAdvanceSemanticResult>;
   /** Existing Operational Observation authority used for REVIEW rework admission. */
   readonly reviewEvidenceReader?: (input: { readonly issue: number; readonly pullRequest: number }) => Promise<unknown>;
+  /** Canonical #926 publication Core/provider delegate, admitted by this Session boundary. */
+  readonly publishPullRequest?: (
+    input: CapabilityAuthorizedPullRequestPublicationInput,
+  ) => Promise<CapabilityAuthorizedPullRequestPublicationResult>;
+}
+
+export interface CapabilityAuthorizedPullRequestPublicationInput {
+  readonly context: AuthenticatedSessionContext;
+  readonly execution: DirectAppTrustedExecutionContext;
+  readonly admission: AdmittedSessionCapability;
+  readonly request: NormalizedPrPublicationRequest;
+}
+
+export interface CapabilityAuthorizedPullRequestPublicationResult {
+  readonly publication: PrPublicationResult;
+  /** Bounded App installation identity established by the existing App authority. */
+  readonly app?: AppProvenance;
 }
 
 /** Public transport-neutral executor seam for one authenticated Session envelope. */
@@ -183,6 +207,22 @@ const DIRECT_REQUEST_KEYS = new Set([
 const DIRECT_MERGE_KEYS = new Set(["version", "issue", "mergeStrategy", "agent"]);
 const DIRECT_NON_ISSUE_KEYS = new Set(["version", "issue", "agent"]);
 const DIRECT_READY_KEYS = new Set([...DIRECT_NON_ISSUE_KEYS, "implementationConformance"]);
+const DIRECT_PUBLICATION_KEYS = new Set([
+  "version",
+  "issue",
+  "publication",
+  "repository",
+  "workIdentity",
+  "routing",
+  "expectedHead",
+  "expectedBase",
+  "headRevision",
+  "title",
+  "body",
+  "draft",
+  "maintainerCanModify",
+  "agent",
+]);
 const AGENT_KEYS = new Set(["name", "version", "runtime", "product"]);
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
 
@@ -296,6 +336,51 @@ function parseDirectRequest(
   });
 }
 
+function parsePublicationRequest(input: unknown): {
+  readonly version: 1;
+  readonly issue: number;
+  readonly publication: unknown;
+  readonly agent?: SessionAgentMetadata;
+} {
+  if (!isRecord(input) || Object.keys(input).some((key) => !DIRECT_PUBLICATION_KEYS.has(key))) {
+    throw new TypeError("Pull-request publication request is invalid.");
+  }
+  if (input.version !== CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION || !safeIssue(input.issue)) {
+    throw new TypeError("Pull-request publication request is invalid.");
+  }
+  const agent = parseAgent(input.agent);
+  if (hasOwn(input, "publication")) {
+    return Object.freeze({
+      version: 1,
+      issue: input.issue,
+      publication: input.publication,
+      ...(agent === undefined ? {} : { agent }),
+    });
+  }
+  const publication: Record<string, unknown> = { version: 1 };
+  for (const key of [
+    "kind",
+    "repository",
+    "workIdentity",
+    "routing",
+    "expectedHead",
+    "expectedBase",
+    "headRevision",
+    "title",
+    "body",
+    "draft",
+    "maintainerCanModify",
+  ]) {
+    if (hasOwn(input, key)) publication[key] = input[key];
+  }
+  return Object.freeze({
+    version: 1,
+    issue: input.issue,
+    publication: Object.freeze(publication),
+    ...(agent === undefined ? {} : { agent }),
+  });
+}
+
 function directExecutionContext(context: AuthenticatedSessionContext): DirectAppTrustedExecutionContext {
   return assertTrustedExecution({
     version: 1,
@@ -313,11 +398,33 @@ function subjectForChange(issue: number): { readonly kind: "change"; readonly is
   return Object.freeze({ kind: "change", issue });
 }
 
+function subjectForPullRequest(
+  issue: number,
+  head: string,
+  base: string,
+): { readonly kind: "pullRequest"; readonly issue: number; readonly head: string; readonly base: string } {
+  return Object.freeze({ kind: "pullRequest", issue, head, base });
+}
+
+/** Map the semantic publish operation onto the existing pullRequest.create capability authority. */
+function capabilityAdmissionContext(context: AuthenticatedSessionContext): AuthenticatedSessionContext {
+  if (context.request.operation !== "pullRequest.publish") return context;
+  return {
+    ...context,
+    request: { ...context.request, operation: "pullRequest.create" },
+    verifiedRequest: {
+      ...context.verifiedRequest,
+      envelope: { ...context.verifiedRequest.envelope, operation: "pullRequest.create" },
+    },
+  };
+}
+
 function authenticatedProvenance(
   context: AuthenticatedSessionContext,
   subject:
     | { readonly kind: "change"; readonly issue: number }
-    | { readonly kind: "branch"; readonly issue: number; readonly branch: string },
+    | { readonly kind: "branch"; readonly issue: number; readonly branch: string }
+    | { readonly kind: "pullRequest"; readonly issue: number; readonly head: string; readonly base: string },
   agent?: SessionAgentMetadata,
   stage: "authenticated" | "authorized" | "app-scoped" | "verified" = "authenticated",
   capability?: AdmittedSessionCapability["capability"],
@@ -347,6 +454,7 @@ function failure(
     readonly diagnostics?: readonly ChangeDiagnostic[];
     readonly evidence?: ChangeExecutionEvidence;
     readonly branchAdvance?: BranchAdvanceSemanticResult;
+    readonly publication?: PrPublicationResult;
   } = {},
 ): CapabilityAuthorizedSessionExecutionResult {
   return Object.freeze({
@@ -355,6 +463,7 @@ function failure(
     status: "failed" as const,
     ...(provenance === undefined ? {} : { provenance }),
     ...(options.branchAdvance === undefined ? {} : { branchAdvance: options.branchAdvance }),
+    ...(options.publication === undefined ? {} : { publication: options.publication }),
     failure: Object.freeze({
       code: "SESSION_EXECUTION_FAILED" as const,
       phase,
@@ -374,6 +483,7 @@ function success(
     readonly projection?: ChangeProjectionResult;
     readonly execution?: ChangeExecutionResult;
     readonly branchAdvance?: BranchAdvanceSemanticResult;
+    readonly publication?: PrPublicationResult;
   },
 ): CapabilityAuthorizedSessionExecutionResult {
   return Object.freeze({
@@ -383,6 +493,7 @@ function success(
     ...(options.projection === undefined ? {} : { projection: options.projection }),
     ...(options.execution === undefined ? {} : { execution: options.execution }),
     ...(options.branchAdvance === undefined ? {} : { branchAdvance: options.branchAdvance }),
+    ...(options.publication === undefined ? {} : { publication: options.publication }),
     provenance,
   });
 }
@@ -419,6 +530,24 @@ function executionFailure(
   return failure(operation, executionPhase(error), provenance, "Session-authorized Change execution failed closed.", {
     ...(trusted === undefined ? {} : { diagnostics: trustedDiagnostics(trusted), evidence: trustedEvidence(trusted) }),
   });
+}
+
+function publicationFailurePhase(publication: PrPublicationResult): SessionExecutionPhase {
+  if (
+    publication.diagnostics.some(
+      (diagnostic) => diagnostic.code.includes("AMBIGUOUS") || diagnostic.code.includes("CONFLICTING"),
+    )
+  ) {
+    return "conflict";
+  }
+  if (
+    publication.diagnostics.some(
+      (diagnostic) => diagnostic.code.includes("INVALID") || diagnostic.code.includes("MISMATCH"),
+    )
+  ) {
+    return "authorization";
+  }
+  return "execution";
 }
 
 function appFromFactory(value: ChangeExecutionPort | CapabilityAuthorizedChangeExecutorFactoryResult): {
@@ -547,6 +676,8 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     const signedRequest = context.verifiedRequest.envelope.request;
 
     if (operation === "branch.advance") return this.executeBranch(envelope, context, signedRequest, operation);
+
+    if (operation === "pullRequest.publish") return this.executePublication(context, signedRequest);
 
     let directRequest: DirectChangeSemanticRequest;
     try {
@@ -743,6 +874,141 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "verification", appScoped, "Verified execution provenance is invalid.", { evidence });
     }
     return success(operation, verified, { projection: verifiedProjection, execution });
+  }
+
+  private async executePublication(
+    context: AuthenticatedSessionContext,
+    signedRequest: unknown,
+  ): Promise<CapabilityAuthorizedSessionExecutionResult> {
+    let directRequest: ReturnType<typeof parsePublicationRequest>;
+    try {
+      directRequest = parsePublicationRequest(signedRequest);
+    } catch {
+      return failure("pullRequest.publish", "request", undefined, "Pull-request publication request is invalid.");
+    }
+    const validated = tryValidatePrPublicationRequest(directRequest.publication);
+    if (!validated.valid || validated.request === undefined) {
+      return failure("pullRequest.publish", "request", undefined, "Pull-request publication request is invalid.");
+    }
+    const request = validated.request;
+    const issue = directRequest.issue;
+    const subject = subjectForPullRequest(issue, request.expectedHead, request.expectedBase);
+    let authenticated: CapabilityExecutionProvenance;
+    try {
+      authenticated = authenticatedProvenance(context, subject, directRequest.agent);
+    } catch {
+      return failure(
+        "pullRequest.publish",
+        "request",
+        undefined,
+        "Session execution provenance could not be established.",
+      );
+    }
+
+    const reader = this.#options.readExecutor ?? this.#options.changeExecutor;
+    if (reader === undefined) {
+      return failure("pullRequest.publish", "evidence", authenticated, "Change evidence read failed closed.");
+    }
+    let initial: ChangeProjectionResult;
+    try {
+      initial = normalizeChangeProjection("show", await reader.read(changeReadRequest(issue)));
+    } catch {
+      return failure("pullRequest.publish", "evidence", authenticated, "Current Change evidence could not be read.");
+    }
+
+    let admission: AdmittedSessionCapability;
+    try {
+      admission = admitAuthenticatedSessionCapability({
+        context: capabilityAdmissionContext(context),
+        operation: "pullRequest.create",
+        subject,
+        projection: initial,
+      });
+    } catch (error: unknown) {
+      if (error instanceof CapabilityAdmissionError) {
+        return failure(
+          "pullRequest.publish",
+          admissionPhase(error.reason),
+          authenticated,
+          "Session capability admission denied.",
+        );
+      }
+      return failure("pullRequest.publish", "authorization", authenticated, "Session capability admission denied.");
+    }
+    if (admission.capability.kind !== "pullRequest.create") {
+      return failure("pullRequest.publish", "authorization", authenticated, "Session capability admission denied.");
+    }
+
+    let authorized: CapabilityExecutionProvenance;
+    try {
+      authorized = authenticatedProvenance(context, subject, directRequest.agent, "authorized", admission.capability);
+    } catch {
+      return failure(
+        "pullRequest.publish",
+        "authorization",
+        authenticated,
+        "Session execution provenance could not be established.",
+      );
+    }
+    const executionContext = (() => {
+      try {
+        return directExecutionContext(context);
+      } catch {
+        return undefined;
+      }
+    })();
+    if (executionContext === undefined) {
+      return failure(
+        "pullRequest.publish",
+        "authorization",
+        authorized,
+        "Direct App trusted execution context is invalid.",
+      );
+    }
+    if (this.#options.publishPullRequest === undefined) {
+      return failure("pullRequest.publish", "execution", authorized, "Authorized PR publication is unavailable.");
+    }
+
+    let delegated: CapabilityAuthorizedPullRequestPublicationResult;
+    try {
+      delegated = await this.#options.publishPullRequest({
+        context,
+        execution: executionContext,
+        admission,
+        request,
+      });
+    } catch {
+      return failure("pullRequest.publish", "execution", authorized, "PR publication failed closed.");
+    }
+    const publication = delegated?.publication;
+    if (publication === undefined || publication.classification === "failed" || !publication.ok) {
+      return failure(
+        "pullRequest.publish",
+        publication === undefined ? "execution" : publicationFailurePhase(publication),
+        authorized,
+        "PR publication failed closed.",
+        { ...(publication === undefined ? {} : { publication }) },
+      );
+    }
+    const app = delegated.app ?? this.#options.app;
+    if (app === undefined) {
+      return failure(
+        "pullRequest.publish",
+        "verification",
+        authorized,
+        "Verified App execution provenance is unavailable.",
+        { publication },
+      );
+    }
+    let verified: CapabilityExecutionProvenance;
+    try {
+      verified = authenticatedProvenance(context, subject, directRequest.agent, "verified", admission.capability, app);
+    } catch {
+      return failure("pullRequest.publish", "verification", authorized, "Verified execution provenance is invalid.", {
+        publication,
+      });
+    }
+    return success("pullRequest.publish", verified, { publication });
   }
 
   private async executeBranch(
