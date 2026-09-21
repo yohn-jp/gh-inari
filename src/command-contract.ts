@@ -34,6 +34,7 @@ export type CommandDomain =
   | "session"
   | "runtime"
   | "mcp"
+  | "release"
   | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
@@ -118,6 +119,7 @@ export type CommandId =
   | "change.abort"
   | "change.merge"
   | "change.publish"
+  | "release.prepare"
   | "authority.generate"
   | "authority.bootstrap"
   | "authority.readiness"
@@ -142,6 +144,7 @@ export type OptionId =
   | "template"
   | "policy"
   | "repository"
+  | "targetVersion"
   | "relayUrl"
   | "endpoint"
   | "configHome"
@@ -217,6 +220,7 @@ const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const OBSERVATION_OPTIONS = ["help", "json", "repository"] as const;
+const RELEASE_PREPARATION_OPTIONS = ["help", "json", "repository", "reviewIntent", "targetVersion"] as const;
 const ISSUE_DISCOVERY_OPTIONS = ["help", "json", "repository", "state", "limit", "page"] as const;
 const PR_DISCOVERY_OPTIONS = [...ISSUE_DISCOVERY_OPTIONS, "head", "base"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
@@ -367,6 +371,15 @@ export const COMMAND_OPTIONS = {
     "required",
     "GitHub repository override; governed commands use its default-branch governance.",
     "repository",
+  ),
+  targetVersion: option(
+    "targetVersion",
+    "target-version",
+    ["--target-version"],
+    "string",
+    "required",
+    "Exact semantic version for an exact release intent.",
+    "version",
   ),
   relayUrl: option(
     "relayUrl",
@@ -1429,6 +1442,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "release.prepare",
+    "release",
+    "prepare",
+    ["release", "prepare"],
+    "Prepare an explicit governed npm release workspace without publishing.",
+    RELEASE_PREPARATION_OPTIONS,
+    "<patch|minor|major|version>",
+  ),
+  command(
     "authority.generate",
     "authority",
     "generate",
@@ -1707,7 +1729,18 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr", template
 
 export function helpInvocation(
   domain:
-    "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp" | "skill",
+    | "issue"
+    | "pr"
+    | "impl"
+    | "branch"
+    | "template"
+    | "change"
+    | "release"
+    | "authority"
+    | "session"
+    | "runtime"
+    | "mcp"
+    | "skill",
 ): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }

@@ -115,6 +115,7 @@ export * from "./golden-path-status.js";
 export * from "./golden-path-implementation.js";
 export * from "./release-certification.js";
 export * from "./release-preparation-plan.js";
+export * from "./release-preparation.js";
 export * from "./github/release-history-adapter.js";
 export * from "./agent-authority/index.js";
 export * from "./session-authorized-change-executor.js";
