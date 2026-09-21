@@ -95,6 +95,7 @@ export * from "./semantic-issue-relations.js";
 export * from "./issue-relationship.js";
 export * from "./operational-observation.js";
 export * from "./endpoint-reconciliation.js";
+export * from "./endpoint-work-projection.js";
 export * from "./operational-discovery.js";
 export * from "./semantic-issue-lifecycle.js";
 export * from "./semantic-issue-closure.js";
