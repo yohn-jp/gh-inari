@@ -307,6 +307,39 @@ test("runtime admission stores only bounded public attachment metadata and confi
   assert.deepEqual(publicJwk(privateKey).kty, "OKP");
 });
 
+test("read-only Runtime presence exposes current and replaced generations", async () => {
+  const state = new FakeState();
+  const object = new RepositoryRelayDurableObject(
+    state,
+    { repository },
+    {
+      now: () => 10_000,
+      randomNonce: (() => {
+        let count = 0;
+        return () => `nonce-presence-${count++}`;
+      })(),
+    },
+  );
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const first = pairFor(object, "role=runtime&connectionId=runtime-presence&delegatorId=delegator-presence");
+  await admitRuntime(object, first, privateKey);
+  const replacement = pairFor(object, "role=runtime&connectionId=runtime-presence&delegatorId=delegator-presence");
+  await admitRuntime(object, replacement, privateKey);
+
+  const presence = object.readRuntimePresence(repository);
+  assert.equal(presence.availability, "available");
+  assert.equal(presence.repository?.repositoryId, repository.repositoryId);
+  const records = presence.records.filter((entry) => entry.connectionId === "runtime-presence");
+  assert.equal(records.length, 2);
+  assert.deepEqual(
+    records.map((entry) => ({ generation: entry.generation, state: entry.state, current: entry.current })),
+    [
+      { generation: 1, state: "stale", current: false },
+      { generation: 2, state: "connected", current: true },
+    ],
+  );
+});
+
 test("production DO admission gates a reconnect retained result until acknowledgement", async () => {
   const state = new FakeState();
   const object = new RepositoryRelayDurableObject(
