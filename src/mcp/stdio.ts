@@ -5,7 +5,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createInariMcpServer, type InariMcpServerOptions } from "./server.js";
 
 export interface InariMcpStdioOptions extends InariMcpServerOptions {

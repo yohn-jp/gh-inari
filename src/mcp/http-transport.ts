@@ -1,7 +1,6 @@
 /** Stateless Web-standard Streamable HTTP adapter for the native Inari MCP catalog. */
 
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
+import { SUPPORTED_PROTOCOL_VERSIONS, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { createInariMcpServer, type InariMcpServerOptions } from "./server.js";
 
 export const DEFAULT_INARI_MCP_HTTP_PATH = "/mcp" as const;
