@@ -343,6 +343,11 @@ export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInp
       diagnostic("ENDPOINT_RUNTIME_PRESENCE_STALE", "Relay evidence exceeds the configured freshness window."),
     ]);
   }
+  if (!Number.isSafeInteger(selected.expiresAtMs) || selected.expiresAtMs <= nowMs) {
+    return projection(endpoint, repository, "stale", selectedFreshness, runtimeOf(selected), [
+      diagnostic("ENDPOINT_RUNTIME_PRESENCE_STALE", "Relay Runtime evidence has expired."),
+    ]);
+  }
   if (selected.state === "connected" && selected.current) {
     return projection(endpoint, repository, "connected", selectedFreshness, runtimeOf(selected), []);
   }

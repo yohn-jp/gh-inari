@@ -80,6 +80,12 @@ test("projects old evidence and replaced generations as stale", () => {
   assert.equal(result.runtime?.current, false);
 });
 
+test("projects an expired current generation as stale even when the read is fresh", () => {
+  const result = projectEndpointRuntimePresence(input(snapshot([record({ expiresAtMs: 1_000 })])));
+  assert.equal(result.state, "stale");
+  assert.equal(result.freshness.state, "fresh");
+});
+
 test("projects an admitted reconnect attempt as reconnecting", () => {
   const result = projectEndpointRuntimePresence(
     input(snapshot([record({ generation: undefined, state: "reconnecting", authenticated: false, current: false })])),

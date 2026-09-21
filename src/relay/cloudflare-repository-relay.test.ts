@@ -338,6 +338,9 @@ test("read-only Runtime presence exposes current and replaced generations", asyn
       { generation: 2, state: "connected", current: true },
     ],
   );
+  first.disconnect();
+  replacement.disconnect();
+  latestPair = undefined;
 });
 
 test("production DO admission gates a reconnect retained result until acknowledgement", async () => {
