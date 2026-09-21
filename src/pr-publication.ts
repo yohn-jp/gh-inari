@@ -10,6 +10,7 @@
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 import { tryAdaptIntegrationRouting } from "./integration-routing-adapters.js";
 import type { IntegrationRoutingProjection } from "./integration-routing.js";
+import { deriveReleasePrPublicationRoute, type ReleasePrPublicationRoute } from "./release-pr-publication.js";
 
 export const PR_PUBLICATION_CONTRACT_VERSION = 1 as const;
 export type PrPublicationContractVersion = typeof PR_PUBLICATION_CONTRACT_VERSION;
@@ -23,12 +24,31 @@ export interface PrPublicationRepositoryIdentity {
   readonly repository?: string;
 }
 
-/** The governed work identity is deliberately explicit and repository-bound. */
-export interface PrPublicationWorkIdentity {
+/** The existing governed Implementation identity remains repository-bound. */
+export interface PrPublicationImplementationWorkIdentity {
   readonly implementation: IssueReference;
   readonly sourceIssue?: IssueReference;
   readonly identityKey?: string;
 }
+
+/** Issue-less release publication identity. */
+export interface PrPublicationReleaseWorkIdentity {
+  /**
+   * Type-only provider compatibility slot. Release values never serialize
+   * this property; privileged providers must remain unable to derive an Issue
+   * from a release identity.
+   */
+  readonly implementation: Readonly<{ readonly number: never }>;
+  readonly release: Readonly<{
+    readonly targetVersion: string;
+    readonly sourceRevision: string;
+  }>;
+}
+
+/** Publication identity is intentionally closed: Implementation or release. */
+export type PrPublicationWorkIdentity = PrPublicationImplementationWorkIdentity | PrPublicationReleaseWorkIdentity;
+
+export type PrPublicationRouting = IntegrationRoutingProjection | ReleasePrPublicationRoute;
 
 export interface PrPublicationRequest {
   readonly version: PrPublicationContractVersion;
@@ -36,7 +56,7 @@ export interface PrPublicationRequest {
   readonly repository: PrPublicationRepositoryIdentity;
   readonly workIdentity: unknown;
   /** Raw route input or the canonical #925 projection. */
-  readonly routing: unknown;
+  readonly routing?: unknown;
   readonly expectedHead?: string;
   readonly expectedBase?: string;
   readonly headRevision: string;
@@ -99,7 +119,7 @@ export interface PrPublicationResult {
   /** Alias retained for callers that use the existing execution terminology. */
   readonly outcome: PrPublicationResultClassification;
   readonly pullRequest?: Readonly<{ readonly number: number; readonly url: string }>;
-  readonly routing?: IntegrationRoutingProjection;
+  readonly routing?: PrPublicationRouting;
   readonly diagnostics: readonly PrPublicationDiagnostic[];
   readonly effects: readonly Readonly<{
     readonly kind: "CREATE_PULL_REQUEST";
@@ -110,7 +130,7 @@ export interface PrPublicationResult {
 export interface PrPublicationValidationResult {
   readonly valid: boolean;
   readonly request?: NormalizedPrPublicationRequest;
-  readonly routing?: IntegrationRoutingProjection;
+  readonly routing?: PrPublicationRouting;
   readonly workIdentity?: PrPublicationWorkIdentity;
   readonly diagnostics: readonly PrPublicationDiagnostic[];
 }
@@ -120,7 +140,7 @@ export interface NormalizedPrPublicationRequest {
   readonly kind: typeof PR_PUBLICATION_KIND;
   readonly repository: PrPublicationRepositoryIdentity;
   readonly workIdentity: PrPublicationWorkIdentity;
-  readonly routing: IntegrationRoutingProjection;
+  readonly routing: PrPublicationRouting;
   readonly expectedHead: string;
   readonly expectedBase: string;
   readonly headRevision: string;
@@ -239,11 +259,58 @@ function issueReference(
   return result.reference;
 }
 
+function releaseWorkIdentity(
+  value: unknown,
+  path: string,
+  diagnostics: PrPublicationDiagnostic[],
+): PrPublicationReleaseWorkIdentity | undefined {
+  if (!isRecord(value) || !isRecord(value.release)) {
+    diagnostics.push(
+      diagnostic("PR_PUBLICATION_WORK_IDENTITY_INVALID", `${path}.release`, "Release identity must be an object."),
+    );
+    return undefined;
+  }
+  const release = value.release;
+  const targetVersion = release.targetVersion;
+  const sourceRevision = release.sourceRevision;
+  if (typeof targetVersion !== "string" || targetVersion.length === 0 || targetVersion.length > 256)
+    diagnostics.push(
+      diagnostic(
+        "PR_PUBLICATION_WORK_IDENTITY_INVALID",
+        `${path}.release.targetVersion`,
+        "Release target version is required and bounded.",
+      ),
+    );
+  if (typeof sourceRevision !== "string" || sourceRevision.trim().length === 0 || sourceRevision.length > 128)
+    diagnostics.push(
+      diagnostic(
+        "PR_PUBLICATION_WORK_IDENTITY_INVALID",
+        `${path}.release.sourceRevision`,
+        "Release source revision is required and bounded.",
+      ),
+    );
+  if (
+    Object.keys(value).some((key) => key !== "release") ||
+    Object.keys(release).some((key) => key !== "targetVersion" && key !== "sourceRevision")
+  )
+    diagnostics.push(
+      diagnostic(
+        "PR_PUBLICATION_WORK_IDENTITY_INVALID",
+        path,
+        "Release identity cannot contain an Issue reference or unsupported property.",
+      ),
+    );
+  if (diagnostics.length > 0 || typeof targetVersion !== "string" || typeof sourceRevision !== "string")
+    return undefined;
+  return { release: { targetVersion, sourceRevision } } as PrPublicationReleaseWorkIdentity;
+}
+
 function normalizeWorkIdentity(
   value: unknown,
   path: string,
   diagnostics: PrPublicationDiagnostic[],
 ): PrPublicationWorkIdentity | undefined {
+  if (isRecord(value) && value.release !== undefined) return releaseWorkIdentity(value, path, diagnostics);
   const source =
     isRecord(value) && (value.implementation !== undefined || value.issue !== undefined)
       ? value
@@ -274,6 +341,7 @@ function normalizeWorkIdentity(
 }
 
 function workIdentityKey(value: PrPublicationWorkIdentity): string {
+  if ("release" in value) return `release:${value.release.targetVersion}:${value.release.sourceRevision}`;
   // The GitHub PR relation persists the governed Implementation reference;
   // authorization/source evidence remains request-side binding data and is
   // intentionally not reconstructed from mutable PR prose.
@@ -322,7 +390,7 @@ function requestResult(
   classification: PrPublicationResultClassification,
   diagnostics: readonly PrPublicationDiagnostic[],
   pullRequest?: PrPublicationRecord,
-  routing?: IntegrationRoutingProjection,
+  routing?: PrPublicationRouting,
   effectStatus: "succeeded" | "not-attempted" = classification === "created" ? "succeeded" : "not-attempted",
 ): PrPublicationResult {
   return freezeDeep({
@@ -336,6 +404,84 @@ function requestResult(
     diagnostics: sortedDiagnostics(diagnostics),
     effects: [{ kind: "CREATE_PULL_REQUEST" as const, status: effectStatus }],
   });
+}
+
+function isReleaseWorkIdentity(
+  value: PrPublicationWorkIdentity | undefined,
+): value is PrPublicationReleaseWorkIdentity {
+  return value !== undefined && "release" in value;
+}
+
+function releaseRouting(
+  value: unknown,
+  identity: PrPublicationReleaseWorkIdentity,
+  diagnostics: PrPublicationDiagnostic[],
+): ReleasePrPublicationRoute | undefined {
+  let derived: ReleasePrPublicationRoute | undefined;
+  try {
+    derived = deriveReleasePrPublicationRoute(identity.release.targetVersion, identity.release.sourceRevision);
+  } catch (error: unknown) {
+    diagnostics.push(
+      diagnostic(
+        "PR_PUBLICATION_RELEASE_ROUTE_INVALID",
+        "$.workIdentity.release",
+        error instanceof Error ? error.message : "Release route identity is invalid.",
+      ),
+    );
+  }
+  if (value === undefined) return derived;
+  if (!isRecord(value)) {
+    diagnostics.push(
+      diagnostic("PR_PUBLICATION_RELEASE_ROUTE_INVALID", "$.routing", "Release routing must be an object."),
+    );
+    return derived;
+  }
+  if (value.kind !== "release-pr-publication" || value.role !== "release")
+    diagnostics.push(
+      diagnostic(
+        "PR_PUBLICATION_RELEASE_ROUTE_INVALID",
+        "$.routing",
+        "Release publication must use the canonical release route.",
+      ),
+    );
+  if (derived !== undefined) {
+    const head = value.head ?? value.expectedHead;
+    const base = value.base ?? value.expectedBase;
+    const revision = value.headRevision ?? value.sourceRevision;
+    if (value.targetVersion !== undefined && value.targetVersion !== derived.targetVersion)
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_RELEASE_VERSION_MISMATCH",
+          "$.routing.targetVersion",
+          "Release route version must match identity.",
+        ),
+      );
+    if (head !== undefined && head !== derived.head)
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_RELEASE_HEAD_MISMATCH",
+          "$.routing.head",
+          "Release route head must be release/<semver>.",
+        ),
+      );
+    if (base !== undefined && base !== derived.base)
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_RELEASE_BASE_MISMATCH",
+          "$.routing.base",
+          "Release route base must be the governed default branch.",
+        ),
+      );
+    if (revision !== undefined && revision !== derived.headRevision)
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_RELEASE_REVISION_MISMATCH",
+          "$.routing.headRevision",
+          "Release route revision must match source revision.",
+        ),
+      );
+  }
+  return derived;
 }
 
 function validateRequest(input: unknown): PrPublicationValidationResult {
@@ -370,88 +516,117 @@ function validateRequest(input: unknown): PrPublicationValidationResult {
     diagnostics.push(diagnostic("PR_PUBLICATION_KIND_INVALID", "$.kind", `kind must be \"${PR_PUBLICATION_KIND}\".`));
   const repository = repositoryIdentity(input.repository, "$.repository", diagnostics);
   const workIdentity = normalizeWorkIdentity(input.workIdentity, "$.workIdentity", diagnostics);
-  const route = tryAdaptIntegrationRouting(input.routing);
-  const routing = route.projection;
-  if (!route.valid || routing === undefined)
+  const release = isReleaseWorkIdentity(workIdentity) ? workIdentity : undefined;
+  const route = release ? undefined : tryAdaptIntegrationRouting(input.routing);
+  const routing = release ? releaseRouting(input.routing, release, diagnostics) : route?.projection;
+  if (route !== undefined && (!route.valid || route.projection === undefined))
     for (const item of route.diagnostics)
       diagnostics.push(diagnostic("PR_PUBLICATION_ROUTING_INVALID", item.path, item.message));
   if (routing !== undefined && repository !== undefined) {
-    const refs = [routing.implementation, routing.sourceIssue, routing.epic].filter(
-      (entry): entry is IssueReference => entry !== undefined,
-    );
-    for (const ref of refs)
+    if ("role" in routing && routing.role === "release") {
+      // Release routes deliberately carry no Issue references.
+    } else {
+      const refs = [routing.implementation, routing.sourceIssue, routing.epic].filter(
+        (entry): entry is IssueReference => entry !== undefined,
+      );
+      for (const ref of refs)
+        if (
+          ref.repositoryHost.toLowerCase() !== repository.repositoryHost ||
+          ref.repositoryId !== repository.repositoryId
+        )
+          diagnostics.push(
+            diagnostic(
+              "PR_PUBLICATION_REPOSITORY_MISMATCH",
+              "$.routing",
+              "Routing references must match the request repository.",
+            ),
+          );
       if (
-        ref.repositoryHost.toLowerCase() !== repository.repositoryHost ||
-        ref.repositoryId !== repository.repositoryId
+        workIdentity !== undefined &&
+        !isReleaseWorkIdentity(workIdentity) &&
+        !sameRepository(
+          {
+            repositoryHost: workIdentity.implementation.repositoryHost,
+            repositoryId: workIdentity.implementation.repositoryId,
+          },
+          repository,
+        )
       )
         diagnostics.push(
           diagnostic(
             "PR_PUBLICATION_REPOSITORY_MISMATCH",
-            "$.routing",
-            "Routing references must match the request repository.",
+            "$.workIdentity.implementation",
+            "Work identity must match the request repository.",
           ),
         );
-    if (
-      workIdentity !== undefined &&
-      !sameRepository(
-        {
-          repositoryHost: workIdentity.implementation.repositoryHost,
-          repositoryId: workIdentity.implementation.repositoryId,
-        },
-        repository,
+      if (
+        workIdentity !== undefined &&
+        !isReleaseWorkIdentity(workIdentity) &&
+        routing.implementation !== undefined &&
+        issueReferenceKey(workIdentity.implementation) !== issueReferenceKey(routing.implementation)
       )
-    )
-      diagnostics.push(
-        diagnostic(
-          "PR_PUBLICATION_REPOSITORY_MISMATCH",
-          "$.workIdentity.implementation",
-          "Work identity must match the request repository.",
-        ),
-      );
-    if (
-      workIdentity !== undefined &&
-      routing.implementation !== undefined &&
-      issueReferenceKey(workIdentity.implementation) !== issueReferenceKey(routing.implementation)
-    )
-      diagnostics.push(
-        diagnostic(
-          "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
-          "$.workIdentity.implementation",
-          "Work identity must match the canonical routing Implementation.",
-        ),
-      );
-    if (
-      workIdentity?.sourceIssue !== undefined &&
-      routing.sourceIssue !== undefined &&
-      issueReferenceKey(workIdentity.sourceIssue) !== issueReferenceKey(routing.sourceIssue)
-    )
-      diagnostics.push(
-        diagnostic(
-          "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
-          "$.workIdentity.sourceIssue",
-          "Work identity source Issue must match canonical routing.",
-        ),
-      );
+        diagnostics.push(
+          diagnostic(
+            "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
+            "$.workIdentity.implementation",
+            "Work identity must match the canonical routing Implementation.",
+          ),
+        );
+      if (
+        workIdentity !== undefined &&
+        !isReleaseWorkIdentity(workIdentity) &&
+        workIdentity.sourceIssue !== undefined &&
+        routing.sourceIssue !== undefined &&
+        issueReferenceKey(workIdentity.sourceIssue) !== issueReferenceKey(routing.sourceIssue)
+      )
+        diagnostics.push(
+          diagnostic(
+            "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
+            "$.workIdentity.sourceIssue",
+            "Work identity source Issue must match canonical routing.",
+          ),
+        );
+    }
   }
-  const expectedHead = input.expectedHead ?? routing?.expectedHead;
-  const expectedBase = input.expectedBase ?? routing?.expectedBase;
+  const releaseExpectedHead =
+    routing !== undefined && "role" in routing && routing.role === "release" ? routing.head : undefined;
+  const releaseExpectedBase =
+    routing !== undefined && "role" in routing && routing.role === "release" ? routing.base : undefined;
+  const expectedHead =
+    input.expectedHead ?? releaseExpectedHead ?? (routing as IntegrationRoutingProjection | undefined)?.expectedHead;
+  const expectedBase =
+    input.expectedBase ?? releaseExpectedBase ?? (routing as IntegrationRoutingProjection | undefined)?.expectedBase;
   if (typeof expectedHead !== "string" || expectedHead.length === 0)
     diagnostics.push(diagnostic("PR_PUBLICATION_HEAD_INVALID", "$.expectedHead", "Expected head is required."));
   if (typeof expectedBase !== "string" || expectedBase.length === 0)
     diagnostics.push(diagnostic("PR_PUBLICATION_BASE_INVALID", "$.expectedBase", "Expected base is required."));
-  if (
-    routing !== undefined &&
-    typeof expectedHead === "string" &&
-    routing.expectedHead !== undefined &&
-    expectedHead !== routing.expectedHead
-  )
-    diagnostics.push(
-      diagnostic("PR_PUBLICATION_HEAD_MISMATCH", "$.expectedHead", "Expected head must match canonical routing."),
-    );
-  if (routing !== undefined && typeof expectedBase === "string" && expectedBase !== routing.expectedBase)
-    diagnostics.push(
-      diagnostic("PR_PUBLICATION_BASE_MISMATCH", "$.expectedBase", "Expected base must match canonical routing."),
-    );
+  if (routing !== undefined && "role" in routing && routing.role === "release") {
+    if (typeof expectedHead === "string" && expectedHead !== routing.head)
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_RELEASE_HEAD_MISMATCH",
+          "$.expectedHead",
+          "Expected head must match release/<semver>.",
+        ),
+      );
+    if (typeof expectedBase === "string" && expectedBase !== routing.base)
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_RELEASE_BASE_MISMATCH",
+          "$.expectedBase",
+          "Expected base must be the governed default branch.",
+        ),
+      );
+  } else if (routing !== undefined) {
+    if (typeof expectedHead === "string" && routing.expectedHead !== undefined && expectedHead !== routing.expectedHead)
+      diagnostics.push(
+        diagnostic("PR_PUBLICATION_HEAD_MISMATCH", "$.expectedHead", "Expected head must match canonical routing."),
+      );
+    if (typeof expectedBase === "string" && expectedBase !== routing.expectedBase)
+      diagnostics.push(
+        diagnostic("PR_PUBLICATION_BASE_MISMATCH", "$.expectedBase", "Expected base must match canonical routing."),
+      );
+  }
   if (
     typeof input.headRevision !== "string" ||
     input.headRevision.trim().length === 0 ||
@@ -459,6 +634,18 @@ function validateRequest(input: unknown): PrPublicationValidationResult {
   )
     diagnostics.push(
       diagnostic("PR_PUBLICATION_HEAD_REVISION_INVALID", "$.headRevision", "Head revision is required and bounded."),
+    );
+  if (
+    release !== undefined &&
+    typeof input.headRevision === "string" &&
+    input.headRevision !== release.release.sourceRevision
+  )
+    diagnostics.push(
+      diagnostic(
+        "PR_PUBLICATION_RELEASE_REVISION_MISMATCH",
+        "$.headRevision",
+        "Release head revision must match the exact source revision.",
+      ),
     );
   if (typeof input.title !== "string" || input.title.trim().length === 0 || input.title.length > 256)
     diagnostics.push(diagnostic("PR_PUBLICATION_TITLE_INVALID", "$.title", "Title is required and bounded."));
@@ -510,30 +697,42 @@ export function tryValidatePrPublicationRequest(input: unknown): PrPublicationVa
 
 export const tryValidatePullRequestPublication = tryValidatePrPublicationRequest;
 
-function candidateMatches(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): boolean {
+function candidateCoreMatches(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): boolean {
   if (candidate.repository !== undefined && !sameRepository(candidate.repository, request.repository)) return false;
   if (candidate.head !== request.expectedHead || candidate.base !== request.expectedBase) return false;
   if (candidate.headRevision !== request.headRevision) return false;
   const identity = candidateIdentity(candidate, request.repository);
+  if ("release" in request.workIdentity && identity === undefined)
+    return request.expectedHead === `release/${request.workIdentity.release.targetVersion}`;
   return identity !== undefined && workIdentityKey(identity) === workIdentityKey(request.workIdentity);
+}
+
+function candidateMatches(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): boolean {
+  return (
+    candidateCoreMatches(candidate, request) && candidate.title === request.title && candidate.body === request.body
+  );
 }
 
 function candidateConflicts(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): boolean {
   if (candidate.repository !== undefined && !sameRepository(candidate.repository, request.repository)) return true;
   if (candidate.head !== request.expectedHead || candidate.base !== request.expectedBase) return false;
   if (candidate.headRevision !== request.headRevision) return true;
+  if (candidate.title !== request.title || candidate.body !== request.body) return true;
   const identity = candidateIdentity(candidate, request.repository);
+  if ("release" in request.workIdentity && identity === undefined)
+    return request.expectedHead !== `release/${request.workIdentity.release.targetVersion}`;
   return identity === undefined || workIdentityKey(identity) !== workIdentityKey(request.workIdentity);
 }
 
 function matchingResult(
   records: readonly PrPublicationRecord[],
   request: NormalizedPrPublicationRequest,
-  routing: IntegrationRoutingProjection,
+  routing: PrPublicationRouting,
 ): PrPublicationResult | undefined {
+  const coreMatches = records.filter((candidate) => candidateCoreMatches(candidate, request));
   const exact = records.filter((candidate) => candidateMatches(candidate, request));
   const conflicts = records.filter((candidate) => candidateConflicts(candidate, request));
-  if (exact.length > 1)
+  if (coreMatches.length > 1 || exact.length > 1)
     return requestResult(
       "failed",
       [
@@ -566,7 +765,7 @@ function matchingResult(
 async function reread(
   provider: PrPublicationProvider,
   request: NormalizedPrPublicationRequest,
-  routing: IntegrationRoutingProjection,
+  routing: PrPublicationRouting,
 ): Promise<PrPublicationResult | undefined> {
   try {
     const records = await provider.listPullRequests({
