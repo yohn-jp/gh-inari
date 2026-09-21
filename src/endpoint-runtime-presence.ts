@@ -91,6 +91,11 @@ export interface EndpointRuntimePresenceRuntime {
   readonly current: boolean;
 }
 
+export interface EndpointRuntimePresenceRuntimeEntry extends EndpointRuntimePresenceRuntime {
+  readonly state: Exclude<EndpointRuntimePresenceState, "unavailable">;
+  readonly freshness: EndpointRuntimePresenceFreshnessEvidence;
+}
+
 export interface EndpointRuntimePresenceProjection {
   readonly version: EndpointRuntimePresenceContractVersion;
   readonly endpoint: EndpointIdentity;
@@ -99,6 +104,9 @@ export interface EndpointRuntimePresenceProjection {
   readonly authoritative: false;
   readonly state: EndpointRuntimePresenceState;
   readonly freshness: EndpointRuntimePresenceFreshnessEvidence;
+  /** Bounded, deterministic presence evidence for each Runtime identity. */
+  readonly runtimes: readonly EndpointRuntimePresenceRuntimeEntry[];
+  /** Compatibility projection for callers that only consume one Runtime. */
   readonly runtime: EndpointRuntimePresenceRuntime | null;
   readonly diagnostics: readonly EndpointRuntimePresenceDiagnostic[];
 }
@@ -165,11 +173,41 @@ function runtimeOf(record: EndpointRuntimePresenceRelayRecord): EndpointRuntimeP
   });
 }
 
+function runtimeState(
+  record: EndpointRuntimePresenceRelayRecord,
+  evidence: EndpointRuntimePresenceFreshnessEvidence,
+  nowMs: number,
+): Exclude<EndpointRuntimePresenceState, "unavailable"> {
+  if (evidence.state === "unknown") return "unknown";
+  if (evidence.state === "stale" || record.expiresAtMs <= nowMs) return "stale";
+  if (record.state === "connected" && record.current) {
+    return record.authenticated && record.generation !== undefined ? "connected" : "unknown";
+  }
+  if (record.state === "connected") return "stale";
+  if (record.state === "reconnecting") return "reconnecting";
+  if (record.state === "stale") return "stale";
+  return "unknown";
+}
+
+function runtimeEntry(
+  record: EndpointRuntimePresenceRelayRecord,
+  nowMs: number,
+  maxAgeMs: number,
+): EndpointRuntimePresenceRuntimeEntry {
+  const evidence = freshness(record.observedAtMs, nowMs, maxAgeMs);
+  return Object.freeze({
+    ...runtimeOf(record),
+    state: runtimeState(record, evidence, nowMs),
+    freshness: evidence,
+  });
+}
+
 function projection(
   endpoint: EndpointIdentity,
   repository: EndpointRepositoryIdentity,
   state: EndpointRuntimePresenceState,
   evidence: EndpointRuntimePresenceFreshnessEvidence,
+  runtimes: readonly EndpointRuntimePresenceRuntimeEntry[],
   runtime: EndpointRuntimePresenceRuntime | null,
   diagnostics: readonly EndpointRuntimePresenceDiagnostic[],
 ): EndpointRuntimePresenceProjection {
@@ -180,6 +218,7 @@ function projection(
     authoritative: false,
     state,
     freshness: evidence,
+    runtimes: Object.freeze(runtimes.slice(0, ENDPOINT_RUNTIME_PRESENCE_LIMITS.maxRecords)),
     runtime,
     diagnostics: Object.freeze(diagnostics.slice(0, ENDPOINT_RUNTIME_PRESENCE_LIMITS.maxDiagnostics)),
   });
@@ -212,6 +251,76 @@ function relayRecords(input: EndpointRuntimePresenceRelaySnapshot): readonly End
   return input.records;
 }
 
+function validRelayRecord(record: EndpointRuntimePresenceRelayRecord, repository: EndpointRepositoryIdentity): boolean {
+  return (
+    record !== null &&
+    typeof record === "object" &&
+    record.version === 1 &&
+    typeof record.connectionId === "string" &&
+    typeof record.delegatorId === "string" &&
+    (record.state === "connected" ||
+      record.state === "reconnecting" ||
+      record.state === "stale" ||
+      record.state === "unknown") &&
+    typeof record.authenticated === "boolean" &&
+    typeof record.current === "boolean" &&
+    (record.generation === undefined || (Number.isSafeInteger(record.generation) && record.generation >= 0)) &&
+    Number.isSafeInteger(record.openedAtMs) &&
+    record.openedAtMs >= 0 &&
+    Number.isSafeInteger(record.expiresAtMs) &&
+    record.expiresAtMs >= 0 &&
+    Number.isSafeInteger(record.observedAtMs) &&
+    record.observedAtMs >= 0 &&
+    repositoryMatches(repository, record.repository)
+  );
+}
+
+function generationValue(record: EndpointRuntimePresenceRelayRecord): number {
+  return record.generation === undefined ? -1 : record.generation;
+}
+
+function selectRuntimeRecord(
+  records: readonly EndpointRuntimePresenceRelayRecord[],
+):
+  | { readonly record: EndpointRuntimePresenceRelayRecord; readonly ambiguous: false }
+  | { readonly record: null; readonly ambiguous: true } {
+  const current = records.filter((record) => record.current);
+  if (current.length > 0) {
+    const highestGeneration = Math.max(...current.map(generationValue));
+    const highest = current.filter((record) => generationValue(record) === highestGeneration);
+    if (highest.length !== 1) return { record: null, ambiguous: true };
+    return { record: highest[0] as EndpointRuntimePresenceRelayRecord, ambiguous: false };
+  }
+
+  const candidates = records.filter((record) => record.state === "reconnecting");
+  const fallback = candidates.length > 0 ? candidates : records;
+  const highestGeneration = Math.max(...fallback.map(generationValue));
+  const highest = fallback.filter((record) => generationValue(record) === highestGeneration);
+  const selected = [...highest].sort((left, right) => {
+    if (left.observedAtMs !== right.observedAtMs) return right.observedAtMs - left.observedAtMs;
+    if (left.openedAtMs !== right.openedAtMs) return right.openedAtMs - left.openedAtMs;
+    return right.expiresAtMs - left.expiresAtMs;
+  })[0];
+  return { record: selected as EndpointRuntimePresenceRelayRecord, ambiguous: false };
+}
+
+function identityKey(record: EndpointRuntimePresenceRelayRecord): string {
+  return JSON.stringify([record.connectionId, record.delegatorId]);
+}
+
+function orderedRuntimeGroups(
+  records: readonly EndpointRuntimePresenceRelayRecord[],
+): readonly (readonly [string, readonly EndpointRuntimePresenceRelayRecord[]])[] {
+  const grouped = new Map<string, EndpointRuntimePresenceRelayRecord[]>();
+  for (const record of records) {
+    const key = identityKey(record);
+    const group = grouped.get(key);
+    if (group === undefined) grouped.set(key, [record]);
+    else group.push(record);
+  }
+  return [...grouped.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
 /** Project one immutable Endpoint/repository context from bounded relay evidence. */
 export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInput): EndpointRuntimePresenceProjection {
   const { endpoint, repository } = normalizedIdentity(input);
@@ -235,6 +344,7 @@ export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInp
       repository,
       "unknown",
       Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
       null,
       [diagnostic("ENDPOINT_RUNTIME_PRESENCE_INVALID_RELAY", "Relay evidence is missing or malformed.")],
     );
@@ -245,6 +355,7 @@ export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInp
       repository,
       "unknown",
       Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
       null,
       [
         diagnostic(
@@ -263,6 +374,7 @@ export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInp
       repository,
       "unknown",
       Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
       null,
       [diagnostic("ENDPOINT_RUNTIME_PRESENCE_INVALID_RELAY", "Relay presence records are malformed.")],
     );
@@ -273,27 +385,18 @@ export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInp
       repository,
       "unknown",
       Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
       null,
       [diagnostic("ENDPOINT_RUNTIME_PRESENCE_INVALID_RELAY", "Relay presence could not be read deterministically.")],
     );
   }
-  if (
-    records.some(
-      (record) =>
-        record === null ||
-        typeof record !== "object" ||
-        typeof record.connectionId !== "string" ||
-        typeof record.delegatorId !== "string" ||
-        typeof record.state !== "string" ||
-        typeof record.current !== "boolean" ||
-        !repositoryMatches(repository, record.repository),
-    )
-  ) {
+  if (records.some((record) => !repositoryMatches(repository, record?.repository))) {
     return projection(
       endpoint,
       repository,
       "unknown",
       Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
       null,
       [
         diagnostic(
@@ -303,58 +406,65 @@ export function projectEndpointRuntimePresence(input: EndpointRuntimePresenceInp
       ],
     );
   }
+  if (records.some((record) => !validRelayRecord(record, repository))) {
+    return projection(
+      endpoint,
+      repository,
+      "unknown",
+      Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
+      null,
+      [diagnostic("ENDPOINT_RUNTIME_PRESENCE_INVALID_RELAY", "Relay presence records are malformed.")],
+    );
+  }
   const matching = records.filter(
     (record) =>
       (input.connectionId === undefined || record.connectionId === input.connectionId) &&
       (input.delegatorId === undefined || record.delegatorId === input.delegatorId),
   );
-  const groups = new Set(matching.map((record) => `${record.connectionId}\u0000${record.delegatorId}`));
-  if (groups.size > 1) {
-    return projection(
-      endpoint,
-      repository,
-      "unknown",
-      Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
-      null,
-      [diagnostic("ENDPOINT_RUNTIME_PRESENCE_AMBIGUOUS", "Multiple Runtime identities match the Endpoint context.")],
-    );
-  }
   if (matching.length === 0) {
-    return projection(endpoint, repository, "unavailable", baseFreshness, null, []);
+    return projection(endpoint, repository, "unavailable", baseFreshness, [], null, []);
   }
-  const current = matching.filter((record) => record.state === "connected" && record.current);
-  if (current.length > 1) {
+
+  const groups = orderedRuntimeGroups(matching);
+  const selections = groups.map(([, group]) => selectRuntimeRecord(group));
+  if (selections.some((selection) => selection.ambiguous)) {
     return projection(
       endpoint,
       repository,
       "unknown",
       Object.freeze({ ...baseFreshness, state: "unknown", ageMs: null }),
+      [],
       null,
-      [diagnostic("ENDPOINT_RUNTIME_PRESENCE_AMBIGUOUS", "Relay reported more than one current Runtime generation.")],
+      [
+        diagnostic(
+          "ENDPOINT_RUNTIME_PRESENCE_AMBIGUOUS",
+          "Relay reported conflicting evidence for a Runtime identity/current generation.",
+        ),
+      ],
     );
   }
-  const selected = current[0] ?? matching.find((record) => record.state === "reconnecting") ?? matching[0];
-  const selectedFreshness = freshness(selected.observedAtMs, nowMs, maxAgeMs);
-  if (selectedFreshness.state === "unknown") {
-    return projection(endpoint, repository, "unknown", selectedFreshness, runtimeOf(selected), []);
-  }
-  if (selectedFreshness.state === "stale") {
-    return projection(endpoint, repository, "stale", selectedFreshness, runtimeOf(selected), [
-      diagnostic("ENDPOINT_RUNTIME_PRESENCE_STALE", "Relay evidence exceeds the configured freshness window."),
-    ]);
-  }
-  if (!Number.isSafeInteger(selected.expiresAtMs) || selected.expiresAtMs <= nowMs) {
-    return projection(endpoint, repository, "stale", selectedFreshness, runtimeOf(selected), [
-      diagnostic("ENDPOINT_RUNTIME_PRESENCE_STALE", "Relay Runtime evidence has expired."),
-    ]);
-  }
-  if (selected.state === "connected" && selected.current) {
-    return projection(endpoint, repository, "connected", selectedFreshness, runtimeOf(selected), []);
-  }
-  if (selected.state === "reconnecting") {
-    return projection(endpoint, repository, "reconnecting", selectedFreshness, runtimeOf(selected), []);
-  }
-  return projection(endpoint, repository, "stale", selectedFreshness, runtimeOf(selected), []);
+  const selected = selections.map((selection) => selection.record as EndpointRuntimePresenceRelayRecord);
+  const runtimes = Object.freeze(selected.map((record) => runtimeEntry(record, nowMs, maxAgeMs)));
+  const state = runtimes.some((runtime) => runtime.state === "connected")
+    ? "connected"
+    : runtimes.some((runtime) => runtime.state === "reconnecting")
+      ? "reconnecting"
+      : runtimes.every((runtime) => runtime.state === "stale")
+        ? "stale"
+        : "unknown";
+  const diagnostics = runtimes.some((runtime) => runtime.state === "stale")
+    ? [diagnostic("ENDPOINT_RUNTIME_PRESENCE_STALE", "Relay evidence exceeds the configured freshness window.")]
+    : [];
+  return projection(
+    endpoint,
+    repository,
+    state,
+    baseFreshness,
+    runtimes,
+    runtimes.length === 1 ? runtimeOf(selected[0] as EndpointRuntimePresenceRelayRecord) : null,
+    diagnostics,
+  );
 }
 
 /** Descriptive alias for Endpoint callers that use "project" as a read operation. */

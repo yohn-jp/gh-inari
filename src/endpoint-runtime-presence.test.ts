@@ -76,7 +76,8 @@ test("projects old evidence and replaced generations as stale", () => {
     input(snapshot([record({ state: "stale", current: false, observedAtMs: 800 })])),
   );
   assert.equal(result.state, "stale");
-  assert.equal(result.freshness.state, "stale");
+  assert.equal(result.runtimes[0]?.freshness.state, "stale");
+  assert.equal(result.runtimes[0]?.state, "stale");
   assert.equal(result.runtime?.current, false);
 });
 
@@ -101,15 +102,50 @@ test("projects a readable relay with no matching Runtime as unavailable", () => 
   assert.equal(result.runtime, null);
 });
 
-test("projects unavailable or ambiguous relay evidence as unknown", () => {
+test("projects unavailable relay evidence as unknown", () => {
   const unavailable = projectEndpointRuntimePresence(input(snapshot([], { availability: "unknown" })));
   assert.equal(unavailable.state, "unknown");
   assert.equal(unavailable.freshness.state, "unknown");
+  assert.deepEqual(unavailable.runtimes, []);
+});
 
+test("projects multiple Runtime identities as a deterministic collection", () => {
   const ambiguous = projectEndpointRuntimePresence(
     input(snapshot([record(), record({ connectionId: "runtime-other" })])),
   );
+  assert.equal(ambiguous.state, "connected");
+  assert.deepEqual(
+    ambiguous.runtimes.map(({ connectionId, delegatorId, generation, current, state }) => ({
+      connectionId,
+      delegatorId,
+      generation,
+      current,
+      state,
+    })),
+    [
+      {
+        connectionId: "runtime-921",
+        delegatorId: "delegator-921",
+        generation: 1,
+        current: true,
+        state: "connected",
+      },
+      {
+        connectionId: "runtime-other",
+        delegatorId: "delegator-921",
+        generation: 1,
+        current: true,
+        state: "connected",
+      },
+    ],
+  );
+  assert.equal(ambiguous.runtime, null);
+});
+
+test("projects duplicate highest current evidence for one identity as ambiguous", () => {
+  const ambiguous = projectEndpointRuntimePresence(input(snapshot([record(), record()])));
   assert.equal(ambiguous.state, "unknown");
+  assert.equal(ambiguous.runtimes.length, 0);
   assert.equal(ambiguous.diagnostics[0]?.code, "ENDPOINT_RUNTIME_PRESENCE_AMBIGUOUS");
 });
 
