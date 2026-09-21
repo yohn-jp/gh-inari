@@ -223,6 +223,7 @@
   },
   "files": [
     "dist",
+    "!dist/dashboard/**",
     "!dist/relay/cloudflare-repository-relay.d.ts",
     "!dist/relay/cloudflare-repository-relay.js",
     "!dist/relay/cloudflare-repository-relay.js.map",
@@ -237,7 +238,7 @@
   ],
   "scripts": {
     "preinstall": "node -e \"const p='./scripts/unlink-worktree-node-modules.mjs';require('node:fs').existsSync(p)&&require('node:child_process').execFileSync(process.execPath,[p],{stdio:'inherit'})\"",
-    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/chmod-bin.mjs && pnpm --dir apps/dashboard build",
     "start": "node dist/index.js",
     "test": "node --test --import tsx \"src/*.test.ts\" \"src/**/*.test.ts\" \"test/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit",
@@ -251,6 +252,8 @@
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "worker:build": "node scripts/build-worker.mjs",
     "hosted-worker:build": "node scripts/build-hosted-worker.mjs",
+    "dashboard:test": "wireit",
+    "dashboard:build": "wireit",
     "worker:deploy": "wrangler deploy",
     "worker:dev": "wrangler dev",
     "verify": "wireit",
@@ -322,10 +325,18 @@
         "readme:check",
         "lint",
         "test",
+        "dashboard:test",
+        "dashboard:build",
         "templates:check",
         "worker:build",
         "verify:package"
       ]
+    },
+    "dashboard:test": {
+      "command": "pnpm --dir apps/dashboard test"
+    },
+    "dashboard:build": {
+      "command": "pnpm --dir apps/dashboard build"
     },
     "verify:package": {
       "command": "pnpm run test:package",
