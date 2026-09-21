@@ -25,6 +25,12 @@ Public routes are deliberately bounded:
   evidence, Session, or capability data.
 - `GET /healthz` — non-secret deployment metadata only.
 
+The native MCP catalog also advertises the read-only `inari_issue_view` tool
+with the MCP Apps `io.modelcontextprotocol/ui` extension. App-capable hosts
+can render the stable `ui://inari/issue-view.html` resource and refresh it by
+calling that same tool through the host. Hosts without the extension continue
+to receive the existing tool result and do not need the resource.
+
 The Worker derives the Durable Object name from the immutable repository ID.
 MCP dispatch uses only the internal `REPOSITORY_RELAY` binding; there is no
 caller-selected backend URL, public dispatch endpoint, or generic proxy.

@@ -14,6 +14,7 @@ import {
   type NativeChangeDependencies,
 } from "./tools.js";
 import { createMcpSessionAppBridge } from "./session-app-bridge.js";
+import { linkInariAppTool, registerInariAppResource } from "./apps/inari-app.js";
 
 export const INARI_MCP_SERVER_NAME = "inari" as const;
 export const INARI_MCP_SERVER_VERSION = INARI_MCP_TOOL_CONTRACT_VERSION;
@@ -48,7 +49,13 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
   const catalogServer = server as unknown as Parameters<typeof registerGoldenPathTools>[0];
   registerGoldenPathTools(catalogServer);
   registerOperationalDiscoveryTools(catalogServer, options);
-  registerSemanticIssueTools(catalogServer, options);
+  const issueTools = registerSemanticIssueTools(catalogServer, options);
+  // The App metadata is attached to the existing read-only Issue view tool;
+  // its handler and semantic/authorization dependencies remain unchanged.
+  const issueViewTool = issueTools[4];
+  if (issueViewTool === undefined) throw new Error("Inari Issue view tool registration is incomplete.");
+  linkInariAppTool(issueViewTool);
+  registerInariAppResource(server);
   registerSemanticBranchTools(catalogServer, options);
   registerSemanticPullRequestTools(catalogServer, options);
   registerImplementationTools(catalogServer, options);
