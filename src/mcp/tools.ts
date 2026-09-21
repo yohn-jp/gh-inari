@@ -122,7 +122,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
 ] as const);
 
 /** Optional privileged catalog, enabled only by an embedding with App execution. */
-export const INARI_MCP_PRIVILEGED_TOOL_NAMES = Object.freeze(["inari_change_execute"] as const);
+export const INARI_MCP_PRIVILEGED_TOOL_NAMES = Object.freeze(["inari_change_execute", "inari_pr_publish"] as const);
 
 export type InariMcpToolName = (typeof INARI_MCP_TOOL_NAMES)[number];
 
@@ -511,12 +511,21 @@ export const sessionAuthorizedChangeOutputSchema = z
   .object({
     version: z.literal(1),
     operation: z
-      .enum(["change.issue", "change.show", "change.ready", "change.abort", "change.merge", "branch.advance"])
+      .enum([
+        "change.issue",
+        "change.show",
+        "change.ready",
+        "change.abort",
+        "change.merge",
+        "branch.advance",
+        "pullRequest.publish",
+      ])
       .optional(),
     status: z.enum(["succeeded", "failed"]),
     projection: z.unknown().optional(),
     execution: z.unknown().optional(),
     branchAdvance: z.unknown().optional(),
+    publication: z.unknown().optional(),
     provenance: z.unknown().optional(),
     failure: z.unknown().optional(),
   })
@@ -1180,7 +1189,19 @@ export function registerSessionAuthorizedChangeTools(
     },
     async (input: SessionAuthorizedChangeInput) => handleSessionAuthorizedChange(input, bridge),
   );
-  return Object.freeze([execute]);
+  const publish = server.registerTool(
+    "inari_pr_publish",
+    {
+      title: "Publish Governed Pull Request",
+      description:
+        "Forward the canonical signed Session request envelope for pullRequest.publish to the existing Session-authorized App executor. The executor maps the request to the existing pullRequest.create capability and canonical PR-publication Core; never provide gh auth, PATs, Runtime private keys, App keys/JWTs, or installation tokens.",
+      inputSchema: sessionAuthorizedChangeInputSchema,
+      outputSchema: sessionAuthorizedChangeOutputSchema,
+      annotations: PRIVILEGED_CHANGE,
+    },
+    async (input: SessionAuthorizedChangeInput) => handleSessionAuthorizedChange(input, bridge),
+  );
+  return Object.freeze([execute, publish]);
 }
 
 function observationRepository(
