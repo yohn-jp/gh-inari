@@ -18,6 +18,11 @@ Public routes are deliberately bounded:
 - `GET /v1/relay/connect` — Runtime WebSocket ingress. It requires
   `repositoryId`, `connectionId`, and `delegatorId`; `repositoryHost` is
   optional and defaults to `github.com`. It always routes the Runtime role.
+- `GET /.well-known/inari` — versioned, secret-free Endpoint onboarding
+  metadata. It contains the public GitHub App identity and installation URL,
+  the supported App-user Device Flow profile, and the current Worker's Relay
+  connection base. It contains no repository identity, credential, enrollment
+  evidence, Session, or capability data.
 - `GET /healthz` — non-secret deployment metadata only.
 
 The Worker derives the Durable Object name from the immutable repository ID.
@@ -85,6 +90,14 @@ partition if `github.com` is not used:
 pnpm exec wrangler deploy --config wrangler.hosted.toml \
   --var INARI_HOSTED_REPOSITORY_HOST:ghe.example.com
 ```
+
+The onboarding descriptor also requires these non-secret public App variables:
+`INARI_GITHUB_APP_ID`, `INARI_GITHUB_APP_CLIENT_ID`,
+`INARI_GITHUB_APP_SLUG`, `INARI_GITHUB_APP_INSTALLATION_URL`, and
+`INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. The descriptor remains
+bounded and unavailable until all required values are valid. Do not put an App
+private key, installation token, user access token, or other credential in
+these variables.
 
 The direct-App deployment remains independent and continues to use:
 

@@ -32,6 +32,11 @@ import {
   recordRelayTelemetry,
   type RelayTelemetrySink,
 } from "./relay/telemetry.js";
+import {
+  ENDPOINT_ONBOARDING_PATH,
+  createEndpointOnboardingDescriptor,
+  type EndpointOnboardingDescriptorInput,
+} from "./endpoint-onboarding.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -53,6 +58,16 @@ export interface Env {
   readonly REPOSITORY_RELAY?: HostedDurableObjectNamespace;
   /** Non-secret provider host partition; the default is GitHub.com. */
   readonly INARI_HOSTED_REPOSITORY_HOST?: string;
+  /** Non-secret public GitHub App numeric identity. */
+  readonly INARI_GITHUB_APP_ID?: string;
+  /** Non-secret public GitHub App OAuth client identity. */
+  readonly INARI_GITHUB_APP_CLIENT_ID?: string;
+  /** Non-secret public GitHub App slug. */
+  readonly INARI_GITHUB_APP_SLUG?: string;
+  /** Non-secret public GitHub App installation URL. */
+  readonly INARI_GITHUB_APP_INSTALLATION_URL?: string;
+  /** Non-secret supported App-user authentication profile. */
+  readonly INARI_GITHUB_APP_USER_AUTH_PROFILE?: string;
   readonly telemetry?: RelayTelemetrySink;
 }
 
@@ -68,7 +83,7 @@ type HostedWebSocket = RepositoryRelayWebSocket & {
 
 type UpgradeResponse = Response & { readonly webSocket?: HostedWebSocket };
 
-function jsonResponse(status: number, body: Record<string, unknown>, headers?: HeadersInit): Response {
+function jsonResponse(status: number, body: object, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
@@ -348,6 +363,48 @@ function healthz(env: Env): Response {
   });
 }
 
+function onboardingUnavailable(): Response {
+  return jsonResponse(503, {
+    version: 1,
+    ok: false,
+    error: { code: "ENDPOINT_ONBOARDING_NOT_CONFIGURED" },
+  });
+}
+
+function onboardingRelayConnectionBase(request: Request): string | undefined {
+  try {
+    const origin = new URL(request.url);
+    if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "") return undefined;
+    origin.protocol = "wss:";
+    origin.pathname = "/v1/relay/connect";
+    origin.search = "";
+    origin.hash = "";
+    return origin.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function onboarding(request: Request, env: Env): Response {
+  if (request.method !== "GET") return methodNotAllowed("GET");
+  const relayConnectionBase = onboardingRelayConnectionBase(request);
+  if (relayConnectionBase === undefined) return onboardingUnavailable();
+  const input: EndpointOnboardingDescriptorInput = {
+    githubHost: env.INARI_HOSTED_REPOSITORY_HOST ?? DEFAULT_REPOSITORY_HOST,
+    appId: env.INARI_GITHUB_APP_ID ?? "",
+    appClientId: env.INARI_GITHUB_APP_CLIENT_ID ?? "",
+    appSlug: env.INARI_GITHUB_APP_SLUG ?? "",
+    appInstallationUrl: env.INARI_GITHUB_APP_INSTALLATION_URL ?? "",
+    appUserAuthProfile: env.INARI_GITHUB_APP_USER_AUTH_PROFILE ?? "",
+    relayConnectionBase,
+  };
+  try {
+    return jsonResponse(200, createEndpointOnboardingDescriptor(input));
+  } catch {
+    return onboardingUnavailable();
+  }
+}
+
 async function relayConnect(request: Request, env: Env): Promise<Response> {
   if (request.method !== "GET") return methodNotAllowed("GET");
   if (request.headers.get("upgrade")?.toLowerCase() !== UPGRADE) {
@@ -435,6 +492,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
+    if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
     if (pathname === "/mcp") return mcp(request, env);
     if (pathname === "/v1/relay/connect") return relayConnect(request, env);
     return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
