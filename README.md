@@ -37,6 +37,21 @@ npx --yes gh-inari --version --json
 
 Inari uses the current GitHub authentication and repository context. Use `--repository owner/name` when the target is not the current checkout.
 
+To connect a repository Runtime, install the Inari GitHub App, then run the
+repository setup Golden Path:
+
+```bash
+inari setup
+# If setup reports trust-pending, open the printed Runtime Authority record
+# in a governed trust PR and merge it on the protected default branch.
+inari setup
+inari runtime connect
+```
+
+Setup stores only a repository-scoped, secret-free Runtime profile. It never
+commits, pushes, approves, or merges Runtime Authority trust; `ready` is
+reported only after canonical protected-ref readiness succeeds.
+
 ## The governed path
 
 ```text

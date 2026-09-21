@@ -184,6 +184,7 @@ import {
   type LocalRuntimeConfig,
   type LocalRuntimeConfigInput,
 } from "./relay/local-runtime-config.js";
+import { setupRepository, type RepositorySetupInput } from "./repository-setup.js";
 import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
@@ -319,6 +320,10 @@ export interface CliDependencies {
   readonly createLocalRuntimeConfig?: (
     input: LocalRuntimeConfigInput,
   ) => LocalRuntimeConfig | PromiseLike<LocalRuntimeConfig>;
+  /** Injectable repository onboarding seam for deterministic setup tests. */
+  readonly setupRepository?: (
+    input: RepositorySetupInput,
+  ) => Awaited<ReturnType<typeof setupRepository>> | PromiseLike<Awaited<ReturnType<typeof setupRepository>>>;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -366,6 +371,8 @@ const VALUE_OPTIONS = new Set([
   "pullRequest",
   "executionEvidence",
   "relayUrl",
+  "endpoint",
+  "configHome",
 ]);
 
 const METADATA_OPTION_KEYS = ["title", "head", "base", "draft", "maintainerCanModify"] as const;
@@ -451,6 +458,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "session") {
       return await runSessionCommand(command, rest, parsed, root, json);
+    }
+    if (domain === "setup") {
+      return await runSetupCommand(parsed, root, dependencies, json);
     }
     if (domain === "runtime") {
       return await runRuntimeCommand(command, rest, parsed, root, dependencies, json);
@@ -1257,6 +1267,7 @@ async function runRuntimeCommand(
     ...(typeof parsed.options.relayUrl === "string" ? { relayUrl: parsed.options.relayUrl } : {}),
     ...(typeof parsed.options.authorityId === "string" ? { delegatorId: parsed.options.authorityId } : {}),
     ...(typeof parsed.options.privateKey === "string" ? { privateKeyPath: parsed.options.privateKey } : {}),
+    ...(typeof parsed.options.configHome === "string" ? { configHome: parsed.options.configHome } : {}),
     ...(dependencies.environment === undefined ? {} : { environment: dependencies.environment }),
   });
   configuration.runtime.connect();
@@ -1280,6 +1291,61 @@ async function runRuntimeCommand(
     console.log(`Relay endpoint: ${configuration.relayUrl}`);
     console.log(`Repository id: ${configuration.repository.repositoryId}`);
     console.log(`Runtime Authority: ${configuration.delegatorId}`);
+  }
+  return 0;
+}
+
+async function runSetupCommand(
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  if (parsed.positionals.length !== 1 || parsed.positionals[0] !== "setup") {
+    throw new CliError("UNKNOWN_COMMAND", "Unknown setup command.");
+  }
+  const definition = getCommand("root.setup");
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by setup.`,
+      "$argv",
+      { command: "setup", option: option.id },
+    );
+  }
+  const setup = dependencies.setupRepository ?? setupRepository;
+  const output = await setup({
+    root,
+    json,
+    ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+    ...(typeof parsed.options.endpoint === "string" ? { endpoint: parsed.options.endpoint } : {}),
+    ...(typeof parsed.options.configHome === "string" ? { configHome: parsed.options.configHome } : {}),
+    ...(typeof parsed.options.authorityId === "string" ? { authorityId: parsed.options.authorityId } : {}),
+    ...(typeof parsed.options.privateKey === "string" ? { privateKeyPath: parsed.options.privateKey } : {}),
+    ...(dependencies.environment === undefined ? {} : { environment: dependencies.environment }),
+    onDeviceAuthorization: json
+      ? undefined
+      : ({ verificationUri, userCode }) => {
+          console.log(`Open ${verificationUri} and enter code ${userCode} to authorize the Inari App.`);
+        },
+  });
+  if (json) console.log(JSON.stringify(output));
+  else {
+    if (output.state === "app-install-required") {
+      console.log("GitHub App installation is required for this repository.");
+      console.log(`Install: ${output.appInstallationUrl}`);
+    } else if (output.state === "trust-pending") {
+      console.log("Runtime Authority trust is pending on the canonical protected ref.");
+      console.log(`Authority: ${output.authority?.authorityId ?? "unknown"}`);
+      if (output.authority?.artifactPath !== undefined) console.log(`Trust record: ${output.authority.artifactPath}`);
+      console.log("After the trust PR is merged, run inari setup again.");
+    } else {
+      console.log("Repository Runtime setup is ready.");
+      console.log(`Authority: ${output.authority?.authorityId ?? "unknown"}`);
+      console.log("Run inari runtime connect.");
+    }
   }
   return 0;
 }
@@ -4591,6 +4657,7 @@ function classifyExitCode(error: unknown): number {
   if (isObjectWithCode(error) && error.code.startsWith("LOCAL_RUNTIME_CONFIG_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("IMPLEMENTATION_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("REPOSITORY_SETUP_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
@@ -4722,6 +4789,10 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     return printDomainHelp("template");
   }
   if (domain === "skill") return printSkillHelp(command);
+  if (domain === "setup") {
+    const definition = getCommandForPositionals(positionals);
+    if (definition?.id === "root.setup") return printLeafHelp(definition);
+  }
   printRootHelp();
 }
 
@@ -4732,6 +4803,7 @@ A governed GitHub CLI with a closed, versioned command surface. Supported
 commands run through Inari; unsupported commands are rejected locally.
 
 Domains:
+  setup      Repository-scoped Runtime onboarding and trust readiness
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
   impl       Canonical Implementation planning, validation, and authorization
