@@ -315,3 +315,34 @@ test("schema-facing and production validation agree on an omitted mutation scope
   assert.deepEqual(result.contract?.scope.delete, []);
   assert.deepEqual(result.contract?.scope.deny, []);
 });
+
+test("reserved integration branch names are strict in Implementation execution metadata", () => {
+  const valid = validContract({
+    execution: {
+      ...(validContract().execution as Record<string, unknown>),
+      baseBranch: "issue/571-source",
+      branch: "feat/572-implementation",
+    },
+  });
+  assert.equal(validateImplementationContract(valid).valid, true);
+
+  const malformedBase = validContract({
+    execution: {
+      ...(validContract().execution as Record<string, unknown>),
+      baseBranch: "issue/not-a-number",
+    },
+  });
+  const malformedBaseResult = validateImplementationContract(malformedBase);
+  assert.equal(malformedBaseResult.valid, false);
+  assert.ok(malformedBaseResult.violations.some((violation) => violation.path === "$.execution.baseBranch"));
+
+  const malformedBranch = validContract({
+    execution: {
+      ...(validContract().execution as Record<string, unknown>),
+      branch: "epic/0-invalid",
+    },
+  });
+  const malformedBranchResult = validateImplementationContract(malformedBranch);
+  assert.equal(malformedBranchResult.valid, false);
+  assert.ok(malformedBranchResult.violations.some((violation) => violation.path === "$.execution.branch"));
+});
