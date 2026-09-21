@@ -648,7 +648,7 @@ export async function publishPullRequest(
         ...(request.draft === undefined ? {} : { draft: request.draft }),
         ...(request.maintainerCanModify === undefined ? {} : { maintainerCanModify: request.maintainerCanModify }),
       });
-    } catch (error: unknown) {
+    } catch {
       const converged = await reread(provider, request, routing);
       if (converged !== undefined) return converged;
       return requestResult(
@@ -691,11 +691,10 @@ export async function publishPullRequest(
       undefined,
       routing,
     );
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Provider publication failed.";
+  } catch {
     return requestResult(
       "failed",
-      [diagnostic("PR_PUBLICATION_PROVIDER_FAILED", "$.provider", message.slice(0, 256))],
+      [diagnostic("PR_PUBLICATION_PROVIDER_FAILED", "$.provider", "Provider publication failed.")],
       undefined,
       routing,
     );
