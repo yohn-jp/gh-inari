@@ -250,6 +250,9 @@ import {
 } from "./implementation-authorization.js";
 import { tryVerifyImplementationConformance } from "./implementation-conformance.js";
 import type { IssueReference } from "./contract/issue-reference.js";
+import { GitHubReleaseHistoryAdapter } from "./github/release-history-adapter.js";
+import { prepareRelease, type ReleasePreparationVerificationRunner } from "./release-preparation.js";
+import type { ReleaseHistoryEvidencePort, ReleaseVersionIntent } from "./release-preparation-plan.js";
 
 const EXIT_USAGE = 1;
 const EXIT_VALIDATION = 2;
@@ -327,6 +330,10 @@ export interface CliDependencies {
   readonly setupRepository?: (
     input: RepositorySetupInput,
   ) => Awaited<ReturnType<typeof setupRepository>> | PromiseLike<Awaited<ReturnType<typeof setupRepository>>>;
+  /** Injectable governed release-history evidence port for release preparation. */
+  readonly releaseHistoryPort?: ReleaseHistoryEvidencePort;
+  /** Injectable fixed-argv verification runner for release preparation tests. */
+  readonly runReleaseVerification?: ReleasePreparationVerificationRunner;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -348,6 +355,8 @@ const VALUE_OPTIONS = new Set([
   "template",
   "policy",
   "repository",
+  "reviewIntent",
+  "targetVersion",
   "title",
   "head",
   "base",
@@ -455,6 +464,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
+    }
+    if (domain === "release") {
+      return await runReleaseCommand(command, rest, parsed, root, dependencies);
     }
     if (domain === "authority") {
       return await runAuthorityCommand(command, rest, parsed, root, dependencies, json);
@@ -2735,6 +2747,70 @@ async function runIntegrationRoutingCommand(rest: readonly string[], parsed: Par
   return projected.valid ? 0 : EXIT_VALIDATION;
 }
 
+async function runReleaseCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  if (command !== "prepare") throw new CliError("UNKNOWN_COMMAND", `Unknown release command "${command ?? ""}".`);
+  const unsupported = Object.keys(parsed.options).find(
+    (key) => !["json", "repository", "reviewIntent", "targetVersion"].includes(key),
+  );
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by release preparation.`,
+      "$argv",
+      { command: "release prepare", option: option.id },
+    );
+  }
+  if (rest.length > 1)
+    throw new CliError("UNKNOWN_COMMAND", "Release preparation accepts one explicit intent or version.");
+  const positional = rest[0];
+  const suppliedIntent = typeof parsed.options.reviewIntent === "string" ? parsed.options.reviewIntent : undefined;
+  const suppliedTarget = typeof parsed.options.targetVersion === "string" ? parsed.options.targetVersion : undefined;
+  if (positional !== undefined && (suppliedIntent !== undefined || suppliedTarget !== undefined))
+    throw new CliError("INVALID_OPTION", "Use either a positional release intent or --intent/--target-version.");
+  const requested = positional ?? suppliedIntent ?? (suppliedTarget === undefined ? undefined : "exact");
+  if (requested === undefined)
+    throw new CliError(
+      "INPUT_REQUIRED",
+      "Release preparation requires explicit patch, minor, major, or exact version intent.",
+      "release prepare",
+    );
+  const semver =
+    /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+  let intent: ReleaseVersionIntent;
+  if (semver.test(requested)) {
+    if (suppliedTarget !== undefined) throw new CliError("INVALID_OPTION", "Exact release version was supplied twice.");
+    intent = { kind: "exact", version: requested };
+  } else if (requested === "patch" || requested === "minor" || requested === "major") {
+    if (suppliedTarget !== undefined)
+      throw new CliError("INVALID_OPTION", "Bump intents cannot include --target-version.");
+    intent = { kind: requested };
+  } else if (requested === "exact") {
+    if (suppliedTarget === undefined)
+      throw new CliError("INPUT_REQUIRED", "Exact release intent requires --target-version.");
+    intent = { kind: "exact", version: suppliedTarget };
+  } else {
+    throw new CliError("INVALID_OPTION", "Release intent must be patch, minor, major, or exact version.", "--intent");
+  }
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const historyPort = dependencies.releaseHistoryPort ?? new GitHubReleaseHistoryAdapter(adapter);
+  const history = await historyPort.readReleaseHistory();
+  const result = await prepareRelease({
+    repositoryRoot: root,
+    history,
+    intent,
+    runVerification: dependencies.runReleaseVerification,
+  });
+  console.log(JSON.stringify({ ...result, mutation: true }));
+  return 0;
+}
+
 /** Execute the Core idempotent PR-publication kernel through user-context GitHub. */
 async function runPrPublicationCommand(
   rest: readonly string[],
@@ -4671,7 +4747,7 @@ function classifyExitCode(error: unknown): number {
   if (
     isObjectWithCode(error) &&
     typeof error.code === "string" &&
-    (error.code.includes("TEMPLATE") || error.code.includes("POLICY"))
+    (error.code.includes("TEMPLATE") || error.code.includes("POLICY") || error.code.startsWith("RELEASE_"))
   )
     return EXIT_VALIDATION;
   if (
@@ -4753,9 +4829,19 @@ function isSupportedInvocation(positionals: readonly string[]): boolean {
   if (getCommandForPositionals(positionals) !== undefined) return true;
   return (
     positionals.length === 1 &&
-    ["issue", "pr", "impl", "branch", "template", "change", "authority", "session", "runtime", "mcp"].includes(
-      positionals[0] ?? "",
-    )
+    [
+      "issue",
+      "pr",
+      "impl",
+      "branch",
+      "template",
+      "change",
+      "release",
+      "authority",
+      "session",
+      "runtime",
+      "mcp",
+    ].includes(positionals[0] ?? "")
   );
 }
 
@@ -4827,7 +4913,17 @@ async function readStdin(): Promise<string> {
 
 const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   Record<
-    "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp",
+    | "issue"
+    | "pr"
+    | "impl"
+    | "branch"
+    | "template"
+    | "change"
+    | "release"
+    | "authority"
+    | "session"
+    | "runtime"
+    | "mcp",
     string
   >
 > = {
@@ -4837,6 +4933,7 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   branch: "branch list",
   template: "template view",
   change: "change list",
+  release: "release prepare",
   authority: "authority generate",
   session: "session issue",
   runtime: "runtime connect",
@@ -4854,6 +4951,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     domain === "impl" ||
     domain === "branch" ||
     domain === "change" ||
+    domain === "release" ||
     domain === "authority" ||
     domain === "session" ||
     domain === "runtime" ||
@@ -4890,6 +4988,7 @@ Domains:
   branch     Semantic Branch observation and drift checks
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
+  release    Governed npm release preparation without publication
   authority  Local Runtime Authority key, bootstrap, readiness, and lifecycle operations
   session    Manual short-lived Session credential issuance and inspection
   runtime    Foreground local Relay Runtime connection
@@ -4905,7 +5004,18 @@ Run \`inari --version\` or \`inari --diagnose\` for machine-readable runtime che
 }
 
 function printDomainHelp(
-  domain: "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp",
+  domain:
+    | "issue"
+    | "pr"
+    | "impl"
+    | "branch"
+    | "template"
+    | "change"
+    | "release"
+    | "authority"
+    | "session"
+    | "runtime"
+    | "mcp",
 ): void {
   const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
