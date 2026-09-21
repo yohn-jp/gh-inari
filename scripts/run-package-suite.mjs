@@ -694,6 +694,12 @@ async function main() {
 
   try {
     const packedFiles = packInfo.files.map((entry) => entry.path);
+    const dashboardFiles = packedFiles.filter(
+      (entry) => entry === "apps/dashboard" || entry.startsWith("apps/dashboard/"),
+    );
+    if (dashboardFiles.length > 0) {
+      throw new Error(`Dashboard application files must not be published in gh-inari: ${dashboardFiles.join(", ")}`);
+    }
     const expected = [...EXPECTED_PACKED_FILES].sort();
     const actual = [...packedFiles].sort();
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
