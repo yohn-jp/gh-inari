@@ -14,6 +14,7 @@ await esbuild.build({
   outfile: path.join(outdir, "hosted-worker.js"),
   bundle: true,
   platform: "neutral",
+  conditions: ["workerd"],
   mainFields: ["module", "main"],
   external: ["node:*"],
   format: "esm",
