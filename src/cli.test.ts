@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,7 @@ import { runCli } from "./cli.js";
 import { COMMAND_CONTRACT_VERSION, getCommand, getOption, RUNTIME_CAPABILITIES } from "./command-contract.js";
 import { projectChangeFromGitHubEvidence } from "./change.js";
 import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
+import type { LocalRuntimeConfig } from "./relay/local-runtime-config.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -663,6 +665,46 @@ async function captureOutput(argv: readonly string[]): Promise<{ exitCode: numbe
     console.log = originalLog;
   }
 }
+
+test("runtime connect awaits App-user composition and emits only safe metadata", async () => {
+  const { privateKey } = generateKeyPairSync("ed25519");
+  let connected = false;
+  const configuration = {
+    relayUrl: "wss://relay.example.test",
+    repository: {
+      repositoryHost: "github.com",
+      repositoryId: "99",
+      repositoryNameWithOwner: "acme/inari",
+    },
+    delegatorId: "runtime-authority",
+    privateKey,
+    executor: {},
+    runtime: {
+      state: "idle",
+      connect: () => {
+        connected = true;
+      },
+      shutdown: () => undefined,
+    },
+    app: { appId: "42", installationId: "7" },
+  } as unknown as LocalRuntimeConfig;
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["runtime", "connect", "--json"], {
+      createLocalRuntimeConfig: async (input) => {
+        assert.equal(input.environment, undefined);
+        return configuration;
+      },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(connected, true);
+    assert.doesNotMatch(lines[0] ?? "", /token|credential|private/i);
+  } finally {
+    console.log = originalLog;
+  }
+});
 
 test("skill lists a bounded, deterministic set of scenarios as text", async () => {
   const { exitCode, output } = await captureOutput(["skill"]);
