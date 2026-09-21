@@ -5,6 +5,7 @@ import {
   INARI_MCP_TOOL_CONTRACT_VERSION,
   registerChangeTools,
   registerGoldenPathTools,
+  registerIntegrationRoutingTools,
   registerImplementationTools,
   registerOperationalDiscoveryTools,
   registerSessionAuthorizedChangeTools,
@@ -40,7 +41,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
     },
     {
       instructions:
-        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. The default catalog performs no GitHub mutation. When an embedding supplies the existing Session-authorized App executor, the optional Change execution tool forwards signed Session requests to that executor without adding MCP authorization. Governed pull-request comment/review/merge writes are not exposed through MCP: the canonical Session-authorized App executor does not yet admit those operations, and MCP must not open a second authorization plane for them. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative.",
+        "Inari MCP exposes semantic Issue, Branch, and pull-request contract discovery, materialization, read-only plan preview, observation, drift comparison, canonical Issue/Epic/Implementation routing validation, the read-only Golden Path entry/action and status projections, and the canonical Change implementation handoff. The default catalog performs no GitHub mutation. When an embedding supplies the existing Session-authorized App executor, the optional Change execution tool forwards signed Session requests to that executor without adding MCP authorization. Governed pull-request comment/review/merge writes are not exposed through MCP: the canonical Session-authorized App executor does not yet admit those operations, and MCP must not open a second authorization plane for them. Inari Core, the #409/#410 Golden Path projectors, and the repository Canon remain authoritative.",
     },
   );
   // The catalog registration surface remains owned by the existing MCP
@@ -48,6 +49,7 @@ export function createInariMcpServer(options: InariMcpServerOptions = {}): McpSe
   // providing the extension-capable runtime at this boundary.
   const catalogServer = server as unknown as Parameters<typeof registerGoldenPathTools>[0];
   registerGoldenPathTools(catalogServer);
+  registerIntegrationRoutingTools(catalogServer);
   registerOperationalDiscoveryTools(catalogServer, options);
   const issueTools = registerSemanticIssueTools(catalogServer, options);
   // The App metadata is attached to the existing read-only Issue view tool;

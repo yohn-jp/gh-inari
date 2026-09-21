@@ -12,7 +12,7 @@ import type { GoldenPathGovernanceDiscoveryResult } from "./golden-path-governan
 
 /** Inari-owned operational playbooks mapping task intents to canonical CLI workflows. */
 
-export const SKILL_MODEL_VERSION = "1.6.0";
+export const SKILL_MODEL_VERSION = "1.7.0";
 export const SKILL_DEFAULT_SCENARIO_ID = "golden-path" as const;
 
 /** Hard cap on any single rendered skill output (index or scenario, text or JSON). */
@@ -426,6 +426,8 @@ export const SKILL_SCENARIOS: readonly SkillScenario[] = [
     invariants: [
       "Use repository-native governance and semantic Change contracts; do not invent branch names, PR identity, or raw GitHub mutations.",
       "The normal route is source Issue -> executable Implementation -> authorization -> Implementation-rooted Change -> handoff -> conformance -> governed readiness -> REVIEW; exact routing comes from the shared canonical composition.",
+      "Integration routing has three review levels: Implementation leaf -> source Issue integration -> Epic integration. Sibling Implementations may proceed concurrently; merge order is not a dependency DAG.",
+      "Consume the canonical routing result for PR role and expected head/base; branch names are identity and consistency evidence, never parentage authority. Standalone and explicit legacy routes remain compatible.",
       "Inari emits the implementation handoff; Nawabari owns the worktree, session, process, and local Git execution without exposing its internals here.",
       "Never infer retry safety or cleanup. Reread authoritative recovery evidence before any retry, abort, or recovery action.",
       "Stop on MANUAL_REVIEW, unavailable or ambiguous evidence, unsupported capability, or any terminal result that provides no safe action.",

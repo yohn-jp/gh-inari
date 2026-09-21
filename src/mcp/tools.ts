@@ -84,6 +84,7 @@ import {
 } from "../implementation-authorization.js";
 import { planExistingIssueRelationReconciliation } from "../semantic-issue-relation-executor.js";
 import { projectOperationalSemanticOverlay } from "../reconciliation.js";
+import { tryAdaptIntegrationRouting } from "../integration-routing-adapters.js";
 import type { McpSessionAppBridge } from "./session-app-bridge.js";
 
 /** Version of the Inari-owned MCP tool/input/output contract. */
@@ -117,6 +118,7 @@ export const INARI_MCP_TOOL_NAMES = Object.freeze([
   "inari_golden_path_entry",
   "inari_change_handoff",
   "inari_impl_frontier",
+  "inari_pr_routing",
 ] as const);
 
 /** Optional privileged catalog, enabled only by an embedding with App execution. */
@@ -578,6 +580,30 @@ export const implementationFrontierOutputSchema = z
   .strict();
 
 export type ImplementationFrontierMcpInput = z.infer<typeof implementationFrontierInputSchema>;
+
+/** Input for the read-only canonical integration-routing projection. */
+export const integrationRoutingInputSchema = z.strictObject({
+  routing: z.unknown().describe("Canonical Issue/Epic/Implementation routing evidence."),
+});
+
+export const integrationRoutingOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    valid: z.boolean(),
+    operation: z.literal("pr.routing"),
+    kind: z.literal("integration-routing"),
+    routing: z.unknown().optional(),
+    role: z.enum(["implementation", "issue-integration", "epic-integration"]).optional(),
+    expectedHead: z.string().optional(),
+    expectedBase: z.string().optional(),
+    head: z.string().optional(),
+    base: z.string().optional(),
+    diagnostics: z.array(z.unknown()),
+    mutation: z.literal(false),
+  })
+  .strict();
+
+export type IntegrationRoutingMcpInput = z.infer<typeof integrationRoutingInputSchema>;
 
 function adapterFor(
   requestRepository: string | undefined,
@@ -1836,6 +1862,47 @@ export function registerGoldenPathTools(server: McpServer): readonly RegisteredT
     async (input: GoldenPathStatusMcpInput) => handleGoldenPathStatus(input),
   );
   return Object.freeze([status]);
+}
+
+/** Register the read-only canonical Issue/Epic/Implementation route projection. */
+export function registerIntegrationRoutingTools(server: McpServer): readonly RegisteredTool[] {
+  const routing = server.registerTool(
+    "inari_pr_routing",
+    {
+      title: "Validate PR integration routing",
+      description:
+        "Validate one Issue/Epic/Implementation integration route through the canonical Core projector. This MCP tool is read-only; branch names are consistency evidence and never parentage authority.",
+      inputSchema: integrationRoutingInputSchema,
+      outputSchema: integrationRoutingOutputSchema,
+      annotations: READ_ONLY,
+    },
+    async (input: IntegrationRoutingMcpInput) => {
+      const projected = tryAdaptIntegrationRouting(input.routing);
+      const routing = projected.projection;
+      return result(
+        {
+          ok: projected.valid,
+          valid: projected.valid,
+          operation: "pr.routing",
+          kind: "integration-routing",
+          ...(routing === undefined
+            ? {}
+            : {
+                routing,
+                role: routing.pullRequest.role,
+                expectedHead: routing.expectedHead,
+                expectedBase: routing.expectedBase,
+                head: routing.head,
+                base: routing.base,
+              }),
+          diagnostics: projected.diagnostics,
+          mutation: false,
+        },
+        projected.valid ? "Validated the canonical PR integration route." : "PR integration routing failed closed.",
+      );
+    },
+  );
+  return Object.freeze([routing]);
 }
 
 /** Register the shared read-only Operational Discovery catalog on any MCP transport. */

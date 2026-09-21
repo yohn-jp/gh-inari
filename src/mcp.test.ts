@@ -291,6 +291,7 @@ test("native MCP exposes one transport-neutral typed semantic PR catalog", async
         "inari_pr_contract",
         "inari_pr_materialize",
         "inari_pr_plan",
+        "inari_pr_routing",
         "inari_pr_observe",
         "inari_pr_view",
         "inari_pr_list",

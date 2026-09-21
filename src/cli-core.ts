@@ -146,6 +146,7 @@ import {
   tryProjectSemanticIssue,
 } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
+import { tryAdaptIntegrationRouting } from "./integration-routing-adapters.js";
 import {
   canonicalDelegatorPublicKeyJson,
   defaultDelegatorPrivateKeyPath,
@@ -2471,6 +2472,9 @@ async function runArtifactCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  if (domain === "pr" && command === "routing") {
+    return runIntegrationRoutingCommand(rest, parsed);
+  }
   if (domain === "issue" && (command === "relations" || command === "relationships")) {
     return runIssueRelationsCommand(rest, parsed, root, dependencies);
   }
@@ -2687,6 +2691,43 @@ async function runArtifactCommand(
     throw invalidArtifactNumberError(domain, rest[0]);
   }
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
+}
+
+async function runIntegrationRoutingCommand(rest: readonly string[], parsed: ParsedArgs): Promise<number> {
+  if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", `Unexpected PR routing argument "${rest[0] ?? ""}".`);
+  const unsupported = Object.keys(parsed.options).find((key) => !["json", "from"].includes(key));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by PR routing.`,
+      "$argv",
+      { command: "pr routing", option: option.id },
+    );
+  }
+  const projected = tryAdaptIntegrationRouting(await readJsonValue(parsed.options.from));
+  const routing = projected.projection;
+  console.log(
+    JSON.stringify({
+      ok: projected.valid,
+      valid: projected.valid,
+      operation: "pr.routing",
+      kind: "integration-routing",
+      ...(routing === undefined
+        ? {}
+        : {
+            routing,
+            role: routing.pullRequest.role,
+            expectedHead: routing.expectedHead,
+            expectedBase: routing.expectedBase,
+            head: routing.head,
+            base: routing.base,
+          }),
+      diagnostics: projected.diagnostics,
+      mutation: false,
+    }),
+  );
+  return projected.valid ? 0 : EXIT_VALIDATION;
 }
 
 /** Project the canonical Operational Observation surface for CLI callers. */
