@@ -4,7 +4,7 @@ import { base64UrlEncodeText } from "./agent-authority/codec.js";
 import { ENDPOINT_AUTHORIZATION_CONTRACT_VERSION } from "./endpoint-authorization.js";
 import { createEndpointApi } from "./endpoint-api.js";
 import { ENDPOINT_HTTP_PATH } from "./endpoint-http.js";
-import { ENDPOINT_WEBHOOK_PATH, EndpointWebhookReplayGuard } from "./endpoint-webhook.js";
+import { ENDPOINT_WEBHOOK_PATH } from "./endpoint-webhook.js";
 import { decodeRelayEnvelope, type RelayRepositoryIdentity } from "./relay/contract.js";
 import {
   createHostedRelayDispatch,
@@ -332,45 +332,21 @@ test("hosted webhook route admits only the bounded Endpoint webhook surface", as
     await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body) as unknown as BufferSource),
   );
   const signature = "sha256=" + [...digest].map((value) => value.toString(16).padStart(2, "0")).join("");
-  const endpointWebhook = {
-    admission: {
-      secret,
-      endpoint: {
-        version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
-        kind: "endpoint" as const,
-        id: "hosted",
-        deployment: "shared-hosted" as const,
-      },
-      installation: {
-        version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
-        kind: "installation" as const,
-        endpointId: "hosted",
-        installationId: "9001",
-      },
-      repositories: [
-        {
-          version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
-          kind: "repository" as const,
-          endpointId: "hosted",
-          installationId: "9001",
-          repositoryHost: "github.com",
-          repositoryId: "1330755860",
-          nameWithOwner: "yohn-jp/gh-inari",
-        },
-      ],
-      now: "2026-09-22T00:00:00.000Z",
-      maxAgeMs: 86_400_000,
-      replay: new EndpointWebhookReplayGuard(),
-    },
+  const hostedEnv = {
+    ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+    INARI_GITHUB_WEBHOOK_SECRET: secret,
+    INARI_ENDPOINT_ID: "hosted",
+    INARI_ENDPOINT_DEPLOYMENT: "shared-hosted" as const,
   };
-  const hostedEnv = { ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])), endpointWebhook };
   const response = await worker.fetch(
     new Request(`https://hosted.example${ENDPOINT_WEBHOOK_PATH}`, {
       method: "POST",
       headers: {
         "x-hub-signature-256": signature,
         "x-github-delivery": "hosted-delivery",
+        "x-inari-endpoint-id": "attacker-selected-endpoint",
         "x-inari-delivery-at": "2026-09-22T00:00:00.000Z",
+        "x-inari-retry": "true",
       },
       body,
     }),
@@ -384,7 +360,9 @@ test("hosted webhook route admits only the bounded Endpoint webhook surface", as
       headers: {
         "x-hub-signature-256": signature,
         "x-github-delivery": "hosted-delivery",
+        "x-inari-endpoint-id": "attacker-selected-endpoint",
         "x-inari-delivery-at": "2026-09-22T00:00:00.000Z",
+        "x-inari-retry": "true",
       },
       body,
     }),

@@ -42,11 +42,7 @@ import {
   createEndpointWebhookHandler,
   type EndpointWebhookHandlerOptions,
 } from "./endpoint-webhook.js";
-import type {
-  EndpointIdentity,
-  EndpointInstallationIdentity,
-  EndpointRepositoryIdentity,
-} from "./endpoint-authorization.js";
+import type { EndpointIdentity } from "./endpoint-authorization.js";
 import { createEndpointHttpHandler, ENDPOINT_HTTP_PATH, type EndpointHttpHandler } from "./endpoint-http.js";
 import type { EndpointApi } from "./endpoint-api.js";
 
@@ -87,9 +83,6 @@ export interface Env {
   readonly INARI_ENDPOINT_DEPLOYMENT?: "shared-hosted" | "self-hosted";
   /** Webhook secret is a Worker secret and is never returned by this module. */
   readonly INARI_GITHUB_WEBHOOK_SECRET?: string;
-  readonly INARI_GITHUB_APP_INSTALLATION_ID?: string;
-  readonly INARI_ENDPOINT_REPOSITORY_ID?: string;
-  readonly INARI_ENDPOINT_REPOSITORY_NAME?: string;
   /** Optional runtime injection for self-hosted composition and tests. */
   readonly endpointWebhook?: EndpointWebhookHandlerOptions;
   /** Shared logical Dashboard API composition; authentication remains injected into the API. */
@@ -516,40 +509,17 @@ async function mcp(request: Request, env: Env): Promise<Response> {
 
 function webhookOptions(env: Env): EndpointWebhookHandlerOptions | undefined {
   if (env.endpointWebhook !== undefined) return env.endpointWebhook;
-  if (
-    env.INARI_GITHUB_WEBHOOK_SECRET === undefined ||
-    env.INARI_ENDPOINT_ID === undefined ||
-    env.INARI_GITHUB_APP_INSTALLATION_ID === undefined ||
-    env.INARI_ENDPOINT_REPOSITORY_ID === undefined ||
-    env.INARI_ENDPOINT_REPOSITORY_NAME === undefined
-  )
-    return undefined;
+  if (env.INARI_GITHUB_WEBHOOK_SECRET === undefined || env.INARI_ENDPOINT_ID === undefined) return undefined;
   const endpoint: EndpointIdentity = {
     version: 1,
     kind: "endpoint",
     id: env.INARI_ENDPOINT_ID,
     deployment: env.INARI_ENDPOINT_DEPLOYMENT ?? "shared-hosted",
   };
-  const installation: EndpointInstallationIdentity = {
-    version: 1,
-    kind: "installation",
-    endpointId: endpoint.id,
-    installationId: env.INARI_GITHUB_APP_INSTALLATION_ID,
-  };
-  const repository: EndpointRepositoryIdentity = {
-    version: 1,
-    kind: "repository",
-    endpointId: endpoint.id,
-    installationId: installation.installationId,
-    repositoryHost: repositoryHost(env),
-    repositoryId: env.INARI_ENDPOINT_REPOSITORY_ID,
-    nameWithOwner: env.INARI_ENDPOINT_REPOSITORY_NAME,
-  };
   return {
     admission: {
       endpoint,
-      installation,
-      repositories: [repository],
+      repositoryHost: repositoryHost(env),
       secret: env.INARI_GITHUB_WEBHOOK_SECRET,
     },
   };

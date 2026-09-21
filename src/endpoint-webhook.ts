@@ -81,11 +81,22 @@ export interface EndpointWebhookHint {
 
 export interface EndpointWebhookAdmissionContext {
   readonly endpoint: EndpointIdentity;
-  readonly installation: EndpointInstallationIdentity;
-  /** The complete enrolled repository set. An omitted/empty set fails closed. */
+  /** Optional self-hosted installation restriction. Signed payload evidence is the default. */
+  readonly installation?: EndpointInstallationIdentity;
+  /** Optional self-hosted repository restriction. Signed immutable IDs remain authoritative. */
   readonly repositories?: readonly EndpointRepositoryIdentity[];
   /** Singular form is convenient for one-repository self-hosted endpoints. */
   readonly repository?: EndpointRepositoryIdentity;
+  /** Provider host partition used when constructing signed repository evidence. */
+  readonly repositoryHost?: string;
+  /** Optional self-hosted restriction; it may only narrow signed provider evidence. */
+  readonly resolveEnrollment?: (candidate: EndpointWebhookEnrollmentCandidate) => boolean | Promise<boolean>;
+}
+
+export interface EndpointWebhookEnrollmentCandidate {
+  readonly endpoint: EndpointIdentity;
+  readonly installation: EndpointInstallationIdentity;
+  readonly repository: EndpointRepositoryIdentity;
 }
 
 export interface EndpointWebhookAdmissionOptions extends EndpointWebhookAdmissionContext {
@@ -225,6 +236,52 @@ function bodyBytes(value: EndpointWebhookDelivery["body"]): Uint8Array | undefin
   return undefined;
 }
 
+type BoundedRequestBody =
+  { readonly kind: "ok"; readonly bytes: Uint8Array } | { readonly kind: "too-large" } | { readonly kind: "invalid" };
+
+function contentLength(
+  request: Request,
+): { readonly kind: "ok" } | { readonly kind: "too-large" } | { readonly kind: "invalid" } {
+  const value = request.headers.get("content-length");
+  if (value === null) return { kind: "ok" };
+  if (!/^\d{1,10}$/u.test(value)) return { kind: "invalid" };
+  const length = Number(value);
+  if (!Number.isSafeInteger(length)) return { kind: "invalid" };
+  return length > ENDPOINT_WEBHOOK_LIMITS.bodyBytes ? { kind: "too-large" } : { kind: "ok" };
+}
+
+async function readBoundedRequestBody(request: Request): Promise<BoundedRequestBody> {
+  const declared = contentLength(request);
+  if (declared.kind !== "ok") return declared;
+  const reader = request.body?.getReader();
+  if (reader === undefined) return { kind: "invalid" };
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > ENDPOINT_WEBHOOK_LIMITS.bodyBytes) {
+        await reader.cancel().catch(() => undefined);
+        return { kind: "too-large" };
+      }
+      chunks.push(next.value);
+    }
+  } catch {
+    return { kind: "invalid" };
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { kind: "ok", bytes };
+}
+
 function hex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -268,29 +325,36 @@ export async function verifyGitHubWebhookSignature(
 function identityContext(options: EndpointWebhookAdmissionOptions):
   | {
       endpoint: EndpointIdentity;
-      installation: EndpointInstallationIdentity;
+      installation?: EndpointInstallationIdentity;
       repositories: readonly EndpointRepositoryIdentity[];
+      repositoryHost: string;
+      resolveEnrollment?: EndpointWebhookAdmissionContext["resolveEnrollment"];
     }
   | undefined {
   const endpoint = validateEndpointIdentity(options.endpoint);
-  const installation = validateEndpointInstallationIdentity(options.installation);
-  if (!endpoint.valid || endpoint.value === undefined || !installation.valid || installation.value === undefined)
-    return undefined;
-  if (installation.value.endpointId !== endpoint.value.id) return undefined;
+  if (!endpoint.valid || endpoint.value === undefined) return undefined;
+  const installation =
+    options.installation === undefined ? undefined : validateEndpointInstallationIdentity(options.installation);
+  if (installation !== undefined && (!installation.valid || installation.value === undefined)) return undefined;
+  if (installation?.value !== undefined && installation.value.endpointId !== endpoint.value.id) return undefined;
   const configuredRepositories = options.repositories ?? (options.repository === undefined ? [] : [options.repository]);
-  if (configuredRepositories.length === 0) return undefined;
   const repositories: EndpointRepositoryIdentity[] = [];
   for (const [index, value] of configuredRepositories.entries()) {
     const repository = validateEndpointRepositoryIdentity(value, `$.repositories[${index}]`);
     if (!repository.valid || repository.value === undefined) return undefined;
-    if (
-      repository.value.endpointId !== endpoint.value.id ||
-      repository.value.installationId !== installation.value.installationId
-    )
+    if (repository.value.endpointId !== endpoint.value.id) return undefined;
+    if (installation?.value !== undefined && repository.value.installationId !== installation.value.installationId)
       return undefined;
     repositories.push(repository.value);
   }
-  return { endpoint: endpoint.value, installation: installation.value, repositories };
+  const repositoryHost = options.repositoryHost ?? repositories[0]?.repositoryHost ?? "github.com";
+  return {
+    endpoint: endpoint.value,
+    installation: installation?.value,
+    repositories,
+    repositoryHost,
+    resolveEnrollment: options.resolveEnrollment,
+  };
 }
 
 function repositoryFromPayload(payload: Record<string, unknown>): { id: string; nameWithOwner: string } | undefined {
@@ -405,7 +469,7 @@ export async function admitEndpointWebhook(
         "Delivery has no valid installation identity.",
       ),
     ]);
-  if (installationId !== context.installation.installationId)
+  if (context.installation !== undefined && installationId !== context.installation.installationId)
     return emptyResult("rejected", true, [
       diagnostic(
         "ENDPOINT_WEBHOOK_INSTALLATION_MISMATCH",
@@ -418,20 +482,57 @@ export async function admitEndpointWebhook(
     return emptyResult("rejected", true, [
       diagnostic("ENDPOINT_WEBHOOK_REPOSITORY_UNBOUND", "$.repository", "Delivery has no valid repository identity."),
     ]);
+  const installation = {
+    version: ENDPOINT_WEBHOOK_CONTRACT_VERSION,
+    kind: "installation",
+    endpointId: context.endpoint.id,
+    installationId,
+  } satisfies EndpointInstallationIdentity;
+  const repositoryCandidate = {
+    version: ENDPOINT_WEBHOOK_CONTRACT_VERSION,
+    kind: "repository",
+    endpointId: context.endpoint.id,
+    installationId,
+    repositoryHost: context.repositoryHost,
+    repositoryId: payloadRepository.id,
+    nameWithOwner: payloadRepository.nameWithOwner,
+  } satisfies EndpointRepositoryIdentity;
+  const repositoryValidation = validateEndpointRepositoryIdentity(repositoryCandidate);
+  if (!repositoryValidation.valid || repositoryValidation.value === undefined)
+    return emptyResult("rejected", true, [
+      diagnostic("ENDPOINT_WEBHOOK_REPOSITORY_UNBOUND", "$.repository.id", "Delivery repository identity is invalid."),
+    ]);
+  const repository = repositoryValidation.value;
   const repositories = context.repositories.filter(
     (candidate) =>
-      candidate.repositoryId === payloadRepository.id &&
-      candidate.nameWithOwner.toLowerCase() === payloadRepository.nameWithOwner.toLowerCase(),
+      candidate.installationId === installationId &&
+      candidate.repositoryHost === repository.repositoryHost &&
+      candidate.repositoryId === repository.repositoryId,
   );
-  if (repositories.length !== 1)
+  if (context.repositories.length > 0 && repositories.length !== 1)
     return emptyResult("rejected", true, [
       diagnostic(
         "ENDPOINT_WEBHOOK_REPOSITORY_UNBOUND",
-        "$.repository",
+        "$.repository.id",
         "Repository is not enrolled on this Endpoint installation.",
       ),
     ]);
-  const repository = repositories[0]!;
+  if (context.resolveEnrollment !== undefined) {
+    let enrolled = false;
+    try {
+      enrolled = await context.resolveEnrollment({ endpoint: context.endpoint, installation, repository });
+    } catch {
+      enrolled = false;
+    }
+    if (!enrolled)
+      return emptyResult("rejected", true, [
+        diagnostic(
+          "ENDPOINT_WEBHOOK_REPOSITORY_UNBOUND",
+          "$.repository.id",
+          "Repository is not enrolled on this Endpoint installation.",
+        ),
+      ]);
+  }
 
   const receivedAt = dateValue(delivery.occurredAt, Date.now());
   if (!Number.isFinite(receivedAt.ms))
@@ -485,7 +586,7 @@ export async function admitEndpointWebhook(
         ),
       ]),
       endpoint: context.endpoint,
-      installation: context.installation,
+      installation,
       repository,
       principal: {
         version: 1,
@@ -500,7 +601,7 @@ export async function admitEndpointWebhook(
     id: deliveryId,
     occurredAt: receivedAt.value ?? new Date(receivedAt.ms).toISOString(),
     endpointId: context.endpoint.id,
-    installationId: context.installation.installationId,
+    installationId,
     repositoryId: repository.repositoryId,
   }) satisfies EndpointWebhookHint;
   guard.set(deliveryId, { fingerprint: digest, admitted: true, seenAt: nowInput.ms });
@@ -512,7 +613,7 @@ export async function admitEndpointWebhook(
     diagnostics: [],
     hint,
     endpoint: context.endpoint,
-    installation: context.installation,
+    installation,
     repository,
     principal: {
       version: 1,
@@ -559,27 +660,19 @@ export function createEndpointWebhookHandler(
   return async (request: Request): Promise<Response> => {
     if (request.method !== "POST")
       return new Response("Method not allowed.", { status: 405, headers: { allow: "POST" } });
-    const contentLength = request.headers.get("content-length");
-    if (
-      contentLength !== null &&
-      (!/^\d+$/u.test(contentLength) || Number(contentLength) > ENDPOINT_WEBHOOK_LIMITS.bodyBytes)
-    )
+    const receivedAt = new Date().toISOString();
+    const body = await readBoundedRequestBody(request);
+    if (body.kind === "too-large")
       return new Response("Payload too large.", { status: 413, headers: { "cache-control": "no-store" } });
-    let body: ArrayBuffer;
-    try {
-      body = await request.arrayBuffer();
-    } catch {
+    if (body.kind === "invalid")
       return new Response("Invalid webhook body.", { status: 400, headers: { "cache-control": "no-store" } });
-    }
     const result = await admitEndpointWebhook(
       {
-        body,
+        body: body.bytes,
         signature: request.headers.get("x-hub-signature-256") ?? undefined,
         deliveryId: request.headers.get("x-github-delivery") ?? undefined,
-        endpointId: request.headers.get("x-inari-endpoint-id") ?? undefined,
         event: request.headers.get("x-github-event") ?? undefined,
-        occurredAt: request.headers.get("x-inari-delivery-at") ?? undefined,
-        retry: request.headers.get("x-inari-retry") === "true",
+        occurredAt: receivedAt,
       },
       admission,
     );

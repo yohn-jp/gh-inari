@@ -8,6 +8,7 @@ import {
 } from "./endpoint-authorization.js";
 import {
   ENDPOINT_WEBHOOK_CONTRACT_VERSION,
+  ENDPOINT_WEBHOOK_LIMITS,
   EndpointWebhookReplayGuard,
   admitEndpointWebhook,
   createEndpointWebhookHandler,
@@ -174,4 +175,80 @@ test("host-style handler is bounded, method-limited, and never returns secret ma
   const output = await response.text();
   assert.equal(output.includes(secret), false);
   assert.equal(output.includes('"state"'), false);
+});
+
+test("shared-hosted admission binds signed installation and repository evidence without static enrollment", async () => {
+  const signed = await signature(payload);
+  const admitted = await admitEndpointWebhook(
+    { ...delivery(), signature: signed },
+    {
+      secret,
+      endpoint,
+      repositoryHost: "github.com",
+      now: "2026-09-22T00:00:00.000Z",
+      replay: new EndpointWebhookReplayGuard(),
+    },
+  );
+  assert.equal(admitted.admitted, true);
+  assert.equal(admitted.installation?.installationId, "9001");
+  assert.equal(admitted.repository?.repositoryId, "1330755860");
+  assert.equal(admitted.repository?.nameWithOwner, "yohn-jp/gh-inari");
+
+  const narrowed = await admitEndpointWebhook(
+    { ...delivery("delivery-narrowed"), signature: signed },
+    {
+      secret,
+      endpoint: { ...endpoint, deployment: "self-hosted" },
+      repositoryHost: "github.com",
+      resolveEnrollment: ({ repository: candidate }) => candidate.repositoryId === "other",
+      now: "2026-09-22T00:00:00.000Z",
+    },
+  );
+  assert.equal(narrowed.admitted, false);
+  assert.equal(narrowed.diagnostics[0]?.code, "ENDPOINT_WEBHOOK_REPOSITORY_UNBOUND");
+});
+
+test("handler enforces the byte ceiling while streaming with missing or false Content-Length", async () => {
+  const handler = createEndpointWebhookHandler({ admission: options({ now: undefined }) });
+  let cancelled = false;
+  let chunk = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (chunk++ === 0) controller.enqueue(new Uint8Array(ENDPOINT_WEBHOOK_LIMITS.bodyBytes));
+      else if (chunk === 2) controller.enqueue(Uint8Array.of(1));
+      else controller.close();
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const oversized = await handler(
+    new Request("https://hosted.example/v1/webhooks/github", {
+      method: "POST",
+      body: stream,
+      duplex: "half",
+      headers: { "content-length": "1" },
+    } as RequestInit & { duplex: "half" }),
+  );
+  assert.equal(oversized.status, 413);
+  assert.equal(cancelled, true);
+});
+
+test("handler rejects an oversized declared body before reading it", async () => {
+  const handler = createEndpointWebhookHandler({ admission: options({ now: undefined }) });
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(Uint8Array.of(1));
+      controller.close();
+    },
+  });
+  const request = new Request("https://hosted.example/v1/webhooks/github", {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+    headers: { "content-length": String(ENDPOINT_WEBHOOK_LIMITS.bodyBytes + 1) },
+  } as RequestInit & { duplex: "half" });
+  const response = await handler(request);
+  assert.equal(response.status, 413);
+  assert.equal(request.body?.locked, false);
 });
