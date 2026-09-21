@@ -36,6 +36,7 @@ import {
   GitHubAdapter,
   isGitHubAdapterError,
 } from "./github/index.js";
+import { GitHubPrPublicationAdapter } from "./github/pr-publication-adapter.js";
 import { readGitHubProviderFailure } from "./github/provider-failure.js";
 import {
   assertPullRequestSyncInputComplete,
@@ -147,6 +148,7 @@ import {
 } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
 import { tryAdaptIntegrationRouting } from "./integration-routing-adapters.js";
+import { publishPullRequest } from "./pr-publication.js";
 import {
   canonicalDelegatorPublicKeyJson,
   defaultDelegatorPrivateKeyPath,
@@ -2485,6 +2487,9 @@ async function runArtifactCommand(
     }
   }
   if (domain === "pr") {
+    if (command === "publish") {
+      return runPrPublicationCommand(rest, parsed, root, dependencies);
+    }
     if (command === "comment" || command === "review" || command === "merge") {
       return runPullRequestMutationCommand(command, rest, parsed, root, dependencies);
     }
@@ -2728,6 +2733,40 @@ async function runIntegrationRoutingCommand(rest: readonly string[], parsed: Par
     }),
   );
   return projected.valid ? 0 : EXIT_VALIDATION;
+}
+
+/** Execute the Core idempotent PR-publication kernel through user-context GitHub. */
+async function runPrPublicationCommand(
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+): Promise<number> {
+  if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", `Unexpected PR publication argument "${rest[0] ?? ""}".`);
+  const unsupported = Object.keys(parsed.options).find((key) => !["json", "from", "repository"].includes(key));
+  if (unsupported !== undefined) {
+    const option = getOption(unsupported as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by PR publication.`,
+      "$argv",
+      { command: "pr publish", option: option.id },
+    );
+  }
+  if (typeof parsed.options.from !== "string")
+    throw new CliError("INPUT_REQUIRED", "PR publication requires --from <path>.", "--from");
+  const input = await readJsonValue(parsed.options.from, "--from");
+  const adapter = createAdapter(dependencies, root, parsed.options.repository);
+  const result = await publishPullRequest(input, new GitHubPrPublicationAdapter(adapter));
+  console.log(JSON.stringify({ ...result, operation: "pr.publish", mutation: result.classification === "created" }));
+  if (result.ok) return 0;
+  const remote = result.diagnostics.some(
+    (entry) =>
+      entry.code === "PR_PUBLICATION_PROVIDER_FAILED" ||
+      entry.code === "PR_PUBLICATION_CREATE_UNCERTAIN" ||
+      entry.code === "PR_PUBLICATION_VERIFICATION_FAILED",
+  );
+  return remote ? EXIT_REMOTE : EXIT_VALIDATION;
 }
 
 /** Project the canonical Operational Observation surface for CLI callers. */

@@ -85,6 +85,7 @@ export type CommandId =
   | "pr.semantic.check"
   | "pr.render"
   | "pr.create"
+  | "pr.publish"
   | "pr.explain"
   | "pr.get"
   | "pr.view"
@@ -220,6 +221,7 @@ const ISSUE_DISCOVERY_OPTIONS = ["help", "json", "repository", "state", "limit",
 const PR_DISCOVERY_OPTIONS = [...ISSUE_DISCOVERY_OPTIONS, "head", "base"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const PR_SYNC_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "dryRun"] as const;
+const PR_PUBLICATION_OPTIONS = ["help", "json", "repository", "from"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
 const CHANGE_READY_OPTIONS = [...CHANGE_SESSION_OPTIONS, "executionEvidence"] as const;
@@ -1136,6 +1138,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["pr", "create"],
     "Validate, render, and create a governed PR.",
     PR_CREATE_OPTIONS,
+  ),
+  command(
+    "pr.publish",
+    "pr",
+    "publish",
+    ["pr", "publish"],
+    "Publish one governed pull request idempotently from an explicit Core request.",
+    PR_PUBLICATION_OPTIONS,
   ),
   command(
     "pr.explain",

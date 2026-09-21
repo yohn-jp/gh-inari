@@ -111,6 +111,14 @@ test("pr routing exposes the read-only canonical routing input", () => {
   assert.match(commandUsage(command), /--from <path>/);
 });
 
+test("pr publish exposes the explicit idempotent publication request", () => {
+  const command = getCommandForPositionals(["pr", "publish"]);
+  assert.ok(command);
+  assert.equal(command.id, "pr.publish");
+  assert.deepEqual(command.optionIds, ["help", "json", "repository", "from"]);
+  assert.match(commandUsage(command), /--from <path>/);
+});
+
 test("impl verify exposes --execution-evidence alongside its authorization and pull-request inputs", () => {
   const command = getCommandForPositionals(["impl", "verify"]);
   assert.ok(command);
