@@ -43,6 +43,8 @@ export * from "./golden-path-review.js";
 export * from "./golden-path-entry.js";
 export * from "./golden-path-recovery.js";
 export * from "./semantic-pr-projection.js";
+export * from "./pr-publication.js";
+export * from "./github/pr-publication-adapter.js";
 // The existing PR projection owns the historical MutationPlan names. Export
 // the governed write authority under explicit names to keep that authority
 // separate at the package barrel as well as in its implementation module.
