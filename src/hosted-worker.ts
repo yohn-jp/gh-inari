@@ -47,6 +47,8 @@ import type {
   EndpointInstallationIdentity,
   EndpointRepositoryIdentity,
 } from "./endpoint-authorization.js";
+import { createEndpointHttpHandler, ENDPOINT_HTTP_PATH, type EndpointHttpHandler } from "./endpoint-http.js";
+import type { EndpointApi } from "./endpoint-api.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -56,6 +58,7 @@ const UPGRADE = "websocket";
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const DELEGATOR_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const HOSTED_WEBHOOK_HANDLERS = new WeakMap<object, ReturnType<typeof createEndpointWebhookHandler>>();
+const HOSTED_ENDPOINT_HANDLERS = new WeakMap<object, EndpointHttpHandler>();
 
 export interface HostedDurableObjectStub {
   fetch(request: Request): Promise<Response>;
@@ -89,6 +92,8 @@ export interface Env {
   readonly INARI_ENDPOINT_REPOSITORY_NAME?: string;
   /** Optional runtime injection for self-hosted composition and tests. */
   readonly endpointWebhook?: EndpointWebhookHandlerOptions;
+  /** Shared logical Dashboard API composition; authentication remains injected into the API. */
+  readonly endpointApi?: EndpointApi;
   readonly telemetry?: RelayTelemetrySink;
 }
 
@@ -567,11 +572,27 @@ async function webhook(request: Request, env: Env): Promise<Response> {
   return handler(request);
 }
 
+async function endpoint(request: Request, env: Env): Promise<Response> {
+  if (env.endpointApi === undefined) return serviceUnavailable();
+  const key = env as object;
+  let handler = HOSTED_ENDPOINT_HANDLERS.get(key);
+  if (handler === undefined) {
+    try {
+      handler = createEndpointHttpHandler({ api: env.endpointApi, path: ENDPOINT_HTTP_PATH });
+    } catch {
+      return serviceUnavailable();
+    }
+    HOSTED_ENDPOINT_HANDLERS.set(key, handler);
+  }
+  return handler(request);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
     if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
+    if (pathname === ENDPOINT_HTTP_PATH) return endpoint(request, env);
     if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);
     if (pathname === "/mcp") return mcp(request, env);
     if (pathname === "/v1/relay/connect") return relayConnect(request, env);

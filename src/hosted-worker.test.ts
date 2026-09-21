@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { base64UrlEncodeText } from "./agent-authority/codec.js";
 import { ENDPOINT_AUTHORIZATION_CONTRACT_VERSION } from "./endpoint-authorization.js";
+import { createEndpointApi } from "./endpoint-api.js";
+import { ENDPOINT_HTTP_PATH } from "./endpoint-http.js";
 import { ENDPOINT_WEBHOOK_PATH, EndpointWebhookReplayGuard } from "./endpoint-webhook.js";
 import { decodeRelayEnvelope, type RelayRepositoryIdentity } from "./relay/contract.js";
 import {
@@ -390,4 +392,93 @@ test("hosted webhook route admits only the bounded Endpoint webhook surface", as
   );
   assert.equal(duplicate.status, 200);
   assert.equal((await worker.fetch(new Request("https://hosted.example/missing"), hostedEnv)).status, 404);
+});
+
+test("hosted Endpoint route delegates to the shared authenticated API composition", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const endpoint = {
+    version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+    kind: "endpoint" as const,
+    id: "hosted-dashboard",
+    deployment: "shared-hosted" as const,
+  };
+  const installation = {
+    version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+    kind: "installation" as const,
+    endpointId: endpoint.id,
+    installationId: "hosted-installation",
+  };
+  const repositoryIdentity = {
+    version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+    kind: "repository" as const,
+    endpointId: endpoint.id,
+    installationId: installation.installationId,
+    repositoryHost: "github.com",
+    repositoryId: "1330755860",
+    nameWithOwner: "yohn-jp/gh-inari",
+  };
+  const principal = { version: 1 as const, kind: "human" as const, id: "hosted-human" };
+  const capability = { kind: "change.implement" as const, issue: 922 };
+  const endpointApi = createEndpointApi({
+    authentication: {
+      authenticate: async () => ({
+        version: 1,
+        authenticated: true as const,
+        principal,
+        endpoint,
+        installation,
+        repository: repositoryIdentity,
+        capabilities: [capability],
+      }),
+    },
+    readPresence: async () => ({
+      endpoint,
+      repository: repositoryIdentity,
+      now: 1_000,
+      relay: {
+        version: 1,
+        repository: { repositoryHost: "github.com", repositoryId: "1330755860" },
+        availability: "available" as const,
+        observedAtMs: 1_000,
+        records: [],
+      },
+    }),
+  });
+  const response = await worker.fetch(
+    new Request(`https://hosted.example${ENDPOINT_HTTP_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        version: 1,
+        operation: "presence.read",
+        endpoint,
+        installation,
+        repository: repositoryIdentity,
+        capability,
+      }),
+    }),
+    { ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])), endpointApi },
+  );
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ok, true);
+  assert.equal(
+    (
+      await worker.fetch(
+        new Request(`https://hosted.example${ENDPOINT_HTTP_PATH}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            version: 1,
+            operation: "presence.read",
+            endpoint,
+            installation,
+            repository: repositoryIdentity,
+            capability,
+          }),
+        }),
+        env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+      )
+    ).status,
+    503,
+  );
 });

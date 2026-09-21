@@ -116,6 +116,8 @@ export * from "./release-certification.js";
 export * from "./agent-authority/index.js";
 export * from "./endpoint-authorization.js";
 export * from "./endpoint-runtime-presence.js";
+export * from "./endpoint-api.js";
+export * from "./endpoint-http.js";
 export * from "./session-authorized-change-executor.js";
 export * from "./mcp/index.js";
 export {
