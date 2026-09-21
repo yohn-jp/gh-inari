@@ -13,6 +13,13 @@ enabled = true
 # No GitHub App, provider, Session, or Runtime credentials are configured here.
 [vars]
 INARI_HOSTED_REPOSITORY_HOST = "github.com"
+# Public GitHub App deployment metadata for /.well-known/inari. These values
+# are intentionally non-secret; leave them empty until the App is configured.
+INARI_GITHUB_APP_ID = ""
+INARI_GITHUB_APP_CLIENT_ID = ""
+INARI_GITHUB_APP_SLUG = ""
+INARI_GITHUB_APP_INSTALLATION_URL = ""
+INARI_GITHUB_APP_USER_AUTH_PROFILE = "device-flow"
 
 [[durable_objects.bindings]]
 name = "REPOSITORY_RELAY"

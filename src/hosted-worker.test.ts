@@ -73,6 +73,74 @@ function env(namespace: HostedDurableObjectNamespace): Env {
   return { REPOSITORY_RELAY: namespace };
 }
 
+function onboardingEnv(namespace: HostedDurableObjectNamespace): Env {
+  return {
+    ...env(namespace),
+    INARI_GITHUB_APP_ID: "123456",
+    INARI_GITHUB_APP_CLIENT_ID: "Iv1.public-client",
+    INARI_GITHUB_APP_SLUG: "inari",
+    INARI_GITHUB_APP_INSTALLATION_URL: "https://github.com/apps/inari/installations/new",
+    INARI_GITHUB_APP_USER_AUTH_PROFILE: "device-flow",
+  };
+}
+
+test("public onboarding descriptor exposes deployment metadata without authority", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const ids: string[] = [];
+  const response = await worker.fetch(
+    new Request("https://hosted.example/.well-known/inari"),
+    onboardingEnv(relayNamespace({ fetch: async () => new Response("unused") }, ids)),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body, {
+    version: 1,
+    githubHost: "github.com",
+    appId: "123456",
+    appClientId: "Iv1.public-client",
+    appSlug: "inari",
+    appInstallationUrl: "https://github.com/apps/inari/installations/new",
+    appUserAuthProfile: "device-flow",
+    relayConnectionBase: "wss://hosted.example/v1/relay/connect",
+  });
+  assert.deepEqual(ids, []);
+  assert.equal(JSON.stringify(body).includes("repositoryId"), false);
+});
+
+test("public onboarding descriptor fails closed for missing or malformed metadata", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const ids: string[] = [];
+  const binding = relayNamespace({ fetch: async () => new Response("unused") }, ids);
+  const missing = await worker.fetch(new Request("https://hosted.example/.well-known/inari"), env(binding));
+  assert.equal(missing.status, 503);
+  assert.deepEqual(await missing.json(), {
+    version: 1,
+    ok: false,
+    error: { code: "ENDPOINT_ONBOARDING_NOT_CONFIGURED" },
+  });
+  const malformed = await worker.fetch(new Request("https://hosted.example/.well-known/inari"), {
+    ...onboardingEnv(binding),
+    INARI_GITHUB_APP_ID: "not-numeric",
+  });
+  assert.equal(malformed.status, 503);
+  assert.deepEqual(await malformed.json(), {
+    version: 1,
+    ok: false,
+    error: { code: "ENDPOINT_ONBOARDING_NOT_CONFIGURED" },
+  });
+  assert.deepEqual(ids, []);
+});
+
+test("public onboarding descriptor only accepts GET", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const response = await worker.fetch(
+    new Request("https://hosted.example/.well-known/inari", { method: "POST" }),
+    onboardingEnv(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+  );
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET");
+});
+
 test("healthz is bounded metadata and does not expose repository or credential state", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const ids: string[] = [];
