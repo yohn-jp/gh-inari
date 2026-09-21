@@ -316,7 +316,9 @@ export interface CliDependencies {
     options: SemanticIssueRelationExecutorOptions,
   ) => SemanticIssueRelationExecutionPort;
   /** Factory seam for the foreground local Relay Runtime composition. */
-  readonly createLocalRuntimeConfig?: (input: LocalRuntimeConfigInput) => LocalRuntimeConfig;
+  readonly createLocalRuntimeConfig?: (
+    input: LocalRuntimeConfigInput,
+  ) => LocalRuntimeConfig | PromiseLike<LocalRuntimeConfig>;
 }
 
 const BOOLEAN_OPTIONS = new Set([
@@ -451,7 +453,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runSessionCommand(command, rest, parsed, root, json);
     }
     if (domain === "runtime") {
-      return runRuntimeCommand(command, rest, parsed, root, dependencies, json);
+      return await runRuntimeCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -1226,14 +1228,14 @@ async function runSessionCommand(
   return 0;
 }
 
-function runRuntimeCommand(
+async function runRuntimeCommand(
   command: string | undefined,
   rest: readonly string[],
   parsed: ParsedArgs,
   root: string,
   dependencies: CliDependencies,
   json: boolean,
-): number {
+): Promise<number> {
   if (command !== "connect" || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
   }
@@ -1249,7 +1251,7 @@ function runRuntimeCommand(
     );
   }
   const createConfig = dependencies.createLocalRuntimeConfig ?? createLocalRuntimeConfig;
-  const configuration = createConfig({
+  const configuration = await createConfig({
     root,
     ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
     ...(typeof parsed.options.relayUrl === "string" ? { relayUrl: parsed.options.relayUrl } : {}),
