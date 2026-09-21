@@ -42,6 +42,7 @@ export type CommandId =
   | "root.version"
   | "root.diagnose"
   | "root.doctor"
+  | "root.setup"
   | "issue.schema"
   | "issue.contract"
   | "issue.validate"
@@ -140,6 +141,8 @@ export type OptionId =
   | "policy"
   | "repository"
   | "relayUrl"
+  | "endpoint"
+  | "configHome"
   | "title"
   | "head"
   | "base"
@@ -207,6 +210,7 @@ export interface CommandDefinition {
 }
 
 const ROOT_OPTIONS = ["help", "json"] as const;
+const SETUP_OPTIONS = ["help", "json", "repository", "endpoint", "configHome", "authorityId", "privateKey"] as const;
 const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
@@ -249,7 +253,7 @@ const AUTHORITY_READINESS_OPTIONS = [
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
 const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
-const RUNTIME_OPTIONS = ["help", "json", "repository", "relayUrl", "authorityId", "privateKey"] as const;
+const RUNTIME_OPTIONS = ["help", "json", "repository", "relayUrl", "authorityId", "privateKey", "configHome"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
 const ISSUE_RELATIONS_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
@@ -368,6 +372,24 @@ export const COMMAND_OPTIONS = {
     "required",
     "Local Repository Relay WebSocket endpoint; transport configuration only, never an authority input.",
     "ws-url",
+  ),
+  endpoint: option(
+    "endpoint",
+    "endpoint",
+    ["--endpoint", "--endpoint-url"],
+    "string",
+    "required",
+    "Public Inari Endpoint used to resolve repository onboarding metadata.",
+    "url",
+  ),
+  configHome: option(
+    "configHome",
+    "config-home",
+    ["--config-home"],
+    "string",
+    "required",
+    "Local Inari configuration home used for the Runtime profile and App-user credential reference.",
+    "path",
   ),
   title: option(
     "title",
@@ -737,6 +759,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "requireCapability",
     "minimumVersion",
   ]),
+  command(
+    "root.setup",
+    "root",
+    "setup",
+    ["setup"],
+    "Prepare the repository-scoped local Runtime profile and report trust readiness.",
+    SETUP_OPTIONS,
+  ),
   command(
     "issue.schema",
     "issue",

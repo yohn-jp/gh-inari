@@ -6,7 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { createLocalRuntimeConfig, LocalRuntimeConfigError } from "./local-runtime-config.js";
 import { createAppUserCredential } from "../github/app-user-credential.js";
-import { InMemoryAppUserCredentialStore } from "../github/app-user-credential-store.js";
+import { FileAppUserCredentialStore, InMemoryAppUserCredentialStore } from "../github/app-user-credential-store.js";
+import { delegatorPublicKeyFingerprint, loadDelegatorPrivateKey } from "../agent-authority/delegator-key.js";
+import { LocalRuntimeProfileStore, type LocalRuntimeProfile } from "../local-runtime-profile.js";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -188,5 +190,82 @@ test("legacy installation-key composition remains compatible", async () => {
     assert.deepEqual(configuration.app, { appId: "42", installationId: "7" });
   } finally {
     await rm(key.directory, { recursive: true, force: true });
+  }
+});
+
+test("ready Runtime profile takes precedence over environment and explicit inputs override the profile", async () => {
+  const profileHome = await mkdtemp(path.join(os.tmpdir(), "inari-runtime-profile-config-"));
+  const profileKey = await runtimeKey();
+  const overrideKey = await runtimeKey();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = appUserFetch();
+  try {
+    const profile: LocalRuntimeProfile = {
+      version: 1,
+      state: "ready",
+      endpoint: "https://endpoint.example.test",
+      relayUrl: "wss://profile-relay.example.test/connect",
+      repository: {
+        repositoryHost: "github.com",
+        repositoryId: "99",
+        repositoryNameWithOwner: "acme/inari",
+      },
+      app: { appId: "42", installationId: "7", clientId: "public-client" },
+      authority: {
+        authorityId: "profile-authority",
+        publicKeyFingerprint: delegatorPublicKeyFingerprint(loadDelegatorPrivateKey(profileKey.path)),
+        privateKeyPath: profileKey.path,
+      },
+    };
+    await new LocalRuntimeProfileStore({ configHome: profileHome }).save(profile);
+    await new FileAppUserCredentialStore({ path: path.join(profileHome, "app-user-credential.json") }).save(
+      createAppUserCredential({
+        accessToken: "access-secret",
+        refreshToken: "refresh-secret",
+        accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
+        refreshTokenExpiresAt: "2027-06-01T00:00:00.000Z",
+      }),
+    );
+    const environment = {
+      INARI_RELAY_URL: "wss://environment-relay.example.test",
+      INARI_RUNTIME_AUTHORITY_ID: "environment-authority",
+      INARI_RUNTIME_AUTHORITY_PRIVATE_KEY_FILE: overrideKey.path,
+      INARI_RUNTIME_PROFILE: "installation-key",
+      INARI_GITHUB_APP_ID: "999",
+    };
+    const fromProfile = await createLocalRuntimeConfig({
+      repository: "acme/inari",
+      configHome: profileHome,
+      environment,
+    });
+    assert.equal(fromProfile.relayUrl, profile.relayUrl);
+    assert.equal(fromProfile.delegatorId, profile.authority.authorityId);
+    assert.deepEqual(fromProfile.repository, {
+      repositoryHost: "github.com",
+      repositoryId: "99",
+      repositoryNameWithOwner: "acme/inari",
+    });
+    assert.deepEqual(fromProfile.app, { appId: "42", installationId: "7" });
+
+    const fromExplicitInput = await createLocalRuntimeConfig({
+      repository: "acme/inari",
+      configHome: profileHome,
+      environment,
+      relayUrl: "wss://explicit-relay.example.test/connect",
+      delegatorId: "explicit-authority",
+      privateKeyPath: overrideKey.path,
+    });
+    assert.equal(fromExplicitInput.relayUrl, "wss://explicit-relay.example.test/connect");
+    assert.equal(fromExplicitInput.delegatorId, "explicit-authority");
+    assert.equal(
+      delegatorPublicKeyFingerprint(fromExplicitInput.privateKey),
+      delegatorPublicKeyFingerprint(loadDelegatorPrivateKey(overrideKey.path)),
+    );
+    assert.deepEqual(fromExplicitInput.app, { appId: "42", installationId: "7" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(profileKey.directory, { recursive: true, force: true });
+    await rm(overrideKey.directory, { recursive: true, force: true });
+    await rm(profileHome, { recursive: true, force: true });
   }
 });

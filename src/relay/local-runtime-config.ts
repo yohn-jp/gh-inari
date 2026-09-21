@@ -17,10 +17,16 @@ import {
 import type { AppProviderCredentialBroker } from "../github/app-provider-credential-broker.js";
 import { GitHubNativeHttpTransport, githubRestBaseUrl } from "../github/native-http-transport.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
-import { loadDelegatorPrivateKey } from "../agent-authority/delegator-key.js";
+import { delegatorPublicKeyFingerprint, loadDelegatorPrivateKey } from "../agent-authority/delegator-key.js";
 import { createLocalRelayRuntime, type LocalRelayRuntime } from "./local-runtime.js";
 import type { RelayRepositoryIdentity } from "./contract.js";
 import type { CapabilityAuthorizedSessionExecutor } from "../session-authorized-change-executor.js";
+import { resolveLocalRepositoryContext } from "../github/local-repository-context.js";
+import {
+  LocalRuntimeProfileStore,
+  resolveLocalRuntimeConfigHome,
+  type LocalRuntimeProfile,
+} from "../local-runtime-profile.js";
 
 const MAX_CONFIG_VALUE_LENGTH = 512;
 const MAX_APP_PRIVATE_KEY_BYTES = 64 * 1024;
@@ -87,6 +93,7 @@ export interface LocalRuntimeConfigInput {
   readonly delegatorId?: string;
   readonly privateKeyPath?: string;
   readonly root?: string;
+  readonly configHome?: string;
   readonly environment?: LocalRuntimeConfigEnvironment;
   readonly profile?: LocalRuntimeCredentialProfile;
   readonly appUser?: LocalRuntimeAppUserInput;
@@ -516,16 +523,49 @@ function profileFromInput(
 /** Compose the provider scope before constructing the immutable local Runtime. */
 export async function createLocalRuntimeConfig(input: LocalRuntimeConfigInput): Promise<LocalRuntimeConfig> {
   const environment = input.environment ?? process.env;
-  const profile = profileFromInput(input, environment);
   const root = path.resolve(input.root ?? process.cwd());
+  let localProfile: LocalRuntimeProfile | undefined;
+  if (input.profile === undefined && input.appUser === undefined) {
+    try {
+      const context = resolveLocalRepositoryContext({ repository: input.repository, cwd: root });
+      localProfile = await new LocalRuntimeProfileStore({
+        configHome: input.configHome,
+        environment,
+      }).findForRepository({
+        repositoryHost: context.hostname,
+        repositoryNameWithOwner: context.nameWithOwner,
+      });
+      if (localProfile?.state !== undefined && localProfile.state !== "ready") {
+        throw new LocalRuntimeConfigError(
+          "LOCAL_RUNTIME_CONFIG_PROVIDER_FAILED",
+          "Local Runtime profile is not ready for foreground execution.",
+          "$profile.state",
+        );
+      }
+    } catch (error: unknown) {
+      if (error instanceof LocalRuntimeConfigError) throw error;
+      // Runtime connect retains its established explicit/environment path when
+      // no repository-scoped profile can be selected.
+      localProfile = undefined;
+    }
+  }
+  const profile = profileFromInput(
+    localProfile === undefined ? input : { ...input, appUser: { appId: localProfile.app.appId } },
+    environment,
+  );
   const repositoryValue = requiredValue(
-    input.repository ?? environmentValue(environment, "INARI_REPOSITORY", "GITHUB_REPOSITORY"),
+    input.repository ??
+      (localProfile === undefined
+        ? environmentValue(environment, "INARI_REPOSITORY", "GITHUB_REPOSITORY")
+        : `${localProfile.repository.repositoryHost}/${localProfile.repository.repositoryId}/${localProfile.repository.repositoryNameWithOwner}`),
     "repository",
     "--repository",
   );
   const repository = repositoryFromValue(repositoryValue, environment, profile === "installation-key");
   const relayUrl = requiredValue(
-    input.relayUrl ?? environmentValue(environment, "INARI_RELAY_URL", "INARI_RELAY_ENDPOINT"),
+    input.relayUrl ??
+      localProfile?.relayUrl ??
+      environmentValue(environment, "INARI_RELAY_URL", "INARI_RELAY_ENDPOINT"),
     "relay endpoint",
     "--relay-url",
   );
@@ -538,13 +578,16 @@ export async function createLocalRuntimeConfig(input: LocalRuntimeConfigInput): 
   if (parsedRelayUrl.protocol !== "ws:" && parsedRelayUrl.protocol !== "wss:")
     throw invalid("Relay endpoint must use ws or wss.", "--relay-url");
   const delegatorId = requiredValue(
-    input.delegatorId ?? environmentValue(environment, "INARI_RUNTIME_AUTHORITY_ID"),
+    input.delegatorId ??
+      localProfile?.authority.authorityId ??
+      environmentValue(environment, "INARI_RUNTIME_AUTHORITY_ID"),
     "Delegator authority id",
     "--authority-id",
   );
   if (!IDENTIFIER_PATTERN.test(delegatorId)) throw invalid("Delegator authority id is invalid.", "--authority-id");
   const keyPathValue =
     input.privateKeyPath ??
+    localProfile?.authority.privateKeyPath ??
     environmentValue(environment, "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY_FILE", "INARI_RUNTIME_PRIVATE_KEY_FILE");
   const keyPath = requiredValue(keyPathValue, "Delegator private-key file", "--private-key");
   const privateKeyPath = path.resolve(root, keyPath);
@@ -559,11 +602,37 @@ export async function createLocalRuntimeConfig(input: LocalRuntimeConfigInput): 
       "--private-key",
     );
   }
+  if (
+    localProfile !== undefined &&
+    input.privateKeyPath === undefined &&
+    delegatorPublicKeyFingerprint(privateKey) !== localProfile.authority.publicKeyFingerprint
+  ) {
+    throw new LocalRuntimeConfigError(
+      "LOCAL_RUNTIME_CONFIG_PROVIDER_FAILED",
+      "Local Runtime profile does not match its private-key reference.",
+      "$profile.authority",
+    );
+  }
   let resolvedRepository: LocalRuntimeRepository & { readonly repositoryId: string };
   let executor: CapabilityAuthorizedSessionExecutor;
   let app: { readonly appId: string; readonly installationId: string };
   if (profile === "app-user") {
-    const composed = await localAppUserConfig(repository, environment, input.appUser ?? {});
+    const composed = await localAppUserConfig(
+      repository,
+      environment,
+      input.appUser ??
+        (localProfile === undefined
+          ? {}
+          : {
+              appId: localProfile.app.appId,
+              installationId: localProfile.app.installationId,
+              clientId: localProfile.app.clientId,
+              credentialFile: path.join(
+                resolveLocalRuntimeConfigHome({ configHome: input.configHome, environment }),
+                "app-user-credential.json",
+              ),
+            }),
+    );
     resolvedRepository = composed.repository;
     executor = composed.executor;
     app = composed.app;
