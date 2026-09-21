@@ -103,6 +103,14 @@ test("pr sync exposes only its complete --from input mode", () => {
   assert.deepEqual(command.optionIds, ["help", "json", "template", "repository", "policy", "from", "dryRun"]);
 });
 
+test("pr routing exposes the read-only canonical routing input", () => {
+  const command = getCommandForPositionals(["pr", "routing"]);
+  assert.ok(command);
+  assert.equal(command.id, "pr.routing");
+  assert.deepEqual(command.optionIds, ["help", "json", "from"]);
+  assert.match(commandUsage(command), /--from <path>/);
+});
+
 test("impl verify exposes --execution-evidence alongside its authorization and pull-request inputs", () => {
   const command = getCommandForPositionals(["impl", "verify"]);
   assert.ok(command);

@@ -97,6 +97,7 @@ export type CommandId =
   | "pr.comment"
   | "pr.review"
   | "pr.merge"
+  | "pr.routing"
   | "impl.plan"
   | "impl.show"
   | "impl.validate"
@@ -274,6 +275,7 @@ const PR_CREATE_OPTIONS = [
 const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHead"] as const;
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
+const PR_ROUTING_OPTIONS = ["help", "json", "from"] as const;
 const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
 const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest", "executionEvidence"] as const;
 
@@ -1243,6 +1245,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
   ),
   command(
+    "pr.routing",
+    "pr",
+    "routing",
+    ["pr", "routing"],
+    "Validate one canonical Issue/Epic/Implementation integration route without GitHub mutation.",
+    PR_ROUTING_OPTIONS,
+  ),
+  command(
     "impl.plan",
     "impl",
     "plan",
@@ -1903,6 +1913,7 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "session.inspect" && id === "from") ||
         ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from") ||
         (entry.id === "pr.sync" && id === "from") ||
+        (entry.id === "pr.routing" && id === "from") ||
         (entry.id === "authority.bootstrap" &&
           (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability")) ||
         (entry.id === "impl.verify" && (id === "from" || id === "pullRequest"));
