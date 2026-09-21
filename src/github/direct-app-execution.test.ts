@@ -15,6 +15,8 @@ import { createLocalDelegatorSignedChangeProvenanceRecord } from "../agent-autho
 import type { SemanticSessionRequest } from "../agent-authority/session-request.js";
 import { compileSemanticTemplateSource, parseSemanticTemplate, renderSemanticNative } from "../semantic-template.js";
 import { createDirectAppSessionExecutor } from "./direct-app-execution.js";
+import { createAppUserCredential } from "./app-user-credential.js";
+import { InMemoryAppUserCredentialStore } from "./app-user-credential-store.js";
 
 const REPOSITORY = { hostname: "github.com", owner: "acme", name: "inari" } as const;
 const FAKE_PRIVATE_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n";
@@ -347,6 +349,25 @@ test("createDirectAppSessionExecutor returns a transport-neutral executor", () =
     privateKeyPem: FAKE_PRIVATE_KEY_PEM,
     repository: REPOSITORY,
     fetch: noNetworkFetch(),
+  });
+  assert.equal(typeof executor.execute, "function");
+});
+
+test("createDirectAppSessionExecutor accepts a Runtime-owned App-user broker without a private key", () => {
+  const executor = createDirectAppSessionExecutor({
+    appId: "123",
+    repository: REPOSITORY,
+    appUser: {
+      repositoryId: REPOSITORY_ID,
+      credentialStore: new InMemoryAppUserCredentialStore(
+        createAppUserCredential({
+          accessToken: "access-secret",
+          refreshToken: "refresh-secret",
+          accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
+        }),
+      ),
+      fetch: noNetworkFetch(),
+    },
   });
   assert.equal(typeof executor.execute, "function");
 });

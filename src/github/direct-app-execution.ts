@@ -17,6 +17,11 @@ import {
   type GitHubAppInstallationCredentialBrokerOptions,
   type GitHubAppRepositoryReadCapability,
 } from "./app-installation-credential-broker.js";
+import {
+  GitHubAppUserCredentialBroker,
+  type GitHubAppUserCredentialBrokerOptions,
+} from "./app-user-credential-broker.js";
+import type { AppProviderCredentialBroker } from "./app-provider-credential-broker.js";
 import { createAppRepositoryEvidenceReader } from "./app-repository-evidence-reader.js";
 import { resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { GitHubChangeStateProjector } from "./change-state-projector.js";
@@ -46,9 +51,9 @@ export interface DirectAppSessionExecutorConfig {
   /** GitHub App numeric identity. Worker secret; never caller input. */
   readonly appId: string;
   /** GitHub App installation identity. Non-secret deployment configuration. */
-  readonly installationId: string;
+  readonly installationId?: string;
   /** GitHub App private key (PEM). Worker secret; never caller input. */
-  readonly privateKeyPem: string;
+  readonly privateKeyPem?: string;
   /** Fixed target repository locator. Non-secret deployment configuration. */
   readonly repository: GitHubChangeEffectRepository;
   readonly repositoryNodeId?: string;
@@ -59,6 +64,13 @@ export interface DirectAppSessionExecutorConfig {
   readonly requestTimeoutMs?: number;
   /** Current repository-verified Implementation evidence for bound Sessions. */
   readonly implementationAuthorization?: ImplementationAuthorizationVerificationInput;
+  /** Injected provider broker, primarily for a Runtime-owned App credential. */
+  readonly credentialBroker?: AppProviderCredentialBroker;
+  /** Local App-user broker configuration; no App private key is accepted. */
+  readonly appUser?: Omit<GitHubAppUserCredentialBrokerOptions, "appId" | "repository"> & {
+    readonly appId?: string;
+    readonly repository?: GitHubChangeEffectRepository;
+  };
 }
 
 function isMutationRequest(request: ChangeReadRequest | ChangeMutationRequest): request is ChangeMutationRequest {
@@ -71,8 +83,10 @@ function buildReader(
   identity: RepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
 ): GitHubChangeStateProjector {
+  const [owner, name] = capability.scope.repository.nameWithOwner.split("/");
+  const repository = { hostname: capability.scope.repository.repositoryHost, owner, name };
   return new GitHubChangeStateProjector({
-    repository: config.repository,
+    repository,
     identity: {
       repositoryHost: identity.repositoryHost,
       repositoryId: identity.repositoryId,
@@ -80,7 +94,7 @@ function buildReader(
     },
     transport: capability.transport,
     providerPrincipal: capability.providerPrincipal,
-    remoteGovernance: createAppRepositoryEvidenceReader(capability, config.repository, identity),
+    remoteGovernance: createAppRepositoryEvidenceReader(capability, repository, identity),
     ...(isMutationRequest(request) && request.semanticPullRequestPlan !== undefined
       ? { semanticPullRequestPlan: request.semanticPullRequestPlan }
       : {}),
@@ -98,7 +112,7 @@ async function projectChangeFromCapability(
 }
 
 async function readChangeProjection(
-  broker: GitHubAppInstallationCredentialBroker,
+  broker: AppProviderCredentialBroker,
   config: DirectAppSessionExecutorConfig,
   identity: RepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
@@ -118,18 +132,45 @@ async function readChangeProjection(
 export function createDirectAppSessionExecutor(
   config: DirectAppSessionExecutorConfig,
 ): CapabilityAuthorizedSessionExecutor {
-  const brokerOptions: GitHubAppInstallationCredentialBrokerOptions = {
-    appId: config.appId,
-    installationId: config.installationId,
-    privateKeyPem: config.privateKeyPem,
-    repository: config.repository,
-    ...(config.repositoryNodeId === undefined ? {} : { repositoryNodeId: config.repositoryNodeId }),
-    ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
-    ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
-    ...(config.now === undefined ? {} : { now: config.now }),
-    ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
+  const installationOptions: GitHubAppInstallationCredentialBrokerOptions | undefined =
+    config.appUser === undefined && config.credentialBroker === undefined
+      ? config.privateKeyPem === undefined || config.installationId === undefined
+        ? undefined
+        : {
+            appId: config.appId,
+            installationId: config.installationId,
+            privateKeyPem: config.privateKeyPem,
+            repository: config.repository,
+            ...(config.repositoryNodeId === undefined ? {} : { repositoryNodeId: config.repositoryNodeId }),
+            ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
+            ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
+            ...(config.now === undefined ? {} : { now: config.now }),
+            ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
+          }
+      : undefined;
+  const createBroker = (provenance?: GitHubChangeProvenanceSignerOptions): AppProviderCredentialBroker => {
+    if (config.credentialBroker !== undefined) return config.credentialBroker;
+    if (config.appUser !== undefined) {
+      const appUserOptions: GitHubAppUserCredentialBrokerOptions = {
+        ...config.appUser,
+        appId: config.appUser.appId ?? config.appId,
+        repository: config.appUser.repository ?? config.repository,
+        ...(config.repositoryNodeId === undefined ? {} : { repositoryNodeId: config.repositoryNodeId }),
+        ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
+        ...(config.now === undefined ? {} : { now: config.now }),
+        ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
+        ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
+        ...(provenance === undefined ? {} : { provenance }),
+      };
+      return new GitHubAppUserCredentialBroker(appUserOptions);
+    }
+    if (installationOptions === undefined) throw new Error("Direct App credential broker configuration is required.");
+    return new GitHubAppInstallationCredentialBroker({
+      ...installationOptions,
+      ...(provenance === undefined ? {} : { provenance }),
+    });
   };
-  const broker = new GitHubAppInstallationCredentialBroker(brokerOptions);
+  const broker = createBroker();
   let establishedApp: CapabilityAuthorizedChangeExecutorFactoryResult["app"];
 
   return createCapabilityAuthorizedSessionExecutor({
@@ -192,10 +233,7 @@ export function createDirectAppSessionExecutor(
           };
           return signer;
         });
-        executionBroker = new GitHubAppInstallationCredentialBroker({
-          ...brokerOptions,
-          provenance,
-        });
+        executionBroker = createBroker(provenance);
       }
       const effectAuthorizer = new InariEffectAuthorizer({
         appId: config.appId,
