@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { GitHubAdapter } from "./github/index.js";
+import { GitHubAdapter, type GitHubPullRequest } from "./github/index.js";
 import {
   nativeTestTransport,
   type FixtureCommandResult,
@@ -398,6 +398,140 @@ test("pr create short help projects branch requirements and checklist field synt
   assert.match(output, /checklist values repeat as --field name=<option-id>/);
 });
 
+test("pr routing exposes the canonical read-only Core result", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "gh-inari-routing-cli-"));
+  const inputPath = path.join(root, "routing.json");
+  const repository = { repositoryHost: "github.com", repositoryId: "100", repository: "acme/inari" };
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      version: 1,
+      kind: "integration-routing",
+      mode: "issue-integration",
+      role: "implementation",
+      implementation: { ...repository, number: 700 },
+      sourceIssue: { ...repository, number: 680 },
+      epic: { ...repository, number: 640 },
+      relationships: {
+        implementationParent: { ...repository, number: 680 },
+        sourceIssueParent: { ...repository, number: 640 },
+      },
+      branches: {
+        default: "main",
+        implementation: "feat/700-routing",
+        issue: "issue/680-routing",
+        epic: "epic/640-routing",
+      },
+      head: "feat/700-routing",
+      base: "issue/680-routing",
+    }),
+  );
+  try {
+    const { exitCode, output } = await captureOutput(["pr", "routing", "--from", inputPath, "--json"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.operation, "pr.routing");
+    assert.equal(result.valid, true);
+    assert.equal(result.routing.pullRequest.role, "implementation");
+    assert.equal(result.routing.expectedBase, "issue/680-routing");
+    assert.equal(result.mutation, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pr publish exposes the same stable classification as Core", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "gh-inari-publication-cli-"));
+  const inputPath = path.join(root, "publication.json");
+  const repository = { repositoryHost: "github.com", repositoryId: "100", repository: "acme/inari" };
+  await writeFile(
+    inputPath,
+    JSON.stringify({
+      version: 1,
+      kind: "pr-publication",
+      repository,
+      workIdentity: { implementation: { ...repository, number: 700 } },
+      routing: {
+        version: 1,
+        kind: "integration-routing",
+        mode: "issue-integration",
+        role: "implementation",
+        implementation: { ...repository, number: 700 },
+        sourceIssue: { ...repository, number: 680 },
+        epic: { ...repository, number: 640 },
+        relationships: {
+          implementationParent: { ...repository, number: 680 },
+          sourceIssueParent: { ...repository, number: 640 },
+        },
+        branches: {
+          default: "main",
+          implementation: "feat/700-publication",
+          issue: "issue/680-integration",
+          epic: "epic/640-integration",
+        },
+        head: "feat/700-publication",
+        base: "issue/680-integration",
+      },
+      headRevision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title: "feat: publication",
+      body: "Closes #700",
+    }),
+  );
+  class PublicationAdapter extends GitHubAdapter {
+    private readonly created: GitHubPullRequest = {
+      number: 42,
+      title: "feat: publication",
+      body: "Closes #700",
+      state: "open",
+      url: "https://github.com/acme/inari/pull/42",
+      draft: false,
+      head: "feat/700-publication",
+      headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      base: "issue/680-integration",
+    };
+
+    override async getRepositoryContext() {
+      return {
+        hostname: "github.com",
+        host: "github.com",
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+        url: "https://github.com/acme/inari",
+        repositoryId: "100",
+      };
+    }
+
+    override async listPullRequests() {
+      return [];
+    }
+
+    override async createPullRequestPublication() {
+      return this.created;
+    }
+
+    override async getPullRequest() {
+      return this.created;
+    }
+  }
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "publish", "--from", inputPath, "--json"], {
+      createAdapter: () => new PublicationAdapter(),
+    });
+    assert.equal(exitCode, 0, lines[0]);
+    const result = JSON.parse(lines[0] ?? "{}") as { classification?: string; outcome?: string; operation?: string };
+    assert.equal(result.classification, "created");
+    assert.equal(result.outcome, "created");
+    assert.equal(result.operation, "pr.publish");
+  } finally {
+    console.log = originalLog;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("template import --help prints that leaf's usage", async () => {
   const { exitCode, output } = await captureHelp(["template", "import", "--help"]);
   assert.equal(exitCode, 0);
@@ -719,7 +853,7 @@ test("skill --json lists the same scenarios as a versioned JSON projection", asy
   const { exitCode, output } = await captureOutput(["skill", "--json"]);
   assert.equal(exitCode, 0);
   const parsed = JSON.parse(output);
-  assert.equal(parsed.version, "1.6.0");
+  assert.equal(parsed.version, "1.7.0");
   assert.deepEqual(
     parsed.scenarios.map((entry: { id: string }) => entry.id),
     [
@@ -858,7 +992,7 @@ test("skill <scenario> --json prints the same playbook as a versioned JSON proje
   const { exitCode, output } = await captureOutput(["skill", "author-issue", "--json"]);
   assert.equal(exitCode, 0);
   const parsed = JSON.parse(output);
-  assert.equal(parsed.version, "1.6.0");
+  assert.equal(parsed.version, "1.7.0");
   assert.equal(parsed.id, "author-issue");
   assert.ok(Array.isArray(parsed.workflow) && parsed.workflow.length > 0);
   assert.ok(Array.isArray(parsed.invariants) && parsed.invariants.length > 0);

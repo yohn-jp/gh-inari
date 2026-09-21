@@ -482,3 +482,33 @@ test("hosted Endpoint route delegates to the shared authenticated API compositio
     503,
   );
 });
+
+test("hosted MCP serves the stable Issue MCP App resource while preserving the native tool", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const binding = relayNamespace({ fetch: async () => new Response("unused") }, []);
+  const call = (id: number, method: string, params: Record<string, unknown> = {}) =>
+    worker.fetch(
+      new Request("https://hosted.example/mcp", {
+        method: "POST",
+        headers: { accept: ACCEPT, "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      }),
+      env(binding),
+    );
+
+  const listed = await (await call(2, "tools/list")).json();
+  assert.ok(listed.result.tools.some((tool: { name: string }) => tool.name === "inari_pr_publish"));
+  const issueView = listed.result.tools.find((tool: { name: string }) => tool.name === "inari_issue_view");
+  assert.deepEqual(issueView._meta.ui, { resourceUri: "ui://inari/issue-view.html" });
+  assert.equal(issueView.annotations.readOnlyHint, true);
+
+  const resources = await (await call(3, "resources/list")).json();
+  assert.ok(
+    resources.result.resources.some((resource: { uri: string }) => resource.uri === "ui://inari/issue-view.html"),
+  );
+
+  const read = await (await call(4, "resources/read", { uri: "ui://inari/issue-view.html" })).json();
+  assert.equal(read.result.contents[0].uri, "ui://inari/issue-view.html");
+  assert.equal(read.result.contents[0].mimeType, "text/html;profile=mcp-app");
+  assert.match(read.result.contents[0].text, /inari_issue_view/);
+});

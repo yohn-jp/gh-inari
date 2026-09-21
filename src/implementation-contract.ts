@@ -3,6 +3,7 @@ import { removeHtmlComments } from "./artifact.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 import { type JsonSchema, type JsonSchemaDocument } from "./contract/schema.js";
 import { JSON_SCHEMA_DIALECT } from "./contract/ir.js";
+import { validateBranchName } from "./branch-naming.js";
 
 /**
  * The representation-independent execution contract for one implementation
@@ -253,6 +254,7 @@ const REPOSITORY_ID_PATTERN = /^[1-9][0-9]{0,19}$/u;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
 const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const IMPLEMENTATION_MARKER = "<!-- inari:implementation v1 -->";
+const RESERVED_INTEGRATION_BRANCH_PATTERN = /^(?:epic|issue)\//u;
 
 /**
  * Canonicalize one authored scope pattern.  This is the only path
@@ -805,14 +807,22 @@ function normalizeContract(input: unknown): ImplementationContractValidationResu
     executionInput === undefined
       ? undefined
       : normalizeReferences(executionInput.dependencies ?? [], "$.execution.dependencies", violations, false);
-  if (baseBranch !== undefined && !BRANCH_PATTERN.test(baseBranch))
+  if (
+    baseBranch !== undefined &&
+    (!BRANCH_PATTERN.test(baseBranch) ||
+      (RESERVED_INTEGRATION_BRANCH_PATTERN.test(baseBranch) && validateBranchName(baseBranch).length > 0))
+  )
     addViolation(
       violations,
       "IMPLEMENTATION_INVALID_VALUE",
       "$.execution.baseBranch",
       "baseBranch is not a valid branch name.",
     );
-  if (branch !== undefined && !BRANCH_PATTERN.test(branch))
+  if (
+    branch !== undefined &&
+    (!BRANCH_PATTERN.test(branch) ||
+      (RESERVED_INTEGRATION_BRANCH_PATTERN.test(branch) && validateBranchName(branch).length > 0))
+  )
     addViolation(
       violations,
       "IMPLEMENTATION_INVALID_VALUE",

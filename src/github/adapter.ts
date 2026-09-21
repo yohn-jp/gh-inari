@@ -1265,6 +1265,51 @@ export class GitHubAdapter {
     return parsePullRequest(result, "pull_request.create");
   }
 
+  /**
+   * Create a pull request from an already admitted publication request.
+   * Publication Core owns route/work identity admission; this method only
+   * performs the bounded provider effect and parses the response.
+   */
+  async createPullRequestPublication(
+    input: {
+      readonly title: string;
+      readonly body: string;
+      readonly head: string;
+      readonly base: string;
+      readonly draft?: boolean;
+      readonly maintainerCanModify?: boolean;
+    },
+    deadline?: ChangeExecutionDeadline,
+  ): Promise<GitHubPullRequest> {
+    if (typeof input?.title !== "string" || input.title.trim().length === 0)
+      throw new ContractViolationError("Pull-request publication title is required.", "title");
+    if (typeof input.body !== "string")
+      throw new ContractViolationError("Pull-request publication body is required.", "body");
+    assertPullRequestRef(input.head, "head");
+    assertPullRequestRef(input.base, "base");
+    if (input.draft !== undefined && typeof input.draft !== "boolean")
+      throw new ContractViolationError("Pull-request publication draft flag is invalid.", "draft");
+    if (input.maintainerCanModify !== undefined && typeof input.maintainerCanModify !== "boolean")
+      throw new ContractViolationError("Pull-request publication maintainer flag is invalid.", "maintainerCanModify");
+    const context = await this.resolveRepositoryContext(deadline);
+    const result = await this.runApi(
+      context,
+      `repos/${context.nameWithOwner}/pulls`,
+      "POST",
+      {
+        title: input.title,
+        body: input.body,
+        head: input.head,
+        base: input.base,
+        ...(input.draft === undefined ? {} : { draft: input.draft }),
+        ...(input.maintainerCanModify === undefined ? {} : { maintainer_can_modify: input.maintainerCanModify }),
+      },
+      "pull_request.create",
+      deadline,
+    );
+    return parsePullRequest(result, "pull_request.create");
+  }
+
   /** Apply a Core-projected v2 Semantic PR through the existing GitHub seam. */
   async createSemanticPullRequest(
     artifact: ValidatedSemanticPullRequestArtifact,

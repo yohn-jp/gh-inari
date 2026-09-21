@@ -33,6 +33,7 @@ export * from "./diagnostics.js";
 export * from "./command-contract.js";
 export * from "./change.js";
 export * from "./branch-naming.js";
+export * from "./integration-routing.js";
 export * from "./branch-creation-ruleset.js";
 export * from "./change-provenance-record.js";
 export * from "./change-execution-port.js";
@@ -42,6 +43,9 @@ export * from "./golden-path-review.js";
 export * from "./golden-path-entry.js";
 export * from "./golden-path-recovery.js";
 export * from "./semantic-pr-projection.js";
+export * from "./pr-publication.js";
+export * from "./release-pr-publication.js";
+export * from "./github/pr-publication-adapter.js";
 // The existing PR projection owns the historical MutationPlan names. Export
 // the governed write authority under explicit names to keep that authority
 // separate at the package barrel as well as in its implementation module.
@@ -113,6 +117,9 @@ export * from "./legacy-artifact-convergence.js";
 export * from "./golden-path-status.js";
 export * from "./golden-path-implementation.js";
 export * from "./release-certification.js";
+export * from "./release-preparation-plan.js";
+export * from "./release-preparation.js";
+export * from "./github/release-history-adapter.js";
 export * from "./agent-authority/index.js";
 export * from "./endpoint-authorization.js";
 export * from "./endpoint-runtime-presence.js";

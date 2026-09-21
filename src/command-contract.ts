@@ -34,6 +34,7 @@ export type CommandDomain =
   | "session"
   | "runtime"
   | "mcp"
+  | "release"
   | "skill";
 export type OptionValueType = "boolean" | "string" | "field" | "raw-input";
 export type OptionArity = "none" | "required" | "optional";
@@ -85,6 +86,7 @@ export type CommandId =
   | "pr.semantic.check"
   | "pr.render"
   | "pr.create"
+  | "pr.publish"
   | "pr.explain"
   | "pr.get"
   | "pr.view"
@@ -97,6 +99,7 @@ export type CommandId =
   | "pr.comment"
   | "pr.review"
   | "pr.merge"
+  | "pr.routing"
   | "impl.plan"
   | "impl.show"
   | "impl.validate"
@@ -116,6 +119,7 @@ export type CommandId =
   | "change.abort"
   | "change.merge"
   | "change.publish"
+  | "release.prepare"
   | "authority.generate"
   | "authority.bootstrap"
   | "authority.readiness"
@@ -140,6 +144,7 @@ export type OptionId =
   | "template"
   | "policy"
   | "repository"
+  | "targetVersion"
   | "relayUrl"
   | "endpoint"
   | "configHome"
@@ -215,10 +220,12 @@ const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
 const OBSERVATION_OPTIONS = ["help", "json", "repository"] as const;
+const RELEASE_PREPARATION_OPTIONS = ["help", "json", "repository", "reviewIntent", "targetVersion"] as const;
 const ISSUE_DISCOVERY_OPTIONS = ["help", "json", "repository", "state", "limit", "page"] as const;
 const PR_DISCOVERY_OPTIONS = [...ISSUE_DISCOVERY_OPTIONS, "head", "base"] as const;
 const REMEDIATION_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "field", "dryRun"] as const;
 const PR_SYNC_OPTIONS = ["help", "json", "template", "repository", "policy", "from", "dryRun"] as const;
+const PR_PUBLICATION_OPTIONS = ["help", "json", "repository", "from"] as const;
 const CHANGE_OPTIONS = ["help", "json", "repository"] as const;
 const CHANGE_SESSION_OPTIONS = [...CHANGE_OPTIONS, "sessionCredential", "appEndpoint"] as const;
 const CHANGE_READY_OPTIONS = [...CHANGE_SESSION_OPTIONS, "executionEvidence"] as const;
@@ -274,6 +281,7 @@ const PR_CREATE_OPTIONS = [
 const PR_COMMENT_OPTIONS = ["help", "json", "repository", "rawBody", "expectedHead"] as const;
 const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "reviewIntent", "rawBody", "retry"] as const;
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
+const PR_ROUTING_OPTIONS = ["help", "json", "from"] as const;
 const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
 const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest", "executionEvidence"] as const;
 
@@ -363,6 +371,15 @@ export const COMMAND_OPTIONS = {
     "required",
     "GitHub repository override; governed commands use its default-branch governance.",
     "repository",
+  ),
+  targetVersion: option(
+    "targetVersion",
+    "target-version",
+    ["--target-version"],
+    "string",
+    "required",
+    "Exact semantic version for an exact release intent.",
+    "version",
   ),
   relayUrl: option(
     "relayUrl",
@@ -1136,6 +1153,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     PR_CREATE_OPTIONS,
   ),
   command(
+    "pr.publish",
+    "pr",
+    "publish",
+    ["pr", "publish"],
+    "Publish one governed pull request idempotently from an explicit Core request.",
+    PR_PUBLICATION_OPTIONS,
+  ),
+  command(
     "pr.explain",
     "pr",
     "explain",
@@ -1241,6 +1266,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Admit, merge, reread, and verify one pull request with a bounded strategy.",
     PR_MERGE_OPTIONS,
     "<number>",
+  ),
+  command(
+    "pr.routing",
+    "pr",
+    "routing",
+    ["pr", "routing"],
+    "Validate one canonical Issue/Epic/Implementation integration route without GitHub mutation.",
+    PR_ROUTING_OPTIONS,
   ),
   command(
     "impl.plan",
@@ -1407,6 +1440,15 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Project a local Git commit into the canonical implementation branch through #466 branch.advance.",
     CHANGE_PUBLISH_OPTIONS,
     "<number>",
+  ),
+  command(
+    "release.prepare",
+    "release",
+    "prepare",
+    ["release", "prepare"],
+    "Prepare an explicit governed npm release workspace without publishing.",
+    RELEASE_PREPARATION_OPTIONS,
+    "<patch|minor|major|version>",
   ),
   command(
     "authority.generate",
@@ -1687,7 +1729,18 @@ export function commandTemplateSchemaInvocation(domain: "issue" | "pr", template
 
 export function helpInvocation(
   domain:
-    "issue" | "pr" | "impl" | "branch" | "template" | "change" | "authority" | "session" | "runtime" | "mcp" | "skill",
+    | "issue"
+    | "pr"
+    | "impl"
+    | "branch"
+    | "template"
+    | "change"
+    | "release"
+    | "authority"
+    | "session"
+    | "runtime"
+    | "mcp"
+    | "skill",
 ): string {
   return `${AGENT_INVOCATION_CONTRACT.canonical} ${domain} --help`;
 }
@@ -1903,6 +1956,7 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "session.inspect" && id === "from") ||
         ((entry.id === "authority.register" || entry.id === "authority.rotate") && id === "from") ||
         (entry.id === "pr.sync" && id === "from") ||
+        (entry.id === "pr.routing" && id === "from") ||
         (entry.id === "authority.bootstrap" &&
           (id === "authorityId" || id === "output" || id === "maxSessionTtlSeconds" || id === "capability")) ||
         (entry.id === "impl.verify" && (id === "from" || id === "pullRequest"));

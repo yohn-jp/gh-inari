@@ -54,6 +54,7 @@ test("injects the existing Session executor without adding transport authorizati
   const response = await post(handler, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const tools = (await response.json()).result.tools as Array<{ name: string }>;
   assert.ok(tools.some((tool) => tool.name === "inari_change_execute"));
+  assert.ok(tools.some((tool) => tool.name === "inari_pr_publish"));
 });
 
 test("fails closed for endpoint, method, media, protocol, Origin, and body bounds", async () => {

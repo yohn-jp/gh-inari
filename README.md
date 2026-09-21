@@ -73,6 +73,23 @@ inari change abort <number> --json
 
 The normative end-to-end model lives in [Inari Golden Path Architecture](./docs/GOLDEN_PATH_ARCHITECTURE.md).
 
+### Integration routing
+
+Epic work may use three governed integration levels:
+
+```text
+Epic (epic/<number>-<slug>)
+  <- source Issue (issue/<number>-<slug>)
+       <- Implementation (feat|fix|refactor|test|docs|chore/<number>-<slug>)
+```
+
+Implementation PRs target the source-Issue branch, source-Issue integration PRs
+target the parent Epic branch, and Epic integration PRs target the governed
+default branch. The canonical routing projection validates relationships and
+uses branch names only as identity/consistency evidence. Sibling Implementations
+may proceed concurrently; merge order is not a dependency DAG. Standalone
+Issues and explicitly legacy in-flight Epic routes remain compatible.
+
 ## Design principles
 
 | Principle              | Contract                                                                                                                                   |
