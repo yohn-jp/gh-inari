@@ -37,3 +37,4 @@ export * from "./user-credential.js";
 export * from "./gh-auth-credential.js";
 export * from "./user-identity.js";
 export * from "./local-repository-context.js";
+export * from "../release-history-governance.js";
