@@ -37,6 +37,16 @@ import {
   createEndpointOnboardingDescriptor,
   type EndpointOnboardingDescriptorInput,
 } from "./endpoint-onboarding.js";
+import {
+  ENDPOINT_WEBHOOK_PATH,
+  createEndpointWebhookHandler,
+  type EndpointWebhookHandlerOptions,
+} from "./endpoint-webhook.js";
+import type {
+  EndpointIdentity,
+  EndpointInstallationIdentity,
+  EndpointRepositoryIdentity,
+} from "./endpoint-authorization.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -45,6 +55,7 @@ const RUNTIME_ROLE = "runtime";
 const UPGRADE = "websocket";
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const DELEGATOR_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
+const HOSTED_WEBHOOK_HANDLERS = new WeakMap<object, ReturnType<typeof createEndpointWebhookHandler>>();
 
 export interface HostedDurableObjectStub {
   fetch(request: Request): Promise<Response>;
@@ -68,6 +79,16 @@ export interface Env {
   readonly INARI_GITHUB_APP_INSTALLATION_URL?: string;
   /** Non-secret supported App-user authentication profile. */
   readonly INARI_GITHUB_APP_USER_AUTH_PROFILE?: string;
+  /** Non-secret Endpoint identity used to bind webhook deliveries. */
+  readonly INARI_ENDPOINT_ID?: string;
+  readonly INARI_ENDPOINT_DEPLOYMENT?: "shared-hosted" | "self-hosted";
+  /** Webhook secret is a Worker secret and is never returned by this module. */
+  readonly INARI_GITHUB_WEBHOOK_SECRET?: string;
+  readonly INARI_GITHUB_APP_INSTALLATION_ID?: string;
+  readonly INARI_ENDPOINT_REPOSITORY_ID?: string;
+  readonly INARI_ENDPOINT_REPOSITORY_NAME?: string;
+  /** Optional runtime injection for self-hosted composition and tests. */
+  readonly endpointWebhook?: EndpointWebhookHandlerOptions;
   readonly telemetry?: RelayTelemetrySink;
 }
 
@@ -488,11 +509,70 @@ async function mcp(request: Request, env: Env): Promise<Response> {
   }
 }
 
+function webhookOptions(env: Env): EndpointWebhookHandlerOptions | undefined {
+  if (env.endpointWebhook !== undefined) return env.endpointWebhook;
+  if (
+    env.INARI_GITHUB_WEBHOOK_SECRET === undefined ||
+    env.INARI_ENDPOINT_ID === undefined ||
+    env.INARI_GITHUB_APP_INSTALLATION_ID === undefined ||
+    env.INARI_ENDPOINT_REPOSITORY_ID === undefined ||
+    env.INARI_ENDPOINT_REPOSITORY_NAME === undefined
+  )
+    return undefined;
+  const endpoint: EndpointIdentity = {
+    version: 1,
+    kind: "endpoint",
+    id: env.INARI_ENDPOINT_ID,
+    deployment: env.INARI_ENDPOINT_DEPLOYMENT ?? "shared-hosted",
+  };
+  const installation: EndpointInstallationIdentity = {
+    version: 1,
+    kind: "installation",
+    endpointId: endpoint.id,
+    installationId: env.INARI_GITHUB_APP_INSTALLATION_ID,
+  };
+  const repository: EndpointRepositoryIdentity = {
+    version: 1,
+    kind: "repository",
+    endpointId: endpoint.id,
+    installationId: installation.installationId,
+    repositoryHost: repositoryHost(env),
+    repositoryId: env.INARI_ENDPOINT_REPOSITORY_ID,
+    nameWithOwner: env.INARI_ENDPOINT_REPOSITORY_NAME,
+  };
+  return {
+    admission: {
+      endpoint,
+      installation,
+      repositories: [repository],
+      secret: env.INARI_GITHUB_WEBHOOK_SECRET,
+    },
+  };
+}
+
+async function webhook(request: Request, env: Env): Promise<Response> {
+  let options: EndpointWebhookHandlerOptions | undefined;
+  try {
+    options = webhookOptions(env);
+  } catch {
+    options = undefined;
+  }
+  if (options === undefined) return serviceUnavailable();
+  const key = env as object;
+  let handler = HOSTED_WEBHOOK_HANDLERS.get(key);
+  if (handler === undefined) {
+    handler = createEndpointWebhookHandler(options);
+    HOSTED_WEBHOOK_HANDLERS.set(key, handler);
+  }
+  return handler(request);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
     if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
+    if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);
     if (pathname === "/mcp") return mcp(request, env);
     if (pathname === "/v1/relay/connect") return relayConnect(request, env);
     return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
