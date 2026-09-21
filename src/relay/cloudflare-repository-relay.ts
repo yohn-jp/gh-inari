@@ -167,6 +167,36 @@ export interface RepositoryRelayDurableObjectOptions {
   readonly telemetry?: RelayTelemetrySink;
 }
 
+/** Read-only transport evidence consumed by Endpoint presence projection. */
+export const RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION = 1 as const;
+export type RelayRuntimePresenceContractVersion = typeof RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION;
+
+export type RelayRuntimePresenceState = "connected" | "reconnecting" | "stale" | "unknown";
+
+export interface RelayRuntimePresenceRecord {
+  readonly version: RelayRuntimePresenceContractVersion;
+  readonly repository: RelayRepositoryIdentity;
+  readonly connectionId: string;
+  readonly delegatorId: string;
+  readonly generation?: number;
+  readonly state: RelayRuntimePresenceState;
+  readonly authenticated: boolean;
+  readonly current: boolean;
+  readonly openedAtMs: number;
+  readonly expiresAtMs: number;
+  /** The relay clock at which this bounded read was produced. */
+  readonly observedAtMs: number;
+}
+
+export interface RelayRuntimePresenceSnapshot {
+  readonly version: RelayRuntimePresenceContractVersion;
+  readonly repository: RelayRepositoryIdentity | null;
+  /** A read failure is explicit and must not be interpreted as unavailable. */
+  readonly availability: "available" | "unknown";
+  readonly observedAtMs: number;
+  readonly records: readonly RelayRuntimePresenceRecord[];
+}
+
 interface RuntimeConnectionAttachment {
   readonly version: typeof CONNECTION_ATTACHMENT_VERSION;
   readonly role: RelayRole;
@@ -447,6 +477,147 @@ export class RepositoryRelayDurableObject {
     this.randomNonce = options.randomNonce ?? nonce;
     this.limits = normalizeOperationalLimits(options.limits);
     this.telemetry = options.telemetry ?? env.telemetry ?? DEFAULT_RELAY_TELEMETRY_SINK;
+  }
+
+  /**
+   * Return bounded, non-authoritative Runtime transport evidence.
+   *
+   * This method does not inspect or mutate delivery records and does not
+   * participate in routing, possession proof, or authorization decisions.
+   * Closed authenticated sockets remain visible as stale generation evidence
+   * so a hibernating/reconnecting Runtime cannot be mistaken for a fresh one.
+   */
+  readRuntimePresence(repository?: RelayRepositoryIdentity): RelayRuntimePresenceSnapshot {
+    const selected = repository ?? this.repository;
+    if (selected === undefined) {
+      return Object.freeze({
+        version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+        repository: null,
+        availability: "unknown",
+        observedAtMs: 0,
+        records: Object.freeze([]),
+      });
+    }
+    let normalizedRepository: RelayRepositoryIdentity;
+    try {
+      normalizedRepository = normalizeRelayRepositoryIdentity(selected);
+    } catch {
+      return Object.freeze({
+        version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+        repository: null,
+        availability: "unknown",
+        observedAtMs: 0,
+        records: Object.freeze([]),
+      });
+    }
+    if (
+      this.repository !== undefined &&
+      (this.repository.repositoryHost !== normalizedRepository.repositoryHost ||
+        this.repository.repositoryId !== normalizedRepository.repositoryId)
+    ) {
+      return Object.freeze({
+        version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+        repository: normalizedRepository,
+        availability: "unknown",
+        observedAtMs: 0,
+        records: Object.freeze([]),
+      });
+    }
+    const observedAtMs = this.now();
+    if (!Number.isSafeInteger(observedAtMs) || observedAtMs < 0) {
+      return Object.freeze({
+        version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+        repository: normalizedRepository,
+        availability: "unknown",
+        observedAtMs: 0,
+        records: Object.freeze([]),
+      });
+    }
+    let sockets: RepositoryRelayWebSocket[];
+    try {
+      sockets = this.state.getWebSockets("runtime");
+    } catch {
+      return Object.freeze({
+        version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+        repository: normalizedRepository,
+        availability: "unknown",
+        observedAtMs,
+        records: Object.freeze([]),
+      });
+    }
+    const runtimeRecords = sockets
+      .map((socket) => ({ socket, attachment: this.attachmentOf(socket) }))
+      .filter(
+        (
+          entry,
+        ): entry is { readonly socket: RepositoryRelayWebSocket; readonly attachment: RuntimeConnectionAttachment } =>
+          entry.attachment !== undefined &&
+          entry.attachment.role === "runtime" &&
+          entry.attachment.repository.repositoryHost === normalizedRepository.repositoryHost &&
+          entry.attachment.repository.repositoryId === normalizedRepository.repositoryId &&
+          entry.attachment.delegatorId !== undefined,
+      )
+      .slice(0, RELAY_OPERATIONAL_HARD_LIMITS.maxConnections);
+    const generationCounts = new Map<string, { highest: number; count: number }>();
+    for (const { attachment } of runtimeRecords) {
+      if (!attachment.authenticated || attachment.generation === undefined) continue;
+      const key = this.runtimeIdentityKey(
+        attachment.repository,
+        attachment.connectionId,
+        attachment.delegatorId as string,
+      );
+      const current = generationCounts.get(key);
+      if (current === undefined || attachment.generation > current.highest) {
+        generationCounts.set(key, { highest: attachment.generation, count: 1 });
+      } else if (attachment.generation === current.highest) {
+        generationCounts.set(key, { highest: current.highest, count: current.count + 1 });
+      }
+    }
+    const records = runtimeRecords.map(({ socket, attachment }) => {
+      const key = this.runtimeIdentityKey(
+        attachment.repository,
+        attachment.connectionId,
+        attachment.delegatorId as string,
+      );
+      const generationSummary = generationCounts.get(key);
+      const ambiguous =
+        attachment.authenticated &&
+        attachment.generation !== undefined &&
+        generationSummary !== undefined &&
+        generationSummary.highest === attachment.generation &&
+        generationSummary.count !== 1;
+      const expired = attachment.expiresAtMs <= observedAtMs;
+      const current = !expired && !ambiguous && this.isCurrentRuntime(socket, attachment);
+      const state: RelayRuntimePresenceState = ambiguous
+        ? "unknown"
+        : attachment.authenticated && attachment.generation !== undefined
+          ? current
+            ? "connected"
+            : "stale"
+          : !expired && isOpen(socket)
+            ? "reconnecting"
+            : "stale";
+      return Object.freeze({
+        version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+        repository: attachment.repository,
+        connectionId: attachment.connectionId,
+        delegatorId: attachment.delegatorId as string,
+        ...(attachment.generation === undefined ? {} : { generation: attachment.generation }),
+        state,
+        authenticated: attachment.authenticated,
+        current,
+        openedAtMs: attachment.openedAtMs,
+        expiresAtMs: attachment.expiresAtMs,
+        observedAtMs,
+      });
+    });
+    return Object.freeze({
+      version: RELAY_RUNTIME_PRESENCE_CONTRACT_VERSION,
+      repository: normalizedRepository,
+      availability: "available",
+      observedAtMs,
+      records: Object.freeze(records),
+    });
   }
 
   private emitTelemetry(
