@@ -296,3 +296,78 @@ test("one Implementation cannot silently claim two branch or PR identities", () 
   assert.equal(result.valid, false);
   assert.ok(result.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_COLLISION"));
 });
+
+test("Implementation identity consumes the canonical source-Issue routing projection", () => {
+  const branch = "feat/575-identity";
+  const issueBranch = "issue/568-source";
+  const current = identityInput(575, branch, 1475);
+  const contractValue = current.contract as Record<string, unknown>;
+  const execution = { ...(contractValue.execution as Record<string, unknown>), baseBranch: issueBranch };
+  const authorizationValue = current.authorization as Record<string, unknown>;
+  const authorization = {
+    ...authorizationValue,
+    base: { ...(authorizationValue.base as Record<string, unknown>), branch: issueBranch },
+  };
+  const evidenceValue = current.executionEvidence as Record<string, unknown>;
+  const executionEvidence = {
+    ...evidenceValue,
+    base: { ...(evidenceValue.base as Record<string, unknown>), branch: issueBranch },
+  };
+  const result = tryProjectImplementationChangeIdentity({
+    ...current,
+    contract: { ...contractValue, execution },
+    authorization,
+    baseBranch: issueBranch,
+    executionEvidence,
+    routing: {
+      mode: "issue-integration",
+      implementation: current.implementation,
+      sourceIssue: source,
+      epic: { ...repository, number: 500 },
+      relationships: {
+        implementationParent: source,
+        sourceIssueParent: { ...repository, number: 500 },
+      },
+      branches: {
+        default: "main",
+        implementation: branch,
+        issue: issueBranch,
+        epic: "epic/500-dashboard",
+      },
+      role: "implementation",
+      head: branch,
+      base: issueBranch,
+    },
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.identity?.routing?.expectedBase, issueBranch);
+
+  const directEpic = tryProjectImplementationChangeIdentity({
+    ...current,
+    contract: { ...contractValue, execution },
+    authorization,
+    baseBranch: issueBranch,
+    executionEvidence,
+    routing: {
+      mode: "issue-integration",
+      implementation: current.implementation,
+      sourceIssue: source,
+      epic: { ...repository, number: 500 },
+      relationships: {
+        implementationParent: source,
+        sourceIssueParent: { ...repository, number: 500 },
+      },
+      branches: {
+        default: "main",
+        implementation: branch,
+        issue: issueBranch,
+        epic: "epic/500-dashboard",
+      },
+      role: "implementation",
+      head: branch,
+      base: "epic/500-dashboard",
+    },
+  });
+  assert.equal(directEpic.valid, false);
+  assert.ok(directEpic.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_INVALID"));
+});

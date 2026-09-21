@@ -33,6 +33,7 @@ export * from "./diagnostics.js";
 export * from "./command-contract.js";
 export * from "./change.js";
 export * from "./branch-naming.js";
+export * from "./integration-routing.js";
 export * from "./branch-creation-ruleset.js";
 export * from "./change-provenance-record.js";
 export * from "./change-execution-port.js";

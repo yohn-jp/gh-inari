@@ -8,7 +8,7 @@
  * lifecycle state, or replace any of those authorities.
  */
 
-import { validateBranchName } from "./branch-naming.js";
+import { recognizeBranchName, validateBranchName } from "./branch-naming.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./agent-authority/codec.js";
 import { changeIdentityKey, validateChange, type Change, type ChangeIdentity } from "./change.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
@@ -28,6 +28,7 @@ import {
   tryParseImplementationExecutionEvidence,
   type ImplementationExecutionEvidence,
 } from "./implementation-execution-evidence.js";
+import { tryProjectIntegrationRouting, type IntegrationRoutingProjection } from "./integration-routing.js";
 import type { SemanticPullRequestProjectionRepresentation } from "./semantic-pr-projection.js";
 
 export const IMPLEMENTATION_CHANGE_IDENTITY_VERSION = 1 as const;
@@ -94,6 +95,8 @@ export interface ImplementationChangeIdentity {
     readonly name: string;
     readonly baseBranch: string;
   };
+  /** Canonical routing projection when this execution opts into integration routing. */
+  readonly routing?: IntegrationRoutingProjection;
   readonly pullRequest: ImplementationPullRequestIdentity;
   readonly executionEvidence: ImplementationExecutionEvidenceIdentity;
   readonly sourceLifecycle: {
@@ -124,6 +127,7 @@ export interface ImplementationChangeIdentityInput {
   readonly session: unknown;
   readonly branch: unknown;
   readonly baseBranch: unknown;
+  readonly routing?: unknown;
   readonly pullRequest: unknown;
   readonly executionEvidence: unknown;
 }
@@ -146,6 +150,8 @@ export type ImplementationChangeIdentityDiagnosticCode =
   | "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_INVALID"
   | "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_MISMATCH"
   | "IMPLEMENTATION_CHANGE_IDENTITY_BASE_MISMATCH"
+  | "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_INVALID"
+  | "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_MISMATCH"
   | "IMPLEMENTATION_CHANGE_IDENTITY_PR_INVALID"
   | "IMPLEMENTATION_CHANGE_IDENTITY_PR_MISMATCH"
   | "IMPLEMENTATION_CHANGE_IDENTITY_RELATION_INVALID"
@@ -198,6 +204,7 @@ const INPUT_KEYS = new Set([
   "session",
   "branch",
   "baseBranch",
+  "routing",
   "pullRequest",
   "executionEvidence",
 ]);
@@ -292,6 +299,12 @@ function sameReference(left: IssueReference, right: IssueReference): boolean {
 
 function validBranch(value: unknown): value is string {
   return typeof value === "string" && validateBranchName(value).length === 0;
+}
+
+function validImplementationBranch(value: unknown): value is string {
+  if (!validBranch(value)) return false;
+  const parts = recognizeBranchName(value);
+  return parts !== undefined && parts.type !== "issue" && parts.type !== "epic";
 }
 
 function positiveNumber(value: unknown): value is number {
@@ -675,6 +688,77 @@ export function tryProjectImplementationChangeIdentity(input: unknown): Implemen
       );
   }
 
+  let routing: IntegrationRoutingProjection | undefined;
+  if (input.routing !== undefined) {
+    const routeInput = isRecord(input.routing)
+      ? {
+          ...input.routing,
+          ...(input.routing.implementation === undefined && implementation === undefined
+            ? {}
+            : { implementation: input.routing.implementation ?? implementation }),
+          ...(input.routing.head === undefined && typeof input.branch === "string" ? { head: input.branch } : {}),
+          ...(input.routing.base === undefined && typeof input.baseBranch === "string"
+            ? { base: input.baseBranch }
+            : {}),
+        }
+      : input.routing;
+    const routingResult = tryProjectIntegrationRouting(routeInput);
+    if (!routingResult.valid || routingResult.projection === undefined) {
+      for (const violation of routingResult.diagnostics)
+        diagnostic(diagnostics, "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_INVALID", violation.path, violation.message);
+    } else {
+      routing = routingResult.projection;
+      if (routing.role !== "implementation")
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_MISMATCH",
+          "$.routing.role",
+          "Implementation Change identity can only bind an Implementation PR route.",
+        );
+      if (
+        implementation !== undefined &&
+        routing.implementation !== undefined &&
+        !sameReference(routing.implementation, implementation)
+      )
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_MISMATCH",
+          "$.routing.implementation",
+          "Routing projection must target the current Implementation.",
+        );
+      const routingSourceIssue = routing.sourceIssue;
+      if (
+        contract !== undefined &&
+        routingSourceIssue !== undefined &&
+        !contract.sources.some((source) => sameReference(source, routingSourceIssue))
+      )
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_MISMATCH",
+          "$.routing.sourceIssue",
+          "Routing source Issue must be one of the Implementation contract sources.",
+        );
+      if (
+        typeof input.branch === "string" &&
+        routing.expectedHead !== undefined &&
+        input.branch !== routing.expectedHead
+      )
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_MISMATCH",
+          "$.branch",
+          "Implementation branch must match the canonical routing projection.",
+        );
+      if (typeof input.baseBranch === "string" && input.baseBranch !== routing.expectedBase)
+        diagnostic(
+          diagnostics,
+          "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_MISMATCH",
+          "$.baseBranch",
+          "Implementation base branch must match the canonical routing projection.",
+        );
+    }
+  }
+
   const session = validateSessionBinding(
     input.session,
     implementation,
@@ -682,7 +766,7 @@ export function tryProjectImplementationChangeIdentity(input: unknown): Implemen
     typeof input.branch === "string" ? input.branch : undefined,
     diagnostics,
   );
-  if (typeof input.branch !== "string" || !validBranch(input.branch))
+  if (typeof input.branch !== "string" || !validImplementationBranch(input.branch))
     diagnostic(
       diagnostics,
       "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_INVALID",
@@ -820,6 +904,7 @@ export function tryProjectImplementationChangeIdentity(input: unknown): Implemen
     },
     session,
     branch: { name: input.branch, baseBranch: input.baseBranch },
+    ...(routing === undefined ? {} : { routing }),
     pullRequest,
     executionEvidence: {
       implementation: executionEvidence.implementation,

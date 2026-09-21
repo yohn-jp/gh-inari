@@ -10,6 +10,10 @@
 export const CANONICAL_BRANCH_TYPES = Object.freeze(["feat", "fix", "docs", "refactor", "test", "chore"] as const);
 export type CanonicalBranchType = (typeof CANONICAL_BRANCH_TYPES)[number];
 
+/** Integration branch classes owned by the canonical Issue routing model. */
+export const CANONICAL_INTEGRATION_BRANCH_TYPES = Object.freeze(["epic", "issue"] as const);
+export type CanonicalIntegrationBranchType = (typeof CANONICAL_INTEGRATION_BRANCH_TYPES)[number];
+
 /** Compatibility spelling for callers that describe the supported kinds as a vocabulary. */
 export const BRANCH_TYPES = CANONICAL_BRANCH_TYPES;
 export type BranchType = CanonicalBranchType;
@@ -25,6 +29,11 @@ export interface BranchNameParts extends BranchNaming {
   readonly issueNumber: number;
 }
 
+/** The parsed identity of an Epic or source-Issue integration branch. */
+export interface IntegrationBranchNameParts extends BranchNameParts {
+  readonly type: CanonicalIntegrationBranchType;
+}
+
 /** The bounded branch-policy shape needed for recognition. */
 export interface BranchNamingGovernance {
   readonly pattern: string;
@@ -34,6 +43,8 @@ export const MAX_BRANCH_TITLE_LENGTH = 255 as const;
 export const DEFAULT_BRANCH_NAME = "main" as const;
 
 const BRANCH_PATTERN = /^(feat|fix|docs|refactor|test|chore)\/(\d+)-([a-z0-9-]+)$/u;
+const INTEGRATION_BRANCH_PATTERN = /^(epic|issue)\/(\d+)-([a-z0-9-]+)$/u;
+const RESERVED_INTEGRATION_BRANCH_PATTERN = /^(epic|issue)\//u;
 const ISSUE_TITLE_PATTERN = /^(feat|fix|docs|refactor|test|chore):\s*(.+)$/iu;
 
 function invalidBranchMessage(branch: unknown): string {
@@ -47,6 +58,18 @@ function invalidBranchMessage(branch: unknown): string {
 export function validateBranchName(branch: string): readonly string[] {
   if (branch === DEFAULT_BRANCH_NAME) return [];
   if (typeof branch === "string" && BRANCH_PATTERN.test(branch)) return [];
+  if (typeof branch === "string") {
+    const integrationMatch = INTEGRATION_BRANCH_PATTERN.exec(branch);
+    if (integrationMatch !== null) {
+      const issueNumber = Number(integrationMatch[2]);
+      if (Number.isSafeInteger(issueNumber) && issueNumber >= 1) return [];
+    }
+    // A malformed reserved branch must not fall through a configurable
+    // ordinary branch rule in a provider adapter.
+    if (RESERVED_INTEGRATION_BRANCH_PATTERN.test(branch)) {
+      return [`branch name "${branch}" does not match <epic|issue>/<positive-issue-number>-<slug>`];
+    }
+  }
   return [invalidBranchMessage(branch)];
 }
 
@@ -57,21 +80,70 @@ export function validateBranchName(branch: string): readonly string[] {
  */
 export function recognizeBranchName(branch: string): BranchNameParts | undefined {
   const match = typeof branch === "string" ? BRANCH_PATTERN.exec(branch) : null;
-  if (match === null) return undefined;
+  if (match !== null) {
+    const issueNumber = Number(match[2]);
+    if (!Number.isSafeInteger(issueNumber)) return undefined;
+    return {
+      type: match[1] as CanonicalBranchType,
+      issueNumber,
+      slug: match[3] as string,
+    };
+  }
 
-  const issueNumber = Number(match[2]);
-  if (!Number.isSafeInteger(issueNumber)) return undefined;
+  const integrationMatch = typeof branch === "string" ? INTEGRATION_BRANCH_PATTERN.exec(branch) : null;
+  if (integrationMatch === null) return undefined;
+
+  const issueNumber = Number(integrationMatch[2]);
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) return undefined;
   return {
-    type: match[1] as CanonicalBranchType,
+    type: integrationMatch[1] as CanonicalIntegrationBranchType,
     issueNumber,
-    slug: match[3] as string,
+    slug: integrationMatch[3] as string,
   };
+}
+
+/** Recognize only an Epic or source-Issue integration branch. */
+export function recognizeIntegrationBranchName(branch: string): IntegrationBranchNameParts | undefined {
+  const parts = recognizeBranchName(branch);
+  if (parts === undefined || !CANONICAL_INTEGRATION_BRANCH_TYPES.includes(parts.type as CanonicalIntegrationBranchType))
+    return undefined;
+  return parts as IntegrationBranchNameParts;
+}
+
+export const recognizeCanonicalIntegrationBranchName = recognizeIntegrationBranchName;
+
+/** Derive a strict source-Issue integration branch from explicit identity data. */
+export function deriveIssueIntegrationBranchName(issueNumber: number, slug: string): string {
+  return deriveIntegrationBranchName("issue", issueNumber, slug);
+}
+
+/** Derive a strict Epic integration branch from explicit identity data. */
+export function deriveEpicIntegrationBranchName(issueNumber: number, slug: string): string {
+  return deriveIntegrationBranchName("epic", issueNumber, slug);
+}
+
+export const deriveIssueBranchName = deriveIssueIntegrationBranchName;
+export const deriveEpicBranchName = deriveEpicIntegrationBranchName;
+
+function deriveIntegrationBranchName(type: CanonicalIntegrationBranchType, issueNumber: number, slug: string): string {
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1)
+    throw new TypeError("Integration branch issue number must be a positive safe integer.");
+  if (typeof slug !== "string" || slug.length === 0)
+    throw new TypeError("Integration branch slug must be a non-empty string.");
+  const branch = `${type}/${issueNumber}-${slug}`;
+  if (validateBranchName(branch).length > 0) throw new TypeError(invalidBranchMessage(branch));
+  return branch;
 }
 
 /** Recognize branch naming parts only when the branch belongs to one root Issue. */
 export function recognizeBranchNamingForIssue(branch: string, rootIssue: number): BranchNaming | undefined {
   const parts = recognizeBranchName(branch);
-  if (parts === undefined || parts.issueNumber !== rootIssue) return undefined;
+  if (
+    parts === undefined ||
+    parts.issueNumber !== rootIssue ||
+    CANONICAL_INTEGRATION_BRANCH_TYPES.includes(parts.type as CanonicalIntegrationBranchType)
+  )
+    return undefined;
   return { type: parts.type, slug: parts.slug };
 }
 
@@ -125,6 +197,9 @@ export const deriveNamingFromIssueTitle = deriveBranchNamingFromIssueTitle;
 export function deriveBranchName({ type, issueNumber, slug }: BranchNameParts): string {
   if (typeof type !== "string" || type.length === 0) {
     throw new TypeError("Branch type must be a non-empty string.");
+  }
+  if (!CANONICAL_BRANCH_TYPES.includes(type as CanonicalBranchType)) {
+    throw new TypeError("Branch type must be an ordinary Change branch type.");
   }
   if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
     throw new TypeError("Branch issue number must be a positive safe integer.");
