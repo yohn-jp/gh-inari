@@ -297,7 +297,7 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport, GitHu
     this.#token = boundedSecret(options.token, MAX_TOKEN_LENGTH);
     this.#repositoryNodeId =
       options.repositoryNodeId === undefined ? undefined : boundedString(options.repositoryNodeId, 255);
-    this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#failureStage = options.failureStage ?? "repository-read";
     this.#failure = options.failure ?? ((stage) => new GitHubAppCredentialBrokerError(stage));
     this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
@@ -336,6 +336,7 @@ export class GitHubAppApiTransport implements GitHubChangeEffectTransport, GitHu
             Accept: "application/vnd.github+json",
             Authorization: `Bearer ${this.#token}`,
             "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "gh-inari-hosted-relay",
             ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
           },
           ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
@@ -563,7 +564,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
         options.repositoryNodeId === undefined ? undefined : boundedString(options.repositoryNodeId, 255);
       this.#provenance = options.provenance;
       this.#apiUrl = boundedString(options.apiUrl ?? DEFAULT_API_URL, MAX_API_URL_LENGTH).replace(/\/+$/u, "");
-      this.#fetch = options.fetch ?? globalThis.fetch;
+      this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
       this.#now = options.now ?? (() => new Date());
     } catch {
       throw this.safeFailure("issuer-configuration");
@@ -804,6 +805,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
           Authorization: `Bearer ${createAppJwt(this.#app.appId, this.#privateKeyPem, requestNow.getTime())}`,
           "Content-Type": "application/json",
           "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "gh-inari-hosted-relay",
         },
         body: JSON.stringify({
           repositories: [this.#repository.name],

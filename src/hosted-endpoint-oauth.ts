@@ -245,7 +245,11 @@ export function createHostedEndpointOAuthHandler(options: HostedEndpointOAuthOpt
       const input = inputFrom(await boundedRequestBody(request, configured.maxBodyBytes), configured.redirectUri);
       const response = await configured.fetcher(configured.tokenEndpoint, {
         method: "POST",
-        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+          "user-agent": "gh-inari-hosted-relay",
+        },
         body: new URLSearchParams({
           client_id: configured.clientId,
           client_secret: configured.clientSecret,

@@ -277,7 +277,7 @@ export class GitHubAppDeviceFlowClient {
     this.#clientId = boundedClientId(options.clientId);
     this.#hostname = boundedHostname(options.hostname ?? DEFAULT_HOSTNAME);
     this.#oauthBaseUrl = oauthBaseUrl(this.#hostname, options.oauthBaseUrl);
-    this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#requestTimeoutMs = requestTimeout(options.requestTimeoutMs);
@@ -396,6 +396,7 @@ export class GitHubAppDeviceFlowClient {
           Accept: "application/json",
           "Content-Type": "application/json",
           "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "gh-inari-hosted-relay",
         },
         body: JSON.stringify(body),
         signal: controller.signal,

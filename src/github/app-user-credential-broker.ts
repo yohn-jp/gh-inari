@@ -362,7 +362,7 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
               ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
             }));
       this.#apiUrl = normalizedApiUrl(options.apiUrl, this.#repository.hostname);
-      this.#fetch = options.fetch ?? globalThis.fetch;
+      this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
       this.#now = options.now ?? (() => new Date());
       this.#provenance = options.provenance;
       this.#requestTimeoutMs = options.requestTimeoutMs;

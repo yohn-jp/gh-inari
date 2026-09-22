@@ -19,7 +19,7 @@ enabled = true
 # No GitHub App, provider, Session, or Runtime credentials are configured here.
 [vars]
 INARI_HOSTED_REPOSITORY_HOST = "github.com"
-INARI_ENDPOINT_ID = ""
+INARI_ENDPOINT_ID = "dashboard-endpoint"
 INARI_ENDPOINT_DEPLOYMENT = "shared-hosted"
 # Public GitHub App deployment metadata for /.well-known/inari. These values
 # are intentionally non-secret; leave them empty until the App is configured.
