@@ -354,7 +354,9 @@ bounded ~30s wait with:
 ```json
 {
   "code": "CHANGE_REMOTE_RUN_FAILED",
-  "details": { "code": "SESSION_RECOVERY_REQUIRED" }
+  "details": {
+    "code": "SESSION_RECOVERY_REQUIRED"
+  }
 }
 ```
 
