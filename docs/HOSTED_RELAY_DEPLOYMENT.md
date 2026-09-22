@@ -148,6 +148,22 @@ pnpm run worker:build
 pnpm exec wrangler deploy --config wrangler.toml
 ```
 
+## Composed Endpoint and Dashboard certification
+
+Before integrating the hosted Endpoint and Dashboard Epic, run the bounded
+composition oracle and its Node test. It uses in-memory provider and Relay
+transports, exercises the actual Worker, Endpoint, webhook, OAuth, and
+Dashboard modules, and prints only the certified Epic and current-main SHAs:
+
+```sh
+node scripts/endpoint-dashboard-certification.mjs
+node --test test/endpoint-dashboard-certification.test.mjs
+```
+
+The package suite invokes the same oracle after package-runtime and release
+certification. The oracle never performs provider mutation and does not retain
+tokens, private keys, signed bodies, or raw provider responses.
+
 ## Live relay certification
 
 Live certification contacts a deployed Worker and is transport-only. It checks
