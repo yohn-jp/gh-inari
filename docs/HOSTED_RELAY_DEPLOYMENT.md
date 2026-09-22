@@ -210,3 +210,156 @@ is reserved for the real-network path so downstream consumers cannot mistake
 a fixture run for a deployed proof. Evidence contains only bounded status
 fields and check summaries; it never contains the private key, signature,
 token, or raw provider response.
+
+## Exercising a live semantic Change against the hosted relay
+
+Live relay certification above is transport-only. To exercise an actual
+`change issue` end to end against a deployed `gh-inari-hosted-relay` Worker,
+two independent local processes and two distinct pieces of Runtime identity
+are both required. This has no single documented example command, and the
+required pieces are easy to conflate; the steps below record the exact path.
+
+### The two identities are not interchangeable
+
+- **Runtime Authority** (Ed25519 keypair, canonical id like
+  `yohn-runtime-2026-09`): signs the Change provenance record and the Session
+  Certificate. Compatibility default local path
+  `~/.config/inari/runtime-authority.pem`. Supplied to CLI commands via
+  `INARI_RUNTIME_AUTHORITY_ID` / `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` (the
+  latter is the **raw PEM string**, not a file path — there is no
+  `_FILE`-suffixed variant for this pair).
+- **GitHub App identity** (App ID + App private key + installation id): only
+  needed by `runtime connect` when it falls back to the `installation-key`
+  credential profile (no `--profile`/App-user input supplied). Supplied via
+  `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_FILE`, `GITHUB_APP_INSTALLATION_ID`
+  (or their `INARI_`-prefixed equivalents). This mints installation tokens for
+  provider API calls; it authenticates the Runtime to GitHub, not to the
+  Relay.
+
+### 1. Connect a foreground Runtime to the relay
+
+```sh
+GITHUB_APP_ID=<numeric App id> \
+GITHUB_APP_PRIVATE_KEY_FILE=~/.config/inari/github-app-<slug>.pem \
+GITHUB_APP_INSTALLATION_ID=<numeric installation id> \
+inari runtime connect \
+  --relay-url wss://HOST \
+  --repository <repositoryId>/<owner>/<name> \
+  --authority-id yohn-runtime-2026-09 \
+  --private-key ~/.config/inari/runtime-authority.pem \
+  --json
+```
+
+Find the installation id from the GitHub App's installation settings page, or
+`gh api /repos/<owner>/<repo>/installation` using a token with App-installation
+read access (a plain user PAT/`gh auth token` is not sufficient for this
+endpoint). This command is foreground and long-running; run it in the
+background and keep it alive for the next step.
+
+### 2. Issue a short-lived Session credential bundle
+
+`inari change issue` does not mint its own Session credential; one must exist
+first via `inari session issue`. The `--from` input is a
+`SessionIssuanceRequestDocument`, not the Change request itself:
+
+```json
+{
+  "version": 1,
+  "kind": "inari-session-issuance-request",
+  "runtimeAuthority": {
+    "version": 1,
+    "kind": "runtime-authority",
+    "id": "yohn-runtime-2026-09",
+    "key": { "crv": "Ed25519", "kty": "OKP", "x": "<public key from the canonical trust record>" },
+    "status": "active",
+    "notBefore": "2026-09-13T00:00:00Z",
+    "notAfter": null,
+    "maxSessionTtlSeconds": 7200,
+    "capabilityCeiling": ["change.implement", "change.ready"]
+  },
+  "repository": { "id": "<repositoryId>", "name": "<owner>/<name>" },
+  "task": { "kind": "issue", "number": <issue number> },
+  "capabilities": [{ "kind": "change.implement", "issue": <issue number> }],
+  "ttlSeconds": 1800
+}
+```
+
+The `runtimeAuthority` block is copied verbatim from the canonical public
+record at `.github/inari/authorities/<authority-id>.json` — it is a public
+key, safe to inline here. Two details that are easy to get wrong:
+
+- `kind` at the top level must be exactly `inari-session-issuance-request`
+  (hyphenated). This is a different vocabulary from the Change operation
+  names.
+- Each capability's `kind` must be `change.implement`, **not** `change.issue`
+  — `change.issue` is the CLI/operation name used later, but it is rejected
+  here with `SESSION_BUNDLE_INVALID_REQUEST`.
+
+```sh
+inari session issue \
+  --from request.json \
+  --private-key ~/.config/inari/runtime-authority.pem \
+  --to ~/.config/inari/session-credential-<issue>.json
+```
+
+The `--to` destination must not be under `/tmp` (rejected as
+`SESSION_BUNDLE_UNSAFE_STORAGE`); keep it under a private config directory.
+The bundle's `certificate` carries a `ttlSeconds`-bounded `exp`; reissue once
+expired rather than reusing a stale bundle (Session issuance itself refuses
+to overwrite an existing `--to` path, so pick a fresh path or delete the old
+one first).
+
+### 3. Dispatch the Change through the direct-App transport
+
+`change issue` reaches the hosted relay Worker only through the **direct-App
+transport**, selected by supplying both `--session-credential` and
+`--app-endpoint` (or their environment equivalents,
+`INARI_SESSION_CREDENTIAL_FILE` and `INARI_APP_ENDPOINT`,
+resolved by `resolveDirectAppTransportOptions` in `src/cli-core.ts`). This
+transport selection is not yet listed in `--help` output.
+
+```sh
+GH_TOKEN="$(gh auth token)" \
+INARI_RUNTIME_AUTHORITY_ID=yohn-runtime-2026-09 \
+INARI_RUNTIME_AUTHORITY_PRIVATE_KEY="$(cat ~/.config/inari/runtime-authority.pem)" \
+inari change issue <issue number> \
+  --repository <owner>/<name> \
+  --session-credential ~/.config/inari/session-credential-<issue>.json \
+  --app-endpoint https://HOST \
+  --json
+```
+
+`INARI_RUNTIME_AUTHORITY_ID`/`INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` are
+required here too — the Session credential bundle authorizes the *capability*,
+but the Change provenance record is signed locally by the Runtime Authority
+key independently of the bundle. `GH_TOKEN` is needed for the local
+`repository.resolve` preflight step and is unrelated to the Relay or the
+Actions adapter below.
+
+**Do not omit `--session-credential`/`--app-endpoint` expecting a relay path
+by default.** Omitting them does not fail closed toward the Relay; it falls
+through to `createActionsChangeExecutionAdapter`, a separate,
+compatibility-only GitHub Actions workflow-dispatch execution path (see
+`docs/NATIVE_MCP_ISSUER_GATEWAY.md`) that has nothing to do with the hosted
+Worker or `runtime connect`. Without `GH_TOKEN` set, that path fails at the
+`repository.resolve` preflight with `RUNTIME_AUTHORITY_SOURCE_UNAVAILABLE`
+before it even reaches the Actions adapter — a misleading local-auth error
+that has no bearing on Relay dispatch.
+
+### Known blocker: Relay dispatch timeout (#1001)
+
+As of 0.15.0 pre-release verification, step 3 above reliably fails after a
+bounded ~30s wait with:
+
+```json
+{"code":"CHANGE_REMOTE_RUN_FAILED","details":{"code":"SESSION_RECOVERY_REQUIRED"}}
+```
+
+This reproduces with a `runtime connect` process confirmed alive and
+WebSocket-connected throughout. The client-side call sequence documented
+above is correct; the fault is server-side, inside the deployed Worker's
+Durable Object dispatch path (`REPOSITORY_RELAY` / `RepositoryRelayDurableObject`,
+composed in `src/hosted-worker.ts`), not in any CLI flag or credential
+combination. Do not re-derive or re-verify the client invocation while
+debugging this; start from the Durable Object's job-dispatch and
+possession-handshake code instead. Track resolution against Issue #1001.
