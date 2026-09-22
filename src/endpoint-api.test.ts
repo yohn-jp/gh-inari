@@ -31,7 +31,7 @@ const principal = {
   kind: "human" as const,
   id: "human-922",
 };
-const capability = { kind: "change.implement" as const, issue: 922 };
+const capability = { kind: "repository.read" as const };
 
 const evidence: EndpointAuthorizationEvidence = {
   version: ENDPOINT_API_CONTRACT_VERSION,
@@ -127,7 +127,7 @@ test("denies a human request when the Endpoint capability is not admitted", asyn
     authentication: {
       authenticate: async () => ({
         ...evidence,
-        capabilities: [{ kind: "change.ready", issue: 922 }],
+        capabilities: [{ kind: "presence.read" }],
       }),
     },
   }).execute(request());

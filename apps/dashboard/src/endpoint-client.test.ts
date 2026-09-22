@@ -35,7 +35,7 @@ const request: DashboardEndpointReadRequest = {
   endpoint,
   installation,
   repository,
-  capability: { kind: "change.implement", issue: 923 },
+  capability: { kind: "repository.read" },
 };
 
 const success = {

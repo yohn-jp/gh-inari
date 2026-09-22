@@ -10,11 +10,24 @@
  */
 
 import {
-  validateCapabilityClaim,
-  type CapabilityClaim,
-  type CapabilityDiagnostic,
-  type CapabilityKind,
-} from "./agent-authority/capability.js";
+  validateEndpointCapability as validateEndpointCapabilityClaim,
+  type EndpointCapability,
+  type EndpointCapabilityDiagnostic,
+  type EndpointCapabilityKind,
+} from "./endpoint-capability.js";
+export {
+  ENDPOINT_CAPABILITY_KINDS,
+  ENDPOINT_READ_OPERATION_CAPABILITIES,
+  endpointCapabilityForOperation,
+} from "./endpoint-capability.js";
+export type {
+  EndpointCapability,
+  EndpointCapabilityDiagnostic,
+  EndpointCapabilityDiagnosticCode,
+  EndpointCapabilityKind,
+  EndpointCapabilityValidationResult,
+  EndpointReadOperation,
+} from "./endpoint-capability.js";
 import { validateRepositoryIdentity, type RepositoryIdentity } from "./github/effect-authorizer.js";
 
 export const ENDPOINT_AUTHORIZATION_CONTRACT_VERSION = 1 as const;
@@ -25,10 +38,6 @@ export type EndpointPrincipalKind = (typeof ENDPOINT_PRINCIPAL_KINDS)[number];
 
 export const ENDPOINT_DEPLOYMENT_KINDS = Object.freeze(["shared-hosted", "self-hosted"] as const);
 export type EndpointDeploymentKind = (typeof ENDPOINT_DEPLOYMENT_KINDS)[number];
-
-/** Endpoint authorization composes the existing Core semantic capability vocabulary. */
-export type EndpointCapability = CapabilityClaim;
-export type EndpointCapabilityKind = CapabilityKind;
 
 export interface HumanEndpointPrincipal {
   readonly version: EndpointAuthorizationContractVersion;
@@ -511,8 +520,8 @@ export function validateEndpointRepositoryIdentity(
   return normalizeRepository(value, path);
 }
 
-function capabilityDiagnostic(entry: CapabilityDiagnostic): EndpointAuthorizationDiagnostic {
-  const unknown = entry.code === "CAPABILITY_UNSUPPORTED_KIND";
+function capabilityDiagnostic(entry: EndpointCapabilityDiagnostic): EndpointAuthorizationDiagnostic {
+  const unknown = entry.code === "ENDPOINT_CAPABILITY_UNSUPPORTED_KIND";
   return diagnostic(
     unknown ? "ENDPOINT_AUTHORIZATION_UNKNOWN_CAPABILITY" : "ENDPOINT_AUTHORIZATION_INVALID_CAPABILITY",
     entry.path,
@@ -524,7 +533,7 @@ export function validateEndpointCapability(
   value: unknown,
   path = "$.capability",
 ): EndpointAuthorizationValidationResult<EndpointCapability> {
-  const result = validateCapabilityClaim(value, path);
+  const result = validateEndpointCapabilityClaim(value, path);
   if (!result.valid || result.value === undefined) {
     return {
       valid: false,
@@ -556,20 +565,7 @@ function sameRepository(left: EndpointRepositoryIdentity, right: EndpointReposit
 }
 
 function sameCapability(left: EndpointCapability, right: EndpointCapability): boolean {
-  if (left.kind !== right.kind) return false;
-  switch (left.kind) {
-    case "change.implement":
-    case "change.ready":
-    case "change.abort":
-    case "change.merge":
-      return right.kind === left.kind && right.issue === left.issue;
-    case "branch.create":
-      return right.kind === left.kind && right.branch === left.branch && right.max === left.max;
-    case "branch.advance":
-      return right.kind === left.kind && right.branch === left.branch && right.pathPolicy === left.pathPolicy;
-    case "pullRequest.create":
-      return right.kind === left.kind && right.head === left.head && right.base === left.base && right.max === left.max;
-  }
+  return left.kind === right.kind;
 }
 
 function normalizeEvidence(
