@@ -1,0 +1,232 @@
+:root {
+  color-scheme: light dark;
+  --ink: #1a1d24;
+  --muted: #5b6472;
+  --line: #d8dce2;
+  --surface: #ffffff;
+  --accent: #2452e8;
+  --ok: #1a7f4e;
+  --error: #b3261e;
+  --radius: 8px;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e7e9ee;
+    --muted: #9aa3b2;
+    --line: #333844;
+    --surface: #1c1f26;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 2.5rem 1.25rem;
+  background: var(--surface);
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 0.25rem;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin: 0 0 1.75rem;
+  font-size: 0.95rem;
+}
+
+#dashboard-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--line);
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+}
+
+#dashboard-status[data-state="ready"] {
+  background: rgba(26, 127, 78, 0.12);
+  color: var(--ok);
+}
+
+#dashboard-status[data-state="error"] {
+  background: rgba(179, 38, 30, 0.12);
+  color: var(--error);
+}
+
+#dashboard-status[data-state="loading"]::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.step {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.step-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.9rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.step-hint {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+#dashboard-sign-in {
+  appearance: none;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.6rem 1.1rem;
+  cursor: pointer;
+}
+
+#dashboard-sign-in:hover {
+  filter: brightness(1.08);
+}
+
+fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+legend {
+  padding: 0;
+}
+
+#dashboard-form label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.9rem;
+}
+
+#dashboard-form input {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#dashboard-form input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#dashboard-form button[type="submit"] {
+  appearance: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.55rem 1.1rem;
+  cursor: pointer;
+}
+
+#dashboard-form button[type="submit"]:hover {
+  background: rgba(36, 82, 232, 0.08);
+}
+
+#dashboard-form fieldset:disabled {
+  opacity: 0.5;
+}
+
+#dashboard-form fieldset:disabled button[type="submit"] {
+  cursor: not-allowed;
+}
+
+#dashboard-result {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+}
+
+#dashboard-result[data-state="result"] {
+  background: rgba(26, 127, 78, 0.08);
+  color: var(--ink);
+  border-color: rgba(26, 127, 78, 0.3);
+}
+
+#dashboard-result[data-state="error"] {
+  background: rgba(179, 38, 30, 0.08);
+  color: var(--ink);
+  border-color: rgba(179, 38, 30, 0.3);
+}

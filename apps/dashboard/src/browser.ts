@@ -436,12 +436,10 @@ export async function startDashboardBrowser(
       await auth.handleCallback(runtime.location.href);
       clearCallbackUrl(runtime);
     }
-    signIn.hidden = auth.getAccessToken() !== undefined;
-    renderStatus(
-      status,
-      auth.getAccessToken() === undefined ? "Sign in to read the Endpoint." : "Signed in in memory.",
-      "ready",
-    );
+    const signedIn = auth.getAccessToken() !== undefined;
+    signIn.hidden = signedIn;
+    form.querySelector("fieldset")?.toggleAttribute("disabled", !signedIn);
+    renderStatus(status, signedIn ? "Signed in in memory." : "Sign in to read the Endpoint.", "ready");
     return Object.freeze({ auth, application, refresh });
   } catch (error: unknown) {
     renderError(status, result, error);
