@@ -182,6 +182,41 @@ legend {
   outline-offset: 1px;
 }
 
+#dashboard-form select {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#dashboard-form select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#dashboard-form details {
+  margin-bottom: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+}
+
+#dashboard-form details summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+#dashboard-form details label {
+  margin-top: 0.75rem;
+}
+
 #dashboard-form button[type="submit"] {
   appearance: none;
   border: 1px solid var(--accent);

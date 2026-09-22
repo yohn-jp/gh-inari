@@ -30,17 +30,32 @@
           <fieldset disabled>
             <legend>Endpoint read</legend>
             <label>
-              Installation ID
-              <input name="installationId" inputmode="numeric" maxlength="128" required />
+              GitHub account/organization
+              <select id="dashboard-installation-select">
+                <option value="">Loading installations…</option>
+              </select>
             </label>
             <label>
-              Repository owner/name
-              <input name="repositoryName" maxlength="255" placeholder="owner/repository" required />
+              Repository
+              <select id="dashboard-repository-select" disabled>
+                <option value="">Select an account first</option>
+              </select>
             </label>
-            <label>
-              Repository ID
-              <input name="repositoryId" inputmode="numeric" maxlength="20" required />
-            </label>
+            <details>
+              <summary>Enter installation and repository manually</summary>
+              <label>
+                Installation ID
+                <input name="installationId" inputmode="numeric" maxlength="128" required />
+              </label>
+              <label>
+                Repository owner/name
+                <input name="repositoryName" maxlength="255" placeholder="owner/repository" required />
+              </label>
+              <label>
+                Repository ID
+                <input name="repositoryId" inputmode="numeric" maxlength="20" required />
+              </label>
+            </details>
             <label>
               Root Issue (optional)
               <input name="rootIssue" inputmode="numeric" maxlength="9" />

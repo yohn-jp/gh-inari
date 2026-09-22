@@ -7,6 +7,7 @@ import { validateEndpointReadQuery, type EndpointReadQuery } from "../../../src/
 import { createDashboardAuth, DashboardAuthError, type DashboardAuthSession } from "./auth.js";
 import { createDashboardApplication, type DashboardApplication } from "./main.js";
 import type { DashboardEndpointReadRequest, DashboardEndpointResult } from "./endpoint-client.js";
+import { createGitHubInstallationsClient, type GitHubInstallationsClient } from "./github-installations-client.js";
 
 const MAX_ENDPOINT_URL_LENGTH = 2_048;
 const MAX_DESCRIPTOR_BYTES = 64 * 1024;
@@ -242,6 +243,65 @@ function formInput(form: HTMLFormElement): DashboardBrowserInput {
   };
 }
 
+function setFormValue(form: HTMLFormElement, name: string, value: string): void {
+  const field = form.elements.namedItem(name);
+  if (field instanceof HTMLInputElement) field.value = value;
+}
+
+function resetSelect(select: HTMLSelectElement, placeholder: string, disabled: boolean): void {
+  select.replaceChildren(new Option(placeholder, ""));
+  select.disabled = disabled;
+}
+
+/** Populate the account/repository pickers from the signed-in user's own GitHub App installations. */
+async function wireInstallationPickers(
+  form: HTMLFormElement,
+  installations: GitHubInstallationsClient,
+  installationSelect: HTMLSelectElement,
+  repositorySelect: HTMLSelectElement,
+  status: HTMLElement,
+): Promise<void> {
+  try {
+    const list = await installations.listInstallations();
+    resetSelect(installationSelect, "Select an account", false);
+    for (const entry of list) {
+      installationSelect.append(new Option(entry.accountLogin, entry.installationId));
+    }
+  } catch {
+    resetSelect(installationSelect, "Unavailable — enter manually below", true);
+    return;
+  }
+
+  installationSelect.addEventListener("change", () => {
+    setFormValue(form, "installationId", installationSelect.value);
+    setFormValue(form, "repositoryName", "");
+    setFormValue(form, "repositoryId", "");
+    if (installationSelect.value === "") {
+      resetSelect(repositorySelect, "Select an account first", true);
+      return;
+    }
+    resetSelect(repositorySelect, "Loading repositories…", true);
+    void installations
+      .listRepositories(installationSelect.value)
+      .then((repositories) => {
+        resetSelect(repositorySelect, "Select a repository", false);
+        for (const entry of repositories) {
+          repositorySelect.append(new Option(entry.nameWithOwner, `${entry.repositoryId}\u0000${entry.nameWithOwner}`));
+        }
+      })
+      .catch(() => {
+        resetSelect(repositorySelect, "Unavailable — enter manually below", true);
+        renderStatus(status, "Could not list repositories for that account.", "error");
+      });
+  });
+
+  repositorySelect.addEventListener("change", () => {
+    const [repositoryId = "", nameWithOwner = ""] = repositorySelect.value.split("\u0000");
+    setFormValue(form, "repositoryId", repositoryId);
+    setFormValue(form, "repositoryName", nameWithOwner);
+  });
+}
+
 /** Fetch and validate the public, secret-free Endpoint onboarding descriptor. */
 export async function fetchDashboardOnboardingDescriptor(
   endpoint: string,
@@ -440,6 +500,17 @@ export async function startDashboardBrowser(
     signIn.hidden = signedIn;
     form.querySelector("fieldset")?.toggleAttribute("disabled", !signedIn);
     renderStatus(status, signedIn ? "Signed in in memory." : "Sign in to read the Endpoint.", "ready");
+    if (signedIn) {
+      const installationSelect = runtime.document.getElementById("dashboard-installation-select");
+      const repositorySelect = runtime.document.getElementById("dashboard-repository-select");
+      if (installationSelect instanceof HTMLSelectElement && repositorySelect instanceof HTMLSelectElement) {
+        const installations = createGitHubInstallationsClient({
+          getAccessToken: () => auth.getAccessToken(),
+          fetch: runtime.fetch,
+        });
+        void wireInstallationPickers(form, installations, installationSelect, repositorySelect, status);
+      }
+    }
     return Object.freeze({ auth, application, refresh });
   } catch (error: unknown) {
     renderError(status, result, error);
