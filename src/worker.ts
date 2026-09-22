@@ -19,6 +19,7 @@ import {
   DIRECT_APP_EXECUTE_PATH,
   DIRECT_APP_HTTP_CONTRACT_VERSION,
 } from "./agent-authority/direct-app-http.js";
+import { jsonResponse, safePathname } from "./worker-http.js";
 
 /** Cloudflare Worker secret and non-secret environment bindings. */
 export interface Env {
@@ -128,14 +129,11 @@ function resolveRuntime(env: Env): RuntimeResolution {
 }
 
 function configurationFailureResponse(): Response {
-  return new Response(
-    JSON.stringify({
-      version: DIRECT_APP_HTTP_CONTRACT_VERSION,
-      ok: false,
-      error: { code: "WORKER_CONFIGURATION_INVALID", message: "Worker configuration is invalid or incomplete." },
-    }),
-    { status: 500, headers: { "content-type": "application/json; charset=utf-8" } },
-  );
+  return jsonResponse(500, {
+    version: DIRECT_APP_HTTP_CONTRACT_VERSION,
+    ok: false,
+    error: { code: "WORKER_CONFIGURATION_INVALID", message: "Worker configuration is invalid or incomplete." },
+  });
 }
 
 /**
@@ -144,41 +142,24 @@ function configurationFailureResponse(): Response {
  */
 function healthzResponse(env: Env): Response {
   const resolution = resolveRuntime(env);
-  const body = {
+  return jsonResponse(resolution.ok ? 200 : 503, {
     ok: resolution.ok,
     service: "gh-inari-direct-app-worker",
     contractVersion: DIRECT_APP_HTTP_CONTRACT_VERSION,
     executePath: DIRECT_APP_EXECUTE_PATH,
-  };
-  return new Response(JSON.stringify(body), {
-    status: resolution.ok ? 200 : 503,
-    headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
 
 function healthzMethodFailureResponse(): Response {
-  return new Response(
-    JSON.stringify({
+  return jsonResponse(
+    405,
+    {
       version: DIRECT_APP_HTTP_CONTRACT_VERSION,
       ok: false,
       error: { code: "METHOD_NOT_ALLOWED", message: "Only GET is supported for this endpoint." },
-    }),
-    {
-      status: 405,
-      headers: {
-        allow: HEALTHZ_METHOD,
-        "content-type": "application/json; charset=utf-8",
-      },
     },
+    { allow: HEALTHZ_METHOD },
   );
-}
-
-function safePathname(url: string): string | undefined {
-  try {
-    return new URL(url).pathname;
-  } catch {
-    return undefined;
-  }
 }
 
 export default {

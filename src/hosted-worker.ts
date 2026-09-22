@@ -22,6 +22,8 @@ import {
   type RepositoryRelayDispatchRequest,
 } from "./mcp/relay-session-executor.js";
 import { createInariMcpHttpHandler } from "./mcp/http-transport.js";
+import { createDirectAppHttpHandler, DIRECT_APP_EXECUTE_PATH } from "./agent-authority/direct-app-http.js";
+import { jsonResponse, methodNotAllowed, safePathname } from "./worker-http.js";
 import type {
   CapabilityAuthorizedSessionExecutionResult,
   CapabilityAuthorizedSessionExecutor,
@@ -120,21 +122,6 @@ type HostedWebSocket = RepositoryRelayWebSocket & {
 };
 
 type UpgradeResponse = Response & { readonly webSocket?: HostedWebSocket };
-
-function jsonResponse(status: number, body: object, headers?: HeadersInit): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "cache-control": "no-store",
-      "content-type": "application/json; charset=utf-8",
-      ...headers,
-    },
-  });
-}
-
-function methodNotAllowed(allow: string): Response {
-  return new Response("Method not allowed.", { status: 405, headers: { allow, "cache-control": "no-store" } });
-}
 
 function serviceUnavailable(): Response {
   return jsonResponse(503, { ok: false, error: { code: "HOSTED_WORKER_UNAVAILABLE" } });
@@ -565,6 +552,19 @@ async function mcp(request: Request, env: Env): Promise<Response> {
   }
 }
 
+/**
+ * Same frozen #377 direct-App wire contract as the standalone `worker.ts`
+ * deployment, but backed by the Relay-dispatched session executor instead of
+ * a Worker-held GitHub App key: execution still requires a connected Runtime.
+ */
+async function execute(request: Request, env: Env): Promise<Response> {
+  try {
+    return await createDirectAppHttpHandler({ executor: createHostedMcpSessionExecutor(env) })(request);
+  } catch {
+    return serviceUnavailable();
+  }
+}
+
 function webhookOptions(env: Env): EndpointWebhookHandlerOptions | undefined {
   if (env.endpointWebhook !== undefined) return env.endpointWebhook;
   if (env.INARI_GITHUB_WEBHOOK_SECRET === undefined || env.INARI_ENDPOINT_ID === undefined) return undefined;
@@ -652,8 +652,8 @@ function workerFirstPath(pathname: string): boolean {
   );
 }
 
-async function staticAsset(request: Request, env: Env): Promise<Response> {
-  if (workerFirstPath(new URL(request.url).pathname) || env.ASSETS === undefined) {
+async function staticAsset(request: Request, env: Env, pathname: string): Promise<Response> {
+  if (workerFirstPath(pathname) || env.ASSETS === undefined) {
     return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
   }
   try {
@@ -665,15 +665,17 @@ async function staticAsset(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const pathname = new URL(request.url).pathname;
+    const pathname = safePathname(request.url);
+    if (pathname === undefined) return jsonResponse(400, { ok: false, error: { code: "MALFORMED_REQUEST" } });
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
     if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
     if (pathname === HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH) return oauthExchange(request, env);
     if (pathname === ENDPOINT_HTTP_PATH) return endpoint(request, env);
     if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);
     if (pathname === "/mcp") return mcp(request, env);
+    if (pathname === DIRECT_APP_EXECUTE_PATH) return execute(request, env);
     if (pathname === "/v1/relay/connect") return relayConnect(request, env);
-    return staticAsset(request, env);
+    return staticAsset(request, env, pathname);
   },
 };
 

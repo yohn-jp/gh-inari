@@ -1550,7 +1550,33 @@ function rejectPartialSessionTransportOptions(
   );
 }
 
-/** Selects the direct App transport when both Session options are supplied; otherwise the native Actions path. */
+/**
+ * Resolves the direct App transport's Session credential path and endpoint,
+ * preferring explicit CLI flags over the `INARI_SESSION_CREDENTIAL_FILE` /
+ * `INARI_APP_ENDPOINT` environment variables. Returns `undefined` when
+ * neither source supplies both values, so the caller falls back to Actions.
+ */
+function resolveDirectAppTransportOptions(
+  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean },
+  environment: Readonly<Record<string, string | undefined>>,
+): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
+  if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
+    return { sessionCredential: sessionOptions.sessionCredential, appEndpoint: sessionOptions.appEndpoint };
+  }
+  const envSessionCredential = environment.INARI_SESSION_CREDENTIAL_FILE;
+  const envAppEndpoint = environment.INARI_APP_ENDPOINT;
+  if (typeof envSessionCredential === "string" && typeof envAppEndpoint === "string") {
+    return { sessionCredential: envSessionCredential, appEndpoint: envAppEndpoint };
+  }
+  return undefined;
+}
+
+/**
+ * Selects the direct App transport when both Session options are supplied,
+ * either as explicit `--session-credential`/`--app-endpoint` flags or as the
+ * `INARI_SESSION_CREDENTIAL_FILE`/`INARI_APP_ENDPOINT` environment variables
+ * (flags take precedence); otherwise falls back to the native Actions path.
+ */
 function createChangeExecutor(
   dependencies: CliDependencies,
   root: string,
@@ -1559,9 +1585,10 @@ function createChangeExecutor(
 ): ChangeExecutionPort {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
   rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
-  if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
-    const { session, agent } = loadDirectAppSession(path.resolve(root, sessionOptions.sessionCredential));
-    const endpoint = resolveAppEndpoint(sessionOptions.appEndpoint);
+  const direct = resolveDirectAppTransportOptions(sessionOptions, process.env);
+  if (direct !== undefined) {
+    const { session, agent } = loadDirectAppSession(path.resolve(root, direct.sessionCredential));
+    const endpoint = resolveAppEndpoint(direct.appEndpoint);
     return createDirectAppChangeExecutionAdapter({ endpoint, session, ...(agent === undefined ? {} : { agent }) });
   }
   const factory =
@@ -1654,19 +1681,23 @@ async function runChangePublishCommand(
   root: string,
   dependencies: CliDependencies,
 ): Promise<number> {
-  const sessionCredential = parsed.options.sessionCredential;
-  const appEndpoint = parsed.options.appEndpoint;
-  if (typeof sessionCredential !== "string" || typeof appEndpoint !== "string") {
+  rejectPartialSessionTransportOptions(parsed.options.sessionCredential, parsed.options.appEndpoint);
+  const direct = resolveDirectAppTransportOptions(
+    { sessionCredential: parsed.options.sessionCredential, appEndpoint: parsed.options.appEndpoint },
+    process.env,
+  );
+  if (direct === undefined) {
     throw new CliError(
       "INPUT_REQUIRED",
-      "change publish requires --session-credential <path> and --app-endpoint <https-url>.",
+      "change publish requires --session-credential <path> and --app-endpoint <https-url>, " +
+        "or the INARI_SESSION_CREDENTIAL_FILE and INARI_APP_ENDPOINT environment variables.",
       "--session-credential",
     );
   }
   const commitRev = typeof parsed.options.commit === "string" ? parsed.options.commit : "HEAD";
 
-  const { session, agent } = loadDirectAppSession(path.resolve(root, sessionCredential));
-  const endpoint = resolveAppEndpoint(appEndpoint);
+  const { session, agent } = loadDirectAppSession(path.resolve(root, direct.sessionCredential));
+  const endpoint = resolveAppEndpoint(direct.appEndpoint);
 
   // #467 requires verifying the local repository identity before publishing:
   // an ancestor/CAS check alone proves nothing about which repository this
@@ -1685,8 +1716,8 @@ async function runChangePublishCommand(
   }
 
   const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
-    sessionCredential,
-    appEndpoint,
+    sessionCredential: direct.sessionCredential,
+    appEndpoint: direct.appEndpoint,
   });
   const projection = await readChangeProjection(executor, changeReadRequest(issue));
   const canonicalBranch = projection.canonicalBranch;

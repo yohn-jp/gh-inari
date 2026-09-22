@@ -220,6 +220,7 @@ function deliveryEvent(job: RuntimeJob, type: RelayDeliveryEvent["type"], digest
 
 export class LocalRelayRuntime {
   readonly #options: LocalRelayRuntimeOptions;
+  readonly #connectUrl: string;
   readonly #repository: RelayRepositoryIdentity;
   readonly #connectionId: string;
   readonly #now: () => number;
@@ -263,6 +264,18 @@ export class LocalRelayRuntime {
     const reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
     if (!Number.isSafeInteger(reconnectDelayMs) || reconnectDelayMs < 0 || reconnectDelayMs > MAX_RECONNECT_DELAY_MS)
       throw new TypeError("Reconnect delay is invalid.");
+    // The hosted Relay's WebSocket upgrade reads repositoryId/repositoryHost/
+    // connectionId/delegatorId from the URL query. A `relayUrl` that already
+    // carries one of these (the documented explicit form) keeps that value;
+    // a bare connection-base URL is filled in here so it cannot silently
+    // loop against a Relay that rejects the resulting unparameterized upgrade.
+    if (!parsed.searchParams.has("repositoryId")) parsed.searchParams.set("repositoryId", repository.repositoryId);
+    if (!parsed.searchParams.has("repositoryHost")) {
+      parsed.searchParams.set("repositoryHost", repository.repositoryHost);
+    }
+    if (!parsed.searchParams.has("connectionId")) parsed.searchParams.set("connectionId", connectionId);
+    if (!parsed.searchParams.has("delegatorId")) parsed.searchParams.set("delegatorId", options.delegatorId);
+    this.#connectUrl = parsed.toString();
     this.#options = options;
     this.#repository = repository;
     this.#connectionId = connectionId;
@@ -297,7 +310,7 @@ export class LocalRelayRuntime {
     this.#state = "connecting";
     this.#possessionProved = false;
     this.#admissionPendingSocket = undefined;
-    const socket = this.#webSocketFactory(this.#options.relayUrl);
+    const socket = this.#webSocketFactory(this.#connectUrl);
     this.#socket = socket;
     this.#listen(socket, "open", () => this.#onOpen(socket));
     this.#listen(socket, "message", (event) => this.#onMessage(socket, event));
