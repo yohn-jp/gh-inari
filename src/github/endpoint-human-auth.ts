@@ -301,6 +301,30 @@ function repositoryPath(locator: RepositoryLocator): string {
   return `repos/${encodeURIComponent(locator.owner)}/${encodeURIComponent(locator.name)}`;
 }
 
+function allowedRepositoryQuery(query: string | undefined): boolean {
+  if (query === undefined) return true;
+  if (query.length === 0 || /%(?![0-9A-Fa-f]{2})/u.test(query) || query.includes("?")) return false;
+
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(query);
+  } catch {
+    return false;
+  }
+  if (
+    /[\u0000-\u001f\u007f]/u.test(decoded) ||
+    decoded.includes("\\") ||
+    decoded.includes("#") ||
+    decoded.includes("?") ||
+    decoded.startsWith("//") ||
+    decoded.startsWith("/") ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(decoded)
+  ) {
+    return false;
+  }
+  return query === "recursive=1" && decoded === "recursive=1";
+}
+
 function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path is string {
   if (
     typeof path !== "string" ||
@@ -308,7 +332,6 @@ function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path 
     path.length > MAX_PATH_LENGTH ||
     /[\u0000-\u001f\u007f]/u.test(path) ||
     path.includes("\\") ||
-    path.includes("?") ||
     path.includes("#") ||
     path.startsWith("/") ||
     path.startsWith("//") ||
@@ -316,19 +339,29 @@ function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path 
   ) {
     return false;
   }
-  const root = repositoryPath(locator);
-  if (path !== root && !path.startsWith(`${root}/`)) return false;
 
-  const suffix = path.slice(root.length + 1);
-  if (path === root || /%(?![0-9A-Fa-f]{2})/u.test(suffix)) return path === root;
+  const queryStart = path.indexOf("?");
+  const rawRepositoryPath = queryStart === -1 ? path : path.slice(0, queryStart);
+  const query = queryStart === -1 ? undefined : path.slice(queryStart + 1);
+  if (queryStart !== -1) {
+    if (query === undefined || query.length === 0 || query.includes("?")) return false;
+  }
+
+  const root = repositoryPath(locator);
+  if (rawRepositoryPath !== root && !rawRepositoryPath.startsWith(`${root}/`)) return false;
+
+  const suffix = rawRepositoryPath.slice(root.length + 1);
+  if (rawRepositoryPath === root) return allowedRepositoryQuery(query);
+  if (/%(?![0-9A-Fa-f]{2})/u.test(suffix)) return false;
 
   try {
     const decoded = decodeURIComponent(suffix);
     if (/[\u0000-\u001f\u007f]/u.test(decoded) || decoded.includes("\\")) return false;
-    return !decoded.split("/").some((component) => component === "." || component === "..");
+    if (decoded.split("/").some((component) => component === "." || component === "..")) return false;
   } catch {
     return false;
   }
+  return allowedRepositoryQuery(query);
 }
 
 function evidenceFor(
