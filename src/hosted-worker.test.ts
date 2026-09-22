@@ -307,13 +307,30 @@ test("hosted MCP exposes the native catalog and internal dispatch targets the im
   assert.equal(response.status, 200);
   assert.equal((await response.json()).result.serverInfo.name, "inari");
 
-  const socket = new FakeSocket();
+  let dispatchedJobKind: string | undefined;
   const dispatch = createHostedRelayDispatch(
     relayNamespace(
       {
         async fetch(request) {
-          assert.equal(new URL(request.url).searchParams.get("role"), "client");
-          return { status: 101, webSocket: socket } as unknown as Response;
+          const url = new URL(request.url);
+          assert.equal(url.pathname, "/__inari/internal/relay/dispatch");
+          assert.equal(request.method, "POST");
+          assert.equal(url.searchParams.has("role"), false);
+          assert.match(url.searchParams.get("connectionId") ?? "", /^mcp-/u);
+          const job = decodeRelayEnvelope(await request.text(), repository);
+          if (job.kind !== "job") throw new Error("Expected relay job.");
+          dispatchedJobKind = job.kind;
+          return new Response(
+            JSON.stringify({
+              version: 1,
+              kind: "result",
+              repository,
+              connectionId: job.connectionId,
+              jobId: job.jobId,
+              deliveryState: "terminal-result",
+              resultPayload: base64UrlEncodeText(JSON.stringify({ version: 1, status: "succeeded" })),
+            }),
+          );
         },
       },
       ids,
@@ -330,7 +347,7 @@ test("hosted MCP exposes the native catalog and internal dispatch targets the im
   const envelope = "envelope" in result ? result.envelope : result;
   assert.equal(envelope.kind, "result");
   assert.equal(ids.at(-1), repository.repositoryId);
-  assert.equal(decodeRelayEnvelope(socket.frames[0]!, repository).kind, "job");
+  assert.equal(dispatchedJobKind, "job");
 });
 
 test("hosted webhook route admits only the bounded Endpoint webhook surface", async () => {

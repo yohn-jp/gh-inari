@@ -346,20 +346,16 @@ Worker or `runtime connect`. Without `GH_TOKEN` set, that path fails at the
 before it even reaches the Actions adapter — a misleading local-auth error
 that has no bearing on Relay dispatch.
 
-### Known blocker: Relay dispatch timeout (#1001)
+### Hosted Worker-to-Relay dispatch transport
 
-As of 0.15.0 pre-release verification, step 3 above reliably fails after a
-bounded ~30s wait with:
+The hosted Worker sends each semantic job to the repository Durable Object
+through the fixed internal HTTP dispatch seam. The Worker does not open a
+second `role=client` WebSocket and wait on that connection while the local
+Runtime executes. Only the user-owned Runtime keeps the long-lived,
+hibernatable WebSocket to the Durable Object.
 
-```json
-{"code":"CHANGE_REMOTE_RUN_FAILED","details":{"code":"SESSION_RECOVERY_REQUIRED"}}
-```
-
-This reproduces with a `runtime connect` process confirmed alive and
-WebSocket-connected throughout. The client-side call sequence documented
-above is correct; the fault is server-side, inside the deployed Worker's
-Durable Object dispatch path (`REPOSITORY_RELAY` / `RepositoryRelayDurableObject`,
-composed in `src/hosted-worker.ts`), not in any CLI flag or credential
-combination. Do not re-derive or re-verify the client invocation while
-debugging this; start from the Durable Object's job-dispatch and
-possession-handshake code instead. Track resolution against Issue #1001.
+This separation is intentional: Worker-to-Durable-Object dispatch is a bounded
+request/response operation, while Runtime connectivity remains the long-lived
+WebSocket transport. The internal dispatch path is not routed publicly and does
+not change Session authority, capability admission, repository partitioning, or
+credential custody.
