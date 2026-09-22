@@ -20,6 +20,7 @@ const DESCRIPTOR_KEYS = [
   "appSlug",
   "appInstallationUrl",
   "appUserAuthProfile",
+  "appCallbackUrl",
   "relayConnectionBase",
 ] as const;
 
@@ -55,6 +56,8 @@ export interface EndpointOnboardingDescriptor {
   readonly appSlug: string;
   readonly appInstallationUrl: string;
   readonly appUserAuthProfile: typeof ENDPOINT_ONBOARDING_APP_USER_AUTH_PROFILE;
+  /** Exact browser OAuth callback; omitted for legacy Device Flow-only deployments. */
+  readonly appCallbackUrl?: string;
   readonly relayConnectionBase: string;
 }
 
@@ -65,6 +68,7 @@ export interface EndpointOnboardingDescriptorInput {
   readonly appSlug: string;
   readonly appInstallationUrl: string;
   readonly appUserAuthProfile: string;
+  readonly appCallbackUrl?: string;
   readonly relayConnectionBase: string;
 }
 
@@ -100,6 +104,7 @@ function assertClosedDescriptor(value: Record<string, unknown>): void {
     );
   }
   for (const key of DESCRIPTOR_KEYS) {
+    if (key === "appCallbackUrl") continue;
     if (!Object.prototype.hasOwnProperty.call(value, key)) {
       fail("ENDPOINT_ONBOARDING_MISSING_FIELD", `$.${key}`, `Required field "${key}" is missing.`);
     }
@@ -177,6 +182,8 @@ function normalizeDescriptor(value: unknown): EndpointOnboardingDescriptor {
   if (appUserAuthProfile !== ENDPOINT_ONBOARDING_APP_USER_AUTH_PROFILE) {
     fail("ENDPOINT_ONBOARDING_INVALID_PROFILE", "$.appUserAuthProfile", "App-user auth profile is unsupported.");
   }
+  const appCallbackUrl =
+    input.appCallbackUrl === undefined ? undefined : boundedUrl(input.appCallbackUrl, "$.appCallbackUrl", ["https:"]);
   return Object.freeze({
     version: ENDPOINT_ONBOARDING_DESCRIPTOR_VERSION,
     githubHost: boundedHost(input.githubHost, "$.githubHost"),
@@ -185,6 +192,7 @@ function normalizeDescriptor(value: unknown): EndpointOnboardingDescriptor {
     appSlug,
     appInstallationUrl: boundedUrl(input.appInstallationUrl, "$.appInstallationUrl", ["https:"]),
     appUserAuthProfile,
+    ...(appCallbackUrl === undefined ? {} : { appCallbackUrl }),
     relayConnectionBase: boundedUrl(input.relayConnectionBase, "$.relayConnectionBase", ["wss:"]),
   });
 }
