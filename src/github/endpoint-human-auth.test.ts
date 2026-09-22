@@ -56,7 +56,7 @@ function fixture(options: FetchFixtureOptions = {}) {
   const fetcher: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
     calls.push({
-      path: url.pathname,
+      path: `${url.pathname}${url.search}`,
       method: String(init?.method ?? "GET"),
       authorization: String(new Headers(init?.headers).get("authorization")),
     });
@@ -88,6 +88,9 @@ function fixture(options: FetchFixtureOptions = {}) {
         },
         { status: 200 },
       );
+    }
+    if (url.pathname === "/repos/acme/inari/git/trees/feat%2F123-example" && url.search === "?recursive=1") {
+      return Response.json({ sha: "b".repeat(40), truncated: false, tree: [] }, { status: 200 });
     }
     if (url.pathname.startsWith("/repos/acme/inari")) return Response.json({ ok: true }, { status: 200 });
     return Response.json({}, { status: 404 });
@@ -207,13 +210,13 @@ test("revoked credentials fail closed and the returned transport is GET-only and
   );
 });
 
-test("admits canonical GitHubAdapter branch paths and rejects encoded traversal before provider I/O", async () => {
+test("admits canonical GitHubAdapter branch and tree paths and rejects encoded traversal before provider I/O", async () => {
   const { calls, fetcher } = fixture();
   const result = await authenticator(fetcher).authenticate(request());
   assert.equal(result.authenticated, true);
   if (!result.authenticated) return;
 
-  const branch = await result.withRepositoryReadTransport((transport) => {
+  const reads = await result.withRepositoryReadTransport(async (transport) => {
     const adapter = new GitHubAdapter({
       repository: "acme/inari",
       hostname: "github.com",
@@ -221,15 +224,23 @@ test("admits canonical GitHubAdapter branch paths and rejects encoded traversal 
         request: (input) => transport.request({ hostname: input.hostname, method: "GET", path: input.path }),
       },
     });
-    return adapter.findBranch("feat/123-example");
+    return {
+      branch: await adapter.findBranch("feat/123-example"),
+      tree: await adapter.getRepositoryTree("feat/123-example"),
+    };
   });
-  assert.deepEqual(branch, {
+  assert.deepEqual(reads.branch, {
     name: "feat/123-example",
     ref: "refs/heads/feat/123-example",
     sha: "a".repeat(40),
   });
+  assert.deepEqual(reads.tree, { sha: "b".repeat(40), entries: [] });
   assert.equal(
     calls.some((entry) => entry.path === "/repos/acme/inari/git/ref/heads/feat%2F123-example"),
+    true,
+  );
+  assert.equal(
+    calls.some((entry) => entry.path === "/repos/acme/inari/git/trees/feat%2F123-example?recursive=1"),
     true,
   );
 
@@ -241,6 +252,12 @@ test("admits canonical GitHubAdapter branch paths and rejects encoded traversal 
     "repos/acme/inari/git/ref/heads/%00",
     "repos/acme/inari/git/ref/heads/%1F",
     "repos/acme/inari/git/ref/heads/%5C..%5Cother",
+    "repos/acme/inari/git/trees/main?recursive=1%",
+    "repos/acme/inari/git/trees/main?recursive%3D1",
+    "repos/acme/inari/git/trees/main?recursive=1%00",
+    "repos/acme/inari/git/trees/main?recursive=1?other",
+    "repos/acme/inari/git/trees/main?//github.com/repos/other",
+    "repos/acme/inari/git/trees/main?recursive=1#fragment",
     "repos/acme/other/git/ref/heads/main",
     "repos/acme%2Finari/git/ref/heads/main",
     "https://github.com/repos/acme/inari/git/ref/heads/main",
