@@ -50,7 +50,9 @@ function request(
 interface FetchFixtureOptions {
   readonly userStatus?: number;
   readonly installationBody?: unknown;
+  readonly installationPages?: readonly unknown[];
   readonly repositoryBody?: unknown;
+  readonly repositoryPages?: readonly unknown[];
   readonly repositoryResponse?: (url: URL) => Response | undefined;
 }
 
@@ -67,16 +69,21 @@ function fixture(options: FetchFixtureOptions = {}) {
       return Response.json({ id: 42, login: "sophia" }, { status: options.userStatus ?? 200 });
     }
     if (url.pathname === "/user/installations") {
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const paginatedBody = options.installationPages?.[page - 1];
       return Response.json(
-        options.installationBody ?? { installations: [{ id: 7, app_id: 1234, suspended_at: null }] },
+        paginatedBody ?? options.installationBody ?? { installations: [{ id: 7, app_id: 1234, suspended_at: null }] },
         { status: 200 },
       );
     }
     if (url.pathname === "/user/installations/7/repositories") {
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const paginatedBody = options.repositoryPages?.[page - 1];
       return Response.json(
-        options.repositoryBody ?? {
-          repositories: [{ id: 1330755860, full_name: "acme/inari", owner: { login: "acme" }, name: "inari" }],
-        },
+        paginatedBody ??
+          options.repositoryBody ?? {
+            repositories: [{ id: 1330755860, full_name: "acme/inari", owner: { login: "acme" }, name: "inari" }],
+          },
         { status: 200 },
       );
     }
@@ -131,9 +138,39 @@ test("authenticates the stable GitHub user and emits only the requested Endpoint
   assert.equal(JSON.stringify(result).includes(TOKEN), false);
   assert.deepEqual(
     calls.map((entry) => entry.path),
-    ["/user", "/user/installations", "/user/installations/7/repositories"],
+    ["/user", "/user/installations?per_page=100&page=1", "/user/installations/7/repositories?per_page=100&page=1"],
   );
   assert.ok(calls.every((entry) => entry.method === "GET" && entry.authorization === `Bearer ${TOKEN}`));
+});
+
+test("paginates installations and repositories before admitting the requested immutable scope", async () => {
+  const { fetcher, calls } = fixture({
+    installationPages: [
+      { total_count: 2, installations: [{ id: 8, app_id: 1234, suspended_at: null }] },
+      { total_count: 2, installations: [{ id: 7, app_id: 1234, suspended_at: null }] },
+    ],
+    repositoryPages: [
+      { total_count: 2, repositories: [{ id: 99, full_name: "acme/other" }] },
+      {
+        total_count: 2,
+        repositories: [{ id: 1330755860, full_name: "acme/inari", owner: { login: "acme" }, name: "inari" }],
+      },
+    ],
+  });
+  const result = await authenticator(fetcher).authenticate(request());
+  assert.equal(result.authenticated, true);
+  if (!result.authenticated) return;
+  assert.equal(result.evidence.repository.repositoryId, "1330755860");
+  assert.deepEqual(
+    calls.map((entry) => entry.path),
+    [
+      "/user",
+      "/user/installations?per_page=100&page=1",
+      "/user/installations?per_page=100&page=2",
+      "/user/installations/7/repositories?per_page=100&page=1",
+      "/user/installations/7/repositories?per_page=100&page=2",
+    ],
+  );
 });
 
 test("accepts a renamed repository by immutable ID and refreshes locator metadata", async () => {
