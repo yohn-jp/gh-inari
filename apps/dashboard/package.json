@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit -p tsconfig.json && node scripts/build.mjs",
+    "build": "tsc --noEmit -p tsconfig.json && node scripts/check-dependencies.mjs && node scripts/build.mjs",
     "test": "node --test --import tsx \"src/*.test.ts\"",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

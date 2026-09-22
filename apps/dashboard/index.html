@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Inari Dashboard</title>
+  </head>
+  <body>
+    <main
+      data-dashboard-shell
+      data-endpoint-id="dashboard-endpoint"
+      data-endpoint-deployment="shared-hosted"
+      data-repository-host="github.com"
+    >
+      <h1>Inari Dashboard</h1>
+      <p id="dashboard-status" role="status" aria-live="polite">Loading Dashboard configuration…</p>
+      <button id="dashboard-sign-in" type="button">Sign in with GitHub</button>
+
+      <form id="dashboard-form">
+        <fieldset>
+          <legend>Endpoint read</legend>
+          <label>
+            Installation ID
+            <input name="installationId" inputmode="numeric" maxlength="128" required />
+          </label>
+          <label>
+            Repository owner/name
+            <input name="repositoryName" maxlength="255" placeholder="owner/repository" required />
+          </label>
+          <label>
+            Repository ID
+            <input name="repositoryId" inputmode="numeric" maxlength="20" required />
+          </label>
+          <label>
+            Root Issue (optional)
+            <input name="rootIssue" inputmode="numeric" maxlength="9" />
+          </label>
+          <button type="submit">Read repository</button>
+        </fieldset>
+      </form>
+
+      <section aria-live="polite">
+        <h2>Result</h2>
+        <pre id="dashboard-result" data-state="empty">No Endpoint read yet.</pre>
+      </section>
+    </main>
+    <script type="module" src="./browser.js"></script>
+  </body>
+</html>
