@@ -266,6 +266,13 @@ export class LocalRelayRuntime {
     const reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
     if (!Number.isSafeInteger(reconnectDelayMs) || reconnectDelayMs < 0 || reconnectDelayMs > MAX_RECONNECT_DELAY_MS)
       throw new TypeError("Reconnect delay is invalid.");
+    // A bare connection-base URL (e.g. "wss://HOST" with no path) does not
+    // reach the hosted Worker's exact-match "/v1/relay/connect" route; the
+    // upgrade is rejected before it reaches the Durable Object and this
+    // Runtime silently reconnect-loops every `reconnectDelayMs` forever,
+    // with no visible error. Fill in the canonical path when the caller
+    // supplied none, so the common "just point me at the host" form works.
+    if (parsed.pathname === "" || parsed.pathname === "/") parsed.pathname = "/v1/relay/connect";
     // The hosted Relay's WebSocket upgrade reads repositoryId/repositoryHost/
     // connectionId/delegatorId from the URL query. A `relayUrl` that already
     // carries one of these (the documented explicit form) keeps that value;
