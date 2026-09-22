@@ -6,6 +6,8 @@ import {
   type EndpointHumanAuthenticatorOptions,
 } from "./endpoint-human-auth.js";
 import { GitHubAdapter } from "./adapter.js";
+import { GitHubIssueRelationObservationAdapter } from "./issue-relation-observation-adapter.js";
+import { GitHubRepositoryEvidenceReader } from "./repository-evidence-reader.js";
 
 const TOKEN = "ghu_request_scoped_secret";
 const endpoint = { version: 1, kind: "endpoint", id: "hosted-endpoint", deployment: "shared-hosted" } as const;
@@ -49,6 +51,7 @@ interface FetchFixtureOptions {
   readonly userStatus?: number;
   readonly installationBody?: unknown;
   readonly repositoryBody?: unknown;
+  readonly repositoryResponse?: (url: URL) => Response | undefined;
 }
 
 function fixture(options: FetchFixtureOptions = {}) {
@@ -77,6 +80,8 @@ function fixture(options: FetchFixtureOptions = {}) {
         { status: 200 },
       );
     }
+    const repositoryResponse = options.repositoryResponse?.(url);
+    if (repositoryResponse !== undefined) return repositoryResponse;
     if (url.pathname === "/repos/acme/inari") {
       return Response.json({ id: 1330755860, full_name: "acme/inari", default_branch: "main" }, { status: 200 });
     }
@@ -191,7 +196,7 @@ test("revoked credentials fail closed and the returned transport is GET-only and
   assert.equal(result.authenticated, true);
   if (!result.authenticated) return;
   const response = await result.withRepositoryReadTransport((transport) =>
-    transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari/contents/README.md" }),
+    transport.request({ hostname: "github.com", method: "GET", path: "repos/acme/inari/git/blobs/README" }),
   );
   assert.equal(response.status, 200);
   await assert.rejects(
@@ -246,6 +251,20 @@ test("admits canonical GitHubAdapter branch and tree paths and rejects encoded t
 
   const providerReadsBeforeRejections = calls.length;
   const rejectedPaths = [
+    "repos/acme/inari/contents/README.md",
+    "repos/acme/inari/git/ref/heads/main?unexpected=1",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100&page=1&extra=1",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100&page=1&page=1",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100&page=0",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100&page=-1",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100&page=11",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=100&page=one",
+    "repos/acme/inari/issues/123/dependencies/blocked_by?per_page=99&page=1",
+    "repos/acme/inari/pulls?state=open&head=acme%3Amain&base=main&per_page=100",
+    "repos/acme/inari/pulls?state=all&head=other%3Amain&base=main&per_page=100",
+    "repos/acme/inari/pulls?state=all&head=acme%3Amain&base=main&per_page=50",
+    "repos/acme/inari/pulls?state=all&head=acme%3Amain&base=main",
     "repos/acme/inari/git/ref/heads/feat%2F123-example%",
     "repos/acme/inari/../other",
     "repos/acme/inari/%2e%2e/other",
@@ -279,4 +298,137 @@ test("admits canonical GitHubAdapter branch and tree paths and rejects encoded t
     EndpointHumanAuthenticationError,
   );
   assert.equal(calls.length, providerReadsBeforeRejections);
+});
+
+test("admits every query-bearing rooted-work family through the actual production emitters", async () => {
+  const issueNumber = 123;
+  const pullRequestNumber = 456;
+  const branch = "feat/123-example";
+  const headSha = "c".repeat(40);
+  const issue = {
+    number: issueNumber,
+    title: "Root issue",
+    body: "Issue body",
+    state: "open",
+    user: { id: 42, login: "sophia" },
+    labels: [],
+    assignees: [],
+    html_url: `https://github.com/acme/inari/issues/${issueNumber}`,
+  };
+  const pullRequest = {
+    number: pullRequestNumber,
+    title: "Change",
+    body: "Pull request body",
+    state: "open",
+    draft: false,
+    user: { id: 42, login: "sophia" },
+    head: { ref: branch, sha: headSha },
+    base: { ref: "main" },
+    review_decision: "APPROVED",
+    labels: [],
+    assignees: [],
+    html_url: `https://github.com/acme/inari/pull/${pullRequestNumber}`,
+  };
+  const { calls, fetcher } = fixture({
+    repositoryResponse: (url) => {
+      if (url.pathname === "/repos/acme/inari") {
+        return Response.json({ id: 1330755860, full_name: "acme/inari" }, { status: 200 });
+      }
+      if (url.pathname === "/repos/acme/inari/git/ref/heads/feat%2F123-example") {
+        return Response.json(
+          { ref: `refs/heads/${branch}`, object: { type: "commit", sha: "a".repeat(40) } },
+          { status: 200 },
+        );
+      }
+      if (url.pathname === "/repos/acme/inari/git/trees/feat%2F123-example" && url.search === "?recursive=1") {
+        return Response.json({ sha: "b".repeat(40), truncated: false, tree: [] }, { status: 200 });
+      }
+      if (
+        url.pathname === `/repos/acme/inari/issues/${issueNumber}/dependencies/blocked_by` &&
+        url.search === "?per_page=100&page=1"
+      ) {
+        return Response.json([], { status: 200 });
+      }
+      if (url.pathname === "/repos/acme/inari/pulls" && url.search.includes("state=all")) {
+        return Response.json([], { status: 200 });
+      }
+      if (url.pathname === `/repos/acme/inari/issues/${issueNumber}`) {
+        return Response.json(issue, { status: 200 });
+      }
+      if (url.pathname === `/repos/acme/inari/pulls/${pullRequestNumber}`) {
+        return Response.json(pullRequest, { status: 200 });
+      }
+      if (
+        url.pathname === `/repos/acme/inari/issues/${issueNumber}/comments` ||
+        url.pathname === `/repos/acme/inari/pulls/${pullRequestNumber}/comments` ||
+        url.pathname === `/repos/acme/inari/pulls/${pullRequestNumber}/reviews` ||
+        url.pathname === `/repos/acme/inari/pulls/${pullRequestNumber}/files`
+      ) {
+        return Response.json([], { status: 200 });
+      }
+      if (url.pathname === `/repos/acme/inari/commits/${headSha}/check-runs` && url.search === "?per_page=100&page=1") {
+        return Response.json({ check_runs: [] }, { status: 200 });
+      }
+      if (url.pathname === `/repos/acme/inari/commits/${headSha}/status` && url.search === "?per_page=100&page=1") {
+        return Response.json({ statuses: [] }, { status: 200 });
+      }
+      if (url.pathname === "/repos/acme/inari/branches/main/protection/required_status_checks") {
+        return Response.json({ contexts: [], checks: [] }, { status: 200 });
+      }
+      return undefined;
+    },
+  });
+  const result = await authenticator(fetcher).authenticate(request());
+  assert.equal(result.authenticated, true);
+  if (!result.authenticated) return;
+
+  await result.withRepositoryReadTransport(async (transport) => {
+    const adapterTransport = {
+      request: (input: { readonly hostname: string; readonly method: "GET"; readonly path: string }) =>
+        transport.request(input),
+    };
+    const adapter = new GitHubAdapter({
+      repository: "acme/inari",
+      hostname: "github.com",
+      transport: adapterTransport,
+    });
+    await adapter.findBranch(branch);
+    await adapter.getRepositoryTree(branch);
+    const context = await adapter.getRepositoryContext();
+    await new GitHubIssueRelationObservationAdapter(adapter, context, {
+      parent: false,
+      blockedBy: true,
+    }).observeBlockedBy(issueNumber);
+    const evidenceReader = new GitHubRepositoryEvidenceReader({
+      repository: { hostname: "github.com", owner: "acme", name: "inari" },
+      repositoryId: "1330755860",
+      transport: adapterTransport,
+    });
+    await evidenceReader.readPullRequests([branch], "main");
+    await adapter.observeIssue(issueNumber);
+    await adapter.observePullRequest(pullRequestNumber);
+  });
+
+  const expected = [
+    `/repos/acme/inari/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    `/repos/acme/inari/issues/${issueNumber}/dependencies/blocked_by?per_page=100&page=1`,
+    `/repos/acme/inari/pulls?state=all&head=${encodeURIComponent(`acme:${branch}`)}&base=main&per_page=100`,
+    `/repos/acme/inari/issues/${issueNumber}/comments?per_page=100&page=1`,
+    `/repos/acme/inari/pulls/${pullRequestNumber}/comments?per_page=100&page=1`,
+    `/repos/acme/inari/pulls/${pullRequestNumber}/reviews?per_page=100&page=1`,
+    `/repos/acme/inari/pulls/${pullRequestNumber}/files?per_page=100&page=1`,
+    `/repos/acme/inari/commits/${headSha}/check-runs?per_page=100&page=1`,
+    `/repos/acme/inari/commits/${headSha}/status?per_page=100&page=1`,
+  ];
+  for (const target of expected)
+    assert.equal(
+      calls.some((entry) => entry.path === target),
+      true,
+      target,
+    );
+  assert.equal(
+    calls.some((entry) => entry.path.includes("/graphql")),
+    false,
+  );
+  assert.ok(calls.every((entry) => entry.method === "GET"));
 });
