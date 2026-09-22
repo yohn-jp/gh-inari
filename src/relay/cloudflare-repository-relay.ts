@@ -73,6 +73,10 @@ const RELAY_HEARTBEAT_RESPONSE = "relay:pong";
 const JOB_PREFIX = "relay:job:";
 const NONCE_KEY = "relay:used-nonces";
 
+/** Fixed Worker-to-DO read seam; the outer Hosted Worker never routes it. */
+export const RELAY_RUNTIME_PRESENCE_INTERNAL_PATH = "/__inari/internal/relay/presence" as const;
+export const RELAY_RUNTIME_PRESENCE_INTERNAL_METHOD = "GET" as const;
+
 type RelayRole = "runtime" | "client";
 
 export interface RelayOperationalLimits {
@@ -348,6 +352,17 @@ function overloadedResponse(): Response {
 
 function badRequest(message = "Invalid relay request."): Response {
   return new Response(message, { status: 400 });
+}
+
+function methodNotAllowed(message = "Method not allowed."): Response {
+  return new Response(message, { status: 405, headers: { allow: RELAY_RUNTIME_PRESENCE_INTERNAL_METHOD } });
+}
+
+function presenceResponse(snapshot: RelayRuntimePresenceSnapshot): Response {
+  return new Response(JSON.stringify(snapshot), {
+    status: 200,
+    headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 function unauthorized(): Response {
@@ -671,7 +686,20 @@ export class RepositoryRelayDurableObject {
     };
   }
 
+  private internalPresenceRequest(request: Request): Response | undefined {
+    const url = new URL(request.url);
+    if (url.pathname !== RELAY_RUNTIME_PRESENCE_INTERNAL_PATH) return undefined;
+    if (request.method !== RELAY_RUNTIME_PRESENCE_INTERNAL_METHOD) return methodNotAllowed();
+    const queryKeys = [...url.searchParams.keys()];
+    if (queryKeys.some((key) => key !== "repositoryId" && key !== "repositoryHost")) return badRequest();
+    const repository = repositoryFromQuery(url, this.repository);
+    if (repository === undefined) return badRequest();
+    return presenceResponse(this.readRuntimePresence(repository));
+  }
+
   async fetch(request: Request): Promise<Response> {
+    const internalPresence = this.internalPresenceRequest(request);
+    if (internalPresence !== undefined) return internalPresence;
     if (!isUpgrade(request)) return badRequest("Repository Relay requires a WebSocket upgrade.");
     const url = new URL(request.url);
     const repository = repositoryFromQuery(url, this.repository);

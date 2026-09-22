@@ -8,6 +8,7 @@ import { ENDPOINT_WEBHOOK_PATH } from "./endpoint-webhook.js";
 import { decodeRelayEnvelope, type RelayRepositoryIdentity } from "./relay/contract.js";
 import {
   createHostedRelayDispatch,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_PATH,
   type Env,
   type HostedDurableObjectNamespace,
   type HostedDurableObjectStub,
@@ -109,6 +110,17 @@ test("public onboarding descriptor exposes deployment metadata without authority
   });
   assert.deepEqual(ids, []);
   assert.equal(JSON.stringify(body).includes("repositoryId"), false);
+});
+
+test("internal Relay presence path is not a public Hosted Worker route", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const ids: string[] = [];
+  const response = await worker.fetch(
+    new Request(`https://hosted.example${RELAY_RUNTIME_PRESENCE_INTERNAL_PATH}`),
+    env(relayNamespace({ fetch: async () => new Response("unexpected") }, ids)),
+  );
+  assert.equal(response.status, 404);
+  assert.deepEqual(ids, []);
 });
 
 test("public onboarding descriptor fails closed for missing or malformed metadata", async () => {
