@@ -381,10 +381,7 @@ test("internal HTTP dispatch returns the Runtime result without a client WebSock
     { now: () => 10_000, randomNonce: () => "nonce-internal-dispatch" },
   );
   const { privateKey } = generateKeyPairSync("ed25519");
-  const runtime = pairFor(
-    object,
-    "role=runtime&connectionId=delegator-internal&delegatorId=delegator-internal",
-  );
+  const runtime = pairFor(object, "role=runtime&connectionId=delegator-internal&delegatorId=delegator-internal");
   await admitRuntime(object, runtime, privateKey);
   runtime.sendHook = (data) => {
     const envelope = decodeRelayEnvelope(
