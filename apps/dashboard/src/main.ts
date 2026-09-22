@@ -8,6 +8,7 @@ import {
 
 export interface DashboardApplication {
   readonly endpoint: DashboardEndpointClient;
+  readonly auth?: DashboardEndpointClientOptions["auth"];
   read(request: DashboardEndpointReadRequest): Promise<DashboardEndpointResult>;
 }
 
@@ -20,6 +21,7 @@ export function createDashboardApplication(options: DashboardEndpointClientOptio
   const endpoint = createDashboardEndpointClient(options);
   return Object.freeze({
     endpoint,
+    ...(options.auth === undefined ? {} : { auth: options.auth }),
     read: (request: DashboardEndpointReadRequest) => endpoint.read(request),
   });
 }

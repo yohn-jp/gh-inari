@@ -86,6 +86,7 @@ function onboardingEnv(namespace: HostedDurableObjectNamespace): Env {
     INARI_GITHUB_APP_SLUG: "inari",
     INARI_GITHUB_APP_INSTALLATION_URL: "https://github.com/apps/inari/installations/new",
     INARI_GITHUB_APP_USER_AUTH_PROFILE: "device-flow",
+    INARI_GITHUB_APP_CALLBACK_URL: "https://hosted.example/dashboard/oauth/callback",
   };
 }
 
@@ -106,6 +107,7 @@ test("public onboarding descriptor exposes deployment metadata without authority
     appSlug: "inari",
     appInstallationUrl: "https://github.com/apps/inari/installations/new",
     appUserAuthProfile: "device-flow",
+    appCallbackUrl: "https://hosted.example/dashboard/oauth/callback",
     relayConnectionBase: "wss://hosted.example/v1/relay/connect",
   });
   assert.deepEqual(ids, []);

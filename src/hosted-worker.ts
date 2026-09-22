@@ -45,6 +45,12 @@ import {
 import type { EndpointIdentity } from "./endpoint-authorization.js";
 import { createEndpointHttpHandler, ENDPOINT_HTTP_PATH, type EndpointHttpHandler } from "./endpoint-http.js";
 import type { EndpointApi } from "./endpoint-api.js";
+import {
+  createHostedEndpointOAuthHandler,
+  HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH,
+  type HostedEndpointOAuthOptions,
+  type HostedEndpointOAuthHandler,
+} from "./hosted-endpoint-oauth.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -55,6 +61,7 @@ const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const DELEGATOR_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const HOSTED_WEBHOOK_HANDLERS = new WeakMap<object, ReturnType<typeof createEndpointWebhookHandler>>();
 const HOSTED_ENDPOINT_HANDLERS = new WeakMap<object, EndpointHttpHandler>();
+const HOSTED_OAUTH_HANDLERS = new WeakMap<object, HostedEndpointOAuthHandler>();
 
 export interface HostedDurableObjectStub {
   fetch(request: Request): Promise<Response>;
@@ -78,6 +85,10 @@ export interface Env {
   readonly INARI_GITHUB_APP_INSTALLATION_URL?: string;
   /** Non-secret supported App-user authentication profile. */
   readonly INARI_GITHUB_APP_USER_AUTH_PROFILE?: string;
+  /** Exact public browser callback URI for the App Authorization Code flow. */
+  readonly INARI_GITHUB_APP_CALLBACK_URL?: string;
+  /** Confidential App OAuth client secret; never returned by this worker. */
+  readonly INARI_GITHUB_APP_CLIENT_SECRET?: string;
   /** Non-secret Endpoint identity used to bind webhook deliveries. */
   readonly INARI_ENDPOINT_ID?: string;
   readonly INARI_ENDPOINT_DEPLOYMENT?: "shared-hosted" | "self-hosted";
@@ -87,6 +98,8 @@ export interface Env {
   readonly endpointWebhook?: EndpointWebhookHandlerOptions;
   /** Shared logical Dashboard API composition; authentication remains injected into the API. */
   readonly endpointApi?: EndpointApi;
+  /** Optional self-hosted OAuth composition for tests and alternate deployments. */
+  readonly endpointOAuth?: HostedEndpointOAuthOptions;
   readonly telemetry?: RelayTelemetrySink;
 }
 
@@ -416,12 +429,51 @@ function onboarding(request: Request, env: Env): Response {
     appInstallationUrl: env.INARI_GITHUB_APP_INSTALLATION_URL ?? "",
     appUserAuthProfile: env.INARI_GITHUB_APP_USER_AUTH_PROFILE ?? "",
     relayConnectionBase,
+    ...(env.INARI_GITHUB_APP_CALLBACK_URL === undefined ? {} : { appCallbackUrl: env.INARI_GITHUB_APP_CALLBACK_URL }),
   };
   try {
     return jsonResponse(200, createEndpointOnboardingDescriptor(input));
   } catch {
     return onboardingUnavailable();
   }
+}
+
+function oauthOptions(env: Env): HostedEndpointOAuthOptions | undefined {
+  if (env.endpointOAuth !== undefined) return env.endpointOAuth;
+  if (
+    env.INARI_GITHUB_APP_CLIENT_ID === undefined ||
+    env.INARI_GITHUB_APP_CLIENT_SECRET === undefined ||
+    env.INARI_GITHUB_APP_CALLBACK_URL === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    clientId: env.INARI_GITHUB_APP_CLIENT_ID,
+    clientSecret: env.INARI_GITHUB_APP_CLIENT_SECRET,
+    redirectUri: env.INARI_GITHUB_APP_CALLBACK_URL,
+    githubHost: env.INARI_HOSTED_REPOSITORY_HOST ?? DEFAULT_REPOSITORY_HOST,
+  };
+}
+
+async function oauthExchange(request: Request, env: Env): Promise<Response> {
+  let options: HostedEndpointOAuthOptions | undefined;
+  try {
+    options = oauthOptions(env);
+  } catch {
+    options = undefined;
+  }
+  if (options === undefined) return serviceUnavailable();
+  const key = env as object;
+  let handler = HOSTED_OAUTH_HANDLERS.get(key);
+  if (handler === undefined) {
+    try {
+      handler = createHostedEndpointOAuthHandler(options);
+    } catch {
+      return serviceUnavailable();
+    }
+    HOSTED_OAUTH_HANDLERS.set(key, handler);
+  }
+  return handler(request);
 }
 
 async function relayConnect(request: Request, env: Env): Promise<Response> {
@@ -562,6 +614,7 @@ export default {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
     if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
+    if (pathname === HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH) return oauthExchange(request, env);
     if (pathname === ENDPOINT_HTTP_PATH) return endpoint(request, env);
     if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);
     if (pathname === "/mcp") return mcp(request, env);
