@@ -188,6 +188,8 @@ import {
   type LocalRuntimeConfigInput,
 } from "./relay/local-runtime-config.js";
 import { setupRepository, type RepositorySetupInput } from "./repository-setup.js";
+import { ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
+import { setupLocalAuthority } from "./local-control/identity.js";
 import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
@@ -461,6 +463,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "template" && command === "import") {
       return await runTemplateImport(root, rest, parsed, json);
+    }
+    if (domain === "init") {
+      return runInitCommand(parsed, dependencies, json);
     }
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
@@ -876,6 +881,7 @@ async function runAuthorityCommand(
 ): Promise<number> {
   if (
     (command !== "generate" &&
+      command !== "setup" &&
       command !== "bootstrap" &&
       command !== "readiness" &&
       command !== "register" &&
@@ -886,6 +892,40 @@ async function runAuthorityCommand(
     (command === "revoke" && rest.length !== 1)
   ) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
+  }
+
+  if (command === "setup") {
+    const definition = getCommand("authority.setup");
+    const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
+    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+      const optionId = unsupported ?? "capability";
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority setup.`,
+        "$argv",
+        { command: "authority setup", option: optionId },
+      );
+    }
+    const output = setupLocalAuthority(dependencies.environment ?? process.env);
+    if (json) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          operation: "authority.setup",
+          configPath: output.configPath,
+          privateKeyPath: output.privateKeyPath,
+          publicKey: output.config.publicKey,
+          publicKeyFingerprint: output.config.publicKeyFingerprint,
+        }),
+      );
+    } else {
+      console.log("Local Runtime Authority custody is ready.");
+      console.log(`Private key: ${output.privateKeyPath}`);
+      console.log(`Public key fingerprint: ${output.config.publicKeyFingerprint}`);
+      console.log("Repository trust was not modified.");
+    }
+    return 0;
   }
 
   if (command === "generate") {
@@ -1085,6 +1125,33 @@ async function runAuthorityCommand(
     else if (result.changed) console.log("Disabled the Runtime Authority trust record.");
     else console.log("Runtime Authority trust record is already disabled.");
     console.log(`Artifact: ${path.join(root, result.path)}`);
+  }
+  return 0;
+}
+
+function runInitCommand(parsed: ParsedArgs, dependencies: CliDependencies, json: boolean): number {
+  const definition = getCommand("root.init");
+  const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
+  if (parsed.positionals.length !== 1 || parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? (parsed.capabilities.length > 0 ? "capability" : undefined);
+    if (optionId !== undefined) {
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by init.`,
+        "$argv",
+        { command: "init", option: optionId },
+      );
+    }
+    throw new CliError("UNKNOWN_COMMAND", "Unknown init command.");
+  }
+  const config = ensureLocalCliTopology(dependencies.environment ?? process.env);
+  const configPath = localComponentPath("cli", "config.json", dependencies.environment ?? process.env);
+  if (json) {
+    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config }));
+  } else {
+    console.log("Initialized local CLI topology.");
+    console.log(`Config: ${configPath}`);
   }
   return 0;
 }
@@ -4778,7 +4845,10 @@ function classifyExitCode(error: unknown): number {
   if (
     isObjectWithCode(error) &&
     typeof error.code === "string" &&
-    (error.code.includes("TEMPLATE") || error.code.includes("POLICY") || error.code.startsWith("RELEASE_"))
+    (error.code.includes("TEMPLATE") ||
+      error.code.includes("POLICY") ||
+      error.code.startsWith("RELEASE_") ||
+      error.code.startsWith("LOCAL_CONTROL_"))
   )
     return EXIT_VALIDATION;
   if (
@@ -4998,6 +5068,10 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     return printDomainHelp("template");
   }
   if (domain === "skill") return printSkillHelp(command);
+  if (domain === "init") {
+    const definition = getCommandForPositionals(positionals);
+    if (definition?.id === "root.init") return printLeafHelp(definition);
+  }
   if (domain === "setup") {
     const definition = getCommandForPositionals(positionals);
     if (definition?.id === "root.setup") return printLeafHelp(definition);
@@ -5012,6 +5086,7 @@ A governed GitHub CLI with a closed, versioned command surface. Supported
 commands run through Inari; unsupported commands are rejected locally.
 
 Domains:
+  init       Declare the local CLI Admission and Executor topology
   setup      Repository-scoped Runtime onboarding and trust readiness
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
@@ -5020,7 +5095,7 @@ Domains:
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
   release    Governed npm release preparation without publication
-  authority  Local Runtime Authority key, bootstrap, readiness, and lifecycle operations
+  authority  Local Runtime Authority setup, key, bootstrap, readiness, and lifecycle operations
   session    Manual short-lived Session credential issuance and inspection
   runtime    Foreground local Relay Runtime connection
   mcp        Native semantic MCP server over local stdio
