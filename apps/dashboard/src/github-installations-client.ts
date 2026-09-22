@@ -53,8 +53,7 @@ async function readJson(response: Response): Promise<unknown> {
   if (new TextEncoder().encode(body).byteLength > MAX_RESPONSE_BYTES) {
     throw new GitHubInstallationsClientError("GitHub response exceeds the supported size.");
   }
-  if (!response.ok)
-    throw new GitHubInstallationsClientError(`GitHub request failed with status ${response.status}.`);
+  if (!response.ok) throw new GitHubInstallationsClientError(`GitHub request failed with status ${response.status}.`);
   try {
     return JSON.parse(body) as unknown;
   } catch {
@@ -93,9 +92,7 @@ function repositoriesFrom(value: unknown): readonly GitHubRepositorySummary[] {
 }
 
 /** Create a read-only client for the signed-in user's own GitHub App installations. */
-export function createGitHubInstallationsClient(
-  options: GitHubInstallationsClientOptions,
-): GitHubInstallationsClient {
+export function createGitHubInstallationsClient(options: GitHubInstallationsClientOptions): GitHubInstallationsClient {
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
   function authorizedGet(path: string): Promise<Response> {
