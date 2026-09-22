@@ -45,6 +45,7 @@ import {
 import type { EndpointIdentity } from "./endpoint-authorization.js";
 import { createEndpointHttpHandler, ENDPOINT_HTTP_PATH, type EndpointHttpHandler } from "./endpoint-http.js";
 import type { EndpointApi } from "./endpoint-api.js";
+import { createHostedEndpoint, type HostedEndpointOptions } from "./hosted-endpoint.js";
 import {
   createHostedEndpointOAuthHandler,
   HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH,
@@ -71,8 +72,13 @@ export interface HostedDurableObjectNamespace extends RelayDurableObjectNamespac
   get(id: unknown): HostedDurableObjectStub;
 }
 
+export interface HostedStaticAssets {
+  fetch(request: Request): Promise<Response>;
+}
+
 export interface Env {
   readonly REPOSITORY_RELAY?: HostedDurableObjectNamespace;
+  readonly ASSETS?: HostedStaticAssets;
   /** Non-secret provider host partition; the default is GitHub.com. */
   readonly INARI_HOSTED_REPOSITORY_HOST?: string;
   /** Non-secret public GitHub App numeric identity. */
@@ -96,7 +102,7 @@ export interface Env {
   readonly INARI_GITHUB_WEBHOOK_SECRET?: string;
   /** Optional runtime injection for self-hosted composition and tests. */
   readonly endpointWebhook?: EndpointWebhookHandlerOptions;
-  /** Shared logical Dashboard API composition; authentication remains injected into the API. */
+  /** Explicit self-hosted/test Endpoint API injection; hosted production composes its own API. */
   readonly endpointApi?: EndpointApi;
   /** Optional self-hosted OAuth composition for tests and alternate deployments. */
   readonly endpointOAuth?: HostedEndpointOAuthOptions;
@@ -594,19 +600,67 @@ async function webhook(request: Request, env: Env): Promise<Response> {
   return handler(request);
 }
 
+function hostedEndpointOptions(env: Env): HostedEndpointOptions | undefined {
+  if (
+    env.REPOSITORY_RELAY === undefined ||
+    env.INARI_ENDPOINT_ID === undefined ||
+    env.INARI_GITHUB_APP_ID === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    endpoint: {
+      version: 1,
+      kind: "endpoint",
+      id: env.INARI_ENDPOINT_ID,
+      deployment: env.INARI_ENDPOINT_DEPLOYMENT ?? "shared-hosted",
+    },
+    appId: env.INARI_GITHUB_APP_ID,
+    presenceNamespace: env.REPOSITORY_RELAY,
+  };
+}
+
 async function endpoint(request: Request, env: Env): Promise<Response> {
-  if (env.endpointApi === undefined) return serviceUnavailable();
   const key = env as object;
   let handler = HOSTED_ENDPOINT_HANDLERS.get(key);
   if (handler === undefined) {
     try {
-      handler = createEndpointHttpHandler({ api: env.endpointApi, path: ENDPOINT_HTTP_PATH });
+      if (env.endpointApi !== undefined) {
+        handler = createEndpointHttpHandler({ api: env.endpointApi, path: ENDPOINT_HTTP_PATH });
+      } else {
+        const options = hostedEndpointOptions(env);
+        if (options === undefined) return serviceUnavailable();
+        handler = createHostedEndpoint(options);
+      }
     } catch {
       return serviceUnavailable();
     }
     HOSTED_ENDPOINT_HANDLERS.set(key, handler);
   }
   return handler(request);
+}
+
+function workerFirstPath(pathname: string): boolean {
+  return (
+    pathname === "/mcp" ||
+    pathname.startsWith("/mcp/") ||
+    pathname === "/v1" ||
+    pathname.startsWith("/v1/") ||
+    pathname === "/.well-known" ||
+    pathname.startsWith("/.well-known/") ||
+    pathname === "/healthz"
+  );
+}
+
+async function staticAsset(request: Request, env: Env): Promise<Response> {
+  if (workerFirstPath(new URL(request.url).pathname) || env.ASSETS === undefined) {
+    return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
+  }
+  try {
+    return await env.ASSETS.fetch(request);
+  } catch {
+    return serviceUnavailable();
+  }
 }
 
 export default {
@@ -619,7 +673,7 @@ export default {
     if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);
     if (pathname === "/mcp") return mcp(request, env);
     if (pathname === "/v1/relay/connect") return relayConnect(request, env);
-    return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
+    return staticAsset(request, env);
   },
 };
 

@@ -7,12 +7,20 @@ compatibility_flags = ["nodejs_compat"]
 pattern = "mcp-inari.yohn.jp"
 custom_domain = true
 
+[assets]
+directory = "apps/dashboard/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*", "/mcp", "/.well-known/*", "/healthz"]
+
 [observability]
 enabled = true
 
 # No GitHub App, provider, Session, or Runtime credentials are configured here.
 [vars]
 INARI_HOSTED_REPOSITORY_HOST = "github.com"
+INARI_ENDPOINT_ID = ""
+INARI_ENDPOINT_DEPLOYMENT = "shared-hosted"
 # Public GitHub App deployment metadata for /.well-known/inari. These values
 # are intentionally non-secret; leave them empty until the App is configured.
 INARI_GITHUB_APP_ID = ""
@@ -25,6 +33,8 @@ INARI_GITHUB_APP_CALLBACK_URL = ""
 
 # Set with `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`; never place the
 # confidential value in this file or in the public onboarding descriptor.
+# Set with `wrangler secret put INARI_GITHUB_WEBHOOK_SECRET`; never place the
+# webhook secret in this file or in the public onboarding descriptor.
 
 [[durable_objects.bindings]]
 name = "REPOSITORY_RELAY"
