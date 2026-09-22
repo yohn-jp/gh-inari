@@ -29,6 +29,9 @@ const MAX_TOKEN_LENGTH = 4_096;
 const MAX_ID_LENGTH = 20;
 const MAX_HOSTNAME_LENGTH = 255;
 const MAX_PATH_LENGTH = 4_096;
+const APP_USER_COLLECTION_PAGE_SIZE = 100;
+const APP_USER_COLLECTION_MAX_PAGES = 10;
+const APP_USER_COLLECTION_MAX_ITEMS = APP_USER_COLLECTION_PAGE_SIZE * APP_USER_COLLECTION_MAX_PAGES;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const LOGIN = /^[A-Za-z0-9-]{1,39}$/u;
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
@@ -206,6 +209,82 @@ async function get(
   }
 }
 
+function nextPageFromLink(
+  value: string | undefined,
+  currentPage: number,
+  stage: EndpointHumanAuthenticationFailureStage,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const next = value.split(",").find((part) => /;\s*rel="next"/iu.test(part));
+  if (next === undefined) return undefined;
+  const match = /[?&]page=([0-9]+)/u.exec(next);
+  if (match === null) throw safeFailure(stage);
+  const page = Number(match[1]);
+  if (!Number.isSafeInteger(page) || page <= currentPage || page > APP_USER_COLLECTION_MAX_PAGES) {
+    throw safeFailure(stage);
+  }
+  return page;
+}
+
+async function readPaginatedCollection(
+  provider: Pick<GitHubNativeHttpTransport, "request">,
+  hostname: string,
+  path: string,
+  collection: "installations" | "repositories",
+  stage: EndpointHumanAuthenticationFailureStage,
+): Promise<readonly unknown[]> {
+  const entries: unknown[] = [];
+  let totalCount: number | undefined;
+  let requestedPage = 1;
+
+  for (let pageCount = 0; pageCount < APP_USER_COLLECTION_MAX_PAGES; pageCount += 1) {
+    const response = await get(
+      provider,
+      hostname,
+      `${path}?per_page=${APP_USER_COLLECTION_PAGE_SIZE}&page=${requestedPage}`,
+      stage,
+    );
+    if (response.status !== 200 || !isRecord(response.body) || !Array.isArray(response.body[collection])) {
+      throw safeFailure(stage);
+    }
+    const pageEntries = response.body[collection];
+    if (
+      pageEntries.length > APP_USER_COLLECTION_PAGE_SIZE ||
+      entries.length + pageEntries.length > APP_USER_COLLECTION_MAX_ITEMS
+    ) {
+      throw safeFailure(stage);
+    }
+    if (response.body.total_count !== undefined) {
+      if (
+        !Number.isSafeInteger(response.body.total_count) ||
+        (response.body.total_count as number) < 0 ||
+        (response.body.total_count as number) > APP_USER_COLLECTION_MAX_ITEMS
+      ) {
+        throw safeFailure(stage);
+      }
+      if (totalCount !== undefined && totalCount !== response.body.total_count) throw safeFailure(stage);
+      totalCount = response.body.total_count as number;
+    }
+    entries.push(...pageEntries);
+    if (totalCount !== undefined && entries.length > totalCount) throw safeFailure(stage);
+
+    const linkedNext = nextPageFromLink(response.headers?.link, requestedPage, stage);
+    const complete =
+      totalCount !== undefined ? entries.length >= totalCount : pageEntries.length < APP_USER_COLLECTION_PAGE_SIZE;
+    if (complete) return entries;
+    const nextPage =
+      linkedNext ??
+      (totalCount !== undefined
+        ? requestedPage + 1
+        : pageEntries.length === APP_USER_COLLECTION_PAGE_SIZE
+          ? requestedPage + 1
+          : undefined);
+    if (nextPage === undefined || nextPage > APP_USER_COLLECTION_MAX_PAGES) throw safeFailure(stage);
+    requestedPage = nextPage;
+  }
+  throw safeFailure(stage);
+}
+
 function validateRequest(request: AuthenticationRequest): {
   readonly endpoint: EndpointIdentity;
   readonly installation: EndpointInstallationIdentity;
@@ -255,14 +334,11 @@ function readUser(response: GitHubNativeHttpResponse): AuthenticatedUser {
 }
 
 function readInstallation(
-  response: GitHubNativeHttpResponse,
+  installations: readonly unknown[],
   expectedAppId: string,
   expectedInstallationId: string,
 ): InstallationEvidence {
-  if (response.status !== 200 || !isRecord(response.body) || !Array.isArray(response.body.installations)) {
-    throw safeFailure("installation-scope");
-  }
-  const matches = response.body.installations
+  const matches = installations
     .filter(isRecord)
     .filter((candidate) => decimalId(candidate.id) === expectedInstallationId);
   if (matches.length !== 1) throw safeFailure("installation-scope");
@@ -274,13 +350,8 @@ function readInstallation(
   return Object.freeze({ id: expectedInstallationId });
 }
 
-function readRepository(response: GitHubNativeHttpResponse, target: EndpointRepositoryIdentity): RepositoryEvidence {
-  if (response.status !== 200 || !isRecord(response.body) || !Array.isArray(response.body.repositories)) {
-    throw safeFailure("repository-scope");
-  }
-  const matches = response.body.repositories
-    .filter(isRecord)
-    .filter((candidate) => decimalId(candidate.id) === target.repositoryId);
+function readRepository(repositories: readonly unknown[], target: EndpointRepositoryIdentity): RepositoryEvidence {
+  const matches = repositories.filter(isRecord).filter((candidate) => decimalId(candidate.id) === target.repositoryId);
   if (matches.length !== 1) throw safeFailure("repository-scope");
   const locator = repositoryLocator(matches[0]);
   if (locator === undefined) throw safeFailure("repository-scope");
@@ -554,15 +625,22 @@ export class EndpointHumanAuthenticator implements EndpointHumanAuthenticationPo
 
     const userResponse = await get(provider, hostname, "user", "user-identity");
     const user = readUser(userResponse);
-    const installationResponse = await get(provider, hostname, "user/installations", "installation-scope");
-    const installation = readInstallation(installationResponse, this.#appId, target.installation.installationId);
-    const repositoryResponse = await get(
+    const installations = await readPaginatedCollection(
+      provider,
+      hostname,
+      "user/installations",
+      "installations",
+      "installation-scope",
+    );
+    const installation = readInstallation(installations, this.#appId, target.installation.installationId);
+    const repositories = await readPaginatedCollection(
       provider,
       hostname,
       `user/installations/${installation.id}/repositories`,
+      "repositories",
       "repository-scope",
     );
-    const repository = readRepository(repositoryResponse, target.repository);
+    const repository = readRepository(repositories, target.repository);
     const evidence = evidenceFor(target.endpoint, target.installation, repository.identity, user, target.capability);
 
     // Re-validate the exact evidence shape before it crosses the auth boundary.
