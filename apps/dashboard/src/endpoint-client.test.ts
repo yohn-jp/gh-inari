@@ -73,6 +73,33 @@ test("Dashboard sends repository reads to the configured Endpoint contract", asy
   });
 });
 
+test("Dashboard sends an explicit work root without provider-specific fields", async () => {
+  let body: unknown;
+  const client = createDashboardEndpointClient({
+    endpoint: "https://endpoint.example.test",
+    fetch: (async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ...success, operation: "work.read" }), { status: 200 });
+    }) as typeof globalThis.fetch,
+  });
+
+  await client.read({
+    ...request,
+    operation: "work.read",
+    capability: { kind: "work.read" },
+    query: { rootIssue: 952 },
+  });
+  assert.deepEqual(body, {
+    version: 1,
+    operation: "work.read",
+    endpoint,
+    installation,
+    repository,
+    capability: { kind: "work.read" },
+    query: { rootIssue: 952 },
+  });
+});
+
 test("Dashboard accepts shared-hosted and self-hosted Endpoint origins without changing the request", async () => {
   for (const configuredEndpoint of ["https://shared.example.test", "https://self-hosted.example.test/dashboard"]) {
     let requested = "";

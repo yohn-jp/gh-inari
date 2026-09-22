@@ -6,6 +6,7 @@
  */
 
 import type { EndpointApiReadOperation, EndpointApiRequest, EndpointApiResult } from "../../../src/endpoint-api.js";
+import type { EndpointReadQuery } from "../../../src/endpoint-read-query.js";
 
 const ENDPOINT_API_CONTRACT_VERSION = 1 as const;
 const ENDPOINT_API_OPERATION_PATH = "/v1/endpoint" as const;
@@ -30,6 +31,8 @@ export interface DashboardRepositoryContext {
 
 export interface DashboardEndpointReadRequest extends DashboardRepositoryContext {
   readonly operation: DashboardEndpointReadOperation;
+  /** Optional bounded root selected by the user-facing Endpoint contract. */
+  readonly query?: EndpointReadQuery;
   readonly signal?: AbortSignal;
 }
 
@@ -198,6 +201,7 @@ export function createDashboardEndpointClient(options: DashboardEndpointClientOp
         installation: request.installation,
         repository: request.repository,
         capability: request.capability,
+        ...(request.query === undefined ? {} : { query: request.query }),
       };
       try {
         const response = await fetcher(`${origin}${ENDPOINT_API_OPERATION_PATH}`, {

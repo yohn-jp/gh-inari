@@ -9,6 +9,7 @@
 
 import {
   authorizeEndpoint,
+  endpointCapabilityForOperation,
   validateEndpointAuthorizationEvidence,
   type EndpointAuthorizationEvidence,
   type EndpointAuthorizationRequest,
@@ -31,6 +32,7 @@ import {
   type EndpointWorkProjectionInput,
   type EndpointWorkProjectionResult,
 } from "./endpoint-work-projection.js";
+import { validateEndpointReadQuery, type EndpointReadQuery } from "./endpoint-read-query.js";
 
 export const ENDPOINT_API_CONTRACT_VERSION = 1 as const;
 export type EndpointApiContractVersion = typeof ENDPOINT_API_CONTRACT_VERSION;
@@ -73,6 +75,8 @@ export interface EndpointApiRequest {
   readonly repository: EndpointRepositoryIdentity;
   /** The existing Endpoint capability vocabulary is reused for admission. */
   readonly capability: EndpointCapability;
+  /** Optional bounded work root; required for work.read. */
+  readonly query?: EndpointReadQuery;
 }
 
 export interface EndpointApiExecutionContext {
@@ -119,6 +123,8 @@ export interface EndpointApiProjectionRequest {
   readonly repository: EndpointRepositoryIdentity;
   readonly principal: HumanEndpointPrincipal;
   readonly authorization: EndpointAuthorizationResult;
+  /** The admitted root selected by the closed Endpoint read query. */
+  readonly rootIssue?: number;
   readonly signal?: AbortSignal;
 }
 
@@ -262,7 +268,7 @@ function sameRepository(left: EndpointRepositoryIdentity, right: EndpointReposit
 
 function normalizeRequest(value: unknown): EndpointApiRequest | EndpointApiFailure {
   if (!isRecord(value)) return failure("ENDPOINT_API_INVALID_REQUEST", "Request must be a plain object.");
-  const allowed = new Set(["version", "operation", "endpoint", "installation", "repository", "capability"]);
+  const allowed = new Set(["version", "operation", "endpoint", "installation", "repository", "capability", "query"]);
   const unknown = Reflect.ownKeys(value).find((key) => typeof key !== "string" || !allowed.has(key));
   if (unknown !== undefined)
     return failure("ENDPOINT_API_INVALID_REQUEST", "Request contains an unknown property.", `$.${String(unknown)}`);
@@ -282,6 +288,27 @@ function normalizeRequest(value: unknown): EndpointApiRequest | EndpointApiFailu
     return failure("ENDPOINT_API_INVALID_REQUEST", "Request repository is required.", "$.repository");
   if (!Object.prototype.hasOwnProperty.call(value, "capability"))
     return failure("ENDPOINT_API_INVALID_REQUEST", "Request capability is required.", "$.capability");
+  if (isReadOperation(value.operation)) {
+    const query = validateEndpointReadQuery(
+      value.operation,
+      Object.prototype.hasOwnProperty.call(value, "query") ? value.query : undefined,
+    );
+    if (!query.valid) {
+      const first = query.diagnostics[0];
+      return failure(
+        "ENDPOINT_API_INVALID_REQUEST",
+        first?.message ?? "Endpoint read query is invalid.",
+        first?.path ?? "$.query",
+        value.operation,
+        undefined,
+        query.diagnostics.map((entry) => diagnostic("ENDPOINT_API_INVALID_REQUEST", entry.path, entry.message)),
+      );
+    }
+    return Object.freeze({
+      ...value,
+      ...(query.value === undefined ? {} : { query: query.value }),
+    }) as unknown as EndpointApiRequest;
+  }
   return value as unknown as EndpointApiRequest;
 }
 
@@ -482,6 +509,7 @@ function projectionRequest(
     repository: request.repository,
     principal,
     authorization,
+    ...(request.query?.rootIssue === undefined ? {} : { rootIssue: request.query.rootIssue }),
     ...(signal === undefined ? {} : { signal }),
   });
 }
@@ -558,6 +586,14 @@ export function createEndpointApi(options: EndpointApiOptions): EndpointApi {
       const normalized = normalizeRequest(rawRequest);
       if ("ok" in normalized) return normalized;
       const request: EndpointApiRequest = normalized;
+      if (!isReadOperation(request.operation))
+        return failure(
+          "ENDPOINT_API_UNSUPPORTED_OPERATION",
+          "The requested Endpoint operation is not supported.",
+          "$.operation",
+          request.operation,
+        );
+      const requiredCapability = endpointCapabilityForOperation(request.operation);
       let rawAuthentication: unknown;
       try {
         rawAuthentication = await authentication.authenticate({
@@ -607,7 +643,7 @@ export function createEndpointApi(options: EndpointApiOptions): EndpointApi {
         endpoint: request.endpoint,
         installation: request.installation,
         repository: request.repository,
-        capability: request.capability,
+        capability: requiredCapability,
         evidence,
       };
       const authorization = authorizeEndpoint(authorizationRequest);
@@ -622,11 +658,11 @@ export function createEndpointApi(options: EndpointApiOptions): EndpointApi {
             diagnostic("ENDPOINT_API_AUTHORIZATION_DENIED", entry.path, entry.message),
           ),
         );
-      if (!isReadOperation(request.operation))
+      if (!isRecord(request.capability) || request.capability.kind !== requiredCapability.kind)
         return failure(
-          "ENDPOINT_API_UNSUPPORTED_OPERATION",
-          "The requested Endpoint operation is not supported.",
-          "$.operation",
+          "ENDPOINT_API_AUTHORIZATION_DENIED",
+          "The requested capability does not match the Endpoint operation.",
+          "$.capability",
           request.operation,
           authorization,
         );
@@ -637,7 +673,9 @@ export function createEndpointApi(options: EndpointApiOptions): EndpointApi {
         presence?: EndpointRuntimePresenceProjection;
         unavailable: EndpointApiUnavailableRead[];
       } = { repository: request.repository, unavailable: [] };
-      const needWork = request.operation === "repository.read" || request.operation === "work.read";
+      const needWork =
+        request.operation === "work.read" ||
+        (request.operation === "repository.read" && request.query?.rootIssue !== undefined);
       const needPresence = request.operation === "repository.read" || request.operation === "presence.read";
       if (needWork) {
         const result = await readWork(
