@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.14.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.15.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -44,6 +44,7 @@ export type CommandId =
   | "root.diagnose"
   | "root.doctor"
   | "root.setup"
+  | "root.init"
   | "issue.schema"
   | "issue.contract"
   | "issue.validate"
@@ -120,6 +121,7 @@ export type CommandId =
   | "change.merge"
   | "change.publish"
   | "release.prepare"
+  | "authority.setup"
   | "authority.generate"
   | "authority.bootstrap"
   | "authority.readiness"
@@ -784,6 +786,9 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Prepare the repository-scoped local Runtime profile and report trust readiness.",
     SETUP_OPTIONS,
   ),
+  command("root.init", "root", "init", ["init"], "Declare the local CLI Admission and Executor topology.", [
+    ...ROOT_OPTIONS,
+  ]),
   command(
     "issue.schema",
     "issue",
@@ -1449,6 +1454,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Prepare an explicit governed npm release workspace without publishing.",
     RELEASE_PREPARATION_OPTIONS,
     "<patch|minor|major|version>",
+  ),
+  command(
+    "authority.setup",
+    "authority",
+    "setup",
+    ["authority", "setup"],
+    "Create or select the separately custodied local Runtime Authority key.",
+    [...ROOT_OPTIONS],
   ),
   command(
     "authority.generate",
