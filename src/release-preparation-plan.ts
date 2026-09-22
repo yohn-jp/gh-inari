@@ -7,6 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { deriveReleasePrPublicationRoute, type ReleasePrPublicationRoute } from "./release-pr-publication.js";
 
 export const RELEASE_PREPARATION_PLAN_VERSION = "1" as const;
 export type ReleasePreparationPlanVersion = typeof RELEASE_PREPARATION_PLAN_VERSION;
@@ -75,10 +76,18 @@ export interface ReleaseVerificationPrerequisite {
   readonly args: readonly string[];
 }
 
-export interface ReleasePublicationPrerequisite {
-  readonly kind: "governed-pull-request";
-  readonly sourceIssue?: number;
+/** Repository-declared configuration for the Issue-less release route. */
+export interface ReleasePublicationContract {
+  readonly kind: "release-pr-publication";
+  readonly role: "release";
+  readonly base: "main";
+  readonly template: "release";
 }
+
+/** Target-bound Issue-less release publication identity. */
+export type ReleasePublicationPrerequisite = ReleasePrPublicationRoute & {
+  readonly template: "release";
+};
 
 /** Repository-specific release configuration; no product prose is embedded. */
 export interface ReleasePreparationRepositoryContract {
@@ -87,7 +96,7 @@ export interface ReleasePreparationRepositoryContract {
   readonly versionBearingArtifacts: readonly ReleaseVersionBearingArtifact[];
   readonly releaseDocumentDirectory: string;
   readonly verification: ReleaseVerificationPrerequisite;
-  readonly publication: ReleasePublicationPrerequisite;
+  readonly publication: ReleasePublicationContract;
 }
 
 export interface PreparedReleaseIdentity {
@@ -487,23 +496,25 @@ function normalizeRepository(
       "Verification arguments must be bounded strings.",
     );
   const publication = value.publication;
-  if (!isRecord(publication) || publication.kind !== "governed-pull-request")
-    addViolation(
-      violations,
-      "REPOSITORY_CONTRACT_INVALID",
-      "$.repository.publication",
-      "Governed pull-request publication is required.",
-    );
-  const sourceIssue = isRecord(publication) ? publication.sourceIssue : undefined;
   if (
-    sourceIssue !== undefined &&
-    (typeof sourceIssue !== "number" || !Number.isSafeInteger(sourceIssue) || sourceIssue < 1)
+    !isRecord(publication) ||
+    publication.kind !== "release-pr-publication" ||
+    publication.role !== "release" ||
+    publication.base !== "main" ||
+    publication.template !== "release"
   )
     addViolation(
       violations,
       "REPOSITORY_CONTRACT_INVALID",
+      "$.repository.publication",
+      "Issue-less release publication must use the governed release route and template.",
+    );
+  if (isRecord(publication) && Object.hasOwn(publication, "sourceIssue"))
+    addViolation(
+      violations,
+      "REPOSITORY_CONTRACT_INVALID",
       "$.repository.publication.sourceIssue",
-      "Publication source Issue is invalid.",
+      "Issue-less release publication must not contain a source Issue.",
     );
   if (
     !Array.isArray(value.versionBearingArtifacts) ||
@@ -599,8 +610,10 @@ function normalizeRepository(
     releaseDocumentDirectory,
     verification: { command, args: [...args] as string[] },
     publication: {
-      kind: "governed-pull-request",
-      ...(sourceIssue === undefined ? {} : { sourceIssue: sourceIssue as number }),
+      kind: "release-pr-publication",
+      role: "release",
+      base: "main",
+      template: "release",
     },
   };
 }
@@ -676,6 +689,11 @@ export function tryPlanReleasePreparation(input: unknown): ReleasePreparationPla
     ...artifact,
     targetValue: targetArtifactValue(targetVersionValue, artifact.format),
   }));
+  const releaseRoute = deriveReleasePrPublicationRoute(targetVersionValue, history.targetSource.sourceRevision);
+  const publication: ReleasePublicationPrerequisite = {
+    ...releaseRoute,
+    template: repository.publication.template,
+  };
   const releaseDocument: ReleaseDocumentTarget = {
     path: `${repository.releaseDocumentDirectory}/${targetVersionValue}.md`,
     version: targetVersionValue,
@@ -693,7 +711,7 @@ export function tryPlanReleasePreparation(input: unknown): ReleasePreparationPla
     versionArtifacts: artifacts,
     releaseDocument,
     verification: repository.verification,
-    publication: repository.publication,
+    publication,
   };
   const plan: ReleasePreparationPlan = { ...withoutDigest, digest: planDigest(withoutDigest) };
   return { valid: true, plan: cloneImmutable(plan), violations: [] };
@@ -770,7 +788,14 @@ export function validateReleasePreparationPlan(input: unknown): ReleasePreparati
           ? input.releaseDocument.path.replace(/\/[^/]+\.md$/u, "")
           : "docs/releases",
       verification: input.verification as ReleaseVerificationPrerequisite,
-      publication: input.publication as ReleasePublicationPrerequisite,
+      publication: isRecord(input.publication)
+        ? ({
+            kind: input.publication.kind,
+            role: input.publication.role,
+            base: input.publication.base,
+            template: input.publication.template,
+          } as ReleasePublicationContract)
+        : (input.publication as ReleasePublicationContract),
     },
   };
   const history = isRecord(input.identity)

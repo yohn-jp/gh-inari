@@ -64,7 +64,7 @@ function input(intent: ReleasePreparationPlanInput["intent"] = "patch"): Release
       ],
       releaseDocumentDirectory: "docs/releases",
       verification: { command: "pnpm", args: ["run", "verify"] },
-      publication: { kind: "governed-pull-request", sourceIssue: 911 },
+      publication: { kind: "release-pr-publication", role: "release", base: "main", template: "release" },
     },
   };
 }
@@ -85,7 +85,18 @@ test("history, bounded governed changes, and verification/publication prerequisi
   assert.deepEqual(plan.identity.targetSource, history().targetSource);
   assert.deepEqual(plan.includedChanges[0]?.sourceIssueNumbers, [912]);
   assert.deepEqual(plan.verification, { command: "pnpm", args: ["run", "verify"] });
-  assert.deepEqual(plan.publication, { kind: "governed-pull-request", sourceIssue: 911 });
+  assert.deepEqual(plan.publication, {
+    version: 1,
+    kind: "release-pr-publication",
+    role: "release",
+    targetVersion: "0.14.2",
+    head: "release/0.14.2",
+    base: "main",
+    expectedHead: "release/0.14.2",
+    expectedBase: "main",
+    headRevision: targetRevision,
+    template: "release",
+  });
 });
 
 test("identical history and intent are idempotent and transport-safe", () => {
