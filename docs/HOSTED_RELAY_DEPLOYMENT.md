@@ -100,7 +100,11 @@ pnpm exec wrangler deploy --config wrangler.hosted.toml \
 The onboarding descriptor also requires these non-secret public App variables:
 `INARI_GITHUB_APP_ID`, `INARI_GITHUB_APP_CLIENT_ID`,
 `INARI_GITHUB_APP_SLUG`, `INARI_GITHUB_APP_INSTALLATION_URL`, and
-`INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. The descriptor remains
+`INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. For Dashboard browser
+authorization, configure the exact registered
+`INARI_GITHUB_APP_CALLBACK_URL` and store the confidential client secret only
+with `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`. The descriptor
+exposes the callback URI but never the secret. The descriptor remains
 bounded and unavailable until all required values are valid. Do not put an App
 private key, installation token, user access token, or other credential in
 these variables.

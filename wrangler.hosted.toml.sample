@@ -13,6 +13,9 @@ enabled = true
 # No GitHub App, provider, Session, or Runtime credentials are configured here.
 [vars]
 INARI_HOSTED_REPOSITORY_HOST = "github.com"
+INARI_GITHUB_APP_CALLBACK_URL = "https://mcp-inari.example.com/dashboard/oauth/callback"
+
+# Configure separately: `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`
 
 [[durable_objects.bindings]]
 name = "REPOSITORY_RELAY"

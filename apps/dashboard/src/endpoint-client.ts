@@ -63,6 +63,10 @@ export interface DashboardEndpointClientOptions {
   readonly endpoint: string;
   /** Transport-owned authentication headers, such as an Authorization header. */
   readonly headers?: HeadersInit;
+  /** Browser-memory auth session; its access token is never persisted by this client. */
+  readonly auth?: {
+    readonly getAccessToken: () => string | undefined;
+  };
   readonly fetch?: typeof globalThis.fetch;
   readonly requestTimeoutMs?: number;
 }
@@ -192,6 +196,11 @@ export function createDashboardEndpointClient(options: DashboardEndpointClientOp
       const abort = () => controller.abort();
       request.signal?.addEventListener("abort", abort, { once: true });
       const headers = new Headers(options.headers);
+      if (options.auth !== undefined) {
+        headers.delete("authorization");
+        const accessToken = options.auth.getAccessToken();
+        if (accessToken !== undefined) headers.set("authorization", `Bearer ${accessToken}`);
+      }
       headers.set("accept", "application/json");
       headers.set("content-type", "application/json");
       const body = {
