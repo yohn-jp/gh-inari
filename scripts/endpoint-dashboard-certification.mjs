@@ -1022,7 +1022,7 @@ export async function runEndpointDashboardCertification() {
     certificationStatus: "passed",
     epicHeadSha: state.epicHeadSha,
     currentMainSha: state.currentMainSha,
-    branch: BRANCH,
+    branch: BRANCH_NAME,
     evidence: {
       bounded: true,
       secretSafe: true,
