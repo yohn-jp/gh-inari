@@ -726,6 +726,13 @@ async function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
 
+  const dashboardDist = path.join(repoRoot, "apps/dashboard", "dist");
+  for (const file of ["index.html", "browser.js"]) {
+    if (!fs.existsSync(path.join(dashboardDist, file))) {
+      throw new Error(`Dashboard build output is missing apps/dashboard/dist/${file}`);
+    }
+  }
+
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
   const packResult = run("npm", ["pack", "--json", "--ignore-scripts"]);
