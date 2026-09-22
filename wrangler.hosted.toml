@@ -23,13 +23,13 @@ INARI_ENDPOINT_ID = ""
 INARI_ENDPOINT_DEPLOYMENT = "shared-hosted"
 # Public GitHub App deployment metadata for /.well-known/inari. These values
 # are intentionally non-secret; leave them empty until the App is configured.
-INARI_GITHUB_APP_ID = ""
-INARI_GITHUB_APP_CLIENT_ID = ""
-INARI_GITHUB_APP_SLUG = ""
-INARI_GITHUB_APP_INSTALLATION_URL = ""
+INARI_GITHUB_APP_ID = "4837577"
+INARI_GITHUB_APP_CLIENT_ID = "Iv23liEzznyp0x5l1PlJ"
+INARI_GITHUB_APP_SLUG = "inari-issuer"
+INARI_GITHUB_APP_INSTALLATION_URL = "https://github.com/apps/inari-issuer/installations/new"
 INARI_GITHUB_APP_USER_AUTH_PROFILE = "device-flow"
 # Exact HTTPS browser callback registered with the GitHub App.
-INARI_GITHUB_APP_CALLBACK_URL = ""
+INARI_GITHUB_APP_CALLBACK_URL = "https://mcp-inari.yohn.jp/oauth/callback"
 
 # Set with `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`; never place the
 # confidential value in this file or in the public onboarding descriptor.
