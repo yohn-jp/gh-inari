@@ -5,6 +5,7 @@ import {
   EndpointHumanAuthenticator,
   type EndpointHumanAuthenticatorOptions,
 } from "./endpoint-human-auth.js";
+import { GitHubAdapter } from "./adapter.js";
 
 const TOKEN = "ghu_request_scoped_secret";
 const endpoint = { version: 1, kind: "endpoint", id: "hosted-endpoint", deployment: "shared-hosted" } as const;
@@ -72,6 +73,18 @@ function fixture(options: FetchFixtureOptions = {}) {
       return Response.json(
         options.repositoryBody ?? {
           repositories: [{ id: 1330755860, full_name: "acme/inari", owner: { login: "acme" }, name: "inari" }],
+        },
+        { status: 200 },
+      );
+    }
+    if (url.pathname === "/repos/acme/inari") {
+      return Response.json({ id: 1330755860, full_name: "acme/inari", default_branch: "main" }, { status: 200 });
+    }
+    if (url.pathname === "/repos/acme/inari/git/ref/heads/feat%2F123-example") {
+      return Response.json(
+        {
+          ref: "refs/heads/feat/123-example",
+          object: { type: "commit", sha: "a".repeat(40) },
         },
         { status: 200 },
       );
@@ -192,4 +205,61 @@ test("revoked credentials fail closed and the returned transport is GET-only and
       ),
     EndpointHumanAuthenticationError,
   );
+});
+
+test("admits canonical GitHubAdapter branch paths and rejects encoded traversal before provider I/O", async () => {
+  const { calls, fetcher } = fixture();
+  const result = await authenticator(fetcher).authenticate(request());
+  assert.equal(result.authenticated, true);
+  if (!result.authenticated) return;
+
+  const branch = await result.withRepositoryReadTransport((transport) => {
+    const adapter = new GitHubAdapter({
+      repository: "acme/inari",
+      hostname: "github.com",
+      transport: {
+        request: (input) => transport.request({ hostname: input.hostname, method: "GET", path: input.path }),
+      },
+    });
+    return adapter.findBranch("feat/123-example");
+  });
+  assert.deepEqual(branch, {
+    name: "feat/123-example",
+    ref: "refs/heads/feat/123-example",
+    sha: "a".repeat(40),
+  });
+  assert.equal(
+    calls.some((entry) => entry.path === "/repos/acme/inari/git/ref/heads/feat%2F123-example"),
+    true,
+  );
+
+  const providerReadsBeforeRejections = calls.length;
+  const rejectedPaths = [
+    "repos/acme/inari/git/ref/heads/feat%2F123-example%",
+    "repos/acme/inari/../other",
+    "repos/acme/inari/%2e%2e/other",
+    "repos/acme/inari/git/ref/heads/%00",
+    "repos/acme/inari/git/ref/heads/%1F",
+    "repos/acme/inari/git/ref/heads/%5C..%5Cother",
+    "repos/acme/other/git/ref/heads/main",
+    "repos/acme%2Finari/git/ref/heads/main",
+    "https://github.com/repos/acme/inari/git/ref/heads/main",
+  ];
+  for (const path of rejectedPaths) {
+    await assert.rejects(
+      () =>
+        result.withRepositoryReadTransport((transport) =>
+          transport.request({ hostname: "github.com", method: "GET", path }),
+        ),
+      EndpointHumanAuthenticationError,
+    );
+  }
+  await assert.rejects(
+    () =>
+      result.withRepositoryReadTransport((transport) =>
+        transport.request({ hostname: "wrong.example", method: "GET", path: "repos/acme/inari" }),
+      ),
+    EndpointHumanAuthenticationError,
+  );
+  assert.equal(calls.length, providerReadsBeforeRejections);
 });

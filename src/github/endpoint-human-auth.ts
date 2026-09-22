@@ -307,15 +307,25 @@ function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path 
     path.length === 0 ||
     path.length > MAX_PATH_LENGTH ||
     /[\u0000-\u001f\u007f]/u.test(path) ||
-    path.includes("..")
+    path.includes("\\") ||
+    path.includes("?") ||
+    path.includes("#") ||
+    path.startsWith("/") ||
+    path.startsWith("//") ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(path)
   ) {
     return false;
   }
   const root = repositoryPath(locator);
   if (path !== root && !path.startsWith(`${root}/`)) return false;
+
+  const suffix = path.slice(root.length + 1);
+  if (path === root || /%(?![0-9A-Fa-f]{2})/u.test(suffix)) return path === root;
+
   try {
-    const decoded = decodeURIComponent(path);
-    return decoded === path && (decoded === root || decoded.startsWith(`${root}/`));
+    const decoded = decodeURIComponent(suffix);
+    if (/[\u0000-\u001f\u007f]/u.test(decoded) || decoded.includes("\\")) return false;
+    return !decoded.split("/").some((component) => component === "." || component === "..");
   } catch {
     return false;
   }
