@@ -5,11 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { runCli } from "./cli.js";
-import {
-  prepareRelease,
-  RELEASE_PUBLICATION_ISSUE,
-  type ReleasePreparationVerificationResult,
-} from "./release-preparation.js";
+import { prepareRelease, type ReleasePreparationVerificationResult } from "./release-preparation.js";
 import type { ReleaseHistoryEvidence } from "./release-preparation-plan.js";
 
 const previousRevision = "a".repeat(40);
@@ -82,7 +78,18 @@ test("prepares all version artifacts, release metadata, and converges on retry",
       runVerification: verifySuccess,
     });
     assert.equal(first.targetVersion, "0.14.2");
-    assert.equal(first.publication.sourceIssue, RELEASE_PUBLICATION_ISSUE);
+    assert.deepEqual(first.publicationHandoff, {
+      version: 1,
+      kind: "release-pr-publication",
+      role: "release",
+      targetVersion: "0.14.2",
+      head: "release/0.14.2",
+      base: "main",
+      expectedHead: "release/0.14.2",
+      expectedBase: "main",
+      headRevision: history.targetSource.sourceRevision,
+      template: "release",
+    });
     assert.equal(first.idempotent, false);
     assert.deepEqual(first.changedPaths, [
       ".agents/plugins/marketplace.json",
@@ -92,7 +99,19 @@ test("prepares all version artifacts, release metadata, and converges on retry",
       "pnpm-lock.yaml",
     ]);
     assert.match(await readFile(path.join(root, "pnpm-lock.yaml"), "utf8"), /    version: 0\.14\.2\n/u);
-    assert.match(await readFile(path.join(root, "docs/releases/0.14.2.md"), "utf8"), /inari:release-preparation/u);
+    const document = await readFile(path.join(root, "docs/releases/0.14.2.md"), "utf8");
+    assert.match(document, /inari:release-preparation/u);
+    for (const heading of [
+      "Summary",
+      "Highlights",
+      "Fixed",
+      "Behavioral changes",
+      "Upgrade instructions",
+      "Breaking changes",
+      "Known limitations",
+    ])
+      assert.match(document, new RegExp(`^## ${heading}$`, "mu"));
+    assert.match(document, /#928: Project release preparation/u);
     const second = await prepareRelease({
       repositoryRoot: root,
       history,
@@ -125,6 +144,23 @@ test("fails closed on dirty workspace and exact-source mismatch", async () => {
   }
 });
 
+test("fails closed when the target release document already contains conflicting content", async () => {
+  const { root, history } = await fixture();
+  try {
+    await writeFile(path.join(root, "docs/releases/0.14.2.md"), "# unrelated release notes\n");
+    await assert.rejects(
+      prepareRelease({ repositoryRoot: root, history, intent: "patch", runVerification: alwaysVerify }),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "RELEASE_TARGET_CONFLICT",
+    );
+    assert.equal(
+      await readFile(path.join(root, "package.json"), "utf8"),
+      '{\n  "name": "gh-inari",\n  "version": "0.14.1"\n}\n',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("release prepare CLI exposes machine-readable handoff without publication", async () => {
   const { root, history } = await fixture();
   const lines: string[] = [];
@@ -142,7 +178,16 @@ test("release prepare CLI exposes machine-readable handoff without publication",
     });
     assert.equal(exitCode, 0, lines[0]);
     assert.equal(lines.length, 1);
-    assert.equal(JSON.parse(lines[0] ?? "{}").targetVersion, "0.20.0");
+    const output = JSON.parse(lines[0] ?? "{}") as {
+      targetVersion?: string;
+      identity?: { targetSource?: { sourceRevision?: string } };
+      publicationHandoff?: { sourceIssue?: number; head?: string; template?: string };
+    };
+    assert.equal(output.targetVersion, "0.20.0");
+    assert.equal(output.identity?.targetSource?.sourceRevision, history.targetSource.sourceRevision);
+    assert.equal(output.publicationHandoff?.sourceIssue, undefined);
+    assert.equal(output.publicationHandoff?.head, "release/0.20.0");
+    assert.equal(output.publicationHandoff?.template, "release");
   } finally {
     console.log = originalLog;
     await rm(root, { recursive: true, force: true });

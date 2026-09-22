@@ -24,7 +24,6 @@ import {
 const execFileAsync = promisify(execFile);
 
 export const RELEASE_PREPARATION_OPERATION = "release.prepare" as const;
-export const RELEASE_PUBLICATION_ISSUE = 926 as const;
 export const RELEASE_DOCUMENT_DIRECTORY = "docs/releases" as const;
 export const RELEASE_VERIFICATION = Object.freeze({ command: "pnpm", args: ["run", "verify"] as const });
 
@@ -69,10 +68,8 @@ export interface ReleasePreparationResult {
   readonly includedChanges: ReleasePreparationPlan["includedChanges"];
   readonly changedPaths: readonly string[];
   readonly publication: ReleasePreparationPlan["publication"];
-  readonly publicationHandoff: {
-    readonly kind: "governed-pull-request";
-    readonly sourceIssue: typeof RELEASE_PUBLICATION_ISSUE;
-  };
+  /** Secret-free, Issue-less handoff for the governed release PR publisher. */
+  readonly publicationHandoff: ReleasePreparationPlan["publication"];
   readonly verification: ReleasePreparationVerificationResult;
   readonly planDigest: string;
   readonly idempotent: boolean;
@@ -252,7 +249,7 @@ function repositoryContract(files: RepositoryFiles): ReleasePreparationRepositor
     ],
     releaseDocumentDirectory: RELEASE_DOCUMENT_DIRECTORY,
     verification: RELEASE_VERIFICATION,
-    publication: { kind: "governed-pull-request", sourceIssue: RELEASE_PUBLICATION_ISSUE },
+    publication: { kind: "release-pr-publication", role: "release", base: "main", template: "release" },
   };
 }
 
@@ -371,9 +368,29 @@ function releaseDocument(plan: ReleasePreparationPlan): string {
     "",
     `Prepared from ${plan.identity.targetSource.ref} at ${plan.identity.targetSource.sourceRevision}; previous release ${plan.identity.previousRelease.tag} (${plan.identity.previousRelease.sourceRevision}).`,
     "",
-    "## Included changes",
+    "## Highlights",
     "",
-    changes === "" ? "No governed changes were included." : changes,
+    changes === "" ? "None." : changes,
+    "",
+    "## Fixed",
+    "",
+    "None.",
+    "",
+    "## Behavioral changes",
+    "",
+    "None.",
+    "",
+    "## Upgrade instructions",
+    "",
+    "None.",
+    "",
+    "## Breaking changes",
+    "",
+    "None.",
+    "",
+    "## Known limitations",
+    "",
+    "None.",
     "",
     "## Verification",
     "",
@@ -528,6 +545,11 @@ export async function prepareReleaseWorkspace(
   const existingDocument = await readExisting(root, documentPath);
   originals.set(documentPath, existingDocument);
   desired.set(documentPath, releaseDocument(input.plan));
+  if (existingDocument.exists && existingDocument.content !== desired.get(documentPath))
+    throw new ReleasePreparationError(
+      "RELEASE_TARGET_CONFLICT",
+      `Existing release document ${documentPath} conflicts with the requested source and version.`,
+    );
   const isPrepared =
     status.length > 0 &&
     status.every((entry) => paths.includes(entry.path)) &&
@@ -580,7 +602,7 @@ export async function prepareReleaseWorkspace(
     includedChanges: input.plan.includedChanges,
     changedPaths: paths,
     publication: input.plan.publication,
-    publicationHandoff: { kind: "governed-pull-request", sourceIssue: RELEASE_PUBLICATION_ISSUE },
+    publicationHandoff: input.plan.publication,
     verification: verify,
     planDigest: input.plan.digest,
     idempotent: alreadyPrepared,
