@@ -301,28 +301,139 @@ function repositoryPath(locator: RepositoryLocator): string {
   return `repos/${encodeURIComponent(locator.owner)}/${encodeURIComponent(locator.name)}`;
 }
 
-function allowedRepositoryQuery(query: string | undefined): boolean {
-  if (query === undefined) return true;
-  if (query.length === 0 || /%(?![0-9A-Fa-f]{2})/u.test(query) || query.includes("?")) return false;
+type RepositoryReadRoute = "no-query" | "tree" | "blocked-by" | "pull-request-discovery" | "operational";
 
+interface ParsedRepositoryQuery {
+  readonly values: ReadonlyMap<string, string>;
+}
+
+const ABSOLUTE_TARGET = /^[A-Za-z][A-Za-z0-9+.-]*:/u;
+const DECIMAL_SEGMENT = /^(?:0|[1-9][0-9]*)$/u;
+const ROUTE_TEXT_MAX_LENGTH = 512;
+
+function decodeRepositoryComponent(value: string): string | undefined {
+  if (/%(?![0-9A-Fa-f]{2})/u.test(value)) return undefined;
   let decoded: string;
   try {
-    decoded = decodeURIComponent(query);
+    decoded = decodeURIComponent(value);
   } catch {
-    return false;
+    return undefined;
   }
   if (
+    decoded.length === 0 ||
     /[\u0000-\u001f\u007f]/u.test(decoded) ||
     decoded.includes("\\") ||
     decoded.includes("#") ||
     decoded.includes("?") ||
-    decoded.startsWith("//") ||
-    decoded.startsWith("/") ||
-    /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(decoded)
+    decoded.startsWith("/")
   ) {
-    return false;
+    return undefined;
   }
-  return query === "recursive=1" && decoded === "recursive=1";
+  return decoded;
+}
+
+function parseRepositoryQuery(query: string | undefined): ParsedRepositoryQuery | undefined {
+  if (query === undefined || query.length === 0 || query.includes("?")) return undefined;
+  const values = new Map<string, string>();
+  for (const pair of query.split("&")) {
+    const separator = pair.indexOf("=");
+    if (separator <= 0) return undefined;
+    const key = decodeRepositoryComponent(pair.slice(0, separator));
+    const value = decodeRepositoryComponent(pair.slice(separator + 1));
+    if (key === undefined || value === undefined || values.has(key)) return undefined;
+    values.set(key, value);
+  }
+  return Object.freeze({ values });
+}
+
+function exactQuery(
+  query: string | undefined,
+  keys: readonly string[],
+  valid: (values: ReadonlyMap<string, string>) => boolean,
+): boolean {
+  const parsed = parseRepositoryQuery(query);
+  if (parsed === undefined || parsed.values.size !== keys.length) return false;
+  if (keys.some((key) => !parsed.values.has(key))) return false;
+  return valid(parsed.values);
+}
+
+function positiveDecimal(value: string | undefined, maximum: number): boolean {
+  if (value === undefined || !DECIMAL_SEGMENT.test(value)) return false;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 1 && number <= maximum;
+}
+
+function boundedPathSegment(value: string | undefined): boolean {
+  if (value === undefined || value.length > ROUTE_TEXT_MAX_LENGTH) return false;
+  const decoded = decodeRepositoryComponent(value);
+  if (decoded === undefined || decoded.length > ROUTE_TEXT_MAX_LENGTH || ABSOLUTE_TARGET.test(decoded)) return false;
+  return !decoded.split("/").some((component) => component === "." || component === "..");
+}
+
+function routeForRepositoryPath(relativePath: string): RepositoryReadRoute | undefined {
+  if (relativePath === "") return "no-query";
+  const segments = relativePath.split("/");
+
+  if (segments.length === 2 && segments[0] === "issues" && positiveDecimal(segments[1], Number.MAX_SAFE_INTEGER)) {
+    return "no-query";
+  }
+  if (
+    segments.length === 4 &&
+    segments[0] === "issues" &&
+    positiveDecimal(segments[1], Number.MAX_SAFE_INTEGER) &&
+    segments[2] === "dependencies" &&
+    segments[3] === "blocked_by"
+  ) {
+    return "blocked-by";
+  }
+  if (
+    segments.length === 3 &&
+    segments[0] === "issues" &&
+    positiveDecimal(segments[1], Number.MAX_SAFE_INTEGER) &&
+    segments[2] === "comments"
+  ) {
+    return "operational";
+  }
+  if (segments.length === 4 && segments[0] === "git" && segments[1] === "ref" && segments[2] === "heads") {
+    return boundedPathSegment(segments[3]) ? "no-query" : undefined;
+  }
+  if (relativePath === "git/matching-refs/heads/") return "no-query";
+  if (segments.length === 3 && segments[0] === "git" && segments[1] === "trees") {
+    return boundedPathSegment(segments[2]) ? "tree" : undefined;
+  }
+  if (segments.length === 3 && segments[0] === "git" && segments[1] === "blobs") {
+    return boundedPathSegment(segments[2]) ? "no-query" : undefined;
+  }
+  if (
+    segments.length === 4 &&
+    segments[0] === "branches" &&
+    boundedPathSegment(segments[1]) &&
+    segments[2] === "protection" &&
+    segments[3] === "required_status_checks"
+  ) {
+    return "no-query";
+  }
+  if (segments.length === 2 && segments[0] === "pulls" && positiveDecimal(segments[1], Number.MAX_SAFE_INTEGER)) {
+    return "no-query";
+  }
+  if (relativePath === "pulls") return "pull-request-discovery";
+  if (
+    segments.length === 3 &&
+    segments[0] === "pulls" &&
+    positiveDecimal(segments[1], Number.MAX_SAFE_INTEGER) &&
+    (segments[2] === "comments" || segments[2] === "reviews" || segments[2] === "files")
+  ) {
+    return "operational";
+  }
+  if (
+    segments.length === 3 &&
+    segments[0] === "commits" &&
+    boundedPathSegment(segments[1]) &&
+    (segments[2] === "check-runs" || segments[2] === "status")
+  ) {
+    return "operational";
+  }
+  return undefined;
 }
 
 function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path is string {
@@ -333,9 +444,10 @@ function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path 
     /[\u0000-\u001f\u007f]/u.test(path) ||
     path.includes("\\") ||
     path.includes("#") ||
+    path.includes("..") ||
     path.startsWith("/") ||
     path.startsWith("//") ||
-    /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(path)
+    ABSOLUTE_TARGET.test(path)
   ) {
     return false;
   }
@@ -343,25 +455,52 @@ function allowedRepositoryPath(path: unknown, locator: RepositoryLocator): path 
   const queryStart = path.indexOf("?");
   const rawRepositoryPath = queryStart === -1 ? path : path.slice(0, queryStart);
   const query = queryStart === -1 ? undefined : path.slice(queryStart + 1);
-  if (queryStart !== -1) {
-    if (query === undefined || query.length === 0 || query.includes("?")) return false;
-  }
+  if (queryStart !== -1 && (query === undefined || query.length === 0 || query.includes("?"))) return false;
 
   const root = repositoryPath(locator);
   if (rawRepositoryPath !== root && !rawRepositoryPath.startsWith(`${root}/`)) return false;
 
-  const suffix = rawRepositoryPath.slice(root.length + 1);
-  if (rawRepositoryPath === root) return allowedRepositoryQuery(query);
-  if (/%(?![0-9A-Fa-f]{2})/u.test(suffix)) return false;
-
+  let decodedRepositoryPath: string;
   try {
-    const decoded = decodeURIComponent(suffix);
-    if (/[\u0000-\u001f\u007f]/u.test(decoded) || decoded.includes("\\")) return false;
-    if (decoded.split("/").some((component) => component === "." || component === "..")) return false;
+    decodedRepositoryPath = decodeURIComponent(rawRepositoryPath);
   } catch {
     return false;
   }
-  return allowedRepositoryQuery(query);
+  if (
+    /[\u0000-\u001f\u007f]/u.test(decodedRepositoryPath) ||
+    decodedRepositoryPath.includes("\\") ||
+    decodedRepositoryPath.includes("#") ||
+    decodedRepositoryPath.includes("?") ||
+    decodedRepositoryPath.split("/").some((component) => component === "." || component === "..")
+  ) {
+    return false;
+  }
+
+  const relativePath = rawRepositoryPath === root ? "" : rawRepositoryPath.slice(root.length + 1);
+  if (relativePath === "" && rawRepositoryPath !== root) return false;
+  const route = routeForRepositoryPath(relativePath);
+  if (route === undefined) return false;
+  if (route === "no-query") return query === undefined;
+  if (route === "tree") {
+    return exactQuery(query, ["recursive"], (values) => values.get("recursive") === "1");
+  }
+  if (route === "blocked-by" || route === "operational") {
+    return exactQuery(query, ["per_page", "page"], (values) => {
+      return values.get("per_page") === "100" && positiveDecimal(values.get("page"), 10);
+    });
+  }
+  return exactQuery(query, ["state", "head", "base", "per_page"], (values) => {
+    const head = values.get("head");
+    const base = values.get("base");
+    if (values.get("state") !== "all" || values.get("per_page") !== "100" || head === undefined || base === undefined) {
+      return false;
+    }
+    return (
+      head.startsWith(`${locator.owner}:`) &&
+      boundedPathSegment(head.slice(locator.owner.length + 1)) &&
+      boundedPathSegment(base)
+    );
+  });
 }
 
 function evidenceFor(
