@@ -14,7 +14,7 @@ import { register } from "tsx/esm/api";
 register();
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CERTIFIED_EPIC_SHA = "adc254de563bae0a78626aebe22d0e55474420ac";
+const CERTIFIED_EPIC_INTEGRATION_SHA = "a443f8eeed7da97b25b91f946905c37e249539ba";
 const MAIN_REF = "origin/main";
 const API_URL = "https://api.example.test";
 const ENDPOINT_URL = "https://hosted.example.test";
@@ -64,7 +64,7 @@ function hasCommit(ref) {
 
 function ensureCertificationRefs() {
   const shallow = run("git", ["rev-parse", "--is-shallow-repository"]) === "true";
-  if (!shallow && hasCommit(CERTIFIED_EPIC_SHA) && hasCommit(MAIN_REF)) return;
+  if (!shallow && hasCommit(CERTIFIED_EPIC_INTEGRATION_SHA) && hasCommit(MAIN_REF)) return;
   run("git", [
     "fetch",
     "--no-tags",
@@ -76,13 +76,13 @@ function ensureCertificationRefs() {
 
 function gitState() {
   ensureCertificationRefs();
-  requireCondition(hasCommit(CERTIFIED_EPIC_SHA), "certified Epic head is unavailable");
-  const epicHeadSha = run("git", ["rev-parse", `${CERTIFIED_EPIC_SHA}^{commit}`]);
+  requireCondition(hasCommit(CERTIFIED_EPIC_INTEGRATION_SHA), "certified Epic integration commit is unavailable");
+  const epicHeadSha = run("git", ["rev-parse", `${CERTIFIED_EPIC_INTEGRATION_SHA}^{commit}`]);
   const currentMainSha = run("git", ["rev-parse", `${MAIN_REF}^{commit}`]);
   const headSha = run("git", ["rev-parse", "HEAD"]);
   requireCondition(
-    run("git", ["merge-base", "HEAD", CERTIFIED_EPIC_SHA]) === epicHeadSha,
-    "revision does not contain the certified Epic head",
+    run("git", ["merge-base", "HEAD", CERTIFIED_EPIC_INTEGRATION_SHA]) === epicHeadSha,
+    "revision does not contain the certified Epic integration commit",
   );
   requireCondition(
     run("git", ["merge-base", "HEAD", MAIN_REF]) === currentMainSha,
