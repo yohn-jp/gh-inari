@@ -352,12 +352,7 @@ As of 0.15.0 pre-release verification, step 3 above reliably fails after a
 bounded ~30s wait with:
 
 ```json
-{
-  "code": "CHANGE_REMOTE_RUN_FAILED",
-  "details": {
-    "code": "SESSION_RECOVERY_REQUIRED"
-  }
-}
+{"code":"CHANGE_REMOTE_RUN_FAILED","details":{"code":"SESSION_RECOVERY_REQUIRED"}}
 ```
 
 This reproduces with a `runtime connect` process confirmed alive and
