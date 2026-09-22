@@ -51,7 +51,33 @@ function run(command, args) {
   }
 }
 
+function hasCommit(ref) {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureCertificationRefs() {
+  const shallow = run("git", ["rev-parse", "--is-shallow-repository"]) === "true";
+  if (!shallow && hasCommit(EPIC_REF) && hasCommit(MAIN_REF)) return;
+  run("git", [
+    "fetch",
+    "--no-tags",
+    ...(shallow ? ["--unshallow"] : []),
+    "origin",
+    "+refs/heads/epic/840-inari-endpoint-dashboard:refs/remotes/origin/epic/840-inari-endpoint-dashboard",
+    "+refs/heads/main:refs/remotes/origin/main",
+  ]);
+}
+
 function gitState() {
+  ensureCertificationRefs();
   const epicHeadSha = run("git", ["rev-parse", `${EPIC_REF}^{commit}`]);
   const currentMainSha = run("git", ["rev-parse", `${MAIN_REF}^{commit}`]);
   const headSha = run("git", ["rev-parse", "HEAD"]);
@@ -61,8 +87,8 @@ function gitState() {
     run("git", ["merge-base", MAIN_REF, EPIC_REF]) === currentMainSha,
     "the Epic does not contain the current origin/main base",
   );
-  requireCondition(run("git", ["merge-base", MAIN_REF, EPIC_REF]) === currentMainSha, "main/Epic base drifted");
-  requireCondition(run("git", ["rev-parse", "--abbrev-ref", "HEAD"]) === BRANCH, "certification branch is incorrect");
+  const branch = process.env.GITHUB_HEAD_REF?.trim() || run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+  requireCondition(branch === BRANCH, "certification branch is incorrect");
   return Object.freeze({ epicHeadSha, currentMainSha, headSha });
 }
 
