@@ -93,7 +93,9 @@ function repositoriesFrom(value: unknown): readonly GitHubRepositorySummary[] {
 }
 
 /** Create a read-only client for the signed-in user's own GitHub App installations. */
-export function createGitHubInstallationsClient(options: GitHubInstallationsClientOptions): GitHubInstallationsClient {
+export function createGitHubInstallationsClient(
+  options: GitHubInstallationsClientOptions,
+): GitHubInstallationsClient {
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
   function authorizedGet(path: string): Promise<Response> {
