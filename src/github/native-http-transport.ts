@@ -338,7 +338,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
   constructor(options: GitHubNativeHttpTransportOptions) {
     this.#token = boundedToken(options.token);
     this.#apiUrl = boundedEndpoint(options.apiUrl);
-    this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#requestTimeoutMs = normalizedRequestTimeoutMs(options.requestTimeoutMs);
     this.#maxResponseBytes = normalizedMaxResponseBytes(options.maxResponseBytes);
   }
@@ -417,6 +417,7 @@ export class GitHubNativeHttpTransport implements GitHubChangeEffectTransport {
             Accept: accept ?? "application/vnd.github+json",
             Authorization: `Bearer ${this.#token}`,
             "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "gh-inari-hosted-relay",
             ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),

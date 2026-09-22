@@ -20,3 +20,4 @@ await build({
   logLevel: "warning",
 });
 await copyFile(path.join(appRoot, "index.html"), path.join(outputDirectory, "index.html"));
+await copyFile(path.join(appRoot, "styles.css"), path.join(outputDirectory, "styles.css"));

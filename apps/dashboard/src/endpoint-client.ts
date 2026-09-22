@@ -178,7 +178,7 @@ async function responseBody(response: Response): Promise<DashboardEndpointResult
 export function createDashboardEndpointClient(options: DashboardEndpointClientOptions): DashboardEndpointClient {
   const origin = endpointOrigin(options.endpoint);
   const timeoutMs = requestTimeout(options.requestTimeoutMs);
-  const fetcher = options.fetch ?? globalThis.fetch;
+  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
   if (typeof fetcher !== "function") {
     throw new DashboardEndpointClientError("DASHBOARD_ENDPOINT_REQUEST_FAILED", "A fetch implementation is required.");
   }
