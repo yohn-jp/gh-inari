@@ -36,14 +36,18 @@ the release tag.
 
 ## Release sequence
 
-1. **Land changes through PR.** Every change to `main` goes through a
-   pull request with a linked Issue and a passing `CI` + `Governance` +
-   `CodeQL` run (see `CONTRIBUTING.md`). No direct pushes to `main`.
+1. **Land changes through PR.** Every ordinary change to `main` goes
+   through a pull request with a linked Issue and a passing `CI` +
+   `Governance` + `CodeQL` run (see `CONTRIBUTING.md`). The release PR is
+   the governed Issue-less exception: it is classified by its strict
+   `release/<version>` head and uses the `release` PR template. No direct
+   pushes to `main`.
 2. **Update the release notes.** Add `docs/releases/<version>.md`
-   (this file's sibling) in the same PR or a follow-up PR, following the
-   structure of [`0.1.0.md`](0.1.0.md): Summary, Highlights, Fixed,
-   Behavioral changes, Upgrade instructions, Breaking changes, Known
-   limitations.
+   (this file's sibling) in the release PR, following the structure of
+   [`0.1.0.md`](0.1.0.md): Summary, Highlights, Fixed, Behavioral changes,
+   Upgrade instructions, Breaking changes, Known limitations. Release
+   preparation derives factual bullets only from verified governed history;
+   sections without applicable evidence say `None.`.
 3. **Bump every file that encodes the package version**, in its own
    commit or PR:
    - `package.json` `version` — the authority `publish.yml` checks
