@@ -710,11 +710,7 @@ export class RepositoryRelayDurableObject {
       });
     }
     const queryKeys = [...url.searchParams.keys()];
-    if (
-      queryKeys.some(
-        (key) => key !== "repositoryId" && key !== "repositoryHost" && key !== "connectionId",
-      )
-    ) {
+    if (queryKeys.some((key) => key !== "repositoryId" && key !== "repositoryHost" && key !== "connectionId")) {
       return badRequest();
     }
     const repository = repositoryFromQuery(url, this.repository);
@@ -779,7 +775,7 @@ export class RepositoryRelayDurableObject {
     try {
       await this.receiveJob(source, sourceAttachment, job);
       const result = await payload;
-      return new Response(result, {
+      return new Response(JSON_DECODER.decode(result), {
         status: 200,
         headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
       });
@@ -797,10 +793,11 @@ export class RepositoryRelayDurableObject {
   async fetch(request: Request): Promise<Response> {
     const internalPresence = this.internalPresenceRequest(request);
     if (internalPresence !== undefined) return internalPresence;
-    const internalDispatch = await this.internalDispatchRequest(request);
-    if (internalDispatch !== undefined) return internalDispatch;
-    if (!isUpgrade(request)) return badRequest("Repository Relay requires a WebSocket upgrade.");
     const url = new URL(request.url);
+    if (url.pathname === RELAY_INTERNAL_DISPATCH_PATH) {
+      return (await this.internalDispatchRequest(request)) ?? badRequest();
+    }
+    if (!isUpgrade(request)) return badRequest("Repository Relay requires a WebSocket upgrade.");
     const repository = repositoryFromQuery(url, this.repository);
     const role = roleFromQuery(url);
     const connectionId = connectionIdFromQuery(url);
