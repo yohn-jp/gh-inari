@@ -137,13 +137,71 @@ test("denies a human request when the Endpoint capability is not admitted", asyn
 });
 
 test("allows an admitted human and composes work and runtime presence through one API", async () => {
-  const result = await api().execute(request());
+  const result = await api().execute(request({ query: { rootIssue: 922 } }));
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.authorization.allowed, true);
   assert.equal(result.data.work?.kind, "endpoint-work");
   assert.equal(result.data.presence?.state, "unavailable");
   assert.equal(result.data.unavailable.length, 0);
+});
+
+test("repository reads without a root do not invoke the work reader", async () => {
+  let workReads = 0;
+  const result = await api({
+    readWork: async () => {
+      workReads += 1;
+      return workInput();
+    },
+  }).execute(request());
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(workReads, 0);
+  assert.equal(result.data.work, undefined);
+  assert.equal(result.data.presence?.state, "unavailable");
+});
+
+test("work reads require a bounded root and carry the exact root to the reader", async () => {
+  let observedRoot: number | undefined;
+  const result = await api({
+    authentication: {
+      authenticate: async () => ({ ...evidence, capabilities: [{ kind: "work.read" }] }),
+    },
+    readWork: async (projectionRequest) => {
+      observedRoot = projectionRequest.rootIssue;
+      return workInput();
+    },
+  }).execute(request({ operation: "work.read", capability: { kind: "work.read" }, query: { rootIssue: 922 } }));
+  assert.equal(result.ok, true);
+  assert.equal(observedRoot, 922);
+
+  const missing = await api().execute(request({ operation: "work.read", capability: { kind: "work.read" } }));
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.error.code, "ENDPOINT_API_INVALID_REQUEST");
+});
+
+test("derives the operation capability and rejects a caller mismatch before reading", async () => {
+  let workReads = 0;
+  const result = await api({
+    authentication: {
+      authenticate: async () => ({ ...evidence, capabilities: [{ kind: "work.read" }] }),
+    },
+    readWork: async () => {
+      workReads += 1;
+      return workInput();
+    },
+  }).execute(request({ operation: "work.read", query: { rootIssue: 922 } }));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "ENDPOINT_API_AUTHORIZATION_DENIED");
+  assert.equal(workReads, 0);
+});
+
+test("rejects presence queries that contain a work root", async () => {
+  const result = await api().execute(
+    request({ operation: "presence.read", capability: { kind: "presence.read" }, query: { rootIssue: 922 } }),
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "ENDPOINT_API_INVALID_REQUEST");
 });
 
 test("denies cross-repository requests even when the human is authenticated", async () => {
@@ -166,7 +224,7 @@ test("exposes stale work and unavailable presence instead of treating them as em
   const result = await api({
     readWork: async () => ({ ...workInput(), freshness: stale }),
     readPresence: async () => ({ status: "unavailable", diagnostics: [] as const }),
-  }).execute(request());
+  }).execute(request({ query: { rootIssue: 922 } }));
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.data.work?.freshness.state, "stale");
