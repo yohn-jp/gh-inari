@@ -418,7 +418,7 @@ test("hosted Endpoint route delegates to the shared authenticated API compositio
     nameWithOwner: "yohn-jp/gh-inari",
   };
   const principal = { version: 1 as const, kind: "human" as const, id: "hosted-human" };
-  const capability = { kind: "change.implement" as const, issue: 922 };
+  const capability = { kind: "presence.read" as const };
   const endpointApi = createEndpointApi({
     authentication: {
       authenticate: async () => ({

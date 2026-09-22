@@ -21,7 +21,7 @@ const repository = {
   nameWithOwner: "yohn-jp/gh-inari",
 } as const;
 const principal = { version: 1, kind: "human", id: "http-human" } as const;
-const capability = { kind: "change.implement", issue: 922 } as const;
+const capability = { kind: "presence.read" } as const;
 const evidence = {
   version: 1,
   authenticated: true,

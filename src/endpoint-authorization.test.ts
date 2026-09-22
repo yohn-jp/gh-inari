@@ -33,7 +33,7 @@ const principal = {
   kind: "runtime/client",
   id: "runtime-test",
 } as const;
-const capability = { kind: "change.implement", issue: 917 } as const;
+const capability = { kind: "work.read" } as const;
 
 function request(overrides: Partial<EndpointAuthorizationRequest> = {}): EndpointAuthorizationRequest {
   return {
@@ -64,7 +64,7 @@ test("allows an explicitly admitted capability in the exact endpoint context", (
 });
 
 test("denies a capability that authenticated evidence did not admit", () => {
-  const result = authorizeEndpoint(request({ capability: { kind: "change.ready", issue: 917 } }));
+  const result = authorizeEndpoint(request({ capability: { kind: "presence.read" } }));
   assert.equal(result.allowed, false);
   assert.equal(result.reason, "capability-denied");
   assert.equal(result.diagnostics[0]?.code, "ENDPOINT_AUTHORIZATION_CAPABILITY_DENIED");
@@ -113,4 +113,21 @@ test("rejects malformed, unknown, and missing capability evidence", () => {
   );
   assert.equal(unauthenticated.allowed, false);
   assert.equal(unauthenticated.reason, "unauthenticated");
+});
+
+test("rejects delegated Agent mutation capabilities at the Endpoint boundary", () => {
+  for (const agentCapability of [
+    { kind: "change.implement", issue: 917 },
+    { kind: "pullRequest.create", head: "feature/read", base: "main", max: 1 },
+  ]) {
+    const result = authorizeEndpoint(
+      request({
+        capability: agentCapability as never,
+        evidence: { ...request().evidence, capabilities: [agentCapability as never] },
+      }),
+    );
+    assert.equal(result.allowed, false);
+    assert.equal(result.reason, "invalid-evidence");
+    assert.equal(result.diagnostics[0]?.code, "ENDPOINT_AUTHORIZATION_UNKNOWN_CAPABILITY");
+  }
 });
