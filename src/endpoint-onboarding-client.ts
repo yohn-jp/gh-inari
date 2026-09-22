@@ -77,7 +77,7 @@ export async function fetchEndpointOnboardingDescriptor(
 ): Promise<EndpointOnboardingDescriptor> {
   const origin = endpointOrigin(options.endpoint);
   const requestTimeoutMs = timeout(options.requestTimeoutMs);
-  const fetcher = options.fetch ?? globalThis.fetch;
+  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {

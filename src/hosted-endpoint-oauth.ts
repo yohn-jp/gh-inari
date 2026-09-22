@@ -214,7 +214,7 @@ function validateOptions(options: HostedEndpointOAuthOptions): Required<
   const allowedOrigin = options.allowedOrigin === undefined ? callbackOrigin : originOf(options.allowedOrigin);
   if (allowedOrigin === undefined || allowedOrigin !== callbackOrigin)
     throw new TypeError("Hosted OAuth origin is invalid.");
-  const fetcher = options.fetch ?? globalThis.fetch;
+  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
   if (typeof fetcher !== "function") throw new TypeError("Hosted OAuth fetch implementation is required.");
   const maxBodyBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1 || maxBodyBytes > MAX_BODY_BYTES) {

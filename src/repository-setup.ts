@@ -542,7 +542,11 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
   const credential = customBroker === undefined ? await ensureCredential(input, descriptor) : undefined;
   const repositoryId =
     customBroker === undefined
-      ? await resolveRepositoryId(context, credential as GitHubAppUserCredential, input.fetch ?? globalThis.fetch)
+      ? await resolveRepositoryId(
+          context,
+          credential as GitHubAppUserCredential,
+          input.fetch ?? globalThis.fetch.bind(globalThis),
+        )
       : undefined;
   const broker =
     customBroker ??
