@@ -11,9 +11,9 @@ import {
   type RelayRepositoryIdentity,
 } from "./relay/contract.js";
 import {
+  RELAY_INTERNAL_DISPATCH_PATH,
   RepositoryRelayDurableObject,
   repositoryRelayDurableObjectId,
-  type RepositoryRelayWebSocket,
   type RelayDurableObjectNamespaceLike,
 } from "./relay/cloudflare-repository-relay.js";
 import {
@@ -111,19 +111,6 @@ export interface Env {
   readonly telemetry?: RelayTelemetrySink;
 }
 
-type HostedWebSocket = RepositoryRelayWebSocket & {
-  readonly accept?: () => void;
-  binaryType?: "blob" | "arraybuffer";
-  addEventListener?: (type: "open" | "message" | "close" | "error", listener: (event: unknown) => void) => void;
-  removeEventListener?: (type: "open" | "message" | "close" | "error", listener: (event: unknown) => void) => void;
-  onopen?: ((event: unknown) => void) | null;
-  onmessage?: ((event: unknown) => void) | null;
-  onclose?: ((event: unknown) => void) | null;
-  onerror?: ((event: unknown) => void) | null;
-};
-
-type UpgradeResponse = Response & { readonly webSocket?: HostedWebSocket };
-
 function serviceUnavailable(): Response {
   return jsonResponse(503, { ok: false, error: { code: "HOSTED_WORKER_UNAVAILABLE" } });
 }
@@ -170,21 +157,6 @@ function randomIdentifier(prefix: string): string {
   return `${prefix}-${uuid ?? Date.now().toString(36)}`;
 }
 
-function frameText(event: unknown): string | undefined {
-  const value =
-    typeof event === "object" && event !== null && "data" in event
-      ? (event as { readonly data?: unknown }).data
-      : event;
-  if (typeof value === "string") return value;
-  if (value instanceof ArrayBuffer) return new TextDecoder("utf-8", { fatal: true }).decode(value);
-  if (ArrayBuffer.isView(value)) {
-    return new TextDecoder("utf-8", { fatal: true }).decode(
-      new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
-    );
-  }
-  return undefined;
-}
-
 function sessionRepository(envelope: unknown, host: string): RelayRepositoryIdentity | undefined {
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) return undefined;
   const repositoryId = (envelope as { readonly repositoryId?: unknown }).repositoryId;
@@ -205,22 +177,6 @@ function unavailableExecution(): CapabilityAuthorizedSessionExecutionResult {
       phase: "execution",
       message: "Hosted Repository Relay execution failed closed.",
     },
-  };
-}
-
-function socketListener(
-  socket: HostedWebSocket,
-  type: "open" | "message" | "close" | "error",
-  listener: (event: unknown) => void,
-): () => void {
-  if (socket.addEventListener !== undefined) {
-    socket.addEventListener(type, listener);
-    return () => socket.removeEventListener?.(type, listener);
-  }
-  const key = `on${type}` as "onopen" | "onmessage" | "onclose" | "onerror";
-  socket[key] = listener;
-  return () => {
-    if (socket[key] === listener) socket[key] = null;
   };
 }
 
@@ -261,91 +217,48 @@ async function dispatchThroughDurableObject(
     connectionId: sourceConnectionId,
     jobId,
   });
-  const internalUrl = new URL("https://inari-relay.internal/v1/relay/connect");
+  const internalUrl = new URL(`https://inari-relay.internal${RELAY_INTERNAL_DISPATCH_PATH}`);
   internalUrl.searchParams.set("repositoryId", repository.repositoryId);
   internalUrl.searchParams.set("repositoryHost", repository.repositoryHost);
-  internalUrl.searchParams.set("role", "client");
   internalUrl.searchParams.set("connectionId", sourceConnectionId);
-  const upgrade = new Request(internalUrl, { method: "GET", headers: { upgrade: UPGRADE }, signal });
-  const response = (await stub.fetch(upgrade)) as UpgradeResponse;
-  const socket = response.webSocket;
-  if (socket === undefined) throw new Error("Repository Relay did not accept the internal connection.");
-  socket.binaryType = "arraybuffer";
-  socket.accept?.();
-
-  return new Promise<RelayEnvelope>((resolve, reject) => {
-    let settled = false;
-    let sent = false;
-    const cleanups: Array<() => void> = [];
-    const finish = (error?: Error, envelope?: RelayEnvelope): void => {
-      if (settled) return;
-      settled = true;
-      for (const cleanup of cleanups) cleanup();
-      socket.close?.(1000, "dispatch-complete");
-      if (envelope !== undefined) {
-        emit({
-          occurredAtMs: Date.now(),
-          kind: "delivery",
-          surface: "hosted-worker",
-          connectionId: sourceConnectionId,
-          jobId,
-          deliveryState:
-            envelope.kind === "result"
-              ? "terminal-result"
-              : envelope.kind === "control"
-                ? envelope.deliveryState === "delivered-ambiguous"
-                  ? "possibly-delivered"
-                  : envelope.deliveryState
-                : undefined,
-          failureClass:
-            envelope.kind === "control" && envelope.deliveryState === "delivered-ambiguous"
-              ? "disconnected"
-              : envelope.kind === "control" && envelope.deliveryState === "expired"
-                ? "expired"
-                : "none",
-        });
-      }
-      if (error !== undefined) reject(error);
-      else if (envelope !== undefined) resolve(envelope);
-      else reject(new Error("Repository Relay closed before a result."));
-    };
-    const onMessage = (event: unknown): void => {
-      let text: string | undefined;
-      try {
-        text = frameText(event);
-      } catch {
-        return;
-      }
-      if (text === undefined) return;
-      try {
-        const envelope = decodeRelayEnvelope(text, repository);
-        if (envelope.kind === "result" || envelope.kind === "control") finish(undefined, envelope);
-      } catch {
-        // Ignore non-contract frames at this internal transport boundary.
-      }
-    };
-    const onClosed = (): void => finish(new Error("Repository Relay connection closed."));
-    cleanups.push(socketListener(socket, "message", onMessage));
-    cleanups.push(socketListener(socket, "close", onClosed));
-    cleanups.push(socketListener(socket, "error", onClosed));
-    const onAbort = (): void => finish(new Error("Repository Relay dispatch was aborted."));
-    if (signal !== undefined) {
-      if (signal.aborted) return onAbort();
-      signal.addEventListener("abort", onAbort, { once: true });
-      cleanups.push(() => signal.removeEventListener("abort", onAbort));
-    }
-    const send = (): void => {
-      if (sent || settled) return;
-      sent = true;
-      try {
-        socket.send(new TextDecoder().decode(encodeRelayEnvelope(job, repository)));
-      } catch {
-        finish(new Error("Repository Relay dispatch could not be sent."));
-      }
-    };
-    if (socket.readyState === 0) cleanups.push(socketListener(socket, "open", send));
-    else send();
+  const response = await stub.fetch(
+    new Request(internalUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: new TextDecoder().decode(encodeRelayEnvelope(job, repository)),
+      signal,
+    }),
+  );
+  if (!response.ok) throw new Error("Repository Relay dispatch request failed.");
+  let envelope: RelayEnvelope;
+  try {
+    envelope = decodeRelayEnvelope(await response.text(), repository);
+  } catch {
+    throw new Error("Repository Relay returned an invalid dispatch result.");
+  }
+  if (envelope.kind !== "result" && envelope.kind !== "control") {
+    throw new Error("Repository Relay returned an invalid dispatch result.");
+  }
+  emit({
+    occurredAtMs: Date.now(),
+    kind: "delivery",
+    surface: "hosted-worker",
+    connectionId: sourceConnectionId,
+    jobId,
+    deliveryState:
+      envelope.kind === "result"
+        ? "terminal-result"
+        : envelope.deliveryState === "delivered-ambiguous"
+          ? "possibly-delivered"
+          : envelope.deliveryState,
+    failureClass:
+      envelope.kind === "control" && envelope.deliveryState === "delivered-ambiguous"
+        ? "disconnected"
+        : envelope.kind === "control" && envelope.deliveryState === "expired"
+          ? "expired"
+          : "none",
   });
+  return envelope;
 }
 
 export function createHostedRelayDispatch(

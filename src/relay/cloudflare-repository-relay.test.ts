@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createPublicKey, generateKeyPairSync, sign as ed25519Sign, type KeyObject } from "node:crypto";
 import {
   RepositoryRelayDurableObject,
+  RELAY_INTERNAL_DISPATCH_PATH,
   RELAY_RUNTIME_PRESENCE_INTERNAL_PATH,
   repositoryRelayDurableObjectName,
   type RepositoryRelayDurableObjectState,
@@ -15,7 +16,7 @@ import {
   encodeRelayPossessionProofResponse,
   type RelayPossessionProofChallenge,
 } from "./connection-proof.js";
-import { encodeRelayEnvelope } from "./contract.js";
+import { decodeRelayEnvelope, encodeRelayEnvelope } from "./contract.js";
 import {
   SESSION_CERTIFICATE_ALG,
   SESSION_CERTIFICATE_CONTRACT_VERSION,
@@ -28,6 +29,12 @@ import {
 
 const repository = { repositoryHost: "github.com", repositoryId: "1330755860" } as const;
 const encoder = new TextEncoder();
+
+function bytesOfTestMessage(message: string | ArrayBuffer | ArrayBufferView): Uint8Array {
+  if (typeof message === "string") return encoder.encode(message);
+  if (message instanceof ArrayBuffer) return new Uint8Array(message);
+  return new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+}
 
 class FakeSocket implements RepositoryRelayWebSocket {
   readyState = 1;
@@ -364,6 +371,64 @@ test("internal presence read returns only the bounded Runtime presence snapshot"
     new Request(`https://relay.test${RELAY_RUNTIME_PRESENCE_INTERNAL_PATH}`, { method: "POST" }),
   );
   assert.equal(method.status, 405);
+});
+
+test("internal HTTP dispatch returns the Runtime result without a client WebSocket", async () => {
+  const state = new FakeState();
+  const object = new RepositoryRelayDurableObject(
+    state,
+    { repository },
+    { now: () => 10_000, randomNonce: () => "nonce-internal-dispatch" },
+  );
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const runtime = pairFor(object, "role=runtime&connectionId=delegator-internal&delegatorId=delegator-internal");
+  await admitRuntime(object, runtime, privateKey);
+  runtime.sendHook = (data) => {
+    const envelope = decodeRelayEnvelope(
+      typeof data === "string" ? data : new TextDecoder().decode(bytesOfTestMessage(data)),
+      repository,
+    );
+    if (envelope.kind !== "job") return;
+    setImmediate(() => {
+      void object.webSocketMessage(
+        runtime,
+        encodeRelayEnvelope(
+          {
+            version: 1,
+            kind: "result",
+            repository,
+            connectionId: envelope.connectionId,
+            jobId: envelope.jobId,
+            deliveryState: "terminal-result",
+            resultPayload: "Ag",
+          },
+          repository,
+        ),
+      );
+    });
+  };
+  const job = {
+    version: 1,
+    kind: "job" as const,
+    repository,
+    connectionId: "delegator-internal",
+    jobId: "job-internal-dispatch",
+    deliveryState: "pre-delivery" as const,
+    deadlineMs: 1_000,
+    signedSessionRequest: signedSessionRequest(privateKey, privateKey, "delegator-internal"),
+  };
+  const response = await object.fetch(
+    new Request(
+      `https://relay.test${RELAY_INTERNAL_DISPATCH_PATH}?repositoryId=${repository.repositoryId}&repositoryHost=${repository.repositoryHost}&connectionId=host-internal`,
+      {
+        method: "POST",
+        body: new TextDecoder().decode(encodeRelayEnvelope(job, repository)),
+      },
+    ),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(state.getWebSockets("client").length, 0);
+  assert.equal(decodeRelayEnvelope(await response.text(), repository).kind, "result");
 });
 
 test("production DO admission gates a reconnect retained result until acknowledgement", async () => {

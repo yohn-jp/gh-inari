@@ -76,6 +76,8 @@ const NONCE_KEY = "relay:used-nonces";
 /** Fixed Worker-to-DO read seam; the outer Hosted Worker never routes it. */
 export const RELAY_RUNTIME_PRESENCE_INTERNAL_PATH = "/__inari/internal/relay/presence" as const;
 export const RELAY_RUNTIME_PRESENCE_INTERNAL_METHOD = "GET" as const;
+export const RELAY_INTERNAL_DISPATCH_PATH = "/__inari/internal/relay/dispatch" as const;
+export const RELAY_INTERNAL_DISPATCH_METHOD = "POST" as const;
 
 type RelayRole = "runtime" | "client";
 
@@ -480,6 +482,7 @@ export class RepositoryRelayDurableObject {
   private readonly limits: RelayOperationalLimits;
   private readonly telemetry?: RelayTelemetrySink;
   private readonly generationReservations = new Map<string, number>();
+  private readonly pendingSources = new Map<string, RepositoryRelayWebSocket>();
 
   constructor(
     private readonly state: RepositoryRelayDurableObjectState,
@@ -697,11 +700,104 @@ export class RepositoryRelayDurableObject {
     return presenceResponse(this.readRuntimePresence(repository));
   }
 
+  private async internalDispatchRequest(request: Request): Promise<Response | undefined> {
+    const url = new URL(request.url);
+    if (url.pathname !== RELAY_INTERNAL_DISPATCH_PATH) return undefined;
+    if (request.method !== RELAY_INTERNAL_DISPATCH_METHOD) {
+      return new Response("Method not allowed.", {
+        status: 405,
+        headers: { allow: RELAY_INTERNAL_DISPATCH_METHOD },
+      });
+    }
+    const queryKeys = [...url.searchParams.keys()];
+    if (queryKeys.some((key) => key !== "repositoryId" && key !== "repositoryHost" && key !== "connectionId")) {
+      return badRequest();
+    }
+    const repository = repositoryFromQuery(url, this.repository);
+    const sourceConnectionId = connectionIdFromQuery(url);
+    if (repository === undefined || sourceConnectionId === undefined) return badRequest();
+
+    let text: string;
+    try {
+      text = await request.text();
+    } catch {
+      return badRequest();
+    }
+    if (JSON_ENCODER.encode(text).byteLength > MAX_MESSAGE_BYTES) return badRequest();
+
+    let job: RelayJobEnvelope;
+    try {
+      const envelope = decodeRelayEnvelope(text, repository);
+      if (envelope.kind !== "job") return badRequest();
+      job = envelope;
+    } catch {
+      return badRequest();
+    }
+    if (this.pendingSources.has(sourceConnectionId)) return overloadedResponse();
+
+    let open = true;
+    let resolvePayload!: (value: Uint8Array) => void;
+    let rejectPayload!: (reason?: unknown) => void;
+    const payload = new Promise<Uint8Array>((resolve, reject) => {
+      resolvePayload = resolve;
+      rejectPayload = reject;
+    });
+    const source: RepositoryRelayWebSocket = {
+      get readyState() {
+        return open ? 1 : 3;
+      },
+      send(message) {
+        if (!open) return;
+        open = false;
+        resolvePayload(bytesOfMessage(message));
+      },
+      close(_code, reason) {
+        if (!open) return;
+        open = false;
+        rejectPayload(new Error(reason ?? "Repository Relay dispatch source closed."));
+      },
+    };
+    const openedAtMs = this.now();
+    const sourceAttachment: RuntimeConnectionAttachment = {
+      version: CONNECTION_ATTACHMENT_VERSION,
+      role: "client",
+      repository,
+      connectionId: sourceConnectionId,
+      authenticated: true,
+      openedAtMs,
+      expiresAtMs: openedAtMs + Math.min(job.deadlineMs, this.limits.connectionTtlMs),
+      messageWindowStartedAtMs: openedAtMs,
+      messageCount: 0,
+    };
+    const abort = (): void => source.close?.(1000, "Repository Relay dispatch aborted.");
+    this.pendingSources.set(sourceConnectionId, source);
+    request.signal.addEventListener("abort", abort, { once: true });
+    try {
+      await this.receiveJob(source, sourceAttachment, job);
+      const result = await payload;
+      return new Response(JSON_DECODER.decode(result), {
+        status: 200,
+        headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+      });
+    } catch {
+      return new Response(JSON.stringify({ ok: false, error: { code: "RELAY_DISPATCH_FAILED" } }), {
+        status: 503,
+        headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+      });
+    } finally {
+      request.signal.removeEventListener("abort", abort);
+      if (this.pendingSources.get(sourceConnectionId) === source) this.pendingSources.delete(sourceConnectionId);
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     const internalPresence = this.internalPresenceRequest(request);
     if (internalPresence !== undefined) return internalPresence;
-    if (!isUpgrade(request)) return badRequest("Repository Relay requires a WebSocket upgrade.");
     const url = new URL(request.url);
+    if (url.pathname === RELAY_INTERNAL_DISPATCH_PATH) {
+      return (await this.internalDispatchRequest(request)) ?? badRequest();
+    }
+    if (!isUpgrade(request)) return badRequest("Repository Relay requires a WebSocket upgrade.");
     const repository = repositoryFromQuery(url, this.repository);
     const role = roleFromQuery(url);
     const connectionId = connectionIdFromQuery(url);
@@ -1597,6 +1693,11 @@ export class RepositoryRelayDurableObject {
   }
 
   private forwardToSource(record: StoredJobRecord, payload: Uint8Array): void {
+    const pendingSource = this.pendingSources.get(record.sourceConnectionId);
+    if (pendingSource !== undefined && isOpen(pendingSource)) {
+      pendingSource.send(payload);
+      return;
+    }
     const source = this.state.getWebSockets("client").find((candidate) => {
       const attachment = this.attachmentOf(candidate);
       return (
