@@ -571,3 +571,9 @@ export default {
 };
 
 export { RepositoryRelayDurableObject };
+export {
+  createHostedEndpointPresenceReader,
+  HostedEndpointPresenceReader,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_METHOD,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_PATH,
+} from "./hosted-endpoint-presence-reader.js";

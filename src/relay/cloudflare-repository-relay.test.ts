@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createPublicKey, generateKeyPairSync, sign as ed25519Sign, type KeyObject } from "node:crypto";
 import {
   RepositoryRelayDurableObject,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_PATH,
   repositoryRelayDurableObjectName,
   type RepositoryRelayDurableObjectState,
   type RepositoryRelayWebSocket,
@@ -341,6 +342,28 @@ test("read-only Runtime presence exposes current and replaced generations", asyn
   first.disconnect();
   replacement.disconnect();
   latestPair = undefined;
+});
+
+test("internal presence read returns only the bounded Runtime presence snapshot", async () => {
+  const state = new FakeState();
+  const object = new RepositoryRelayDurableObject(state, { repository }, { now: () => 10_000 });
+  const response = await object.fetch(
+    new Request(
+      `https://relay.test${RELAY_RUNTIME_PRESENCE_INTERNAL_PATH}?repositoryId=${repository.repositoryId}&repositoryHost=${repository.repositoryHost}`,
+    ),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    version: 1,
+    repository,
+    availability: "available",
+    observedAtMs: 10_000,
+    records: [],
+  });
+  const method = await object.fetch(
+    new Request(`https://relay.test${RELAY_RUNTIME_PRESENCE_INTERNAL_PATH}`, { method: "POST" }),
+  );
+  assert.equal(method.status, 405);
 });
 
 test("production DO admission gates a reconnect retained result until acknowledgement", async () => {
