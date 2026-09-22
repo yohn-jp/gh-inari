@@ -53,7 +53,8 @@ async function readJson(response: Response): Promise<unknown> {
   if (new TextEncoder().encode(body).byteLength > MAX_RESPONSE_BYTES) {
     throw new GitHubInstallationsClientError("GitHub response exceeds the supported size.");
   }
-  if (!response.ok) throw new GitHubInstallationsClientError(`GitHub request failed with status ${response.status}.`);
+  if (!response.ok)
+    throw new GitHubInstallationsClientError(`GitHub request failed with status ${response.status}.`);
   try {
     return JSON.parse(body) as unknown;
   } catch {
