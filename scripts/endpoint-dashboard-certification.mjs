@@ -17,6 +17,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const EPIC_REF = "origin/epic/840-inari-endpoint-dashboard";
 const MAIN_REF = "origin/main";
 const BRANCH = "test/958-endpoint-dashboard-certification";
+const EPIC_BRANCH = "epic/840-inari-endpoint-dashboard";
 const API_URL = "https://api.example.test";
 const ENDPOINT_URL = "https://hosted.example.test";
 const DASHBOARD_ORIGIN = "https://dashboard.example.test";
@@ -87,8 +88,14 @@ function gitState() {
     run("git", ["merge-base", MAIN_REF, EPIC_REF]) === currentMainSha,
     "the Epic does not contain the current origin/main base",
   );
-  const branch = process.env.GITHUB_HEAD_REF?.trim() || run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
-  requireCondition(branch === BRANCH, "certification branch is incorrect");
+  const headRef = process.env.GITHUB_HEAD_REF?.trim();
+  const branch = headRef || run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+  requireCondition(
+    branch === BRANCH ||
+      (branch === EPIC_BRANCH && headSha === epicHeadSha) ||
+      (headRef !== undefined && mergeBase === epicHeadSha),
+    "certification branch is incorrect",
+  );
   return Object.freeze({ epicHeadSha, currentMainSha, headSha });
 }
 
