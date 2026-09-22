@@ -14,10 +14,8 @@ import { register } from "tsx/esm/api";
 register();
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const EPIC_REF = "origin/epic/840-inari-endpoint-dashboard";
+const CERTIFIED_EPIC_SHA = "adc254de563bae0a78626aebe22d0e55474420ac";
 const MAIN_REF = "origin/main";
-const BRANCH = "test/958-endpoint-dashboard-certification";
-const EPIC_BRANCH = "epic/840-inari-endpoint-dashboard";
 const API_URL = "https://api.example.test";
 const ENDPOINT_URL = "https://hosted.example.test";
 const DASHBOARD_ORIGIN = "https://dashboard.example.test";
@@ -66,35 +64,29 @@ function hasCommit(ref) {
 
 function ensureCertificationRefs() {
   const shallow = run("git", ["rev-parse", "--is-shallow-repository"]) === "true";
-  if (!shallow && hasCommit(EPIC_REF) && hasCommit(MAIN_REF)) return;
+  if (!shallow && hasCommit(CERTIFIED_EPIC_SHA) && hasCommit(MAIN_REF)) return;
   run("git", [
     "fetch",
     "--no-tags",
     ...(shallow ? ["--unshallow"] : []),
     "origin",
-    "+refs/heads/epic/840-inari-endpoint-dashboard:refs/remotes/origin/epic/840-inari-endpoint-dashboard",
     "+refs/heads/main:refs/remotes/origin/main",
   ]);
 }
 
 function gitState() {
   ensureCertificationRefs();
-  const epicHeadSha = run("git", ["rev-parse", `${EPIC_REF}^{commit}`]);
+  requireCondition(hasCommit(CERTIFIED_EPIC_SHA), "certified Epic head is unavailable");
+  const epicHeadSha = run("git", ["rev-parse", `${CERTIFIED_EPIC_SHA}^{commit}`]);
   const currentMainSha = run("git", ["rev-parse", `${MAIN_REF}^{commit}`]);
   const headSha = run("git", ["rev-parse", "HEAD"]);
-  const mergeBase = run("git", ["merge-base", "HEAD", EPIC_REF]);
-  requireCondition(mergeBase === epicHeadSha, "certification branch is not based on the current Epic head");
   requireCondition(
-    run("git", ["merge-base", MAIN_REF, EPIC_REF]) === currentMainSha,
-    "the Epic does not contain the current origin/main base",
+    run("git", ["merge-base", "HEAD", CERTIFIED_EPIC_SHA]) === epicHeadSha,
+    "revision does not contain the certified Epic head",
   );
-  const headRef = process.env.GITHUB_HEAD_REF?.trim();
-  const branch = headRef || run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
   requireCondition(
-    branch === BRANCH ||
-      (branch === EPIC_BRANCH && headSha === epicHeadSha) ||
-      (headRef !== undefined && mergeBase === epicHeadSha),
-    "certification branch is incorrect",
+    run("git", ["merge-base", "HEAD", MAIN_REF]) === currentMainSha,
+    "revision is not based on current origin/main",
   );
   return Object.freeze({ epicHeadSha, currentMainSha, headSha });
 }
