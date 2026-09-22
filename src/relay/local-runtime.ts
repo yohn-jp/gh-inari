@@ -49,6 +49,7 @@ export interface RelayWebSocketCloseEvent {
 /** Small injectable surface shared by Node's WebSocket and deterministic fakes. */
 export interface RelayWebSocket {
   readonly readyState?: number;
+  binaryType?: "blob" | "arraybuffer";
   send(data: string): void;
   close?(code?: number, reason?: string): void;
   addEventListener?(type: "open" | "message" | "close" | "error", listener: (event: unknown) => void): void;
@@ -97,10 +98,9 @@ interface RuntimeJob {
 }
 
 const OPEN_READY_STATE = 1;
+const MAX_RELAY_CLOCK_SKEW_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-/** Tolerance for ordinary clock drift between this Runtime and the Relay when checking a challenge's issuedAtMs. */
-const CHALLENGE_CLOCK_SKEW_TOLERANCE_MS = 5_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const RELAY_HANDSHAKE_KIND = "repository-relay-possession-challenge";
 const RELAY_HANDSHAKE_RESPONSE_KIND = "repository-relay-possession-response";
@@ -318,6 +318,7 @@ export class LocalRelayRuntime {
     this.#possessionProved = false;
     this.#admissionPendingSocket = undefined;
     const socket = this.#webSocketFactory(this.#connectUrl);
+    socket.binaryType = "arraybuffer";
     this.#socket = socket;
     this.#listen(socket, "open", () => this.#onOpen(socket));
     this.#listen(socket, "message", (event) => this.#onMessage(socket, event));
@@ -378,12 +379,13 @@ export class LocalRelayRuntime {
         return;
       const nowMs = this.#now();
       // Ordinary clock drift between this Runtime and the Relay can put nowMs
-      // a moment before the Relay's issuedAtMs; tolerate that rather than
-      // silently dropping an otherwise-valid challenge and looping forever.
+      // a moment before issuedAtMs or a moment past expiresAtMs; tolerate both
+      // rather than silently dropping an otherwise-valid challenge and looping
+      // forever.
       if (
         !validClock(nowMs) ||
-        nowMs < challenge.issuedAtMs - CHALLENGE_CLOCK_SKEW_TOLERANCE_MS ||
-        nowMs >= challenge.expiresAtMs
+        challenge.issuedAtMs - nowMs > MAX_RELAY_CLOCK_SKEW_MS ||
+        nowMs - challenge.expiresAtMs >= MAX_RELAY_CLOCK_SKEW_MS
       )
         return;
       const proof = signRelayPossessionProof(challenge, this.#options.privateKey);
