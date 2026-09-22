@@ -475,6 +475,33 @@ test("hosted Endpoint route delegates to the shared authenticated API compositio
   );
 });
 
+test("hosted Worker serves Dashboard assets while keeping Worker surfaces first", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const requests: string[] = [];
+  const hostedEnv = {
+    ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+    ASSETS: {
+      async fetch(request: Request) {
+        requests.push(new URL(request.url).pathname);
+        return new Response("dashboard-shell", { status: 200, headers: { "content-type": "text/html" } });
+      },
+    },
+  };
+
+  const dashboard = await worker.fetch(new Request("https://hosted.example/"), hostedEnv);
+  assert.equal(dashboard.status, 200);
+  assert.equal(await dashboard.text(), "dashboard-shell");
+  assert.deepEqual(requests, ["/"]);
+
+  const workerFirst = await worker.fetch(new Request("https://hosted.example/v1/unknown"), hostedEnv);
+  assert.equal(workerFirst.status, 404);
+  const mcpChild = await worker.fetch(new Request("https://hosted.example/mcp/unknown"), hostedEnv);
+  assert.equal(mcpChild.status, 404);
+  const descriptorChild = await worker.fetch(new Request("https://hosted.example/.well-known/unknown"), hostedEnv);
+  assert.equal(descriptorChild.status, 404);
+  assert.deepEqual(requests, ["/"]);
+});
+
 test("hosted MCP serves the stable Issue MCP App resource while preserving the native tool", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const binding = relayNamespace({ fetch: async () => new Response("unused") }, []);
