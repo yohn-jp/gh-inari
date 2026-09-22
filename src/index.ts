@@ -124,6 +124,7 @@ export * from "./agent-authority/index.js";
 export * from "./endpoint-authorization.js";
 export * from "./endpoint-runtime-presence.js";
 export * from "./hosted-endpoint-presence-reader.js";
+export * from "./hosted-endpoint-work-reader.js";
 export * from "./endpoint-api.js";
 export * from "./endpoint-http.js";
 export * from "./session-authorized-change-executor.js";
