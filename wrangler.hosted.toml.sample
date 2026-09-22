@@ -7,12 +7,30 @@ compatibility_flags = ["nodejs_compat"]
 pattern = "mcp-inari.example.com"
 custom_domain = true
 
+[assets]
+directory = "apps/dashboard/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*", "/mcp", "/.well-known/*", "/healthz"]
+
 [observability]
 enabled = true
 
 # No GitHub App, provider, Session, or Runtime credentials are configured here.
 [vars]
 INARI_HOSTED_REPOSITORY_HOST = "github.com"
+INARI_ENDPOINT_ID = "dashboard-endpoint"
+INARI_ENDPOINT_DEPLOYMENT = "shared-hosted"
+INARI_GITHUB_APP_ID = "123456"
+INARI_GITHUB_APP_CLIENT_ID = "Iv1.public-client"
+INARI_GITHUB_APP_SLUG = "inari"
+INARI_GITHUB_APP_INSTALLATION_URL = "https://github.com/apps/inari/installations/new"
+INARI_GITHUB_APP_USER_AUTH_PROFILE = "device-flow"
+INARI_GITHUB_APP_CALLBACK_URL = "https://mcp-inari.example.com/dashboard/oauth/callback"
+
+# Configure separately:
+# `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`
+# `wrangler secret put INARI_GITHUB_WEBHOOK_SECRET`
 
 [[durable_objects.bindings]]
 name = "REPOSITORY_RELAY"

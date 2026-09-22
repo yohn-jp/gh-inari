@@ -37,6 +37,21 @@ import {
   createEndpointOnboardingDescriptor,
   type EndpointOnboardingDescriptorInput,
 } from "./endpoint-onboarding.js";
+import {
+  ENDPOINT_WEBHOOK_PATH,
+  createEndpointWebhookHandler,
+  type EndpointWebhookHandlerOptions,
+} from "./endpoint-webhook.js";
+import type { EndpointIdentity } from "./endpoint-authorization.js";
+import { createEndpointHttpHandler, ENDPOINT_HTTP_PATH, type EndpointHttpHandler } from "./endpoint-http.js";
+import type { EndpointApi } from "./endpoint-api.js";
+import { createHostedEndpoint, type HostedEndpointOptions } from "./hosted-endpoint.js";
+import {
+  createHostedEndpointOAuthHandler,
+  HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH,
+  type HostedEndpointOAuthOptions,
+  type HostedEndpointOAuthHandler,
+} from "./hosted-endpoint-oauth.js";
 
 const DEFAULT_REPOSITORY_HOST = "github.com";
 const SERVICE_NAME = "gh-inari-hosted-relay-worker";
@@ -45,6 +60,9 @@ const RUNTIME_ROLE = "runtime";
 const UPGRADE = "websocket";
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const DELEGATOR_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
+const HOSTED_WEBHOOK_HANDLERS = new WeakMap<object, ReturnType<typeof createEndpointWebhookHandler>>();
+const HOSTED_ENDPOINT_HANDLERS = new WeakMap<object, EndpointHttpHandler>();
+const HOSTED_OAUTH_HANDLERS = new WeakMap<object, HostedEndpointOAuthHandler>();
 
 export interface HostedDurableObjectStub {
   fetch(request: Request): Promise<Response>;
@@ -54,8 +72,13 @@ export interface HostedDurableObjectNamespace extends RelayDurableObjectNamespac
   get(id: unknown): HostedDurableObjectStub;
 }
 
+export interface HostedStaticAssets {
+  fetch(request: Request): Promise<Response>;
+}
+
 export interface Env {
   readonly REPOSITORY_RELAY?: HostedDurableObjectNamespace;
+  readonly ASSETS?: HostedStaticAssets;
   /** Non-secret provider host partition; the default is GitHub.com. */
   readonly INARI_HOSTED_REPOSITORY_HOST?: string;
   /** Non-secret public GitHub App numeric identity. */
@@ -68,6 +91,21 @@ export interface Env {
   readonly INARI_GITHUB_APP_INSTALLATION_URL?: string;
   /** Non-secret supported App-user authentication profile. */
   readonly INARI_GITHUB_APP_USER_AUTH_PROFILE?: string;
+  /** Exact public browser callback URI for the App Authorization Code flow. */
+  readonly INARI_GITHUB_APP_CALLBACK_URL?: string;
+  /** Confidential App OAuth client secret; never returned by this worker. */
+  readonly INARI_GITHUB_APP_CLIENT_SECRET?: string;
+  /** Non-secret Endpoint identity used to bind webhook deliveries. */
+  readonly INARI_ENDPOINT_ID?: string;
+  readonly INARI_ENDPOINT_DEPLOYMENT?: "shared-hosted" | "self-hosted";
+  /** Webhook secret is a Worker secret and is never returned by this module. */
+  readonly INARI_GITHUB_WEBHOOK_SECRET?: string;
+  /** Optional runtime injection for self-hosted composition and tests. */
+  readonly endpointWebhook?: EndpointWebhookHandlerOptions;
+  /** Explicit self-hosted/test Endpoint API injection; hosted production composes its own API. */
+  readonly endpointApi?: EndpointApi;
+  /** Optional self-hosted OAuth composition for tests and alternate deployments. */
+  readonly endpointOAuth?: HostedEndpointOAuthOptions;
   readonly telemetry?: RelayTelemetrySink;
 }
 
@@ -397,12 +435,51 @@ function onboarding(request: Request, env: Env): Response {
     appInstallationUrl: env.INARI_GITHUB_APP_INSTALLATION_URL ?? "",
     appUserAuthProfile: env.INARI_GITHUB_APP_USER_AUTH_PROFILE ?? "",
     relayConnectionBase,
+    ...(env.INARI_GITHUB_APP_CALLBACK_URL === undefined ? {} : { appCallbackUrl: env.INARI_GITHUB_APP_CALLBACK_URL }),
   };
   try {
     return jsonResponse(200, createEndpointOnboardingDescriptor(input));
   } catch {
     return onboardingUnavailable();
   }
+}
+
+function oauthOptions(env: Env): HostedEndpointOAuthOptions | undefined {
+  if (env.endpointOAuth !== undefined) return env.endpointOAuth;
+  if (
+    env.INARI_GITHUB_APP_CLIENT_ID === undefined ||
+    env.INARI_GITHUB_APP_CLIENT_SECRET === undefined ||
+    env.INARI_GITHUB_APP_CALLBACK_URL === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    clientId: env.INARI_GITHUB_APP_CLIENT_ID,
+    clientSecret: env.INARI_GITHUB_APP_CLIENT_SECRET,
+    redirectUri: env.INARI_GITHUB_APP_CALLBACK_URL,
+    githubHost: env.INARI_HOSTED_REPOSITORY_HOST ?? DEFAULT_REPOSITORY_HOST,
+  };
+}
+
+async function oauthExchange(request: Request, env: Env): Promise<Response> {
+  let options: HostedEndpointOAuthOptions | undefined;
+  try {
+    options = oauthOptions(env);
+  } catch {
+    options = undefined;
+  }
+  if (options === undefined) return serviceUnavailable();
+  const key = env as object;
+  let handler = HOSTED_OAUTH_HANDLERS.get(key);
+  if (handler === undefined) {
+    try {
+      handler = createHostedEndpointOAuthHandler(options);
+    } catch {
+      return serviceUnavailable();
+    }
+    HOSTED_OAUTH_HANDLERS.set(key, handler);
+  }
+  return handler(request);
 }
 
 async function relayConnect(request: Request, env: Env): Promise<Response> {
@@ -488,15 +565,122 @@ async function mcp(request: Request, env: Env): Promise<Response> {
   }
 }
 
+function webhookOptions(env: Env): EndpointWebhookHandlerOptions | undefined {
+  if (env.endpointWebhook !== undefined) return env.endpointWebhook;
+  if (env.INARI_GITHUB_WEBHOOK_SECRET === undefined || env.INARI_ENDPOINT_ID === undefined) return undefined;
+  const endpoint: EndpointIdentity = {
+    version: 1,
+    kind: "endpoint",
+    id: env.INARI_ENDPOINT_ID,
+    deployment: env.INARI_ENDPOINT_DEPLOYMENT ?? "shared-hosted",
+  };
+  return {
+    admission: {
+      endpoint,
+      repositoryHost: repositoryHost(env),
+      secret: env.INARI_GITHUB_WEBHOOK_SECRET,
+    },
+  };
+}
+
+async function webhook(request: Request, env: Env): Promise<Response> {
+  let options: EndpointWebhookHandlerOptions | undefined;
+  try {
+    options = webhookOptions(env);
+  } catch {
+    options = undefined;
+  }
+  if (options === undefined) return serviceUnavailable();
+  const key = env as object;
+  let handler = HOSTED_WEBHOOK_HANDLERS.get(key);
+  if (handler === undefined) {
+    handler = createEndpointWebhookHandler(options);
+    HOSTED_WEBHOOK_HANDLERS.set(key, handler);
+  }
+  return handler(request);
+}
+
+function hostedEndpointOptions(env: Env): HostedEndpointOptions | undefined {
+  if (
+    env.REPOSITORY_RELAY === undefined ||
+    env.INARI_ENDPOINT_ID === undefined ||
+    env.INARI_GITHUB_APP_ID === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    endpoint: {
+      version: 1,
+      kind: "endpoint",
+      id: env.INARI_ENDPOINT_ID,
+      deployment: env.INARI_ENDPOINT_DEPLOYMENT ?? "shared-hosted",
+    },
+    appId: env.INARI_GITHUB_APP_ID,
+    presenceNamespace: env.REPOSITORY_RELAY,
+  };
+}
+
+async function endpoint(request: Request, env: Env): Promise<Response> {
+  const key = env as object;
+  let handler = HOSTED_ENDPOINT_HANDLERS.get(key);
+  if (handler === undefined) {
+    try {
+      if (env.endpointApi !== undefined) {
+        handler = createEndpointHttpHandler({ api: env.endpointApi, path: ENDPOINT_HTTP_PATH });
+      } else {
+        const options = hostedEndpointOptions(env);
+        if (options === undefined) return serviceUnavailable();
+        handler = createHostedEndpoint(options);
+      }
+    } catch {
+      return serviceUnavailable();
+    }
+    HOSTED_ENDPOINT_HANDLERS.set(key, handler);
+  }
+  return handler(request);
+}
+
+function workerFirstPath(pathname: string): boolean {
+  return (
+    pathname === "/mcp" ||
+    pathname.startsWith("/mcp/") ||
+    pathname === "/v1" ||
+    pathname.startsWith("/v1/") ||
+    pathname === "/.well-known" ||
+    pathname.startsWith("/.well-known/") ||
+    pathname === "/healthz"
+  );
+}
+
+async function staticAsset(request: Request, env: Env): Promise<Response> {
+  if (workerFirstPath(new URL(request.url).pathname) || env.ASSETS === undefined) {
+    return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
+  }
+  try {
+    return await env.ASSETS.fetch(request);
+  } catch {
+    return serviceUnavailable();
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
     if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
+    if (pathname === HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH) return oauthExchange(request, env);
+    if (pathname === ENDPOINT_HTTP_PATH) return endpoint(request, env);
+    if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);
     if (pathname === "/mcp") return mcp(request, env);
     if (pathname === "/v1/relay/connect") return relayConnect(request, env);
-    return new Response("Not found.", { status: 404, headers: { "cache-control": "no-store" } });
+    return staticAsset(request, env);
   },
 };
 
 export { RepositoryRelayDurableObject };
+export {
+  createHostedEndpointPresenceReader,
+  HostedEndpointPresenceReader,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_METHOD,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_PATH,
+} from "./hosted-endpoint-presence-reader.js";

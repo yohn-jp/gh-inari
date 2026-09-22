@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { base64UrlEncodeText } from "./agent-authority/codec.js";
+import { ENDPOINT_AUTHORIZATION_CONTRACT_VERSION } from "./endpoint-authorization.js";
+import { createEndpointApi } from "./endpoint-api.js";
+import { ENDPOINT_HTTP_PATH } from "./endpoint-http.js";
+import { ENDPOINT_WEBHOOK_PATH } from "./endpoint-webhook.js";
 import { decodeRelayEnvelope, type RelayRepositoryIdentity } from "./relay/contract.js";
 import {
   createHostedRelayDispatch,
+  RELAY_RUNTIME_PRESENCE_INTERNAL_PATH,
   type Env,
   type HostedDurableObjectNamespace,
   type HostedDurableObjectStub,
@@ -81,6 +86,7 @@ function onboardingEnv(namespace: HostedDurableObjectNamespace): Env {
     INARI_GITHUB_APP_SLUG: "inari",
     INARI_GITHUB_APP_INSTALLATION_URL: "https://github.com/apps/inari/installations/new",
     INARI_GITHUB_APP_USER_AUTH_PROFILE: "device-flow",
+    INARI_GITHUB_APP_CALLBACK_URL: "https://hosted.example/dashboard/oauth/callback",
   };
 }
 
@@ -101,10 +107,22 @@ test("public onboarding descriptor exposes deployment metadata without authority
     appSlug: "inari",
     appInstallationUrl: "https://github.com/apps/inari/installations/new",
     appUserAuthProfile: "device-flow",
+    appCallbackUrl: "https://hosted.example/dashboard/oauth/callback",
     relayConnectionBase: "wss://hosted.example/v1/relay/connect",
   });
   assert.deepEqual(ids, []);
   assert.equal(JSON.stringify(body).includes("repositoryId"), false);
+});
+
+test("internal Relay presence path is not a public Hosted Worker route", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const ids: string[] = [];
+  const response = await worker.fetch(
+    new Request(`https://hosted.example${RELAY_RUNTIME_PRESENCE_INTERNAL_PATH}`),
+    env(relayNamespace({ fetch: async () => new Response("unexpected") }, ids)),
+  );
+  assert.equal(response.status, 404);
+  assert.deepEqual(ids, []);
 });
 
 test("public onboarding descriptor fails closed for missing or malformed metadata", async () => {
@@ -308,6 +326,180 @@ test("hosted MCP exposes the native catalog and internal dispatch targets the im
   assert.equal(envelope.kind, "result");
   assert.equal(ids.at(-1), repository.repositoryId);
   assert.equal(decodeRelayEnvelope(socket.frames[0]!, repository).kind, "job");
+});
+
+test("hosted webhook route admits only the bounded Endpoint webhook surface", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const secret = "hosted-webhook-secret";
+  const body = JSON.stringify({
+    installation: { id: 9001 },
+    repository: { id: 1330755860, full_name: "yohn-jp/gh-inari" },
+  });
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret) as unknown as BufferSource,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body) as unknown as BufferSource),
+  );
+  const signature = "sha256=" + [...digest].map((value) => value.toString(16).padStart(2, "0")).join("");
+  const hostedEnv = {
+    ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+    INARI_GITHUB_WEBHOOK_SECRET: secret,
+    INARI_ENDPOINT_ID: "hosted",
+    INARI_ENDPOINT_DEPLOYMENT: "shared-hosted" as const,
+  };
+  const response = await worker.fetch(
+    new Request(`https://hosted.example${ENDPOINT_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": signature,
+        "x-github-delivery": "hosted-delivery",
+        "x-inari-endpoint-id": "attacker-selected-endpoint",
+        "x-inari-delivery-at": "2026-09-22T00:00:00.000Z",
+        "x-inari-retry": "true",
+      },
+      body,
+    }),
+    hostedEnv,
+  );
+  assert.equal(response.status, 202);
+  assert.equal((await response.text()).includes(secret), false);
+  const duplicate = await worker.fetch(
+    new Request(`https://hosted.example${ENDPOINT_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": signature,
+        "x-github-delivery": "hosted-delivery",
+        "x-inari-endpoint-id": "attacker-selected-endpoint",
+        "x-inari-delivery-at": "2026-09-22T00:00:00.000Z",
+        "x-inari-retry": "true",
+      },
+      body,
+    }),
+    hostedEnv,
+  );
+  assert.equal(duplicate.status, 200);
+  assert.equal((await worker.fetch(new Request("https://hosted.example/missing"), hostedEnv)).status, 404);
+});
+
+test("hosted Endpoint route delegates to the shared authenticated API composition", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const endpoint = {
+    version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+    kind: "endpoint" as const,
+    id: "hosted-dashboard",
+    deployment: "shared-hosted" as const,
+  };
+  const installation = {
+    version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+    kind: "installation" as const,
+    endpointId: endpoint.id,
+    installationId: "hosted-installation",
+  };
+  const repositoryIdentity = {
+    version: ENDPOINT_AUTHORIZATION_CONTRACT_VERSION,
+    kind: "repository" as const,
+    endpointId: endpoint.id,
+    installationId: installation.installationId,
+    repositoryHost: "github.com",
+    repositoryId: "1330755860",
+    nameWithOwner: "yohn-jp/gh-inari",
+  };
+  const principal = { version: 1 as const, kind: "human" as const, id: "hosted-human" };
+  const capability = { kind: "presence.read" as const };
+  const endpointApi = createEndpointApi({
+    authentication: {
+      authenticate: async () => ({
+        version: 1,
+        authenticated: true as const,
+        principal,
+        endpoint,
+        installation,
+        repository: repositoryIdentity,
+        capabilities: [capability],
+      }),
+    },
+    readPresence: async () => ({
+      endpoint,
+      repository: repositoryIdentity,
+      now: 1_000,
+      relay: {
+        version: 1,
+        repository: { repositoryHost: "github.com", repositoryId: "1330755860" },
+        availability: "available" as const,
+        observedAtMs: 1_000,
+        records: [],
+      },
+    }),
+  });
+  const response = await worker.fetch(
+    new Request(`https://hosted.example${ENDPOINT_HTTP_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        version: 1,
+        operation: "presence.read",
+        endpoint,
+        installation,
+        repository: repositoryIdentity,
+        capability,
+      }),
+    }),
+    { ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])), endpointApi },
+  );
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ok, true);
+  assert.equal(
+    (
+      await worker.fetch(
+        new Request(`https://hosted.example${ENDPOINT_HTTP_PATH}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            version: 1,
+            operation: "presence.read",
+            endpoint,
+            installation,
+            repository: repositoryIdentity,
+            capability,
+          }),
+        }),
+        env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+      )
+    ).status,
+    503,
+  );
+});
+
+test("hosted Worker serves Dashboard assets while keeping Worker surfaces first", async () => {
+  const worker = (await import("./hosted-worker.js")).default;
+  const requests: string[] = [];
+  const hostedEnv = {
+    ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
+    ASSETS: {
+      async fetch(request: Request) {
+        requests.push(new URL(request.url).pathname);
+        return new Response("dashboard-shell", { status: 200, headers: { "content-type": "text/html" } });
+      },
+    },
+  };
+
+  const dashboard = await worker.fetch(new Request("https://hosted.example/"), hostedEnv);
+  assert.equal(dashboard.status, 200);
+  assert.equal(await dashboard.text(), "dashboard-shell");
+  assert.deepEqual(requests, ["/"]);
+
+  const workerFirst = await worker.fetch(new Request("https://hosted.example/v1/unknown"), hostedEnv);
+  assert.equal(workerFirst.status, 404);
+  const mcpChild = await worker.fetch(new Request("https://hosted.example/mcp/unknown"), hostedEnv);
+  assert.equal(mcpChild.status, 404);
+  const descriptorChild = await worker.fetch(new Request("https://hosted.example/.well-known/unknown"), hostedEnv);
+  assert.equal(descriptorChild.status, 404);
+  assert.deepEqual(requests, ["/"]);
 });
 
 test("hosted MCP serves the stable Issue MCP App resource while preserving the native tool", async () => {

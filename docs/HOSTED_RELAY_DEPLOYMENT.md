@@ -23,7 +23,21 @@ Public routes are deliberately bounded:
   the supported App-user Device Flow profile, and the current Worker's Relay
   connection base. It contains no repository identity, credential, enrollment
   evidence, Session, or capability data.
+- `POST /v1/endpoint` — request-scoped, human-authenticated Endpoint reads for
+  the configured logical Endpoint. Installation and repository identities are
+  admitted dynamically through the GitHub App user scope; no static repository
+  binding is used.
+- `POST /v1/webhooks/github` — bounded signed GitHub App delivery admission.
+  The signed installation/repository identity becomes reconciliation input only;
+  it is not Dashboard authorization.
+- `POST /v1/auth/github/exchange` — one-shot Dashboard Authorization Code +
+  PKCE exchange. The Worker never persists the returned App-user token.
 - `GET /healthz` — non-secret deployment metadata only.
+
+The Dashboard browser shell is served from the Worker Static Assets directory
+`apps/dashboard/dist`. Worker routes are evaluated first for `/v1/*`, `/mcp`,
+`/.well-known/*`, and `/healthz`, so those surfaces never fall through to the
+SPA shell. There is no second Dashboard server.
 
 The native MCP catalog also advertises the read-only `inari_issue_view` tool
 with the MCP Apps `io.modelcontextprotocol/ui` extension. App-capable hosts
@@ -88,9 +102,25 @@ pnpm run hosted-worker:build
 pnpm exec wrangler deploy --config wrangler.hosted.toml
 ```
 
-`wrangler.hosted.toml` declares the `RepositoryRelayDurableObject` binding
-and its explicit migration. Configure only the non-secret provider host
-partition if `github.com` is not used:
+The hosted build first runs the Dashboard build and requires
+`apps/dashboard/dist/index.html` before packaging the Worker. The reference
+`wrangler.hosted.toml` publishes that directory as Static Assets and declares
+the `RepositoryRelayDurableObject` binding with its explicit migration.
+
+Configure the non-secret Endpoint and public App metadata:
+
+```text
+INARI_ENDPOINT_ID=dashboard-endpoint
+INARI_ENDPOINT_DEPLOYMENT=shared-hosted
+INARI_GITHUB_APP_ID=<numeric App database ID>
+INARI_GITHUB_APP_CLIENT_ID=<public OAuth client ID>
+INARI_GITHUB_APP_SLUG=<App slug>
+INARI_GITHUB_APP_INSTALLATION_URL=https://github.com/apps/<slug>/installations/new
+INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow
+INARI_GITHUB_APP_CALLBACK_URL=https://HOST/dashboard/oauth/callback
+```
+
+Configure only the non-secret provider host partition if `github.com` is not used:
 
 ```sh
 pnpm exec wrangler deploy --config wrangler.hosted.toml \
@@ -100,10 +130,16 @@ pnpm exec wrangler deploy --config wrangler.hosted.toml \
 The onboarding descriptor also requires these non-secret public App variables:
 `INARI_GITHUB_APP_ID`, `INARI_GITHUB_APP_CLIENT_ID`,
 `INARI_GITHUB_APP_SLUG`, `INARI_GITHUB_APP_INSTALLATION_URL`, and
-`INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. The descriptor remains
-bounded and unavailable until all required values are valid. Do not put an App
-private key, installation token, user access token, or other credential in
-these variables.
+`INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. For Dashboard browser
+authorization, configure the exact registered
+`INARI_GITHUB_APP_CALLBACK_URL` and store the confidential client secret only
+with `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`. Configure the
+webhook secret separately with
+`wrangler secret put INARI_GITHUB_WEBHOOK_SECRET`. The descriptor exposes the
+callback URI but never either secret. The descriptor remains bounded and
+unavailable until all required values are valid. Do not put an App private key,
+installation token, user access token, Runtime credential, or other credential
+in Worker variables or Durable Object state.
 
 The direct-App deployment remains independent and continues to use:
 
@@ -111,6 +147,22 @@ The direct-App deployment remains independent and continues to use:
 pnpm run worker:build
 pnpm exec wrangler deploy --config wrangler.toml
 ```
+
+## Composed Endpoint and Dashboard certification
+
+Before integrating the hosted Endpoint and Dashboard Epic, run the bounded
+composition oracle and its Node test. It uses in-memory provider and Relay
+transports, exercises the actual Worker, Endpoint, webhook, OAuth, and
+Dashboard modules, and prints only the certified Epic and current-main SHAs:
+
+```sh
+node scripts/endpoint-dashboard-certification.mjs
+node --test test/endpoint-dashboard-certification.test.mjs
+```
+
+The package suite invokes the same oracle after package-runtime and release
+certification. The oracle never performs provider mutation and does not retain
+tokens, private keys, signed bodies, or raw provider responses.
 
 ## Live relay certification
 

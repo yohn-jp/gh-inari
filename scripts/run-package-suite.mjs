@@ -278,6 +278,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/github/app-user-credential-broker.d.ts",
   "dist/github/app-user-credential-broker.js",
   "dist/github/app-user-credential-broker.js.map",
+  "dist/github/endpoint-human-auth.d.ts",
+  "dist/github/endpoint-human-auth.js",
+  "dist/github/endpoint-human-auth.js.map",
   "dist/github/app-user-credential-store.d.ts",
   "dist/github/app-user-credential-store.js",
   "dist/github/app-user-credential-store.js.map",
@@ -359,12 +362,51 @@ const EXPECTED_PACKED_FILES = [
   "dist/hosted-worker.d.ts",
   "dist/hosted-worker.js",
   "dist/hosted-worker.js.map",
+  "dist/hosted-endpoint.d.ts",
+  "dist/hosted-endpoint.js",
+  "dist/hosted-endpoint.js.map",
+  "dist/hosted-endpoint-presence-reader.d.ts",
+  "dist/hosted-endpoint-presence-reader.js",
+  "dist/hosted-endpoint-presence-reader.js.map",
+  "dist/hosted-endpoint-work-reader.d.ts",
+  "dist/hosted-endpoint-work-reader.js",
+  "dist/hosted-endpoint-work-reader.js.map",
+  "dist/hosted-endpoint-oauth.d.ts",
+  "dist/hosted-endpoint-oauth.js",
+  "dist/hosted-endpoint-oauth.js.map",
   "dist/endpoint-onboarding.d.ts",
   "dist/endpoint-onboarding.js",
   "dist/endpoint-onboarding.js.map",
   "dist/endpoint-onboarding-client.d.ts",
   "dist/endpoint-onboarding-client.js",
   "dist/endpoint-onboarding-client.js.map",
+  "dist/endpoint-authorization.d.ts",
+  "dist/endpoint-authorization.js",
+  "dist/endpoint-authorization.js.map",
+  "dist/endpoint-capability.d.ts",
+  "dist/endpoint-capability.js",
+  "dist/endpoint-capability.js.map",
+  "dist/endpoint-reconciliation.d.ts",
+  "dist/endpoint-reconciliation.js",
+  "dist/endpoint-reconciliation.js.map",
+  "dist/endpoint-work-projection.d.ts",
+  "dist/endpoint-work-projection.js",
+  "dist/endpoint-work-projection.js.map",
+  "dist/endpoint-webhook.d.ts",
+  "dist/endpoint-webhook.js",
+  "dist/endpoint-webhook.js.map",
+  "dist/endpoint-runtime-presence.d.ts",
+  "dist/endpoint-runtime-presence.js",
+  "dist/endpoint-runtime-presence.js.map",
+  "dist/endpoint-read-query.d.ts",
+  "dist/endpoint-read-query.js",
+  "dist/endpoint-read-query.js.map",
+  "dist/endpoint-api.d.ts",
+  "dist/endpoint-api.js",
+  "dist/endpoint-api.js.map",
+  "dist/endpoint-http.d.ts",
+  "dist/endpoint-http.js",
+  "dist/endpoint-http.js.map",
   "dist/index.d.ts",
   "dist/index.js",
   "dist/index.js.map",
@@ -687,6 +729,13 @@ async function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
 
+  const dashboardDist = path.join(repoRoot, "apps/dashboard", "dist");
+  for (const file of ["index.html", "browser.js"]) {
+    if (!fs.existsSync(path.join(dashboardDist, file))) {
+      throw new Error(`Dashboard build output is missing apps/dashboard/dist/${file}`);
+    }
+  }
+
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
   const packResult = run("npm", ["pack", "--json", "--ignore-scripts"]);
@@ -703,6 +752,12 @@ async function main() {
 
   try {
     const packedFiles = packInfo.files.map((entry) => entry.path);
+    const dashboardFiles = packedFiles.filter(
+      (entry) => entry === "apps/dashboard" || entry.startsWith("apps/dashboard/"),
+    );
+    if (dashboardFiles.length > 0) {
+      throw new Error(`Dashboard application files must not be published in gh-inari: ${dashboardFiles.join(", ")}`);
+    }
     const expected = [...EXPECTED_PACKED_FILES].sort();
     const actual = [...packedFiles].sort();
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -745,6 +800,7 @@ async function main() {
       stdio: "inherit",
     });
     run(process.execPath, ["scripts/release-preparation-certification.mjs"], { stdio: "inherit" });
+    run(process.execPath, ["scripts/endpoint-dashboard-certification.mjs"], { stdio: "inherit" });
   } finally {
     fs.rmSync(tarballPath, { force: true });
   }
