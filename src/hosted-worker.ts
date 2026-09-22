@@ -113,6 +113,7 @@ export interface Env {
 
 type HostedWebSocket = RepositoryRelayWebSocket & {
   readonly accept?: () => void;
+  binaryType?: "blob" | "arraybuffer";
   addEventListener?: (type: "open" | "message" | "close" | "error", listener: (event: unknown) => void) => void;
   removeEventListener?: (type: "open" | "message" | "close" | "error", listener: (event: unknown) => void) => void;
   onopen?: ((event: unknown) => void) | null;
@@ -269,6 +270,7 @@ async function dispatchThroughDurableObject(
   const response = (await stub.fetch(upgrade)) as UpgradeResponse;
   const socket = response.webSocket;
   if (socket === undefined) throw new Error("Repository Relay did not accept the internal connection.");
+  socket.binaryType = "arraybuffer";
   socket.accept?.();
 
   return new Promise<RelayEnvelope>((resolve, reject) => {

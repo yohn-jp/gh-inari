@@ -18,6 +18,7 @@ const repository: RelayRepositoryIdentity = {
 class FakeWebSocket implements RelayWebSocket {
   readonly frames: string[] = [];
   readyState = 0;
+  binaryType: "blob" | "arraybuffer" = "blob";
   onopen: ((event: unknown) => void) | null = null;
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -37,8 +38,13 @@ class FakeWebSocket implements RelayWebSocket {
     this.onopen?.({});
   }
 
-  receive(data: string): void {
+  receive(data: unknown): void {
     this.onmessage?.({ data });
+  }
+
+  receiveBinary(data: string): void {
+    const bytes = new TextEncoder().encode(data);
+    this.receive(this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]));
   }
 
   disconnect(): void {
@@ -127,6 +133,7 @@ test("opens only an outbound socket, proves possession, forwards the unchanged S
   runtime.connect();
   assert.equal(sockets.length, 1);
   const socket = sockets[0]!;
+  assert.equal(socket.binaryType, "arraybuffer");
   socket.open();
   assert.equal(socket.frames.length, 0);
   socket.receive(challenge());
@@ -160,7 +167,7 @@ test("opens only an outbound socket, proves possession, forwards the unchanged S
   socket.receive(connected());
   assert.equal(runtime.snapshot().possessionProved, true);
 
-  socket.receive(job("connection-820"));
+  socket.receiveBinary(job("connection-820"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(received, { certificate: "canonical", request: { version: 1, issue: 820 } });
   const result = decodeRelayEnvelope(socket.frames[1]!, repository);
@@ -211,5 +218,39 @@ test("disconnect marks delivery ambiguous and reconnect never executes the same 
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(second.frames.length, 2);
   assert.equal(decodeRelayEnvelope(second.frames[1]!, repository).kind, "result");
+  runtime.shutdown();
+});
+
+test("defaults hosted connection identity to the Delegator and tolerates bounded relay clock skew", () => {
+  const sockets: FakeWebSocket[] = [];
+  const urls: string[] = [];
+  const pair = keyPair();
+  const runtime = new LocalRelayRuntime({
+    relayUrl: "wss://relay.example.test/repository",
+    repository,
+    delegatorId: "runtime-820",
+    privateKey: pair.privateKey,
+    executor: {
+      async execute() {
+        return { version: 1, status: "succeeded" };
+      },
+    },
+    webSocketFactory(url) {
+      urls.push(url);
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    now: () => 8_500,
+  });
+
+  runtime.connect();
+  assert.equal(runtime.connectionId, "runtime-820");
+  assert.equal(new URL(urls[0]!).searchParams.get("connectionId"), "runtime-820");
+  const socket = sockets[0]!;
+  assert.equal(socket.binaryType, "arraybuffer");
+  socket.open();
+  socket.receive(challenge());
+  assert.equal(socket.frames.length, 1);
   runtime.shutdown();
 });
