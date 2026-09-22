@@ -1806,13 +1806,18 @@ function assertOptionalBoolean(value: unknown, path: string): asserts value is b
   }
 }
 
+const RELEASE_COMPARE_API_PATH = /^compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}\?per_page=100$/u;
+
 function assertRepositoryApiPath(value: string): void {
+  const releaseComparePath = RELEASE_COMPARE_API_PATH.test(value);
   if (
     value.length > 2048 ||
     value.startsWith("/") ||
     value.includes("\u0000") ||
-    value.includes("..") ||
-    (value !== "" && !/^(?:issues(?:\/|\?|$)|pulls(?:\/|\?|$)|git\/|branches\/|commits\/)/u.test(value))
+    (!releaseComparePath && value.includes("..")) ||
+    (value !== "" &&
+      !releaseComparePath &&
+      !/^(?:issues(?:\/|\?|$)|pulls(?:\/|\?|$)|git\/|branches\/|commits\/)/u.test(value))
   ) {
     throw new ContractViolationError("Repository API path is invalid.", "repositoryPath");
   }
