@@ -7,7 +7,7 @@
  * capabilities, or compose provider credentials.
  */
 
-import { createHash, randomBytes, type KeyObject } from "node:crypto";
+import { createHash, type KeyObject } from "node:crypto";
 import { base64UrlDecodeToBytes, base64UrlEncodeBytes } from "../agent-authority/codec.js";
 import {
   decodeRelayPossessionProofChallenge,
@@ -99,6 +99,8 @@ interface RuntimeJob {
 const OPEN_READY_STATE = 1;
 const DEFAULT_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+/** Tolerance for ordinary clock drift between this Runtime and the Relay when checking a challenge's issuedAtMs. */
+const CHALLENGE_CLOCK_SKEW_TOLERANCE_MS = 5_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const RELAY_HANDSHAKE_KIND = "repository-relay-possession-challenge";
 const RELAY_HANDSHAKE_RESPONSE_KIND = "repository-relay-possession-response";
@@ -257,7 +259,12 @@ export class LocalRelayRuntime {
     if (typeof options.delegatorId !== "string" || !IDENTIFIER_PATTERN.test(options.delegatorId))
       throw new TypeError("Delegator id is invalid.");
     const repository = normalizeRelayRepositoryIdentity(options.repository);
-    const connectionId = options.connectionId ?? `runtime-${randomBytes(16).toString("base64url")}`;
+    // The hosted Relay dispatches a job with connectionId set to the caller's
+    // delegatorId (#821), so a Runtime that connects under a different,
+    // randomly generated connectionId never matches an incoming job and the
+    // dispatch times out with no visible error. Default to delegatorId,
+    // exactly as the documented explicit relayUrl form does.
+    const connectionId = options.connectionId ?? options.delegatorId;
     if (!IDENTIFIER_PATTERN.test(connectionId)) throw new TypeError("Connection id is invalid.");
     const now = options.now ?? Date.now;
     if (typeof now !== "function") throw new TypeError("Runtime clock is invalid.");
@@ -370,7 +377,15 @@ export class LocalRelayRuntime {
       )
         return;
       const nowMs = this.#now();
-      if (!validClock(nowMs) || nowMs < challenge.issuedAtMs || nowMs >= challenge.expiresAtMs) return;
+      // Ordinary clock drift between this Runtime and the Relay can put nowMs
+      // a moment before the Relay's issuedAtMs; tolerate that rather than
+      // silently dropping an otherwise-valid challenge and looping forever.
+      if (
+        !validClock(nowMs) ||
+        nowMs < challenge.issuedAtMs - CHALLENGE_CLOCK_SKEW_TOLERANCE_MS ||
+        nowMs >= challenge.expiresAtMs
+      )
+        return;
       const proof = signRelayPossessionProof(challenge, this.#options.privateKey);
       const encodedProof = JSON.parse(new TextDecoder().decode(encodeRelayPossessionProofResponse(proof))) as unknown;
       if (challengeFrame.production) {
