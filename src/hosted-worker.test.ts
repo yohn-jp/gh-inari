@@ -21,7 +21,12 @@ const ACCEPT = "application/json, text/event-stream";
 class FakeSocket {
   readonly frames: string[] = [];
   readyState = 1;
+  binaryType: "blob" | "arraybuffer" = "blob";
   private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+  accept(): void {
+    assert.equal(this.binaryType, "arraybuffer");
+  }
 
   addEventListener(type: string, listener: (event: unknown) => void): void {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -38,8 +43,7 @@ class FakeSocket {
     const envelope = decodeRelayEnvelope(data, repository);
     if (envelope.kind !== "job") return;
     queueMicrotask(() => {
-      this.emit(
-        "message",
+      const bytes = new TextEncoder().encode(
         JSON.stringify({
           version: 1,
           kind: "result",
@@ -50,6 +54,7 @@ class FakeSocket {
           resultPayload: base64UrlEncodeText(JSON.stringify({ version: 1, status: "succeeded" })),
         }),
       );
+      this.emit("message", this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]));
     });
   }
 

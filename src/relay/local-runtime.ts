@@ -7,7 +7,7 @@
  * capabilities, or compose provider credentials.
  */
 
-import { createHash, randomBytes, type KeyObject } from "node:crypto";
+import { createHash, type KeyObject } from "node:crypto";
 import { base64UrlDecodeToBytes, base64UrlEncodeBytes } from "../agent-authority/codec.js";
 import {
   decodeRelayPossessionProofChallenge,
@@ -49,6 +49,7 @@ export interface RelayWebSocketCloseEvent {
 /** Small injectable surface shared by Node's WebSocket and deterministic fakes. */
 export interface RelayWebSocket {
   readonly readyState?: number;
+  binaryType?: "blob" | "arraybuffer";
   send(data: string): void;
   close?(code?: number, reason?: string): void;
   addEventListener?(type: "open" | "message" | "close" | "error", listener: (event: unknown) => void): void;
@@ -97,6 +98,7 @@ interface RuntimeJob {
 }
 
 const OPEN_READY_STATE = 1;
+const MAX_RELAY_CLOCK_SKEW_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
@@ -257,7 +259,7 @@ export class LocalRelayRuntime {
     if (typeof options.delegatorId !== "string" || !IDENTIFIER_PATTERN.test(options.delegatorId))
       throw new TypeError("Delegator id is invalid.");
     const repository = normalizeRelayRepositoryIdentity(options.repository);
-    const connectionId = options.connectionId ?? `runtime-${randomBytes(16).toString("base64url")}`;
+    const connectionId = options.connectionId ?? options.delegatorId;
     if (!IDENTIFIER_PATTERN.test(connectionId)) throw new TypeError("Connection id is invalid.");
     const now = options.now ?? Date.now;
     if (typeof now !== "function") throw new TypeError("Runtime clock is invalid.");
@@ -311,6 +313,7 @@ export class LocalRelayRuntime {
     this.#possessionProved = false;
     this.#admissionPendingSocket = undefined;
     const socket = this.#webSocketFactory(this.#connectUrl);
+    socket.binaryType = "arraybuffer";
     this.#socket = socket;
     this.#listen(socket, "open", () => this.#onOpen(socket));
     this.#listen(socket, "message", (event) => this.#onMessage(socket, event));
@@ -370,7 +373,12 @@ export class LocalRelayRuntime {
       )
         return;
       const nowMs = this.#now();
-      if (!validClock(nowMs) || nowMs < challenge.issuedAtMs || nowMs >= challenge.expiresAtMs) return;
+      if (
+        !validClock(nowMs) ||
+        challenge.issuedAtMs - nowMs > MAX_RELAY_CLOCK_SKEW_MS ||
+        nowMs - challenge.expiresAtMs >= MAX_RELAY_CLOCK_SKEW_MS
+      )
+        return;
       const proof = signRelayPossessionProof(challenge, this.#options.privateKey);
       const encodedProof = JSON.parse(new TextDecoder().decode(encodeRelayPossessionProofResponse(proof))) as unknown;
       if (challengeFrame.production) {

@@ -579,6 +579,23 @@ test("reads the repository root without adding a trailing slash", async () => {
   ]);
 });
 
+test("allows the bounded commit compare path used by release history", async () => {
+  const base = "a".repeat(40);
+  const head = "b".repeat(40);
+  const transport = new StubFixtureTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, 'HTTP/2 200 OK\ncontent-type: application/json\n\n{"status":"ahead","commits":[]}'),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
+
+  const response = await adapter.requestRepositoryApi(`compare/${base}...${head}?per_page=100`);
+
+  assert.equal(response.status, 200);
+  assert.ok(transport.calls.at(-1)?.args.includes(`repos/acme/inari/compare/${base}...${head}?per_page=100`));
+});
+
 test("normalizes Check Run app identity and commit-status source identity", async () => {
   const transport = operationalPullRequestTransport(
     [
