@@ -191,6 +191,7 @@ import { setupRepository, type RepositorySetupInput } from "./repository-setup.j
 import { ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
 import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
+import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
 import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
@@ -488,6 +489,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "executor") {
       return await runExecutorCommand(command, rest, parsed, metadata.version, dependencies, json);
+    }
+    if (domain === "admission") {
+      return await runAdmissionCommand(command, rest, parsed, root, metadata.version, dependencies, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -1457,6 +1461,95 @@ async function runExecutorCommand(
     );
   } else {
     console.log("Foreground local Executor server started.");
+    console.log(`Endpoint: ${endpoint}`);
+    console.log("Health: /health");
+  }
+  return 0;
+}
+
+async function runAdmissionCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  version: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  if ((command !== "setup" && command !== "serve") || rest.length > 0)
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Admission command "${command ?? ""}".`);
+  const definition = getCommand(command === "setup" ? "admission.setup" : "admission.serve");
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? "capability";
+    const option = getOption(optionId as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by admission ${command}.`,
+      "$argv",
+      { command: `admission ${command}`, option: optionId },
+    );
+  }
+  const environment = dependencies.environment ?? process.env;
+  if (command === "setup") {
+    const from = parsed.options.from;
+    if (typeof from !== "string")
+      throw new CliError("INPUT_REQUIRED", "Use --from <runtime-authority.json>.", "--from");
+    const authority = await readJsonValue(from === "-" ? from : path.resolve(root, from));
+    const result = setupLocalAdmission(authority, environment);
+    const output = {
+      ok: true,
+      operation: "admission.setup",
+      admissionId: result.config.id,
+      endpoint: `http://${result.config.listen.host}:${result.config.listen.port}`,
+      executorId: result.config.executor.id,
+      executorEndpoint: result.config.executor.endpoint,
+      configPath: result.configPath,
+      publicAuthorityPath: result.authorityPath,
+    };
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Local Admission identity and configuration are ready.");
+      console.log(`Admission id: ${output.admissionId}`);
+      console.log(`Endpoint: ${output.endpoint}`);
+      console.log(`Executor: ${output.executorId} (${output.executorEndpoint})`);
+      console.log(`Configuration: ${output.configPath}`);
+    }
+    return 0;
+  }
+
+  const started = await startConfiguredLocalAdmission(version, environment);
+  const server = started.server;
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : undefined;
+  if (port === undefined) {
+    server.close();
+    throw new CliError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a loopback port.");
+  }
+  const endpoint = `http://127.0.0.1:${port}`;
+  const shutdown = (): void => {
+    server.close();
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  server.once("close", () => {
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  });
+  if (json)
+    console.log(
+      JSON.stringify({
+        ok: true,
+        operation: "admission.serve",
+        admissionId: started.config.id,
+        endpoint,
+        foreground: true,
+      }),
+    );
+  else {
+    console.log("Foreground local Admission server started.");
     console.log(`Endpoint: ${endpoint}`);
     console.log("Health: /health");
   }
@@ -4935,6 +5028,7 @@ function classifyExitCode(error: unknown): number {
       error.code.includes("POLICY") ||
       error.code.startsWith("RELEASE_") ||
       error.code.startsWith("EXECUTOR_") ||
+      error.code.startsWith("ADMISSION_") ||
       error.code.startsWith("LOCAL_CONTROL_"))
   )
     return EXIT_VALIDATION;
@@ -5112,6 +5206,7 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
     | "session"
     | "runtime"
     | "executor"
+    | "admission"
     | "mcp",
     string
   >
@@ -5127,6 +5222,7 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   session: "session issue",
   runtime: "runtime connect",
   executor: "executor serve",
+  admission: "admission serve",
   mcp: "mcp serve",
 };
 
@@ -5145,6 +5241,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     domain === "authority" ||
     domain === "session" ||
     domain === "executor" ||
+    domain === "admission" ||
     domain === "runtime" ||
     domain === "mcp"
   ) {
@@ -5213,6 +5310,7 @@ function printDomainHelp(
     | "session"
     | "runtime"
     | "executor"
+    | "admission"
     | "mcp",
 ): void {
   const commands =

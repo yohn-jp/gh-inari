@@ -425,6 +425,94 @@ async function composeCandidate(
   };
 }
 
+/** Current, provider-backed inputs for per-execution Implementation admission. */
+export interface CurrentImplementationAdmissionEvidence {
+  readonly implementation: IssueReference;
+  readonly issue: Readonly<{ reference: IssueReference; body: string }>;
+  readonly repository: ImplementationRepositoryIdentity;
+  readonly base: unknown;
+  readonly readiness: Readonly<{ evidence: readonly RecordValue[] }>;
+  readonly change: unknown;
+  readonly pullRequest?: GitHubOperationalPullRequestEvidence;
+}
+
+/**
+ * Read the same canonical Issue, dependency lifecycle, Change, PR, and base
+ * evidence used by the Implementation Frontier before deriving an execution
+ * authorization. Incomplete closure or stale/unavailable reads fail closed.
+ */
+export async function readCurrentImplementationAdmissionEvidence(
+  repository: ImplementationFrontierRepository,
+  implementationIssue: number,
+): Promise<CurrentImplementationAdmissionEvidence> {
+  if (!positiveIssueNumber(implementationIssue)) throw new Error("A positive Implementation Issue number is required.");
+  const identity = repositoryIdentity(await repository.getRepositoryContext());
+  const closure = await observeClosure(repository, identity, implementationIssue);
+  if (closure.scope !== "complete") throw new Error("Current Implementation dependency evidence is unavailable.");
+  const lifecycleInput = {
+    scope: closure.scope,
+    issues: closure.entries.map((entry) => ({
+      reference: entry.reference,
+      ...(entry.observed === undefined ? {} : { observed: entry.observed }),
+    })),
+  };
+  const lifecycleResult = tryProjectSemanticIssueLifecycle(lifecycleInput);
+  if (!lifecycleResult.valid || lifecycleResult.projection === undefined)
+    throw new Error("Current Implementation lifecycle evidence is unavailable.");
+
+  const states: CandidateState[] = [];
+  for (const entry of closure.entries) {
+    if (entry.issue === undefined || entry.observed === undefined)
+      throw new Error("Current Implementation Issue evidence is unavailable.");
+    const body = bodyOf(entry.issue);
+    const parsed = parseImplementationIssueBody(body);
+    const contractResult = parsed.contract === undefined ? undefined : validateImplementationContract(parsed.contract);
+    let change: unknown;
+    try {
+      change = await repository.readChange(entry.reference.number);
+    } catch {
+      throw new Error("Current Implementation Change evidence is unavailable.");
+    }
+    states.push({
+      entry,
+      body,
+      ...(contractResult?.valid === true && contractResult.contract !== undefined
+        ? { contract: contractResult.contract }
+        : {}),
+      implementationCandidate:
+        parsed.valid || labelMarksImplementation(entry.issue) || bodyLooksLikeImplementation(body),
+      change,
+    });
+  }
+  const candidates = new Map(states.map((state) => [issueReferenceKey(state.entry.reference), state]));
+  const selected = candidates.get(issueReferenceKey(reference(identity, implementationIssue)));
+  if (selected === undefined || selected.entry.issue === undefined || selected.contract === undefined)
+    throw new Error("Current Implementation contract is unavailable.");
+  const base = await currentBase(repository, selected.contract, undefined);
+  if (base === undefined) throw new Error("Current Implementation base evidence is unavailable.");
+  const change = selected.change;
+  const number = pullRequestNumber(change);
+  let pullRequest: GitHubOperationalPullRequestEvidence | undefined;
+  if (number !== undefined) {
+    try {
+      pullRequest = await repository.observePullRequest(number);
+    } catch {
+      throw new Error("Current Implementation pull request evidence is unavailable.");
+    }
+  }
+  return Object.freeze({
+    implementation: selected.entry.reference,
+    issue: Object.freeze({ reference: selected.entry.reference, body: selected.body }),
+    repository: repositoryForReference(selected.entry.reference),
+    base,
+    readiness: Object.freeze({
+      evidence: Object.freeze(readinessEvidence(selected, candidates, lifecycleResult.projection)),
+    }),
+    change,
+    ...(pullRequest === undefined ? {} : { pullRequest }),
+  });
+}
+
 function implementationEvidence(state: CandidateState): RecordValue | undefined {
   const raw = rawImplementationEvidence(state.repositoryEvidence);
   const candidate = state.implementationCandidate || raw !== undefined;

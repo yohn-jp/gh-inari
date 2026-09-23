@@ -8,7 +8,11 @@ import {
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "../change.js";
 import { executeAuthorizedExecution, type AuthorizedExecution } from "../authorized-execution.js";
 import { createLocalExecutorHttpServer } from "./executor-server.js";
-import { LOCAL_EXECUTOR_EXECUTIONS_PATH, LOCAL_EXECUTOR_HEALTH_PATH } from "./executor-http.js";
+import {
+  LOCAL_EXECUTOR_EXECUTIONS_PATH,
+  LOCAL_EXECUTOR_EVIDENCE_PATH,
+  LOCAL_EXECUTOR_HEALTH_PATH,
+} from "./executor-http.js";
 import type { LocalExecutorConfig } from "./config.js";
 import { INARI_ISSUER_PRINCIPAL } from "../github/effect-authorizer.js";
 
@@ -157,6 +161,66 @@ test("local Executor rejects raw Session envelopes, CLI intents, unknown fields,
       body: JSON.stringify({ payload: "x".repeat(5000) }),
     });
     assert.equal(oversized.status, 413);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("Executor evidence endpoint is closed, bounded, read-only, and identifies the configured Executor", async () => {
+  let reads = 0;
+  const server = createLocalExecutorHttpServer({
+    config: CONFIG,
+    listenPort: 0,
+    version: "0.14.1",
+    executorId: CONFIG.id,
+    execute: async () => {
+      throw new Error("Evidence requests must not execute.");
+    },
+    readEvidence: async (request) => {
+      reads += 1;
+      return { repository: request.repository, authorityId: request.authorityId };
+    },
+  });
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const endpoint = `http://127.0.0.1:${address.port}${LOCAL_EXECUTOR_EVIDENCE_PATH}`;
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        version: 1,
+        repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+        authorityId: "runtime-local-test",
+        issue: ISSUE,
+        implementationIssue: ISSUE,
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      component: "executor",
+      executorId: CONFIG.id,
+      protocol: 1,
+      evidence: {
+        repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+        authorityId: "runtime-local-test",
+      },
+    });
+    for (const body of [
+      { version: 1, repository: REPOSITORY, authorityId: "runtime-local-test", capabilities: [] },
+      { version: 2, repository: REPOSITORY, authorityId: "runtime-local-test" },
+      { version: 1, repository: REPOSITORY, authorityId: "runtime-local-test", issue: ISSUE },
+    ]) {
+      const denied = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(denied.status, 400);
+    }
+    assert.equal(reads, 1);
   } finally {
     await closeServer(server);
   }
