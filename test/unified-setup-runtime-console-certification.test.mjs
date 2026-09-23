@@ -141,44 +141,85 @@ test(
       delete baseEnv.INARI_APP_USER_CREDENTIAL_FILE;
       delete baseEnv.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY;
 
-      // Before `init`, the ordered setup path is not yet declared: both projections must agree
-      // it is blocked on the same first step.
-      console_ = await startConsole(workspace, baseEnv);
-      let state = await (await fetch(`${console_.announcement.endpoint}/api/state`)).json();
-      assert.equal(state.application.nextAction.stepId, "cli-topology");
-      await stopConsole(console_);
-
-      const initial = jsonOutput(command(["init", "--json"], { cwd: workspace, env: baseEnv }), "init");
-      assert.equal(initial.applicationState.status, "incomplete");
-      assert.equal(initial.applicationState.nextAction.stepId, "app-user-authorization");
-      assert.equal(initial.runtimeStatus.executor, "not-running");
-      assert.equal(initial.runtimeStatus.admission, "not-running");
-      assert.equal(initial.runtimeStatus.overall, "not-ready");
-
-      // After `init` declares the local CLI topology, the CLI and the browser console must
-      // agree on the exact same next action and runtime readiness — the seam is one function,
-      // not two independently maintained projections.
+      // Before anything runs, the ordered setup path is not yet declared: the browser
+      // console must show it is blocked on the same first step the CLI would report.
       console_ = await startConsole(workspace, baseEnv);
       const port = new URL(console_.announcement.endpoint).port;
       assert.equal(console_.announcement.sshForward, `-L ${port}:127.0.0.1:${port}`);
 
+      let state = await (await fetch(`${console_.announcement.endpoint}/api/state`)).json();
+      assert.equal(state.application.status, "incomplete");
+      assert.equal(state.application.nextAction.stepId, "cli-topology");
+      assert.equal(state.runtime.executor, "not-running");
+      assert.equal(state.runtime.admission, "not-running");
+      assert.equal(state.runtime.overall, "not-ready");
+
+      // The browser performs its one bounded setup action — declaring the local CLI
+      // topology — through the console, not through the CLI.
+      const actionResponse = await fetch(`${console_.announcement.endpoint}/api/actions/cli-topology`, {
+        method: "POST",
+        headers: { accept: "application/json" },
+      });
+      assert.equal(actionResponse.status, 200);
+      const actionState = await actionResponse.json();
+      assert.equal(actionState.operation, "runtime.console.action");
+      assert.equal(actionState.action, "cli-topology");
+      assert.equal(actionState.application.steps.find((step) => step.id === "cli-topology").status, "ready");
+      assert.equal(actionState.application.nextAction.stepId, "app-user-authorization");
+
+      // A plain HTML form submission of the same action (no Accept: application/json)
+      // is redirected back to the page — the same bounded service, browser-native flow.
+      const formResponse = await fetch(`${console_.announcement.endpoint}/api/actions/cli-topology`, {
+        method: "POST",
+        redirect: "manual",
+      });
+      assert.equal(formResponse.status, 303);
+      assert.equal(formResponse.headers.get("location"), "/");
+
+      await stopConsole(console_);
+
+      // The CLI, run only after the browser action, must see exactly the state the
+      // browser produced: the same persisted config file, the same next action. This is
+      // the proof that the browser action invoked the same bounded application service
+      // the CLI uses, rather than a second, independent setup implementation.
+      const afterBrowserAction = jsonOutput(
+        command(["init", "--json"], { cwd: workspace, env: baseEnv }),
+        "init after the browser's cli-topology action",
+      );
+      assert.equal(afterBrowserAction.applicationState.nextAction.stepId, "app-user-authorization");
+      assert.deepEqual(afterBrowserAction.applicationState.nextAction, actionState.application.nextAction);
+      assert.deepEqual(
+        afterBrowserAction.applicationState.steps.map((step) => step.status),
+        actionState.application.steps.map((step) => step.status),
+      );
+      assert.equal(afterBrowserAction.runtimeStatus.executor, "not-running");
+      assert.equal(afterBrowserAction.runtimeStatus.admission, "not-running");
+      assert.equal(afterBrowserAction.runtimeStatus.overall, "not-ready");
+
+      // Restarting the console afterward must independently agree with the CLI on the
+      // exact same next action and runtime readiness — the seam is one function read
+      // live each time, not a cached or independently maintained projection.
+      console_ = await startConsole(workspace, baseEnv);
       state = await (await fetch(`${console_.announcement.endpoint}/api/state`)).json();
-      assert.equal(state.application.status, initial.applicationState.status);
-      assert.equal(state.application.nextAction.stepId, initial.applicationState.nextAction.stepId);
-      assert.deepEqual(state.application.nextAction.commands, initial.applicationState.nextAction.commands);
+      assert.equal(state.application.status, afterBrowserAction.applicationState.status);
+      assert.equal(state.application.nextAction.stepId, afterBrowserAction.applicationState.nextAction.stepId);
+      assert.deepEqual(state.application.nextAction.commands, afterBrowserAction.applicationState.nextAction.commands);
       assert.deepEqual(
         state.application.steps.map((step) => step.status),
-        initial.applicationState.steps.map((step) => step.status),
+        afterBrowserAction.applicationState.steps.map((step) => step.status),
       );
-      assert.deepEqual(state.runtime, initial.runtimeStatus);
+      assert.deepEqual(state.runtime, afterBrowserAction.runtimeStatus);
 
       const page = await (await fetch(`${console_.announcement.endpoint}/`)).text();
       assert.match(page, /app-user-authorization|Authorize the Inari GitHub App user/u);
       assert.match(page, /<dd>not-running<\/dd>/u);
       assert.ok(!page.includes("console-must-not-render-this-token"));
+      // The cli-topology step is already complete, so its action form is no longer offered.
+      assert.doesNotMatch(page, /action="\/api\/actions\/cli-topology"/u);
 
       assert.equal((await fetch(`${console_.announcement.endpoint}/`, { method: "POST" })).status, 405);
       assert.equal((await fetch(`${console_.announcement.endpoint}/unknown`)).status, 404);
+      assert.equal((await fetch(`${console_.announcement.endpoint}/api/actions/cli-topology`)).status, 405);
 
       // The operator-facing (non-JSON) guidance must substitute the actual dynamically
       // allocated port into the ready-to-use SSH forward, so the operator never has to
