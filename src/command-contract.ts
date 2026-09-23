@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.17.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.18.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -136,6 +136,7 @@ export type CommandId =
   | "session.close"
   | "runtime.connect"
   | "runtime.supervise"
+  | "runtime.console"
   | "executor.setup"
   | "executor.serve"
   | "admission.setup"
@@ -1588,6 +1589,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "supervise",
     ["runtime", "supervise"],
     "Supervise separate local Executor and Admission processes and verify their discovered loopback readiness.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "runtime.console",
+    "runtime",
+    "console",
+    ["runtime", "console"],
+    "Serve the canonical local setup/runtime state as a loopback-only, secret-free browser console.",
     [...ROOT_OPTIONS],
   ),
   command(

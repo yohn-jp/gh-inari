@@ -192,8 +192,9 @@ import { bindLocalCliAdmissionRoute, ensureLocalCliTopology, localComponentPath 
 import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
-import { projectLocalApplicationState } from "./local-application-state.js";
+import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
+import { startLocalConsole } from "./local-control/console-server.js";
 import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
@@ -1176,14 +1177,13 @@ async function runInitCommand(
     }
     throw new CliError("UNKNOWN_COMMAND", "Unknown init command.");
   }
-  const config = ensureLocalCliTopology(dependencies.environment ?? process.env);
-  const configPath = localComponentPath("cli", "config.json", dependencies.environment ?? process.env);
-  const applicationState = await projectLocalApplicationState({
-    root,
-    environment: dependencies.environment ?? process.env,
-  });
+  const environment = dependencies.environment ?? process.env;
+  const config = ensureLocalCliTopology(environment);
+  const configPath = localComponentPath("cli", "config.json", environment);
+  const applicationState = await projectLocalApplicationState({ root, environment });
+  const runtimeStatus = await projectLocalRuntimeReadiness(environment);
   if (json) {
-    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config, applicationState }));
+    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config, applicationState, runtimeStatus }));
   } else {
     console.log("Initialized local CLI topology.");
     console.log(`Config: ${configPath}`);
@@ -1199,6 +1199,10 @@ async function runInitCommand(
     console.log("After setup, run each service command in a separate terminal:");
     for (const command of applicationState.runtime.commands) console.log(`Run: ${command}`);
     console.log(`Then launch the governed child with: ${applicationState.sessionStartCommand}`);
+    console.log(
+      `Runtime readiness: executor=${runtimeStatus.executor} admission=${runtimeStatus.admission} overall=${runtimeStatus.overall}`,
+    );
+    console.log("Run `inari runtime console` for a browser view of this same state, including over SSH.");
   }
   return 0;
 }
@@ -1444,6 +1448,55 @@ async function runRuntimeCommand(
       );
     }
     return superviseLocalRuntime(dependencies.environment ?? process.env, json);
+  }
+  if (command === "console") {
+    if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "Unknown Runtime console command.");
+    const definition = getCommand("runtime.console");
+    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+      const optionId = unsupported ?? "capability";
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime console.`,
+        "$argv",
+        { command: "runtime console", option: optionId },
+      );
+    }
+    const environment = dependencies.environment ?? process.env;
+    const { server, announcement } = await startLocalConsole(root, environment);
+    const shutdown = (): void => {
+      server.close();
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    server.once("close", () => {
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+    });
+    const port = new URL(announcement.endpoint).port;
+    const sshForward = `-L ${port}:127.0.0.1:${port}`;
+    if (json) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          operation: "runtime.console",
+          endpoint: announcement.endpoint,
+          sshForward,
+          foreground: true,
+        }),
+      );
+    } else {
+      console.log(`Local setup/runtime console: ${announcement.endpoint}/`);
+      console.log("Loopback-only; this page never renders credentials, tokens, or private key material.");
+      console.log("To reach this console from a workstation browser over SSH, forward the same loopback port:");
+      console.log(`  ssh ${sshForward} <user>@<remote-host>`);
+      console.log(`Then open ${announcement.endpoint}/ in the workstation browser.`);
+      console.log("Press Ctrl-C to stop.");
+    }
+    return 0;
   }
   if (command !== "connect" || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
