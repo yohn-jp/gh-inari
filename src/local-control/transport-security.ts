@@ -67,7 +67,14 @@ export function loadLocalMtlsIdentity(
     const privateKey = createPrivateKey(privateKeyBytes);
     if (!certificate.checkPrivateKey(privateKey)) throw new LocalTransportSecurityError();
     const caCertificate = parseCertificate(caCertificateBytes);
-    if (!caCertificate.ca || !validNow(caCertificate)) throw new LocalTransportSecurityError();
+    if (
+      !caCertificate.ca ||
+      !validNow(caCertificate) ||
+      certificate.issuer !== caCertificate.subject ||
+      !certificate.verify(caCertificate.publicKey)
+    ) {
+      throw new LocalTransportSecurityError();
+    }
     return {
       certificate: certificateBytes,
       privateKey: privateKeyBytes,

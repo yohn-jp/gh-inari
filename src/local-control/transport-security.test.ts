@@ -7,6 +7,11 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { localComponentDirectory } from "./config.js";
+import {
+  clearLocalRuntimeEndpoint,
+  publishLocalRuntimeEndpoint,
+  type LocalRuntimeEndpoint,
+} from "./runtime-discovery.js";
 
 const ADMISSION_ID = "adm_0123456789abcdef";
 const WRONG_ADMISSION_ID = "adm_fedcba9876543210";
@@ -239,9 +244,10 @@ process.once("SIGTERM", () => server.close(() => process.exit(0)));
 const CLIENT_PROGRAM = `
 import { LocalExecutorClient } from "./src/local-control/executor-client.ts";
 import { loadLocalMtlsIdentity } from "./src/local-control/transport-security.ts";
+import { requireLocalRuntimeEndpoint } from "./src/local-control/runtime-discovery.ts";
 const admissionId = process.env.INARI_TEST_ADMISSION_ID;
 const executorId = process.env.INARI_TEST_EXECUTOR_ID;
-const endpoint = process.env.INARI_TEST_EXECUTOR_ENDPOINT;
+const endpoint = requireLocalRuntimeEndpoint("executor", executorId, process.env).endpoint;
 let transport;
 if (process.env.INARI_TEST_WRONG_CLIENT_CERT) {
   const { readFileSync } = await import("node:fs");
@@ -315,13 +321,19 @@ test(
     const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-mtls-"));
     const configHome = path.join(root, "config");
     const wrongServerConfigHome = path.join(root, "wrong-server-config");
+    const wrongCaConfigHome = path.join(root, "wrong-ca-config");
+    const wrongCaDirectory = path.join(root, "wrong-ca");
     await mkdir(configHome, { mode: 0o700 });
     await mkdir(wrongServerConfigHome, { mode: 0o700 });
+    await mkdir(wrongCaConfigHome, { mode: 0o700 });
+    await mkdir(wrongCaDirectory, { mode: 0o700 });
     const certificates = await createCertificates(root);
+    const wrongCa = await createCertificates(wrongCaDirectory);
     await installComponentIdentity(configHome, "admission", certificates.admission, certificates.ca);
     await installComponentIdentity(configHome, "executor", certificates.executor, certificates.ca);
     await installComponentIdentity(wrongServerConfigHome, "admission", certificates.admission, certificates.ca);
     await installComponentIdentity(wrongServerConfigHome, "executor", certificates.wrongExecutor, certificates.ca);
+    await installComponentIdentity(wrongCaConfigHome, "executor", certificates.executor, wrongCa.ca);
 
     const commonEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
@@ -330,23 +342,26 @@ test(
       INARI_TEST_EXECUTOR_ID: EXECUTOR_ID,
     };
     let server: CapturedChild | undefined;
+    let announcement: LocalRuntimeEndpoint | undefined;
     try {
       server = startChild(SERVER_PROGRAM, commonEnvironment);
       const startup = await nextJsonLine(server);
       assert.equal(typeof startup.port, "number");
-      const endpoint = `https://127.0.0.1:${String(startup.port)}`;
+      announcement = publishLocalRuntimeEndpoint(
+        "executor",
+        EXECUTOR_ID,
+        startup.port as number,
+        commonEnvironment,
+        "https",
+      );
 
-      const successfulClient = startChild(CLIENT_PROGRAM, {
-        ...commonEnvironment,
-        INARI_TEST_EXECUTOR_ENDPOINT: endpoint,
-      });
+      const successfulClient = startChild(CLIENT_PROGRAM, commonEnvironment);
       const successfulExit = await exitResult(successfulClient);
       assert.equal(successfulExit.code, 0, successfulClient.stderr());
       assert.deepEqual(JSON.parse(successfulClient.stdout()), { ok: true, executorId: EXECUTOR_ID });
 
       const wrongClientEnvironment = {
         ...commonEnvironment,
-        INARI_TEST_EXECUTOR_ENDPOINT: endpoint,
         INARI_TEST_WRONG_CLIENT_CERT: certificates.wrongAdmission.certificate,
         INARI_TEST_WRONG_CLIENT_KEY: certificates.wrongAdmission.privateKey,
       };
@@ -361,10 +376,14 @@ test(
         INARI_TEST_EXECUTOR_TLS_ID: WRONG_EXECUTOR_ID,
       });
       const wrongServerStartup = await nextJsonLine(wrongServer);
-      const wrongServerClient = startChild(CLIENT_PROGRAM, {
-        ...commonEnvironment,
-        INARI_TEST_EXECUTOR_ENDPOINT: `https://127.0.0.1:${String(wrongServerStartup.port)}`,
-      });
+      announcement = publishLocalRuntimeEndpoint(
+        "executor",
+        EXECUTOR_ID,
+        wrongServerStartup.port as number,
+        commonEnvironment,
+        "https",
+      );
+      const wrongServerClient = startChild(CLIENT_PROGRAM, commonEnvironment);
       const wrongServerExit = await exitResult(wrongServerClient);
       assert.equal(wrongServerExit.code, 2);
       assert.deepEqual(JSON.parse(wrongServerClient.stdout()), { ok: false, code: "EXECUTOR_UNAVAILABLE" });
@@ -381,7 +400,17 @@ test(
       const missingIdentityExit = await exitResult(missingIdentity);
       assert.notEqual(missingIdentityExit.code, 0);
       assert.equal(missingIdentity.stdout(), "");
+
+      const wrongCaEnvironment: NodeJS.ProcessEnv = {
+        ...commonEnvironment,
+        INARI_CONFIG_HOME: wrongCaConfigHome,
+      };
+      const wrongCaChild = startChild(SERVER_PROGRAM, wrongCaEnvironment);
+      const wrongCaExit = await exitResult(wrongCaChild);
+      assert.notEqual(wrongCaExit.code, 0);
+      assert.equal(wrongCaChild.stdout(), "");
     } finally {
+      if (announcement !== undefined) clearLocalRuntimeEndpoint(announcement, commonEnvironment);
       if (server !== undefined && server.child.exitCode === null) {
         server.child.kill("SIGTERM");
         await exitResult(server);

@@ -535,7 +535,7 @@ test("Executor setup provisions stable identity and references the existing App-
     assert.deepEqual(first.config, {
       version: 1,
       id: first.config.id,
-      listen: { host: "127.0.0.1", port: 8765 },
+      listen: { host: "127.0.0.1", port: 0 },
       provider: { kind: "github", credentialProfile: "default" },
     });
     const configText = await readFile(first.configPath, "utf8");
@@ -558,7 +558,7 @@ test("Executor setup accepts an explicit all-interface bind policy", async () =>
     await saveCredential(environment);
     const configured = await setupLocalExecutor(environment);
     assert.equal(configured.config.listen.host, "0.0.0.0");
-    assert.equal(configured.config.listen.port, 8765);
+    assert.equal(configured.config.listen.port, 0);
     delete environment.INARI_LOCAL_RUNTIME_BIND;
     await assert.rejects(
       () => setupLocalExecutor(environment),

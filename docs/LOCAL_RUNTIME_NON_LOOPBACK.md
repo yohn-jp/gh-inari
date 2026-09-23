@@ -4,8 +4,9 @@ Loopback is the default. To select all-interface listening for a new local
 Runtime setup, set `INARI_LOCAL_RUNTIME_BIND=0.0.0.0` before running both
 `inari executor setup` and `inari admission setup`. The setting is recorded in
 each component's local configuration. `0.0.0.0` is only a listen address;
-Admission connects to Executor at `127.0.0.1` over HTTPS, and CLI setup keeps
-the Admission route at `127.0.0.1`.
+Admission discovers and connects to Executor at `127.0.0.1` over HTTPS, and CLI
+discovers the Admission route at `127.0.0.1`. OS-assigned ports are recorded
+only in local Runtime discovery state.
 
 Non-loopback services refuse to start until both components have valid mTLS
 material under their private configuration directories. Each component uses
@@ -36,5 +37,10 @@ and the peer's configured URI identity. Admission also keeps the existing
 Executor ID check in its health protocol. Session and Capability authorization
 continues at Admission and remains required for governed operations.
 
-Return to loopback by selecting `INARI_LOCAL_RUNTIME_BIND=loopback` before
-setting up both components again in a fresh local configuration.
+The TLS private-key bytes stay in their component directories. Runtime code
+does not put them in Agent child environments, CLI semantic input, status HTML,
+or repository artifacts.
+
+The bind policy is recorded during setup. To return to loopback, set
+`INARI_LOCAL_RUNTIME_BIND=loopback` and set up both components in a fresh
+`INARI_CONFIG_HOME`; loopback remains the default when the variable is unset.
