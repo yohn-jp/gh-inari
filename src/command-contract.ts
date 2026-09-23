@@ -132,6 +132,8 @@ export type CommandId =
   | "authority.revoke"
   | "session.issue"
   | "session.inspect"
+  | "session.start"
+  | "session.close"
   | "runtime.connect"
   | "executor.setup"
   | "executor.serve"
@@ -162,6 +164,7 @@ export type OptionId =
   | "state"
   | "limit"
   | "page"
+  | "issueNumber"
   | "to"
   | "requireCapability"
   | "minimumVersion"
@@ -268,6 +271,7 @@ const AUTHORITY_READINESS_OPTIONS = [
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
 const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
+const SESSION_START_OPTIONS = ["help", "json", "issueNumber"] as const;
 const RUNTIME_OPTIONS = ["help", "json", "repository", "relayUrl", "authorityId", "privateKey", "configHome"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
@@ -452,6 +456,15 @@ export const COMMAND_OPTIONS = {
     "string",
     "required",
     "Explicit discovery page number; continuation is never implicit.",
+    "number",
+  ),
+  issueNumber: option(
+    "issueNumber",
+    "issue",
+    ["--issue"],
+    "string",
+    "required",
+    "Issue number that bounds the local Session.",
     "number",
   ),
   to: option(
@@ -1539,6 +1552,23 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["help", "json", "from"],
   ),
   command(
+    "session.start",
+    "session",
+    "start",
+    ["session", "start"],
+    "Issue or reuse a bounded local Session and launch one exact child command.",
+    SESSION_START_OPTIONS,
+    "--issue <n> -- <command...>",
+  ),
+  command(
+    "session.close",
+    "session",
+    "close",
+    ["session", "close"],
+    "Close only the inherited local Session through configured Admission.",
+    ["help", "json"],
+  ),
+  command(
     "runtime.connect",
     "runtime",
     "connect",
@@ -1611,6 +1641,7 @@ export function getCommand(id: CommandId): CommandDefinition {
 }
 
 export function getCommandForPositionals(positionals: readonly string[]): CommandDefinition | undefined {
+  if (positionals[0] === "session" && positionals[1] === "start") return getCommand("session.start");
   // Command examples are also consumed directly by contract/Skill projections;
   // tolerate their option tokens while matching only the command path and slots.
   const commandPositionals = positionals.some((token) => token.startsWith("-"))
@@ -1992,6 +2023,7 @@ export function commandUsage(entry: CommandDefinition): string {
   const positionals = entry.positionalSyntax === undefined ? "" : ` ${entry.positionalSyntax}`;
   const options = entry.optionIds
     .filter((id) => !(entry.id === "impl.frontier" && id === "from"))
+    .filter((id) => !(entry.id === "session.start" && id === "issueNumber"))
     .filter((id) => id !== "help" && id !== "json")
     .map((id) => {
       const optionDefinition = getOption(id);
@@ -2006,6 +2038,7 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "pr.review" && (id === "expectedHead" || id === "reviewIntent")) ||
         (entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
         (entry.id === "change.merge" && id === "mergeStrategy") ||
+        (entry.id === "session.start" && id === "issueNumber") ||
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||
