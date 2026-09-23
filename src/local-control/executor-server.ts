@@ -4,12 +4,12 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import {
   executeAuthorizedExecution,
-  createAuthorizedExecution,
   type AuthorizedExecution,
   type AuthorizedExecutionChangeFactoryResult,
   type AuthorizedExecutionDelegates,
   type AuthorizedExecutionResult,
 } from "../authorized-execution.js";
+import { executeBranchAdvanceEffects } from "../agent-authority/branch-advance.js";
 import { projectChangeFromGitHubEvidence } from "../change.js";
 import {
   changeReadRequest,
@@ -26,11 +26,13 @@ import {
   FileAppUserCredentialStore,
   GitHubChangeStateProjector,
   InariEffectAuthorizer,
+  createPrPublicationProvider,
   type GitHubChangeEffectRepository,
   type GitHubChangeProvenanceSignerOptions,
   type GitHubAppRepositoryReadCapability,
   type RepositoryIdentity,
 } from "../github/index.js";
+import { publishPullRequest } from "../pr-publication.js";
 import {
   LocalControlError,
   LOCAL_CONFIG_VERSION,
@@ -212,9 +214,35 @@ function createDelegates(
   const readExecutor = {
     read: (request: ChangeReadRequest) => projectChange(readBroker, readRepository, input.repository, request),
   };
+  const executionBroker = createBroker(input.repository, environment, credentialStore);
+  const effectAuthorizer = new InariEffectAuthorizer({ appId: appId(environment), broker: executionBroker });
 
   return {
     readExecutor,
+    branchAdvance: ({ request, branchAuthorization, provenance }) =>
+      executeBranchAdvanceEffects({
+        repository: input.repository,
+        provenance,
+        broker: executionBroker,
+        request,
+        authorization: branchAuthorization,
+      }),
+    publishPullRequest: async ({ execution, request }) => {
+      const app = await executionBroker.withRepositoryReadCapability({}, async (capability) => ({
+        ...capability.scope.app,
+        installationId: capability.scope.installation.installationId,
+      }));
+      const publication = await publishPullRequest(
+        request,
+        createPrPublicationProvider({
+          broker: executionBroker,
+          authorizer: effectAuthorizer,
+          execution,
+          target: input.repository,
+        }),
+      );
+      return { publication, app };
+    },
     createChangeExecutor: async ({ execution, request }) => {
       const target = execution.repository;
       const repository = providerRepository(target);
@@ -281,8 +309,7 @@ export async function executeLocalAuthorizedExecution(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<AuthorizedExecutionResult> {
   const credentialStore = await requireCredential(environment);
-  const branded = createAuthorizedExecution(input);
-  return executeAuthorizedExecution(branded, createDelegates(branded, environment, credentialStore));
+  return executeAuthorizedExecution(input, createDelegates(input, environment, credentialStore));
 }
 
 export interface LocalExecutorHttpServerOptions extends LocalExecutorHttpHandlerOptions {
