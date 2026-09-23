@@ -283,17 +283,17 @@ async function prepareInExactWorktree(productionModules, history, targetRevision
     marketplaceJson.plugins[0].source.version = "^" + previousVersion;
     await writeFile(path.join(root, "package.json"), JSON.stringify(packageJson, null, 2) + "\n");
     await writeFile(path.join(root, ".codex-plugin/plugin.json"), JSON.stringify(pluginJson, null, 2) + "\n");
-    await writeFile(path.join(root, ".agents/plugins/marketplace.json"), JSON.stringify(marketplaceJson, null, 2) + "\n");
+    await writeFile(\n      path.join(root, ".agents/plugins/marketplace.json"),\n      JSON.stringify(marketplaceJson, null, 2) + "\\n",\n    );
     execFileSync("git", ["config", "user.email", "release-certification@example.invalid"], { cwd: root });
     execFileSync("git", ["config", "user.name", "Release Certification"], { cwd: root });
-    execFileSync("git", ["add", "package.json", ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json"], { cwd: root });
+    execFileSync(\n      "git",\n      ["add", "package.json", ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json"],\n      { cwd: root },\n    );
     execFileSync("git", ["commit", "-qm", "fixture previous-release version"], { cwd: root });
-    const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], {\n      cwd: root,\n      encoding: "utf8",\n    }).trim();
     const preparedHistory = { ...history, targetSource: { ...history.targetSource, sourceRevision } };
     const verification = async (command, args, cwd) => ({ command, args, cwd, status: 0 });
-    const first = await productionModules.prepareRelease({ repositoryRoot: root, history: preparedHistory, intent: "patch", runVerification: verification });
+    const first = await productionModules.prepareRelease({\n      repositoryRoot: root,\n      history: preparedHistory,\n      intent: "patch",\n      runVerification: verification,\n    });
     const document = await readFile(path.join(root, "docs/releases", first.targetVersion + ".md"), "utf8");
-    const second = await productionModules.prepareRelease({ repositoryRoot: root, history: preparedHistory, intent: "patch", runVerification: verification });
+    const second = await productionModules.prepareRelease({\n      repositoryRoot: root,\n      history: preparedHistory,\n      intent: "patch",\n      runVerification: verification,\n    });
     return { first, second, document };
   } finally {
     execFileSync("git", ["worktree", "remove", "--force", root], { cwd: repoRoot });
