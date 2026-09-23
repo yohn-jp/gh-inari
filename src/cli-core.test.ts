@@ -5,6 +5,8 @@ import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli-core.js";
 import { getCommandForPositionals } from "./command-contract.js";
+import { createAppUserCredential } from "./github/app-user-credential.js";
+import { FileAppUserCredentialStore } from "./github/app-user-credential-store.js";
 
 interface CapturedOutput {
   readonly exitCode: number;
@@ -116,6 +118,64 @@ test("local provisioning commands are additive, closed, and use INARI_CONFIG_HOM
     assert.equal(invalid.exitCode, 1);
     assert.equal(JSON.parse(invalid.stdout).error.code, "INVALID_OPTION");
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "cli")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("executor setup and serve use the Executor command contract and existing credential custody", async () => {
+  assert.equal(getCommandForPositionals(["executor", "setup"])?.id, "executor.setup");
+  assert.equal(getCommandForPositionals(["executor", "serve"])?.id, "executor.serve");
+
+  const { root, environment } = await temporaryEnvironment();
+  environment.INARI_GITHUB_APP_ID = "123456";
+  try {
+    const missingSetup = await capture(["executor", "serve", "--json"], environment);
+    assert.equal(missingSetup.exitCode, 2);
+    assert.equal(JSON.parse(missingSetup.stdout).error.code, "EXECUTOR_NOT_SETUP");
+
+    const store = new FileAppUserCredentialStore({
+      path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    });
+    await store.save(
+      createAppUserCredential({
+        accessToken: "access-secret",
+        refreshToken: "refresh-secret",
+        accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
+        refreshTokenExpiresAt: "2027-06-01T00:00:00.000Z",
+      }),
+    );
+    const setup = await capture(["executor", "setup", "--json"], environment);
+    assert.equal(setup.exitCode, 0);
+    const output = JSON.parse(setup.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly executorId: string;
+      readonly configPath: string;
+      readonly provider: { readonly credentialProfile: string };
+    };
+    assert.equal(output.ok, true);
+    assert.equal(output.operation, "executor.setup");
+    assert.match(output.executorId, /^exec_[A-Za-z0-9_-]{16,64}$/u);
+    assert.equal(output.configPath, path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json"));
+    assert.equal(output.provider.credentialProfile, "default");
+    assert.equal(setup.stdout.includes("access-secret"), false);
+    const second = await capture(["executor", "setup", "--json"], environment);
+    assert.equal(JSON.parse(second.stdout).executorId, output.executorId);
+
+    const unsupported = await capture(
+      ["executor", "setup", "--config-home", path.join(root, "elsewhere"), "--json"],
+      environment,
+    );
+    assert.equal(unsupported.exitCode, 1);
+    assert.equal(JSON.parse(unsupported.stdout).error.code, "INVALID_OPTION");
+
+    const unsupportedCapability = await capture(
+      ["executor", "setup", "--capability", "change.implement", "--json"],
+      environment,
+    );
+    assert.equal(unsupportedCapability.exitCode, 1);
+    assert.equal(JSON.parse(unsupportedCapability.stdout).error.code, "INVALID_OPTION");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
