@@ -4,7 +4,7 @@
 // native GitHub REST response shapes and the production adapters/modules.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -274,20 +274,49 @@ async function prepareInExactWorktree(productionModules, history, targetRevision
   const root = await mkdtemp(path.join(os.tmpdir(), "gh-inari-release-golden-path-"));
   execFileSync("git", ["worktree", "add", "--detach", "--quiet", root, targetRevision], { cwd: repoRoot });
   try {
-    const verification = async (command, args, cwd) => ({ command, args, cwd, status: 0 });
+    const previousVersion = history.previousRelease.version;
+    const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+    packageJson.version = previousVersion;
+    const pluginJson = JSON.parse(await readFile(path.join(root, ".codex-plugin/plugin.json"), "utf8"));
+    pluginJson.version = previousVersion;
+    const marketplaceJson = JSON.parse(await readFile(path.join(root, ".agents/plugins/marketplace.json"), "utf8"));
+    marketplaceJson.plugins[0].source.version = "^" + previousVersion;
+    await writeFile(path.join(root, "package.json"), JSON.stringify(packageJson, null, 2) + "\n");
+    await writeFile(path.join(root, ".codex-plugin/plugin.json"), JSON.stringify(pluginJson, null, 2) + "\n");
+    await writeFile(
+      path.join(root, ".agents/plugins/marketplace.json"),
+      JSON.stringify(marketplaceJson, null, 2) + "\n",
+    );
+    execFileSync("git", ["config", "user.email", "release-certification@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Release Certification"], { cwd: root });
+    execFileSync("git", ["add", "package.json", ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json"], {
+      cwd: root,
+    });
+    execFileSync("git", ["commit", "-qm", "fixture previous-release version"], { cwd: root });
+    const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    const preparedHistory = {
+      ...history,
+      targetSource: { ...history.targetSource, sourceRevision },
+    };
+    const verification = async (command, args, cwd) => ({
+      command,
+      args,
+      cwd,
+      status: 0,
+    });
     const first = await productionModules.prepareRelease({
       repositoryRoot: root,
-      history,
+      history: preparedHistory,
       intent: "patch",
       runVerification: verification,
     });
-    const document = await readFile(
-      path.join(root, first.publicationHandoff.head.replace(/^release\//u, "docs/releases/") + ".md"),
-      "utf8",
-    ).catch(async () => readFile(path.join(root, "docs/releases", `${first.targetVersion}.md`), "utf8"));
+    const document = await readFile(path.join(root, "docs/releases", first.targetVersion + ".md"), "utf8");
     const second = await productionModules.prepareRelease({
       repositoryRoot: root,
-      history,
+      history: preparedHistory,
       intent: "patch",
       runVerification: verification,
     });
@@ -336,7 +365,7 @@ export async function runCertification() {
     base: "main",
     expectedHead: "release/0.14.2",
     expectedBase: "main",
-    headRevision: fixture.targetRevision,
+    headRevision: prepared.first.source.sourceRevision,
     template: "release",
   });
   assert.match(prepared.document, /^# Release 0\.14\.2$/mu);
@@ -349,7 +378,7 @@ export async function runCertification() {
     {
       repository: publicationRepository,
       targetVersion: prepared.first.targetVersion,
-      sourceRevision: fixture.targetRevision,
+      sourceRevision: prepared.first.source.sourceRevision,
       title: "Release 0.14.2",
       body: publicationBody,
     },
@@ -360,7 +389,7 @@ export async function runCertification() {
     {
       repository: publicationRepository,
       targetVersion: prepared.first.targetVersion,
-      sourceRevision: fixture.targetRevision,
+      sourceRevision: prepared.first.source.sourceRevision,
       title: "Release 0.14.2",
       body: publicationBody,
     },
@@ -416,7 +445,7 @@ export async function runCertification() {
   const validRequest = modules.createReleasePrPublicationRequest({
     repository: publicationRepository,
     targetVersion: "0.14.2",
-    sourceRevision: fixture.targetRevision,
+    sourceRevision: prepared.first.source.sourceRevision,
     title: "Release 0.14.2",
     body: publicationBody,
   });
@@ -439,7 +468,7 @@ export async function runCertification() {
     {
       repository: publicationRepository,
       targetVersion: "0.14.2",
-      sourceRevision: fixture.targetRevision,
+      sourceRevision: prepared.first.source.sourceRevision,
       title: "Release 0.14.2",
       body: publicationBody,
     },
@@ -452,7 +481,7 @@ export async function runCertification() {
 
   return {
     ok: true,
-    targetRevision: fixture.targetRevision,
+    targetRevision: prepared.first.source.sourceRevision,
     history: {
       previousTag: history.previousRelease.tag,
       compareCommits: mergeRevisions.length,
