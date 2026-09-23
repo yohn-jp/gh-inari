@@ -9,6 +9,7 @@ import {
   publishLocalRuntimeEndpoint,
   readLocalRuntimeEndpoint,
   requireLocalRuntimeEndpoint,
+  validateLocalRuntimeEndpoint,
 } from "./runtime-discovery.js";
 
 async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
@@ -49,6 +50,27 @@ test("runtime discovery enforces the pinned component identity and loopback endp
     assert.throws(
       () => publishLocalRuntimeEndpoint("admission", "adm_0123456789abcdef", 65536, environment),
       /discovery state is invalid/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Executor discovery supports HTTPS while keeping 0.0.0.0 out of client destinations", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const executor = publishLocalRuntimeEndpoint("executor", "exec_0123456789abcdef", 41004, environment, "https");
+    assert.equal(executor.endpoint, "https://127.0.0.1:41004");
+    assert.deepEqual(requireLocalRuntimeEndpoint("executor", executor.id, environment), executor);
+    assert.throws(() => publishLocalRuntimeEndpoint("admission", "adm_0123456789abcdef", 41005, environment, "https"));
+    assert.throws(() =>
+      validateLocalRuntimeEndpoint({
+        version: 1,
+        component: "executor",
+        id: "exec_0123456789abcdef",
+        endpoint: "https://0.0.0.0:41004",
+        instanceId: "0123456789abcdefghijklmn",
+      }),
     );
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -1525,7 +1525,7 @@ async function runExecutorCommand(
   const port = typeof address === "object" && address !== null ? address.port : undefined;
   if (port === undefined) {
     server.close();
-    throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
+    throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a listening port.");
   }
   const shutdown = (): void => {
     server.close();
@@ -1549,7 +1549,7 @@ async function runExecutorCommand(
     );
   } else {
     console.log("Foreground local Executor server started.");
-    console.log("Health: /health");
+    console.log("Admission can now verify local Executor readiness.");
   }
   return 0;
 }
@@ -1597,7 +1597,7 @@ async function runAdmissionCommand(
     else {
       console.log("Local Admission identity and configuration are ready.");
       console.log(`Admission id: ${output.admissionId}`);
-      console.log(`Executor id: ${output.executorId}`);
+      console.log(`Executor identity: ${output.executorId}`);
       console.log(`Configuration: ${output.configPath}`);
     }
     return 0;
@@ -1609,7 +1609,7 @@ async function runAdmissionCommand(
   const port = typeof address === "object" && address !== null ? address.port : undefined;
   if (port === undefined) {
     server.close();
-    throw new CliError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a loopback port.");
+    throw new CliError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a listening port.");
   }
   const shutdown = (): void => {
     server.close();

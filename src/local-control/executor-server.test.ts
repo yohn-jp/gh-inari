@@ -551,6 +551,24 @@ test("Executor setup provisions stable identity and references the existing App-
   }
 });
 
+test("Executor setup accepts an explicit all-interface bind policy", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  environment.INARI_LOCAL_RUNTIME_BIND = "0.0.0.0";
+  try {
+    await saveCredential(environment);
+    const configured = await setupLocalExecutor(environment);
+    assert.equal(configured.config.listen.host, "0.0.0.0");
+    assert.equal(configured.config.listen.port, 0);
+    delete environment.INARI_LOCAL_RUNTIME_BIND;
+    await assert.rejects(
+      () => setupLocalExecutor(environment),
+      (error: unknown) => error instanceof LocalExecutorError && error.code === "EXECUTOR_BIND_POLICY_CONFLICT",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Executor serve fails closed when setup or existing provider credentials are missing", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {

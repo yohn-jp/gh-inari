@@ -264,6 +264,50 @@ test("Admission setup is idempotent and Admission serve requires setup and verif
   }
 });
 
+test("Admission setup records an explicit non-loopback policy and serve fails closed without mTLS custody", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  environment.INARI_LOCAL_RUNTIME_BIND = "0.0.0.0";
+  const { keyPair, authority } = authorityFixture();
+  try {
+    writeLocalJson(
+      "executor",
+      "config.json",
+      {
+        version: 1,
+        id: EXECUTOR_ID,
+        listen: { host: "0.0.0.0", port: 0 },
+        provider: { kind: "github", credentialProfile: "default" },
+      },
+      validateLocalExecutorConfig,
+      environment,
+    );
+    writeLocalJson(
+      "authority",
+      "config.json",
+      {
+        version: 1,
+        publicKey: keyPair.publicKeyJwk,
+        publicKeyFingerprint: delegatorPublicKeyFingerprint(authority.key),
+        privateKeyFile: "private-key.pem",
+      },
+      validateLocalAuthorityConfig,
+      environment,
+    );
+
+    const configured = setupLocalAdmission(authority, environment);
+    assert.equal(configured.config.listen.host, "0.0.0.0");
+    assert.equal(configured.config.listen.port, 0);
+    assert.equal(configured.config.executor.endpoint, undefined);
+    await assert.rejects(
+      startConfiguredLocalAdmission("0.15.0", environment),
+      (error: unknown) =>
+        error instanceof LocalAdmissionError && error.code === "LOCAL_TRANSPORT_MTLS_CONFIGURATION_INVALID",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Admission rejects wrong Executor identity before opening its ready server", async () => {
   const { root, environment } = await temporaryEnvironment();
   const { keyPair, authority } = authorityFixture();

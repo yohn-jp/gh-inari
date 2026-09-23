@@ -5,6 +5,25 @@ import { LocalExecutorClient, LocalExecutorClientError } from "./executor-client
 
 const ID = "exec_0123456789abcdef";
 
+test("Executor HTTPS endpoints require an mTLS identity and never use the bind address as a destination", () => {
+  assert.throws(() => new LocalExecutorClient({ id: ID, endpoint: "https://127.0.0.1:8765" }), /mTLS identity/u);
+  assert.throws(
+    () =>
+      new LocalExecutorClient({
+        id: ID,
+        endpoint: "https://0.0.0.0:8765",
+        transport: {
+          certificate: Buffer.from("certificate"),
+          privateKey: Buffer.from("private key"),
+          caCertificate: Buffer.from("CA"),
+          peerId: ID,
+          peerRole: "executor",
+        },
+      }),
+    /loopback destination/u,
+  );
+});
+
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
