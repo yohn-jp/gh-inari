@@ -14,9 +14,12 @@ import { assertRuntimeAuthority, type RuntimeAuthority } from "../agent-authorit
 import { createLocalDelegatorSignedChangeProvenanceRecord } from "../agent-authority/delegator-operations.js";
 import type { SemanticSessionRequest } from "../agent-authority/session-request.js";
 import { compileSemanticTemplateSource, parseSemanticTemplate, renderSemanticNative } from "../semantic-template.js";
-import { createDirectAppSessionExecutor } from "./direct-app-execution.js";
+import { createDirectAppSessionExecutor, createPrPublicationProvider } from "./direct-app-execution.js";
 import { createAppUserCredential } from "./app-user-credential.js";
 import { InMemoryAppUserCredentialStore } from "./app-user-credential-store.js";
+import type { AppProviderCredentialBroker } from "./app-provider-credential-broker.js";
+import type { DirectAppTrustedExecutionContext, RepositoryIdentity } from "./effect-authorizer.js";
+import type { PrPublicationCreateInput } from "../pr-publication.js";
 
 const REPOSITORY = { hostname: "github.com", owner: "acme", name: "inari" } as const;
 const FAKE_PRIVATE_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n";
@@ -351,6 +354,104 @@ test("createDirectAppSessionExecutor returns a transport-neutral executor", () =
     fetch: noNetworkFetch(),
   });
   assert.equal(typeof executor.execute, "function");
+});
+
+test("canonical PR publication provider reuses App reads and governed effect authorization", async () => {
+  const target: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: REPOSITORY_ID,
+    nameWithOwner: "acme/inari",
+  };
+  const providerResponse = {
+    number: PULL_REQUEST,
+    html_url: `https://github.com/acme/inari/pull/${PULL_REQUEST}`,
+    title: "feat: publish implementation",
+    body: "Closes #469",
+    head: { ref: BRANCH, sha: ISSUE_SOURCE_SHA },
+    base: { ref: "main" },
+    draft: true,
+  };
+  const readCapability = {
+    providerPrincipal: { kind: "github-app", slug: "inari-issuer", appId: "123", principal: "app:inari-issuer" },
+    scope: {
+      app: { kind: "github-app", slug: "inari-issuer", appId: "123", principal: "app:inari-issuer" },
+      installation: { appId: "123", installationId: INSTALLATION_ID, repositoryHost: "github.com" },
+      repository: target,
+      repositorySelection: "selected",
+      permissions: { contents: "read", metadata: "read", pull_requests: "write" },
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    },
+    transport: {
+      request: async (input: { readonly hostname: string; readonly method: "GET"; readonly path: string }) => {
+        assert.equal(input.hostname, "github.com");
+        assert.equal(input.method, "GET");
+        assert.equal(input.path, `repos/acme/inari/pulls/${PULL_REQUEST}`);
+        return { status: 200, body: providerResponse };
+      },
+    },
+  };
+  const broker = {
+    withRepositoryReadCapability: async (_request: unknown, operation: (capability: unknown) => Promise<unknown>) =>
+      operation(readCapability),
+  } as unknown as AppProviderCredentialBroker;
+  const applied: Record<string, unknown>[] = [];
+  const authorizer = {
+    applyEffects: async (input: unknown) => {
+      applied.push(input as Record<string, unknown>);
+      return {
+        effects: [
+          { kind: "CREATE_PULL_REQUEST", evidence: { kind: "CREATE_PULL_REQUEST", pullRequest: PULL_REQUEST } },
+        ],
+      };
+    },
+  } as never;
+  const execution = {
+    version: 1,
+    runtime: "inari-app",
+    event: "session-request",
+    repository: target,
+    requestId: "request-pull-request-publish",
+    sessionId: "session-469",
+    certificateJti: "certificate-469",
+    requester: "session:session-469",
+  } as unknown as DirectAppTrustedExecutionContext;
+  const provider = createPrPublicationProvider({
+    broker,
+    authorizer,
+    execution,
+    target,
+  });
+  const input: PrPublicationCreateInput = {
+    repository: {
+      repositoryHost: target.repositoryHost,
+      repositoryId: target.repositoryId,
+      repository: target.nameWithOwner,
+    },
+    workIdentity: { implementation: { ...target, number: ISSUE } },
+    title: "feat: publish implementation",
+    body: "Closes #469",
+    head: BRANCH,
+    base: "main",
+    headRevision: ISSUE_SOURCE_SHA,
+    draft: true,
+  };
+
+  const created = await provider.createPullRequest(input);
+  assert.equal(created.number, PULL_REQUEST);
+  assert.equal(created.headRevision, ISSUE_SOURCE_SHA);
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0]?.authority, "issuer");
+  assert.deepEqual(applied[0]?.effects, [
+    {
+      kind: "CREATE_PULL_REQUEST",
+      branch: BRANCH,
+      baseBranch: "main",
+      rootIssue: ISSUE,
+      title: "feat: publish implementation",
+      body: "Closes #469",
+      draft: true,
+    },
+  ]);
 });
 
 test("createDirectAppSessionExecutor accepts a Runtime-owned App-user broker without a private key", () => {

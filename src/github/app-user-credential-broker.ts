@@ -430,6 +430,10 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
     const resolved = await this.#resolve(request.permissions);
     if (!hasPermissions(resolved.scope.permissions, request.permissions))
       throw this.#safeFailure("installation-scope", { reason: "scope" });
+    const operationScope: AppInstallationScope = Object.freeze({
+      ...resolved.scope,
+      permissions: Object.freeze({ ...request.permissions }),
+    });
     const transport = this.#apiTransport(resolved.credential, "projection-execution", resolved.repositoryNodeId);
     let provenance:
       | {
@@ -463,7 +467,7 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
       ...(provenance === undefined ? {} : { provenance }),
     });
     const capability: AppScopedMutationCapability = {
-      scope: resolved.scope,
+      scope: operationScope,
       apply: async (effect) => {
         const result = await adapter.execute(effect);
         if (result.status === "failed") throw this.#safeMutationFailure(effect, result.failure, result.providerFailure);

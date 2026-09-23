@@ -3,6 +3,14 @@ import test from "node:test";
 import { createAppUserCredential } from "./app-user-credential.js";
 import { InMemoryAppUserCredentialStore } from "./app-user-credential-store.js";
 import {
+  assertTrustedExecution,
+  createInariAppPrincipalIdentity,
+  EFFECT_AUTHORIZER_CONTRACT_VERSION,
+  validateIssuerInstallationScope,
+  type EffectAuthorizerCredentialRequest,
+  type RepositoryIdentity,
+} from "./effect-authorizer.js";
+import {
   GitHubAppUserCredentialBroker,
   GitHubAppUserCredentialBrokerError,
   type GitHubAppUserCredentialBrokerOptions,
@@ -88,6 +96,46 @@ test("App-user broker resolves the configured App/repository and exposes no toke
     assert.equal(JSON.stringify(capability).includes("access-secret"), false);
   });
   assert.deepEqual(provider.calls, ["/user/installations", "/user/installations/7/repositories", "/repos/acme/inari"]);
+});
+
+test("App-user broker bounds operation scope to requested effect permissions after validating the provider grant", async () => {
+  const provider = brokerFetch();
+  const broker = new GitHubAppUserCredentialBroker(options(provider.fetch));
+  const app = createInariAppPrincipalIdentity("42");
+  const target: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: "99",
+    nameWithOwner: "acme/inari",
+  };
+  const request = {
+    version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
+    authority: "issuer",
+    app,
+    execution: assertTrustedExecution({
+      version: EFFECT_AUTHORIZER_CONTRACT_VERSION,
+      runtime: "inari-app",
+      event: "session-request",
+      repository: target,
+      requestId: "request-operation-scope",
+      sessionId: "session-operation-scope",
+      certificateJti: "certificate-operation-scope",
+      requester: "session:session-operation-scope",
+    }),
+    target,
+    permissions: { pull_requests: "write" },
+  } satisfies EffectAuthorizerCredentialRequest;
+
+  await broker.withScopedInstallationCredential(request, async (capability) => {
+    assert.deepEqual(capability.scope.permissions, request.permissions);
+    const validation = validateIssuerInstallationScope(capability.scope, {
+      app,
+      target,
+      requiredPermissions: request.permissions,
+    });
+    assert.equal(validation.valid, true, JSON.stringify(validation.diagnostics));
+  });
+
+  assert.deepEqual(provider.calls, ["/user/installations", "/user/installations/7/repositories"]);
 });
 
 test("App-user broker preserves immutable identity across repository rename", async () => {

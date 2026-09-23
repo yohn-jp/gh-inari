@@ -48,7 +48,7 @@ import {
   type CapabilityAuthorizedChangeExecutorFactoryResult,
   type CapabilityAuthorizedSessionExecutor,
 } from "../session-authorized-change-executor.js";
-import { executeBranchAdvance } from "../agent-authority/branch-advance.js";
+import { executeBranchAdvanceEffects } from "../agent-authority/branch-advance.js";
 import type { ImplementationAuthorizationVerificationInput } from "../implementation-authorization.js";
 import {
   changeReadRequest,
@@ -119,12 +119,17 @@ function publicationRepositoryMatches(
   );
 }
 
-function publicationProvider(
-  broker: AppProviderCredentialBroker,
-  authorizer: InariEffectAuthorizer,
-  execution: DirectAppTrustedExecutionContext,
-  target: RepositoryIdentity,
-): PrPublicationProvider {
+/**
+ * Canonical GitHub App adapter for governed PR publication. Local Executor
+ * composition and direct-App compatibility share this provider/effect seam.
+ */
+export function createPrPublicationProvider(input: {
+  readonly broker: AppProviderCredentialBroker;
+  readonly authorizer: InariEffectAuthorizer;
+  readonly execution: DirectAppTrustedExecutionContext;
+  readonly target: RepositoryIdentity;
+}): PrPublicationProvider {
+  const { broker, authorizer, execution, target } = input;
   const identity = (scope: GitHubAppRepositoryReadCapability["scope"]): PrPublicationRepositoryIdentity => ({
     repositoryHost: scope.repository.repositoryHost,
     repositoryId: scope.repository.repositoryId,
@@ -430,16 +435,17 @@ export function createDirectAppSessionExecutor(
       });
       const publication = await publishPullRequest(
         input.request,
-        publicationProvider(broker, authorizer, input.execution, target),
+        createPrPublicationProvider({ broker, authorizer, execution: input.execution, target }),
       );
       return { publication, ...(establishedApp === undefined ? {} : { app: establishedApp }) };
     },
     branchAdvance: (input) =>
-      executeBranchAdvance({
-        context: input.context,
+      executeBranchAdvanceEffects({
+        repository: input.context.repository,
+        provenance: input.provenance,
         broker,
-        admission: input.admission,
         request: input.request,
+        authorization: input.branchAuthorization,
         ...(config.now === undefined ? {} : { now: config.now }),
       }),
   });

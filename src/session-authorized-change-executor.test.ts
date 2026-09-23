@@ -2,13 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   canonicalRuntimeAuthorityJson,
-  createCapabilityExecutionProvenance,
   createManagedSession,
   generateRuntimeAuthorityKeyPair,
   issueSessionCertificate,
   renderRuntimeAuthorityArtifact,
   signSessionRequest,
-  type CapabilityExecutionProvenance,
   type RuntimeAuthority,
 } from "./agent-authority/index.js";
 import { assertRuntimeAuthority } from "./agent-authority/runtime-authority.js";
@@ -593,28 +591,6 @@ test("direct App trusted context dispatches without weakening the existing Actio
   assert.equal(validateTrustedExecutionContext(actions).valid, true);
 });
 
-function verifiedBranchProvenance(admission: {
-  readonly repository: CapabilityExecutionProvenance["repository"];
-  readonly runtimeAuthority: CapabilityExecutionProvenance["runtimeAuthority"];
-  readonly session: CapabilityExecutionProvenance["session"];
-  readonly authority: CapabilityExecutionProvenance["authority"];
-  readonly request: CapabilityExecutionProvenance["request"];
-  readonly capability: CapabilityClaim;
-}): CapabilityExecutionProvenance {
-  return createCapabilityExecutionProvenance({
-    version: 1,
-    stage: "verified",
-    repository: admission.repository,
-    runtimeAuthority: admission.runtimeAuthority,
-    session: admission.session,
-    authority: admission.authority,
-    request: admission.request,
-    subject: { kind: "branch", issue: ISSUE, branch: BRANCH },
-    capability: admission.capability,
-    app: APP,
-  });
-}
-
 function branchAdvanceRequest(): Record<string, unknown> {
   return {
     version: 1,
@@ -633,71 +609,23 @@ function branchAdvanceRequest(): Record<string, unknown> {
   };
 }
 
-test("branch.advance performs composition and delegates without owning Git mutation", async () => {
+test("branch.advance requires bound Implementation scope before reaching provider execution", async () => {
   const executor = new FakeChangeExecutor(projection("draft"), projection("draft"));
   const signed = signedEnvelope("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
   let delegated = 0;
   const result = await createCapabilityAuthorizedSessionExecutor({
     authentication: signed.authentication,
     changeExecutor: executor,
-    branchAdvance: async (input) => {
+    branchAdvance: async () => {
       delegated += 1;
-      assert.equal(input.admission.operation, "branch.advance");
-      return {
-        version: 1,
-        operation: "branch.advance",
-        status: "succeeded",
-        outcome: "advanced",
-        branch: BRANCH,
-        expectedHead: "d".repeat(40),
-        resultingHead: "e".repeat(40),
-        provenance: verifiedBranchProvenance(input.admission),
-      };
+      throw new Error("Must not run without bound Implementation scope.");
     },
   }).execute(signed.envelope);
-  assert.equal(result.status, "succeeded");
-  assert.equal(result.branchAdvance?.outcome, "advanced");
-  assert.equal(result.provenance?.stage, "verified");
-  assert.equal(delegated, 1);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.phase, "authorization");
+  assert.equal(result.branchAdvance?.failure?.reason, "authorization");
+  assert.equal(delegated, 0);
   assert.deepEqual(executor.events, ["read"]);
-});
-
-test("branch.advance success without #466 verified provenance fails closed instead of falling back to authorized", async () => {
-  const executor = new FakeChangeExecutor(projection("draft"), projection("draft"));
-  const signed = signedEnvelope("branch.advance", branchAdvanceRequest(), [{ kind: "branch.advance", branch: BRANCH }]);
-  const succeededWithoutProvenance = {
-    version: 1 as const,
-    operation: "branch.advance" as const,
-    status: "succeeded" as const,
-    outcome: "advanced" as const,
-    branch: BRANCH,
-    expectedHead: "d".repeat(40),
-    resultingHead: "e".repeat(40),
-  };
-  const missingProvenance = await createCapabilityAuthorizedSessionExecutor({
-    authentication: signed.authentication,
-    changeExecutor: executor,
-    branchAdvance: async () => succeededWithoutProvenance,
-  }).execute(signed.envelope);
-  assert.equal(missingProvenance.status, "failed");
-  assert.equal(missingProvenance.failure?.phase, "verification");
-  assert.equal(missingProvenance.provenance?.stage, "authorized");
-  assert.deepEqual(missingProvenance.branchAdvance, succeededWithoutProvenance);
-
-  const unverifiedProvenance = await createCapabilityAuthorizedSessionExecutor({
-    authentication: signed.authentication,
-    changeExecutor: executor,
-    branchAdvance: async (input) => ({
-      ...succeededWithoutProvenance,
-      provenance: {
-        ...verifiedBranchProvenance(input.admission),
-        stage: "authorized" as const,
-      },
-    }),
-  }).execute(signed.envelope);
-  assert.equal(unverifiedProvenance.status, "failed");
-  assert.equal(unverifiedProvenance.failure?.phase, "verification");
-  assert.notEqual(unverifiedProvenance.provenance?.stage, "verified");
 });
 
 test("ChangeTrustedExecutor errors retain only its bounded diagnostics/evidence", async () => {
