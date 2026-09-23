@@ -274,6 +274,7 @@ test("Admission CLI setup is deterministic and serve requires setup", async () =
     );
     const authorityPath = path.join(root, "runtime-authority.json");
     await writeFile(authorityPath, `${JSON.stringify(authority)}\n`, "utf8");
+    assert.equal((await capture(["init", "--json"], environment)).exitCode, 0);
 
     const first = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
     assert.equal(first.exitCode, 0);
@@ -563,6 +564,9 @@ test("session start registers a production-verifiable binding and bounded proven
       async verifyReady() {
         return { ok: true };
       },
+      async resolveRepository() {
+        return { repositoryHost: "github.com", repositoryId: "123456789", nameWithOwner: "acme/inari" };
+      },
       async readEvidence() {
         return localTrustEvidence(local.authority);
       },
@@ -622,7 +626,7 @@ test("session start registers a production-verifiable binding and bounded proven
       },
     );
     assert.equal(result, 13);
-    assert.equal(identityReads, 1);
+    assert.equal(identityReads, 0);
     assert.equal(environment.INARI_SESSION_ID, undefined);
     assert.equal(environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, "parent-only-secret");
     assert.equal(environment.PARENT_ONLY, "unchanged");

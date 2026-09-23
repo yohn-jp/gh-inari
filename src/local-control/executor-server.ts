@@ -220,7 +220,8 @@ async function resolveLocalExecutorRepository(
   environment: NodeJS.ProcessEnv,
 ): Promise<RepositoryIdentity> {
   const parts = repositoryNameWithOwner.split("/");
-  if (parts.length !== 2) throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity is invalid.");
+  if (parts.length !== 2)
+    throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity is invalid.");
   const [owner, name] = parts as [string, string];
   const store = await requireCredential(environment);
   const credential = await store.load();
@@ -235,7 +236,12 @@ async function resolveLocalExecutorRepository(
         path: `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
       }),
     );
-    if (response.status !== 200 || typeof response.body !== "object" || response.body === null || Array.isArray(response.body)) {
+    if (
+      response.status !== 200 ||
+      typeof response.body !== "object" ||
+      response.body === null ||
+      Array.isArray(response.body)
+    ) {
       throw new Error();
     }
     const body = response.body as Record<string, unknown>;
@@ -288,7 +294,7 @@ async function readLocalExecutorEvidence(
       },
     });
     const runtime = await resolveDelegator(adapter, request.authorityId);
-    const authority = Object.freeze({ ref: runtime.provenance.ref, sha: runtime.provenance.policySha });
+    const authority = Object.freeze({ ref: `refs/heads/${runtime.provenance.ref}`, sha: runtime.provenance.policySha });
     if (request.issue === undefined || request.implementationIssue === undefined) {
       return Object.freeze({
         repository: identity,
@@ -497,7 +503,8 @@ export async function startConfiguredLocalExecutor(
     version,
     executorId: config.id,
     execute: (execution) => executeLocalAuthorizedExecution(execution, environment),
-    resolveRepository: (repositoryNameWithOwner) => resolveLocalExecutorRepository(repositoryNameWithOwner, environment),
+    resolveRepository: (repositoryNameWithOwner) =>
+      resolveLocalExecutorRepository(repositoryNameWithOwner, environment),
     readEvidence: (request) => readLocalExecutorEvidence(request, environment),
     ready: () => true,
   });

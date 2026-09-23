@@ -71,11 +71,7 @@ test("Admission setup can bind the initialized CLI route exactly once", async ()
     assert.deepEqual(bound.admission, route);
     assert.deepEqual(bindLocalCliAdmissionRoute(route, environment), bound);
     assert.throws(
-      () =>
-        bindLocalCliAdmissionRoute(
-          { id: "adm_fedcba9876543210", endpoint: "http://127.0.0.1:8766" },
-          environment,
-        ),
+      () => bindLocalCliAdmissionRoute({ id: "adm_fedcba9876543210", endpoint: "http://127.0.0.1:8766" }, environment),
       /conflicts/u,
     );
   } finally {

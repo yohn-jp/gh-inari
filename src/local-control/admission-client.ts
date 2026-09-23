@@ -173,7 +173,8 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
         typeof repository.repositoryId !== "string" ||
         !/^[1-9][0-9]{0,19}$/u.test(repository.repositoryId) ||
         typeof repository.repositoryNameWithOwner !== "string" ||
-        repository.repositoryNameWithOwner.toLocaleLowerCase("en-US") !== repositoryNameWithOwner.toLocaleLowerCase("en-US")
+        repository.repositoryNameWithOwner.toLocaleLowerCase("en-US") !==
+          repositoryNameWithOwner.toLocaleLowerCase("en-US")
       ) {
         throw new LocalAdmissionClientError(
           "ADMISSION_RESPONSE_INVALID",

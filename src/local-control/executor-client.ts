@@ -160,7 +160,8 @@ export class LocalExecutorClient {
       typeof repository.repositoryId !== "string" ||
       !/^[1-9][0-9]{0,19}$/u.test(repository.repositoryId) ||
       typeof repository.repositoryNameWithOwner !== "string" ||
-      repository.repositoryNameWithOwner.toLocaleLowerCase("en-US") !== repositoryNameWithOwner.toLocaleLowerCase("en-US")
+      repository.repositoryNameWithOwner.toLocaleLowerCase("en-US") !==
+        repositoryNameWithOwner.toLocaleLowerCase("en-US")
     ) {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Repository identity could not be resolved.");
     }
