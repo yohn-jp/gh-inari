@@ -16,6 +16,9 @@ import {
   validateLocalExecutorConfig,
 } from "./local-control/config.js";
 import { localExecutorAppId, localExecutorCredentialPath } from "./local-control/executor-server.js";
+import { LOCAL_EXECUTOR_HEALTH_PATH } from "./local-control/executor-http.js";
+import { LOCAL_ADMISSION_HEALTH_PATH } from "./local-control/admission-server.js";
+import { readLocalRuntimeEndpoint, type LocalRuntimeComponent } from "./local-control/runtime-discovery.js";
 import {
   delegatorPublicKeyFingerprint,
   exportDelegatorPublicKey,
@@ -404,4 +407,57 @@ export async function projectLocalApplicationState(
     },
     sessionStartCommand: SESSION_START_COMMAND,
   };
+}
+
+export type LocalRuntimeComponentReadiness = "ready" | "not-ready" | "not-running";
+
+export interface LocalRuntimeReadiness {
+  readonly executor: LocalRuntimeComponentReadiness;
+  readonly admission: LocalRuntimeComponentReadiness;
+  readonly overall: "ready" | "not-ready";
+}
+
+const RUNTIME_HEALTH_PATH: Readonly<Record<"executor" | "admission", string>> = {
+  executor: LOCAL_EXECUTOR_HEALTH_PATH,
+  admission: LOCAL_ADMISSION_HEALTH_PATH,
+};
+const RUNTIME_HEALTH_PROBE_TIMEOUT_MS = 800;
+
+async function probeLocalRuntimeComponentReadiness(
+  component: "executor" | "admission",
+  environment: NodeJS.ProcessEnv,
+): Promise<LocalRuntimeComponentReadiness> {
+  const discovered = readLocalRuntimeEndpoint(component as LocalRuntimeComponent, environment);
+  if (discovered === undefined) return "not-running";
+  try {
+    const response = await fetch(new URL(RUNTIME_HEALTH_PATH[component], discovered.endpoint), {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(RUNTIME_HEALTH_PROBE_TIMEOUT_MS),
+    });
+    if (response.status !== 200) return "not-ready";
+    const body: unknown = await response.json();
+    const readiness =
+      typeof body === "object" && body !== null && "readiness" in body
+        ? (body as Record<string, unknown>).readiness
+        : undefined;
+    return readiness === "ready" ? "ready" : "not-ready";
+  } catch {
+    return "not-ready";
+  }
+}
+
+/**
+ * Probe live Executor/Admission process readiness through the same loopback
+ * discovery and health surfaces the Supervisor uses. This is a best-effort
+ * read; it never persists state and exposes no secrets.
+ */
+export async function projectLocalRuntimeReadiness(
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<LocalRuntimeReadiness> {
+  const [executor, admission] = await Promise.all([
+    probeLocalRuntimeComponentReadiness("executor", environment),
+    probeLocalRuntimeComponentReadiness("admission", environment),
+  ]);
+  return { executor, admission, overall: executor === "ready" && admission === "ready" ? "ready" : "not-ready" };
 }

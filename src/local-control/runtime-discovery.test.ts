@@ -76,3 +76,22 @@ test("Executor discovery supports HTTPS while keeping 0.0.0.0 out of client dest
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("runtime discovery reuses its registry for the loopback console component", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const pathOnDisk = localRuntimeDiscoveryPath("console", environment);
+    const consoleEndpoint = publishLocalRuntimeEndpoint("console", "cnsl_0123456789abcdef", 41006, environment);
+    assert.equal(consoleEndpoint.endpoint, "http://127.0.0.1:41006");
+    assert.deepEqual(JSON.parse(await readFile(pathOnDisk, "utf8")), consoleEndpoint);
+    assert.deepEqual(requireLocalRuntimeEndpoint("console", consoleEndpoint.id, environment), consoleEndpoint);
+    assert.throws(
+      () => publishLocalRuntimeEndpoint("console", "cnsl_0123456789abcdef", 41007, environment, "https"),
+      /discovery state is invalid/u,
+    );
+    assert.equal(clearLocalRuntimeEndpoint(consoleEndpoint, environment), true);
+    assert.equal(readLocalRuntimeEndpoint("console", environment), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -20,7 +20,7 @@ export function isLocalRuntimeLoopbackAddress(address: string | undefined): bool
   );
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
