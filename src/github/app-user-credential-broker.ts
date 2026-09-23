@@ -4,12 +4,10 @@
  * immutable repository scope before it is exposed to its callback.
  */
 
-import { randomUUID } from "node:crypto";
 import {
   GitHubAppApiTransport,
   GITHUB_APP_GIT_DATA_PERMISSIONS,
   GITHUB_APP_REPOSITORY_READ_PERMISSIONS,
-  GITHUB_APP_RUNTIME_AUTHORITY_DISPATCH_PERMISSIONS,
   type GitHubAppCredentialFailureStage,
   type GitHubAppRepositoryReadCapability,
   type GitHubAppRepositoryReadPermissionSet,
@@ -41,7 +39,6 @@ import {
   validateRepositoryIdentity,
 } from "./effect-authorizer.js";
 import type {
-  GitHubChangeEffectJsonObject,
   GitHubChangeEffectGraphqlRequest,
   GitHubChangeEffectRepository,
   GitHubChangeEffectRequest,
@@ -68,10 +65,8 @@ import {
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
 import { attachChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
 import type { Delegator } from "../agent-authority/delegator.js";
-import {
-  createRuntimeAuthorityPublicationRequest,
-  RUNTIME_AUTHORITY_PUBLICATION_EVENT,
-} from "../runtime-authority-publication.js";
+import { createRuntimeAuthorityPublicationRequest } from "../runtime-authority-publication.js";
+import { RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH } from "../agent-authority/runtime-authority-publication-http.js";
 
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_API_URL_LENGTH = 2_048;
@@ -131,6 +126,15 @@ export interface GitHubAppUserCredentialBrokerOptions {
   readonly mutationFailure?: (effect: ChangeEffect) => Error;
   readonly provenance?: GitHubChangeProvenanceSignerOptions;
   readonly requestTimeoutMs?: number;
+  /**
+   * Base URL of the centrally custodied Runtime Authority Issuer/Worker
+   * boundary (#1066 correction; see `../github/direct-app-execution.js`'s
+   * `createDirectAppRuntimeAuthorityPublisher`). Required only by
+   * `dispatchRuntimeAuthorityPublication`. This repository's own Actions
+   * runtime never receives the Issuer private key: the caller submits only
+   * the validated public Runtime Authority record to this URL.
+   */
+  readonly issuerWorkerUrl?: string;
 }
 
 interface ResolvedCredential {
@@ -283,6 +287,22 @@ function normalizedApiUrl(value: string | undefined, hostname: string): string {
   }
 }
 
+function normalizedIssuerWorkerUrl(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.length === 0 || value.length > MAX_API_URL_LENGTH) {
+    throw new GitHubAppUserCredentialBrokerError("issuer-configuration");
+  }
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+      throw new Error();
+    }
+    return url.toString().replace(/\/$/u, "");
+  } catch {
+    throw new GitHubAppUserCredentialBrokerError("issuer-configuration");
+  }
+}
+
 /** App-user broker implementing the same bounded capability port as App installations. */
 export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroker {
   readonly #app: AppPrincipalIdentity;
@@ -299,6 +319,7 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
   readonly #mutationFailure: (effect: ChangeEffect) => Error;
   readonly #provenance: GitHubChangeProvenanceSignerOptions | undefined;
   readonly #requestTimeoutMs: number | undefined;
+  readonly #issuerWorkerUrl: string | undefined;
 
   constructor(options: GitHubAppUserCredentialBrokerOptions) {
     this.#failure = options.failure ?? ((stage) => new GitHubAppUserCredentialBrokerError(stage));
@@ -374,6 +395,7 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
       this.#now = options.now ?? (() => new Date());
       this.#provenance = options.provenance;
       this.#requestTimeoutMs = options.requestTimeoutMs;
+      this.#issuerWorkerUrl = normalizedIssuerWorkerUrl(options.issuerWorkerUrl);
     } catch (error: unknown) {
       if (error instanceof GitHubAppUserCredentialBrokerError) throw error;
       throw this.#safeFailure("issuer-configuration");
@@ -541,6 +563,15 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
     }
   }
 
+  /**
+   * Submit only the validated public Runtime Authority record to the
+   * centrally custodied Issuer/Worker boundary (#1066 correction). This
+   * repository is never required to hold the Issuer private key as an
+   * Actions secret: the Worker performs the bounded mutation (dedicated,
+   * repository-independent branch; exactly one public Authority artifact
+   * commit; governed PR; no auto-merge/approval) against its own
+   * deployment-fixed target repository and returns only success/failure.
+   */
   async dispatchRuntimeAuthorityPublication(request: { readonly authority: Delegator }): Promise<void> {
     let publicationRequest: ReturnType<typeof createRuntimeAuthorityPublicationRequest>;
     try {
@@ -548,27 +579,23 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
     } catch {
       throw this.#safeFailure("projection-execution", { reason: "response-validation" });
     }
-    const resolved = await this.#resolve(GITHUB_APP_RUNTIME_AUTHORITY_DISPATCH_PERMISSIONS);
+    if (this.#issuerWorkerUrl === undefined) throw this.#safeFailure("issuer-configuration");
     try {
-      const response = await resolved.credential.withAccessToken(async (token) => {
-        const transport = new GitHubNativeHttpTransport({
-          token,
-          apiUrl: this.#apiUrl,
-          fetch: this.#fetch,
-          ...(this.#requestTimeoutMs === undefined ? {} : { requestTimeoutMs: this.#requestTimeoutMs }),
-          maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES,
-        });
-        return transport.request({
-          hostname: this.#repository.hostname,
-          method: "POST",
-          path: `repos/${encodeURIComponent(this.#repository.owner)}/${encodeURIComponent(this.#repository.name)}/dispatches`,
-          body: {
-            event_type: RUNTIME_AUTHORITY_PUBLICATION_EVENT,
-            client_payload: { correlation: randomUUID(), request: publicationRequest },
-          } as unknown as GitHubChangeEffectJsonObject,
-        });
+      const response = await this.#fetch(`${this.#issuerWorkerUrl}${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify(publicationRequest),
       });
-      if (response.status !== 204) throw this.#safeFailure("projection-execution");
+      if (response.status !== 200) throw new Error();
+      const body: unknown = await response.json();
+      if (
+        typeof body !== "object" ||
+        body === null ||
+        Array.isArray(body) ||
+        (body as { readonly ok?: unknown }).ok !== true
+      ) {
+        throw new Error();
+      }
     } catch (error: unknown) {
       throw this.#safeOperation(error, "projection-execution");
     }

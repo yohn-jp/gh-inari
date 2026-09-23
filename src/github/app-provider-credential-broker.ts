@@ -36,7 +36,12 @@ export interface AppProviderCredentialBroker {
     operation: (capability: GitHubBranchAdvanceCapability) => Promise<T>,
   ): Promise<T>;
 
-  /** Dispatch one validated public Runtime Authority record when this broker supports setup publication. */
+  /**
+   * Submit one validated public Runtime Authority record to the centrally
+   * custodied Issuer/Worker boundary when this broker supports setup
+   * publication (#1066). Implementations never require the Issuer private
+   * key to cross this call.
+   */
   dispatchRuntimeAuthorityPublication?(request: { readonly authority: Delegator }): Promise<void>;
 }
 

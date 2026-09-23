@@ -58,6 +58,7 @@ import {
   type ChangeMutationRequest,
   type ChangeReadRequest,
 } from "../change-execution-port.js";
+import { publishRuntimeAuthority, type RuntimeAuthorityPublicationResult } from "../runtime-authority-publication.js";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -449,5 +450,73 @@ export function createDirectAppSessionExecutor(
         authorization: input.branchAuthorization,
         ...(config.now === undefined ? {} : { now: config.now }),
       }),
+  });
+}
+
+/**
+ * Deployment configuration for the stateless direct-App Runtime Authority
+ * publisher (#1066 correction). Unlike `DirectAppSessionExecutorConfig`, this
+ * composition never accepts an App-user broker, Session provenance, or
+ * caller-supplied target repository: bootstrap publication precedes any
+ * established Runtime Authority, so there is no Session to authorize it, and
+ * the target repository is fixed deployment configuration exactly like
+ * #468's Worker deployment profile.
+ */
+export interface DirectAppRuntimeAuthorityPublisherConfig {
+  /** GitHub App numeric identity. Worker secret; never caller input. */
+  readonly appId: string;
+  /** GitHub App installation identity. Non-secret deployment configuration. */
+  readonly installationId: string;
+  /** GitHub App private key (PEM). Worker secret; never caller input. */
+  readonly privateKeyPem: string;
+  /** Fixed target repository locator. Non-secret deployment configuration. */
+  readonly repository: GitHubChangeEffectRepository;
+  readonly repositoryNodeId?: string;
+  readonly apiUrl?: string;
+  readonly fetch?: typeof globalThis.fetch;
+  readonly now?: () => Date;
+  /** Bounded deadline applied to every GitHub provider request. Defaults to 10s; hard ceiling 30s. */
+  readonly requestTimeoutMs?: number;
+  /** Test/composition seam; production always mints a fresh #464 installation broker from the fields above. */
+  readonly credentialBroker?: Pick<
+    GitHubAppInstallationCredentialBroker,
+    "withRepositoryReadCapability" | "withRuntimeAuthorityPublicationCapability"
+  >;
+}
+
+/** Publishes only the validated public Runtime Authority record; never accepts private-key material. */
+export interface DirectAppRuntimeAuthorityPublisher {
+  publish(request: unknown): Promise<RuntimeAuthorityPublicationResult>;
+}
+
+/**
+ * Build the centrally custodied Runtime Authority publisher (#1066) for one
+ * fixed target repository. The caller supplies only the validated public
+ * Runtime Authority request/artifact; this composition owns the bounded
+ * mutation -- centrally custodied Issuer installation credential, dedicated
+ * branch, exactly one public Authority artifact commit, governed PR -- and
+ * never merges or approves the PR it opens.
+ */
+export function createDirectAppRuntimeAuthorityPublisher(
+  config: DirectAppRuntimeAuthorityPublisherConfig,
+): DirectAppRuntimeAuthorityPublisher {
+  const broker =
+    config.credentialBroker ??
+    new GitHubAppInstallationCredentialBroker({
+      appId: config.appId,
+      installationId: config.installationId,
+      privateKeyPem: config.privateKeyPem,
+      repository: config.repository,
+      ...(config.repositoryNodeId === undefined ? {} : { repositoryNodeId: config.repositoryNodeId }),
+      ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
+      ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
+      ...(config.now === undefined ? {} : { now: config.now }),
+      ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
+    });
+  return Object.freeze({
+    publish: async (request: unknown): Promise<RuntimeAuthorityPublicationResult> => {
+      const target = await broker.withRepositoryReadCapability({}, async (capability) => capability.scope.repository);
+      return publishRuntimeAuthority(request, target, broker);
+    },
   });
 }
