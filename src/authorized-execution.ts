@@ -137,7 +137,8 @@ export type AuthorizedExecution =
     })
   | (AuthorizedExecutionBase & {
       readonly operation: "pullRequest.publish";
-      readonly request: PrPublicationRequest | NormalizedPrPublicationRequest;
+      /** Canonical caller wire request, validated and frozen without derived route fields. */
+      readonly request: PrPublicationRequest;
       readonly execution: DirectAppTrustedExecutionContext;
     });
 
@@ -145,7 +146,7 @@ type NormalizedAuthorizedExecution =
   | Exclude<AuthorizedExecution, { readonly operation: "pullRequest.publish" }>
   | (AuthorizedExecutionBase & {
       readonly operation: "pullRequest.publish";
-      readonly request: NormalizedPrPublicationRequest;
+      readonly request: PrPublicationRequest;
       readonly execution: DirectAppTrustedExecutionContext;
     });
 
@@ -169,7 +170,7 @@ export interface AuthorizedExecutionDelegates {
   }) => Promise<BranchAdvanceSemanticResult>;
   readonly publishPullRequest?: (input: {
     readonly execution: DirectAppTrustedExecutionContext;
-    readonly request: NormalizedPrPublicationRequest;
+    readonly request: PrPublicationRequest;
   }) => Promise<Readonly<{ publication: PrPublicationResult; app?: CapabilityExecutionProvenance["app"] }>>;
 }
 
@@ -371,6 +372,47 @@ function normalizeChangeRequest(
   );
 }
 
+function clonePublicationWireValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => clonePublicationWireValue(entry));
+  if (isRecord(value)) {
+    const clone: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) clone[key] = clonePublicationWireValue(value[key]);
+    return clone;
+  }
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  throw new TypeError("Authorized publication routing is invalid.");
+}
+
+/** Preserve the validated publication wire shape; its normalized route is internal derived data. */
+function canonicalPublicationWireRequest(
+  input: unknown,
+  normalized: NormalizedPrPublicationRequest,
+): PrPublicationRequest {
+  if (!isRecord(input)) throw new TypeError("Authorized publication request is invalid.");
+  return freezeDeep({
+    version: normalized.version,
+    kind: normalized.kind,
+    repository: normalized.repository,
+    workIdentity: normalized.workIdentity,
+    ...(input.routing === undefined ? {} : { routing: clonePublicationWireValue(input.routing) }),
+    expectedHead: normalized.expectedHead,
+    expectedBase: normalized.expectedBase,
+    headRevision: normalized.headRevision,
+    title: normalized.title,
+    body: normalized.body,
+    ...(normalized.draft === undefined ? {} : { draft: normalized.draft }),
+    ...(normalized.maintainerCanModify === undefined ? {} : { maintainerCanModify: normalized.maintainerCanModify }),
+  }) as PrPublicationRequest;
+}
+
 function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecution {
   if (!isRecord(input) || input.version !== AUTHORIZED_EXECUTION_VERSION) {
     throw new TypeError("Authorized execution context is invalid.");
@@ -420,10 +462,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
     throw new TypeError("Authorized execution task does not match its request.");
 
   let request:
-    | ChangeMutationRequest
-    | ReturnType<typeof changeReadRequest>
-    | BranchAdvanceSemanticRequest
-    | NormalizedPrPublicationRequest;
+    ChangeMutationRequest | ReturnType<typeof changeReadRequest> | BranchAdvanceSemanticRequest | PrPublicationRequest;
   let initialProjection: ChangeProjectionResult | undefined;
   let execution: DirectAppTrustedExecutionContext | undefined;
   let branchAuthorization: BranchAdvanceAuthorizationEvidence | undefined;
@@ -472,7 +511,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
     const trusted = assertTrustedExecution(input.execution);
     if (trusted.runtime !== "inari-app") throw new TypeError("Authorized execution context is invalid.");
     execution = trusted as DirectAppTrustedExecutionContext;
-    request = validated.request;
+    request = canonicalPublicationWireRequest(input.request, validated.request);
   }
 
   if (
@@ -520,7 +559,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
   return Object.freeze({
     ...base,
     operation,
-    request: request as NormalizedPrPublicationRequest,
+    request: request as PrPublicationRequest,
     execution: execution!,
   }) as NormalizedAuthorizedExecution;
 }

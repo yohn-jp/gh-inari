@@ -49,7 +49,7 @@ import type { ChangeDiagnostic, ChangeProjectionResult } from "./change.js";
 import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
 import {
   tryValidatePrPublicationRequest,
-  type NormalizedPrPublicationRequest,
+  type PrPublicationRequest,
   type PrPublicationResult,
 } from "./pr-publication.js";
 import {
@@ -162,7 +162,8 @@ export interface CapabilityAuthorizedPullRequestPublicationInput {
   readonly context: AuthenticatedSessionContext;
   readonly execution: DirectAppTrustedExecutionContext;
   readonly admission: AdmittedSessionCapability;
-  readonly request: NormalizedPrPublicationRequest;
+  /** Canonical publication wire request accepted by the existing publisher. */
+  readonly request: PrPublicationRequest;
 }
 
 export interface CapabilityAuthorizedPullRequestPublicationResult {

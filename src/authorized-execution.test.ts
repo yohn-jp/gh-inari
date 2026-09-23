@@ -14,7 +14,13 @@ import {
   type AuthorizedExecution,
   type AuthorizedExecutionOperation,
 } from "./authorized-execution.js";
-import type { PrPublicationRequest } from "./pr-publication.js";
+import {
+  publishPullRequest,
+  tryValidatePrPublicationRequest,
+  type PrPublicationProvider,
+  type PrPublicationRecord,
+  type PrPublicationRequest,
+} from "./pr-publication.js";
 
 const ISSUE = 465;
 const REPOSITORY: RepositoryIdentity = {
@@ -312,6 +318,58 @@ test("executes branch advancement and publication through their existing delegat
   });
   assert.equal(publication.status, "succeeded", JSON.stringify(publication));
   assert.equal(publicationCalls, 1);
+});
+
+test("AuthorizedExecution passes the validated publication wire request to the canonical publisher", async () => {
+  const request = publicationRequest();
+  const input = authorized(
+    "pullRequest.publish",
+    request,
+    { kind: "pullRequest.create", head: BRANCH, base: "main", max: 1 },
+    { kind: "pullRequest", issue: ISSUE, head: BRANCH, base: "main" },
+  );
+  if (input.operation !== "pullRequest.publish") throw new Error("Publication fixture is invalid.");
+  assert.throws(() =>
+    createAuthorizedExecution({
+      ...input,
+      request: { ...request, pullRequest: { number: 42, url: "https://github.com/acme/inari/pull/42" } },
+    }),
+  );
+  let observed: PrPublicationRecord | undefined;
+  const provider: PrPublicationProvider = {
+    listPullRequests: async () => [],
+    readPullRequest: async (number) => {
+      assert.equal(number, 42);
+      if (observed === undefined) throw new Error("Created PR is unavailable.");
+      return observed;
+    },
+    createPullRequest: async (created) => {
+      observed = {
+        number: 42,
+        url: "https://github.com/acme/inari/pull/42",
+        title: created.title,
+        body: created.body,
+        head: created.head,
+        base: created.base,
+        headRevision: created.headRevision,
+        repository: created.repository,
+        workIdentity: created.workIdentity,
+      };
+      return observed;
+    },
+  };
+
+  const result = await executeAuthorizedExecution(input, {
+    publishPullRequest: async ({ request: wireRequest }) => {
+      assert.equal(tryValidatePrPublicationRequest(wireRequest).valid, true);
+      assert.equal("pullRequest" in (wireRequest.routing as Record<string, unknown>), false);
+      return { publication: await publishPullRequest(wireRequest, provider), app: APP };
+    },
+  });
+
+  assert.equal(result.status, "succeeded", JSON.stringify(result));
+  assert.equal(result.publication?.classification, "created");
+  assert.equal(result.provenance?.stage, "verified");
 });
 
 test("malformed or caller-authored authorization data fails closed before delegates run", async () => {
