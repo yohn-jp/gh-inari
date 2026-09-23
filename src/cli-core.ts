@@ -193,6 +193,7 @@ import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
 import { projectLocalApplicationState } from "./local-application-state.js";
+import { superviseLocalRuntime } from "./local-control/supervisor.js";
 import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
@@ -1428,6 +1429,22 @@ async function runRuntimeCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  if (command === "supervise") {
+    if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "Unknown Runtime supervise command.");
+    const definition = getCommand("runtime.supervise");
+    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+      const optionId = unsupported ?? "capability";
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime supervise.`,
+        "$argv",
+        { command: "runtime supervise", option: optionId },
+      );
+    }
+    return superviseLocalRuntime(dependencies.environment ?? process.env, json);
+  }
   if (command !== "connect" || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
   }

@@ -48,6 +48,17 @@ test("retired extension distribution is absent from the public runtime contract"
   assert.equal((RUNTIME_CAPABILITIES as readonly string[]).includes("extension-bootstrap"), false);
 });
 
+test("local Runtime supervision is one closed command over the canonical command contract", () => {
+  const command = getCommandForPositionals(["runtime", "supervise"]);
+  assert.ok(command);
+  assert.equal(command.id, "runtime.supervise");
+  assert.deepEqual(command.optionIds, ["help", "json"]);
+  assert.deepEqual(
+    projectCommandHelp(["runtime"]).commands.map((entry) => entry.id),
+    ["runtime.connect", "runtime.supervise"],
+  );
+});
+
 test("the shared tokenizer consumes every value-taking option before command identity", () => {
   const cases: readonly (readonly string[])[] = [
     ["--repository", "acme/inari", "issue", "create"],

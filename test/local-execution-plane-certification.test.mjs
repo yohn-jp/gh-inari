@@ -27,8 +27,16 @@ const providerPreload = String.raw`
 import http from "node:http";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
-const role = process.env.INARI_CERT_ROLE;
+const configuredRole = process.env.INARI_CERT_ROLE;
+const serviceArg = process.argv.find((value) => value === "admission" || value === "executor");
+const role = configuredRole === "supervisor" ? serviceArg : configuredRole;
 const requestLog = process.env.INARI_CERT_REQUEST_LOG;
+const forbiddenRuntimeCredentials = role === "admission"
+  ? ["GH_TOKEN", "GITHUB_TOKEN", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE", "INARI_GITHUB_APP_ID", "GITHUB_APP_ID", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"]
+  : ["GH_TOKEN", "GITHUB_TOKEN", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"];
+if ((role === "executor" || role === "admission") && forbiddenRuntimeCredentials.some((name) => Object.hasOwn(process.env, name))) {
+  throw new Error("A local Runtime child received credentials outside its custody boundary");
+}
 const originalEmit = http.Server.prototype.emit;
 http.Server.prototype.emit = function (event, ...args) {
   if (event === "request" && requestLog) {
@@ -215,6 +223,63 @@ async function startServer(group, cwd, env) {
   });
   assert.equal(announcement.operation, `${group}.serve`);
   return { child, announcement, stderr: () => stderr };
+}
+
+async function startSupervisor(cwd, env) {
+  const child = spawn(tsx, [cliEntry, "runtime", "supervise", "--json"], {
+    cwd,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const announcement = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`runtime supervise timed out: ${stdout}\n${stderr}`));
+    }, 20_000);
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout += chunk;
+      const line = stdout.split("\n").find((candidate) => candidate.startsWith("{"));
+      if (line === undefined) return;
+      try {
+        const value = JSON.parse(line);
+        clearTimeout(timer);
+        resolve(value);
+      } catch {
+        /* wait for a complete line */
+      }
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`runtime supervise exited ${code}: ${stdout}\n${stderr}`));
+    });
+  });
+  assert.equal(announcement.operation, "runtime.supervise");
+  assert.equal(announcement.readiness, "ready");
+  assert.equal(Object.hasOwn(announcement, "executorEndpoint"), false);
+  assert.equal(Object.hasOwn(announcement, "admissionEndpoint"), false);
+  return { child, announcement, stderr: () => stderr };
+}
+
+async function stopSupervisor(supervisor) {
+  if (supervisor.child.exitCode !== null) return;
+  supervisor.child.kill("SIGTERM");
+  let timeout;
+  try {
+    await Promise.race([
+      once(supervisor.child, "close"),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Supervisor did not stop")), 15_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+  assert.equal(supervisor.child.exitCode, 0, `Supervisor shutdown failed: ${supervisor.stderr()}`);
 }
 
 async function stopServer(server) {
@@ -651,6 +716,89 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     );
     await writeFile(clockFile, String(Date.now() + 3_700_000));
     await denied(intent(), expiringId, "expired Session denial");
+
+    for (const server of servers.reverse()) await stopServer(server);
+    servers.length = 0;
+    assert.equal(existsSync(discoveryPath(configHome, "executor")), false);
+    assert.equal(existsSync(discoveryPath(configHome, "admission")), false);
+    const supervisorEnv = {
+      ...executorEnv,
+      INARI_CERT_ROLE: "supervisor",
+      INARI_CERT_REQUEST_LOG: path.join(directory, "supervisor-requests.jsonl"),
+      INARI_CERT_CLOCK_FILE: clockFile,
+      GH_TOKEN: "executor-must-not-inherit-this-token",
+      GITHUB_TOKEN: "admission-must-not-inherit-this-token",
+      INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "runtime-authority-private-sentinel",
+    };
+    const executorFailure = command(["runtime", "supervise", "--json"], {
+      cwd: workspace,
+      env: {
+        ...supervisorEnv,
+        INARI_GITHUB_APP_USER_CREDENTIAL_FILE: path.join(providerCustody, "missing-app-user.json"),
+      },
+    });
+    assert.equal(executorFailure.error, undefined, `Executor failure check timed out: ${executorFailure.stderr}`);
+    assert.notEqual(
+      executorFailure.status,
+      0,
+      `Supervisor concealed an Executor startup failure: ${executorFailure.stdout}\n${executorFailure.stderr}`,
+    );
+    assert.match(executorFailure.stdout, /EXECUTOR_CREDENTIALS_MISSING/u);
+    assert.equal(existsSync(discoveryPath(configHome, "executor")), false);
+    assert.equal(existsSync(discoveryPath(configHome, "admission")), false);
+
+    const admissionConfigForFailure = JSON.parse(await readFile(admissionSetup.configPath, "utf8"));
+    const wrongSupervisorPeer = `${executorSetup.executorId.slice(0, -1)}${executorSetup.executorId.endsWith("A") ? "B" : "A"}`;
+    await updateJson(admissionSetup.configPath, (config) => {
+      config.executor.id = wrongSupervisorPeer;
+    });
+    const admissionFailure = command(["runtime", "supervise", "--json"], {
+      cwd: workspace,
+      env: supervisorEnv,
+    });
+    assert.equal(admissionFailure.error, undefined, `Admission failure check timed out: ${admissionFailure.stderr}`);
+    assert.notEqual(admissionFailure.status, 0, "Supervisor concealed an Admission startup failure");
+    assert.match(admissionFailure.stdout, /EXECUTOR_NOT_READY/u);
+    assert.equal(
+      existsSync(discoveryPath(configHome, "executor")),
+      false,
+      "Failed Supervisor left Executor discovery active",
+    );
+    assert.equal(existsSync(discoveryPath(configHome, "admission")), false);
+    await writeFile(admissionSetup.configPath, `${JSON.stringify(admissionConfigForFailure)}\n`);
+
+    const supervisor = await startSupervisor(workspace, supervisorEnv);
+    const supervisedExecutor = await readDiscovery(configHome, "executor");
+    const supervisedAdmission = await readDiscovery(configHome, "admission");
+    assert.equal(supervisedExecutor.component, "executor");
+    assert.equal(supervisedAdmission.component, "admission");
+    assert.equal(supervisedExecutor.id, executorSetup.executorId);
+    assert.equal(supervisedAdmission.id, admissionSetup.admissionId);
+    for (const [component, announcement] of [
+      ["executor", supervisedExecutor],
+      ["admission", supervisedAdmission],
+    ]) {
+      const statusResponse = await fetch(`${announcement.endpoint}/status`);
+      assert.equal(statusResponse.status, 200);
+      assert.match(statusResponse.headers.get("content-type"), /text\/html/iu);
+      const status = await statusResponse.text();
+      assert.match(status, new RegExp(component === "executor" ? "Local Executor" : "Local Admission", "u"));
+      assert.match(status, /<dd>ready<\/dd>/u);
+      assert.ok(status.includes(announcement.endpoint));
+      assert.ok(!status.includes(accessToken));
+      assert.ok(!status.includes(refreshToken));
+      assert.ok(!status.includes(privateKey));
+      assert.equal((await fetch(`${announcement.endpoint}/status`, { method: "POST" })).status, 405);
+    }
+    const admissionStatus = await (await fetch(`${supervisedAdmission.endpoint}/status`)).text();
+    assert.ok(admissionStatus.includes(`Pinned peer</dt><dd>executor ${executorSetup.executorId}</dd>`));
+    await stopSupervisor(supervisor);
+    assert.equal(existsSync(discoveryPath(configHome, "executor")), false, "Supervisor left Executor discovery active");
+    assert.equal(
+      existsSync(discoveryPath(configHome, "admission")),
+      false,
+      "Supervisor left Admission discovery active",
+    );
   } finally {
     for (const server of servers.reverse()) await stopServer(server);
     for (const server of historicalPortOccupants.reverse()) {

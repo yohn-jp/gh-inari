@@ -59,8 +59,10 @@ import {
   type LocalRuntimeEndpoint,
 } from "./runtime-discovery.js";
 import { LocalTransportSecurityError, loadLocalMtlsIdentity, type LocalMtlsIdentity } from "./transport-security.js";
+import { createLocalRuntimeStatusPage, isLocalRuntimeLoopbackAddress } from "./status-page.js";
 
 export const LOCAL_ADMISSION_DEFAULT_PORT = 0;
+export const LOCAL_ADMISSION_STATUS_PATH = "/status" as const;
 const LOCAL_ADMISSION_HISTORICAL_PORT = 8766;
 export const LOCAL_ADMISSION_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_ADMISSION_HEALTH_PATH = "/health" as const;
@@ -760,9 +762,49 @@ export function createLocalAdmissionHttpServer(
     executor,
     ...options,
   });
-  return createServer((incoming, outgoing) => {
+  let server: Server;
+  server = createServer((incoming, outgoing) => {
     void (async () => {
       try {
+        const pathname = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
+        if (pathname === LOCAL_ADMISSION_STATUS_PATH) {
+          if (config.listen.host !== "127.0.0.1" && !isLocalRuntimeLoopbackAddress(incoming.socket.remoteAddress)) {
+            outgoing.statusCode = 404;
+            outgoing.end();
+            return;
+          }
+          if (incoming.method !== "GET") {
+            outgoing.statusCode = 405;
+            outgoing.setHeader("allow", "GET");
+            outgoing.setHeader("content-type", "text/plain; charset=utf-8");
+            outgoing.end("Only GET is supported.\n");
+            return;
+          }
+          const address = server.address();
+          const boundPort = typeof address === "object" && address !== null ? address.port : undefined;
+          if (boundPort === undefined) {
+            outgoing.statusCode = 503;
+            outgoing.end();
+            return;
+          }
+          let readiness: "ready" | "not-ready" = "ready";
+          try {
+            await executor.verifyReady();
+          } catch {
+            readiness = "not-ready";
+          }
+          const response = createLocalRuntimeStatusPage({
+            component: "admission",
+            id: config.id,
+            readiness,
+            endpoint: `http://127.0.0.1:${boundPort}`,
+            pinnedPeer: { component: "executor", id: config.executor.id },
+          });
+          outgoing.statusCode = response.status;
+          response.headers.forEach((value, key) => outgoing.setHeader(key, value));
+          outgoing.end(Buffer.from(await response.arrayBuffer()));
+          return;
+        }
         const response = await handler(requestFromIncoming(incoming));
         outgoing.statusCode = response.status;
         response.headers.forEach((value, key) => outgoing.setHeader(key, value));
@@ -775,7 +817,8 @@ export function createLocalAdmissionHttpServer(
         );
       }
     })();
-  }).listen(
+  });
+  return server.listen(
     config.listen.port === LOCAL_ADMISSION_HISTORICAL_PORT ? LOCAL_ADMISSION_DEFAULT_PORT : config.listen.port,
     config.listen.host,
   );
