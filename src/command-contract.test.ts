@@ -55,8 +55,15 @@ test("local Runtime supervision is one closed command over the canonical command
   assert.deepEqual(command.optionIds, ["help", "json"]);
   assert.deepEqual(
     projectCommandHelp(["runtime"]).commands.map((entry) => entry.id),
-    ["runtime.connect", "runtime.supervise"],
+    ["runtime.connect", "runtime.supervise", "runtime.console"],
   );
+});
+
+test("the local Runtime console is one closed command projecting the canonical setup/runtime state", () => {
+  const command = getCommandForPositionals(["runtime", "console"]);
+  assert.ok(command);
+  assert.equal(command.id, "runtime.console");
+  assert.deepEqual(command.optionIds, ["help", "json"]);
 });
 
 test("the shared tokenizer consumes every value-taking option before command identity", () => {

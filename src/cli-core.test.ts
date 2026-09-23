@@ -105,6 +105,7 @@ test("inari init declares only the local CLI topology and is idempotent", async 
         readonly runtime: { readonly status: string; readonly commands: readonly string[] };
         readonly sessionStartCommand: string;
       };
+      readonly runtimeStatus: { readonly executor: string; readonly admission: string; readonly overall: string };
     };
     assert.equal(firstOutput.ok, true);
     assert.equal(firstOutput.operation, "init");
@@ -145,6 +146,9 @@ test("inari init declares only the local CLI topology and is idempotent", async 
       firstOutput.applicationState.sessionStartCommand,
       "inari session start --issue <number> -- <command...>",
     );
+    assert.equal(firstOutput.runtimeStatus.executor, "not-running");
+    assert.equal(firstOutput.runtimeStatus.admission, "not-running");
+    assert.equal(firstOutput.runtimeStatus.overall, "not-ready");
     assert.equal(first.stdout.includes("BEGIN PRIVATE KEY"), false);
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
@@ -157,6 +161,8 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     assert.ok(human.stdout.includes("inari authority bootstrap"));
     assert.ok(human.stdout.includes("inari admission setup --from"));
     assert.ok(human.stdout.includes("inari session start --issue <number> -- <command...>"));
+    assert.ok(human.stdout.includes("Runtime readiness: executor=not-running admission=not-running overall=not-ready"));
+    assert.ok(human.stdout.includes("inari runtime console"));
 
     const second = await capture(["init", "--json"], environment);
     assert.equal(second.exitCode, 0);
