@@ -32,6 +32,7 @@ import {
   type LocalExecutorConfig,
 } from "./config.js";
 import { LOCAL_SESSION_BINDING_VERSION, type LocalSessionBinding } from "./session-binding.js";
+import { clearLocalRuntimeEndpoint, publishLocalRuntimeEndpoint } from "./runtime-discovery.js";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 const REPOSITORY = { repositoryHost: "github.com", repositoryId: "123456789", repository: "acme/inari" };
@@ -206,6 +207,7 @@ test("Admission setup is idempotent and Admission serve requires setup and verif
   await once(executor, "listening");
   const address = executor.address();
   assert.ok(address !== null && typeof address !== "string");
+  const executorAnnouncement = publishLocalRuntimeEndpoint("executor", EXECUTOR_ID, address.port, environment);
   try {
     const executorConfig: LocalExecutorConfig = {
       version: 1,
@@ -256,6 +258,7 @@ test("Admission setup is idempotent and Admission serve requires setup and verif
       await closeServer(started.server);
     }
   } finally {
+    clearLocalRuntimeEndpoint(executorAnnouncement, environment);
     await closeServer(executor);
     await rm(root, { recursive: true, force: true });
   }
@@ -279,6 +282,7 @@ test("Admission rejects wrong Executor identity before opening its ready server"
   await once(wrong, "listening");
   const address = wrong.address();
   assert.ok(address !== null && typeof address !== "string");
+  const executorAnnouncement = publishLocalRuntimeEndpoint("executor", EXECUTOR_ID, address.port, environment);
   try {
     writeLocalJson(
       "executor",
@@ -310,6 +314,7 @@ test("Admission rejects wrong Executor identity before opening its ready server"
       (error: unknown) => error instanceof LocalAdmissionError && error.code === "EXECUTOR_NOT_READY",
     );
   } finally {
+    clearLocalRuntimeEndpoint(executorAnnouncement, environment);
     await closeServer(wrong);
     await rm(root, { recursive: true, force: true });
   }
