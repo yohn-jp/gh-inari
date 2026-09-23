@@ -17,6 +17,7 @@ import {
 } from "./admission-server.js";
 import { validateExecutionIntent, type ExecutionIntent } from "./execution-intent.js";
 import { readLocalJson, validateLocalCliConfig, type LocalAdmissionRoute } from "./config.js";
+import { requireLocalRuntimeEndpoint } from "./runtime-discovery.js";
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_SESSION_BINDING_BYTES = 16 * 1024;
@@ -252,7 +253,7 @@ export function configuredLocalAdmissionRoute(
 
 export function requireConfiguredLocalAdmissionRoute(
   environment: NodeJS.ProcessEnv = process.env,
-): LocalAdmissionRoute {
+): LocalAdmissionRoute & { readonly endpoint: string } {
   const route = configuredLocalAdmissionRoute(environment);
   if (route === undefined) {
     throw new LocalAdmissionClientError(
@@ -260,7 +261,8 @@ export function requireConfiguredLocalAdmissionRoute(
       "No Admission route is configured for the local CLI.",
     );
   }
-  return route;
+  const endpoint = requireLocalRuntimeEndpoint("admission", route.id, environment);
+  return { id: route.id, endpoint: endpoint.endpoint };
 }
 
 export function createSessionExecutionIntent(
