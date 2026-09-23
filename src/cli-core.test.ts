@@ -36,6 +36,7 @@ import {
   validateLocalExecutorConfig,
   writeLocalJson,
 } from "./local-control/config.js";
+import { publishLocalRuntimeEndpoint } from "./local-control/runtime-discovery.js";
 import {
   readLocalSessionBinding,
   readLocalSessionChangeIssueProvenance,
@@ -418,7 +419,6 @@ test("Admission CLI setup is deterministic and serve requires setup", async () =
     assert.equal(JSON.parse(second.stdout).admissionId, firstOutput.admissionId);
     assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")).executor, {
       id: firstOutput.executorId,
-      endpoint: "http://127.0.0.1:8765",
     });
     assert.equal(
       firstOutput.publicAuthorityPath,
@@ -480,17 +480,19 @@ function closeHttpServer(server: { close(callback: (error?: Error) => void): unk
 }
 
 function writeAdmissionRoute(environment: NodeJS.ProcessEnv, endpoint: string): void {
+  const id = "adm_0123456789abcdef";
   writeLocalJson(
     "cli",
     "config.json",
     {
       version: 1,
       topology: { admission: "local", executor: "local" },
-      admission: { id: "adm_0123456789abcdef", endpoint },
+      admission: { id },
     },
     validateLocalCliConfig,
     environment,
   );
+  publishLocalRuntimeEndpoint("admission", id, Number(new URL(endpoint).port), environment);
 }
 
 function authorityValidator(value: unknown): Delegator {

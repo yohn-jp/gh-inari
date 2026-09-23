@@ -309,13 +309,9 @@ export async function projectLocalApplicationState(
     authority.value !== undefined &&
     JSON.stringify(pinnedAuthority.value) === JSON.stringify(record.value) &&
     executor.value !== undefined &&
-    admission.value.executor.id === executor.value.id &&
-    admission.value.executor.endpoint === `http://${executor.value.listen.host}:${executor.value.listen.port}`;
+    admission.value.executor.id === executor.value.id;
   const configuredCliRoute = cli.value?.admission;
-  const cliRouteMatches =
-    admission.value !== undefined &&
-    configuredCliRoute?.id === admission.value.id &&
-    configuredCliRoute.endpoint === `http://${admission.value.listen.host}:${admission.value.listen.port}`;
+  const cliRouteMatches = admission.value !== undefined && configuredCliRoute?.id === admission.value.id;
   const cliRouteConflict = configuredCliRoute !== undefined && !cliRouteMatches;
   const admissionMatches = admissionConfigMatches && cliRouteMatches;
   const admissionBlocked =

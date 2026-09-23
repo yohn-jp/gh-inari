@@ -161,15 +161,19 @@ function jsonOutput(result, label) {
   return JSON.parse(lines.at(-1));
 }
 
-async function freePort() {
+async function occupyPort(port) {
   const server = createServer();
-  server.listen(0, "127.0.0.1");
+  server.listen(port, "127.0.0.1");
   await once(server, "listening");
-  const address = server.address();
-  const port = address.port;
-  server.close();
-  await once(server, "close");
-  return port;
+  return server;
+}
+
+function discoveryPath(configHome, component) {
+  return path.join(configHome, "runtime", "endpoints", `${component}.json`);
+}
+
+async function readDiscovery(configHome, component) {
+  return JSON.parse(await readFile(discoveryPath(configHome, component), "utf8"));
 }
 
 async function updateJson(file, update) {
@@ -332,8 +336,11 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
   const admissionLog = path.join(directory, "admission-requests.jsonl");
   const clockFile = path.join(directory, "clock.txt");
   const servers = [];
+  const historicalPortOccupants = [];
   try {
     await Promise.all([mkdir(configHome), mkdir(workspace), mkdir(providerCustody)]);
+    historicalPortOccupants.push(await occupyPort(8765));
+    historicalPortOccupants.push(await occupyPort(8766));
     git(workspace, "init", "-q");
     git(workspace, "remote", "add", "origin", "https://github.com/acme/inari.git");
     git(workspace, "checkout", "-q", "-b", branch);
@@ -421,10 +428,6 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       command(["executor", "setup", "--json"], { cwd: workspace, env: executorEnv }),
       "executor setup",
     );
-    const executorPort = await freePort();
-    await updateJson(executorSetup.configPath, (config) => {
-      config.listen.port = executorPort;
-    });
     const admissionSetup = jsonOutput(
       command(["admission", "setup", "--from", publicAuthorityFile, "--json"], {
         cwd: workspace,
@@ -432,13 +435,6 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       }),
       "admission setup",
     );
-    const admissionPort = await freePort();
-    await updateJson(admissionSetup.configPath, (config) => {
-      config.listen.port = admissionPort;
-    });
-    await updateJson(path.join(configHome, "cli/config.json"), (config) => {
-      config.admission.endpoint = `http://127.0.0.1:${admissionPort}`;
-    });
     const configuredState = jsonOutput(
       command(["init", "--json"], { cwd: workspace, env: executorEnv }),
       "configured init",
@@ -480,14 +476,18 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
 
     const executor = await startServer("executor", workspace, executorEnv);
     servers.push(executor);
-    const executorEndpoint = executor.announcement.endpoint;
+    assert.equal(Object.hasOwn(executor.announcement, "endpoint"), false, "serve output exposed an internal port");
+    const executorAnnouncement = await readDiscovery(configHome, "executor");
+    const executorEndpoint = executorAnnouncement.endpoint;
+    assert.notEqual(new URL(executorEndpoint).port, "8765");
+    assert.notEqual(new URL(executorEndpoint).port, "8766");
     const executorHealth = await fetch(`${executorEndpoint}/health`);
     assert.equal(executorHealth.status, 200);
     assert.equal((await executorHealth.json()).executorId, executorSetup.executorId);
 
     const admissionConfig = JSON.parse(await readFile(admissionSetup.configPath, "utf8"));
     assert.equal(admissionConfig.executor.id, executorSetup.executorId);
-    assert.equal(admissionConfig.executor.endpoint, executorEndpoint);
+    assert.equal(Object.hasOwn(admissionConfig.executor, "endpoint"), false);
     const wrongId = `${executorSetup.executorId.slice(0, -1)}${executorSetup.executorId.endsWith("A") ? "B" : "A"}`;
     await updateJson(admissionSetup.configPath, (config) => {
       config.executor.id = wrongId;
@@ -505,7 +505,11 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
 
     const admission = await startServer("admission", workspace, admissionEnv);
     servers.push(admission);
-    const admissionEndpoint = admission.announcement.endpoint;
+    assert.equal(Object.hasOwn(admission.announcement, "endpoint"), false, "serve output exposed an internal port");
+    const admissionAnnouncement = await readDiscovery(configHome, "admission");
+    let admissionEndpoint = admissionAnnouncement.endpoint;
+    assert.notEqual(new URL(admissionEndpoint).port, "8765");
+    assert.notEqual(new URL(admissionEndpoint).port, "8766");
     const admissionHealth = await fetch(`${admissionEndpoint}/health`);
     assert.equal(admissionHealth.status, 200);
     assert.equal((await admissionHealth.json()).admissionId, admissionSetup.admissionId);
@@ -515,6 +519,49 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     const rawResponse = await postIntent(executorEndpoint, rawIntent, "cert-session");
     assert.ok(rawResponse.status >= 400 && rawResponse.status < 500, "Executor accepted raw ExecutionIntent");
     assert.equal((await events(providerLog)).length, providerCallsBeforeRaw);
+
+    const executorConfigBeforeRestart = await readFile(executorSetup.configPath, "utf8");
+    const previousExecutorPort = Number(new URL(executorEndpoint).port);
+    const admissionConfigBeforeRestart = await readFile(admissionSetup.configPath, "utf8");
+    await stopServer(executor);
+    assert.equal(
+      existsSync(discoveryPath(configHome, "executor")),
+      false,
+      "Executor shutdown left a live announcement",
+    );
+    const previousPortOccupant = await occupyPort(previousExecutorPort);
+    try {
+      const restartedExecutor = await startServer("executor", workspace, executorEnv);
+      servers.push(restartedExecutor);
+      const restartedAnnouncement = await readDiscovery(configHome, "executor");
+      assert.notEqual(restartedAnnouncement.endpoint, executorEndpoint);
+      assert.notEqual(Number(new URL(restartedAnnouncement.endpoint).port), previousExecutorPort);
+      assert.equal(await readFile(executorSetup.configPath, "utf8"), executorConfigBeforeRestart);
+    } finally {
+      previousPortOccupant.close();
+      await once(previousPortOccupant, "close");
+    }
+
+    const previousAdmissionPort = Number(new URL(admissionEndpoint).port);
+    await stopServer(admission);
+    assert.equal(
+      existsSync(discoveryPath(configHome, "admission")),
+      false,
+      "Admission shutdown left a live announcement",
+    );
+    const previousAdmissionPortOccupant = await occupyPort(previousAdmissionPort);
+    try {
+      const restartedAdmission = await startServer("admission", workspace, admissionEnv);
+      servers.push(restartedAdmission);
+      const restartedAnnouncement = await readDiscovery(configHome, "admission");
+      assert.notEqual(restartedAnnouncement.endpoint, admissionEndpoint);
+      assert.notEqual(Number(new URL(restartedAnnouncement.endpoint).port), previousAdmissionPort);
+      admissionEndpoint = restartedAnnouncement.endpoint;
+      assert.equal(await readFile(admissionSetup.configPath, "utf8"), admissionConfigBeforeRestart);
+    } finally {
+      previousAdmissionPortOccupant.close();
+      await once(previousAdmissionPortOccupant, "close");
+    }
 
     const sessionId = "cert-session";
     const agentEnv = {
@@ -606,6 +653,10 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     await denied(intent(), expiringId, "expired Session denial");
   } finally {
     for (const server of servers.reverse()) await stopServer(server);
+    for (const server of historicalPortOccupants.reverse()) {
+      server.close();
+      await once(server, "close");
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });

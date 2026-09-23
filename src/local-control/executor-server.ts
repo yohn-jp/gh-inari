@@ -54,9 +54,15 @@ import {
   type LocalExecutorEvidenceRequest,
   type LocalExecutorHttpHandlerOptions,
 } from "./executor-http.js";
+import {
+  clearLocalRuntimeEndpoint,
+  publishLocalRuntimeEndpoint,
+  type LocalRuntimeEndpoint,
+} from "./runtime-discovery.js";
 
-export const LOCAL_EXECUTOR_DEFAULT_PORT = 8765;
+export const LOCAL_EXECUTOR_DEFAULT_PORT = 0;
 export const LOCAL_EXECUTOR_CREDENTIAL_PROFILE = "default";
+const LOCAL_EXECUTOR_HISTORICAL_PORT = 8765;
 const EXECUTOR_CONFIG_PATH = "config.json";
 
 export class LocalExecutorError extends Error {
@@ -72,6 +78,10 @@ export class LocalExecutorError extends Error {
 export interface LocalExecutorSetupResult {
   readonly config: LocalExecutorConfig;
   readonly configPath: string;
+}
+
+function configuredListenPort(port: number): number {
+  return port === LOCAL_EXECUTOR_HISTORICAL_PORT ? LOCAL_EXECUTOR_DEFAULT_PORT : port;
 }
 
 export function localExecutorCredentialPath(environment: NodeJS.ProcessEnv = process.env): string {
@@ -477,7 +487,7 @@ function requestFromIncoming(request: IncomingMessage): Request {
 
 export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOptions): Server {
   const handler = createLocalExecutorHttpHandler(options);
-  const port = options.listenPort ?? options.config.listen.port;
+  const port = options.listenPort ?? configuredListenPort(options.config.listen.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new TypeError("Local Executor listen port is invalid.");
   return createServer((incoming, outgoing) => {
@@ -500,7 +510,11 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
 export async function startConfiguredLocalExecutor(
   version: string,
   environment: NodeJS.ProcessEnv = process.env,
-): Promise<{ readonly server: Server; readonly config: LocalExecutorConfig }> {
+): Promise<{
+  readonly server: Server;
+  readonly config: LocalExecutorConfig;
+  readonly announcement: LocalRuntimeEndpoint;
+}> {
   const config = configuredLocalExecutor(environment);
   await requireCredential(environment);
   appId(environment);
@@ -526,5 +540,25 @@ export async function startConfiguredLocalExecutor(
       "Local Executor could not bind its configured loopback endpoint.",
     );
   }
-  return { server, config };
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : undefined;
+  if (port === undefined) {
+    server.close();
+    throw new LocalExecutorError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
+  }
+  let announcement: LocalRuntimeEndpoint;
+  try {
+    announcement = publishLocalRuntimeEndpoint("executor", config.id, port, environment);
+  } catch {
+    server.close();
+    throw new LocalExecutorError("EXECUTOR_DISCOVERY_FAILED", "Local Executor endpoint could not be published safely.");
+  }
+  server.once("close", () => {
+    try {
+      clearLocalRuntimeEndpoint(announcement, environment);
+    } catch {
+      // A shutdown cleanup failure must not change the process close behavior.
+    }
+  });
+  return { server, config, announcement };
 }
