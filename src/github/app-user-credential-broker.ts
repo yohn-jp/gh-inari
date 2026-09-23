@@ -4,10 +4,12 @@
  * immutable repository scope before it is exposed to its callback.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   GitHubAppApiTransport,
   GITHUB_APP_GIT_DATA_PERMISSIONS,
   GITHUB_APP_REPOSITORY_READ_PERMISSIONS,
+  GITHUB_APP_RUNTIME_AUTHORITY_DISPATCH_PERMISSIONS,
   type GitHubAppCredentialFailureStage,
   type GitHubAppRepositoryReadCapability,
   type GitHubAppRepositoryReadPermissionSet,
@@ -39,6 +41,7 @@ import {
   validateRepositoryIdentity,
 } from "./effect-authorizer.js";
 import type {
+  GitHubChangeEffectJsonObject,
   GitHubChangeEffectGraphqlRequest,
   GitHubChangeEffectRepository,
   GitHubChangeEffectRequest,
@@ -64,6 +67,11 @@ import {
 } from "./provider-failure.js";
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
 import { attachChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
+import type { Delegator } from "../agent-authority/delegator.js";
+import {
+  createRuntimeAuthorityPublicationRequest,
+  RUNTIME_AUTHORITY_PUBLICATION_EVENT,
+} from "../runtime-authority-publication.js";
 
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_API_URL_LENGTH = 2_048;
@@ -528,6 +536,39 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
     });
     try {
       return await operation(capability);
+    } catch (error: unknown) {
+      throw this.#safeOperation(error, "projection-execution");
+    }
+  }
+
+  async dispatchRuntimeAuthorityPublication(request: { readonly authority: Delegator }): Promise<void> {
+    let publicationRequest: ReturnType<typeof createRuntimeAuthorityPublicationRequest>;
+    try {
+      publicationRequest = createRuntimeAuthorityPublicationRequest(request.authority);
+    } catch {
+      throw this.#safeFailure("projection-execution", { reason: "response-validation" });
+    }
+    const resolved = await this.#resolve(GITHUB_APP_RUNTIME_AUTHORITY_DISPATCH_PERMISSIONS);
+    try {
+      const response = await resolved.credential.withAccessToken(async (token) => {
+        const transport = new GitHubNativeHttpTransport({
+          token,
+          apiUrl: this.#apiUrl,
+          fetch: this.#fetch,
+          ...(this.#requestTimeoutMs === undefined ? {} : { requestTimeoutMs: this.#requestTimeoutMs }),
+          maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES,
+        });
+        return transport.request({
+          hostname: this.#repository.hostname,
+          method: "POST",
+          path: `repos/${encodeURIComponent(this.#repository.owner)}/${encodeURIComponent(this.#repository.name)}/dispatches`,
+          body: {
+            event_type: RUNTIME_AUTHORITY_PUBLICATION_EVENT,
+            client_payload: { correlation: randomUUID(), request: publicationRequest },
+          } as unknown as GitHubChangeEffectJsonObject,
+        });
+      });
+      if (response.status !== 204) throw this.#safeFailure("projection-execution");
     } catch (error: unknown) {
       throw this.#safeOperation(error, "projection-execution");
     }

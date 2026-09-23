@@ -39,6 +39,11 @@ import {
   type LocalRuntimeProfileRepository,
 } from "./local-runtime-profile.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry } from "./github/types.js";
+import {
+  publishSetupRuntimeAuthority,
+  type RuntimeAuthorityPublicationClientOptions,
+} from "./github/runtime-authority-publication-client.js";
+import type { RuntimeAuthorityPublicationResult } from "./runtime-authority-publication.js";
 
 const DEFAULT_SESSION_TTL_SECONDS = 3_600;
 const DEFAULT_GITHUB_HOST = "github.com";
@@ -53,7 +58,8 @@ export type RepositorySetupErrorCode =
   | "REPOSITORY_SETUP_PROFILE_MISMATCH"
   | "REPOSITORY_SETUP_AUTHORITY_MISMATCH"
   | "REPOSITORY_SETUP_AUTHORITY_FAILED"
-  | "REPOSITORY_SETUP_TRUST_UNAVAILABLE";
+  | "REPOSITORY_SETUP_TRUST_UNAVAILABLE"
+  | "REPOSITORY_SETUP_PUBLICATION_FAILED";
 
 export class RepositorySetupError extends Error {
   readonly code: RepositorySetupErrorCode;
@@ -86,6 +92,10 @@ export interface RepositorySetupInput {
     readonly clientId?: string;
   };
   readonly appUserBroker?: AppProviderCredentialBroker;
+  /** Test/composition seam; production setup uses its Device Flow credential and bounded Issuer workflow. */
+  readonly authorityPublisher?: (
+    options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">,
+  ) => Promise<RuntimeAuthorityPublicationResult>;
   readonly now?: () => Date;
   readonly maxSessionTtlSeconds?: number;
   /** Called only for human Device Flow setup; values are public short-lived instructions. */
@@ -113,6 +123,7 @@ export interface RepositorySetupResult {
     readonly privateKeyPath: string;
     readonly artifactPath: string;
   };
+  readonly publication?: RuntimeAuthorityPublicationResult;
   readonly profilePath?: string;
   readonly readiness?: Pick<DelegatorReadinessResult, "ok" | "state" | "canonical" | "diagnostics">;
 }
@@ -372,6 +383,9 @@ async function setupWithCapability(
   capability: GitHubAppRepositoryReadCapability,
   installationId: string,
   endpoint: string,
+  authorityPublisher?: (
+    options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">,
+  ) => Promise<RuntimeAuthorityPublicationResult>,
 ): Promise<RepositorySetupResult> {
   const environment = input.environment ?? process.env;
   const profileStore = new LocalRuntimeProfileStore({ configHome: input.configHome, environment });
@@ -488,6 +502,22 @@ async function setupWithCapability(
     );
   }
   if (!readiness.ok) {
+    let publication: RuntimeAuthorityPublicationResult | undefined;
+    if (authorityPublisher !== undefined) {
+      try {
+        publication = await authorityPublisher({
+          capability,
+          repository,
+          authority: materializedAuthority,
+        });
+      } catch {
+        throw new RepositorySetupError(
+          "REPOSITORY_SETUP_PUBLICATION_FAILED",
+          "Runtime Authority trust PR could not be published. Resolve the repository publication state and rerun setup.",
+          { authorityId },
+        );
+      }
+    }
     return {
       ok: true,
       operation: "setup",
@@ -500,6 +530,7 @@ async function setupWithCapability(
       authority: { authorityId, publicKeyFingerprint: fingerprint, privateKeyPath: keyPath, artifactPath },
       profilePath,
       readiness: { ok: false, state: readiness.state, diagnostics: readiness.diagnostics },
+      ...(publication === undefined ? {} : { publication }),
     };
   }
   const readyProfile = await profileStore.save({ ...pendingProfile, state: "ready" });
@@ -571,6 +602,16 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
       ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       ...(input.now === undefined ? {} : { now: input.now }),
     });
+  const dispatchRuntimeAuthorityPublication = broker.dispatchRuntimeAuthorityPublication?.bind(broker);
+  const authorityPublisher =
+    input.authorityPublisher ??
+    (dispatchRuntimeAuthorityPublication === undefined
+      ? undefined
+      : async (options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">) =>
+          publishSetupRuntimeAuthority({
+            ...options,
+            dispatch: (authority) => dispatchRuntimeAuthorityPublication({ authority }),
+          }));
   try {
     return await broker.withRepositoryReadCapability({}, async (capability) => {
       const scope = capability.scope;
@@ -600,6 +641,7 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
         capability,
         scope.installation.installationId,
         endpoint,
+        authorityPublisher,
       );
     });
   } catch (error: unknown) {
