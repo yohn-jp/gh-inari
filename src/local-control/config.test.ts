@@ -5,11 +5,14 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   bindLocalCliAdmissionRoute,
+  configuredLocalRuntimeBindHost,
+  ensureLocalComponentDirectory,
   ensureLocalCliTopology,
   localComponentDirectory,
   localComponentPath,
   readExistingLocalPublicJson,
   resolveConfigHome,
+  readLocalPrivateFile,
   validateLocalAdmissionConfig,
   validateLocalCliConfig,
   validateLocalExecutorConfig,
@@ -140,6 +143,72 @@ test("local config schemas are closed, bounded, and pin only local loopback rout
       }),
     /unsupported fields/u,
   );
+});
+
+test("non-loopback configuration is explicit and keeps client destinations loopback-only", () => {
+  const environment = { INARI_LOCAL_RUNTIME_BIND: "0.0.0.0" };
+  assert.equal(configuredLocalRuntimeBindHost(environment), "0.0.0.0");
+  assert.equal(configuredLocalRuntimeBindHost({}), "127.0.0.1");
+  assert.throws(() => configuredLocalRuntimeBindHost({ INARI_LOCAL_RUNTIME_BIND: "192.0.2.10" }), /must be/u);
+  assert.deepEqual(
+    validateLocalAdmissionConfig({
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "0.0.0.0", port: 8080 },
+      executor: { id: "exec_0123456789abcdef", endpoint: "https://127.0.0.1:8081" },
+    }),
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "0.0.0.0", port: 8080 },
+      executor: { id: "exec_0123456789abcdef", endpoint: "https://127.0.0.1:8081" },
+    },
+  );
+  assert.throws(
+    () =>
+      validateLocalAdmissionConfig({
+        version: 1,
+        id: "adm_0123456789abcdef",
+        listen: { host: "0.0.0.0", port: 8080 },
+        executor: { id: "exec_0123456789abcdef", endpoint: "https://0.0.0.0:8081" },
+      }),
+    /loopback destination/u,
+  );
+  assert.throws(
+    () =>
+      validateLocalAdmissionConfig({
+        version: 1,
+        id: "adm_0123456789abcdef",
+        listen: { host: "0.0.0.0", port: 8080 },
+        executor: { id: "exec_0123456789abcdef", endpoint: "http://127.0.0.1:8081" },
+      }),
+    /loopback destination/u,
+  );
+});
+
+test("local transport identity files are read only from owner-only regular files", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    ensureLocalComponentDirectory("admission", environment);
+    const keyPath = localComponentPath("admission", "mtls-private-key.pem", environment);
+    await writeFile(keyPath, "private material", { mode: 0o600 });
+    assert.equal(
+      readLocalPrivateFile("admission", "mtls-private-key.pem", environment)?.toString(),
+      "private material",
+    );
+
+    const unsafePath = localComponentPath("admission", "unsafe.pem", environment);
+    await writeFile(unsafePath, "private material", { mode: 0o644 });
+    assert.throws(() => readLocalPrivateFile("admission", "unsafe.pem", environment), /permissions|ownership/u);
+
+    const outsidePath = path.join(root, "outside.pem");
+    await writeFile(outsidePath, "private material", { mode: 0o600 });
+    await rm(keyPath);
+    await symlink(outsidePath, keyPath);
+    assert.throws(() => readLocalPrivateFile("admission", "mtls-private-key.pem", environment), /safely|unsafe/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("local configuration rejects symlink files and keeps private directory and file modes", async () => {

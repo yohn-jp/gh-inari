@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import type { TLSSocket } from "node:tls";
 import { Readable } from "node:stream";
 import path from "node:path";
 import {
@@ -45,10 +47,17 @@ import {
   LOCAL_CONFIG_VERSION,
   readLocalJson,
   resolveConfigHome,
+  validateLocalAdmissionConfig,
   validateLocalExecutorConfig,
+  configuredLocalRuntimeBindHost,
   writeLocalJson,
   type LocalExecutorConfig,
 } from "./config.js";
+import {
+  LocalTransportSecurityError,
+  loadLocalMtlsIdentity,
+  verifyLocalMtlsPeerIdentity,
+} from "./transport-security.js";
 import {
   createLocalExecutorHttpHandler,
   type LocalExecutorEvidenceRequest,
@@ -144,13 +153,20 @@ export async function setupLocalExecutor(
   appId(environment);
   const configPath = path.join(resolveConfigHome(environment), "executor", EXECUTOR_CONFIG_PATH);
   const existing = readLocalJson("executor", EXECUTOR_CONFIG_PATH, validateLocalExecutorConfig, environment);
+  const bindHost = configuredLocalRuntimeBindHost(environment);
   if (existing !== undefined) requireSupportedCredentialProfile(existing);
+  if (existing !== undefined && existing.listen.host !== bindHost) {
+    throw new LocalExecutorError(
+      "EXECUTOR_BIND_POLICY_CONFLICT",
+      "Executor bind policy conflicts with existing setup. Select the bind policy before setting up local components.",
+    );
+  }
   if (existing !== undefined) return { config: existing, configPath };
 
   const config: LocalExecutorConfig = {
     version: LOCAL_CONFIG_VERSION,
     id: `exec_${randomBytes(24).toString("base64url")}`,
-    listen: { host: "127.0.0.1", port: LOCAL_EXECUTOR_DEFAULT_PORT },
+    listen: { host: bindHost, port: LOCAL_EXECUTOR_DEFAULT_PORT },
     provider: { kind: "github", credentialProfile: LOCAL_EXECUTOR_CREDENTIAL_PROFILE },
   };
   try {
@@ -457,6 +473,7 @@ export async function executeLocalAuthorizedExecution(
 export interface LocalExecutorHttpServerOptions extends LocalExecutorHttpHandlerOptions {
   readonly config: LocalExecutorConfig;
   readonly listenPort?: number;
+  readonly transport?: ReturnType<typeof loadLocalMtlsIdentity>;
 }
 
 function writeResponse(response: Response, outgoing: ServerResponse): Promise<void> {
@@ -490,7 +507,26 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
   const port = options.listenPort ?? configuredListenPort(options.config.listen.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new TypeError("Local Executor listen port is invalid.");
-  return createServer((incoming, outgoing) => {
+  const nonLoopback = options.config.listen.host === "0.0.0.0";
+  if (
+    nonLoopback !== (options.transport !== undefined) ||
+    (options.transport !== undefined && options.transport.peerRole !== "admission")
+  ) {
+    throw new TypeError("Local Executor non-loopback bind requires a configured mTLS identity.");
+  }
+  const handle = (incoming: IncomingMessage, outgoing: ServerResponse): void => {
+    if (nonLoopback) {
+      const socket = incoming.socket as TLSSocket;
+      const peer = socket.getPeerCertificate();
+      if (
+        !socket.authorized ||
+        options.transport === undefined ||
+        !verifyLocalMtlsPeerIdentity(peer, "admission", options.transport.peerId)
+      ) {
+        socket.destroy();
+        return;
+      }
+    }
     void (async () => {
       try {
         await writeResponse(await handler(requestFromIncoming(incoming)), outgoing);
@@ -504,7 +540,22 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
         );
       }
     })();
-  }).listen(port, options.config.listen.host);
+  };
+  if (nonLoopback) {
+    const transport = options.transport;
+    if (transport === undefined) throw new TypeError("Local Executor mTLS identity is missing.");
+    return createHttpsServer(
+      {
+        key: transport.privateKey,
+        cert: transport.certificate,
+        ca: transport.caCertificate,
+        requestCert: true,
+        rejectUnauthorized: true,
+      },
+      handle,
+    ).listen(port, options.config.listen.host);
+  }
+  return createServer(handle).listen(port, options.config.listen.host);
 }
 
 export async function startConfiguredLocalExecutor(
@@ -518,6 +569,24 @@ export async function startConfiguredLocalExecutor(
   const config = configuredLocalExecutor(environment);
   await requireCredential(environment);
   appId(environment);
+  let transport: ReturnType<typeof loadLocalMtlsIdentity> | undefined;
+  if (config.listen.host === "0.0.0.0") {
+    const admission = readLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment);
+    if (admission === undefined) {
+      throw new LocalExecutorError(
+        "EXECUTOR_ADMISSION_IDENTITY_MISSING",
+        "Non-loopback Executor requires configured local Admission identity and mTLS custody.",
+      );
+    }
+    try {
+      transport = loadLocalMtlsIdentity("executor", config.id, admission.id, environment);
+    } catch (error: unknown) {
+      if (error instanceof LocalTransportSecurityError) {
+        throw new LocalExecutorError(error.code, error.message);
+      }
+      throw error;
+    }
+  }
   const server = createLocalExecutorHttpServer({
     config,
     version,
@@ -527,6 +596,7 @@ export async function startConfiguredLocalExecutor(
       resolveLocalExecutorRepository(repositoryNameWithOwner, environment),
     readEvidence: (request) => readLocalExecutorEvidence(request, environment),
     ready: () => true,
+    ...(transport === undefined ? {} : { transport }),
   });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -535,20 +605,23 @@ export async function startConfiguredLocalExecutor(
     });
   } catch {
     server.close();
-    throw new LocalExecutorError(
-      "EXECUTOR_LISTEN_FAILED",
-      "Local Executor could not bind its configured loopback endpoint.",
-    );
+    throw new LocalExecutorError("EXECUTOR_LISTEN_FAILED", "Local Executor could not bind its configured endpoint.");
   }
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : undefined;
   if (port === undefined) {
     server.close();
-    throw new LocalExecutorError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
+    throw new LocalExecutorError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a listening port.");
   }
   let announcement: LocalRuntimeEndpoint;
   try {
-    announcement = publishLocalRuntimeEndpoint("executor", config.id, port, environment);
+    announcement = publishLocalRuntimeEndpoint(
+      "executor",
+      config.id,
+      port,
+      environment,
+      config.listen.host === "0.0.0.0" ? "https" : "http",
+    );
   } catch {
     server.close();
     throw new LocalExecutorError("EXECUTOR_DISCOVERY_FAILED", "Local Executor endpoint could not be published safely.");

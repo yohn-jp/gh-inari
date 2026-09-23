@@ -20,6 +20,8 @@ export interface LocalRuntimeEndpoint {
   readonly instanceId: string;
 }
 
+export type LocalRuntimeEndpointScheme = "http" | "https";
+
 export type LocalRuntimeDiscoveryErrorCode =
   | "LOCAL_RUNTIME_ENDPOINT_NOT_DISCOVERED"
   | "LOCAL_RUNTIME_ENDPOINT_IDENTITY_MISMATCH"
@@ -66,7 +68,8 @@ export function validateLocalRuntimeEndpoint(value: unknown): LocalRuntimeEndpoi
     throw invalid();
   }
   if (
-    endpoint.protocol !== "http:" ||
+    (component === "admission" && endpoint.protocol !== "http:") ||
+    (component === "executor" && endpoint.protocol !== "http:" && endpoint.protocol !== "https:") ||
     endpoint.hostname !== "127.0.0.1" ||
     endpoint.port.length === 0 ||
     !Number.isInteger(Number(endpoint.port)) ||
@@ -137,13 +140,15 @@ export function publishLocalRuntimeEndpoint(
   id: string,
   port: number,
   environment: NodeJS.ProcessEnv = process.env,
+  scheme: LocalRuntimeEndpointScheme = "http",
 ): LocalRuntimeEndpoint {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw invalid();
+  if (component === "admission" && scheme !== "http") throw invalid();
   const candidate = validateLocalRuntimeEndpoint({
     version: LOCAL_RUNTIME_DISCOVERY_VERSION,
     component,
     id,
-    endpoint: `http://127.0.0.1:${port}`,
+    endpoint: `${scheme}://127.0.0.1:${port}`,
     instanceId: randomBytes(24).toString("base64url"),
   });
   return replaceLocalJson("runtime", discoveryPath(component), candidate, endpointValidator, environment);

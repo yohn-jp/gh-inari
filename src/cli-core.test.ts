@@ -328,6 +328,7 @@ test("executor setup and serve use the Executor command contract and existing cr
     assert.equal(output.ok, true);
     assert.equal(output.operation, "executor.setup");
     assert.match(output.executorId, /^exec_[A-Za-z0-9_-]{16,64}$/u);
+    assert.equal("endpoint" in output, false);
     assert.equal(output.configPath, path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json"));
     assert.equal(output.provider.credentialProfile, "default");
     assert.equal(setup.stdout.includes("access-secret"), false);
@@ -413,6 +414,7 @@ test("Admission CLI setup is deterministic and serve requires setup", async () =
     assert.equal(firstOutput.operation, "admission.setup");
     assert.match(firstOutput.admissionId, /^adm_[A-Za-z0-9_-]{16,64}$/u);
     assert.equal(firstOutput.executorId, "exec_0123456789abcdef");
+    assert.equal("executorEndpoint" in firstOutput, false);
     assert.equal(first.stdout.includes("private"), false);
 
     const second = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
