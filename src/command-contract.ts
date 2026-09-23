@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.15.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.16.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -33,6 +33,7 @@ export type CommandDomain =
   | "authority"
   | "session"
   | "runtime"
+  | "executor"
   | "mcp"
   | "release"
   | "skill";
@@ -131,6 +132,8 @@ export type CommandId =
   | "session.issue"
   | "session.inspect"
   | "runtime.connect"
+  | "executor.setup"
+  | "executor.serve"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -1541,6 +1544,22 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     RUNTIME_OPTIONS,
   ),
   command(
+    "executor.setup",
+    "executor",
+    "setup",
+    ["executor", "setup"],
+    "Provision the local Executor identity and reference existing GitHub App user credential custody.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "executor.serve",
+    "executor",
+    "serve",
+    ["executor", "serve"],
+    "Run the configured post-admission local Executor HTTP server on loopback.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
     "mcp.serve",
     "mcp",
     "serve",
@@ -1752,6 +1771,7 @@ export function helpInvocation(
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
     | "mcp"
     | "skill",
 ): string {
@@ -1936,6 +1956,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "change" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "executor" ||
     domain === "mcp"
   )
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };

@@ -190,6 +190,7 @@ import {
 import { setupRepository, type RepositorySetupInput } from "./repository-setup.js";
 import { ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
 import { setupLocalAuthority } from "./local-control/identity.js";
+import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
@@ -484,6 +485,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     if (domain === "runtime") {
       return await runRuntimeCommand(command, rest, parsed, root, dependencies, json);
+    }
+    if (domain === "executor") {
+      return await runExecutorCommand(command, rest, parsed, metadata.version, dependencies, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -1373,6 +1377,88 @@ async function runRuntimeCommand(
     console.log(`Relay endpoint: ${configuration.relayUrl}`);
     console.log(`Repository id: ${configuration.repository.repositoryId}`);
     console.log(`Runtime Authority: ${configuration.delegatorId}`);
+  }
+  return 0;
+}
+
+async function runExecutorCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  version: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  if ((command !== "setup" && command !== "serve") || rest.length > 0) {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Executor command "${command ?? ""}".`);
+  }
+  const definition = getCommand(command === "setup" ? "executor.setup" : "executor.serve");
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? "capability";
+    const option = getOption(optionId as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by executor ${command}.`,
+      "$argv",
+      { command: `executor ${command}`, option: optionId },
+    );
+  }
+  const environment = dependencies.environment ?? process.env;
+  if (command === "setup") {
+    const result = await setupLocalExecutor(environment);
+    const output = {
+      ok: true,
+      operation: "executor.setup",
+      configPath: result.configPath,
+      executorId: result.config.id,
+      endpoint: `http://${result.config.listen.host}:${result.config.listen.port}`,
+      provider: result.config.provider,
+    };
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Local Executor identity and configuration are ready.");
+      console.log(`Executor id: ${result.config.id}`);
+      console.log(`Endpoint: ${output.endpoint}`);
+      console.log(`Configuration: ${result.configPath}`);
+    }
+    return 0;
+  }
+
+  const started = await startConfiguredLocalExecutor(version, environment);
+  const server = started.server;
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : undefined;
+  if (port === undefined) {
+    server.close();
+    throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
+  }
+  const endpoint = `http://127.0.0.1:${port}`;
+  const shutdown = (): void => {
+    server.close();
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  server.once("close", () => {
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  });
+  if (json) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        operation: "executor.serve",
+        executorId: started.config.id,
+        endpoint,
+        foreground: true,
+      }),
+    );
+  } else {
+    console.log("Foreground local Executor server started.");
+    console.log(`Endpoint: ${endpoint}`);
+    console.log("Health: /health");
   }
   return 0;
 }
@@ -4848,6 +4934,7 @@ function classifyExitCode(error: unknown): number {
     (error.code.includes("TEMPLATE") ||
       error.code.includes("POLICY") ||
       error.code.startsWith("RELEASE_") ||
+      error.code.startsWith("EXECUTOR_") ||
       error.code.startsWith("LOCAL_CONTROL_"))
   )
     return EXIT_VALIDATION;
@@ -5024,6 +5111,7 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
     | "mcp",
     string
   >
@@ -5038,6 +5126,7 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   authority: "authority generate",
   session: "session issue",
   runtime: "runtime connect",
+  executor: "executor serve",
   mcp: "mcp serve",
 };
 
@@ -5055,6 +5144,7 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     domain === "release" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "executor" ||
     domain === "runtime" ||
     domain === "mcp"
   ) {
@@ -5098,6 +5188,7 @@ Domains:
   authority  Local Runtime Authority setup, key, bootstrap, readiness, and lifecycle operations
   session    Manual short-lived Session credential issuance and inspection
   runtime    Foreground local Relay Runtime connection
+  executor   Local post-admission HTTP execution server
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
@@ -5121,9 +5212,12 @@ function printDomainHelp(
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
     | "mcp",
 ): void {
-  const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
+  const commands =
+    domain === "executor" ? INARI_COMMANDS.filter((entry) => entry.domain === domain) : getDomainCommands(domain);
+  const lines = commands.map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
 
 Operations:
