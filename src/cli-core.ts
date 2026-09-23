@@ -188,7 +188,7 @@ import {
   type LocalRuntimeConfigInput,
 } from "./relay/local-runtime-config.js";
 import { setupRepository, type RepositorySetupInput } from "./repository-setup.js";
-import { ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
+import { bindLocalCliAdmissionRoute, ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
 import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
@@ -1569,11 +1569,13 @@ async function runAdmissionCommand(
       throw new CliError("INPUT_REQUIRED", "Use --from <runtime-authority.json>.", "--from");
     const authority = await readJsonValue(from === "-" ? from : path.resolve(root, from));
     const result = setupLocalAdmission(authority, environment);
+    const endpoint = `http://${result.config.listen.host}:${result.config.listen.port}`;
+    bindLocalCliAdmissionRoute({ id: result.config.id, endpoint }, environment);
     const output = {
       ok: true,
       operation: "admission.setup",
       admissionId: result.config.id,
-      endpoint: `http://${result.config.listen.host}:${result.config.listen.port}`,
+      endpoint,
       executorId: result.config.executor.id,
       executorEndpoint: result.config.executor.endpoint,
       configPath: result.configPath,

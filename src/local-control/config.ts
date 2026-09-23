@@ -13,6 +13,7 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  renameSync,
   unlinkSync,
   writeSync,
   type Stats,
@@ -531,6 +532,44 @@ export function readLocalJson<T>(
   );
 }
 
+function persistReplaceJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {
+  const target = secureFilePath(directory, fileName);
+  const temporary = secureFilePath(directory, `${fileName}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`);
+  const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  if (bytes.byteLength > MAX_LOCAL_CONFIG_BYTES) {
+    throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local configuration file is too large.");
+  }
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow(),
+      PRIVATE_FILE_MODE,
+    );
+    let offset = 0;
+    while (offset < bytes.byteLength) offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
+    fchmodSync(fd, PRIVATE_FILE_MODE);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temporary, target);
+    try {
+      fsyncSync(directory.fd);
+    } catch {
+      // The replacement is already atomically visible; directory fsync is best effort.
+    }
+  } catch (error: unknown) {
+    closeQuietly(fd);
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // The temporary path may already have been atomically renamed.
+    }
+    if (error instanceof LocalControlError) throw error;
+    throw new LocalControlError("LOCAL_CONTROL_STORAGE_FAILED", "Local configuration could not be persisted.");
+  }
+}
+
 function persistFirstJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {
   const target = secureFilePath(directory, fileName);
   const temporary = secureFilePath(directory, `${fileName}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`);
@@ -637,4 +676,49 @@ export function ensureLocalCliTopology(environment: NodeJS.ProcessEnv = process.
       return raced;
     throw error;
   }
+}
+
+export function bindLocalCliAdmissionRoute(
+  route: LocalAdmissionRoute,
+  environment: NodeJS.ProcessEnv = process.env,
+): LocalCliConfig {
+  const candidate = validateLocalCliConfig({
+    version: LOCAL_CONFIG_VERSION,
+    topology: { admission: "local", executor: "local" },
+    admission: route,
+  });
+  const admission = candidate.admission;
+  if (admission === undefined) throw invalid("CLI Admission route is invalid.");
+  const { directory, fileName } = safeFileName("config.json");
+  const directoryPath = componentDirectoryPath("cli", directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      const existing = readExistingJson(handle, fileName, validateLocalCliConfig);
+      if (existing === undefined) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_CONFIG_CONFLICT",
+          "Local CLI topology is not initialized. Run `inari init` first.",
+        );
+      }
+      if (existing.admission !== undefined) {
+        if (canonicalJson(existing.admission) !== canonicalJson(admission)) {
+          throw new LocalControlError(
+            "LOCAL_CONTROL_CONFIG_CONFLICT",
+            "Existing CLI Admission route conflicts with local Admission setup.",
+          );
+        }
+        return existing;
+      }
+      const next = validateLocalCliConfig({ ...existing, admission });
+      persistReplaceJson(handle, fileName, next);
+      const persisted = readExistingJson(handle, fileName, validateLocalCliConfig);
+      if (persisted === undefined || canonicalJson(persisted) !== canonicalJson(next)) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_STORAGE_FAILED",
+          "CLI Admission route could not be verified after persistence.",
+        );
+      }
+      return persisted;
+    }),
+  );
 }

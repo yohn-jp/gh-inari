@@ -124,6 +124,9 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
     ...state.environment,
     PARENT_ONLY: "unchanged",
     INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "must-not-reach-child",
+    GH_TOKEN: "must-not-reach-child",
+    GITHUB_TOKEN: "must-not-reach-child",
+    INARI_GITHUB_APP_USER_CREDENTIAL_FILE: "/must/not/reach/child.json",
   };
   try {
     const exitCode = await startLocalSession({
@@ -164,10 +167,17 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
     assert.equal(children[0]?.cwd, state.root);
     assert.equal(children[0]?.shell, false);
     assert.equal(children[0]?.stdio, "inherit");
+    const deniedChildEnvironment = new Set([
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "INARI_GITHUB_APP_USER_CREDENTIAL_FILE",
+      "INARI_APP_USER_CREDENTIAL_FILE",
+      "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY",
+    ]);
     const expectedChildEnvironment = Object.fromEntries(
-      Object.entries(parentEnvironment).filter(([name]) => name !== "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"),
+      Object.entries(parentEnvironment).filter(([name]) => !deniedChildEnvironment.has(name)),
     );
-    assert.equal(children[0]?.env["INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"], undefined);
+    for (const name of deniedChildEnvironment) assert.equal(children[0]?.env[name], undefined);
     assert.deepEqual(children[0]?.env, { ...expectedChildEnvironment, INARI_SESSION_ID: binding.sessionId });
     assert.equal(parentEnvironment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, "must-not-reach-child");
     assert.equal(parentEnvironment.INARI_SESSION_ID, undefined);

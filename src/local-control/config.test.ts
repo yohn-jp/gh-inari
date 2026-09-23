@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
+  bindLocalCliAdmissionRoute,
   ensureLocalCliTopology,
   localComponentDirectory,
   localComponentPath,
@@ -56,6 +57,27 @@ test("init preserves an existing local Admission route and rejects conflicting t
     const conflict = { version: 1, topology: { admission: "remote", executor: "local" } };
     await writeFile(configPath, `${JSON.stringify(conflict)}\n`, { mode: 0o600 });
     assert.throws(() => ensureLocalCliTopology(environment), /topology|configuration/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Admission setup can bind the initialized CLI route exactly once", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    ensureLocalCliTopology(environment);
+    const route = { id: "adm_0123456789abcdef", endpoint: "http://127.0.0.1:8766" };
+    const bound = bindLocalCliAdmissionRoute(route, environment);
+    assert.deepEqual(bound.admission, route);
+    assert.deepEqual(bindLocalCliAdmissionRoute(route, environment), bound);
+    assert.throws(
+      () =>
+        bindLocalCliAdmissionRoute(
+          { id: "adm_fedcba9876543210", endpoint: "http://127.0.0.1:8766" },
+          environment,
+        ),
+      /conflicts/u,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

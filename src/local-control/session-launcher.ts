@@ -32,6 +32,13 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const DEFAULT_SESSION_TTL_SECONDS = 3_600;
 const CHANGE_CAPABILITIES = ["change.implement", "change.ready", "change.abort", "change.merge"] as const;
 const CHANGE_ISSUE_PROVENANCE_SUFFIX = ".change-issue-provenance.json";
+const CHILD_ENVIRONMENT_DENYLIST = new Set([
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "INARI_GITHUB_APP_USER_CREDENTIAL_FILE",
+  "INARI_APP_USER_CREDENTIAL_FILE",
+  "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY",
+]);
 
 interface StoredSessionBinding {
   readonly version: typeof STORED_BINDING_VERSION;
@@ -341,7 +348,7 @@ function childExitCode(options: StartLocalSessionOptions, sessionId: string): Pr
   const spawnChild = options.spawnChild ?? spawn;
   const childEnvironment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(options.environment)) {
-    if (name !== "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY" && value !== undefined) childEnvironment[name] = value;
+    if (!CHILD_ENVIRONMENT_DENYLIST.has(name) && value !== undefined) childEnvironment[name] = value;
   }
   childEnvironment.INARI_SESSION_ID = sessionId;
   return new Promise((resolve, reject) => {
