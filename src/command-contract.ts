@@ -1581,7 +1581,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "executor",
     "setup",
     ["executor", "setup"],
-    "Provision the local Executor identity and reference existing GitHub App user credential custody.",
+    "Provision the local Executor identity and reference existing GitHub App user credential custody; endpoint allocation is automatic.",
     [...ROOT_OPTIONS],
   ),
   command(
@@ -1589,7 +1589,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "executor",
     "serve",
     ["executor", "serve"],
-    "Run the configured post-admission local Executor HTTP server on loopback.",
+    "Run the local Executor on loopback and publish its current endpoint for Admission discovery.",
     [...ROOT_OPTIONS],
   ),
   command(
@@ -1597,7 +1597,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "admission",
     "setup",
     ["admission", "setup"],
-    "Create local Admission configuration and pin public Runtime Authority trust from a Delegator record.",
+    "Create local Admission configuration, pin public Runtime Authority trust, and bind CLI routing to Admission identity.",
     AUTHORITY_INPUT_OPTIONS,
   ),
   command(
@@ -1605,7 +1605,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "admission",
     "serve",
     ["admission", "serve"],
-    "Run the configured local Admission server after verifying its pinned Executor identity.",
+    "Run local Admission on loopback after verifying the discovered pinned Executor identity.",
     [...ROOT_OPTIONS],
   ),
   command(

@@ -66,20 +66,44 @@ test("Admission setup can bind the initialized CLI route exactly once", async ()
   const { root, environment } = await temporaryEnvironment();
   try {
     ensureLocalCliTopology(environment);
-    const route = { id: "adm_0123456789abcdef", endpoint: "http://127.0.0.1:8766" };
+    const route = { id: "adm_0123456789abcdef" };
     const bound = bindLocalCliAdmissionRoute(route, environment);
     assert.deepEqual(bound.admission, route);
     assert.deepEqual(bindLocalCliAdmissionRoute(route, environment), bound);
-    assert.throws(
-      () => bindLocalCliAdmissionRoute({ id: "adm_fedcba9876543210", endpoint: "http://127.0.0.1:8766" }, environment),
-      /conflicts/u,
+    assert.throws(() => bindLocalCliAdmissionRoute({ id: "adm_fedcba9876543210" }, environment), /conflicts/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Admission setup migrates a legacy static CLI endpoint to identity-only routing", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const config = ensureLocalCliTopology(environment);
+    const configPath = localComponentPath("cli", "config.json", environment);
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ ...config, admission: { id: "adm_0123456789abcdef", endpoint: "http://127.0.0.1:8766" } })}\n`,
+      { mode: 0o600 },
     );
+    const bound = bindLocalCliAdmissionRoute({ id: "adm_0123456789abcdef" }, environment);
+    assert.deepEqual(bound.admission, { id: "adm_0123456789abcdef" });
+    assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")).admission, bound.admission);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test("local config schemas are closed, bounded, and pin only local loopback routes", () => {
+  assert.deepEqual(
+    validateLocalExecutorConfig({
+      version: 1,
+      id: "exec_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      provider: { kind: "github", credentialProfile: "default" },
+    }).listen,
+    { host: "127.0.0.1", port: 0 },
+  );
   assert.throws(
     () => validateLocalCliConfig({ version: 1, topology: { admission: "local", executor: "local" }, extra: true }),
     /unsupported fields/u,

@@ -539,7 +539,7 @@ test("Executor setup provisions stable identity and references the existing App-
     assert.deepEqual(first.config, {
       version: 1,
       id: first.config.id,
-      listen: { host: "127.0.0.1", port: 8765 },
+      listen: { host: "127.0.0.1", port: 0 },
       provider: { kind: "github", credentialProfile: "default" },
     });
     const configText = await readFile(first.configPath, "utf8");

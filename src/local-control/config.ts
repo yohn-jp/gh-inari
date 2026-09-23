@@ -25,11 +25,12 @@ import { randomBytes } from "node:crypto";
 export const LOCAL_CONFIG_VERSION = 1 as const;
 export const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
 
-export type LocalComponent = "cli" | "authority" | "admission" | "executor";
+export type LocalComponent = "cli" | "authority" | "admission" | "executor" | "runtime";
 
 export interface LocalAdmissionRoute {
   readonly id: string;
-  readonly endpoint: string;
+  /** Present only in pre-discovery CLI configuration; runtime discovery is authoritative. */
+  readonly endpoint?: string;
 }
 
 export interface LocalCliConfig {
@@ -46,7 +47,7 @@ export interface LocalAdmissionConfig {
   readonly version: typeof LOCAL_CONFIG_VERSION;
   readonly id: string;
   readonly listen: { readonly host: "127.0.0.1"; readonly port: number };
-  readonly executor: { readonly id: string; readonly endpoint: string };
+  readonly executor: { readonly id: string; readonly endpoint?: string };
 }
 
 export interface LocalExecutorConfig {
@@ -82,7 +83,7 @@ export class LocalControlError extends Error {
   }
 }
 
-const COMPONENT_NAMES: ReadonlySet<string> = new Set(["cli", "authority", "admission", "executor"]);
+const COMPONENT_NAMES: ReadonlySet<string> = new Set(["cli", "authority", "admission", "executor", "runtime"]);
 const SAFE_SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const ID_VALUE = /^[a-zA-Z0-9_-]{16,64}$/u;
 const LOCALHOST = "127.0.0.1";
@@ -304,7 +305,7 @@ function assertId(value: unknown, prefix: "adm_" | "exec_"): string {
 }
 
 function assertPort(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65535) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 65535) {
     throw invalid("Local component port is invalid.");
   }
   return value;
@@ -355,7 +356,10 @@ export function validateLocalCliConfig(value: unknown): LocalCliConfig {
   if (config.admission !== undefined) {
     const route = assertRecord(config.admission, "CLI Admission route is invalid.");
     assertClosed(route, ["id", "endpoint"], "CLI Admission route has unsupported fields.");
-    admission = { id: assertId(route.id, "adm_"), endpoint: assertLoopbackEndpoint(route.endpoint) };
+    admission = {
+      id: assertId(route.id, "adm_"),
+      ...(route.endpoint === undefined ? {} : { endpoint: assertLoopbackEndpoint(route.endpoint) }),
+    };
   }
   return {
     version: LOCAL_CONFIG_VERSION,
@@ -386,11 +390,15 @@ export function validateLocalAdmissionConfig(value: unknown): LocalAdmissionConf
   assertVersion(config.version);
   const executor = assertRecord(config.executor, "Admission Executor binding is invalid.");
   assertClosed(executor, ["id", "endpoint"], "Admission Executor binding has unsupported fields.");
+  const executorEndpoint = executor.endpoint === undefined ? undefined : assertLoopbackEndpoint(executor.endpoint);
   return {
     version: LOCAL_CONFIG_VERSION,
     id: assertId(config.id, "adm_"),
     listen: assertListen(config.listen),
-    executor: { id: assertId(executor.id, "exec_"), endpoint: assertLoopbackEndpoint(executor.endpoint) },
+    executor: {
+      id: assertId(executor.id, "exec_"),
+      ...(executorEndpoint === undefined ? {} : { endpoint: executorEndpoint }),
+    },
   };
 }
 
@@ -651,6 +659,61 @@ export function writeLocalJson<T>(
   );
 }
 
+/** Atomically replace bounded local state owned by Inari, such as a live endpoint announcement. */
+export function replaceLocalJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  value: T,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T {
+  const validated = validator(value);
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      persistReplaceJson(handle, fileName, validated);
+      const persisted = readExistingJson(handle, fileName, validator);
+      if (persisted === undefined || canonicalJson(persisted) !== canonicalJson(validated)) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_STORAGE_FAILED",
+          "Local runtime state could not be verified after persistence.",
+        );
+      }
+      return persisted;
+    }),
+  );
+}
+
+/** Remove bounded local state only while it still matches the selected runtime instance. */
+export function removeLocalJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  shouldRemove: (value: T) => boolean,
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      const existing = readExistingJson(handle, fileName, validator);
+      if (existing === undefined || !shouldRemove(existing)) return false;
+      try {
+        unlinkSync(secureFilePath(handle, fileName));
+        try {
+          fsyncSync(handle.fd);
+        } catch {
+          // Removal is already visible; directory fsync is best effort.
+        }
+        return true;
+      } catch {
+        throw new LocalControlError("LOCAL_CONTROL_STORAGE_FAILED", "Local runtime state could not be removed.");
+      }
+    }),
+  );
+}
+
 export function ensureLocalCliTopology(environment: NodeJS.ProcessEnv = process.env): LocalCliConfig {
   const initial: LocalCliConfig = {
     version: LOCAL_CONFIG_VERSION,
@@ -700,13 +763,17 @@ export function bindLocalCliAdmissionRoute(
           "Local CLI topology is not initialized. Run `inari init` first.",
         );
       }
-      if (existing.admission !== undefined) {
-        if (canonicalJson(existing.admission) !== canonicalJson(admission)) {
-          throw new LocalControlError(
-            "LOCAL_CONTROL_CONFIG_CONFLICT",
-            "Existing CLI Admission route conflicts with local Admission setup.",
-          );
-        }
+      if (existing.admission !== undefined && existing.admission.id !== admission.id) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_CONFIG_CONFLICT",
+          "Existing CLI Admission route conflicts with local Admission setup.",
+        );
+      }
+      if (
+        existing.admission !== undefined &&
+        existing.admission.id === admission.id &&
+        existing.admission.endpoint === undefined
+      ) {
         return existing;
       }
       const next = validateLocalCliConfig({ ...existing, admission });
