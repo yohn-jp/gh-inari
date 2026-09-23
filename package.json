@@ -281,7 +281,7 @@
     "prettier": "3.9.6",
     "tsx": "^4.19.4",
     "typescript": "^6.0.3",
-    "typescript-eslint": "8.69.0",
+    "typescript-eslint": "8.70.0",
     "wireit": "0.14.13",
     "wrangler": "4.131.1"
   },
