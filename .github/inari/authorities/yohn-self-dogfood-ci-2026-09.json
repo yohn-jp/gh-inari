@@ -1,11 +1,1 @@
-{
-  "capabilityCeiling": ["change.implement", "change.ready"],
-  "id": "yohn-self-dogfood-ci-2026-09",
-  "key": { "crv": "Ed25519", "kty": "OKP", "x": "BcyN1sa22QgEadkxSnCcbJ4SjLl39c4s7ST0UX8bqkI" },
-  "kind": "runtime-authority",
-  "maxSessionTtlSeconds": 7200,
-  "notAfter": null,
-  "notBefore": "2026-09-13T11:50:33.975Z",
-  "status": "active",
-  "version": 1
-}
+{"capabilityCeiling":["change.implement","change.ready"],"id":"yohn-self-dogfood-ci-2026-09","key":{"crv":"Ed25519","kty":"OKP","x":"BcyN1sa22QgEadkxSnCcbJ4SjLl39c4s7ST0UX8bqkI"},"kind":"runtime-authority","maxSessionTtlSeconds":7200,"notAfter":null,"notBefore":"2026-09-13T11:50:33.975Z","status":"active","version":1}
