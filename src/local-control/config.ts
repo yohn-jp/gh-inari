@@ -89,6 +89,7 @@ const LOCALHOST = "127.0.0.1";
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_MODE_MASK = 0o077;
+const PUBLIC_FILE_WRITE_MASK = 0o022;
 const ANCESTOR_WRITE_MASK = 0o022;
 const STICKY_MODE = 0o1000;
 
@@ -170,8 +171,10 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
   let fd: number;
   try {
     fd = openSync(pathname, directoryFlags());
-  } catch {
-    throw unsafe("Local configuration path contains an unsafe directory.");
+  } catch (error: unknown) {
+    const failure = unsafe("Local configuration path contains an unsafe directory.");
+    failure.cause = error;
+    throw failure;
   }
   try {
     const stat = fstatSync(fd);
@@ -188,7 +191,7 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
   }
 }
 
-function openSecureDirectory(directoryPath: string, create: boolean): DirectoryHandle {
+function openSecureDirectory(directoryPath: string, create: boolean, missingOk = false): DirectoryHandle | undefined {
   const target = path.resolve(directoryPath);
   const root = path.parse(target).root;
   const rootFd = openDirectory(root, false);
@@ -208,6 +211,17 @@ function openSecureDirectory(directoryPath: string, create: boolean): DirectoryH
       try {
         childFd = openDirectory(childPath, isFinal);
       } catch (error: unknown) {
+        if (
+          missingOk &&
+          error instanceof Error &&
+          error.cause !== null &&
+          typeof error.cause === "object" &&
+          "code" in error.cause &&
+          error.cause.code === "ENOENT"
+        ) {
+          closeQuietly(current.fd);
+          return undefined;
+        }
         if (!create) throw error;
         try {
           mkdirSync(childPath, { mode: PRIVATE_DIRECTORY_MODE });
@@ -234,6 +248,7 @@ function openSecureDirectory(directoryPath: string, create: boolean): DirectoryH
 
 function withSecureDirectory<T>(directoryPath: string, operation: (directory: DirectoryHandle) => T): T {
   const directory = openSecureDirectory(directoryPath, true);
+  if (directory === undefined) throw unsafe("Local configuration directory is unavailable.");
   try {
     return operation(directory);
   } finally {
@@ -480,6 +495,7 @@ function readExistingJson<T>(
   directory: DirectoryHandle,
   fileName: string,
   validator: LocalConfigValidator<T>,
+  visibility: "private" | "public" = "private",
 ): T | undefined {
   const target = secureFilePath(directory, fileName);
   let fd: number;
@@ -491,7 +507,9 @@ function readExistingJson<T>(
   }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || (stat.mode & PRIVATE_MODE_MASK) !== 0) {
+    const unsafePermissions =
+      visibility === "private" ? (stat.mode & PRIVATE_MODE_MASK) !== 0 : (stat.mode & PUBLIC_FILE_WRITE_MASK) !== 0;
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || unsafePermissions) {
       throw unsafe("Local configuration file permissions or ownership are unsafe.");
     }
     if (stat.size > MAX_LOCAL_CONFIG_BYTES) {
@@ -530,6 +548,24 @@ export function readLocalJson<T>(
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => readExistingJson(handle, fileName, validator)),
   );
+}
+
+/** Read a public local artifact without creating absent directories or following symlinks. */
+export function readExistingLocalPublicJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T | undefined {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const handle = openSecureDirectory(directoryPath, false, true);
+  if (handle === undefined) return undefined;
+  try {
+    return readExistingJson(handle, fileName, validator, "public");
+  } finally {
+    closeQuietly(handle.fd);
+  }
 }
 
 function persistReplaceJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {

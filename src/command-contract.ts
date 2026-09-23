@@ -805,9 +805,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Prepare the repository-scoped local Runtime profile and report trust readiness.",
     SETUP_OPTIONS,
   ),
-  command("root.init", "root", "init", ["init"], "Declare the local CLI Admission and Executor topology.", [
-    ...ROOT_OPTIONS,
-  ]),
+  command(
+    "root.init",
+    "root",
+    "init",
+    ["init"],
+    "Initialize local topology and report ordered execution setup state.",
+    [...ROOT_OPTIONS],
+  ),
   command(
     "issue.schema",
     "issue",

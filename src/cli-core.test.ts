@@ -94,6 +94,16 @@ test("inari init declares only the local CLI topology and is idempotent", async 
       readonly operation: string;
       readonly configPath: string;
       readonly config: Record<string, unknown>;
+      readonly applicationState: {
+        readonly version: number;
+        readonly status: string;
+        readonly setupComplete: boolean;
+        readonly provider: { readonly credentialConfigured: boolean; readonly credentialPath: string };
+        readonly steps: readonly { readonly id: string; readonly status: string; readonly syntax: string }[];
+        readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+        readonly runtime: { readonly status: string; readonly commands: readonly string[] };
+        readonly sessionStartCommand: string;
+      };
     };
     assert.equal(firstOutput.ok, true);
     assert.equal(firstOutput.operation, "init");
@@ -104,14 +114,125 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     });
     assert.equal("endpoint" in firstOutput.config, false);
     assert.equal("admission" in firstOutput.config, false);
-    assert.equal(first.stdout.includes("private-key.pem"), false);
+    assert.equal(firstOutput.applicationState.version, 1);
+    assert.equal(firstOutput.applicationState.status, "incomplete");
+    assert.equal(firstOutput.applicationState.setupComplete, false);
+    assert.equal(firstOutput.applicationState.provider.credentialConfigured, false);
+    assert.equal(
+      firstOutput.applicationState.provider.credentialPath,
+      path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    );
+    assert.equal(firstOutput.applicationState.nextAction.stepId, "app-user-authorization");
+    assert.deepEqual(firstOutput.applicationState.nextAction.commands, ["inari setup --endpoint <endpoint-url>"]);
+    assert.deepEqual(
+      firstOutput.applicationState.steps.map((step) => step.id),
+      [
+        "cli-topology",
+        "app-user-authorization",
+        "executor-app-id",
+        "executor",
+        "runtime-authority-key",
+        "runtime-authority-record",
+        "admission",
+      ],
+    );
+    assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("authority bootstrap")));
+    assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("admission setup --from")));
+    assert.deepEqual(firstOutput.applicationState.runtime.commands, ["inari executor serve", "inari admission serve"]);
+    assert.equal(firstOutput.applicationState.runtime.status, "not-checked");
+    assert.equal(
+      firstOutput.applicationState.sessionStartCommand,
+      "inari session start --issue <number> -- <command...>",
+    );
+    assert.equal(first.stdout.includes("BEGIN PRIVATE KEY"), false);
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
+
+    const human = await capture(["init"], environment);
+    assert.equal(human.exitCode, 0);
+    assert.ok(human.stdout.includes("Ordered setup path:"));
+    assert.ok(human.stdout.includes("inari setup --endpoint <endpoint-url>"));
+    assert.ok(human.stdout.includes("INARI_GITHUB_APP_ID"));
+    assert.ok(human.stdout.includes("inari authority bootstrap"));
+    assert.ok(human.stdout.includes("inari admission setup --from"));
+    assert.ok(human.stdout.includes("inari session start --issue <number> -- <command...>"));
 
     const second = await capture(["init", "--json"], environment);
     assert.equal(second.exitCode, 0);
     assert.deepEqual(JSON.parse(second.stdout), firstOutput);
     assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")), firstOutput.config);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local application state reaches configured through supported CLI commands without JSON editing", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  environment.INARI_GITHUB_APP_ID = "123456";
+  const publicAuthorityPath = localComponentPath("authority", "runtime-authority.json", environment);
+  try {
+    assert.equal((await capture(["init", "--json"], environment)).exitCode, 0);
+    await new FileAppUserCredentialStore({
+      path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    }).save(
+      createAppUserCredential({
+        accessToken: "state-access-secret",
+        refreshToken: "state-refresh-secret",
+        accessTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+      }),
+    );
+    assert.equal((await capture(["executor", "setup", "--json"], environment)).exitCode, 0);
+    const authorityOutput = await capture(["authority", "setup", "--json"], environment);
+    assert.equal(authorityOutput.exitCode, 0);
+    const authority = JSON.parse(authorityOutput.stdout) as {
+      readonly privateKeyPath: string;
+      readonly publicKeyFingerprint: string;
+    };
+    const authorityId = `runtime-${authority.publicKeyFingerprint.slice("sha256:".length)}`;
+    const bootstrap = await capture(
+      [
+        "authority",
+        "bootstrap",
+        "--authority-id",
+        authorityId,
+        "--private-key",
+        authority.privateKeyPath,
+        "--max-session-ttl-seconds",
+        "3600",
+        "--capability",
+        "change.implement",
+        "--output",
+        publicAuthorityPath,
+        "--json",
+      ],
+      environment,
+    );
+    assert.equal(bootstrap.exitCode, 0, bootstrap.stderr);
+    const admission = await capture(["admission", "setup", "--from", publicAuthorityPath, "--json"], environment);
+    assert.equal(admission.exitCode, 0, admission.stderr);
+
+    const initialized = await capture(["init", "--json"], environment);
+    assert.equal(initialized.exitCode, 0);
+    const state = JSON.parse(initialized.stdout).applicationState as {
+      readonly status: string;
+      readonly setupComplete: boolean;
+      readonly steps: readonly { readonly id: string; readonly status: string }[];
+      readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+    };
+    assert.equal(state.status, "configured", JSON.stringify(state.steps));
+    assert.equal(state.setupComplete, true);
+    assert.ok(
+      state.steps.every((step) => step.status === "ready"),
+      JSON.stringify(state.steps),
+    );
+    assert.deepEqual(state.nextAction, {
+      stepId: "start-runtime",
+      commands: ["inari executor serve", "inari admission serve"],
+      detail: "Run each command in a separate terminal; then launch the governed child with the Session command below.",
+    });
+    assert.equal(initialized.stdout.includes("state-access-secret"), false);
+    assert.equal(initialized.stdout.includes("state-refresh-secret"), false);
+    assert.equal(initialized.stdout.includes("BEGIN PRIVATE KEY"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -129,6 +129,7 @@ export * from "./endpoint-api.js";
 export * from "./endpoint-http.js";
 export * from "./session-authorized-change-executor.js";
 export * from "./mcp/index.js";
+export * from "./local-application-state.js";
 export {
   discoverTemplates,
   discoverTemplatesSync,

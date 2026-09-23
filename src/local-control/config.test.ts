@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import {
   ensureLocalCliTopology,
   localComponentDirectory,
   localComponentPath,
+  readExistingLocalPublicJson,
   resolveConfigHome,
   validateLocalAdmissionConfig,
   validateLocalCliConfig,
@@ -129,6 +130,41 @@ test("local configuration rejects symlink files and keeps private directory and 
     await symlink(outsidePath, configPath);
     assert.throws(() => ensureLocalCliTopology(environment), /safely|unsafe/u);
     assert.equal((await lstat(localComponentDirectory("cli", environment))).mode & 0o077, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("existing local artifact reads do not create missing storage or follow directory symlinks", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const readUnknownJson = (value: unknown): unknown => value;
+    assert.equal(
+      readExistingLocalPublicJson("authority", "runtime-authority.json", readUnknownJson, environment),
+      undefined,
+    );
+    await assert.rejects(lstat(resolveConfigHome(environment)));
+
+    const configHome = resolveConfigHome(environment);
+    const outside = path.join(root, "outside");
+    await mkdir(configHome, { mode: 0o700 });
+    await mkdir(outside, { mode: 0o700 });
+    const artifact = '{"public":true}\n';
+    await writeFile(path.join(outside, "runtime-authority.json"), artifact, { mode: 0o644 });
+    await mkdir(localComponentDirectory("authority", environment), { mode: 0o700 });
+    await writeFile(localComponentPath("authority", "runtime-authority.json", environment), artifact, {
+      mode: 0o644,
+    });
+    assert.deepEqual(readExistingLocalPublicJson("authority", "runtime-authority.json", readUnknownJson, environment), {
+      public: true,
+    });
+    await rm(localComponentDirectory("authority", environment), { recursive: true });
+    await symlink(outside, localComponentDirectory("authority", environment));
+
+    assert.throws(
+      () => readExistingLocalPublicJson("authority", "runtime-authority.json", readUnknownJson, environment),
+      /unsafe directory/u,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

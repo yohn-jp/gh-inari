@@ -192,6 +192,7 @@ import { bindLocalCliAdmissionRoute, ensureLocalCliTopology, localComponentPath 
 import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
+import { projectLocalApplicationState } from "./local-application-state.js";
 import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
@@ -483,7 +484,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runTemplateImport(root, rest, parsed, json);
     }
     if (domain === "init") {
-      return runInitCommand(parsed, dependencies, json);
+      return await runInitCommand(parsed, root, dependencies, json);
     }
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
@@ -1153,7 +1154,12 @@ async function runAuthorityCommand(
   return 0;
 }
 
-function runInitCommand(parsed: ParsedArgs, dependencies: CliDependencies, json: boolean): number {
+async function runInitCommand(
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
   const definition = getCommand("root.init");
   const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
   if (parsed.positionals.length !== 1 || parsed.capabilities.length > 0 || unsupported !== undefined) {
@@ -1171,11 +1177,27 @@ function runInitCommand(parsed: ParsedArgs, dependencies: CliDependencies, json:
   }
   const config = ensureLocalCliTopology(dependencies.environment ?? process.env);
   const configPath = localComponentPath("cli", "config.json", dependencies.environment ?? process.env);
+  const applicationState = await projectLocalApplicationState({
+    root,
+    environment: dependencies.environment ?? process.env,
+  });
   if (json) {
-    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config }));
+    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config, applicationState }));
   } else {
     console.log("Initialized local CLI topology.");
     console.log(`Config: ${configPath}`);
+    console.log(`Local execution setup: ${applicationState.status}.`);
+    console.log("Ordered setup path:");
+    applicationState.steps.forEach((step, index) => {
+      console.log(`${index + 1}. [${step.status}] ${step.title}`);
+      console.log(`   ${step.syntax}`);
+    });
+    console.log(`Next: ${applicationState.nextAction.detail}`);
+    for (const command of applicationState.nextAction.commands) console.log(`Run: ${command}`);
+    console.log(`Credential custody: ${applicationState.provider.credentialPath}`);
+    console.log("After setup, run each service command in a separate terminal:");
+    for (const command of applicationState.runtime.commands) console.log(`Run: ${command}`);
+    console.log(`Then launch the governed child with: ${applicationState.sessionStartCommand}`);
   }
   return 0;
 }
@@ -1666,6 +1688,7 @@ async function runSetupCommand(
   });
   if (json) console.log(JSON.stringify(output));
   else {
+    console.log(`GitHub App ID: ${output.app.appId}`);
     if (output.state === "app-install-required") {
       console.log("GitHub App installation is required for this repository.");
       console.log(`Install: ${output.appInstallationUrl}`);

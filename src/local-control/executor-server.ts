@@ -74,31 +74,37 @@ export interface LocalExecutorSetupResult {
   readonly configPath: string;
 }
 
-function providerCredentialPath(environment: NodeJS.ProcessEnv): string {
+export function localExecutorCredentialPath(environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.INARI_GITHUB_APP_USER_CREDENTIAL_FILE ?? environment.INARI_APP_USER_CREDENTIAL_FILE;
   return configured === undefined
     ? path.join(resolveConfigHome(environment), "app-user-credential.json")
     : path.resolve(configured);
 }
 
-function appId(environment: NodeJS.ProcessEnv): string {
+export function localExecutorAppId(environment: NodeJS.ProcessEnv = process.env): string | undefined {
   const value = environment.INARI_GITHUB_APP_ID ?? environment.GITHUB_APP_ID;
-  if (value === undefined || !/^[1-9][0-9]{0,19}$/u.test(value.trim())) {
-    throw new LocalExecutorError(
-      "EXECUTOR_PROVIDER_CONFIGURATION_MISSING",
-      "GitHub App credentials are not configured for the local Executor.",
-    );
-  }
+  if (value === undefined || !/^[1-9][0-9]{0,19}$/u.test(value.trim())) return undefined;
   return value.trim();
 }
 
+function appId(environment: NodeJS.ProcessEnv): string {
+  const value = localExecutorAppId(environment);
+  if (value === undefined) {
+    throw new LocalExecutorError(
+      "EXECUTOR_PROVIDER_CONFIGURATION_MISSING",
+      "Set INARI_GITHUB_APP_ID (or GITHUB_APP_ID) to the numeric App ID shown by `inari setup` before configuring the local Executor.",
+    );
+  }
+  return value;
+}
+
 async function requireCredential(environment: NodeJS.ProcessEnv): Promise<FileAppUserCredentialStore> {
-  const store = new FileAppUserCredentialStore({ path: providerCredentialPath(environment) });
+  const store = new FileAppUserCredentialStore({ path: localExecutorCredentialPath(environment) });
   try {
     if ((await store.load()) === undefined) {
       throw new LocalExecutorError(
         "EXECUTOR_CREDENTIALS_MISSING",
-        "GitHub App user credentials are missing. Complete local App setup before using the Executor.",
+        "GitHub App user authorization is missing. Run `inari setup --endpoint <endpoint-url>` to complete Device Flow before configuring the local Executor.",
       );
     }
   } catch (error: unknown) {
@@ -124,8 +130,8 @@ function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalEx
 export async function setupLocalExecutor(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LocalExecutorSetupResult> {
-  appId(environment);
   await requireCredential(environment);
+  appId(environment);
   const configPath = path.join(resolveConfigHome(environment), "executor", EXECUTOR_CONFIG_PATH);
   const existing = readLocalJson("executor", EXECUTOR_CONFIG_PATH, validateLocalExecutorConfig, environment);
   if (existing !== undefined) requireSupportedCredentialProfile(existing);

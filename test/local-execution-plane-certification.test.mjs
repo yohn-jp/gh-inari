@@ -377,12 +377,23 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       NODE_OPTIONS: `--import=${preloadFile}`,
     };
 
-    jsonOutput(command(["init", "--json"], { cwd: workspace, env: baseEnv }), "init");
+    const initialState = jsonOutput(command(["init", "--json"], { cwd: workspace, env: baseEnv }), "init");
+    assert.equal(initialState.applicationState.status, "incomplete");
+    assert.equal(initialState.applicationState.nextAction.stepId, "app-user-authorization");
+    assert.deepEqual(initialState.applicationState.nextAction.commands, ["inari setup --endpoint <endpoint-url>"]);
+    assert.equal(initialState.applicationState.provider.credentialConfigured, false);
+    assert.match(initialState.applicationState.provider.credentialPath, /app-user-credential\.json$/u);
+    assert.ok(initialState.applicationState.steps.some((step) => step.syntax.includes("authority bootstrap")));
+    assert.ok(initialState.applicationState.steps.some((step) => step.syntax.includes("admission setup --from")));
+    assert.equal(
+      initialState.applicationState.sessionStartCommand,
+      "inari session start --issue <number> -- <command...>",
+    );
     const authority = jsonOutput(
       command(["authority", "setup", "--json"], { cwd: workspace, env: baseEnv }),
       "authority setup",
     );
-    const publicAuthorityFile = path.join(directory, "runtime-authority.json");
+    const publicAuthorityFile = path.join(configHome, "authority", "runtime-authority.json");
     const bootstrap = jsonOutput(
       command(
         [
@@ -428,6 +439,13 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     await updateJson(path.join(configHome, "cli/config.json"), (config) => {
       config.admission.endpoint = `http://127.0.0.1:${admissionPort}`;
     });
+    const configuredState = jsonOutput(
+      command(["init", "--json"], { cwd: workspace, env: executorEnv }),
+      "configured init",
+    );
+    assert.equal(configuredState.applicationState.status, "configured");
+    assert.equal(configuredState.applicationState.setupComplete, true);
+    assert.ok(configuredState.applicationState.steps.every((step) => step.status === "ready"));
 
     const issueFixture = await createIssueFixture(directory);
     const blobs = {};
