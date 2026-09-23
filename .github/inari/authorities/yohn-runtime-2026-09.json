@@ -1,11 +1,1 @@
-{
-  "capabilityCeiling": ["change.implement", "change.ready"],
-  "id": "yohn-runtime-2026-09",
-  "key": { "crv": "Ed25519", "kty": "OKP", "x": "cHhnCVw8mdQp1zfLdW00wrNlto721VLCcPX0j-x80Vs" },
-  "kind": "runtime-authority",
-  "maxSessionTtlSeconds": 7200,
-  "notAfter": null,
-  "notBefore": "2026-09-13T00:00:00Z",
-  "status": "active",
-  "version": 1
-}
+{"capabilityCeiling":["change.implement","change.ready"],"id":"yohn-runtime-2026-09","key":{"crv":"Ed25519","kty":"OKP","x":"cHhnCVw8mdQp1zfLdW00wrNlto721VLCcPX0j-x80Vs"},"kind":"runtime-authority","maxSessionTtlSeconds":7200,"notAfter":null,"notBefore":"2026-09-13T00:00:00Z","status":"active","version":1}
