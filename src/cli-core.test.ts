@@ -596,6 +596,7 @@ test("session start registers a production-verifiable binding and bounded proven
     writeAdmissionRoute(environment, `http://127.0.0.1:${address.port}`);
     environment.PARENT_ONLY = "unchanged";
     environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY = "parent-only-secret";
+    environment.INARI_ISSUER_APP_PRIVATE_KEY = "parent-only-issuer-secret";
     let identityReads = 0;
     const result = await runCli(
       [
@@ -606,7 +607,7 @@ test("session start registers a production-verifiable binding and bounded proven
         "--",
         process.execPath,
         "-e",
-        "process.exit(process.env.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY ? 91 : 13)",
+        "process.exit(process.env.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY || process.env.INARI_ISSUER_APP_PRIVATE_KEY ? 91 : 13)",
       ],
       {
         repositoryRoot: root,
@@ -629,6 +630,7 @@ test("session start registers a production-verifiable binding and bounded proven
     assert.equal(identityReads, 0);
     assert.equal(environment.INARI_SESSION_ID, undefined);
     assert.equal(environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, "parent-only-secret");
+    assert.equal(environment.INARI_ISSUER_APP_PRIVATE_KEY, "parent-only-issuer-secret");
     assert.equal(environment.PARENT_ONLY, "unchanged");
 
     const sessionFiles = await readdir(path.join(environment.INARI_CONFIG_HOME as string, "cli", "sessions"));

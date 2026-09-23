@@ -131,6 +131,7 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
     ...state.environment,
     PARENT_ONLY: "unchanged",
     INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "must-not-reach-child",
+    INARI_ISSUER_APP_PRIVATE_KEY: "must-not-reach-child",
     GH_TOKEN: "must-not-reach-child",
     GITHUB_TOKEN: "must-not-reach-child",
     INARI_GITHUB_APP_USER_CREDENTIAL_FILE: "/must/not/reach/child.json",
@@ -180,6 +181,7 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
       "INARI_GITHUB_APP_USER_CREDENTIAL_FILE",
       "INARI_APP_USER_CREDENTIAL_FILE",
       "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY",
+      "INARI_ISSUER_APP_PRIVATE_KEY",
     ]);
     const expectedChildEnvironment = Object.fromEntries(
       Object.entries(parentEnvironment).filter(([name]) => !deniedChildEnvironment.has(name)),
@@ -187,6 +189,7 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
     for (const name of deniedChildEnvironment) assert.equal(children[0]?.env[name], undefined);
     assert.deepEqual(children[0]?.env, { ...expectedChildEnvironment, INARI_SESSION_ID: binding.sessionId });
     assert.equal(parentEnvironment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, "must-not-reach-child");
+    assert.equal(parentEnvironment.INARI_ISSUER_APP_PRIVATE_KEY, "must-not-reach-child");
     assert.equal(parentEnvironment.INARI_SESSION_ID, undefined);
     assert.equal(admission.closes.length, 0);
 
