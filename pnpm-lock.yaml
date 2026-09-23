@@ -41,7 +41,7 @@ importers:
         version: 4.0.4
       '@types/node':
         specifier: ^26.5.1
-        version: 26.5.1
+        version: 26.6.2
       '@xstate/graph':
         specifier: 3.0.4
         version: 3.0.4(xstate@5.33.0)
@@ -68,7 +68,7 @@ importers:
         version: 0.14.13
       wrangler:
         specifier: 4.131.1
-        version: 4.131.1(@types/node@26.5.1)
+        version: 4.131.1(@types/node@26.6.2)
 
   apps/dashboard:
     devDependencies:
@@ -778,8 +778,8 @@ packages:
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
 
-  '@types/node@26.5.1':
-    resolution: {integrity: sha512-CzNm2FezW4VR/LjG6yUdiEgLE/rAQ9Slj5gCu/C2VrdcW7I0ahNZ8DRbHT7zOZ6r3ONgd/bsQIeSaoDGrd1C6g==}
+  '@types/node@26.6.2':
+    resolution: {integrity: sha512-X1P21scMv4zGKLYqjdGjaKa7COa0RKVYYZZN/NfvLQ1JegxFhdhpZG/Lyn8AXx6CDUavKAd11v6BvfpkDByK8g==}
 
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
@@ -2286,7 +2286,7 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@26.5.1':
+  '@types/node@26.6.2':
     dependencies:
       undici-types: 8.9.0
 
@@ -3225,10 +3225,10 @@ snapshots:
     dependencies:
       mime-db: 1.54.0
 
-  miniflare@5.20260911.0-alpha(@types/node@26.5.1):
+  miniflare@5.20260911.0-alpha(@types/node@26.6.2):
     dependencies:
       '@cspotcode/source-map-support': 0.8.1
-      sharp: 0.35.4(@types/node@26.5.1)
+      sharp: 0.35.4(@types/node@26.6.2)
       undici: 7.29.0
       workerd: 1.20260911.1
       ws: 8.21.0
@@ -3393,7 +3393,7 @@ snapshots:
 
   setprototypeof@1.2.0: {}
 
-  sharp@0.35.4(@types/node@26.5.1):
+  sharp@0.35.4(@types/node@26.6.2):
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
@@ -3424,7 +3424,7 @@ snapshots:
       '@img/sharp-win32-arm64': 0.35.4
       '@img/sharp-win32-ia32': 0.35.4
       '@img/sharp-win32-x64': 0.35.4
-      '@types/node': 26.5.1
+      '@types/node': 26.6.2
 
   shebang-command@2.0.0:
     dependencies:
@@ -3570,13 +3570,13 @@ snapshots:
       '@cloudflare/workerd-linux-arm64': 1.20260911.1
       '@cloudflare/workerd-windows-64': 1.20260911.1
 
-  wrangler@4.131.1(@types/node@26.5.1):
+  wrangler@4.131.1(@types/node@26.6.2):
     dependencies:
       '@cloudflare/kv-asset-handler': 0.5.0
       '@cloudflare/unenv-preset': 2.16.1(unenv@2.0.0-rc.24)(workerd@1.20260911.1)
       blake3-wasm: 2.1.5
       esbuild: 0.28.1
-      miniflare: 5.20260911.0-alpha(@types/node@26.5.1)
+      miniflare: 5.20260911.0-alpha(@types/node@26.6.2)
       path-to-regexp: 6.3.0
       unenv: 2.0.0-rc.24
       workerd: 1.20260911.1
