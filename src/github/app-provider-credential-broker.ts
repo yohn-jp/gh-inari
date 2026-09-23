@@ -12,6 +12,7 @@ import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
 import type { AppScopedMutationCapability, EffectAuthorizerCredentialRequest } from "./effect-authorizer.js";
 import type { SemanticPullRequestMutationExecutionPort } from "../semantic-pr-mutation.js";
 import type { RepositoryIdentity } from "./effect-authorizer.js";
+import type { Delegator } from "../agent-authority/delegator.js";
 
 /** Shared credential-bound capability surface for direct Session/App execution. */
 export interface AppProviderCredentialBroker {
@@ -34,6 +35,9 @@ export interface AppProviderCredentialBroker {
     request: { readonly target: RepositoryIdentity },
     operation: (capability: GitHubBranchAdvanceCapability) => Promise<T>,
   ): Promise<T>;
+
+  /** Dispatch one validated public Runtime Authority record when this broker supports setup publication. */
+  dispatchRuntimeAuthorityPublication?(request: { readonly authority: Delegator }): Promise<void>;
 }
 
 /** Compatibility alias for callers that name the implementation boundary. */

@@ -1701,7 +1701,13 @@ async function runSetupCommand(
       console.log("Runtime Authority trust is pending on the canonical protected ref.");
       console.log(`Authority: ${output.authority?.authorityId ?? "unknown"}`);
       if (output.authority?.artifactPath !== undefined) console.log(`Trust record: ${output.authority.artifactPath}`);
-      console.log("After the trust PR is merged, run inari setup again.");
+      if (output.publication !== undefined) {
+        console.log(`Trust PR: #${output.publication.pullRequest.number} (${output.publication.pullRequest.url})`);
+        console.log(`Trust branch: ${output.publication.branch}`);
+        console.log("Review and merge the trust PR, then run inari setup again.");
+      } else {
+        console.log("After the trust PR is merged, run inari setup again.");
+      }
     } else {
       console.log("Repository Runtime setup is ready.");
       console.log(`Authority: ${output.authority?.authorityId ?? "unknown"}`);
