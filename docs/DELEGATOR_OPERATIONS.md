@@ -352,13 +352,26 @@ tokens, headers, or raw provider errors.
 
 ## Local execution plane
 
-After the public Delegator record is registered on the protected branch, use
-one isolated `INARI_CONFIG_HOME` for the local CLI, Admission, and Executor.
-Run `inari executor setup`, then `inari admission setup --from <public-record-file>`.
-Start `inari executor serve` before `inari admission serve`; Admission checks
-the configured Executor identity before becoming ready. Keep GitHub App user
-credentials with Executor. The CLI and Agent child use the configured
-Admission route and do not need provider credentials.
+Use one isolated `INARI_CONFIG_HOME` for the local CLI, Admission, Executor,
+and Runtime Authority. `inari init` reports the ordered setup state and the
+next supported command. Repository Runtime onboarding through
+`inari setup --endpoint <endpoint-url>` performs GitHub App Device Flow and
+stores the App-user credential at `$INARI_CONFIG_HOME/app-user-credential.json`
+by default. It also manages repository-scoped Runtime setup; configuring the
+local Executor remains a separate step.
+
+Set `INARI_GITHUB_APP_ID` (or `GITHUB_APP_ID`) to the numeric App ID reported
+by `inari setup`, then run `inari executor setup`. Run `inari authority setup`
+to create local key custody, followed by `inari authority bootstrap` to create
+the public Runtime Authority record. Pass that public file to
+`inari admission setup --from <public-record-file>`; this pins public trust and
+binds the CLI Admission route. The private Authority key stays in its local
+custody directory, and App-user credentials stay in their credential file.
+
+Start `inari executor serve` before `inari admission serve`, in separate
+terminals. Admission checks the configured Executor identity before becoming
+ready. The CLI and Agent child use the configured Admission route and do not
+need provider credentials.
 
 From the governed repository checkout, launch the Agent with
 `inari session start --issue <n> -- <command...>`. The child inherits

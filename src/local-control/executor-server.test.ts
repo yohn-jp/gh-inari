@@ -589,7 +589,8 @@ test("Executor serve fails closed when setup or existing provider credentials ar
       (error: unknown) => {
         assert.ok(error instanceof LocalExecutorError);
         assert.equal(error.code, "EXECUTOR_CREDENTIALS_MISSING");
-        assert.match(error.message, /credentials are missing/u);
+        assert.match(error.message, /authorization is missing/u);
+        assert.match(error.message, /inari setup --endpoint/u);
         return true;
       },
     );
@@ -607,6 +608,29 @@ test("Executor setup reports missing credentials without creating component conf
       (error: unknown) => {
         assert.ok(error instanceof LocalExecutorError);
         assert.equal(error.code, "EXECUTOR_CREDENTIALS_MISSING");
+        assert.match(error.message, /Device Flow/u);
+        assert.match(error.message, /inari setup --endpoint/u);
+        return true;
+      },
+    );
+    await assert.rejects(readFile(path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Executor setup names the supported App ID configuration when credentials exist", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    await saveCredential(environment);
+    delete environment.INARI_GITHUB_APP_ID;
+    await assert.rejects(
+      () => setupLocalExecutor(environment),
+      (error: unknown) => {
+        assert.ok(error instanceof LocalExecutorError);
+        assert.equal(error.code, "EXECUTOR_PROVIDER_CONFIGURATION_MISSING");
+        assert.match(error.message, /INARI_GITHUB_APP_ID/u);
+        assert.match(error.message, /inari setup/u);
         return true;
       },
     );
