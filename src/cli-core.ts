@@ -204,7 +204,6 @@ import {
   readLocalSessionBinding,
   readLocalSessionChangeIssueProvenance,
   startLocalSession,
-  type LocalSessionRepositoryIdentity,
 } from "./local-control/session-launcher.js";
 import {
   validateBranchAdvanceSemanticRequest,
@@ -212,6 +211,7 @@ import {
   type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
 import { projectPublishTreeDelta, resolveLocalRepositoryNameWithOwner } from "./change-publish-projection.js";
+import { resolveLocalRepositoryContext } from "./github/local-repository-context.js";
 import {
   compareSemanticIssueProjection,
   tryObserveSemanticIssue,
@@ -1313,14 +1313,12 @@ async function runSessionCommand(
       commandArgs: rest.slice(1),
       environment,
       admission,
-      resolveRepository: async (): Promise<LocalSessionRepositoryIdentity> => {
-        const context = await createAdapter(dependencies, root, undefined, {
-          credentialFallback: false,
-        }).getRepositoryContext();
-        if (context.repositoryId === undefined) {
-          throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Immutable repository identity could not be resolved.");
+      resolveRepository: async () => {
+        const context = resolveLocalRepositoryContext({ cwd: root });
+        if (context.hostname !== "github.com") {
+          throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Local Session repository must be hosted on github.com.");
         }
-        return { host: context.hostname, repositoryId: context.repositoryId, nameWithOwner: context.nameWithOwner };
+        return admission.resolveRepository(context.nameWithOwner);
       },
     });
     return code;

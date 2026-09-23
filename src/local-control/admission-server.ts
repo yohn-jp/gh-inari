@@ -56,6 +56,7 @@ export const LOCAL_ADMISSION_DEFAULT_PORT = 8766;
 export const LOCAL_ADMISSION_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_ADMISSION_HEALTH_PATH = "/health" as const;
 export const LOCAL_ADMISSION_SESSIONS_PATH = "/v1/sessions" as const;
+export const LOCAL_ADMISSION_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_EXECUTIONS_PATH = "/v1/executions" as const;
 export const LOCAL_ADMISSION_SESSION_ID_HEADER = "x-inari-session-id" as const;
 export const MAX_LOCAL_ADMISSION_BODY_BYTES = 1_048_576;
@@ -146,6 +147,7 @@ export function setupLocalAdmission(
 
 interface AdmissionExecutor {
   verifyReady(): Promise<unknown>;
+  resolveRepository?(repositoryNameWithOwner: string): Promise<RepositoryIdentity>;
   readEvidence(request: LocalExecutorEvidenceRequest): Promise<unknown>;
   execute(execution: AuthorizedExecution): Promise<unknown>;
 }
@@ -544,6 +546,50 @@ function createLocalAdmissionHttpHandler(
         protocol: LOCAL_ADMISSION_PROTOCOL_VERSION,
         readiness: "ready",
       });
+    }
+    if (url.pathname === LOCAL_ADMISSION_REPOSITORY_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      if (
+        !isRecord(parsed.value) ||
+        !exactKeys(parsed.value, ["version", "repositoryNameWithOwner"]) ||
+        parsed.value.version !== LOCAL_ADMISSION_PROTOCOL_VERSION ||
+        typeof parsed.value.repositoryNameWithOwner !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(parsed.value.repositoryNameWithOwner) ||
+        options.executor.resolveRepository === undefined
+      ) {
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_REPOSITORY_REQUEST", message: "Repository request is invalid." },
+        });
+      }
+      try {
+        const repository = await options.executor.resolveRepository(parsed.value.repositoryNameWithOwner);
+        const validation = validateIssuerRepositoryIdentity(repository);
+        if (
+          !validation.valid ||
+          validation.value === undefined ||
+          validation.value.nameWithOwner.toLocaleLowerCase("en-US") !==
+            parsed.value.repositoryNameWithOwner.toLocaleLowerCase("en-US")
+        ) {
+          throw new Error();
+        }
+        return json(200, {
+          ok: true,
+          repository: {
+            repositoryHost: validation.value.repositoryHost,
+            repositoryId: validation.value.repositoryId,
+            repositoryNameWithOwner: validation.value.nameWithOwner,
+          },
+        });
+      } catch {
+        return json(503, {
+          ok: false,
+          error: { code: "REPOSITORY_UNAVAILABLE", message: "Repository identity could not be resolved." },
+        });
+      }
     }
     if (url.pathname === LOCAL_ADMISSION_SESSIONS_PATH) {
       if (request.method !== "POST")

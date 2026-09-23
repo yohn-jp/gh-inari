@@ -11,6 +11,7 @@ import type { LocalSessionBinding } from "./session-binding.js";
 import {
   LOCAL_ADMISSION_EXECUTIONS_PATH,
   LOCAL_ADMISSION_PROTOCOL_VERSION,
+  LOCAL_ADMISSION_REPOSITORY_PATH,
   LOCAL_ADMISSION_SESSION_ID_HEADER,
   LOCAL_ADMISSION_SESSIONS_PATH,
 } from "./admission-server.js";
@@ -33,7 +34,14 @@ export class LocalAdmissionClientError extends Error {
   }
 }
 
+export interface LocalAdmissionRepositoryIdentity {
+  readonly host: "github.com";
+  readonly repositoryId: string;
+  readonly nameWithOwner: string;
+}
+
 export interface LocalAdmissionClient {
+  resolveRepository(repositoryNameWithOwner: string): Promise<LocalAdmissionRepositoryIdentity>;
   registerSession(binding: LocalSessionBinding): Promise<{ readonly id: string; readonly status: string }>;
   closeSession(binding: LocalSessionBinding): Promise<{ readonly id: string; readonly status: string }>;
   executeIntent(intent: ExecutionIntent, sessionId: string): Promise<unknown>;
@@ -150,6 +158,34 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
   }
 
   return Object.freeze({
+    async resolveRepository(repositoryNameWithOwner: string) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repositoryNameWithOwner)) {
+        throw new LocalAdmissionClientError("ADMISSION_REPOSITORY_INVALID", "Local repository locator is invalid.");
+      }
+      const envelope = await request(LOCAL_ADMISSION_REPOSITORY_PATH, "POST", {
+        version: LOCAL_ADMISSION_PROTOCOL_VERSION,
+        repositoryNameWithOwner,
+      });
+      const repository = isRecord(envelope.repository) ? envelope.repository : undefined;
+      if (
+        repository === undefined ||
+        repository.repositoryHost !== "github.com" ||
+        typeof repository.repositoryId !== "string" ||
+        !/^[1-9][0-9]{0,19}$/u.test(repository.repositoryId) ||
+        typeof repository.repositoryNameWithOwner !== "string" ||
+        repository.repositoryNameWithOwner.toLocaleLowerCase("en-US") !== repositoryNameWithOwner.toLocaleLowerCase("en-US")
+      ) {
+        throw new LocalAdmissionClientError(
+          "ADMISSION_RESPONSE_INVALID",
+          "Admission returned an invalid repository identity.",
+        );
+      }
+      return {
+        host: "github.com" as const,
+        repositoryId: repository.repositoryId,
+        nameWithOwner: repository.repositoryNameWithOwner,
+      };
+    },
     async registerSession(binding: LocalSessionBinding) {
       const envelope = await request(LOCAL_ADMISSION_SESSIONS_PATH, "POST", {
         version: LOCAL_ADMISSION_PROTOCOL_VERSION,

@@ -33,6 +33,8 @@ import {
   type GitHubAppRepositoryReadCapability,
   type RepositoryIdentity,
 } from "../github/index.js";
+import { validateIssuerRepositoryIdentity } from "../github/effect-authorizer.js";
+import { GitHubNativeHttpTransport, githubRestBaseUrl } from "../github/native-http-transport.js";
 import {
   createGitHubImplementationFrontierRepository,
   readCurrentImplementationAdmissionEvidence,
@@ -211,6 +213,51 @@ async function projectChange(
   return broker.withRepositoryReadCapability({}, async (capability) =>
     projectChangeFromGitHubEvidence(await buildReader(capability, repository, identity, request).read(request)),
   );
+}
+
+async function resolveLocalExecutorRepository(
+  repositoryNameWithOwner: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<RepositoryIdentity> {
+  const parts = repositoryNameWithOwner.split("/");
+  if (parts.length !== 2) throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity is invalid.");
+  const [owner, name] = parts as [string, string];
+  const store = await requireCredential(environment);
+  const credential = await store.load();
+  if (credential === undefined) {
+    throw new LocalExecutorError("EXECUTOR_CREDENTIALS_MISSING", "GitHub App user credentials are missing.");
+  }
+  try {
+    const response = await credential.withAccessToken((token) =>
+      new GitHubNativeHttpTransport({ token, apiUrl: githubRestBaseUrl("github.com") }).request({
+        hostname: "github.com",
+        method: "GET",
+        path: `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+      }),
+    );
+    if (response.status !== 200 || typeof response.body !== "object" || response.body === null || Array.isArray(response.body)) {
+      throw new Error();
+    }
+    const body = response.body as Record<string, unknown>;
+    const id = typeof body.id === "number" && Number.isSafeInteger(body.id) ? String(body.id) : body.id;
+    const fullName = body.full_name;
+    const candidate = {
+      repositoryHost: "github.com",
+      repositoryId: id,
+      nameWithOwner: fullName,
+    };
+    const validation = validateIssuerRepositoryIdentity(candidate);
+    if (
+      !validation.valid ||
+      validation.value === undefined ||
+      validation.value.nameWithOwner.toLocaleLowerCase("en-US") !== repositoryNameWithOwner.toLocaleLowerCase("en-US")
+    ) {
+      throw new Error();
+    }
+    return validation.value;
+  } catch {
+    throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity could not be resolved.");
+  }
 }
 
 async function readLocalExecutorEvidence(
@@ -450,6 +497,7 @@ export async function startConfiguredLocalExecutor(
     version,
     executorId: config.id,
     execute: (execution) => executeLocalAuthorizedExecution(execution, environment),
+    resolveRepository: (repositoryNameWithOwner) => resolveLocalExecutorRepository(repositoryNameWithOwner, environment),
     readEvidence: (request) => readLocalExecutorEvidence(request, environment),
     ready: () => true,
   });

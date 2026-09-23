@@ -1,9 +1,11 @@
 import type { AuthorizedExecution, AuthorizedExecutionResult } from "../authorized-execution.js";
+import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
   LOCAL_EXECUTOR_EVIDENCE_PATH,
   LOCAL_EXECUTOR_EXECUTIONS_PATH,
   LOCAL_EXECUTOR_HEALTH_PATH,
   LOCAL_EXECUTOR_PROTOCOL_VERSION,
+  LOCAL_EXECUTOR_REPOSITORY_PATH,
   MAX_LOCAL_EXECUTOR_BODY_BYTES,
   type LocalExecutorEvidenceRequest,
 } from "./executor-http.js";
@@ -135,6 +137,38 @@ export class LocalExecutorClient {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Configured Executor is not ready.");
     }
     return body as unknown as LocalExecutorHealth;
+  }
+
+  async resolveRepository(repositoryNameWithOwner: string): Promise<RepositoryIdentity> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repositoryNameWithOwner)) {
+      throw new LocalExecutorClientError("EXECUTOR_PROTOCOL_INVALID", "Repository locator is invalid.");
+    }
+    const { response, body } = await this.request(LOCAL_EXECUTOR_REPOSITORY_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: LOCAL_EXECUTOR_PROTOCOL_VERSION, repositoryNameWithOwner }),
+    });
+    this.assertIdentity(body);
+    const repository = record(body.repository) ? body.repository : undefined;
+    if (
+      response.status !== 200 ||
+      !exactKeys(body, ["ok", "component", "executorId", "protocol", "repository"]) ||
+      body.ok !== true ||
+      repository === undefined ||
+      !exactKeys(repository, ["repositoryHost", "repositoryId", "repositoryNameWithOwner"]) ||
+      repository.repositoryHost !== "github.com" ||
+      typeof repository.repositoryId !== "string" ||
+      !/^[1-9][0-9]{0,19}$/u.test(repository.repositoryId) ||
+      typeof repository.repositoryNameWithOwner !== "string" ||
+      repository.repositoryNameWithOwner.toLocaleLowerCase("en-US") !== repositoryNameWithOwner.toLocaleLowerCase("en-US")
+    ) {
+      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Repository identity could not be resolved.");
+    }
+    return {
+      repositoryHost: "github.com",
+      repositoryId: repository.repositoryId,
+      nameWithOwner: repository.repositoryNameWithOwner,
+    };
   }
 
   async readEvidence(request: LocalExecutorEvidenceRequest): Promise<unknown> {
