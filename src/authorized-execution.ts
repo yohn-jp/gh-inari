@@ -13,7 +13,9 @@ import {
 } from "./agent-authority/capability-provenance.js";
 import type { SessionCertificateTask } from "./agent-authority/session-certificate.js";
 import {
+  validateBranchAdvanceAuthorizationEvidence,
   validateBranchAdvanceSemanticRequest,
+  type BranchAdvanceAuthorizationEvidence,
   type BranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
@@ -131,6 +133,7 @@ export type AuthorizedExecution =
   | (AuthorizedExecutionBase & {
       readonly operation: "branch.advance";
       readonly request: BranchAdvanceSemanticRequest;
+      readonly branchAuthorization: BranchAdvanceAuthorizationEvidence;
     })
   | (AuthorizedExecutionBase & {
       readonly operation: "pullRequest.publish";
@@ -161,6 +164,8 @@ export interface AuthorizedExecutionDelegates {
   readonly app?: CapabilityExecutionProvenance["app"];
   readonly branchAdvance?: (input: {
     readonly request: BranchAdvanceSemanticRequest;
+    readonly branchAuthorization: BranchAdvanceAuthorizationEvidence;
+    readonly provenance: CapabilityExecutionProvenance;
   }) => Promise<BranchAdvanceSemanticResult>;
   readonly publishPullRequest?: (input: {
     readonly execution: DirectAppTrustedExecutionContext;
@@ -376,7 +381,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
   const allowedRootKeys = new Set(COMMON_ROOT_KEYS);
   if (operation === "change.show") allowedRootKeys.add("initialProjection");
   else if (operation === "branch.advance") {
-    // Branch execution consumes only the semantic request and authorized scope.
+    allowedRootKeys.add("branchAuthorization");
   } else allowedRootKeys.add("execution");
   if (!exactKeys(input, allowedRootKeys)) throw new TypeError("Authorized execution context is invalid.");
   const { issue, kind } = issueAndCapability(input);
@@ -421,6 +426,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
     | NormalizedPrPublicationRequest;
   let initialProjection: ChangeProjectionResult | undefined;
   let execution: DirectAppTrustedExecutionContext | undefined;
+  let branchAuthorization: BranchAdvanceAuthorizationEvidence | undefined;
   if (operation.startsWith("change.")) {
     const changeRequest = normalizeChangeRequest(operation, input.request);
     if (changeRequest === undefined) {
@@ -435,10 +441,15 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
   } else if (operation === "branch.advance") {
     const validated = validateBranchAdvanceSemanticRequest(input.request);
     if (!validated.valid || validated.value === undefined) throw new TypeError("Authorized branch request is invalid.");
+    const authorization = validateBranchAdvanceAuthorizationEvidence(input.branchAuthorization, validated.value);
+    if (!authorization.valid || authorization.authorization === undefined) {
+      throw new TypeError("Authorized branch scope evidence is invalid.");
+    }
     if (capability.kind !== "branch.advance" || capability.branch !== validated.value.branch) {
       throw new TypeError("Authorized branch capability does not match its request.");
     }
     request = validated.value;
+    branchAuthorization = authorization.authorization;
   } else {
     const validated = tryValidatePrPublicationRequest(input.request);
     if (!validated.valid || validated.request === undefined)
@@ -503,6 +514,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
       ...base,
       operation,
       request: request as BranchAdvanceSemanticRequest,
+      branchAuthorization: branchAuthorization!,
     }) as NormalizedAuthorizedExecution;
   }
   return Object.freeze({
@@ -735,7 +747,11 @@ export async function executeAuthorizedExecution(
       return failure(operation, "execution", provenance, "The #466 branch advance delegate is unavailable.");
     let delegated: BranchAdvanceSemanticResult;
     try {
-      delegated = await delegates.branchAdvance({ request: execution.request });
+      delegated = await delegates.branchAdvance({
+        request: execution.request,
+        branchAuthorization: execution.branchAuthorization,
+        provenance,
+      });
     } catch {
       return failure(operation, "execution", provenance, "Branch advance delegation failed closed.");
     }

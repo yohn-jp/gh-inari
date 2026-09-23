@@ -28,7 +28,9 @@ import {
 } from "./agent-authority/session-bundle.js";
 import type { DelegatedTreeDelta } from "./agent-authority/protected-paths.js";
 import {
+  authorizeBranchAdvance,
   validateBranchAdvanceSemanticRequest,
+  type BranchAdvanceAuthorizationEvidence,
   type BranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
@@ -129,6 +131,8 @@ export interface CapabilityAuthorizedBranchAdvanceInput {
   readonly admission: AdmittedSessionCapability;
   /** The exact signed #466 semantic request; #465 does not reinterpret it. */
   readonly request: BranchAdvanceSemanticRequest;
+  readonly branchAuthorization: BranchAdvanceAuthorizationEvidence;
+  readonly provenance: CapabilityExecutionProvenance;
 }
 
 export interface CapabilityAuthorizedSessionExecutorOptions {
@@ -897,6 +901,14 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       );
     }
 
+    const branchAuthorization = authorizeBranchAdvance({ context, admission, request: fields.request });
+    if (!branchAuthorization.valid) {
+      const phase = branchAuthorization.failure.outcome === "stale" ? "conflict" : "authorization";
+      return failure(operation, phase, authorized, "Branch advance authorization failed closed.", {
+        branchAdvance: branchAuthorization.failure,
+      });
+    }
+
     const authorizedExecution: AuthorizedExecution = {
       version: 1,
       operation,
@@ -906,12 +918,21 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       capability: admission.capability,
       provenance: authorized,
       request: fields.request,
+      branchAuthorization: branchAuthorization.authorization,
     };
     const delegates: AuthorizedExecutionDelegates = {
       ...(this.#options.branchAdvance === undefined
         ? {}
         : {
-            branchAdvance: ({ request }) => this.#options.branchAdvance!({ envelope, context, admission, request }),
+            branchAdvance: ({ request, branchAuthorization: admittedBranchAuthorization, provenance }) =>
+              this.#options.branchAdvance!({
+                envelope,
+                context,
+                admission,
+                request,
+                branchAuthorization: admittedBranchAuthorization,
+                provenance,
+              }),
           }),
     };
     return executeAuthorizedSessionOperation(authorizedExecution, delegates, operation, authorized);

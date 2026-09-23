@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { canonicalizeSemanticRequest } from "./agent-authority/session-request.js";
 import type { BranchAdvanceSemanticRequest } from "./agent-authority/branch-advance.js";
 import { validateCapabilityClaim, type CapabilityClaim } from "./agent-authority/capability.js";
 import { createCapabilityExecutionProvenance } from "./agent-authority/capability-provenance.js";
@@ -130,7 +132,21 @@ function authorized(
     provenance,
   };
   if (operation === "branch.advance") {
-    return createAuthorizedExecution({ ...common, operation, request: request as BranchAdvanceSemanticRequest });
+    const branchRequest = request as BranchAdvanceSemanticRequest;
+    return createAuthorizedExecution({
+      ...common,
+      operation,
+      request: branchRequest,
+      branchAuthorization: {
+        version: 1,
+        requestDigest: createHash("sha256").update(canonicalizeSemanticRequest(branchRequest), "utf8").digest("hex"),
+        implementation: { number: ISSUE, governedBodyDigest: "b".repeat(64) },
+        paths: branchRequest.changes.map((change) => ({
+          path: change.path,
+          operations: change.operation === "delete" ? ["DELETE"] : ["WRITE"],
+        })),
+      },
+    });
   }
   if (operation === "pullRequest.publish") {
     return createAuthorizedExecution({
@@ -222,18 +238,23 @@ test("executes branch advancement and publication through their existing delegat
     ],
     commit: { message: "bounded test commit", author: { name: "Test Author", email: "test@example.test" } },
   };
-  const branchCapability = { kind: "branch.advance", branch: BRANCH, pathPolicy: "src/**" };
+  const branchCapability = { kind: "branch.advance", branch: BRANCH };
   const branchInput = authorized("branch.advance", branchRequest, branchCapability, {
     kind: "branch",
     issue: ISSUE,
     branch: BRANCH,
   });
+  if (branchInput.operation !== "branch.advance") throw new Error("Branch fixture is invalid.");
+  assert.equal("context" in branchInput, false);
+  assert.equal("verifiedRequest" in branchInput, false);
   let branchCalls = 0;
   const branchResult = await executeAuthorizedExecution(branchInput, {
-    branchAdvance: async ({ request }) => {
+    branchAdvance: async ({ request, branchAuthorization, provenance }) => {
       branchCalls += 1;
+      assert.equal(branchAuthorization.paths[0]?.path, "src/session.txt");
+      assert.equal(provenance.stage, "authorized");
       const verified = createCapabilityExecutionProvenance({
-        ...branchInput.provenance,
+        ...provenance,
         stage: "verified",
         app: APP,
       });
@@ -251,6 +272,16 @@ test("executes branch advancement and publication through their existing delegat
   });
   assert.equal(branchResult.status, "succeeded", JSON.stringify(branchResult));
   assert.equal(branchCalls, 1);
+
+  assert.throws(() =>
+    createAuthorizedExecution({
+      ...branchInput,
+      branchAuthorization: {
+        ...branchInput.branchAuthorization,
+        requestDigest: "f".repeat(64),
+      },
+    }),
+  );
 
   const pub = publicationRequest();
   const pubInput = authorized(
