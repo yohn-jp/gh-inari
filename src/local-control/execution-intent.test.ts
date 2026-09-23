@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { tryValidatePrPublicationRequest } from "../pr-publication.js";
 import { validateExecutionIntent } from "./execution-intent.js";
 
 const branchRequest = {
@@ -49,4 +50,54 @@ test("ExecutionIntent accepts a closed operation request and rejects caller-auth
   ]) {
     assert.equal(validateExecutionIntent(invalid).valid, false);
   }
+});
+
+test("ExecutionIntent preserves canonical publication routing and rejects conflicting route claims", () => {
+  const repository = {
+    repositoryHost: "github.com",
+    repositoryId: "123456789",
+    repository: "acme/inari",
+  };
+  const implementation = { ...repository, number: 1028 };
+  const request = {
+    version: 1,
+    kind: "pr-publication",
+    repository,
+    workIdentity: { implementation },
+    routing: {
+      version: 1,
+      kind: "integration-routing",
+      mode: "standalone",
+      role: "implementation",
+      implementation,
+      relationships: {},
+      branches: { default: "main", implementation: "feat/1028-local-admission" },
+      head: "feat/1028-local-admission",
+      base: "main",
+    },
+    headRevision: "a".repeat(40),
+    title: "feat: local admission",
+    body: "Closes #1028",
+    draft: true,
+  };
+  const canonical = tryValidatePrPublicationRequest(request);
+  assert.equal(canonical.valid, true);
+  assert.ok(canonical.request);
+  assert.equal(canonical.request.expectedHead, request.routing.head);
+  assert.equal(canonical.request.expectedBase, request.routing.base);
+  const intent = {
+    version: 1,
+    requestId: "publication-routing",
+    repository: {
+      repositoryHost: repository.repositoryHost,
+      repositoryId: repository.repositoryId,
+      repositoryNameWithOwner: repository.repository,
+    },
+    operation: "pullRequest.publish",
+    request,
+  };
+  const validated = validateExecutionIntent(intent);
+  assert.equal(validated.valid, true);
+  assert.deepEqual(validated.intent?.request, canonical.request);
+  assert.equal(validateExecutionIntent({ ...intent, request: { ...request, expectedBase: "other" } }).valid, false);
 });
