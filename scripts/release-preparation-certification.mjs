@@ -279,7 +279,9 @@ async function prepareInExactWorktree(productionModules, history, targetRevision
     packageJson.version = previousVersion;
     const pluginJson = JSON.parse(await readFile(path.join(root, ".codex-plugin/plugin.json"), "utf8"));
     pluginJson.version = previousVersion;
-    const marketplaceJson = JSON.parse(await readFile(path.join(root, ".agents/plugins/marketplace.json"), "utf8"));
+    const marketplaceJson = JSON.parse(
+      await readFile(path.join(root, ".agents/plugins/marketplace.json"), "utf8"),
+    );
     marketplaceJson.plugins[0].source.version = "^" + previousVersion;
     await writeFile(path.join(root, "package.json"), JSON.stringify(packageJson, null, 2) + "\n");
     await writeFile(path.join(root, ".codex-plugin/plugin.json"), JSON.stringify(pluginJson, null, 2) + "\n");
@@ -299,15 +301,26 @@ async function prepareInExactWorktree(productionModules, history, targetRevision
       cwd: root,
       encoding: "utf8",
     }).trim();
-    const preparedHistory = { ...history, targetSource: { ...history.targetSource, sourceRevision } };
-    const verification = async (command, args, cwd) => ({ command, args, cwd, status: 0 });
+    const preparedHistory = {
+      ...history,
+      targetSource: { ...history.targetSource, sourceRevision },
+    };
+    const verification = async (command, args, cwd) => ({
+      command,
+      args,
+      cwd,
+      status: 0,
+    });
     const first = await productionModules.prepareRelease({
       repositoryRoot: root,
       history: preparedHistory,
       intent: "patch",
       runVerification: verification,
     });
-    const document = await readFile(path.join(root, "docs/releases", first.targetVersion + ".md"), "utf8");
+    const document = await readFile(
+      path.join(root, "docs/releases", first.targetVersion + ".md"),
+      "utf8",
+    );
     const second = await productionModules.prepareRelease({
       repositoryRoot: root,
       history: preparedHistory,
