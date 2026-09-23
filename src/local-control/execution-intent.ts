@@ -80,7 +80,7 @@ function normalizeRequest(operation: AuthorizedExecutionOperation, value: unknow
       !positiveIssue(parsed.request.workIdentity.implementation?.number)
     )
       return undefined;
-    return value;
+    return parsed.request;
   }
   if (!positiveIssue(value.issue)) return undefined;
   if (operation === "change.show") {
