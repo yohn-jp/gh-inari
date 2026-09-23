@@ -11,6 +11,7 @@ import {
   type ChecklistItem,
   type StringField,
 } from "./contract/ir.js";
+import { parseMarkdownStructure, type MarkdownHeading, type MarkdownStructure } from "./markdown-ast.js";
 import {
   discoverTemplates,
   discoverTemplatesSync,
@@ -61,20 +62,6 @@ export class PullRequestTemplateError extends Error {
   }
 }
 
-interface LexedLine {
-  readonly text: string;
-  readonly line: number;
-  readonly protected: boolean;
-}
-
-interface HeadingNode {
-  readonly start: number;
-  readonly end: number;
-  readonly line: number;
-  readonly level: number;
-  readonly title: string;
-}
-
 interface TaskItemSource {
   readonly line: number;
   readonly sourceIndex: number;
@@ -88,17 +75,18 @@ interface ChecklistBody {
   readonly trailingContent?: string;
 }
 
-interface Fence {
-  readonly character: "`" | "~";
-  readonly length: number;
-}
-
 /**
  * Parse one repository-native PR template into the existing canonical IR.
  *
  * The identity is deliberately the discovery-layer identity. This keeps
  * filesystem discovery and parsing as separate concerns while ensuring the
  * compiled contract cannot be detached from a native template path.
+ *
+ * Markdown grammar, source positions, headings, lists, task-list state and
+ * fenced/HTML block boundaries are recognized exclusively through the
+ * shared {@link parseMarkdownStructure} CommonMark/GFM adapter. This module
+ * owns only the supported PR-template subset admitted on top of that
+ * structure and CanonicalContract construction.
  */
 export function parsePullRequestTemplate(markdown: string, identity: DiscoveredTemplateIdentity): CanonicalContract {
   assertPullRequestIdentity(identity);
@@ -110,10 +98,16 @@ export function parsePullRequestTemplate(markdown: string, identity: DiscoveredT
     );
   }
 
-  const lines = normalizeSource(markdown).split("\n");
-  const lexedLines = lexLines(lines);
-  assertNoUnsupportedTaskContexts(lexedLines);
-  const headings = findHeadings(lexedLines);
+  const normalized = normalizeSource(markdown);
+  const lines = normalized.split("\n");
+  const structure = parseMarkdownStructure(normalized);
+
+  assertCommentsTerminated(structure);
+  assertNoBlockquotedTasks(structure);
+  assertNoHeadingLikeIndentedCode(structure, lines);
+  assertSupportedHeadings(structure.headings);
+
+  const headings = structure.headings;
   const sections: CanonicalSection[] = [];
   const usedIds = new Set<string>();
 
@@ -122,7 +116,7 @@ export function parsePullRequestTemplate(markdown: string, identity: DiscoveredT
     if (content === undefined) {
       throw new PullRequestTemplateError("PR_TEMPLATE_EMPTY", "Pull request template contains no renderable content.");
     }
-    if (containsTopLevelTask(lexedLines)) {
+    if (structure.listItems.some((item) => item.checked !== undefined)) {
       throw new PullRequestTemplateError(
         "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
         "A top-level checklist requires a heading section in the supported PR-template representation.",
@@ -131,16 +125,18 @@ export function parsePullRequestTemplate(markdown: string, identity: DiscoveredT
     }
     sections.push(createDocumentationSection(content, 0, usedIds));
   } else {
-    const preamble = trimBlankLines(lines.slice(0, headings[0]?.start ?? 0).join("\n"));
+    const preambleEnd = (headings[0]?.startLine ?? 1) - 1;
+    const preamble = trimBlankLines(lines.slice(0, preambleEnd).join("\n"));
     if (preamble !== undefined)
       sections.push(createDocumentationSection(preamble, sections.length, usedIds, "preamble_content"));
 
     headings.forEach((heading, headingIndex) => {
       const nextHeading = headings[headingIndex + 1];
-      const bodyStart = heading.end + 1;
-      const bodyEnd = nextHeading?.start ?? lines.length;
-      const body = lexedLines.slice(bodyStart, bodyEnd);
-      sections.push(...createInputSections(heading, body, sections.length, usedIds));
+      const bodyStartLine = heading.endLine + 1;
+      const bodyEndLine = nextHeading !== undefined ? nextHeading.startLine - 1 : lines.length;
+      sections.push(
+        ...createInputSections(heading, bodyStartLine, bodyEndLine, lines, structure, sections.length, usedIds),
+      );
     });
   }
 
@@ -229,6 +225,64 @@ export function renderPullRequestTemplate(input: unknown): string {
   return `${blocks.join("\n\n")}\n`;
 }
 
+/** Reject unterminated HTML comments; mdast treats them as valid blocks extending to end of input. */
+function assertCommentsTerminated(structure: MarkdownStructure): void {
+  for (const block of structure.opaqueBlocks) {
+    if (block.kind !== "html") continue;
+    const text = structure.sourceSlice(block);
+    if (text.startsWith("<!--") && !text.includes("-->")) {
+      throw new PullRequestTemplateError("PR_TEMPLATE_UNSUPPORTED_CONSTRUCT", "HTML comment is not closed.", {
+        line: block.startLine,
+        construct: "unclosed HTML comment",
+      });
+    }
+  }
+}
+
+function assertNoBlockquotedTasks(structure: MarkdownStructure): void {
+  const item = structure.listItems.find((candidate) => candidate.checked !== undefined && candidate.blockquoted);
+  if (item !== undefined) {
+    throw new PullRequestTemplateError(
+      "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
+      "Checklist items inside blockquotes are not representable in the canonical PR section model.",
+      { line: item.startLine, construct: "blockquote checklist" },
+    );
+  }
+}
+
+/** A 4+-space indented ATX-like line becomes an indented code block; its ambiguous list/block context is still rejected. */
+function assertNoHeadingLikeIndentedCode(structure: MarkdownStructure, lines: readonly string[]): void {
+  for (const block of structure.opaqueBlocks) {
+    if (block.kind !== "indented-code") continue;
+    const text = lines[block.startLine - 1] ?? "";
+    if (/^[ \t]+#{1,6}(?:[ \t]+|$)/u.test(text)) {
+      throw new PullRequestTemplateError(
+        "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
+        "Indented headings are not supported because their list/block context is ambiguous.",
+        { line: block.startLine, construct: "indented heading" },
+      );
+    }
+  }
+}
+
+function assertSupportedHeadings(headings: readonly MarkdownHeading[]): void {
+  for (const heading of headings) {
+    if (heading.indented) {
+      throw new PullRequestTemplateError(
+        "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
+        "Indented headings are not supported because their list/block context is ambiguous.",
+        { line: heading.startLine, construct: "indented heading" },
+      );
+    }
+    if (heading.title.length === 0) {
+      throw new PullRequestTemplateError("PR_TEMPLATE_UNSUPPORTED_CONSTRUCT", "Headings must contain a title.", {
+        line: heading.startLine,
+        construct: "empty heading",
+      });
+    }
+  }
+}
+
 function createDocumentationSection(
   content: string,
   order: number,
@@ -247,16 +301,24 @@ function createDocumentationSection(
 }
 
 function createInputSections(
-  heading: HeadingNode,
-  body: readonly LexedLine[],
+  heading: MarkdownHeading,
+  bodyStartLine: number,
+  bodyEndLine: number,
+  lines: readonly string[],
+  structure: MarkdownStructure,
   order: number,
   usedIds: Set<string>,
 ): readonly CanonicalSection[] {
-  const id = uniqueOrThrow(toCanonicalIdentifier(heading.title, "section"), usedIds, heading.line, "heading section");
-  const checklist = parseChecklistBody(body);
+  const id = uniqueOrThrow(
+    toCanonicalIdentifier(heading.title, "section"),
+    usedIds,
+    heading.startLine,
+    "heading section",
+  );
+  const checklist = parseChecklistBody(bodyStartLine, bodyEndLine, lines, structure);
   const field =
     checklist === undefined
-      ? createStringField(id, heading.title, body)
+      ? createStringField(id, heading.title, bodyStartLine, bodyEndLine, lines)
       : createChecklistField(id, heading.title, checklist);
 
   const sections: CanonicalSection[] = [
@@ -264,8 +326,8 @@ function createInputSections(
       id,
       title: heading.title,
       kind: "input",
-      render: { order, headingLevel: heading.level },
-      nativeMetadata: { elementType: "heading", sourceId: id, headingLevel: heading.level },
+      render: { order, headingLevel: heading.depth },
+      nativeMetadata: { elementType: "heading", sourceId: id, headingLevel: heading.depth },
       fields: [field],
     },
   ];
@@ -275,8 +337,15 @@ function createInputSections(
   return sections;
 }
 
-function createStringField(id: string, label: string, body: readonly LexedLine[]): StringField {
-  const placeholder = trimBlankLines(body.map((line) => line.text).join("\n"));
+function createStringField(
+  id: string,
+  label: string,
+  bodyStartLine: number,
+  bodyEndLine: number,
+  lines: readonly string[],
+): StringField {
+  const placeholder =
+    bodyEndLine < bodyStartLine ? undefined : trimBlankLines(lines.slice(bodyStartLine - 1, bodyEndLine).join("\n"));
   return {
     id,
     label,
@@ -329,231 +398,85 @@ function createChecklistField(id: string, label: string, body: ChecklistBody): C
   };
 }
 
-function parseChecklistBody(body: readonly LexedLine[]): ChecklistBody | undefined {
-  const tasks: TaskItemSource[] = [];
+/**
+ * Detect and structurally validate one heading section's checklist, using
+ * GFM task-list items recognized by the shared Markdown structure adapter.
+ * Preserves the pre-migration admission rule: a checklist is only
+ * representable as one contiguous block of top-level, non-blockquoted task
+ * items; anything else interleaved between the first and last task is
+ * ambiguous.
+ */
+function parseChecklistBody(
+  bodyStartLine: number,
+  bodyEndLine: number,
+  lines: readonly string[],
+  structure: MarkdownStructure,
+): ChecklistBody | undefined {
+  if (bodyEndLine < bodyStartLine) return undefined;
 
-  body.forEach((line, sourceIndex) => {
-    if (line.protected || line.text.trim().length === 0) return;
-    const listItem = parseListItem(line.text);
-    if (listItem === undefined) return;
-    if (listItem.indent > 0 && listItem.task !== undefined) {
+  const taskByLine = new Map<number, { readonly checked: boolean; readonly label: string }>();
+  for (const item of structure.listItems) {
+    if (item.startLine < bodyStartLine || item.startLine > bodyEndLine) continue;
+    if (item.checked === undefined) continue;
+    if (item.depth > 0) {
       throw new PullRequestTemplateError(
         "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
         "Nested task lists are not representable in the canonical PR section model.",
-        { line: line.line, construct: "nested checklist" },
+        { line: item.startLine, construct: "nested checklist" },
       );
     }
-    if (listItem.task === undefined) {
-      return;
-    }
-    if (listItem.indent > 0) {
+    taskByLine.set(item.startLine, { checked: item.checked, label: item.label });
+  }
+  if (taskByLine.size === 0) return undefined;
+
+  const protectedLines = new Set<number>();
+  for (const block of structure.opaqueBlocks) {
+    const start = Math.max(block.startLine, bodyStartLine);
+    const end = Math.min(block.endLine, bodyEndLine);
+    for (let line = start; line <= end; line += 1) protectedLines.add(line);
+  }
+
+  const taskLines = [...taskByLine.keys()].sort((left, right) => left - right);
+  const firstLine = taskLines[0];
+  const lastLine = taskLines[taskLines.length - 1];
+  if (firstLine === undefined || lastLine === undefined) return undefined;
+
+  for (let line = firstLine + 1; line < lastLine; line += 1) {
+    if (taskByLine.has(line) || protectedLines.has(line)) continue;
+    const text = lines[line - 1] ?? "";
+    if (text.trim().length === 0) continue;
+    throw new PullRequestTemplateError(
+      "PR_TEMPLATE_AMBIGUOUS_STRUCTURE",
+      "Checklist items must form one contiguous structural block.",
+      { line, construct: "checklist block" },
+    );
+  }
+
+  const items: TaskItemSource[] = taskLines.map((line, index) => {
+    const task = taskByLine.get(line);
+    const label = task?.label ?? "";
+    if (label.length === 0) {
       throw new PullRequestTemplateError(
         "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
-        "Indented checklist items are not representable in the canonical PR section model.",
-        { line: line.line, construct: "nested checklist" },
+        "Checklist items must contain a non-empty label.",
+        { line, construct: "empty checklist item" },
       );
     }
-    tasks.push({
-      line: line.line,
-      sourceIndex,
-      checked: listItem.task.checked,
-      label: listItem.task.label,
-    });
+    return { line, sourceIndex: index, checked: task?.checked ?? false, label };
   });
 
-  if (tasks.length === 0) return undefined;
-
-  const firstTask = tasks[0];
-  const lastTask = tasks[tasks.length - 1];
-  if (firstTask === undefined || lastTask === undefined) return undefined;
-
-  for (let index = firstTask.sourceIndex + 1; index < lastTask.sourceIndex; index += 1) {
-    const line = body[index];
-    if (
-      line !== undefined &&
-      !line.protected &&
-      line.text.trim().length > 0 &&
-      parseListItem(line.text)?.task === undefined
-    ) {
-      throw new PullRequestTemplateError(
-        "PR_TEMPLATE_AMBIGUOUS_STRUCTURE",
-        "Checklist items must form one contiguous structural block.",
-        { line: line.line, construct: "checklist block" },
-      );
-    }
-  }
-  const placeholder = trimBlankLines(
-    body
-      .slice(0, firstTask.sourceIndex)
-      .map((line) => line.text)
-      .join("\n"),
-  );
-  const trailingContent = trimBlankLines(
-    body
-      .slice(lastTask.sourceIndex + 1)
-      .map((line) => line.text)
-      .join("\n"),
-  );
+  const placeholder = trimBlankLines(lines.slice(bodyStartLine - 1, firstLine - 1).join("\n"));
+  const trailingContent = trimBlankLines(lines.slice(lastLine, bodyEndLine).join("\n"));
   return {
-    items: tasks,
+    items,
     ...(placeholder === undefined ? {} : { placeholder }),
     ...(trailingContent === undefined ? {} : { trailingContent }),
   };
 }
 
-function parseListItem(text: string):
-  | {
-      readonly indent: number;
-      readonly task?: { readonly checked: boolean; readonly label: string };
-    }
-  | undefined {
-  const match = /^(?<indent>[ \t]*)(?<marker>[-+*]|\d+[.)])(?:[ \t]+)(?<rest>.*)$/u.exec(text);
-  if (match === null) return undefined;
-
-  const indentText = match.groups?.indent ?? "";
-  const indent = [...indentText].reduce((total, character) => total + (character === "\t" ? 4 : 1), 0);
-  const rest = match.groups?.rest ?? "";
-  const taskMatch = /^\[([ xX])\](?:[ \t]+(.+)|[ \t]*)$/u.exec(rest);
-  if (taskMatch === null) return { indent };
-
-  const label = taskMatch[2]?.trim() ?? "";
-  if (label.length === 0) {
-    throw new PullRequestTemplateError(
-      "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
-      "Checklist items must contain a non-empty label.",
-      { construct: "empty checklist item" },
-    );
-  }
-  return { indent, task: { checked: taskMatch[1]?.toLowerCase() === "x", label } };
-}
-
-function containsTopLevelTask(lexed: readonly LexedLine[]): boolean {
-  return lexed.some((line) => !line.protected && parseListItem(line.text)?.task !== undefined);
-}
-
-function assertNoUnsupportedTaskContexts(lines: readonly LexedLine[]): void {
-  for (const line of lines) {
-    if (!line.protected && /^ {0,3}>[ \t]+(?:[-+*]|\d+[.)])[ \t]+\[[ xX]\]/u.test(line.text)) {
-      throw new PullRequestTemplateError(
-        "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
-        "Checklist items inside blockquotes are not representable in the canonical PR section model.",
-        { line: line.line, construct: "blockquote checklist" },
-      );
-    }
-  }
-}
-
-function findHeadings(lines: readonly LexedLine[]): readonly HeadingNode[] {
-  const headings: HeadingNode[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line === undefined || line.protected) continue;
-
-    const atx = parseAtxHeading(line.text);
-    if (atx !== undefined) {
-      headings.push({ start: index, end: index, line: line.line, level: atx.level, title: atx.title });
-      continue;
-    }
-    if (/^[ \t]+#{1,6}(?:[ \t]+|$)/u.test(line.text)) {
-      throw new PullRequestTemplateError(
-        "PR_TEMPLATE_UNSUPPORTED_CONSTRUCT",
-        "Indented headings are not supported because their list/block context is ambiguous.",
-        { line: line.line, construct: "indented heading" },
-      );
-    }
-
-    const underline = lines[index + 1];
-    if (underline === undefined || underline.protected || !/^([=-])\1{1,}[ \t]*$/u.test(underline.text)) continue;
-    const title = line.text.trim();
-    if (title.length === 0 || isBlockLikeLine(line.text)) continue;
-    const level = underline.text.trimStart().startsWith("=") ? 1 : 2;
-    headings.push({ start: index, end: index + 1, line: line.line, level, title });
-    index += 1;
-  }
-  return headings;
-}
-
-function parseAtxHeading(text: string): { readonly level: number; readonly title: string } | undefined {
-  const match = /^(?<marks>#{1,6})(?:[ \t]+(?<title>.*?)|[ \t]*)$/u.exec(text);
-  if (match === null) return undefined;
-  let title = (match.groups?.title ?? "").trim();
-  title = title.replace(/[ \t]+#+[ \t]*$/u, "").trim();
-  if (title.length === 0) {
-    throw new PullRequestTemplateError("PR_TEMPLATE_UNSUPPORTED_CONSTRUCT", "Headings must contain a title.", {
-      construct: "empty heading",
-    });
-  }
-  return { level: match.groups?.marks?.length ?? 1, title };
-}
-
-function isBlockLikeLine(text: string): boolean {
-  return /^(?:[ \t]*)(?:[-+*]|\d+[.)])[ \t]+|[ \t]*>|[ \t]*```|[ \t]*~~~|[ \t]*#/u.test(text);
-}
-
-function lexLines(lines: readonly string[]): readonly LexedLine[] {
-  const lexed: LexedLine[] = [];
-  let fence: Fence | undefined;
-  let commentStart: number | undefined;
-  let commentOpen = false;
-
-  lines.forEach((text, index) => {
-    const line = index + 1;
-    if (fence !== undefined) {
-      lexed.push({ text, line, protected: true });
-      if (isClosingFence(text, fence)) fence = undefined;
-      return;
-    }
-    if (commentOpen) {
-      lexed.push({ text, line, protected: true });
-      if (text.includes("-->") === true) commentOpen = false;
-      return;
-    }
-
-    const openingFence = parseOpeningFence(text);
-    if (openingFence !== undefined) {
-      fence = openingFence;
-      lexed.push({ text, line, protected: true });
-      return;
-    }
-
-    const commentIndex = text.indexOf("<!--");
-    if (commentIndex >= 0) {
-      lexed.push({ text, line, protected: true });
-      if (text.indexOf("-->", commentIndex + 4) < 0) {
-        commentOpen = true;
-        commentStart = line;
-      }
-      return;
-    }
-    lexed.push({ text, line, protected: false });
-  });
-
-  if (commentOpen) {
-    throw new PullRequestTemplateError("PR_TEMPLATE_UNSUPPORTED_CONSTRUCT", "HTML comment is not closed.", {
-      line: commentStart,
-      construct: "unclosed HTML comment",
-    });
-  }
-  return lexed;
-}
-
-function parseOpeningFence(text: string): Fence | undefined {
-  const match = /^(?: {0,3})(?<marker>`{3,}|~{3,})/u.exec(text);
-  if (match === null) return undefined;
-  const marker = match.groups?.marker;
-  if (marker === undefined) return undefined;
-  return { character: marker[0] as "`" | "~", length: marker.length };
-}
-
-function isClosingFence(text: string, fence: Fence): boolean {
-  const escapedCharacter = fence.character === "`" ? "`" : "~";
-  const pattern = new RegExp(`^ {0,3}${escapedCharacter}{${fence.length},}[ \\t]*$`, "u");
-  return pattern.test(text);
-}
-
 function normalizeSource(markdown: string): string {
   return markdown
-    .replace(/^\uFEFF/u, "")
+    .replace(/^﻿/u, "")
     .replace(new RegExp(`^${GENERATED_SEMANTIC_NOTICE}\\n?`, "u"), "")
     .replace(/\r\n?/gu, "\n");
 }
