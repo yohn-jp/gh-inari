@@ -50,6 +50,7 @@ const identity = {
   rootIssue: 221,
 } as const;
 const branch = "feat/221-implement-governed-change-ready-transition";
+const branchCommitSha = "0123456789abcdef0123456789abcdef01234567";
 const baseBranch = "main";
 const issuer = INARI_ISSUER_PRINCIPAL;
 const branchGovernance = { pattern: "^(feat|fix|docs|refactor|test|chore)/[0-9]+-[a-z0-9-]+$" };
@@ -745,6 +746,7 @@ test("Ready addition preserves the Abort recovery plan", () => {
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     transition: "abort",
     change,
+    target: { branchCommitSha },
   });
   const recovery = planChangeRecovery({
     transition,
@@ -762,7 +764,7 @@ test("Ready addition preserves the Abort recovery plan", () => {
 
   assert.equal(recovery.operation, "recover-transition");
   if (recovery.operation !== "recover-transition") throw new Error("expected Abort transition recovery");
-  assert.deepEqual(recovery.effects, [{ kind: "DELETE_BRANCH", branch }]);
+  assert.deepEqual(recovery.effects, [{ kind: "DELETE_BRANCH", branch, expectedCommitSha: branchCommitSha }]);
 });
 
 test("Abort addition preserves the healthy Ready retry no-op", () => {

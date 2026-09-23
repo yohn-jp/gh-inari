@@ -35,6 +35,8 @@ const TREE_SHA = "b".repeat(40);
 const AUTHORITY_BLOB_SHA = "c".repeat(40);
 const ISSUE_SOURCE_SHA = "d".repeat(40);
 const ISSUE_NATIVE_SHA = "e".repeat(40);
+const BRANCH_SHA = "f".repeat(40);
+const REPOSITORY_NODE_ID = "R_kgDOAbCdEf";
 
 const ISSUE_SOURCE = parseSemanticTemplate(
   JSON.stringify({
@@ -259,7 +261,7 @@ function successfulMutationFetch(): {
           token: "installation-token",
           expires_at: "2026-09-13T00:10:00.000Z",
           permissions: body.permissions,
-          repositories: [{ id: Number(REPOSITORY_ID), full_name: "acme/inari" }],
+          repositories: [{ id: Number(REPOSITORY_ID), node_id: REPOSITORY_NODE_ID, full_name: "acme/inari" }],
         },
         201,
       );
@@ -307,11 +309,26 @@ function successfulMutationFetch(): {
     }
     if (path === `repos/acme/inari/git/ref/heads/${BRANCH}` && method === "GET") {
       return branchPresent
-        ? jsonResponse({ ref: `refs/heads/${BRANCH}`, object: { type: "commit" } })
+        ? jsonResponse({ ref: `refs/heads/${BRANCH}`, object: { type: "commit", sha: BRANCH_SHA } })
         : jsonResponse({}, 404);
     }
     if (path === "repos/acme/inari/git/matching-refs/heads/" && method === "GET") {
-      return jsonResponse(branchPresent ? [{ ref: `refs/heads/${BRANCH}`, object: { type: "commit" } }] : []);
+      return jsonResponse(
+        branchPresent ? [{ ref: `refs/heads/${BRANCH}`, object: { type: "commit", sha: BRANCH_SHA } }] : [],
+      );
+    }
+    if (path === "graphql" && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as {
+        readonly variables: {
+          readonly input: { readonly refUpdates: readonly { readonly name: string; readonly beforeOid: string }[] };
+        };
+      };
+      const refUpdate = body.variables.input.refUpdates[0];
+      if (refUpdate?.name === `refs/heads/${BRANCH}` && refUpdate.beforeOid === BRANCH_SHA) {
+        branchPresent = false;
+        return jsonResponse({ data: { updateRefs: { clientMutationId: null } } });
+      }
+      return jsonResponse({ errors: [{ type: "UNPROCESSABLE", message: "Ref update failed." }] }, 200);
     }
     if (path === "repos/acme/inari/pulls" && method === "GET") {
       return jsonResponse([
@@ -524,7 +541,7 @@ test("successful direct-App Change mutation retains verified broker App provenan
     installationId: INSTALLATION_ID,
   });
   assert.ok(provider.calls.some((call) => call.method === "PATCH"));
-  assert.ok(provider.calls.some((call) => call.method === "DELETE"));
+  assert.ok(provider.calls.some((call) => call.method === "POST" && call.path === "graphql"));
 });
 
 test("a locally signed change.issue provenance record resolves canonical Delegator trust through the App broker and reaches effect execution", async () => {

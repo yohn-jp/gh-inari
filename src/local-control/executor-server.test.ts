@@ -422,6 +422,10 @@ function providerFetch(
           },
         });
       }
+      if (body?.query && String(body.query).includes("ConditionalDeleteRef")) {
+        changeBranchPresent = false;
+        return json({ data: { updateRefs: { clientMutationId: null } } });
+      }
       return json({ data: { updateRefs: { refUpdates: [{}] } } });
     }
     if (url.pathname === "/repos/acme/inari/pulls" && method === "GET") {
@@ -690,11 +694,8 @@ test("Local Executor production composition executes change.abort through canoni
       ),
     );
     assert.ok(
-      provider.calls.some(
-        (call) =>
-          call.method === "DELETE" &&
-          call.url.pathname === `/repos/acme/inari/git/refs/heads/${encodeURIComponent(BRANCH)}`,
-      ),
+      provider.calls.some((call) => call.method === "POST" && call.url.pathname === "/graphql"),
+      "the canonical App effect authority must delete the branch only through the generation-safe compare-and-delete",
     );
   } finally {
     await rm(root, { recursive: true, force: true });

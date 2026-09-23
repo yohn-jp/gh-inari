@@ -382,6 +382,7 @@ test("shared transition recovery plans retain abort provenance and only the pend
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     transition: "abort",
     change,
+    target: { branchCommitSha: createdCommitSha },
   });
   const projection = projectionInput({
     issue: issueEvidence(),
@@ -414,7 +415,9 @@ test("shared transition recovery plans retain abort provenance and only the pend
 
   assert.equal(plan.operation, "recover-transition");
   if (plan.operation !== "recover-transition") throw new Error("expected transition recovery");
-  assert.deepEqual(plan.effects, [{ kind: "DELETE_BRANCH", branch: canonicalBranch }]);
+  assert.deepEqual(plan.effects, [
+    { kind: "DELETE_BRANCH", branch: canonicalBranch, expectedCommitSha: createdCommitSha },
+  ]);
   assert.equal(plan.result.change.state, "RECOVERY_REQUIRED");
   assert.deepEqual(plan.result.change.provenance, {
     requester: "human:sophia",
@@ -435,10 +438,49 @@ test("branch-only abort recovery is an explicit branch cleanup plan without a PR
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     transition: "abort",
     change,
-    target: { branch: canonicalBranch },
+    target: { branch: canonicalBranch, branchCommitSha: createdCommitSha },
   });
 
-  assert.deepEqual(plan.effects, [{ kind: "DELETE_BRANCH", branch: canonicalBranch }]);
+  assert.deepEqual(plan.effects, [
+    { kind: "DELETE_BRANCH", branch: canonicalBranch, expectedCommitSha: createdCommitSha },
+  ]);
   assert.equal(plan.result.state, "ABORTED");
   assert.deepEqual(plan.result.projection, { branch: canonicalBranch });
+});
+
+test("abort cleanup fails closed when the canonical branch generation is unproven", () => {
+  const draftChange = {
+    version: 1 as const,
+    identity,
+    state: "DRAFT" as const,
+    provenance: { requester: "human:sophia", issuer: "app:inari-issuer", implementer: "agent:codex" },
+    projection: { branch: canonicalBranch, pullRequest: 901 },
+  };
+  assert.throws(
+    () =>
+      planChangeTransition({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        transition: "abort",
+        change: draftChange,
+      }),
+    /proven canonical branch generation/u,
+  );
+
+  const recoveryChange = {
+    version: 1 as const,
+    identity,
+    state: "RECOVERY_REQUIRED" as const,
+    provenance: { issuer: "app:inari-issuer" },
+    projection: { branch: canonicalBranch },
+  };
+  assert.throws(
+    () =>
+      planChangeTransition({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        transition: "abort",
+        change: recoveryChange,
+        target: { branch: canonicalBranch },
+      }),
+    /proven canonical branch generation/u,
+  );
 });
