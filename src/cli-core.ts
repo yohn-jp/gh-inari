@@ -1868,25 +1868,36 @@ function rejectPartialSessionTransportOptions(
   );
 }
 
-/**
- * Resolves the direct App transport's Session credential path and endpoint,
- * preferring explicit CLI flags over the `INARI_SESSION_CREDENTIAL_FILE` /
- * `INARI_APP_ENDPOINT` environment variables. Returns `undefined` when
- * neither source supplies both values, so the caller falls back to Actions.
- */
-function resolveDirectAppTransportOptions(
-  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean },
-  environment: Readonly<Record<string, string | undefined>>,
-): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
+/** Resolves an explicitly selected direct App transport without consulting environment variables. */
+function resolveExplicitDirectAppTransportOptions(sessionOptions: {
+  readonly sessionCredential?: string | boolean;
+  readonly appEndpoint?: string | boolean;
+}): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
   if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
     return { sessionCredential: sessionOptions.sessionCredential, appEndpoint: sessionOptions.appEndpoint };
   }
+  return undefined;
+}
+
+/** Resolves the legacy environment-derived direct App transport, when configured. */
+function resolveLegacyDirectAppTransportOptions(
+  environment: Readonly<Record<string, string | undefined>>,
+): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
   const envSessionCredential = environment.INARI_SESSION_CREDENTIAL_FILE;
   const envAppEndpoint = environment.INARI_APP_ENDPOINT;
   if (typeof envSessionCredential === "string" && typeof envAppEndpoint === "string") {
     return { sessionCredential: envSessionCredential, appEndpoint: envAppEndpoint };
   }
   return undefined;
+}
+
+function resolveDirectAppTransportOptions(
+  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean },
+  environment: Readonly<Record<string, string | undefined>>,
+): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
+  return (
+    resolveExplicitDirectAppTransportOptions(sessionOptions) ?? resolveLegacyDirectAppTransportOptions(environment)
+  );
 }
 
 /**
@@ -2352,9 +2363,9 @@ async function runChangeCommand(
   const appEndpoint = parsed.options.appEndpoint;
   const environment = dependencies.environment ?? process.env;
   rejectPartialSessionTransportOptions(sessionCredential, appEndpoint);
-  const directAppTransport = resolveDirectAppTransportOptions({ sessionCredential, appEndpoint }, environment);
+  const explicitDirectAppTransport = resolveExplicitDirectAppTransportOptions({ sessionCredential, appEndpoint });
   if (
-    directAppTransport === undefined &&
+    explicitDirectAppTransport === undefined &&
     configuredLocalAdmissionTopology(environment) &&
     ["issue", "show", "ready", "abort", "merge", "publish"].includes(definition.operation)
   ) {
@@ -2366,6 +2377,7 @@ async function runChangeCommand(
       environment,
     );
   }
+  const directAppTransport = explicitDirectAppTransport ?? resolveLegacyDirectAppTransportOptions(environment);
   if (definition.operation === "publish") {
     return await runChangePublishCommand(issue, parsed, root, dependencies);
   }

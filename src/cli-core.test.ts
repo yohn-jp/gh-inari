@@ -766,6 +766,8 @@ test("local Change commands use the production Admission authority and its exact
 
   try {
     writeAdmissionRoute(environment, proxy.endpoint);
+    environment.INARI_SESSION_CREDENTIAL_FILE = path.join(configRoot, "legacy-session.json");
+    environment.INARI_APP_ENDPOINT = "https://legacy-app.example.com";
     const binding = localSessionBinding(sessionId, issue, "123456789", "acme/inari", {
       authority: local.authority,
       keyPair: local.keyPair,
