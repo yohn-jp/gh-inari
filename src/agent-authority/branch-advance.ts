@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import { validateBranchName } from "../branch-naming.js";
 import { MAX_SESSION_REQUEST_BYTES, canonicalizeSemanticRequest } from "./session-request.js";
 import { classifyDelegatedTreeDelta } from "./protected-paths.js";
-import { MAX_ISSUE_NUMBER, type BranchAdvanceCapabilityClaim } from "./capability.js";
-import { createCapabilityExecutionProvenance, type CapabilityExecutionProvenance } from "./capability-provenance.js";
+import { MAX_ISSUE_NUMBER } from "./capability.js";
+import {
+  createCapabilityExecutionProvenance,
+  validateCapabilityExecutionProvenance,
+  type CapabilityExecutionProvenance,
+} from "./capability-provenance.js";
 import type { AuthenticatedSessionContext } from "./session-authentication.js";
 import type { SessionAgentMetadata } from "./session-bundle.js";
 import {
@@ -21,7 +25,7 @@ import {
   type GitHubBranchAdvanceCapability,
 } from "../github/git-data-capability.js";
 import type { AdmittedSessionCapability } from "./capability-admission.js";
-import type { RepositoryIdentity } from "../github/effect-authorizer.js";
+import { validateIssuerRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 
 export const BRANCH_ADVANCE_CONTRACT_VERSION = 1 as const;
 export const BRANCH_ADVANCE_OPERATION = "branch.advance" as const;
@@ -106,6 +110,49 @@ export interface ExecuteBranchAdvanceOptions {
   readonly broker: BranchAdvanceCapabilityBroker;
   readonly admission: AdmittedSessionCapability;
   readonly request?: unknown;
+  readonly now?: Date | number | (() => Date | number);
+}
+
+export type BranchAdvanceAuthorizedPathOperation = Exclude<ImplementationScopeOperation, "READONLY">;
+
+export interface BranchAdvanceAuthorizedPath {
+  readonly path: string;
+  /** The exact Implementation scope operations admitted for this requested path. */
+  readonly operations: readonly BranchAdvanceAuthorizedPathOperation[];
+}
+
+/**
+ * Bounded path authorization issued after Session/Implementation Admission.
+ * The request digest binds this evidence to the complete signed semantic
+ * request without carrying the Session request signature or Session context.
+ */
+export interface BranchAdvanceAuthorizationEvidence {
+  readonly version: 1;
+  readonly requestDigest: string;
+  readonly implementation: Readonly<{ number: number; governedBodyDigest: string }>;
+  readonly paths: readonly BranchAdvanceAuthorizedPath[];
+}
+
+export interface BranchAdvanceAuthorizationOptions {
+  readonly context: AuthenticatedSessionContext;
+  readonly admission: AdmittedSessionCapability;
+  readonly request?: unknown;
+}
+
+export type BranchAdvanceAuthorizationResult =
+  | Readonly<{
+      readonly valid: true;
+      readonly request: BranchAdvanceSemanticRequest;
+      readonly authorization: BranchAdvanceAuthorizationEvidence;
+    }>
+  | Readonly<{ readonly valid: false; readonly failure: BranchAdvanceSemanticResult }>;
+
+export interface ExecuteBranchAdvanceEffectsOptions {
+  readonly repository: RepositoryIdentity;
+  readonly provenance: CapabilityExecutionProvenance;
+  readonly request: unknown;
+  readonly authorization: unknown;
+  readonly broker: BranchAdvanceCapabilityBroker;
   readonly now?: Date | number | (() => Date | number);
 }
 
@@ -343,24 +390,15 @@ function provesTarget(
   }
   return true;
 }
-function provenance(
-  context: AuthenticatedSessionContext,
+function verifiedProvenance(
+  authorized: CapabilityExecutionProvenance,
   capability: GitHubBranchAdvanceCapability,
   request: BranchAdvanceSemanticRequest,
-  c: BranchAdvanceCapabilityClaim,
 ): CapabilityExecutionProvenance | undefined {
-  if (!context.task || context.task.kind !== "issue") return undefined;
   try {
     return createCapabilityExecutionProvenance({
-      version: 1,
+      ...authorized,
       stage: "verified",
-      repository: context.repository,
-      runtimeAuthority: context.runtimeAuthority,
-      session: context.session,
-      authority: context.authority,
-      request: context.request,
-      subject: { kind: "branch", issue: context.task.number, branch: request.branch },
-      capability: c,
       app: { ...capability.scope.app, installationId: capability.scope.installation.installationId },
       ...(request.commit.author === undefined ? {} : { commitAuthor: request.commit.author }),
       ...(request.agent === undefined ? {} : { agent: request.agent }),
@@ -415,194 +453,447 @@ function scopeAllows(
   }
 }
 
-export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions): Promise<BranchAdvanceSemanticResult> {
+function requestDigest(request: BranchAdvanceSemanticRequest): string {
+  return createHash("sha256").update(canonicalizeSemanticRequest(request), "utf8").digest("hex");
+}
+
+export interface BranchAdvanceAuthorizationValidationResult {
+  readonly valid: boolean;
+  readonly authorization?: BranchAdvanceAuthorizationEvidence;
+  readonly diagnostics: readonly string[];
+}
+
+/** Validate the bounded Admission evidence against the exact branch request. */
+export function validateBranchAdvanceAuthorizationEvidence(
+  input: unknown,
+  requestInput: unknown,
+): BranchAdvanceAuthorizationValidationResult {
+  const diagnostics: string[] = [];
+  const requestResult = validateBranchAdvanceSemanticRequest(requestInput);
+  if (!requestResult.valid || requestResult.value === undefined) {
+    return { valid: false, diagnostics: Object.freeze(["Branch request is invalid."]) };
+  }
+  const request = requestResult.value;
+  if (!record(input)) return { valid: false, diagnostics: Object.freeze(["Branch authorization is invalid."]) };
+  const allowedRoot = new Set(["version", "requestDigest", "implementation", "paths"]);
+  if (Object.keys(input).some((key) => !allowedRoot.has(key))) diagnostics.push("Branch authorization is invalid.");
+  if (input.version !== 1 || input.requestDigest !== requestDigest(request))
+    diagnostics.push("Branch authorization is invalid.");
+  if (
+    !record(input.implementation) ||
+    Object.keys(input.implementation).some((key) => !new Set(["number", "governedBodyDigest"]).has(key)) ||
+    input.implementation.number !== request.issue ||
+    typeof input.implementation.governedBodyDigest !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(input.implementation.governedBodyDigest)
+  ) {
+    diagnostics.push("Branch authorization is invalid.");
+  }
+  if (!Array.isArray(input.paths) || input.paths.length !== request.changes.length) {
+    diagnostics.push("Branch authorization is invalid.");
+  } else {
+    const normalizedPaths: BranchAdvanceAuthorizedPath[] = [];
+    input.paths.forEach((entry, index) => {
+      const change = request.changes[index];
+      if (
+        change === undefined ||
+        !record(entry) ||
+        Object.keys(entry).some((key) => !new Set(["path", "operations"]).has(key)) ||
+        entry.path !== change.path ||
+        !Array.isArray(entry.operations)
+      ) {
+        diagnostics.push("Branch authorization is invalid.");
+        return;
+      }
+      const operations = entry.operations;
+      const validValues = change.operation === "delete" ? ["DELETE"] : ["CREATE", "WRITE"];
+      if (
+        operations.length === 0 ||
+        operations.some((operation) => !validValues.includes(operation as string)) ||
+        new Set(operations).size !== operations.length ||
+        (change.operation === "delete" && (operations.length !== 1 || operations[0] !== "DELETE"))
+      ) {
+        diagnostics.push("Branch authorization is invalid.");
+        return;
+      }
+      normalizedPaths.push(
+        Object.freeze({
+          path: change.path,
+          operations: Object.freeze([...operations]) as readonly BranchAdvanceAuthorizedPathOperation[],
+        }),
+      );
+    });
+    if (diagnostics.length === 0) {
+      const implementation = input.implementation as Record<string, unknown>;
+      return {
+        valid: true,
+        authorization: Object.freeze({
+          version: 1,
+          requestDigest: input.requestDigest as string,
+          implementation: Object.freeze({
+            number: implementation.number as number,
+            governedBodyDigest: implementation.governedBodyDigest as string,
+          }),
+          paths: Object.freeze(normalizedPaths),
+        }),
+        diagnostics: Object.freeze([]),
+      };
+    }
+  }
+  return { valid: false, diagnostics: Object.freeze(diagnostics.slice(0, 32)) };
+}
+
+/**
+ * Complete Session, capability, binding, protected-path, and Implementation
+ * scope authorization before the post-admission execution boundary. No Git
+ * provider capability or mutation is acquired here.
+ */
+export function authorizeBranchAdvance(options: BranchAdvanceAuthorizationOptions): BranchAdvanceAuthorizationResult {
   const signed = options?.context?.verifiedRequest?.envelope?.request;
   const candidate = options?.request ?? signed;
-  const v = validateBranchAdvanceSemanticRequest(candidate);
-  if (!v.valid || !v.value) return fail(undefined, "request", v.diagnostics[0]?.message ?? "Request is invalid.");
-  const r = v.value;
-  if (r.rework !== undefined && r.expectedHead !== r.rework.reviewHead)
-    return fail(r, "stale-head", "Rework review head does not match the expected branch head.", "stale");
+  const validation = validateBranchAdvanceSemanticRequest(candidate);
+  if (!validation.valid || validation.value === undefined) {
+    return {
+      valid: false,
+      failure: fail(undefined, "request", validation.diagnostics[0]?.message ?? "Request is invalid."),
+    };
+  }
+  const request = validation.value;
+  if (request.rework !== undefined && request.expectedHead !== request.rework.reviewHead) {
+    return {
+      valid: false,
+      failure: fail(request, "stale-head", "Rework review head does not match the expected branch head.", "stale"),
+    };
+  }
   const context = options.context;
   if (options.request !== undefined) {
     try {
-      if (canonicalizeSemanticRequest(options.request) !== canonicalizeSemanticRequest(signed))
-        return fail(r, "authorization", "Request is not the signed Session request.");
+      if (canonicalizeSemanticRequest(options.request) !== canonicalizeSemanticRequest(signed)) {
+        return { valid: false, failure: fail(request, "authorization", "Request is not the signed Session request.") };
+      }
     } catch {
-      return fail(r, "authorization", "Request is not the signed Session request.");
+      return { valid: false, failure: fail(request, "authorization", "Request is not the signed Session request.") };
     }
   }
   if (
     context.repository.repositoryId === "" ||
     context.request.operation !== BRANCH_ADVANCE_OPERATION ||
     context.task?.kind !== "issue" ||
-    context.task.number !== r.issue
-  )
-    return fail(r, "authorization", "The request is not admitted for this Issue.");
-  if (r.branch === context.authority.ref || r.branch === "main")
-    return fail(r, "branch-state", "Default-branch writes are forbidden.");
+    context.task.number !== request.issue
+  ) {
+    return { valid: false, failure: fail(request, "authorization", "The request is not admitted for this Issue.") };
+  }
+  if (request.branch === context.authority.ref || request.branch === "main") {
+    return { valid: false, failure: fail(request, "branch-state", "Default-branch writes are forbidden.") };
+  }
   const admission = options.admission;
   const subject = admission?.subject;
   if (
     admission?.operation !== BRANCH_ADVANCE_OPERATION ||
     subject?.kind !== "branch" ||
-    subject.issue !== r.issue ||
-    subject.branch !== r.branch ||
-    admission.canonical?.branch !== r.branch ||
+    subject.issue !== request.issue ||
+    subject.branch !== request.branch ||
+    admission.canonical?.branch !== request.branch ||
     admission.repository?.repositoryHost?.toLowerCase() !== context.repository.repositoryHost.toLowerCase() ||
     admission.repository?.repositoryId !== context.repository.repositoryId ||
     admission.session?.id !== context.session.id ||
     admission.session?.certificateJti !== context.session.certificateJti ||
     admission.request?.requestId !== context.request.requestId ||
     admission.request?.operation !== context.request.operation
-  )
-    return fail(
-      r,
-      "authorization",
-      "The supplied admission is not the exact branch.advance admission for this request.",
-    );
-  if (r.rework !== undefined) {
-    if (admission.canonical.state !== "REVIEW" || admission.canonical.pullRequest !== r.rework.pullRequest)
-      return fail(r, "authorization", "Rework is not bound to the canonical REVIEW pull request.");
-    const binding = context.implementationBinding;
-    if (binding === undefined || binding.authorization.governedBodyDigest !== r.rework.authorizationDigest)
-      return fail(r, "authorization", "Rework is not bound to the current Implementation authorization.");
-  } else if (admission.canonical.state === "REVIEW") {
-    return fail(r, "authorization", "A REVIEW branch advance requires an explicit bounded rework marker.");
+  ) {
+    return {
+      valid: false,
+      failure: fail(
+        request,
+        "authorization",
+        "The supplied admission is not the exact branch.advance admission for this request.",
+      ),
+    };
   }
-  const c = admission.capability;
-  if (c.kind !== "branch.advance" || c.branch !== r.branch)
-    return fail(r, "authorization", "No exact branch.advance capability was admitted.");
-  const projected = { changes: r.changes.map((x) => ({ operation: "modify" as const, path: x.path })) };
-  const classification = classifyDelegatedTreeDelta(projected);
-  if (classification.kind !== "allowed") return fail(r, "protected-path", classification.message);
+  if (request.rework !== undefined) {
+    if (admission.canonical.state !== "REVIEW" || admission.canonical.pullRequest !== request.rework.pullRequest) {
+      return {
+        valid: false,
+        failure: fail(request, "authorization", "Rework is not bound to the canonical REVIEW pull request."),
+      };
+    }
+    const binding = context.implementationBinding;
+    if (binding === undefined || binding.authorization.governedBodyDigest !== request.rework.authorizationDigest) {
+      return {
+        valid: false,
+        failure: fail(request, "authorization", "Rework is not bound to the current Implementation authorization."),
+      };
+    }
+  } else if (admission.canonical.state === "REVIEW") {
+    return {
+      valid: false,
+      failure: fail(request, "authorization", "A REVIEW branch advance requires an explicit bounded rework marker."),
+    };
+  }
+  const capability = admission.capability;
+  if (capability.kind !== "branch.advance" || capability.branch !== request.branch) {
+    return {
+      valid: false,
+      failure: fail(request, "authorization", "No exact branch.advance capability was admitted."),
+    };
+  }
+  const classification = classifyDelegatedTreeDelta({
+    changes: request.changes.map((change) => ({ operation: "modify" as const, path: change.path })),
+  });
+  if (classification.kind !== "allowed") {
+    return { valid: false, failure: fail(request, "protected-path", classification.message) };
+  }
   const implementationScope = context.implementationScope;
   if (
     implementationScope === undefined ||
-    !matchesImplementationScopeBinding(context, implementationScope, r.issue, r.branch)
-  )
-    return fail(r, "authorization", "The current Implementation scope is not bound to this Session request.");
-  if (c.pathPolicy !== undefined) return fail(r, "authorization", "Named path policy could not be resolved.");
-  const target = {
-    repositoryHost: context.repository.repositoryHost,
-    repositoryId: context.repository.repositoryId,
-    nameWithOwner: context.repository.nameWithOwner,
-  };
+    !matchesImplementationScopeBinding(context, implementationScope, request.issue, request.branch)
+  ) {
+    return {
+      valid: false,
+      failure: fail(request, "authorization", "The current Implementation scope is not bound to this Session request."),
+    };
+  }
+  if (capability.pathPolicy !== undefined) {
+    return { valid: false, failure: fail(request, "authorization", "Named path policy could not be resolved.") };
+  }
+  const paths: BranchAdvanceAuthorizedPath[] = [];
+  for (const change of request.changes) {
+    const operations: BranchAdvanceAuthorizedPathOperation[] =
+      change.operation === "delete"
+        ? scopeAllows(implementationScope, "DELETE", change.path)
+          ? ["DELETE"]
+          : []
+        : (["CREATE", "WRITE"] as const).filter((operation) =>
+            scopeAllows(implementationScope, operation, change.path),
+          );
+    if (operations.length === 0) {
+      return {
+        valid: false,
+        failure: fail(
+          request,
+          "authorization",
+          "The proposed tree delta is outside the authorized Implementation scope.",
+        ),
+      };
+    }
+    paths.push(Object.freeze({ path: change.path, operations: Object.freeze([...operations]) }));
+  }
+  const authorization: BranchAdvanceAuthorizationEvidence = Object.freeze({
+    version: 1,
+    requestDigest: requestDigest(request),
+    implementation: Object.freeze({
+      number: request.issue,
+      governedBodyDigest: implementationScope.authorization.governedBodyDigest,
+    }),
+    paths: Object.freeze(paths),
+  });
+  return { valid: true, request, authorization };
+}
+
+function sameRepositoryIdentity(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
+  return (
+    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() &&
+    left.repositoryId === right.repositoryId &&
+    left.nameWithOwner.toLowerCase() === right.nameWithOwner.toLowerCase()
+  );
+}
+
+/** Execute only provider effects from an Admission-authorized branch request. */
+export async function executeBranchAdvanceEffects(
+  options: ExecuteBranchAdvanceEffectsOptions,
+): Promise<BranchAdvanceSemanticResult> {
+  const validation = validateBranchAdvanceSemanticRequest(options?.request);
+  if (!validation.valid || validation.value === undefined) {
+    return fail(undefined, "request", validation.diagnostics[0]?.message ?? "Request is invalid.");
+  }
+  const request = validation.value;
+  if (request.rework !== undefined && request.expectedHead !== request.rework.reviewHead) {
+    return fail(request, "stale-head", "Rework review head does not match the expected branch head.", "stale");
+  }
+  const authorizationResult = validateBranchAdvanceAuthorizationEvidence(options.authorization, request);
+  if (!authorizationResult.valid || authorizationResult.authorization === undefined) {
+    return fail(request, "authorization", "Branch scope authorization evidence is invalid.");
+  }
+  const provenanceResult = validateCapabilityExecutionProvenance(options.provenance);
+  if (!provenanceResult.valid || provenanceResult.value === undefined) {
+    return fail(request, "authorization", "Authorized branch provenance is invalid.");
+  }
+  const authorized = provenanceResult.value;
+  const capabilityClaim = authorized.capability;
+  const repositoryResult = validateIssuerRepositoryIdentity(options.repository);
+  if (!repositoryResult.valid || repositoryResult.value === undefined) {
+    return fail(request, "authorization", "Authorized branch repository is invalid.");
+  }
+  if (
+    authorized.stage !== "authorized" ||
+    authorized.request.operation !== BRANCH_ADVANCE_OPERATION ||
+    authorized.subject.kind !== "branch" ||
+    authorized.subject.issue !== request.issue ||
+    authorized.subject.branch !== request.branch ||
+    capabilityClaim?.kind !== "branch.advance" ||
+    capabilityClaim.branch !== request.branch ||
+    capabilityClaim.pathPolicy !== undefined ||
+    !sameRepositoryIdentity(authorized.repository, repositoryResult.value) ||
+    authorizationResult.authorization.implementation.number !== request.issue
+  ) {
+    return fail(request, "authorization", "Authorized branch provenance does not match the request.");
+  }
+  const target = repositoryResult.value;
   try {
     return await options.broker.withBranchAdvanceCapability({ target }, async (capability) => {
-      if (capability.scope.repository.repositoryId !== target.repositoryId)
-        return fail(r, "authorization", "Capability repository does not match.");
-      const ref = await capability.readRef(r.branch);
-      if (!ref) return fail(r, "branch-state", "Branch does not exist.");
+      if (!sameRepositoryIdentity(capability.scope.repository, target))
+        return fail(request, "authorization", "Capability repository does not match.");
+      const ref = await capability.readRef(request.branch);
+      if (!ref) return fail(request, "branch-state", "Branch does not exist.");
       const commit = await capability.readCommit(ref.sha);
       const tree = await capability.readTree(commit.treeSha);
       const before: Map<string, { sha: string; mode: string }> = new Map(
         tree.entries
-          .filter((e: { type: string }) => e.type === "blob")
-          .map((e: { path: string; sha: string; mode: string }): [string, { sha: string; mode: string }] => [
-            e.path,
-            { sha: e.sha, mode: e.mode },
+          .filter((entry: { type: string }) => entry.type === "blob")
+          .map((entry: { path: string; sha: string; mode: string }): [string, { sha: string; mode: string }] => [
+            entry.path,
+            { sha: entry.sha, mode: entry.mode },
           ]),
       );
-      if (ref.sha !== r.expectedHead) {
+      if (ref.sha !== request.expectedHead) {
         const replayCommit = await capability.readCommit(ref.sha);
         const replayTree = await capability.readTree(replayCommit.treeSha);
-        const expectedHeadCommit = await capability.readCommit(r.expectedHead);
+        const expectedHeadCommit = await capability.readCommit(request.expectedHead);
         const expectedHeadTree = await capability.readTree(expectedHeadCommit.treeSha);
-        if (provesTarget(replayTree, expectedHeadTree, r))
-          return result(r, "idempotent", undefined, ref.sha, provenance(context, capability, r, c));
-        return fail(r, "stale-head", "Expected head is stale; no overwrite was attempted.", "stale");
-      }
-      const operations = r.changes.map((ch) => {
-        if (ch.operation === "delete") {
-          if (!before.has(ch.path)) return undefined;
-          return { change: ch, operation: "DELETE" as const };
+        if (provesTarget(replayTree, expectedHeadTree, request)) {
+          const verified = verifiedProvenance(authorized, capability, request);
+          return verified === undefined
+            ? fail(request, "verification", "Verified provenance is unavailable.", "recovery-required")
+            : result(request, "idempotent", undefined, ref.sha, verified);
         }
-        return { change: ch, operation: before.has(ch.path) ? ("WRITE" as const) : ("CREATE" as const) };
+        return fail(request, "stale-head", "Expected head is stale; no overwrite was attempted.", "stale");
+      }
+      const operations = request.changes.map((change, index) => {
+        if (change.operation === "delete") {
+          if (!before.has(change.path)) return undefined;
+          return { change, operation: "DELETE" as const, admitted: authorizationResult.authorization!.paths[index] };
+        }
+        return {
+          change,
+          operation: before.has(change.path) ? ("WRITE" as const) : ("CREATE" as const),
+          admitted: authorizationResult.authorization!.paths[index],
+        };
       });
       if (operations.some((operation) => operation === undefined))
-        return fail(r, "branch-state", "Cannot delete a missing path.");
-      if (implementationScope !== undefined) {
-        for (const entry of operations) {
-          if (entry !== undefined && !scopeAllows(implementationScope, entry.operation, entry.change.path))
-            return fail(r, "authorization", "The proposed tree delta is outside the authorized Implementation scope.");
+        return fail(request, "branch-state", "Cannot delete a missing path.");
+      for (const entry of operations) {
+        if (entry !== undefined && !entry.admitted?.operations.includes(entry.operation)) {
+          return fail(
+            request,
+            "authorization",
+            "The proposed tree delta is outside the admitted Implementation scope.",
+          );
         }
       }
       const writes = [];
       for (const entry of operations) {
         if (entry === undefined) continue;
-        const ch = entry.change;
-        if (ch.operation === "delete") {
+        const change = entry.change;
+        if (change.operation === "delete") {
           writes.push({
-            path: ch.path,
+            path: change.path,
             sha: null,
-            mode: before.get(ch.path)!.mode === "100755" ? ("100755" as const) : ("100644" as const),
+            mode: before.get(change.path)!.mode === "100755" ? ("100755" as const) : ("100644" as const),
             type: "blob" as const,
           });
         } else {
-          const blob = await capability.createBlob({ content: ch.content });
-          if (blob.sha !== blobSha(ch.content))
-            return fail(r, "verification", "Created blob identity could not be verified.");
-          writes.push({ path: ch.path, sha: blob.sha, mode: ch.mode, type: "blob" as const });
+          const blob = await capability.createBlob({ content: change.content });
+          if (blob.sha !== blobSha(change.content))
+            return fail(request, "verification", "Created blob identity could not be verified.");
+          writes.push({ path: change.path, sha: blob.sha, mode: change.mode, type: "blob" as const });
         }
       }
       const newTree = await capability.createTree({ baseTreeSha: commit.treeSha, entries: writes });
       const newCommit = await capability.createCommit({
-        message: r.commit.message,
+        message: request.commit.message,
         treeSha: newTree.sha,
-        parents: [r.expectedHead],
-        ...(r.commit.author === undefined ? {} : { author: r.commit.author }),
+        parents: [request.expectedHead],
+        ...(request.commit.author === undefined ? {} : { author: request.commit.author }),
       });
 
       const resolveUncertainUpdate = async (providerThrew: boolean): Promise<BranchAdvanceSemanticResult> => {
         let reread: Awaited<ReturnType<GitHubBranchAdvanceCapability["readRef"]>>;
         try {
-          reread = await capability.readRef(r.branch);
+          reread = await capability.readRef(request.branch);
         } catch {
-          return fail(r, "recovery-required", "Authoritative provider reread failed.", "recovery-required");
+          return fail(request, "recovery-required", "Authoritative provider reread failed.", "recovery-required");
         }
         if (reread?.sha === newCommit.sha) {
-          const p = provenance(context, capability, r, c);
-          if (!p) return fail(r, "verification", "Verified provenance is unavailable.", "recovery-required");
-          return result(r, "idempotent", undefined, reread.sha, p);
+          const verified = verifiedProvenance(authorized, capability, request);
+          if (verified === undefined)
+            return fail(request, "verification", "Verified provenance is unavailable.", "recovery-required");
+          return result(request, "idempotent", undefined, reread.sha, verified);
         }
-        if (reread?.sha === r.expectedHead) {
+        if (reread?.sha === request.expectedHead) {
           return providerThrew
-            ? fail(r, "provider", "Provider mutation was not proven.")
-            : fail(r, "stale-head", "Concurrent branch update rejected the compare-and-swap.", "stale");
+            ? fail(request, "provider", "Provider mutation was not proven.")
+            : fail(request, "stale-head", "Concurrent branch update rejected the compare-and-swap.", "stale");
         }
-        return fail(r, "recovery-required", "Provider ambiguity requires recovery.", "recovery-required");
+        return fail(request, "recovery-required", "Provider ambiguity requires recovery.", "recovery-required");
       };
 
       let update: Awaited<ReturnType<GitHubBranchAdvanceCapability["compareAndAdvanceRef"]>>;
       try {
         update = await capability.compareAndAdvanceRef({
-          branch: r.branch,
-          beforeOid: r.expectedHead,
+          branch: request.branch,
+          beforeOid: request.expectedHead,
           afterOid: newCommit.sha,
           force: false,
         });
       } catch {
         return resolveUncertainUpdate(true);
       }
-      if (update.status !== "updated") {
-        return resolveUncertainUpdate(false);
-      }
+      if (update.status !== "updated") return resolveUncertainUpdate(false);
       let reread: Awaited<ReturnType<GitHubBranchAdvanceCapability["readRef"]>>;
       try {
-        reread = await capability.readRef(r.branch);
+        reread = await capability.readRef(request.branch);
       } catch {
-        return fail(r, "recovery-required", "Authoritative provider reread failed.", "recovery-required");
+        return fail(request, "recovery-required", "Authoritative provider reread failed.", "recovery-required");
       }
       if (!reread || reread.sha !== newCommit.sha)
-        return fail(r, "verification", "Authoritative postcondition verification failed.", "recovery-required");
-      const p = provenance(context, capability, r, c);
-      if (!p) return fail(r, "verification", "Verified provenance is unavailable.");
-      return result(r, "advanced", undefined, reread.sha, p);
+        return fail(request, "verification", "Authoritative postcondition verification failed.", "recovery-required");
+      const verified = verifiedProvenance(authorized, capability, request);
+      if (verified === undefined) return fail(request, "verification", "Verified provenance is unavailable.");
+      return result(request, "advanced", undefined, reread.sha, verified);
     });
-  } catch (e) {
-    if (e instanceof GitDataCapabilityError)
-      return fail(r, "provider", "Git provider operation failed.", "recovery-required");
-    return fail(r, "provider", "Branch advancement failed closed.");
+  } catch (error) {
+    if (error instanceof GitDataCapabilityError)
+      return fail(request, "provider", "Git provider operation failed.", "recovery-required");
+    return fail(request, "provider", "Branch advancement failed closed.");
   }
+}
+
+/** Compatibility composition: authorize first, then share the same provider-effect primitive. */
+export async function executeBranchAdvance(options: ExecuteBranchAdvanceOptions): Promise<BranchAdvanceSemanticResult> {
+  const prepared = authorizeBranchAdvance(options);
+  if (!prepared.valid) return prepared.failure;
+  const context = options.context;
+  let provenance: CapabilityExecutionProvenance;
+  try {
+    provenance = createCapabilityExecutionProvenance({
+      version: 1,
+      stage: "authorized",
+      repository: context.repository,
+      runtimeAuthority: context.runtimeAuthority,
+      session: context.session,
+      authority: context.authority,
+      request: context.request,
+      subject: options.admission.subject,
+      capability: options.admission.capability,
+    });
+  } catch {
+    return fail(prepared.request, "authorization", "Authorized branch provenance could not be established.");
+  }
+  return executeBranchAdvanceEffects({
+    repository: context.repository,
+    provenance,
+    request: prepared.request,
+    authorization: prepared.authorization,
+    broker: options.broker,
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
 }
