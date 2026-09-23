@@ -202,6 +202,10 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
   });
 }
 
+export function configuredLocalAdmissionTopology(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return readLocalJson("cli", "config.json", validateLocalCliConfig, environment) !== undefined;
+}
+
 export function configuredLocalAdmissionRoute(
   environment: NodeJS.ProcessEnv = process.env,
 ): LocalAdmissionRoute | undefined {
@@ -291,7 +295,7 @@ export function createAdmissionChangeExecutionPort(
         request.operation,
         request.issue,
         undefined,
-        undefined,
+        request.operation === "issue" ? request.signedProvenanceRecord : undefined,
         request.mergeStrategy,
       );
       const operation = `change.${request.operation}` as AuthorizedExecutionOperation;

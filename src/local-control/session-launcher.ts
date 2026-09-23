@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   LocalControlError,
   localComponentPath,
@@ -12,8 +12,16 @@ import {
   loadDelegatorKeyPair,
   delegatorPublicKeyFingerprint,
   exportDelegatorPublicKey,
+  type DelegatorKeyPair,
 } from "../agent-authority/delegator-key.js";
+import { createLocalDelegatorSignedChangeProvenanceRecord } from "../agent-authority/delegator-operations.js";
 import { validateDelegator, type Delegator } from "../agent-authority/delegator.js";
+import { CANONICAL_BRANCH_TYPES, recognizeBranchName } from "../branch-naming.js";
+import {
+  validateChangeProvenanceRecord,
+  verifyChangeProvenanceRecord,
+  type SignedChangeProvenanceRecord,
+} from "../change-provenance-record.js";
 import type { CapabilityClaim } from "../agent-authority/capability.js";
 import { MAX_ISSUE_NUMBER } from "../agent-authority/capability.js";
 import { resolveLocalRepositoryNameWithOwner } from "../change-publish-projection.js";
@@ -23,6 +31,7 @@ const STORED_BINDING_VERSION = 1 as const;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const DEFAULT_SESSION_TTL_SECONDS = 3_600;
 const CHANGE_CAPABILITIES = ["change.implement", "change.ready", "change.abort", "change.merge"] as const;
+const CHANGE_ISSUE_PROVENANCE_SUFFIX = ".change-issue-provenance.json";
 
 interface StoredSessionBinding {
   readonly version: typeof STORED_BINDING_VERSION;
@@ -145,17 +154,16 @@ function trustedRuntimeAuthority(environment: NodeJS.ProcessEnv): Delegator {
   return value;
 }
 
-function createBinding(
-  sessionId: string,
-  issue: number,
-  repository: LocalSessionRepositoryIdentity,
-  environment: NodeJS.ProcessEnv,
-  now: Date,
-): LocalSessionBinding {
+interface LocalRuntimeSigningMaterial {
+  readonly authority: Delegator;
+  readonly runtimeKey: DelegatorKeyPair;
+}
+
+function localRuntimeSigningMaterial(environment: NodeJS.ProcessEnv): LocalRuntimeSigningMaterial {
   const authorityConfig = readLocalJson("authority", "config.json", validateLocalAuthorityConfig, environment);
   if (authorityConfig === undefined) fail("LOCAL_CONTROL_INVALID_CONFIG", "Local Runtime Authority is not configured.");
   const privateKeyPath = localComponentPath("authority", authorityConfig.privateKeyFile, environment);
-  let runtimeKey: ReturnType<typeof loadDelegatorKeyPair>;
+  let runtimeKey: DelegatorKeyPair;
   try {
     runtimeKey = loadDelegatorKeyPair(privateKeyPath);
   } catch {
@@ -173,9 +181,46 @@ function createBinding(
   if (authority.key.x !== authorityConfig.publicKey.x) {
     fail("ADMISSION_AUTHORITY_MISMATCH", "Local Runtime Authority key does not match Admission trust.");
   }
+  return { authority, runtimeKey };
+}
+
+function canonicalIssueBranch(cwd: string, issue: number): string {
+  let branch: string;
+  try {
+    branch = execFileSync("git", ["branch", "--show-current"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    fail("ADMISSION_SESSION_BRANCH_UNAVAILABLE", "A canonical local Change branch is required for branch.advance.");
+  }
+  const identity = recognizeBranchName(branch);
+  if (
+    identity === undefined ||
+    !CANONICAL_BRANCH_TYPES.some((kind) => kind === identity.type) ||
+    identity.issueNumber !== issue
+  ) {
+    fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Local Change branch must be canonical and bound to the selected Issue.");
+  }
+  return branch;
+}
+
+function createBinding(
+  sessionId: string,
+  issue: number,
+  repository: LocalSessionRepositoryIdentity,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+  now: Date,
+): LocalSessionBinding {
+  const { authority, runtimeKey } = localRuntimeSigningMaterial(environment);
   const capabilities: CapabilityClaim[] = [];
   for (const kind of CHANGE_CAPABILITIES) {
     if (authority.capabilityCeiling.includes(kind)) capabilities.push({ kind, issue });
+  }
+  if (authority.capabilityCeiling.includes("branch.advance")) {
+    capabilities.push({ kind: "branch.advance", branch: canonicalIssueBranch(cwd, issue) });
   }
   if (!capabilities.some((claim) => claim.kind === "change.implement")) {
     fail("ADMISSION_SESSION_CAPABILITY_UNAVAILABLE", "Runtime Authority cannot delegate Issue implementation.");
@@ -205,6 +250,83 @@ function createBinding(
   }
 }
 
+function provenancePath(sessionId: string): string {
+  validateSessionId(sessionId);
+  return `sessions/${sessionId}${CHANGE_ISSUE_PROVENANCE_SUFFIX}`;
+}
+
+function storedProvenanceValidator(value: unknown): SignedChangeProvenanceRecord {
+  const validation = validateChangeProvenanceRecord(value);
+  if (!validation.valid || validation.record === undefined) {
+    throw new LocalControlError("LOCAL_CONTROL_INVALID_CONFIG", "Stored Session provenance is malformed.");
+  }
+  return validation.record;
+}
+
+function verifySessionProvenance(
+  binding: LocalSessionBinding,
+  record: SignedChangeProvenanceRecord,
+  authority: Delegator,
+): void {
+  if (
+    binding.authority.id !== authority.id ||
+    binding.authority.publicKeyFingerprint !== delegatorPublicKeyFingerprint(authority.key)
+  ) {
+    fail("ADMISSION_CHANGE_PROVENANCE_AUTHORITY_MISMATCH", "Session and provenance Runtime Authority do not match.");
+  }
+  let payload: ReturnType<typeof verifyChangeProvenanceRecord>;
+  try {
+    payload = verifyChangeProvenanceRecord(record, authority);
+  } catch {
+    fail("ADMISSION_CHANGE_PROVENANCE_INVALID", "Signed Runtime provenance could not be verified.");
+  }
+  if (payload.rootIssue !== binding.task.number || payload.operation !== "change.issue") {
+    fail("ADMISSION_CHANGE_PROVENANCE_MISMATCH", "Signed provenance is not bound to this Session Issue.");
+  }
+}
+
+export function readLocalSessionChangeIssueProvenance(
+  binding: LocalSessionBinding,
+  environment: NodeJS.ProcessEnv = process.env,
+): SignedChangeProvenanceRecord | undefined {
+  const record = readLocalJson("cli", provenancePath(binding.sessionId), storedProvenanceValidator, environment);
+  if (record === undefined) return undefined;
+  verifySessionProvenance(binding, record, trustedRuntimeAuthority(environment));
+  return record;
+}
+
+export function storeLocalSessionChangeIssueProvenance(
+  binding: LocalSessionBinding,
+  record: SignedChangeProvenanceRecord,
+  environment: NodeJS.ProcessEnv = process.env,
+): SignedChangeProvenanceRecord {
+  validateSessionId(binding.sessionId);
+  const validated = storedProvenanceValidator(record);
+  verifySessionProvenance(binding, validated, trustedRuntimeAuthority(environment));
+  return writeLocalJson("cli", provenancePath(binding.sessionId), validated, storedProvenanceValidator, environment);
+}
+
+async function ensureLocalSessionChangeIssueProvenance(
+  binding: LocalSessionBinding,
+  environment: NodeJS.ProcessEnv,
+  now: Date,
+): Promise<SignedChangeProvenanceRecord> {
+  const existing = readLocalSessionChangeIssueProvenance(binding, environment);
+  if (existing !== undefined) return existing;
+  const { authority, runtimeKey } = localRuntimeSigningMaterial(environment);
+  let record: SignedChangeProvenanceRecord;
+  try {
+    record = await createLocalDelegatorSignedChangeProvenanceRecord(binding.task.number, {
+      authorityId: authority.id,
+      privateKey: runtimeKey,
+      now,
+    });
+  } catch {
+    fail("ADMISSION_CHANGE_PROVENANCE_SIGNING_FAILED", "Runtime Authority could not sign change.issue provenance.");
+  }
+  return storeLocalSessionChangeIssueProvenance(binding, record, environment);
+}
+
 function validateRepositoryIdentity(repository: LocalSessionRepositoryIdentity): void {
   if (
     repository.host.toLowerCase() !== "github.com" ||
@@ -217,7 +339,11 @@ function validateRepositoryIdentity(repository: LocalSessionRepositoryIdentity):
 
 function childExitCode(options: StartLocalSessionOptions, sessionId: string): Promise<number> {
   const spawnChild = options.spawnChild ?? spawn;
-  const childEnvironment = { ...options.environment, INARI_SESSION_ID: sessionId };
+  const childEnvironment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(options.environment)) {
+    if (name !== "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY" && value !== undefined) childEnvironment[name] = value;
+  }
+  childEnvironment.INARI_SESSION_ID = sessionId;
   return new Promise((resolve, reject) => {
     const child = spawnChild(options.command, [...options.commandArgs], {
       cwd: options.cwd,
@@ -239,6 +365,7 @@ export async function startLocalSession(options: StartLocalSessionOptions): Prom
   if (inheritedSessionId !== undefined) validateSessionId(inheritedSessionId);
   const sessionId = inheritedSessionId ?? generateSessionId();
 
+  const now = options.now ?? new Date();
   let binding = readLocalSessionBinding(sessionId, options.environment);
   if (binding !== undefined) {
     if (binding.task.number !== options.issue) {
@@ -251,13 +378,14 @@ export async function startLocalSession(options: StartLocalSessionOptions): Prom
   } else {
     const repository = await options.resolveRepository();
     validateRepositoryIdentity(repository);
-    binding = createBinding(sessionId, options.issue, repository, options.environment, options.now ?? new Date());
+    binding = createBinding(sessionId, options.issue, repository, options.cwd, options.environment, now);
   }
 
   const stored = storeLocalSessionBinding(binding, options.environment);
   if (stored.sessionId !== sessionId || stored.task.number !== options.issue) {
     fail("ADMISSION_SESSION_BINDING_MISMATCH", "Stored Session binding does not match the requested Session.");
   }
+  await ensureLocalSessionChangeIssueProvenance(stored, options.environment, now);
   const registration = await options.admission.registerSession(stored);
   if (registration.id !== sessionId || registration.status !== "active") {
     fail("ADMISSION_SESSION_REGISTRATION_FAILED", "Admission did not register the selected Session as active.");

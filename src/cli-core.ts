@@ -196,11 +196,13 @@ import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
   createSessionExecutionIntent,
+  configuredLocalAdmissionTopology,
   requireConfiguredLocalAdmissionRoute,
 } from "./local-control/admission-client.js";
 import {
   closeLocalSession,
   readLocalSessionBinding,
+  readLocalSessionChangeIssueProvenance,
   startLocalSession,
   type LocalSessionRepositoryIdentity,
 } from "./local-control/session-launcher.js";
@@ -2149,11 +2151,19 @@ async function runLocalAdmissionChangeCommand(
   if (operation === "show") {
     projection = await readChangeProjection(context.executor, changeReadRequest(issue));
   } else {
+    const signedProvenanceRecord =
+      operation === "issue" ? readLocalSessionChangeIssueProvenance(context.binding, environment) : undefined;
+    if (operation === "issue" && signedProvenanceRecord === undefined) {
+      throw new CliError(
+        "ADMISSION_CHANGE_PROVENANCE_REQUIRED",
+        "Local Session has no bounded Runtime-signed change.issue provenance artifact.",
+      );
+    }
     const request = changeMutationRequest(
       operation,
       issue,
       undefined,
-      undefined,
+      signedProvenanceRecord,
       operation === "merge" && typeof parsed.options.mergeStrategy === "string"
         ? (parsed.options.mergeStrategy as "merge" | "squash" | "rebase")
         : undefined,
@@ -2344,8 +2354,8 @@ async function runChangeCommand(
   rejectPartialSessionTransportOptions(sessionCredential, appEndpoint);
   const directAppTransport = resolveDirectAppTransportOptions({ sessionCredential, appEndpoint }, environment);
   if (
-    environment.INARI_SESSION_ID !== undefined &&
     directAppTransport === undefined &&
+    configuredLocalAdmissionTopology(environment) &&
     ["issue", "show", "ready", "abort", "merge", "publish"].includes(definition.operation)
   ) {
     return await runLocalAdmissionChangeCommand(

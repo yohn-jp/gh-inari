@@ -1,21 +1,33 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli-core.js";
 import { getCommandForPositionals } from "./command-contract.js";
-import { createDelegatorRecord } from "./agent-authority/delegator-operations.js";
+import {
+  createDelegatorRecord,
+  createLocalDelegatorSignedChangeProvenanceRecord,
+} from "./agent-authority/delegator-operations.js";
 import {
   delegatorPublicKeyFingerprint,
   generateDelegatorKeyPair,
   loadDelegatorKeyPair,
 } from "./agent-authority/delegator-key.js";
 import { validateDelegator, type Delegator } from "./agent-authority/delegator.js";
-import { createLocalSessionBinding, type LocalSessionBinding } from "./local-control/session-binding.js";
+import {
+  createLocalSessionBinding,
+  verifyLocalSessionBinding,
+  type LocalSessionBinding,
+} from "./local-control/session-binding.js";
+import { createLocalAdmissionHttpServer } from "./local-control/admission-server.js";
+import { LocalExecutorClient } from "./local-control/executor-client.js";
+import { createLocalExecutorHttpServer } from "./local-control/executor-server.js";
+import { createLocalAdmissionClient } from "./local-control/admission-client.js";
 import { setupLocalAuthority } from "./local-control/identity.js";
 import {
   localComponentPath,
@@ -24,8 +36,16 @@ import {
   validateLocalExecutorConfig,
   writeLocalJson,
 } from "./local-control/config.js";
-import { storeLocalSessionBinding } from "./local-control/session-launcher.js";
+import {
+  readLocalSessionBinding,
+  readLocalSessionChangeIssueProvenance,
+  storeLocalSessionBinding,
+  storeLocalSessionChangeIssueProvenance,
+} from "./local-control/session-launcher.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
+import { renderImplementationIssueBody } from "./implementation-contract.js";
+import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
+import type { AuthorizedExecutionResult } from "./authorized-execution.js";
 import { createAppUserCredential } from "./github/app-user-credential.js";
 import { FileAppUserCredentialStore } from "./github/app-user-credential-store.js";
 
@@ -295,12 +315,15 @@ interface AdmissionTestRequest {
 }
 
 async function startAdmissionTestServer(
-  handler: (request: AdmissionTestRequest) => { readonly status: number; readonly body: unknown },
+  handler: (
+    request: AdmissionTestRequest,
+  ) =>
+    { readonly status: number; readonly body: unknown } | Promise<{ readonly status: number; readonly body: unknown }>,
 ): Promise<{ readonly endpoint: string; close(): Promise<void> }> {
   const server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)));
-    request.on("end", () => {
+    request.on("end", async () => {
       let body: unknown;
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
@@ -309,7 +332,7 @@ async function startAdmissionTestServer(
         response.end(JSON.stringify({ ok: false }));
         return;
       }
-      const result = handler({
+      const result = await handler({
         method: request.method ?? "",
         path: request.url ?? "",
         headers: { ...request.headers },
@@ -328,6 +351,10 @@ async function startAdmissionTestServer(
     endpoint: `http://127.0.0.1:${address.port}`,
     close: () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   };
+}
+
+function closeHttpServer(server: { close(callback: (error?: Error) => void): unknown }): Promise<void> {
+  return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 }
 
 function writeAdmissionRoute(environment: NodeJS.ProcessEnv, endpoint: string): void {
@@ -350,7 +377,10 @@ function authorityValidator(value: unknown): Delegator {
   return validation.value;
 }
 
-function localAuthority(environment: NodeJS.ProcessEnv): Delegator {
+function localAuthority(environment: NodeJS.ProcessEnv): {
+  readonly authority: Delegator;
+  readonly keyPair: ReturnType<typeof generateDelegatorKeyPair>;
+} {
   setupLocalAuthority(environment);
   const keyPair = loadDelegatorKeyPair(localComponentPath("authority", "private-key.pem", environment));
   const authority = createDelegatorRecord({
@@ -358,10 +388,10 @@ function localAuthority(environment: NodeJS.ProcessEnv): Delegator {
     key: keyPair,
     notBefore: new Date("2026-01-01T00:00:00.000Z"),
     maxSessionTtlSeconds: 3_600,
-    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge"],
+    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
   });
   writeLocalJson("admission", "runtime-authority.json", authority, authorityValidator, environment);
-  return authority;
+  return { authority, keyPair };
 }
 
 function localSessionBinding(
@@ -369,15 +399,22 @@ function localSessionBinding(
   issue: number,
   repositoryId: string,
   repositoryName: string,
+  options: {
+    readonly authority?: Delegator;
+    readonly keyPair?: ReturnType<typeof generateDelegatorKeyPair>;
+    readonly branch?: string;
+  } = {},
 ): LocalSessionBinding {
-  const keyPair = generateDelegatorKeyPair();
-  const authority = createDelegatorRecord({
-    id: "cli-local-binding-test",
-    key: keyPair,
-    notBefore: new Date("2026-01-01T00:00:00.000Z"),
-    maxSessionTtlSeconds: 3_600,
-    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge"],
-  });
+  const keyPair = options.keyPair ?? generateDelegatorKeyPair();
+  const authority =
+    options.authority ??
+    createDelegatorRecord({
+      id: "cli-local-binding-test",
+      key: keyPair,
+      notBefore: new Date("2026-01-01T00:00:00.000Z"),
+      maxSessionTtlSeconds: 3_600,
+      capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
+    });
   return createLocalSessionBinding({
     sessionId,
     repository: { id: repositoryId, name: repositoryName },
@@ -387,11 +424,71 @@ function localSessionBinding(
       { kind: "change.ready", issue },
       { kind: "change.abort", issue },
       { kind: "change.merge", issue },
+      { kind: "branch.advance", branch: options.branch ?? `feat/${issue}-local-cli-admission-path` },
     ],
     ttlSeconds: 300,
     runtimeAuthority: authority,
     runtimeKey: keyPair,
+    now: new Date(),
   });
+}
+
+function localTrustEvidence(authority: Delegator): {
+  readonly repository: {
+    readonly repositoryHost: "github.com";
+    readonly repositoryId: string;
+    readonly nameWithOwner: string;
+  };
+  readonly authority: { readonly ref: string; readonly sha: string };
+  readonly runtimeAuthority: Delegator;
+} {
+  return {
+    repository: { repositoryHost: "github.com", repositoryId: "123456789", nameWithOwner: "acme/inari" },
+    authority: { ref: "refs/heads/main", sha: "a".repeat(40) },
+    runtimeAuthority: authority,
+  };
+}
+
+function localImplementationEvidence(
+  issue: number,
+  repositoryId: string,
+  branch: string,
+  baseHead: string,
+  projection: ChangeProjectionResult,
+): Record<string, unknown> {
+  const repository = { repositoryHost: "github.com", repositoryId, repository: "acme/inari" };
+  const reference = { ...repository, number: issue };
+  const body = renderImplementationIssueBody({
+    version: 1,
+    kind: "implementation",
+    repository,
+    sources: [reference],
+    objective: "Admit bounded local implementation.",
+    nonGoals: ["Persisting derived scope."],
+    architecture: {
+      decision: "Derive current authorization for every execution.",
+      affectedComponents: ["Admission"],
+      invariants: ["Executor identity is pinned."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: ["src/**"], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Admission denies stale evidence."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: { baseBranch: "main", baseRevision: baseHead, baseFreshness: baseHead, branch, dependencies: [] },
+  });
+  return {
+    implementation: reference,
+    issue: { reference, body },
+    repository,
+    base: { branch: "main", revision: baseHead, freshness: baseHead },
+    readiness: { evidence: [] },
+    change: projection,
+  };
 }
 
 function localChangeProjection(
@@ -431,31 +528,52 @@ function localChangeProjection(
 
 async function gitRepository(root: string): Promise<{ readonly baseHead: string; readonly head: string }> {
   execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["checkout", "-b", "feat/1029-local-cli-admission-path"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Inari Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "inari-test@example.invalid"], { cwd: root });
   execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/inari.git"], { cwd: root });
-  await writeFile(path.join(root, "README.md"), "baseline\n", "utf8");
-  execFileSync("git", ["add", "README.md"], { cwd: root });
+  await mkdir(path.join(root, "src"));
+  await writeFile(path.join(root, "src", "example.ts"), "export const baseline = true;\n", "utf8");
+  execFileSync("git", ["add", "src/example.ts"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
   const baseHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  await writeFile(path.join(root, "README.md"), "local admission change\n", "utf8");
-  execFileSync("git", ["add", "README.md"], { cwd: root });
+  await writeFile(path.join(root, "src", "example.ts"), "export const baseline = false;\n", "utf8");
+  execFileSync("git", ["add", "src/example.ts"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "local admission change"], { cwd: root });
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   return { baseHead, head };
 }
 
-test("session start issues through Authority and Admission, then returns the exact child exit code", async () => {
+test("session start registers a production-verifiable binding and bounded provenance without exposing its private key", async () => {
   const { root, environment } = await temporaryEnvironment();
-  const calls: AdmissionTestRequest[] = [];
-  const server = await startAdmissionTestServer((request) => {
-    calls.push(request);
-    const body = request.body as { readonly binding?: LocalSessionBinding };
-    return {
-      status: 201,
-      body: { ok: true, session: { id: body.binding?.sessionId, status: "active", exp: body.binding?.exp } },
-    };
-  });
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["checkout", "-b", "feat/1029-local-cli-admission-path"], { cwd: root });
+  execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/inari.git"], { cwd: root });
+  const local = localAuthority(environment);
+  const admissionServer = createLocalAdmissionHttpServer(
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      executor: { id: "exec_0123456789abcdef", endpoint: "http://127.0.0.1:8765" },
+    },
+    "0.14.1-test",
+    local.authority,
+    {
+      async verifyReady() {
+        return { ok: true };
+      },
+      async readEvidence() {
+        return localTrustEvidence(local.authority);
+      },
+      async execute() {
+        throw new Error("session start must not execute Change mutations");
+      },
+    },
+    { environment },
+  );
+  await once(admissionServer, "listening");
+  const address = admissionServer.address() as AddressInfo;
   try {
     assert.equal(
       getCommandForPositionals(["session", "start", process.execPath, "-e", "process.exit(13)"])?.id,
@@ -471,13 +589,21 @@ test("session start issues through Authority and Admission, then returns the exa
     );
     assert.notEqual(missingSeparator.exitCode, 0);
     assert.notEqual(oversizedIssue.exitCode, 0);
-    assert.equal(calls.length, 0);
-    localAuthority(environment);
-    writeAdmissionRoute(environment, server.endpoint);
+    writeAdmissionRoute(environment, `http://127.0.0.1:${address.port}`);
     environment.PARENT_ONLY = "unchanged";
+    environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY = "parent-only-secret";
     let identityReads = 0;
     const result = await runCli(
-      ["session", "start", "--issue", "1029", "--", process.execPath, "-e", "process.exit(13)"],
+      [
+        "session",
+        "start",
+        "--issue",
+        "1029",
+        "--",
+        process.execPath,
+        "-e",
+        "process.exit(process.env.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY ? 91 : 13)",
+      ],
       {
         repositoryRoot: root,
         environment,
@@ -498,118 +624,217 @@ test("session start issues through Authority and Admission, then returns the exa
     assert.equal(result, 13);
     assert.equal(identityReads, 1);
     assert.equal(environment.INARI_SESSION_ID, undefined);
+    assert.equal(environment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, "parent-only-secret");
     assert.equal(environment.PARENT_ONLY, "unchanged");
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0]?.method, "POST");
-    assert.equal(calls[0]?.path, "/v1/sessions");
-    assert.equal((calls[0]?.body as { readonly binding?: LocalSessionBinding }).binding?.task.number, 1029);
-    assert.equal(
-      await lstat(path.join(environment.INARI_CONFIG_HOME as string, "cli", "sessions", "current.json")).then(
-        () => true,
-        () => false,
+
+    const sessionFiles = await readdir(path.join(environment.INARI_CONFIG_HOME as string, "cli", "sessions"));
+    const bindingFile = sessionFiles.find(
+      (name) => name.endsWith(".json") && !name.endsWith(".change-issue-provenance.json"),
+    );
+    assert.ok(bindingFile);
+    const sessionId = bindingFile.slice(0, -".json".length);
+    const binding = readLocalSessionBinding(sessionId, environment);
+    assert.ok(binding);
+    assert.equal(verifyLocalSessionBinding(binding, local.authority).valid, true);
+    assert.ok(
+      binding.capabilities.some(
+        (claim) => claim.kind === "branch.advance" && claim.branch === "feat/1029-local-cli-admission-path",
       ),
+    );
+    const provenance = readLocalSessionChangeIssueProvenance(binding, environment);
+    assert.equal(provenance?.rootIssue, 1029);
+    const admissionRecord = JSON.parse(
+      await readFile(localComponentPath("admission", `sessions/${sessionId}.json`, environment), "utf8"),
+    ) as { readonly state: string };
+    assert.equal(admissionRecord.state, "active");
+    assert.deepEqual(sessionFiles.sort(), [`${sessionId}.change-issue-provenance.json`, `${sessionId}.json`].sort());
+    assert.equal(
+      sessionFiles.some((name) => name.includes("current")),
       false,
     );
   } finally {
-    await server.close();
+    await new Promise<void>((resolve, reject) => admissionServer.close((error) => (error ? reject(error) : resolve())));
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("all six normal Change operations route closed intents only to configured Admission", async () => {
+test("local Change commands use the production Admission authority and its exact Session capabilities", async () => {
   const { root: configRoot, environment } = await temporaryEnvironment();
   const repositoryRoot = path.join(configRoot, "repository");
   await mkdir(repositoryRoot);
   const { baseHead, head } = await gitRepository(repositoryRoot);
-  const sessionId = "sess_cli-route-1029";
   const issue = 1029;
   const branch = "feat/1029-local-cli-admission-path";
+  const sessionId = "sess_cli-route-1029";
   const received: AdmissionTestRequest[] = [];
+  const local = localAuthority(environment);
   let currentHead = baseHead;
+  let issueProvenanceVerified = false;
+  let branchAdvanceAuthorized = false;
   let rejectAdmission = false;
-  const server = await startAdmissionTestServer((request) => {
-    received.push(request);
-    if (rejectAdmission && request.path === "/v1/executions") {
-      return { status: 503, body: { ok: false, error: { code: "UNAVAILABLE" } } };
-    }
-    if (request.method === "POST" && request.path === "/v1/executions") {
-      const intent = request.body as {
-        readonly operation: string;
-        readonly request: Record<string, unknown>;
+
+  const executorServer = createLocalExecutorHttpServer({
+    config: {
+      version: 1,
+      id: "exec_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 8765 },
+      provider: { kind: "github", credentialProfile: "default" },
+    },
+    listenPort: 0,
+    version: "0.14.1-test",
+    executorId: "exec_0123456789abcdef",
+    readEvidence: async (request) => {
+      const trust = localTrustEvidence(local.authority);
+      if (request.issue === undefined) return trust;
+      const projection = localChangeProjection(issue, "123456789", branch, currentHead);
+      return {
+        ...trust,
+        change: projection,
+        implementation: localImplementationEvidence(issue, "123456789", branch, baseHead, projection),
       };
-      if (intent.operation === "change.show") {
-        return {
-          status: 200,
-          body: {
-            ok: true,
-            result: {
-              version: 1,
-              operation: "change.show",
-              status: "succeeded",
-              projection: localChangeProjection(issue, "123456789", branch, currentHead),
-            },
-          },
-        };
+    },
+    execute: async (execution): Promise<AuthorizedExecutionResult> => {
+      if (execution.operation === "change.issue") {
+        const record = execution.request.signedProvenanceRecord;
+        assert.ok(record, "the production Executor requires caller-produced signed change.issue provenance");
+        assert.equal(verifyChangeProvenanceRecord(record, local.authority).rootIssue, issue);
+        issueProvenanceVerified = true;
       }
-      if (intent.operation === "branch.advance") {
+      if (execution.operation === "branch.advance") {
+        assert.equal(execution.capability.kind, "branch.advance");
+        assert.equal(execution.capability.branch, branch);
+        branchAdvanceAuthorized = true;
         currentHead = head;
         return {
-          status: 200,
-          body: {
-            ok: true,
-            result: {
-              version: 1,
-              operation: "branch.advance",
-              status: "succeeded",
-              branchAdvance: {
-                version: 1,
-                operation: "branch.advance",
-                status: "succeeded",
-                outcome: "advanced",
-                branch,
-                expectedHead: baseHead,
-                resultingHead: head,
-              },
-            },
+          version: 1,
+          operation: "branch.advance",
+          status: "succeeded",
+          branchAdvance: {
+            version: 1,
+            operation: "branch.advance",
+            status: "succeeded",
+            outcome: "advanced",
+            branch,
+            expectedHead: execution.request.expectedHead,
+            resultingHead: head,
           },
         };
       }
       const projection = localChangeProjection(issue, "123456789", branch, currentHead);
       return {
-        status: 200,
-        body: {
-          ok: true,
-          result: {
-            version: 1,
-            operation: intent.operation,
-            status: "succeeded",
-            projection,
-            execution: { projection },
-          },
-        },
+        version: 1,
+        operation: execution.operation,
+        status: "succeeded",
+        projection,
+        execution: { projection },
       };
-    }
-    return { status: 404, body: { ok: false } };
+    },
   });
+  await once(executorServer, "listening");
+  const executorAddress = executorServer.address() as AddressInfo;
+  const executorEndpoint = `http://127.0.0.1:${executorAddress.port}`;
+  const admissionServer = createLocalAdmissionHttpServer(
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      executor: { id: "exec_0123456789abcdef", endpoint: executorEndpoint },
+    },
+    "0.14.1-test",
+    local.authority,
+    new LocalExecutorClient({ id: "exec_0123456789abcdef", endpoint: executorEndpoint }),
+    { environment },
+  );
+  await once(admissionServer, "listening");
+  const admissionAddress = admissionServer.address() as AddressInfo;
+  const admissionEndpoint = `http://127.0.0.1:${admissionAddress.port}`;
+  const proxy = await startAdmissionTestServer(async (request) => {
+    received.push(request);
+    if (rejectAdmission && request.path === "/v1/executions") {
+      return { status: 503, body: { ok: false, error: { code: "UNAVAILABLE" } } };
+    }
+    const headers = new Headers({ "content-type": "application/json" });
+    const sessionHeader = request.headers["x-inari-session-id"];
+    if (typeof sessionHeader === "string") headers.set("x-inari-session-id", sessionHeader);
+    const response = await fetch(`${admissionEndpoint}${request.path}`, {
+      method: request.method,
+      headers,
+      body: JSON.stringify(request.body),
+    });
+    return { status: response.status, body: (await response.json()) as unknown };
+  });
+
   try {
-    writeAdmissionRoute(environment, server.endpoint);
-    environment.INARI_SESSION_ID = sessionId;
-    environment.GH_TOKEN = "must-not-be-read";
-    storeLocalSessionBinding(localSessionBinding(sessionId, issue, "123456789", "acme/inari"), environment);
+    writeAdmissionRoute(environment, proxy.endpoint);
+    const binding = localSessionBinding(sessionId, issue, "123456789", "acme/inari", {
+      authority: local.authority,
+      keyPair: local.keyPair,
+      branch,
+    });
+    storeLocalSessionBinding(binding, environment);
+    const signedProvenanceRecord = await createLocalDelegatorSignedChangeProvenanceRecord(issue, {
+      authorityId: local.authority.id,
+      privateKey: local.keyPair,
+    });
+    storeLocalSessionChangeIssueProvenance(binding, signedProvenanceRecord, environment);
+    await createLocalAdmissionClient({ endpoint: proxy.endpoint }).registerSession(binding);
+    received.length = 0;
+
     let providerAdapterUsed = false;
     let nonAdmissionExecutorUsed = false;
     const dependencies = {
       repositoryRoot,
-      environment,
       createAdapter: (() => {
         providerAdapterUsed = true;
-        throw new Error("local Admission route must not construct GitHubAdapter");
+        throw new Error("configured local topology must not construct GitHubAdapter");
       }) as never,
       createChangeExecutor: (() => {
         nonAdmissionExecutorUsed = true;
-        throw new Error("local Admission route must not construct another executor");
+        throw new Error("configured local topology must not construct another executor");
       }) as never,
     };
+    const noSelectorEnvironment = { ...environment };
+    delete noSelectorEnvironment.INARI_SESSION_ID;
+    const missingSelector = await capture(
+      ["change", "show", String(issue), "--json"],
+      noSelectorEnvironment,
+      dependencies,
+    );
+    assert.equal(JSON.parse(missingSelector.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+    assert.equal(received.length, 0);
+
+    let explicitDirectAppSelected = false;
+    const explicitDirectApp = await capture(
+      [
+        "change",
+        "show",
+        String(issue),
+        "--session-credential",
+        "unused-session.json",
+        "--app-endpoint",
+        "https://api.github.com",
+        "--json",
+      ],
+      { ...noSelectorEnvironment, INARI_SESSION_ID: "malformed-but-explicit-direct-app-wins" },
+      {
+        ...dependencies,
+        changeExecutor: {
+          async read() {
+            explicitDirectAppSelected = true;
+            throw new Error("explicit direct-App compatibility selected");
+          },
+          async execute() {
+            throw new Error("unexpected direct-App mutation");
+          },
+        },
+      },
+    );
+    assert.notEqual(explicitDirectApp.exitCode, 0);
+    assert.equal(explicitDirectAppSelected, true);
+    assert.equal(received.length, 0);
+
+    environment.INARI_SESSION_ID = sessionId;
+    environment.GH_TOKEN = "must-not-be-read";
     const commands = [
       ["change", "issue", String(issue), "--json"],
       ["change", "show", String(issue), "--json"],
@@ -618,10 +843,13 @@ test("all six normal Change operations route closed intents only to configured A
       ["change", "merge", String(issue), "--strategy", "squash", "--json"],
       ["change", "publish", String(issue), "--commit", "HEAD", "--json"],
     ];
-    for (const command of commands) {
-      const result = await capture(command, environment, dependencies);
-      assert.equal(result.exitCode, 0, result.stdout || result.stderr);
-    }
+    const results: CapturedOutput[] = [];
+    for (const command of commands) results.push(await capture(command, environment, dependencies));
+    assert.equal(results[0]?.exitCode, 0, results[0]?.stdout || results[0]?.stderr);
+    assert.equal(results[5]?.exitCode, 0, results[5]?.stdout || results[5]?.stderr);
+    assert.equal(issueProvenanceVerified, true);
+    assert.equal(branchAdvanceAuthorized, true);
+
     rejectAdmission = true;
     const denied = await capture(["change", "show", String(issue), "--json"], environment, dependencies);
     assert.notEqual(denied.exitCode, 0);
@@ -657,44 +885,95 @@ test("all six normal Change operations route closed intents only to configured A
       assert.equal(request?.headers["x-inari-session-id"], sessionId);
     }
     const issueIntent = intents[0]?.request as Record<string, unknown>;
-    assert.equal("signedProvenanceRecord" in issueIntent, false);
+    assert.ok(issueIntent.signedProvenanceRecord);
     assert.equal("implementationConformance" in issueIntent, false);
     assert.equal("semanticPullRequestPlan" in issueIntent, false);
+    const execution = JSON.parse(
+      await readFile(localComponentPath("admission", `sessions/${sessionId}.json`, environment), "utf8"),
+    ) as { readonly state: string };
+    assert.equal(execution.state, "active");
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
-    assert.equal(
-      received.every((request) => request.path.startsWith("/v1/executions")),
-      true,
-    );
   } finally {
-    await server.close();
+    await proxy.close();
+    await closeHttpServer(admissionServer);
+    await closeHttpServer(executorServer);
     await rm(configRoot, { recursive: true, force: true });
   }
 });
 
-test("session close selects only inherited INARI_SESSION_ID through Admission without Authority or Executor config", async () => {
+test("session close selects only inherited INARI_SESSION_ID through the production Admission server", async () => {
   const { root, environment } = await temporaryEnvironment();
+  const local = localAuthority(environment);
   const selectedId = "sess_close-selected";
   const otherId = "sess_close-other";
-  const selected = localSessionBinding(selectedId, 1029, "123456789", "acme/inari");
-  const other = localSessionBinding(otherId, 1030, "123456789", "acme/inari");
+  const selected = localSessionBinding(selectedId, 1029, "123456789", "acme/inari", {
+    authority: local.authority,
+    keyPair: local.keyPair,
+  });
+  const other = localSessionBinding(otherId, 1030, "123456789", "acme/inari", {
+    authority: local.authority,
+    keyPair: local.keyPair,
+  });
   storeLocalSessionBinding(selected, environment);
   storeLocalSessionBinding(other, environment);
+  const admissionServer = createLocalAdmissionHttpServer(
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      executor: { id: "exec_0123456789abcdef", endpoint: "http://127.0.0.1:8765" },
+    },
+    "0.14.1-test",
+    local.authority,
+    {
+      async verifyReady() {
+        return { ok: true };
+      },
+      async readEvidence() {
+        return localTrustEvidence(local.authority);
+      },
+      async execute() {
+        throw new Error("session close must not execute Change mutations");
+      },
+    },
+    { environment },
+  );
+  await once(admissionServer, "listening");
+  const address = admissionServer.address() as AddressInfo;
+  const admissionEndpoint = `http://127.0.0.1:${address.port}`;
   const calls: AdmissionTestRequest[] = [];
-  const server = await startAdmissionTestServer((request) => {
+  const proxy = await startAdmissionTestServer(async (request) => {
     calls.push(request);
-    return { status: 200, body: { ok: true, session: { id: selectedId, status: "closed" } } };
+    const response = await fetch(`${admissionEndpoint}${request.path}`, {
+      method: request.method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request.body),
+    });
+    return { status: response.status, body: (await response.json()) as unknown };
   });
   try {
-    writeAdmissionRoute(environment, server.endpoint);
+    writeAdmissionRoute(environment, proxy.endpoint);
+    const client = createLocalAdmissionClient({ endpoint: proxy.endpoint });
+    await client.registerSession(selected);
+    await client.registerSession(other);
+    calls.length = 0;
+    await unlink(localComponentPath("authority", "private-key.pem", environment));
     environment.INARI_SESSION_ID = selectedId;
     const result = await capture(["session", "close", "--json"], environment);
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitCode, 0, result.stdout || result.stderr);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.method, "DELETE");
     assert.equal(calls[0]?.path, `/v1/sessions/${selectedId}`);
     assert.deepEqual(calls[0]?.body, { version: 1, binding: selected });
     assert.notEqual((calls[0]?.body as { readonly binding: LocalSessionBinding }).binding.sessionId, otherId);
-    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "authority")));
+    const closedRecord = JSON.parse(
+      await readFile(localComponentPath("admission", `sessions/${selectedId}.json`, environment), "utf8"),
+    ) as { readonly state: string };
+    const otherRecord = JSON.parse(
+      await readFile(localComponentPath("admission", `sessions/${otherId}.json`, environment), "utf8"),
+    ) as { readonly state: string };
+    assert.equal(closedRecord.state, "closed");
+    assert.equal(otherRecord.state, "active");
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
 
     const noSelector = { INARI_CONFIG_HOME: environment.INARI_CONFIG_HOME };
@@ -703,7 +982,8 @@ test("session close selects only inherited INARI_SESSION_ID through Admission wi
     assert.equal(JSON.parse(missing.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
     assert.equal(calls.length, 1);
   } finally {
-    await server.close();
+    await proxy.close();
+    await closeHttpServer(admissionServer);
     await rm(root, { recursive: true, force: true });
   }
 });

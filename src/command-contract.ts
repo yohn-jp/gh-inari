@@ -1558,7 +1558,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["session", "start"],
     "Issue or reuse a bounded local Session and launch one exact child command.",
     SESSION_START_OPTIONS,
-    "--issue <n> -- <command...>",
+    "--issue <number> -- <command...>",
   ),
   command(
     "session.close",

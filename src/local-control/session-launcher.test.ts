@@ -14,6 +14,7 @@ import type { LocalAdmissionClient } from "./admission-client.js";
 import {
   closeLocalSession,
   readLocalSessionBinding,
+  readLocalSessionChangeIssueProvenance,
   startLocalSession,
   type LocalSessionRepositoryIdentity,
 } from "./session-launcher.js";
@@ -35,6 +36,7 @@ async function fixture(): Promise<Fixture> {
   const root = await mkdtemp(path.join(os.tmpdir(), "inari-session-launcher-"));
   const environment = { INARI_CONFIG_HOME: path.join(root, "config"), PATH: process.env.PATH ?? "" };
   execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["checkout", "-b", "feat/1029-local-admission-test"], { cwd: root });
   execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/inari.git"], { cwd: root });
   setupLocalAuthority(environment);
   const privateKeyPath = localComponentPath("authority", "private-key.pem", environment);
@@ -44,7 +46,7 @@ async function fixture(): Promise<Fixture> {
     key: keyPair,
     notBefore: new Date("2026-08-01T00:00:00.000Z"),
     maxSessionTtlSeconds: 3_600,
-    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge"],
+    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
   });
   writeLocalJson(
     "admission",
@@ -118,7 +120,11 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
   const state = await fixture();
   const admission = fakeAdmission();
   const children: CapturedChild[] = [];
-  const parentEnvironment: NodeJS.ProcessEnv = { ...state.environment, PARENT_ONLY: "unchanged" };
+  const parentEnvironment: NodeJS.ProcessEnv = {
+    ...state.environment,
+    PARENT_ONLY: "unchanged",
+    INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "must-not-reach-child",
+  };
   try {
     const exitCode = await startLocalSession({
       cwd: state.root,
@@ -146,18 +152,32 @@ test("issues and registers one bounded binding, launches exact argv, isolates th
       "the separately custodied local Authority must sign the registered binding",
     );
     assert.ok(binding.capabilities.some((claim) => claim.kind === "change.implement" && claim.issue === ISSUE));
+    assert.ok(
+      binding.capabilities.some(
+        (claim) => claim.kind === "branch.advance" && claim.branch === "feat/1029-local-admission-test",
+      ),
+    );
+    assert.equal(readLocalSessionChangeIssueProvenance(binding, parentEnvironment)?.rootIssue, ISSUE);
     assert.equal(children.length, 1);
     assert.equal(children[0]?.command, process.execPath);
     assert.deepEqual(children[0]?.args, ["-e", "process.exit(19)", "one argument"]);
     assert.equal(children[0]?.cwd, state.root);
     assert.equal(children[0]?.shell, false);
     assert.equal(children[0]?.stdio, "inherit");
-    assert.deepEqual(children[0]?.env, { ...parentEnvironment, INARI_SESSION_ID: binding.sessionId });
+    const expectedChildEnvironment = Object.fromEntries(
+      Object.entries(parentEnvironment).filter(([name]) => name !== "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"),
+    );
+    assert.equal(children[0]?.env["INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"], undefined);
+    assert.deepEqual(children[0]?.env, { ...expectedChildEnvironment, INARI_SESSION_ID: binding.sessionId });
+    assert.equal(parentEnvironment.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY, "must-not-reach-child");
     assert.equal(parentEnvironment.INARI_SESSION_ID, undefined);
     assert.equal(admission.closes.length, 0);
 
     const sessionFiles = await readdir(path.join(state.environment.INARI_CONFIG_HOME as string, "cli", "sessions"));
-    assert.deepEqual(sessionFiles, [`${binding.sessionId}.json`]);
+    assert.deepEqual(
+      sessionFiles.sort(),
+      [`${binding.sessionId}.change-issue-provenance.json`, `${binding.sessionId}.json`].sort(),
+    );
     assert.equal(
       sessionFiles.some((name) => name.includes("current")),
       false,
