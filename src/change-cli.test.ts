@@ -586,16 +586,16 @@ test("fresh change issue fails before dispatch when the Runtime signer is not co
   });
 });
 
-test("Direct App Session selection for change issue signs locally, never constructs a GitHubAdapter, and ignores poisoned ambient GitHub credentials", async () => {
+test("Direct App Session selection via explicit flags and legacy env signs locally without constructing a GitHubAdapter", async () => {
   const dir = await mkdtemp(path.join(process.cwd(), ".change-issue-direct-app-"));
   try {
     const bundlePath = await createDirectAppBundleFile(dir);
-    let executeRequest: Record<string, unknown> | undefined;
+    const executeRequests: Record<string, unknown>[] = [];
     const restore = installFakeFetch((url, body) => {
       assert.equal(url.pathname, "/v1/execute");
       const envelope = body as { operation: string; request: Record<string, unknown> };
       assert.equal(envelope.operation, "change.issue");
-      executeRequest = envelope.request;
+      executeRequests.push(envelope.request);
       return {
         status: 200,
         body: {
@@ -636,6 +636,8 @@ test("Direct App Session selection for change issue signs locally, never constru
       );
 
       assert.equal(result.exitCode, 0, JSON.stringify(result.output));
+      assert.equal(executeRequests.length, 1);
+      const executeRequest = executeRequests[0];
       assert.ok(executeRequest !== undefined);
       const signedProvenanceRecord = executeRequest.signedProvenanceRecord;
       assert.equal(typeof signedProvenanceRecord, "object");
@@ -645,6 +647,34 @@ test("Direct App Session selection for change issue signs locally, never constru
         operation: "change.issue",
       });
       assert.doesNotMatch(JSON.stringify(executeRequest), /poison-/u);
+
+      executeRequests.length = 0;
+      const legacyEnvironment = {
+        ...runtimeSignerEnvironment,
+        INARI_CONFIG_HOME: path.join(dir, "legacy-config"),
+        INARI_SESSION_CREDENTIAL_FILE: bundlePath,
+        INARI_APP_ENDPOINT: "https://app.example.com",
+        GH_TOKEN: "poison-gh-token",
+        GITHUB_TOKEN: "poison-github-token",
+        GH_ENTERPRISE_TOKEN: "poison-gh-enterprise-token",
+        GITHUB_ENTERPRISE_TOKEN: "poison-github-enterprise-token",
+      };
+      const legacyResult = await capture(["change", "issue", String(identity.rootIssue), "--json"], {
+        environment: legacyEnvironment,
+        createAdapter: () => {
+          throw new Error("GitHubAdapter must not be constructed on the legacy Direct App Session path");
+        },
+      });
+      assert.equal(legacyResult.exitCode, 0, JSON.stringify(legacyResult.output));
+      assert.equal(executeRequests.length, 1);
+      const legacyRequest = executeRequests[0];
+      assert.ok(legacyRequest !== undefined);
+      assert.deepEqual(verifyChangeProvenanceRecord(legacyRequest.signedProvenanceRecord, runtimeSignerAuthority), {
+        version: 1,
+        rootIssue: identity.rootIssue,
+        operation: "change.issue",
+      });
+      assert.doesNotMatch(JSON.stringify(legacyRequest), /poison-/u);
     } finally {
       restore();
     }
