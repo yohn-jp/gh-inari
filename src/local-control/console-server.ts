@@ -8,6 +8,7 @@ import {
   type LocalApplicationState,
   type LocalRuntimeReadiness,
 } from "../local-application-state.js";
+import { ensureLocalCliTopology } from "./config.js";
 import {
   clearLocalRuntimeEndpoint,
   publishLocalRuntimeEndpoint,
@@ -18,6 +19,17 @@ import { escapeHtml, isLocalRuntimeLoopbackAddress } from "./status-page.js";
 export const LOCAL_CONSOLE_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_CONSOLE_ROOT_PATH = "/" as const;
 export const LOCAL_CONSOLE_STATE_PATH = "/api/state" as const;
+
+/**
+ * The one bounded setup action the console can invoke directly: declaring the
+ * local CLI topology. It is the same call `inari init` makes
+ * (`ensureLocalCliTopology`), it is always safe to invoke (idempotent, no
+ * secrets, no network), and it is always the first step of the ordered setup
+ * path. Every later step requires either Device Flow interaction or provider
+ * network calls and stays CLI-only; the console only ever shows their exact
+ * command text.
+ */
+export const LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH = "/api/actions/cli-topology" as const;
 
 export class LocalConsoleError extends Error {
   readonly code: string;
@@ -55,6 +67,14 @@ function renderLocalConsolePage(input: {
   const nextActionCommands = application.nextAction.commands
     .map((commandLine) => `      <pre><code>${escapeHtml(commandLine)}</code></pre>`)
     .join("\n");
+  const cliTopologyAction =
+    application.nextAction.stepId === "cli-topology"
+      ? [
+          `      <form method="post" action="${LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH}">`,
+          '        <button type="submit">Run this from the browser: initialize the local CLI topology</button>',
+          "      </form>",
+        ].join("\n")
+      : "";
   const body = [
     "<!doctype html>",
     '<html lang="en">',
@@ -75,6 +95,7 @@ function renderLocalConsolePage(input: {
     "      <h2>Next action</h2>",
     `      <p>${escapeHtml(application.nextAction.detail)}</p>`,
     nextActionCommands,
+    cliTopologyAction,
     "      <h2>Runtime readiness</h2>",
     "      <dl>",
     `        <dt>Executor</dt><dd>${escapeHtml(runtime.executor)}</dd>`,
@@ -109,6 +130,47 @@ export function createLocalConsoleHttpServer(options: LocalConsoleServerOptions)
           return;
         }
         const url = new URL(incoming.url ?? "/", "http://127.0.0.1");
+        const computeState = (): Promise<[LocalApplicationState, LocalRuntimeReadiness]> =>
+          Promise.all([
+            projectLocalApplicationState({ root: options.root, environment }),
+            projectLocalRuntimeReadiness(environment),
+          ]);
+
+        if (url.pathname === LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH) {
+          incoming.resume(); // No request body is read; discard it so the connection does not stall.
+          if (incoming.method !== "POST") {
+            outgoing.statusCode = 405;
+            outgoing.setHeader("allow", "POST");
+            outgoing.setHeader("content-type", "text/plain; charset=utf-8");
+            outgoing.end("Only POST is supported.\n");
+            return;
+          }
+          ensureLocalCliTopology(environment);
+          const [application, runtime] = await computeState();
+          if ((incoming.headers.accept ?? "").includes("application/json")) {
+            outgoing.statusCode = 200;
+            outgoing.setHeader("content-type", "application/json; charset=utf-8");
+            outgoing.setHeader("cache-control", "no-store");
+            outgoing.setHeader("x-content-type-options", "nosniff");
+            outgoing.end(
+              JSON.stringify({
+                ok: true,
+                operation: "runtime.console.action",
+                action: "cli-topology",
+                version: LOCAL_CONSOLE_PROTOCOL_VERSION,
+                application,
+                runtime,
+              }),
+            );
+            return;
+          }
+          outgoing.statusCode = 303;
+          outgoing.setHeader("location", LOCAL_CONSOLE_ROOT_PATH);
+          outgoing.setHeader("cache-control", "no-store");
+          outgoing.end();
+          return;
+        }
+
         if (url.pathname !== LOCAL_CONSOLE_ROOT_PATH && url.pathname !== LOCAL_CONSOLE_STATE_PATH) {
           outgoing.statusCode = 404;
           outgoing.end();
@@ -121,10 +183,7 @@ export function createLocalConsoleHttpServer(options: LocalConsoleServerOptions)
           outgoing.end("Only GET is supported.\n");
           return;
         }
-        const [application, runtime] = await Promise.all([
-          projectLocalApplicationState({ root: options.root, environment }),
-          projectLocalRuntimeReadiness(environment),
-        ]);
+        const [application, runtime] = await computeState();
         if (url.pathname === LOCAL_CONSOLE_STATE_PATH) {
           outgoing.statusCode = 200;
           outgoing.setHeader("content-type", "application/json; charset=utf-8");
@@ -146,7 +205,7 @@ export function createLocalConsoleHttpServer(options: LocalConsoleServerOptions)
         outgoing.setHeader("cache-control", "no-store");
         outgoing.setHeader(
           "content-security-policy",
-          "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+          "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
         );
         outgoing.setHeader("x-content-type-options", "nosniff");
         outgoing.end(renderLocalConsolePage({ application, runtime }));

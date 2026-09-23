@@ -4,8 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import { test } from "node:test";
+import { localComponentPath } from "./config.js";
 import { localRuntimeDiscoveryPath } from "./runtime-discovery.js";
-import { startLocalConsole } from "./console-server.js";
+import { LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH, startLocalConsole } from "./console-server.js";
+
+interface ConsoleStateBody {
+  readonly application: { readonly steps: readonly { readonly id: string; readonly status: string }[] };
+}
 
 async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-console-"));
@@ -29,7 +34,7 @@ test("the local console serves the canonical setup/runtime state as loopback-onl
       assert.match(page.headers.get("content-type") ?? "", /text\/html/iu);
       assert.equal(
         page.headers.get("content-security-policy"),
-        "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
       );
       const html = await page.text();
       assert.match(html, /Ordered setup path/u);
@@ -37,6 +42,7 @@ test("the local console serves the canonical setup/runtime state as loopback-onl
       assert.match(html, /Runtime readiness/u);
       assert.match(html, /<dd>not-running<\/dd>/gu);
       assert.doesNotMatch(html, /BEGIN PRIVATE KEY/u);
+      assert.match(html, new RegExp(`<form method="post" action="${LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH}">`, "u"));
 
       const state = await fetch(`${announcement.endpoint}/api/state`);
       assert.equal(state.status, 200);
@@ -57,6 +63,49 @@ test("the local console serves the canonical setup/runtime state as loopback-onl
       await once(server, "close");
     }
     await assert.rejects(readFile(localRuntimeDiscoveryPath("console", environment), "utf8"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the local console's cli-topology action invokes the same bounded service `inari init` uses", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const { server, announcement } = await startLocalConsole(root, environment);
+    try {
+      const actionUrl = `${announcement.endpoint}${LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH}`;
+      assert.equal((await fetch(actionUrl)).status, 405);
+
+      const configPath = localComponentPath("cli", "config.json", environment);
+      await assert.rejects(readFile(configPath, "utf8"));
+
+      const jsonResponse = await fetch(actionUrl, { method: "POST", headers: { accept: "application/json" } });
+      assert.equal(jsonResponse.status, 200);
+      const jsonBody = (await jsonResponse.json()) as ConsoleStateBody & {
+        readonly ok: boolean;
+        readonly operation: string;
+        readonly action: string;
+      };
+      assert.equal(jsonBody.ok, true);
+      assert.equal(jsonBody.operation, "runtime.console.action");
+      assert.equal(jsonBody.action, "cli-topology");
+      assert.equal(jsonBody.application.steps.find((step) => step.id === "cli-topology")?.status, "ready");
+
+      // The action wrote through the exact same persisted config file `inari init` writes.
+      const written = JSON.parse(await readFile(configPath, "utf8"));
+      assert.deepEqual(written, { version: 1, topology: { admission: "local", executor: "local" } });
+
+      // A plain HTML form submission (no Accept: application/json) gets a redirect back to the page.
+      const redirectResponse = await fetch(actionUrl, { method: "POST", redirect: "manual" });
+      assert.equal(redirectResponse.status, 303);
+      assert.equal(redirectResponse.headers.get("location"), "/");
+
+      const state = (await (await fetch(`${announcement.endpoint}/api/state`)).json()) as ConsoleStateBody;
+      assert.equal(state.application.steps.find((step) => step.id === "cli-topology")?.status, "ready");
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
