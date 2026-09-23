@@ -95,6 +95,13 @@ function fakeAdmission() {
   const registrations: LocalSessionBinding[] = [];
   const closes: LocalSessionBinding[] = [];
   const client: LocalAdmissionClient = {
+    async resolveRepository(repositoryNameWithOwner) {
+      return {
+        host: "github.com",
+        repositoryId: REPOSITORY.id,
+        nameWithOwner: repositoryNameWithOwner,
+      };
+    },
     async registerSession(binding) {
       registrations.push(binding);
       return { id: binding.sessionId, status: "active" };
