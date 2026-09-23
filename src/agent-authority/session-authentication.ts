@@ -27,7 +27,7 @@ import {
 } from "./session-certificate.js";
 import { resolveDelegator, type LoadedDelegator } from "./delegator-trust.js";
 import type { CapabilityClaim } from "./capability.js";
-import { verifySessionRequest, type VerifiedSessionRequest } from "./session-request.js";
+import { verifySessionRequest, type SemanticSessionRequest, type VerifiedSessionRequest } from "./session-request.js";
 import { validateRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
   projectImplementationSessionAuthorizationBinding,
@@ -94,12 +94,9 @@ export interface AuthenticatedSessionRequestIdentity {
   readonly expiresAt: number;
 }
 
-/**
- * The sole output of App-side Session authentication. Every field is derived
- * from the provider identity, canonical Runtime trust, or a verified #373
- * request. No App/installation credential or provider response is represented.
- */
-export interface AuthenticatedSessionContext {
+/** Common values consumed by capability and branch authorization after the
+ * caller-specific Session proof has been verified by its owning boundary. */
+export interface SessionAdmissionAuthorizationContext {
   readonly repository: AuthenticatedSessionRepository;
   readonly runtimeAuthority: AuthenticatedSessionDelegator;
   readonly session: AuthenticatedSessionIdentity;
@@ -110,7 +107,36 @@ export interface AuthenticatedSessionContext {
   readonly capabilities: readonly CapabilityClaim[];
   readonly authority: AuthenticatedSessionAuthorityRef;
   readonly request: AuthenticatedSessionRequestIdentity;
+  readonly semanticRequest: SemanticSessionRequest;
+}
+
+/**
+ * The sole output of App-side Session authentication. Every field is derived
+ * from the provider identity, canonical Runtime trust, or a verified #373
+ * request. No App/installation credential or provider response is represented.
+ */
+export interface AuthenticatedSessionContext extends SessionAdmissionAuthorizationContext {
   readonly verifiedRequest: VerifiedSessionRequest;
+}
+
+/** Project Direct-App authentication output onto the authorization values
+ * shared with other verified Session boundaries. Session proof stays owned by
+ * the caller-specific authentication context. */
+export function projectSessionAdmissionAuthorizationContext(
+  context: AuthenticatedSessionContext,
+): SessionAdmissionAuthorizationContext {
+  return Object.freeze({
+    repository: context.repository,
+    runtimeAuthority: context.runtimeAuthority,
+    session: context.session,
+    ...(context.task === undefined ? {} : { task: context.task }),
+    ...(context.implementationBinding === undefined ? {} : { implementationBinding: context.implementationBinding }),
+    ...(context.implementationScope === undefined ? {} : { implementationScope: context.implementationScope }),
+    capabilities: context.capabilities,
+    authority: context.authority,
+    request: context.request,
+    semanticRequest: context.semanticRequest,
+  });
 }
 
 export const SESSION_AUTHENTICATION_FAILURE_REASONS = Object.freeze([
@@ -291,6 +317,7 @@ function authenticatedContext(
       issuedAt: verifiedRequest.envelope.issuedAt,
       expiresAt: verifiedRequest.envelope.expiresAt,
     }),
+    semanticRequest: verifiedRequest.envelope.request,
     verifiedRequest,
   };
   return Object.freeze(context);

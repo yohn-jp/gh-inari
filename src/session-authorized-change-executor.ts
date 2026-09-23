@@ -14,7 +14,9 @@ import {
 } from "./agent-authority/capability-admission.js";
 import {
   authenticateSessionRequest,
+  projectSessionAdmissionAuthorizationContext,
   type AuthenticatedSessionContext,
+  type SessionAdmissionAuthorizationContext,
   type AuthenticateSessionRequestOptions,
 } from "./agent-authority/session-authentication.js";
 import {
@@ -28,55 +30,55 @@ import {
 } from "./agent-authority/session-bundle.js";
 import type { DelegatedTreeDelta } from "./agent-authority/protected-paths.js";
 import {
+  authorizeBranchAdvance,
   validateBranchAdvanceSemanticRequest,
+  type BranchAdvanceAuthorizationEvidence,
   type BranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
 import { MAX_ISSUE_NUMBER } from "./agent-authority/capability.js";
-import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/effect-authorizer.js";
+import {
+  assertTrustedExecution,
+  type DirectAppTrustedExecutionContext,
+  type SessionTrustedExecutionContext,
+} from "./github/effect-authorizer.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   changeMutationRequest,
   changeReadRequest,
-  normalizeChangeExecutionResult,
   normalizeChangeProjection,
   type ChangeExecutionEvidence,
   type ChangeExecutionResult,
   type ChangeExecutionPort,
 } from "./change-execution-port.js";
-import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import type { ChangeDiagnostic, ChangeProjectionResult } from "./change.js";
 import { validateChangeProvenanceRecord, type SignedChangeProvenanceRecord } from "./change-provenance-record.js";
 import {
   tryValidatePrPublicationRequest,
-  type NormalizedPrPublicationRequest,
+  type PrPublicationRequest,
   type PrPublicationResult,
 } from "./pr-publication.js";
+import {
+  AUTHORIZED_EXECUTION_PHASES,
+  AUTHORIZED_EXECUTION_OPERATIONS,
+  AUTHORIZED_EXECUTION_VERSION,
+  createAuthorizedExecution,
+  executeAuthorizedExecution,
+  type AuthorizedExecution,
+  type AuthorizedExecutionDelegates,
+  type AuthorizedExecutionFailure,
+  type AuthorizedExecutionOperation,
+  type AuthorizedExecutionPhase,
+  type AuthorizedExecutionResult,
+} from "./authorized-execution.js";
 
-export const CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION = 1 as const;
+export const CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION = AUTHORIZED_EXECUTION_VERSION;
 
-export const CAPABILITY_AUTHORIZED_SESSION_OPERATIONS = Object.freeze([
-  "change.issue",
-  "change.show",
-  "change.ready",
-  "change.abort",
-  "change.merge",
-  "branch.advance",
-  "pullRequest.publish",
-] as const);
-export type CapabilityAuthorizedSessionOperation = (typeof CAPABILITY_AUTHORIZED_SESSION_OPERATIONS)[number];
+export const CAPABILITY_AUTHORIZED_SESSION_OPERATIONS = AUTHORIZED_EXECUTION_OPERATIONS;
+export type CapabilityAuthorizedSessionOperation = AuthorizedExecutionOperation;
 
-export const SESSION_EXECUTION_PHASES = Object.freeze([
-  "authentication",
-  "request",
-  "authorization",
-  "evidence",
-  "execution",
-  "conflict",
-  "verification",
-  "recovery-required",
-] as const);
-export type SessionExecutionPhase = (typeof SESSION_EXECUTION_PHASES)[number];
+export const SESSION_EXECUTION_PHASES = AUTHORIZED_EXECUTION_PHASES;
+export type SessionExecutionPhase = AuthorizedExecutionPhase;
 
 /** The direct Change body signed inside the #373 Session request envelope. */
 export type DirectChangeSemanticRequest =
@@ -103,26 +105,8 @@ export type DirectChangeSemanticRequest =
 
 type AppProvenance = NonNullable<CapabilityExecutionProvenance["app"]>;
 
-export interface CapabilityAuthorizedSessionExecutionFailure {
-  readonly code: "SESSION_EXECUTION_FAILED";
-  readonly phase: SessionExecutionPhase;
-  readonly message: string;
-  readonly diagnostics?: readonly ChangeDiagnostic[];
-  readonly evidence?: ChangeExecutionEvidence;
-}
-
-export interface CapabilityAuthorizedSessionExecutionResult {
-  readonly version: typeof CAPABILITY_AUTHORIZED_SESSION_EXECUTION_VERSION;
-  readonly operation?: CapabilityAuthorizedSessionOperation;
-  readonly status: "succeeded" | "failed";
-  readonly projection?: ChangeProjectionResult;
-  readonly execution?: ChangeExecutionResult;
-  readonly branchAdvance?: BranchAdvanceSemanticResult;
-  readonly publication?: PrPublicationResult;
-  /** Present only after #376 has established bounded provenance. */
-  readonly provenance?: CapabilityExecutionProvenance;
-  readonly failure?: CapabilityAuthorizedSessionExecutionFailure;
-}
+export type CapabilityAuthorizedSessionExecutionFailure = AuthorizedExecutionFailure;
+export type CapabilityAuthorizedSessionExecutionResult = AuthorizedExecutionResult;
 
 export interface CapabilityAuthorizedChangeExecutorFactoryInput {
   readonly context: AuthenticatedSessionContext;
@@ -153,6 +137,8 @@ export interface CapabilityAuthorizedBranchAdvanceInput {
   readonly admission: AdmittedSessionCapability;
   /** The exact signed #466 semantic request; #465 does not reinterpret it. */
   readonly request: BranchAdvanceSemanticRequest;
+  readonly branchAuthorization: BranchAdvanceAuthorizationEvidence;
+  readonly provenance: CapabilityExecutionProvenance;
 }
 
 export interface CapabilityAuthorizedSessionExecutorOptions {
@@ -182,7 +168,8 @@ export interface CapabilityAuthorizedPullRequestPublicationInput {
   readonly context: AuthenticatedSessionContext;
   readonly execution: DirectAppTrustedExecutionContext;
   readonly admission: AdmittedSessionCapability;
-  readonly request: NormalizedPrPublicationRequest;
+  /** Canonical publication wire request accepted by the existing publisher. */
+  readonly request: PrPublicationRequest;
 }
 
 export interface CapabilityAuthorizedPullRequestPublicationResult {
@@ -406,17 +393,21 @@ function subjectForPullRequest(
   return Object.freeze({ kind: "pullRequest", issue, head, base });
 }
 
+function directAppExecution(execution: SessionTrustedExecutionContext): DirectAppTrustedExecutionContext {
+  if (execution.runtime !== "inari-app") {
+    throw new TypeError("Direct-App execution context is invalid.");
+  }
+  return execution;
+}
+
 /** Map the semantic publish operation onto the existing pullRequest.create capability authority. */
-function capabilityAdmissionContext(context: AuthenticatedSessionContext): AuthenticatedSessionContext {
-  if (context.request.operation !== "pullRequest.publish") return context;
-  return {
-    ...context,
+function capabilityAdmissionContext(context: AuthenticatedSessionContext): SessionAdmissionAuthorizationContext {
+  const admissionContext = projectSessionAdmissionAuthorizationContext(context);
+  if (context.request.operation !== "pullRequest.publish") return admissionContext;
+  return Object.freeze({
+    ...admissionContext,
     request: { ...context.request, operation: "pullRequest.create" },
-    verifiedRequest: {
-      ...context.verifiedRequest,
-      envelope: { ...context.verifiedRequest.envelope, operation: "pullRequest.create" },
-    },
-  };
+  });
 }
 
 function authenticatedProvenance(
@@ -504,117 +495,6 @@ function admissionPhase(reason: CapabilityAdmissionError["reason"]): SessionExec
   return "authorization";
 }
 
-function trustedDiagnostics(error: ChangeTrustedExecutorError): readonly ChangeDiagnostic[] {
-  return error.diagnostics.slice(0, 16);
-}
-
-function trustedEvidence(error: ChangeTrustedExecutorError): ChangeExecutionEvidence | undefined {
-  return error.evidence;
-}
-
-function executionPhase(error: unknown): SessionExecutionPhase {
-  if (error instanceof ChangeTrustedExecutorError) {
-    if (error.code === "CHANGE_EXECUTION_RECOVERY_REQUIRED") return "recovery-required";
-    if (error.code === "CHANGE_EXECUTION_PRECONDITION_FAILED") return "conflict";
-    if (error.code === "CHANGE_EXECUTION_PROJECTION_VERIFICATION_FAILED") return "verification";
-  }
-  return "execution";
-}
-
-function executionFailure(
-  operation: CapabilityAuthorizedSessionOperation,
-  provenance: CapabilityExecutionProvenance,
-  error: unknown,
-): CapabilityAuthorizedSessionExecutionResult {
-  const trusted = error instanceof ChangeTrustedExecutorError ? error : undefined;
-  return failure(operation, executionPhase(error), provenance, "Session-authorized Change execution failed closed.", {
-    ...(trusted === undefined ? {} : { diagnostics: trustedDiagnostics(trusted), evidence: trustedEvidence(trusted) }),
-  });
-}
-
-function publicationFailurePhase(publication: PrPublicationResult): SessionExecutionPhase {
-  if (
-    publication.diagnostics.some(
-      (diagnostic) => diagnostic.code.includes("AMBIGUOUS") || diagnostic.code.includes("CONFLICTING"),
-    )
-  ) {
-    return "conflict";
-  }
-  if (
-    publication.diagnostics.some(
-      (diagnostic) => diagnostic.code.includes("INVALID") || diagnostic.code.includes("MISMATCH"),
-    )
-  ) {
-    return "authorization";
-  }
-  return "execution";
-}
-
-function appFromFactory(value: ChangeExecutionPort | CapabilityAuthorizedChangeExecutorFactoryResult): {
-  readonly executor: ChangeExecutionPort;
-  readonly app?: AppProvenance;
-} {
-  if (isRecord(value) && "executor" in value) {
-    if (
-      !isObject(value.executor) ||
-      typeof value.executor.execute !== "function" ||
-      typeof value.executor.read !== "function"
-    ) {
-      throw new TypeError("Change executor factory returned an invalid executor.");
-    }
-    return { executor: value.executor as unknown as ChangeExecutionPort, app: value.app as AppProvenance | undefined };
-  }
-  if (!isObject(value) || typeof value.execute !== "function" || typeof value.read !== "function") {
-    throw new TypeError("Change executor factory returned an invalid executor.");
-  }
-  return { executor: value as unknown as ChangeExecutionPort };
-}
-
-function equivalentProjection(left: ChangeProjectionResult, right: ChangeProjectionResult, issue: number): boolean {
-  const leftChange = left.change;
-  const rightChange = right.change;
-  if (left.status !== right.status || left.valid !== right.valid) return false;
-  if (left.canonicalBranch !== right.canonicalBranch || left.canonicalBaseBranch !== right.canonicalBaseBranch) {
-    return false;
-  }
-  if (leftChange === undefined || rightChange === undefined) return leftChange === rightChange;
-  return (
-    leftChange.identity.repositoryHost === rightChange.identity.repositoryHost &&
-    leftChange.identity.repositoryId === rightChange.identity.repositoryId &&
-    leftChange.identity.rootIssue === issue &&
-    rightChange.identity.rootIssue === issue &&
-    leftChange.state === rightChange.state &&
-    leftChange.projection?.branch === rightChange.projection?.branch &&
-    leftChange.projection?.pullRequest === rightChange.projection?.pullRequest
-  );
-}
-
-function validPostExecutionProjection(
-  projection: ChangeProjectionResult,
-  issue: number,
-  operation: CapabilityAuthorizedSessionOperation,
-): boolean {
-  if (
-    projection.valid &&
-    projection.status === "healthy" &&
-    projection.change !== undefined &&
-    projection.change.identity.rootIssue === issue
-  ) {
-    return true;
-  }
-  return (
-    operation === "change.abort" &&
-    projection.valid &&
-    projection.status === "absent" &&
-    projection.diagnostics.length === 0 &&
-    projection.change?.identity.rootIssue === issue &&
-    projection.change.state === "DEFINED" &&
-    projection.change.projection === undefined &&
-    projection.candidates.branches.length === 0 &&
-    projection.candidates.pullRequests.length === 0
-  );
-}
-
 function branchRequestFields(input: unknown): {
   readonly request: BranchAdvanceSemanticRequest;
   readonly treeDelta: DelegatedTreeDelta;
@@ -631,6 +511,19 @@ function branchRequestFields(input: unknown): {
       })),
     },
   };
+}
+
+async function executeAuthorizedSessionOperation(
+  input: unknown,
+  delegates: AuthorizedExecutionDelegates,
+  operation: CapabilityAuthorizedSessionOperation,
+  provenance: CapabilityExecutionProvenance,
+): Promise<CapabilityAuthorizedSessionExecutionResult> {
+  try {
+    return await executeAuthorizedExecution(createAuthorizedExecution(input), delegates);
+  } catch {
+    return failure(operation, "authorization", provenance, "Authorized execution context is invalid.");
+  }
 }
 
 export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSessionExecutor {
@@ -706,7 +599,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     let admission: AdmittedSessionCapability;
     try {
       admission = admitAuthenticatedSessionCapability({
-        context,
+        context: capabilityAdmissionContext(context),
         operation: operation as CapabilityAdmissionOperation,
         subject: subjectForChange(issue),
         projection: initial,
@@ -737,20 +630,18 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     }
 
     if (operation === "change.show") {
-      let reread: ChangeProjectionResult;
-      try {
-        reread = normalizeChangeProjection("show", await reader.read(changeReadRequest(issue)));
-      } catch {
-        return failure(operation, "verification", authorized, "Authoritative Change verification failed.");
-      }
-      if (
-        !reread.valid ||
-        (reread.status !== "absent" && reread.status !== "healthy") ||
-        !equivalentProjection(initial, reread, issue)
-      ) {
-        return failure(operation, "verification", authorized, "Authoritative Change verification failed.");
-      }
-      return success(operation, authorized, { projection: reread });
+      const execution: AuthorizedExecution = {
+        version: 1,
+        operation,
+        repository: admission.repository,
+        ...(admission.task === undefined ? {} : { task: admission.task }),
+        subject: admission.subject,
+        capability: admission.capability,
+        provenance: authorized,
+        request: changeReadRequest(issue),
+        initialProjection: initial,
+      };
+      return executeAuthorizedSessionOperation(execution, { readExecutor: reader }, operation, authorized);
     }
 
     const request = changeMutationRequest(
@@ -784,96 +675,38 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       return failure(operation, "authorization", authorized, "Direct App trusted execution context is invalid.");
     }
 
-    let executor: ChangeExecutionPort = this.#options.changeExecutor as ChangeExecutionPort;
-    let app = this.#options.app;
-    if (this.#options.createChangeExecutor !== undefined) {
-      try {
-        const factoryRequest = {
-          ...request,
-          ...(operation === "change.issue" && "signedProvenanceRecord" in directRequest
-            ? { signedProvenanceRecord: directRequest.signedProvenanceRecord }
-            : {}),
-        };
-        const created = appFromFactory(
-          await this.#options.createChangeExecutor({
-            context,
-            execution: executionContext,
-            admission,
-            request: factoryRequest,
+    const authorizedExecution = {
+      version: 1 as const,
+      operation,
+      repository: admission.repository,
+      ...(admission.task === undefined ? {} : { task: admission.task }),
+      subject: admission.subject,
+      capability: admission.capability,
+      provenance: authorized,
+      request,
+      execution: executionContext,
+    } as const;
+    const delegates: AuthorizedExecutionDelegates = {
+      ...(this.#options.changeExecutor === undefined ? {} : { changeExecutor: this.#options.changeExecutor }),
+      ...(this.#options.app === undefined ? {} : { app: this.#options.app }),
+      ...(this.#options.createChangeExecutor === undefined
+        ? {}
+        : {
+            createChangeExecutor: ({ execution: trustedExecution, request: authorizedRequest }) =>
+              this.#options.createChangeExecutor!({
+                context,
+                execution: directAppExecution(trustedExecution),
+                admission,
+                request: {
+                  ...authorizedRequest,
+                  ...(operation === "change.issue" && "signedProvenanceRecord" in directRequest
+                    ? { signedProvenanceRecord: directRequest.signedProvenanceRecord }
+                    : {}),
+                },
+              }),
           }),
-        );
-        executor = created.executor;
-        app = created.app ?? app;
-      } catch {
-        return failure(operation, "execution", authorized, "Authorized Change executor could not be created.");
-      }
-    }
-    if (executor === undefined)
-      return failure(operation, "execution", authorized, "Authorized Change executor is unavailable.");
-
-    let appScoped = authorized;
-    if (app !== undefined) {
-      try {
-        appScoped = authenticatedProvenance(
-          context,
-          subjectForChange(issue),
-          directRequest.agent,
-          "app-scoped",
-          admission.capability,
-          app,
-        );
-      } catch {
-        return failure(operation, "execution", authorized, "App-scoped execution provenance is invalid.");
-      }
-    }
-
-    let execution: ChangeExecutionResult;
-    try {
-      execution = normalizeChangeExecutionResult(request.operation, await executor.execute(request));
-    } catch (error: unknown) {
-      return executionFailure(operation, appScoped, error);
-    }
-    const evidence = execution.evidence;
-    if (evidence?.outcome === "recovery-required") {
-      return failure(operation, "recovery-required", appScoped, "Change execution requires governed recovery.", {
-        evidence,
-      });
-    }
-    if (evidence?.outcome === "failed") {
-      return failure(operation, "execution", appScoped, "Change effect execution failed.", { evidence });
-    }
-
-    let verifiedProjection: ChangeProjectionResult;
-    try {
-      verifiedProjection = normalizeChangeProjection("show", await executor.read(changeReadRequest(issue)));
-    } catch {
-      return failure(operation, "verification", appScoped, "Authoritative Change verification failed.", { evidence });
-    }
-    if (
-      !validPostExecutionProjection(verifiedProjection, issue, operation) ||
-      !equivalentProjection(execution.projection, verifiedProjection, issue)
-    ) {
-      return failure(operation, "verification", appScoped, "Authoritative Change verification failed.", { evidence });
-    }
-    if (app === undefined) {
-      return failure(operation, "verification", authorized, "Verified App execution provenance is unavailable.", {
-        evidence,
-      });
-    }
-    let verified: CapabilityExecutionProvenance;
-    try {
-      verified = authenticatedProvenance(
-        context,
-        subjectForChange(issue),
-        directRequest.agent,
-        "verified",
-        admission.capability,
-        app,
-      );
-    } catch {
-      return failure(operation, "verification", appScoped, "Verified execution provenance is invalid.", { evidence });
-    }
-    return success(operation, verified, { projection: verifiedProjection, execution });
+    };
+    return executeAuthorizedSessionOperation(authorizedExecution, delegates, operation, authorized);
   }
 
   private async executePublication(
@@ -965,50 +798,32 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
         "Direct App trusted execution context is invalid.",
       );
     }
-    if (this.#options.publishPullRequest === undefined) {
-      return failure("pullRequest.publish", "execution", authorized, "Authorized PR publication is unavailable.");
-    }
-
-    let delegated: CapabilityAuthorizedPullRequestPublicationResult;
-    try {
-      delegated = await this.#options.publishPullRequest({
-        context,
-        execution: executionContext,
-        admission,
-        request,
-      });
-    } catch {
-      return failure("pullRequest.publish", "execution", authorized, "PR publication failed closed.");
-    }
-    const publication = delegated?.publication;
-    if (publication === undefined || publication.classification === "failed" || !publication.ok) {
-      return failure(
-        "pullRequest.publish",
-        publication === undefined ? "execution" : publicationFailurePhase(publication),
-        authorized,
-        "PR publication failed closed.",
-        { ...(publication === undefined ? {} : { publication }) },
-      );
-    }
-    const app = delegated.app ?? this.#options.app;
-    if (app === undefined) {
-      return failure(
-        "pullRequest.publish",
-        "verification",
-        authorized,
-        "Verified App execution provenance is unavailable.",
-        { publication },
-      );
-    }
-    let verified: CapabilityExecutionProvenance;
-    try {
-      verified = authenticatedProvenance(context, subject, directRequest.agent, "verified", admission.capability, app);
-    } catch {
-      return failure("pullRequest.publish", "verification", authorized, "Verified execution provenance is invalid.", {
-        publication,
-      });
-    }
-    return success("pullRequest.publish", verified, { publication });
+    const authorizedExecution = {
+      version: 1,
+      operation: "pullRequest.publish",
+      repository: admission.repository,
+      ...(admission.task === undefined ? {} : { task: admission.task }),
+      subject: admission.subject,
+      capability: admission.capability,
+      provenance: authorized,
+      request: directRequest.publication,
+      execution: executionContext,
+    };
+    const delegates: AuthorizedExecutionDelegates = {
+      ...(this.#options.app === undefined ? {} : { app: this.#options.app }),
+      ...(this.#options.publishPullRequest === undefined
+        ? {}
+        : {
+            publishPullRequest: ({ execution: trustedExecution, request: publicationRequest }) =>
+              this.#options.publishPullRequest!({
+                context,
+                execution: directAppExecution(trustedExecution),
+                admission,
+                request: publicationRequest,
+              }),
+          }),
+    };
+    return executeAuthorizedSessionOperation(authorizedExecution, delegates, "pullRequest.publish", authorized);
   }
 
   private async executeBranch(
@@ -1066,7 +881,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     let admission: AdmittedSessionCapability;
     try {
       admission = admitAuthenticatedSessionCapability({
-        context,
+        context: capabilityAdmissionContext(context),
         operation,
         subject: { kind: "branch", issue, branch: fields.request.branch },
         projection,
@@ -1097,38 +912,45 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       );
     }
 
-    if (this.#options.branchAdvance === undefined) {
-      return failure(operation, "execution", authorized, "The #466 branch advance delegate is unavailable.");
-    }
-
-    let delegated: BranchAdvanceSemanticResult;
-    try {
-      delegated = await this.#options.branchAdvance({ envelope, context, admission, request: fields.request });
-    } catch {
-      return failure(operation, "execution", authorized, "Branch advance delegation failed closed.");
-    }
-    if (delegated.status === "failed") {
-      const phase =
-        delegated.outcome === "recovery-required"
-          ? "recovery-required"
-          : delegated.outcome === "stale"
-            ? "conflict"
-            : "execution";
-      return failure(operation, phase, delegated.provenance ?? authorized, "Branch advance failed closed.", {
-        branchAdvance: delegated,
+    const branchAuthorization = authorizeBranchAdvance({
+      context: projectSessionAdmissionAuthorizationContext(context),
+      admission,
+      request: fields.request,
+    });
+    if (!branchAuthorization.valid) {
+      const phase = branchAuthorization.failure.outcome === "stale" ? "conflict" : "authorization";
+      return failure(operation, phase, authorized, "Branch advance authorization failed closed.", {
+        branchAdvance: branchAuthorization.failure,
       });
     }
-    const verified = delegated.provenance;
-    if (verified === undefined || verified.stage !== "verified") {
-      return failure(
-        operation,
-        "verification",
-        verified ?? authorized,
-        "Branch advance succeeded without authoritative verified provenance.",
-        { branchAdvance: delegated },
-      );
-    }
-    return success(operation, verified, { branchAdvance: delegated });
+
+    const authorizedExecution: AuthorizedExecution = {
+      version: 1,
+      operation,
+      repository: admission.repository,
+      ...(admission.task === undefined ? {} : { task: admission.task }),
+      subject: admission.subject,
+      capability: admission.capability,
+      provenance: authorized,
+      request: fields.request,
+      branchAuthorization: branchAuthorization.authorization,
+    };
+    const delegates: AuthorizedExecutionDelegates = {
+      ...(this.#options.branchAdvance === undefined
+        ? {}
+        : {
+            branchAdvance: ({ request, branchAuthorization: admittedBranchAuthorization, provenance }) =>
+              this.#options.branchAdvance!({
+                envelope,
+                context,
+                admission,
+                request,
+                branchAuthorization: admittedBranchAuthorization,
+                provenance,
+              }),
+          }),
+    };
+    return executeAuthorizedSessionOperation(authorizedExecution, delegates, operation, authorized);
   }
 }
 

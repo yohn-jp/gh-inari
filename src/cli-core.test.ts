@@ -1,0 +1,262 @@
+import assert from "node:assert/strict";
+import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { runCli } from "./cli-core.js";
+import { getCommandForPositionals } from "./command-contract.js";
+import { createDelegatorRecord } from "./agent-authority/delegator-operations.js";
+import { delegatorPublicKeyFingerprint, generateDelegatorKeyPair } from "./agent-authority/delegator-key.js";
+import { createAppUserCredential } from "./github/app-user-credential.js";
+import { FileAppUserCredentialStore } from "./github/app-user-credential-store.js";
+import { validateLocalAuthorityConfig, validateLocalExecutorConfig, writeLocalJson } from "./local-control/config.js";
+
+interface CapturedOutput {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-cli-"));
+  return { root, environment: { INARI_CONFIG_HOME: path.join(root, "config") } };
+}
+
+async function capture(argv: string[], environment: NodeJS.ProcessEnv): Promise<CapturedOutput> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+  console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+  try {
+    return { exitCode: await runCli(argv, { environment }), stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+}
+
+test("inari init declares only the local CLI topology and is idempotent", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const first = await capture(["init", "--json"], environment);
+    assert.equal(first.exitCode, 0);
+    assert.equal(first.stderr, "");
+    const firstOutput = JSON.parse(first.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly configPath: string;
+      readonly config: Record<string, unknown>;
+    };
+    assert.equal(firstOutput.ok, true);
+    assert.equal(firstOutput.operation, "init");
+    assert.equal(firstOutput.configPath, path.join(environment.INARI_CONFIG_HOME as string, "cli", "config.json"));
+    assert.deepEqual(firstOutput.config, {
+      version: 1,
+      topology: { admission: "local", executor: "local" },
+    });
+    assert.equal("endpoint" in firstOutput.config, false);
+    assert.equal("admission" in firstOutput.config, false);
+    assert.equal(first.stdout.includes("private-key.pem"), false);
+    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
+    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
+
+    const second = await capture(["init", "--json"], environment);
+    assert.equal(second.exitCode, 0);
+    assert.deepEqual(JSON.parse(second.stdout), firstOutput);
+    assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")), firstOutput.config);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("authority setup provisions only Authority custody without emitting private material", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const first = await capture(["authority", "setup", "--json"], environment);
+    assert.equal(first.exitCode, 0);
+    assert.equal(first.stderr, "");
+    assert.equal(first.stdout.includes("BEGIN PRIVATE KEY"), false);
+    const output = JSON.parse(first.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly configPath: string;
+      readonly privateKeyPath: string;
+      readonly publicKey: { readonly x: string; readonly d?: string };
+      readonly publicKeyFingerprint: string;
+    };
+    assert.equal(output.ok, true);
+    assert.equal(output.operation, "authority.setup");
+    assert.equal(output.configPath, path.join(environment.INARI_CONFIG_HOME as string, "authority", "config.json"));
+    assert.equal(
+      output.privateKeyPath,
+      path.join(environment.INARI_CONFIG_HOME as string, "authority", "private-key.pem"),
+    );
+    assert.equal("d" in output.publicKey, false);
+    assert.match(output.publicKeyFingerprint, /^sha256:[a-f0-9]{64}$/u);
+    assert.equal((await lstat(output.privateKeyPath)).mode & 0o777, 0o600);
+    assert.equal((await readFile(output.configPath, "utf8")).includes("BEGIN PRIVATE KEY"), false);
+    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "cli")));
+    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
+    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
+
+    const second = await capture(["authority", "setup", "--json"], environment);
+    assert.equal(second.exitCode, 0);
+    assert.equal(JSON.parse(second.stdout).publicKeyFingerprint, output.publicKeyFingerprint);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local provisioning commands are additive, closed, and use INARI_CONFIG_HOME only", async () => {
+  assert.equal(getCommandForPositionals(["init"])?.id, "root.init");
+  assert.equal(getCommandForPositionals(["authority", "setup"])?.id, "authority.setup");
+  assert.equal(getCommandForPositionals(["setup"])?.id, "root.setup");
+  assert.equal(getCommandForPositionals(["authority", "generate"])?.id, "authority.generate");
+
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const invalid = await capture(["init", "--config-home", path.join(root, "other"), "--json"], environment);
+    assert.equal(invalid.exitCode, 1);
+    assert.equal(JSON.parse(invalid.stdout).error.code, "INVALID_OPTION");
+    await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "cli")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("executor setup and serve use the Executor command contract and existing credential custody", async () => {
+  assert.equal(getCommandForPositionals(["executor", "setup"])?.id, "executor.setup");
+  assert.equal(getCommandForPositionals(["executor", "serve"])?.id, "executor.serve");
+
+  const { root, environment } = await temporaryEnvironment();
+  environment.INARI_GITHUB_APP_ID = "123456";
+  try {
+    const missingSetup = await capture(["executor", "serve", "--json"], environment);
+    assert.equal(missingSetup.exitCode, 2);
+    assert.equal(JSON.parse(missingSetup.stdout).error.code, "EXECUTOR_NOT_SETUP");
+
+    const store = new FileAppUserCredentialStore({
+      path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    });
+    await store.save(
+      createAppUserCredential({
+        accessToken: "access-secret",
+        refreshToken: "refresh-secret",
+        accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
+        refreshTokenExpiresAt: "2027-06-01T00:00:00.000Z",
+      }),
+    );
+    const setup = await capture(["executor", "setup", "--json"], environment);
+    assert.equal(setup.exitCode, 0);
+    const output = JSON.parse(setup.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly executorId: string;
+      readonly configPath: string;
+      readonly provider: { readonly credentialProfile: string };
+    };
+    assert.equal(output.ok, true);
+    assert.equal(output.operation, "executor.setup");
+    assert.match(output.executorId, /^exec_[A-Za-z0-9_-]{16,64}$/u);
+    assert.equal(output.configPath, path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json"));
+    assert.equal(output.provider.credentialProfile, "default");
+    assert.equal(setup.stdout.includes("access-secret"), false);
+    const second = await capture(["executor", "setup", "--json"], environment);
+    assert.equal(JSON.parse(second.stdout).executorId, output.executorId);
+
+    const unsupported = await capture(
+      ["executor", "setup", "--config-home", path.join(root, "elsewhere"), "--json"],
+      environment,
+    );
+    assert.equal(unsupported.exitCode, 1);
+    assert.equal(JSON.parse(unsupported.stdout).error.code, "INVALID_OPTION");
+
+    const unsupportedCapability = await capture(
+      ["executor", "setup", "--capability", "change.implement", "--json"],
+      environment,
+    );
+    assert.equal(unsupportedCapability.exitCode, 1);
+    assert.equal(JSON.parse(unsupportedCapability.stdout).error.code, "INVALID_OPTION");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Admission CLI setup is deterministic and serve requires setup", async () => {
+  assert.equal(getCommandForPositionals(["admission", "setup"])?.id, "admission.setup");
+  assert.equal(getCommandForPositionals(["admission", "serve"])?.id, "admission.serve");
+
+  const { root, environment } = await temporaryEnvironment();
+  const keyPair = generateDelegatorKeyPair();
+  const authority = createDelegatorRecord({
+    id: "cli-admission-runtime",
+    key: keyPair,
+    notBefore: new Date("2026-08-01T00:00:00.000Z"),
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement", "branch.advance"],
+  });
+  try {
+    const unconfigured = await capture(["admission", "serve", "--json"], environment);
+    assert.equal(unconfigured.exitCode, 2);
+    assert.equal(JSON.parse(unconfigured.stdout).error.code, "ADMISSION_NOT_SETUP");
+
+    writeLocalJson(
+      "authority",
+      "config.json",
+      {
+        version: 1,
+        publicKey: keyPair.publicKeyJwk,
+        publicKeyFingerprint: delegatorPublicKeyFingerprint(authority.key),
+        privateKeyFile: "private-key.pem",
+      },
+      validateLocalAuthorityConfig,
+      environment,
+    );
+    writeLocalJson(
+      "executor",
+      "config.json",
+      {
+        version: 1,
+        id: "exec_0123456789abcdef",
+        listen: { host: "127.0.0.1", port: 8765 },
+        provider: { kind: "github", credentialProfile: "default" },
+      },
+      validateLocalExecutorConfig,
+      environment,
+    );
+    const authorityPath = path.join(root, "runtime-authority.json");
+    await writeFile(authorityPath, `${JSON.stringify(authority)}\n`, "utf8");
+
+    const first = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
+    assert.equal(first.exitCode, 0);
+    assert.equal(first.stderr, "");
+    const firstOutput = JSON.parse(first.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly admissionId: string;
+      readonly executorId: string;
+      readonly configPath: string;
+      readonly publicAuthorityPath: string;
+    };
+    assert.equal(firstOutput.ok, true);
+    assert.equal(firstOutput.operation, "admission.setup");
+    assert.match(firstOutput.admissionId, /^adm_[A-Za-z0-9_-]{16,64}$/u);
+    assert.equal(firstOutput.executorId, "exec_0123456789abcdef");
+    assert.equal(first.stdout.includes("private"), false);
+
+    const second = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
+    assert.equal(JSON.parse(second.stdout).admissionId, firstOutput.admissionId);
+    assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")).executor, {
+      id: firstOutput.executorId,
+      endpoint: "http://127.0.0.1:8765",
+    });
+    assert.equal(
+      firstOutput.publicAuthorityPath,
+      path.join(environment.INARI_CONFIG_HOME as string, "admission", "runtime-authority.json"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

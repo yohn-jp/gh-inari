@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.14.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.16.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -33,6 +33,8 @@ export type CommandDomain =
   | "authority"
   | "session"
   | "runtime"
+  | "executor"
+  | "admission"
   | "mcp"
   | "release"
   | "skill";
@@ -44,6 +46,7 @@ export type CommandId =
   | "root.diagnose"
   | "root.doctor"
   | "root.setup"
+  | "root.init"
   | "issue.schema"
   | "issue.contract"
   | "issue.validate"
@@ -120,6 +123,7 @@ export type CommandId =
   | "change.merge"
   | "change.publish"
   | "release.prepare"
+  | "authority.setup"
   | "authority.generate"
   | "authority.bootstrap"
   | "authority.readiness"
@@ -129,6 +133,10 @@ export type CommandId =
   | "session.issue"
   | "session.inspect"
   | "runtime.connect"
+  | "executor.setup"
+  | "executor.serve"
+  | "admission.setup"
+  | "admission.serve"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -784,6 +792,9 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Prepare the repository-scoped local Runtime profile and report trust readiness.",
     SETUP_OPTIONS,
   ),
+  command("root.init", "root", "init", ["init"], "Declare the local CLI Admission and Executor topology.", [
+    ...ROOT_OPTIONS,
+  ]),
   command(
     "issue.schema",
     "issue",
@@ -1451,6 +1462,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<patch|minor|major|version>",
   ),
   command(
+    "authority.setup",
+    "authority",
+    "setup",
+    ["authority", "setup"],
+    "Create or select the separately custodied local Runtime Authority key.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
     "authority.generate",
     "authority",
     "generate",
@@ -1526,6 +1545,38 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["runtime", "connect"],
     "Connect a foreground local Runtime to the Repository Relay.",
     RUNTIME_OPTIONS,
+  ),
+  command(
+    "executor.setup",
+    "executor",
+    "setup",
+    ["executor", "setup"],
+    "Provision the local Executor identity and reference existing GitHub App user credential custody.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "executor.serve",
+    "executor",
+    "serve",
+    ["executor", "serve"],
+    "Run the configured post-admission local Executor HTTP server on loopback.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "admission.setup",
+    "admission",
+    "setup",
+    ["admission", "setup"],
+    "Create local Admission configuration and pin public Runtime Authority trust from a Delegator record.",
+    AUTHORITY_INPUT_OPTIONS,
+  ),
+  command(
+    "admission.serve",
+    "admission",
+    "serve",
+    ["admission", "serve"],
+    "Run the configured local Admission server after verifying its pinned Executor identity.",
+    [...ROOT_OPTIONS],
   ),
   command(
     "mcp.serve",
@@ -1739,6 +1790,8 @@ export function helpInvocation(
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
+    | "admission"
     | "mcp"
     | "skill",
 ): string {
@@ -1923,6 +1976,8 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "change" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "executor" ||
+    domain === "admission" ||
     domain === "mcp"
   )
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };

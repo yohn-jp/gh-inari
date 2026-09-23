@@ -182,7 +182,9 @@ test("production issuance records branch and provenance generation evidence befo
   assert.equal(result.evidence?.effects[1]?.createdCommitSha, GOLDEN_PATH_CREATED_COMMIT_SHA);
   assert.equal(result.evidence?.effects[2]?.kind, "CREATE_PULL_REQUEST");
   assert.equal(result.evidence?.effects[2]?.status, "succeeded");
-  assert.equal(actors.issuer.requests[0]?.execution.workflowTrust, "protected");
+  const issuedExecution = actors.issuer.requests[0]?.execution;
+  assert.ok(issuedExecution !== undefined && "workflowTrust" in issuedExecution);
+  assert.equal(issuedExecution.workflowTrust, "protected");
   assert.equal(actors.issuer.requests[0]?.target.repositoryId, "411000001");
 });
 
