@@ -299,6 +299,13 @@ function providerFixture(mode: ProviderMode, authority: RuntimeAuthority): Provi
     }
 
     if (path === "graphql" && method === "POST") {
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      const isConditionalDelete = typeof body.query === "string" && body.query.includes("ConditionalDeleteRef");
+      if (isConditionalDelete) {
+        if (mode === "branch-stale") return jsonResponse(200, { errors: [{ message: "compare and swap rejected" }] });
+        state.branchPresent = false;
+        return jsonResponse(200, { data: { updateRefs: { clientMutationId: null } } });
+      }
       if (mode !== "branch-success") return jsonResponse(200, { errors: [{ message: "compare and swap rejected" }] });
       state.branchSha = RESULTING_HEAD;
       return jsonResponse(200, { data: { updateRefs: { clientMutationId: "integration" } } });
@@ -589,9 +596,7 @@ test("authenticated direct-App Change mutation returns verified App provenance a
   assert.ok(
     provider.state.calls.some((call) => call.method === "PATCH" && call.path.endsWith(`/pulls/${PULL_REQUEST}`)),
   );
-  assert.ok(
-    provider.state.calls.some((call) => call.method === "DELETE" && call.path.endsWith(`/git/refs/heads/${BRANCH}`)),
-  );
+  assert.ok(provider.state.calls.some((call) => call.method === "POST" && call.path === "graphql"));
 });
 
 test("replaying the same signed Change request does not duplicate canonical effects", async () => {

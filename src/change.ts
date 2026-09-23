@@ -134,6 +134,13 @@ export interface ChangeTransitionTarget {
   readonly branch?: string;
   readonly baseBranch?: string;
   readonly pullRequest?: number;
+  /**
+   * Freshly observed canonical branch commit generation. Required for abort
+   * cleanup to authorize a generation-safe (compare-and-delete) branch
+   * deletion; a missing value fails abort planning closed rather than
+   * permitting an unconditional delete.
+   */
+  readonly branchCommitSha?: string;
   /** Core-produced PR plan consumed by Change for issuance or merge composition. */
   readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
   /** Fresh merge plan delegated to the governed Semantic PR mutation authority. */
@@ -1047,6 +1054,7 @@ const TRANSITION_TARGET_KEYS = new Set([
   "branch",
   "baseBranch",
   "pullRequest",
+  "branchCommitSha",
   "semanticPullRequestPlan",
   "semanticPullRequestMergePlan",
 ]);
@@ -2856,6 +2864,7 @@ interface ResolvedTransitionTarget {
   readonly branch?: string;
   readonly baseBranch?: string;
   readonly pullRequest?: number;
+  readonly branchCommitSha?: string;
   readonly semanticPullRequestPlan?: SemanticPullRequestMutationPlan;
   readonly semanticPullRequestMergePlan?: SemanticPullRequestMergePlan;
 }
@@ -2901,6 +2910,7 @@ function validateTransitionTarget(input: unknown, path: string): ChangeTransitio
   let branch: string | undefined;
   let baseBranch: string | undefined;
   let pullRequest: number | undefined;
+  let branchCommitSha: string | undefined;
   let semanticPullRequestPlan: SemanticPullRequestMutationPlan | undefined;
   let semanticPullRequestMergePlan: SemanticPullRequestMergePlan | undefined;
   if (hasOwn(input, "branch")) {
@@ -2951,6 +2961,22 @@ function validateTransitionTarget(input: unknown, path: string): ChangeTransitio
       pullRequest = input.pullRequest;
     }
   }
+  if (hasOwn(input, "branchCommitSha")) {
+    if (
+      typeof input.branchCommitSha !== "string" ||
+      input.branchCommitSha.length !== MAX_CHANGE_COMMIT_SHA_LENGTH ||
+      !/^[0-9a-f]{40}$/iu.test(input.branchCommitSha)
+    ) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_TRANSITION_TARGET",
+        `${path}.branchCommitSha`,
+        "branchCommitSha must be a canonical commit SHA.",
+      );
+    } else {
+      branchCommitSha = input.branchCommitSha.toLowerCase();
+    }
+  }
   if (hasOwn(input, "semanticPullRequestPlan")) {
     semanticPullRequestPlan = validateSemanticPullRequestPlan(
       input.semanticPullRequestPlan,
@@ -2981,6 +3007,7 @@ function validateTransitionTarget(input: unknown, path: string): ChangeTransitio
       ...(branch === undefined ? {} : { branch }),
       ...(baseBranch === undefined ? {} : { baseBranch }),
       ...(pullRequest === undefined ? {} : { pullRequest }),
+      ...(branchCommitSha === undefined ? {} : { branchCommitSha }),
       ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
       ...(semanticPullRequestMergePlan === undefined ? {} : { semanticPullRequestMergePlan }),
     },
@@ -3409,6 +3436,7 @@ function resolvedTransitionTarget(request: ChangeTransitionRequest): ResolvedTra
   return {
     branch: target?.branch ?? projection?.branch,
     pullRequest: target?.pullRequest ?? projection?.pullRequest,
+    branchCommitSha: target?.branchCommitSha,
   };
 }
 
@@ -3496,12 +3524,18 @@ function buildChangeTransitionPlan(request: ChangeTransitionRequest): ChangeTran
       // trusted executor admits this edge only for explicitly classified
       // recovery evidence; Core remains the sole effect planner.
       if (resolved.branch === undefined) throw new Error("A recovery retry must resolve a canonical branch.");
-      effects.push({ kind: "DELETE_BRANCH", branch: resolved.branch });
+      if (resolved.branchCommitSha === undefined) {
+        throw new Error("A recovery retry must resolve a proven canonical branch generation.");
+      }
+      effects.push({ kind: "DELETE_BRANCH", branch: resolved.branch, expectedCommitSha: resolved.branchCommitSha });
     } else {
       if (resolved.pullRequest === undefined) throw new Error("A valid abort request must resolve a pull request.");
+      if (resolved.branchCommitSha === undefined) {
+        throw new Error("A valid abort request must resolve a proven canonical branch generation.");
+      }
       effects.push(
         { kind: "CLOSE_PULL_REQUEST", pullRequest: resolved.pullRequest },
-        { kind: "DELETE_BRANCH", branch: resolved.branch! },
+        { kind: "DELETE_BRANCH", branch: resolved.branch!, expectedCommitSha: resolved.branchCommitSha },
       );
     }
   } else if (request.transition === "merge") {

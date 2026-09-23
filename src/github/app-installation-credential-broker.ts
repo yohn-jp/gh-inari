@@ -634,7 +634,7 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
     const transport = new GitHubAppApiTransport({
       apiUrl: this.#apiUrl,
       token: credential.token,
-      repositoryNodeId: this.#repositoryNodeId,
+      repositoryNodeId: credential.repositoryNodeId ?? this.#repositoryNodeId,
       fetch: this.#fetch,
       failureStage: "projection-execution",
       failure: this.#failure,

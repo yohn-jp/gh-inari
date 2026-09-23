@@ -351,7 +351,7 @@ test("a validated abort recovery plan exposes only its remaining Core-admitted c
     version: 1,
     transition: "abort",
     change,
-    target: { branch, pullRequest: 902 },
+    target: { branch, pullRequest: 902, branchCommitSha: branchSha },
   });
   const plan = planChangeTransitionRecovery({
     transition,

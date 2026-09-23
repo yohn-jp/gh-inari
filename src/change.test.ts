@@ -39,6 +39,8 @@ import {
 } from "./change.js";
 import { GITHUB_PULL_REQUEST_PROJECTION_CAPABILITIES, planSemanticPullRequest } from "./semantic-pr-projection.js";
 
+const canonicalBranchCommitSha = "0123456789abcdef0123456789abcdef01234567";
+
 const validChange: Change = {
   version: CHANGE_CONTRACT_VERSION,
   identity: {
@@ -424,12 +426,28 @@ test("ready and abort produce Core-declared effects", () => {
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     transition: "abort",
     change: { ...validChange, state: "REVIEW" },
+    target: { branchCommitSha: canonicalBranchCommitSha },
   });
   assert.deepEqual(abortPlan.effects, [
     { kind: "CLOSE_PULL_REQUEST", pullRequest: 321 },
-    { kind: "DELETE_BRANCH", branch: "feat/210-define-canonical-change-domain-contract" },
+    {
+      kind: "DELETE_BRANCH",
+      branch: "feat/210-define-canonical-change-domain-contract",
+      expectedCommitSha: canonicalBranchCommitSha,
+    },
   ]);
   assert.equal(abortPlan.to, "ABORTED");
+
+  assert.throws(
+    () =>
+      planChangeTransition({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        transition: "abort",
+        change: { ...validChange, state: "REVIEW" },
+      }),
+    /proven canonical branch generation/u,
+    "abort cleanup must fail closed without a proven branch generation",
+  );
 });
 
 test("abort retries are idempotent and recovery retries only canonical cleanup", () => {
@@ -444,11 +462,27 @@ test("abort retries are idempotent and recovery retries only canonical cleanup",
     version: CHANGE_TRANSITION_CONTRACT_VERSION,
     transition: "abort",
     change: { ...validChange, state: "RECOVERY_REQUIRED" },
+    target: { branchCommitSha: canonicalBranchCommitSha },
   });
   assert.deepEqual(recovery.effects, [
-    { kind: "DELETE_BRANCH", branch: "feat/210-define-canonical-change-domain-contract" },
+    {
+      kind: "DELETE_BRANCH",
+      branch: "feat/210-define-canonical-change-domain-contract",
+      expectedCommitSha: canonicalBranchCommitSha,
+    },
   ]);
   assert.equal(recovery.to, "ABORTED");
+
+  assert.throws(
+    () =>
+      planChangeTransition({
+        version: CHANGE_TRANSITION_CONTRACT_VERSION,
+        transition: "abort",
+        change: { ...validChange, state: "RECOVERY_REQUIRED" },
+      }),
+    /proven canonical branch generation/u,
+    "recovery cleanup must fail closed without a proven branch generation",
+  );
 });
 
 test("invalid transitions fail closed with structured diagnostics", () => {

@@ -1142,18 +1142,27 @@ export class TrustedChangeExecutionAdapter implements ChangeExecutionPort {
               ...(this.#trustedRequester === undefined ? {} : { requester: this.#trustedRequester }),
             },
           } satisfies Change;
+          const canonicalBranchName = projection.change.projection?.branch;
+          const branchCandidate =
+            canonicalBranchName === undefined
+              ? undefined
+              : projection.candidates.branches.find(
+                  (candidate) =>
+                    candidate.classification === "canonical" && candidate.candidate.name === canonicalBranchName,
+                );
           try {
             const plan = planChangeTransition({
               version: CHANGE_TRANSITION_CONTRACT_VERSION,
               transition: abortRequest.operation,
               change,
               target: {
-                ...(projection.change.projection?.branch === undefined
-                  ? {}
-                  : { branch: projection.change.projection.branch }),
+                ...(canonicalBranchName === undefined ? {} : { branch: canonicalBranchName }),
                 ...(projection.change.projection?.pullRequest === undefined
                   ? {}
                   : { pullRequest: projection.change.projection.pullRequest }),
+                ...(branchCandidate?.candidate.sha === undefined
+                  ? {}
+                  : { branchCommitSha: branchCandidate.candidate.sha }),
               },
             });
             return { ok: true, plan };

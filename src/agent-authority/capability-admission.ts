@@ -598,11 +598,14 @@ function requireCanonicalState(
         deny("canonical-state");
       }
       return;
-    case "change.abort":
+    case "change.abort": {
       if (projection.status === "absent") return;
       if (projection.status !== "healthy" && projection.status !== "partial") deny("canonical-state");
       if (pullRequest === undefined && !canonicalAbortRecovery(canonical)) deny("canonical-state");
       if (projection.status === "partial" && !canonicalAbortRecovery(canonical)) deny("canonical-state");
+      const abortBranchCandidate = canonical.projection.candidates.branches.find(
+        (candidate) => candidate.classification === "canonical" && candidate.candidate.name === canonical.branch,
+      );
       try {
         planChangeTransition({
           version: CHANGE_TRANSITION_CONTRACT_VERSION,
@@ -611,12 +614,16 @@ function requireCanonicalState(
           target: {
             branch: canonical.branch,
             ...(pullRequest === undefined ? {} : { pullRequest }),
+            ...(abortBranchCandidate?.candidate.sha === undefined
+              ? {}
+              : { branchCommitSha: abortBranchCandidate.candidate.sha }),
           },
         });
       } catch {
         deny("canonical-state");
       }
       return;
+    }
     case "change.merge":
       if (
         projection.status !== "healthy" ||
