@@ -22,7 +22,7 @@ import {
 import {
   assertTrustedExecution,
   validateIssuerRepositoryIdentity,
-  type DirectAppTrustedExecutionContext,
+  type SessionTrustedExecutionContext,
   type RepositoryIdentity,
 } from "./github/effect-authorizer.js";
 import {
@@ -113,22 +113,22 @@ export type AuthorizedExecution =
   | (AuthorizedExecutionBase & {
       readonly operation: "change.issue";
       readonly request: ChangeMutationRequest & Readonly<{ operation: "issue" }>;
-      readonly execution: DirectAppTrustedExecutionContext;
+      readonly execution: SessionTrustedExecutionContext;
     })
   | (AuthorizedExecutionBase & {
       readonly operation: "change.ready";
       readonly request: ChangeMutationRequest & Readonly<{ operation: "ready" }>;
-      readonly execution: DirectAppTrustedExecutionContext;
+      readonly execution: SessionTrustedExecutionContext;
     })
   | (AuthorizedExecutionBase & {
       readonly operation: "change.abort";
       readonly request: ChangeMutationRequest & Readonly<{ operation: "abort" }>;
-      readonly execution: DirectAppTrustedExecutionContext;
+      readonly execution: SessionTrustedExecutionContext;
     })
   | (AuthorizedExecutionBase & {
       readonly operation: "change.merge";
       readonly request: ChangeMutationRequest & Readonly<{ operation: "merge" }>;
-      readonly execution: DirectAppTrustedExecutionContext;
+      readonly execution: SessionTrustedExecutionContext;
     })
   | (AuthorizedExecutionBase & {
       readonly operation: "branch.advance";
@@ -139,7 +139,7 @@ export type AuthorizedExecution =
       readonly operation: "pullRequest.publish";
       /** Canonical caller wire request, validated and frozen without derived route fields. */
       readonly request: PrPublicationRequest;
-      readonly execution: DirectAppTrustedExecutionContext;
+      readonly execution: SessionTrustedExecutionContext;
     });
 
 type NormalizedAuthorizedExecution =
@@ -147,7 +147,7 @@ type NormalizedAuthorizedExecution =
   | (AuthorizedExecutionBase & {
       readonly operation: "pullRequest.publish";
       readonly request: PrPublicationRequest;
-      readonly execution: DirectAppTrustedExecutionContext;
+      readonly execution: SessionTrustedExecutionContext;
     });
 
 export interface AuthorizedExecutionChangeFactoryResult {
@@ -159,7 +159,7 @@ export interface AuthorizedExecutionDelegates {
   readonly readExecutor?: Pick<ChangeExecutionPort, "read">;
   readonly changeExecutor?: ChangeExecutionPort;
   readonly createChangeExecutor?: (input: {
-    readonly execution: DirectAppTrustedExecutionContext;
+    readonly execution: SessionTrustedExecutionContext;
     readonly request: ChangeMutationRequest;
   }) => Promise<ChangeExecutionPort | AuthorizedExecutionChangeFactoryResult>;
   readonly app?: CapabilityExecutionProvenance["app"];
@@ -169,7 +169,7 @@ export interface AuthorizedExecutionDelegates {
     readonly provenance: CapabilityExecutionProvenance;
   }) => Promise<BranchAdvanceSemanticResult>;
   readonly publishPullRequest?: (input: {
-    readonly execution: DirectAppTrustedExecutionContext;
+    readonly execution: SessionTrustedExecutionContext;
     readonly request: PrPublicationRequest;
   }) => Promise<Readonly<{ publication: PrPublicationResult; app?: CapabilityExecutionProvenance["app"] }>>;
 }
@@ -464,7 +464,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
   let request:
     ChangeMutationRequest | ReturnType<typeof changeReadRequest> | BranchAdvanceSemanticRequest | PrPublicationRequest;
   let initialProjection: ChangeProjectionResult | undefined;
-  let execution: DirectAppTrustedExecutionContext | undefined;
+  let execution: SessionTrustedExecutionContext | undefined;
   let branchAuthorization: BranchAdvanceAuthorizationEvidence | undefined;
   if (operation.startsWith("change.")) {
     const changeRequest = normalizeChangeRequest(operation, input.request);
@@ -473,8 +473,9 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
       initialProjection = normalizeChangeProjection("show", input.initialProjection);
     } else {
       const trusted = assertTrustedExecution(input.execution);
-      if (trusted.runtime !== "inari-app") throw new TypeError("Authorized execution context is invalid.");
-      execution = trusted as DirectAppTrustedExecutionContext;
+      if (trusted.runtime !== "inari-app" && trusted.runtime !== "inari-local-admission")
+        throw new TypeError("Authorized execution context is invalid.");
+      execution = trusted as SessionTrustedExecutionContext;
       request = changeRequest;
     }
   } else if (operation === "branch.advance") {
@@ -509,8 +510,9 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
       throw new TypeError("Authorized publication request does not match its subject.");
     }
     const trusted = assertTrustedExecution(input.execution);
-    if (trusted.runtime !== "inari-app") throw new TypeError("Authorized execution context is invalid.");
-    execution = trusted as DirectAppTrustedExecutionContext;
+    if (trusted.runtime !== "inari-app" && trusted.runtime !== "inari-local-admission")
+      throw new TypeError("Authorized execution context is invalid.");
+    execution = trusted as SessionTrustedExecutionContext;
     request = canonicalPublicationWireRequest(input.request, validated.request);
   }
 
@@ -519,7 +521,9 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
     (!sameRepository(repository, execution.repository) ||
       execution.requestId !== provenance.request.requestId ||
       execution.sessionId !== provenance.session.id ||
-      execution.certificateJti !== provenance.session.certificateJti)
+      (execution.runtime === "inari-app"
+        ? execution.certificateJti !== provenance.session.certificateJti
+        : execution.sessionBindingSignature !== provenance.session.certificateJti))
   )
     throw new TypeError("Authorized execution context is invalid.");
 

@@ -29,6 +29,7 @@ import {
   InariEffectAuthorizer,
   type DirectAppTrustedExecutionContext,
   type RepositoryIdentity,
+  type SessionTrustedExecutionContext,
 } from "./effect-authorizer.js";
 import type { GitHubChangeEffectRepository, GitHubChangeProvenanceSignerOptions } from "./change-effect-adapter.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
@@ -126,7 +127,7 @@ function publicationRepositoryMatches(
 export function createPrPublicationProvider(input: {
   readonly broker: AppProviderCredentialBroker;
   readonly authorizer: InariEffectAuthorizer;
-  readonly execution: DirectAppTrustedExecutionContext;
+  readonly execution: SessionTrustedExecutionContext;
   readonly target: RepositoryIdentity;
 }): PrPublicationProvider {
   const { broker, authorizer, execution, target } = input;

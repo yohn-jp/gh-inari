@@ -428,6 +428,39 @@ test("Admission maps active Session, derives bounded branch authorization, and n
     assert.match(branchAuthorization.implementation.governedBodyDigest, /^[a-f0-9]{64}$/u);
     assert.deepEqual(branchAuthorization.paths, [{ path: "src/example.ts", operations: ["CREATE", "WRITE"] }]);
 
+    const readyBinding = bindingFixture(keyPair, authority, "session-local-admission-execution", {
+      kind: "change.ready",
+      issue: ISSUE,
+    });
+    await createSession(readyBinding);
+    const ready = await execute(
+      {
+        version: 1,
+        requestId: "request-local-admission-execution",
+        repository: {
+          repositoryHost: "github.com",
+          repositoryId: REPOSITORY.repositoryId,
+          repositoryNameWithOwner: REPOSITORY.repository,
+        },
+        operation: "change.ready",
+        request: { version: 1, operation: "ready", issue: ISSUE },
+      },
+      readyBinding.sessionId,
+    );
+    assert.equal(ready.status, 200);
+    assert.equal(currentExecution?.operation, "change.ready");
+    const trustedExecution = currentExecution?.execution as {
+      readonly runtime: string;
+      readonly event: string;
+      readonly sessionBindingSignature: string;
+      readonly certificateJti?: string;
+    };
+    assert.equal(trustedExecution.runtime, "inari-local-admission");
+    assert.equal(trustedExecution.event, "authorized-session-execution");
+    assert.equal(trustedExecution.sessionBindingSignature, readyBinding.signature);
+    assert.equal("certificateJti" in trustedExecution, false);
+    assert.equal(executorCalls, 2);
+
     for (const denied of [
       await execute(branchIntent("request-missing-session"), "missing-session"),
       await execute({ ...branchIntent("request-unknown"), extra: true }, original.sessionId),
@@ -447,18 +480,18 @@ test("Admission maps active Session, derives bounded branch authorization, and n
     ]) {
       assert.ok(denied.status === 400 || denied.status === 403);
     }
-    assert.equal(executorCalls, 1);
+    assert.equal(executorCalls, 2);
     assert.equal((await execute(branchIntent("request-no-selector"))).status, 400);
     assert.equal((await execute(branchIntent("request-malformed-selector"), "bad selector")).status, 400);
     assert.equal((await executeRaw("{", original.sessionId)).status, 400);
     assert.equal((await executeRaw(" ".repeat(MAX_LOCAL_ADMISSION_BODY_BYTES + 1), original.sessionId)).status, 413);
-    assert.equal(executorCalls, 1);
+    assert.equal(executorCalls, 2);
 
     wrongRepository = true;
     const repoMismatch = await execute(branchIntent("request-current-repository-mismatch"), original.sessionId);
     assert.equal(repoMismatch.status, 403);
     wrongRepository = false;
-    assert.equal(executorCalls, 1);
+    assert.equal(executorCalls, 2);
 
     const close = await fetch(`${endpoint}${LOCAL_ADMISSION_SESSIONS_PATH}/${original.sessionId}`, {
       method: "DELETE",
@@ -475,7 +508,7 @@ test("Admission maps active Session, derives bounded branch authorization, and n
     await createSession(expired);
     now = new Date(NOW.getTime() + 61_000);
     assert.equal((await execute(branchIntent("request-expired"), expired.sessionId)).status, 403);
-    assert.equal(executorCalls, 1);
+    assert.equal(executorCalls, 2);
   } finally {
     await closeServer(admission);
     await closeServer(executor);

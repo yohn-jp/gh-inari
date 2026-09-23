@@ -51,6 +51,7 @@ export type IssuerAuthorityContractVersion = EffectAuthorizerContractVersion;
 
 export const TRUSTED_EXECUTION_RUNTIME = "github-actions" as const;
 export const DIRECT_APP_TRUSTED_EXECUTION_RUNTIME = "inari-app" as const;
+export const LOCAL_ADMISSION_TRUSTED_EXECUTION_RUNTIME = "inari-local-admission" as const;
 export const TRUSTED_EXECUTION_EVENTS = Object.freeze(["workflow_dispatch", "workflow_call"] as const);
 export type TrustedExecutionEvent = (typeof TRUSTED_EXECUTION_EVENTS)[number];
 
@@ -226,6 +227,18 @@ export interface DirectAppTrustedExecutionContext {
   readonly requester: string;
 }
 
+/** Local Admission execution carries its Authority-signed binding identity. */
+export interface LocalAdmissionTrustedExecutionContext {
+  readonly version: IssuerAuthorityContractVersion;
+  readonly runtime: typeof LOCAL_ADMISSION_TRUSTED_EXECUTION_RUNTIME;
+  readonly event: "authorized-session-execution";
+  readonly repository: IssuerRepositoryIdentity;
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly sessionBindingSignature: string;
+  readonly requester: string;
+}
+
 /**
  * Tagged union with optional legacy-only fields retained for source
  * compatibility with callers that inspect an Actions execution after the
@@ -234,9 +247,12 @@ export interface DirectAppTrustedExecutionContext {
  */
 export type TrustedExecutionContext =
   | GitHubActionsTrustedExecutionContext
+  | LocalAdmissionTrustedExecutionContext
   | (DirectAppTrustedExecutionContext & {
       readonly workflowTrust?: "protected";
     });
+
+export type SessionTrustedExecutionContext = DirectAppTrustedExecutionContext | LocalAdmissionTrustedExecutionContext;
 
 export interface IssuerMutationRequest {
   readonly version: IssuerAuthorityContractVersion;
@@ -363,6 +379,16 @@ const DIRECT_APP_TRUSTED_EXECUTION_KEYS = new Set([
   "requestId",
   "sessionId",
   "certificateJti",
+  "requester",
+]);
+const LOCAL_ADMISSION_TRUSTED_EXECUTION_KEYS = new Set([
+  "version",
+  "runtime",
+  "event",
+  "repository",
+  "requestId",
+  "sessionId",
+  "sessionBindingSignature",
   "requester",
 ]);
 const MUTATION_REQUEST_KEYS = new Set(["version", "authority", "execution", "target", "effects"]);
@@ -766,6 +792,91 @@ function validateDirectAppTrustedExecutionContext(
   );
 }
 
+function validateLocalAdmissionTrustedExecutionContext(
+  input: RecordValue,
+  path: string,
+): IssuerValidationResult<LocalAdmissionTrustedExecutionContext> {
+  const diagnostics: IssuerDiagnostic[] = [];
+  addUnknownProperties(input, LOCAL_ADMISSION_TRUSTED_EXECUTION_KEYS, path, diagnostics);
+  if (!requireProperty(input, "version", path, diagnostics)) {
+    // Continue checking the local Session binding.
+  } else if (input.version !== ISSUER_AUTHORITY_CONTRACT_VERSION) {
+    diagnostics.push(
+      createDiagnostic("ISSUER_INVALID_EXECUTION", `${path}.version`, "Execution contract version is unsupported."),
+    );
+  }
+  if (!requireProperty(input, "runtime", path, diagnostics)) {
+    // Continue checking the local runtime.
+  } else if (input.runtime !== LOCAL_ADMISSION_TRUSTED_EXECUTION_RUNTIME) {
+    diagnostics.push(
+      createDiagnostic("ISSUER_INVALID_EXECUTION", `${path}.runtime`, "Execution runtime is not trusted."),
+    );
+  }
+  if (!requireProperty(input, "event", path, diagnostics)) {
+    // Continue checking the Admission event.
+  } else if (input.event !== "authorized-session-execution") {
+    diagnostics.push(
+      createDiagnostic("ISSUER_UNTRUSTED_EXECUTION", `${path}.event`, "This event cannot obtain issuer credentials."),
+    );
+  }
+
+  const repositoryResult = requireProperty(input, "repository", path, diagnostics)
+    ? validateRepositoryIdentityInput(input.repository, `${path}.repository`)
+    : report<IssuerRepositoryIdentity>([]);
+  diagnostics.push(...repositoryResult.diagnostics);
+  const text = (key: "requestId" | "sessionId"): string | undefined => {
+    if (!requireProperty(input, key, path, diagnostics)) return undefined;
+    const value = input[key];
+    if (typeof value !== "string" || value.length === 0 || value.length > 128 || !/^[\x21-\x7e]+$/u.test(value)) {
+      diagnostics.push(createDiagnostic("ISSUER_INVALID_EXECUTION", `${path}.${key}`, "Session binding is invalid."));
+      return undefined;
+    }
+    return value;
+  };
+  const requestId = text("requestId");
+  const sessionId = text("sessionId");
+  const signaturePresent = requireProperty(input, "sessionBindingSignature", path, diagnostics);
+  const sessionBindingSignature = input.sessionBindingSignature;
+  if (
+    signaturePresent &&
+    (typeof sessionBindingSignature !== "string" || !/^[A-Za-z0-9_-]{86}$/u.test(sessionBindingSignature))
+  ) {
+    diagnostics.push(
+      createDiagnostic(
+        "ISSUER_INVALID_EXECUTION",
+        `${path}.sessionBindingSignature`,
+        "Session binding proof is invalid.",
+      ),
+    );
+  }
+  const requesterPresent = requireProperty(input, "requester", path, diagnostics);
+  const requester = requesterPresent
+    ? normalizeRequester(input.requester, `${path}.requester`, diagnostics)
+    : undefined;
+
+  if (
+    diagnostics.length > 0 ||
+    repositoryResult.value === undefined ||
+    requestId === undefined ||
+    sessionId === undefined ||
+    typeof sessionBindingSignature !== "string" ||
+    requester === undefined
+  )
+    return report(diagnostics);
+  return valid(
+    Object.freeze({
+      version: ISSUER_AUTHORITY_CONTRACT_VERSION,
+      runtime: LOCAL_ADMISSION_TRUSTED_EXECUTION_RUNTIME,
+      event: "authorized-session-execution",
+      repository: repositoryResult.value,
+      requestId,
+      sessionId,
+      sessionBindingSignature,
+      requester,
+    }),
+  );
+}
+
 function validateGitHubActionsTrustedExecutionContext(
   input: unknown,
   path = "$.execution",
@@ -891,6 +1002,9 @@ export function validateTrustedExecutionContext(
     return report([createDiagnostic("ISSUER_INVALID_EXECUTION", path, "Execution context must be an object.")]);
   if (input.runtime === DIRECT_APP_TRUSTED_EXECUTION_RUNTIME) {
     return validateDirectAppTrustedExecutionContext(input, path);
+  }
+  if (input.runtime === LOCAL_ADMISSION_TRUSTED_EXECUTION_RUNTIME) {
+    return validateLocalAdmissionTrustedExecutionContext(input, path);
   }
   return validateGitHubActionsTrustedExecutionContext(input, path);
 }

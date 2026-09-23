@@ -32,8 +32,7 @@ import {
   createCapabilityExecutionProvenance,
   type CapabilityExecutionProvenance,
 } from "../agent-authority/capability-provenance.js";
-import type { AuthenticatedSessionContext } from "../agent-authority/session-authentication.js";
-import type { VerifiedSessionRequest } from "../agent-authority/session-request.js";
+import type { SessionAdmissionAuthorizationContext } from "../agent-authority/session-authentication.js";
 import type { SessionCertificateRepository } from "../agent-authority/session-certificate.js";
 import type { CapabilityClaim } from "../agent-authority/capability.js";
 import { createAuthorizedExecution, type AuthorizedExecution } from "../authorized-execution.js";
@@ -43,7 +42,11 @@ import { tryAuthorizeImplementation, type ImplementationAuthorizationInput } fro
 import { projectImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 import { tryProjectImplementationScope } from "../implementation-scope-projection.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "../agent-authority/codec.js";
-import { validateIssuerRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
+import {
+  assertTrustedExecution,
+  validateIssuerRepositoryIdentity,
+  type RepositoryIdentity,
+} from "../github/effect-authorizer.js";
 import { tryValidatePrPublicationRequest, type PrPublicationRequest } from "../pr-publication.js";
 import { LocalExecutorClient } from "./executor-client.js";
 import type { LocalExecutorEvidenceRequest } from "./executor-http.js";
@@ -261,35 +264,6 @@ function intentRepositoryMatchesBinding(
   );
 }
 
-function requestEnvelope(
-  intent: ExecutionIntent,
-  certificateJti: string,
-  repositoryId: string,
-  operation: CapabilityAdmissionOperation,
-  issuedAt: number,
-  expiresAt: number,
-): VerifiedSessionRequest {
-  return {
-    envelope: {
-      version: 1,
-      alg: "EdDSA",
-      certificate: "local-admission-binding",
-      request: intent.request as Record<string, never>,
-      certificateJti,
-      repositoryId,
-      operation,
-      requestId: intent.requestId,
-      issuedAt,
-      expiresAt,
-      signature: "A".repeat(86),
-    },
-    certificate: {} as VerifiedSessionRequest["certificate"],
-    requestDigest: "0".repeat(64),
-    signingInput: "",
-    signingInputBytes: new Uint8Array(),
-  };
-}
-
 function makeContext(
   binding: LocalSessionBinding,
   repository: RepositoryIdentity,
@@ -297,7 +271,7 @@ function makeContext(
   intent: ExecutionIntent,
   operation: CapabilityAdmissionOperation,
   nowSeconds: number,
-): AuthenticatedSessionContext {
+): SessionAdmissionAuthorizationContext {
   const request = Object.freeze({
     requestId: intent.requestId,
     operation,
@@ -312,14 +286,7 @@ function makeContext(
     capabilities: binding.capabilities,
     authority,
     request,
-    verifiedRequest: requestEnvelope(
-      intent,
-      binding.signature,
-      repository.repositoryId,
-      operation,
-      request.issuedAt,
-      request.expiresAt,
-    ),
+    semanticRequest: intent.request as SessionAdmissionAuthorizationContext["semanticRequest"],
   });
 }
 
@@ -499,7 +466,7 @@ async function executeIntent(
     ...makeContext(binding, evidence.repository, evidence.authority, intent, operation, nowSeconds),
     implementationBinding: current.binding,
     implementationScope: current.scope,
-  } as AuthenticatedSessionContext;
+  } as SessionAdmissionAuthorizationContext;
   const admission = admitAuthenticatedSessionCapability({
     context,
     operation,
@@ -529,16 +496,16 @@ async function executeIntent(
     subject: admission.subject,
     capability: admission.capability,
   });
-  const directExecution = {
+  const localAdmissionExecution = assertTrustedExecution({
     version: 1,
-    runtime: "inari-app",
-    event: "session-request",
+    runtime: "inari-local-admission",
+    event: "authorized-session-execution",
     repository: evidence.repository,
     requestId: intent.requestId,
     sessionId: binding.sessionId,
-    certificateJti: binding.signature,
+    sessionBindingSignature: binding.signature,
     requester: `session:${binding.sessionId}`,
-  };
+  });
   const executionInput: Record<string, unknown> = {
     version: 1,
     operation: intent.operation,
@@ -551,7 +518,7 @@ async function executeIntent(
   };
   if (intent.operation === "change.show") executionInput.initialProjection = evidence.change;
   else if (intent.operation === "branch.advance") executionInput.branchAuthorization = branchAuthorization;
-  else executionInput.execution = directExecution;
+  else executionInput.execution = localAdmissionExecution;
   const authorizedExecution = createAuthorizedExecution(executionInput);
   return options.executor.execute(authorizedExecution);
 }
