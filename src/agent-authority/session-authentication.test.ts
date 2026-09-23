@@ -9,7 +9,11 @@ import {
   type RuntimeAuthority,
 } from "./index.js";
 import { assertRuntimeAuthority } from "./runtime-authority.js";
-import { authenticateSessionRequest, SessionAuthenticationError } from "./session-authentication.js";
+import {
+  authenticateSessionRequest,
+  projectSessionAdmissionAuthorizationContext,
+  SessionAuthenticationError,
+} from "./session-authentication.js";
 import type { GitHubAppRepositoryReadCapability } from "../github/app-installation-credential-broker.js";
 import type { GitHubChangeEffectRepository } from "../github/change-effect-adapter.js";
 import {
@@ -271,7 +275,11 @@ test("authenticates from one fresh App read capability and emits only bounded au
     issuedAt: NOW_SECONDS,
     expiresAt: NOW_SECONDS + 60,
   });
+  assert.deepEqual(context.semanticRequest, context.verifiedRequest.envelope.request);
   assert.equal(context.verifiedRequest.envelope.certificate, request.certificate);
+  const admissionContext = projectSessionAdmissionAuthorizationContext(context);
+  assert.deepEqual(admissionContext.semanticRequest, context.verifiedRequest.envelope.request);
+  assert.equal("verifiedRequest" in admissionContext, false);
   assert.equal(Object.isFrozen(context), true);
   assert.equal(Object.isFrozen(context.repository), true);
   assert.equal(JSON.stringify(context).includes("installation-token"), false);

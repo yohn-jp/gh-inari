@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.14.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.16.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -33,6 +33,8 @@ export type CommandDomain =
   | "authority"
   | "session"
   | "runtime"
+  | "executor"
+  | "admission"
   | "mcp"
   | "release"
   | "skill";
@@ -44,6 +46,7 @@ export type CommandId =
   | "root.diagnose"
   | "root.doctor"
   | "root.setup"
+  | "root.init"
   | "issue.schema"
   | "issue.contract"
   | "issue.validate"
@@ -120,6 +123,7 @@ export type CommandId =
   | "change.merge"
   | "change.publish"
   | "release.prepare"
+  | "authority.setup"
   | "authority.generate"
   | "authority.bootstrap"
   | "authority.readiness"
@@ -128,7 +132,13 @@ export type CommandId =
   | "authority.revoke"
   | "session.issue"
   | "session.inspect"
+  | "session.start"
+  | "session.close"
   | "runtime.connect"
+  | "executor.setup"
+  | "executor.serve"
+  | "admission.setup"
+  | "admission.serve"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -154,6 +164,7 @@ export type OptionId =
   | "state"
   | "limit"
   | "page"
+  | "issueNumber"
   | "to"
   | "requireCapability"
   | "minimumVersion"
@@ -260,6 +271,7 @@ const AUTHORITY_READINESS_OPTIONS = [
 const AUTHORITY_INPUT_OPTIONS = ["help", "json", "from"] as const;
 const AUTHORITY_REVOKE_OPTIONS = ["help", "json"] as const;
 const SESSION_OPTIONS = ["help", "json", "from", "privateKey", "to"] as const;
+const SESSION_START_OPTIONS = ["help", "json", "issueNumber"] as const;
 const RUNTIME_OPTIONS = ["help", "json", "repository", "relayUrl", "authorityId", "privateKey", "configHome"] as const;
 const MCP_OPTIONS = ["help", "repository"] as const;
 const ISSUE_CREATE_OPTIONS = ["help", "json", "template", "title", "from", "field", "repository", "policy"] as const;
@@ -444,6 +456,15 @@ export const COMMAND_OPTIONS = {
     "string",
     "required",
     "Explicit discovery page number; continuation is never implicit.",
+    "number",
+  ),
+  issueNumber: option(
+    "issueNumber",
+    "issue",
+    ["--issue"],
+    "string",
+    "required",
+    "Issue number that bounds the local Session.",
     "number",
   ),
   to: option(
@@ -784,6 +805,9 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Prepare the repository-scoped local Runtime profile and report trust readiness.",
     SETUP_OPTIONS,
   ),
+  command("root.init", "root", "init", ["init"], "Declare the local CLI Admission and Executor topology.", [
+    ...ROOT_OPTIONS,
+  ]),
   command(
     "issue.schema",
     "issue",
@@ -1451,6 +1475,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<patch|minor|major|version>",
   ),
   command(
+    "authority.setup",
+    "authority",
+    "setup",
+    ["authority", "setup"],
+    "Create or select the separately custodied local Runtime Authority key.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
     "authority.generate",
     "authority",
     "generate",
@@ -1520,12 +1552,61 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["help", "json", "from"],
   ),
   command(
+    "session.start",
+    "session",
+    "start",
+    ["session", "start"],
+    "Issue or reuse a bounded local Session and launch one exact child command.",
+    SESSION_START_OPTIONS,
+    "--issue <number> -- <command...>",
+  ),
+  command(
+    "session.close",
+    "session",
+    "close",
+    ["session", "close"],
+    "Close only the inherited local Session through configured Admission.",
+    ["help", "json"],
+  ),
+  command(
     "runtime.connect",
     "runtime",
     "connect",
     ["runtime", "connect"],
     "Connect a foreground local Runtime to the Repository Relay.",
     RUNTIME_OPTIONS,
+  ),
+  command(
+    "executor.setup",
+    "executor",
+    "setup",
+    ["executor", "setup"],
+    "Provision the local Executor identity and reference existing GitHub App user credential custody.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "executor.serve",
+    "executor",
+    "serve",
+    ["executor", "serve"],
+    "Run the configured post-admission local Executor HTTP server on loopback.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "admission.setup",
+    "admission",
+    "setup",
+    ["admission", "setup"],
+    "Create local Admission configuration and pin public Runtime Authority trust from a Delegator record.",
+    AUTHORITY_INPUT_OPTIONS,
+  ),
+  command(
+    "admission.serve",
+    "admission",
+    "serve",
+    ["admission", "serve"],
+    "Run the configured local Admission server after verifying its pinned Executor identity.",
+    [...ROOT_OPTIONS],
   ),
   command(
     "mcp.serve",
@@ -1560,6 +1641,7 @@ export function getCommand(id: CommandId): CommandDefinition {
 }
 
 export function getCommandForPositionals(positionals: readonly string[]): CommandDefinition | undefined {
+  if (positionals[0] === "session" && positionals[1] === "start") return getCommand("session.start");
   // Command examples are also consumed directly by contract/Skill projections;
   // tolerate their option tokens while matching only the command path and slots.
   const commandPositionals = positionals.some((token) => token.startsWith("-"))
@@ -1739,6 +1821,8 @@ export function helpInvocation(
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
+    | "admission"
     | "mcp"
     | "skill",
 ): string {
@@ -1923,6 +2007,8 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "change" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "executor" ||
+    domain === "admission" ||
     domain === "mcp"
   )
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };
@@ -1937,6 +2023,7 @@ export function commandUsage(entry: CommandDefinition): string {
   const positionals = entry.positionalSyntax === undefined ? "" : ` ${entry.positionalSyntax}`;
   const options = entry.optionIds
     .filter((id) => !(entry.id === "impl.frontier" && id === "from"))
+    .filter((id) => !(entry.id === "session.start" && id === "issueNumber"))
     .filter((id) => id !== "help" && id !== "json")
     .map((id) => {
       const optionDefinition = getOption(id);
@@ -1951,6 +2038,7 @@ export function commandUsage(entry: CommandDefinition): string {
         (entry.id === "pr.review" && (id === "expectedHead" || id === "reviewIntent")) ||
         (entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
         (entry.id === "change.merge" && id === "mergeStrategy") ||
+        (entry.id === "session.start" && id === "issueNumber") ||
         (entry.id === "template.import" && id === "from") ||
         (entry.id === "session.issue" && (id === "from" || id === "privateKey" || id === "to")) ||
         (entry.id === "session.inspect" && id === "from") ||

@@ -350,6 +350,23 @@ tokens, headers, or raw provider errors.
 - Never add a central Runtime registry, revocation database, HSM/KMS product,
   or general secrets manager to this workflow.
 
+## Local execution plane
+
+After the public Delegator record is registered on the protected branch, use
+one isolated `INARI_CONFIG_HOME` for the local CLI, Admission, and Executor.
+Run `inari executor setup`, then `inari admission setup --from <public-record-file>`.
+Start `inari executor serve` before `inari admission serve`; Admission checks
+the configured Executor identity before becoming ready. Keep GitHub App user
+credentials with Executor. The CLI and Agent child use the configured
+Admission route and do not need provider credentials.
+
+From the governed repository checkout, launch the Agent with
+`inari session start --issue <n> -- <command...>`. The child inherits
+`INARI_SESSION_ID`; `inari change show <n>` and admitted Change mutations use
+that Session. Run `inari session close` with the same selector when finished.
+The local process route is certified without live provider services by
+`test/local-execution-plane-certification.test.mjs` in `pnpm run verify`.
+
 ## Runtime Authority compatibility inventory
 
 The following names are stable compatibility surfaces. They remain readable,

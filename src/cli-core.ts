@@ -167,7 +167,7 @@ import {
 } from "./agent-authority/delegator-operations.js";
 import { DELEGATOR_ARTIFACT_DIRECTORY } from "./agent-authority/delegator.js";
 import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
-import type { CapabilityKind } from "./agent-authority/capability.js";
+import { MAX_ISSUE_NUMBER, type CapabilityKind } from "./agent-authority/capability.js";
 import { registerDelegator, revokeDelegator, rotateDelegator } from "./agent-authority/delegator-lifecycle.js";
 import {
   createSessionCredentialBundle,
@@ -188,11 +188,30 @@ import {
   type LocalRuntimeConfigInput,
 } from "./relay/local-runtime-config.js";
 import { setupRepository, type RepositorySetupInput } from "./repository-setup.js";
+import { bindLocalCliAdmissionRoute, ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
+import { setupLocalAuthority } from "./local-control/identity.js";
+import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
+import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
+import {
+  createAdmissionChangeExecutionPort,
+  createLocalAdmissionClient,
+  createSessionExecutionIntent,
+  configuredLocalAdmissionTopology,
+  requireConfiguredLocalAdmissionRoute,
+} from "./local-control/admission-client.js";
+import {
+  closeLocalSession,
+  readLocalSessionBinding,
+  readLocalSessionChangeIssueProvenance,
+  startLocalSession,
+} from "./local-control/session-launcher.js";
 import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
+  type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
 import { projectPublishTreeDelta, resolveLocalRepositoryNameWithOwner } from "./change-publish-projection.js";
+import { resolveLocalRepositoryContext } from "./github/local-repository-context.js";
 import {
   compareSemanticIssueProjection,
   tryObserveSemanticIssue,
@@ -363,6 +382,7 @@ const VALUE_OPTIONS = new Set([
   "state",
   "limit",
   "page",
+  "issueNumber",
   "to",
   "requireCapability",
   "minimumVersion",
@@ -462,6 +482,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     if (domain === "template" && command === "import") {
       return await runTemplateImport(root, rest, parsed, json);
     }
+    if (domain === "init") {
+      return runInitCommand(parsed, dependencies, json);
+    }
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
     }
@@ -472,13 +495,19 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runAuthorityCommand(command, rest, parsed, root, dependencies, json);
     }
     if (domain === "session") {
-      return await runSessionCommand(command, rest, parsed, root, json);
+      return await runSessionCommand(command, rest, parsed, root, dependencies, json, argv.includes("--"));
     }
     if (domain === "setup") {
       return await runSetupCommand(parsed, root, dependencies, json);
     }
     if (domain === "runtime") {
       return await runRuntimeCommand(command, rest, parsed, root, dependencies, json);
+    }
+    if (domain === "executor") {
+      return await runExecutorCommand(command, rest, parsed, metadata.version, dependencies, json);
+    }
+    if (domain === "admission") {
+      return await runAdmissionCommand(command, rest, parsed, root, metadata.version, dependencies, json);
     }
     if (domain === "mcp") {
       return await runMcpCommand(command, rest, parsed, root);
@@ -876,6 +905,7 @@ async function runAuthorityCommand(
 ): Promise<number> {
   if (
     (command !== "generate" &&
+      command !== "setup" &&
       command !== "bootstrap" &&
       command !== "readiness" &&
       command !== "register" &&
@@ -886,6 +916,40 @@ async function runAuthorityCommand(
     (command === "revoke" && rest.length !== 1)
   ) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown authority command "${command ?? ""}".`);
+  }
+
+  if (command === "setup") {
+    const definition = getCommand("authority.setup");
+    const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
+    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+      const optionId = unsupported ?? "capability";
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by authority setup.`,
+        "$argv",
+        { command: "authority setup", option: optionId },
+      );
+    }
+    const output = setupLocalAuthority(dependencies.environment ?? process.env);
+    if (json) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          operation: "authority.setup",
+          configPath: output.configPath,
+          privateKeyPath: output.privateKeyPath,
+          publicKey: output.config.publicKey,
+          publicKeyFingerprint: output.config.publicKeyFingerprint,
+        }),
+      );
+    } else {
+      console.log("Local Runtime Authority custody is ready.");
+      console.log(`Private key: ${output.privateKeyPath}`);
+      console.log(`Public key fingerprint: ${output.config.publicKeyFingerprint}`);
+      console.log("Repository trust was not modified.");
+    }
+    return 0;
   }
 
   if (command === "generate") {
@@ -1089,6 +1153,33 @@ async function runAuthorityCommand(
   return 0;
 }
 
+function runInitCommand(parsed: ParsedArgs, dependencies: CliDependencies, json: boolean): number {
+  const definition = getCommand("root.init");
+  const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
+  if (parsed.positionals.length !== 1 || parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? (parsed.capabilities.length > 0 ? "capability" : undefined);
+    if (optionId !== undefined) {
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by init.`,
+        "$argv",
+        { command: "init", option: optionId },
+      );
+    }
+    throw new CliError("UNKNOWN_COMMAND", "Unknown init command.");
+  }
+  const config = ensureLocalCliTopology(dependencies.environment ?? process.env);
+  const configPath = localComponentPath("cli", "config.json", dependencies.environment ?? process.env);
+  if (json) {
+    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config }));
+  } else {
+    console.log("Initialized local CLI topology.");
+    console.log(`Config: ${configPath}`);
+  }
+  return 0;
+}
+
 function requiredAuthorityOption(
   parsed: ParsedArgs,
   key: "authorityId" | "output" | "maxSessionTtlSeconds",
@@ -1171,8 +1262,11 @@ function requiredSessionOption(
   return value;
 }
 
-function rejectUnsupportedSessionOptions(command: "issue" | "inspect", parsed: ParsedArgs): void {
-  const definition = getCommand(command === "issue" ? "session.issue" : "session.inspect");
+function rejectUnsupportedSessionOptions(command: string, parsed: ParsedArgs): void {
+  const definition = getCommandForPositionals(["session", command]);
+  if (definition === undefined || definition.domain !== "session") {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown session command "${command}".`);
+  }
   if (parsed.capabilities.length > 0) {
     throw new CliError("INVALID_OPTION", "Option --capability is not supported by Session commands.", "--capability");
   }
@@ -1192,8 +1286,59 @@ async function runSessionCommand(
   rest: readonly string[],
   parsed: ParsedArgs,
   root: string,
+  dependencies: CliDependencies,
   json: boolean,
+  commandSeparatorPresent: boolean,
 ): Promise<number> {
+  if (command === "start") {
+    rejectUnsupportedSessionOptions(command, parsed);
+    if (!commandSeparatorPresent || rest.length === 0) {
+      throw new CliError("INPUT_REQUIRED", "Use inari session start --issue <n> -- <command...>.", "--");
+    }
+    const issueValue = parsed.options.issueNumber;
+    if (typeof issueValue !== "string" || !/^[1-9][0-9]*$/u.test(issueValue)) {
+      throw new CliError("INVALID_OPTION", "--issue must be a bounded positive Issue number.", "--issue");
+    }
+    const issue = Number(issueValue);
+    if (!Number.isSafeInteger(issue) || issue > MAX_ISSUE_NUMBER) {
+      throw new CliError("INVALID_OPTION", "--issue exceeds the supported Issue number bound.", "--issue");
+    }
+    const environment = dependencies.environment ?? process.env;
+    const route = requireConfiguredLocalAdmissionRoute(environment);
+    const admission = createLocalAdmissionClient({ endpoint: route.endpoint });
+    const code = await startLocalSession({
+      cwd: root,
+      issue,
+      command: rest[0] as string,
+      commandArgs: rest.slice(1),
+      environment,
+      admission,
+      resolveRepository: async () => {
+        const context = resolveLocalRepositoryContext({ cwd: root });
+        if (context.hostname !== "github.com") {
+          throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Local Session repository must be hosted on github.com.");
+        }
+        return admission.resolveRepository(context.nameWithOwner);
+      },
+    });
+    return code;
+  }
+
+  if (command === "close") {
+    rejectUnsupportedSessionOptions(command, parsed);
+    if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "session close does not accept command arguments.");
+    const environment = dependencies.environment ?? process.env;
+    const route = requireConfiguredLocalAdmissionRoute(environment);
+    const closed = await closeLocalSession({
+      environment,
+      admission: createLocalAdmissionClient({ endpoint: route.endpoint }),
+    });
+    const output = { ok: true, operation: "session.close", session: closed };
+    if (json) console.log(JSON.stringify(output));
+    else console.log(`Closed local Session ${closed.id}.`);
+    return 0;
+  }
+
   if ((command !== "issue" && command !== "inspect") || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown session command "${command ?? ""}".`);
   }
@@ -1306,6 +1451,179 @@ async function runRuntimeCommand(
     console.log(`Relay endpoint: ${configuration.relayUrl}`);
     console.log(`Repository id: ${configuration.repository.repositoryId}`);
     console.log(`Runtime Authority: ${configuration.delegatorId}`);
+  }
+  return 0;
+}
+
+async function runExecutorCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  version: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  if ((command !== "setup" && command !== "serve") || rest.length > 0) {
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Executor command "${command ?? ""}".`);
+  }
+  const definition = getCommand(command === "setup" ? "executor.setup" : "executor.serve");
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? "capability";
+    const option = getOption(optionId as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by executor ${command}.`,
+      "$argv",
+      { command: `executor ${command}`, option: optionId },
+    );
+  }
+  const environment = dependencies.environment ?? process.env;
+  if (command === "setup") {
+    const result = await setupLocalExecutor(environment);
+    const output = {
+      ok: true,
+      operation: "executor.setup",
+      configPath: result.configPath,
+      executorId: result.config.id,
+      endpoint: `http://${result.config.listen.host}:${result.config.listen.port}`,
+      provider: result.config.provider,
+    };
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Local Executor identity and configuration are ready.");
+      console.log(`Executor id: ${result.config.id}`);
+      console.log(`Endpoint: ${output.endpoint}`);
+      console.log(`Configuration: ${result.configPath}`);
+    }
+    return 0;
+  }
+
+  const started = await startConfiguredLocalExecutor(version, environment);
+  const server = started.server;
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : undefined;
+  if (port === undefined) {
+    server.close();
+    throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
+  }
+  const endpoint = `http://127.0.0.1:${port}`;
+  const shutdown = (): void => {
+    server.close();
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  server.once("close", () => {
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  });
+  if (json) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        operation: "executor.serve",
+        executorId: started.config.id,
+        endpoint,
+        foreground: true,
+      }),
+    );
+  } else {
+    console.log("Foreground local Executor server started.");
+    console.log(`Endpoint: ${endpoint}`);
+    console.log("Health: /health");
+  }
+  return 0;
+}
+
+async function runAdmissionCommand(
+  command: string | undefined,
+  rest: readonly string[],
+  parsed: ParsedArgs,
+  root: string,
+  version: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  if ((command !== "setup" && command !== "serve") || rest.length > 0)
+    throw new CliError("UNKNOWN_COMMAND", `Unknown Admission command "${command ?? ""}".`);
+  const definition = getCommand(command === "setup" ? "admission.setup" : "admission.serve");
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? "capability";
+    const option = getOption(optionId as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by admission ${command}.`,
+      "$argv",
+      { command: `admission ${command}`, option: optionId },
+    );
+  }
+  const environment = dependencies.environment ?? process.env;
+  if (command === "setup") {
+    const from = parsed.options.from;
+    if (typeof from !== "string")
+      throw new CliError("INPUT_REQUIRED", "Use --from <runtime-authority.json>.", "--from");
+    const authority = await readJsonValue(from === "-" ? from : path.resolve(root, from));
+    const result = setupLocalAdmission(authority, environment);
+    const endpoint = `http://${result.config.listen.host}:${result.config.listen.port}`;
+    bindLocalCliAdmissionRoute({ id: result.config.id, endpoint }, environment);
+    const output = {
+      ok: true,
+      operation: "admission.setup",
+      admissionId: result.config.id,
+      endpoint,
+      executorId: result.config.executor.id,
+      executorEndpoint: result.config.executor.endpoint,
+      configPath: result.configPath,
+      publicAuthorityPath: result.authorityPath,
+    };
+    if (json) console.log(JSON.stringify(output));
+    else {
+      console.log("Local Admission identity and configuration are ready.");
+      console.log(`Admission id: ${output.admissionId}`);
+      console.log(`Endpoint: ${output.endpoint}`);
+      console.log(`Executor: ${output.executorId} (${output.executorEndpoint})`);
+      console.log(`Configuration: ${output.configPath}`);
+    }
+    return 0;
+  }
+
+  const started = await startConfiguredLocalAdmission(version, environment);
+  const server = started.server;
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : undefined;
+  if (port === undefined) {
+    server.close();
+    throw new CliError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a loopback port.");
+  }
+  const endpoint = `http://127.0.0.1:${port}`;
+  const shutdown = (): void => {
+    server.close();
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  server.once("close", () => {
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  });
+  if (json)
+    console.log(
+      JSON.stringify({
+        ok: true,
+        operation: "admission.serve",
+        admissionId: started.config.id,
+        endpoint,
+        foreground: true,
+      }),
+    );
+  else {
+    console.log("Foreground local Admission server started.");
+    console.log(`Endpoint: ${endpoint}`);
+    console.log("Health: /health");
   }
   return 0;
 }
@@ -1550,25 +1868,36 @@ function rejectPartialSessionTransportOptions(
   );
 }
 
-/**
- * Resolves the direct App transport's Session credential path and endpoint,
- * preferring explicit CLI flags over the `INARI_SESSION_CREDENTIAL_FILE` /
- * `INARI_APP_ENDPOINT` environment variables. Returns `undefined` when
- * neither source supplies both values, so the caller falls back to Actions.
- */
-function resolveDirectAppTransportOptions(
-  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean },
-  environment: Readonly<Record<string, string | undefined>>,
-): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
+/** Resolves an explicitly selected direct App transport without consulting environment variables. */
+function resolveExplicitDirectAppTransportOptions(sessionOptions: {
+  readonly sessionCredential?: string | boolean;
+  readonly appEndpoint?: string | boolean;
+}): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
   if (typeof sessionOptions.sessionCredential === "string" && typeof sessionOptions.appEndpoint === "string") {
     return { sessionCredential: sessionOptions.sessionCredential, appEndpoint: sessionOptions.appEndpoint };
   }
+  return undefined;
+}
+
+/** Resolves the legacy environment-derived direct App transport, when configured. */
+function resolveLegacyDirectAppTransportOptions(
+  environment: Readonly<Record<string, string | undefined>>,
+): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
   const envSessionCredential = environment.INARI_SESSION_CREDENTIAL_FILE;
   const envAppEndpoint = environment.INARI_APP_ENDPOINT;
   if (typeof envSessionCredential === "string" && typeof envAppEndpoint === "string") {
     return { sessionCredential: envSessionCredential, appEndpoint: envAppEndpoint };
   }
   return undefined;
+}
+
+function resolveDirectAppTransportOptions(
+  sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean },
+  environment: Readonly<Record<string, string | undefined>>,
+): { readonly sessionCredential: string; readonly appEndpoint: string } | undefined {
+  return (
+    resolveExplicitDirectAppTransportOptions(sessionOptions) ?? resolveLegacyDirectAppTransportOptions(environment)
+  );
 }
 
 /**
@@ -1582,10 +1911,11 @@ function createChangeExecutor(
   root: string,
   repository: string | boolean | undefined,
   sessionOptions: { readonly sessionCredential?: string | boolean; readonly appEndpoint?: string | boolean } = {},
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): ChangeExecutionPort {
   if (dependencies.changeExecutor !== undefined) return dependencies.changeExecutor;
   rejectPartialSessionTransportOptions(sessionOptions.sessionCredential, sessionOptions.appEndpoint);
-  const direct = resolveDirectAppTransportOptions(sessionOptions, process.env);
+  const direct = resolveDirectAppTransportOptions(sessionOptions, environment);
   if (direct !== undefined) {
     const { session, agent } = loadDirectAppSession(path.resolve(root, direct.sessionCredential));
     const endpoint = resolveAppEndpoint(direct.appEndpoint);
@@ -1669,6 +1999,205 @@ function rejectUnsupportedChangeOptions(command: string, options: Readonly<Recor
   );
 }
 
+interface LocalAdmissionSessionContext {
+  readonly sessionId: string;
+  readonly binding: NonNullable<ReturnType<typeof readLocalSessionBinding>>;
+  readonly client: ReturnType<typeof createLocalAdmissionClient>;
+  readonly executor: ChangeExecutionPort;
+}
+
+function requireLocalAdmissionSessionContext(
+  root: string,
+  parsed: ParsedArgs,
+  environment: NodeJS.ProcessEnv,
+): LocalAdmissionSessionContext {
+  const sessionId = environment.INARI_SESSION_ID;
+  if (sessionId === undefined || sessionId.length === 0) {
+    throw new CliError("ADMISSION_SESSION_SELECTOR_REQUIRED", "Local Change routing requires INARI_SESSION_ID.");
+  }
+  const route = requireConfiguredLocalAdmissionRoute(environment);
+  const binding = readLocalSessionBinding(sessionId, environment);
+  if (binding === undefined || binding.sessionId !== sessionId) {
+    throw new CliError("ADMISSION_SESSION_BINDING_NOT_FOUND", "No local binding exists for INARI_SESSION_ID.");
+  }
+  const localRepository = resolveLocalRepositoryNameWithOwner(root);
+  if (localRepository?.toLocaleLowerCase("en-US") !== binding.repository.name.toLocaleLowerCase("en-US")) {
+    throw new CliError(
+      "ADMISSION_SESSION_REPOSITORY_MISMATCH",
+      "Local repository does not match the selected Session.",
+    );
+  }
+  if (
+    typeof parsed.options.repository === "string" &&
+    parsed.options.repository.toLocaleLowerCase("en-US") !== binding.repository.name.toLocaleLowerCase("en-US")
+  ) {
+    throw new CliError("ADMISSION_SESSION_REPOSITORY_MISMATCH", "--repository does not match the selected Session.");
+  }
+  const client = createLocalAdmissionClient({ endpoint: route.endpoint });
+  return {
+    sessionId,
+    binding,
+    client,
+    executor: createAdmissionChangeExecutionPort(client, binding),
+  };
+}
+
+async function runLocalAdmissionChangePublishCommand(
+  issue: number,
+  parsed: ParsedArgs,
+  root: string,
+  context: LocalAdmissionSessionContext,
+): Promise<number> {
+  const commitRev = typeof parsed.options.commit === "string" ? parsed.options.commit : "HEAD";
+  const projection = await readChangeProjection(context.executor, changeReadRequest(issue));
+  const canonicalBranch = projection.canonicalBranch;
+  if (canonicalBranch === undefined) {
+    throw new CliError("CHANGE_PUBLISH_BRANCH_UNAVAILABLE", `Change #${issue} has no canonical implementation branch.`);
+  }
+  const branchCandidate = projection.candidates.branches.find(
+    (candidate) => candidate.candidate.name === canonicalBranch,
+  );
+  const expectedHead = branchCandidate?.candidate.sha;
+  if (expectedHead === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_HEAD_UNAVAILABLE",
+      `Admission could not resolve the current head of "${canonicalBranch}".`,
+    );
+  }
+  const treeDelta = projectPublishTreeDelta({ cwd: root, commit: commitRev, expectedHead });
+  const compiled: BranchAdvanceSemanticRequest = {
+    version: 1,
+    issue,
+    branch: canonicalBranch,
+    expectedHead,
+    changes: treeDelta.changes,
+    commit: treeDelta.commitMetadata,
+  };
+  const validated = validateBranchAdvanceSemanticRequest(compiled);
+  if (!validated.valid || validated.value === undefined) {
+    throw new CliError(
+      "CHANGE_PUBLISH_REQUEST_INVALID",
+      "The compiled branch.advance request is invalid.",
+      "$request",
+      {
+        diagnostics: validated.diagnostics,
+      },
+    );
+  }
+  const intent = createSessionExecutionIntent(context.binding, "branch.advance", validated.value);
+  const raw = await context.client.executeIntent(intent, context.sessionId);
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    Array.isArray(raw) ||
+    (raw as Record<string, unknown>).operation !== "branch.advance"
+  ) {
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid branch.advance result.");
+  }
+  const authorized = raw as { readonly status?: unknown; readonly branchAdvance?: BranchAdvanceSemanticResult };
+  const advance = authorized.branchAdvance;
+  if (authorized.status !== "succeeded" || advance === undefined || advance.status !== "succeeded") {
+    if (advance?.status === "failed") {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          operation: "change.publish",
+          issue,
+          branch: advance.branch,
+          expectedHead: advance.expectedHead,
+          commit: treeDelta.commit,
+          outcome: advance.outcome,
+        }),
+      );
+      return EXIT_REMOTE;
+    }
+    throw new CliError("ADMISSION_EXECUTION_DENIED", "Admission did not authorize branch.advance.");
+  }
+  const resultBranch = advance.branch;
+  const resultingHead = advance.resultingHead;
+  if (resultingHead === undefined) {
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned no resulting branch head.");
+  }
+  const verification = await readChangeProjection(context.executor, changeReadRequest(issue));
+  const verifiedBranch = verification.candidates.branches.find(
+    (candidate) => candidate.candidate.name === resultBranch,
+  );
+  if (verifiedBranch?.candidate.sha !== resultingHead) {
+    throw new CliError("CHANGE_PUBLISH_VERIFICATION_FAILED", "Admission could not verify the published branch head.");
+  }
+  console.log(
+    JSON.stringify({
+      ok: true,
+      operation: "change.publish",
+      issue,
+      branch: resultBranch,
+      expectedHead: advance.expectedHead,
+      commit: treeDelta.commit,
+      outcome: advance.outcome,
+      resultingHead,
+      verified: true,
+    }),
+  );
+  return 0;
+}
+
+async function runLocalAdmissionChangeCommand(
+  operation: "issue" | "show" | "ready" | "abort" | "merge" | "publish",
+  issue: number,
+  parsed: ParsedArgs,
+  root: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<number> {
+  const context = requireLocalAdmissionSessionContext(root, parsed, environment);
+  if (operation === "publish") return runLocalAdmissionChangePublishCommand(issue, parsed, root, context);
+  if (operation === "ready" && typeof parsed.options.executionEvidence === "string") {
+    throw new CliError(
+      "INVALID_OPTION",
+      "Local Admission derives current Implementation authorization; --execution-evidence is not sent on this route.",
+      "--execution-evidence",
+    );
+  }
+  let projection: Awaited<ReturnType<typeof readChangeProjection>>;
+  let evidence: Awaited<ReturnType<typeof executeChangeMutationResult>>["evidence"] = undefined;
+  if (operation === "show") {
+    projection = await readChangeProjection(context.executor, changeReadRequest(issue));
+  } else {
+    const signedProvenanceRecord =
+      operation === "issue" ? readLocalSessionChangeIssueProvenance(context.binding, environment) : undefined;
+    if (operation === "issue" && signedProvenanceRecord === undefined) {
+      throw new CliError(
+        "ADMISSION_CHANGE_PROVENANCE_REQUIRED",
+        "Local Session has no bounded Runtime-signed change.issue provenance artifact.",
+      );
+    }
+    const request = changeMutationRequest(
+      operation,
+      issue,
+      undefined,
+      signedProvenanceRecord,
+      operation === "merge" && typeof parsed.options.mergeStrategy === "string"
+        ? (parsed.options.mergeStrategy as "merge" | "squash" | "rebase")
+        : undefined,
+    );
+    const result = await executeChangeMutationResult(context.executor, request);
+    projection = result.projection;
+    evidence = result.evidence;
+  }
+  const commandResult = projectChangeCommandResult(operation, issue, projection, evidence);
+  const entry =
+    operation === "issue"
+      ? tryProjectGoldenPathEntry({
+          projection,
+          requireGovernedIssue: false,
+          ...(evidence?.outcome === undefined ? {} : { executionOutcome: evidence.outcome }),
+        })
+      : undefined;
+  console.log(JSON.stringify({ ...commandResult, ...(entry === undefined ? {} : { entry }) }));
+  const executionSucceeded =
+    evidence === undefined || evidence.outcome === "verified" || evidence.outcome === "returned-existing";
+  return projection.valid && executionSucceeded && (entry === undefined || entry.valid) ? 0 : EXIT_VALIDATION;
+}
+
 /**
  * `change publish` derives the bounded tree delta from a local commit and
  * submits the exact canonical #466 `branch.advance` request through the
@@ -1681,10 +2210,11 @@ async function runChangePublishCommand(
   root: string,
   dependencies: CliDependencies,
 ): Promise<number> {
+  const environment = dependencies.environment ?? process.env;
   rejectPartialSessionTransportOptions(parsed.options.sessionCredential, parsed.options.appEndpoint);
   const direct = resolveDirectAppTransportOptions(
     { sessionCredential: parsed.options.sessionCredential, appEndpoint: parsed.options.appEndpoint },
-    process.env,
+    environment,
   );
   if (direct === undefined) {
     throw new CliError(
@@ -1715,10 +2245,13 @@ async function runChangePublishCommand(
     );
   }
 
-  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
-    sessionCredential: direct.sessionCredential,
-    appEndpoint: direct.appEndpoint,
-  });
+  const executor = createChangeExecutor(
+    dependencies,
+    root,
+    parsed.options.repository,
+    { sessionCredential: direct.sessionCredential, appEndpoint: direct.appEndpoint },
+    environment,
+  );
   const projection = await readChangeProjection(executor, changeReadRequest(issue));
   const canonicalBranch = projection.canonicalBranch;
   if (canonicalBranch === undefined) {
@@ -1825,20 +2358,34 @@ async function runChangeCommand(
   }
   if (rest.length !== 1 || !isPositiveInteger(rest[0])) throw invalidChangeNumberError(rest[0]);
   rejectUnsupportedChangeOptions(definition.operation, parsed.options);
-  if (definition.operation === "publish") {
-    return await runChangePublishCommand(Number(rest[0]), parsed, root, dependencies);
-  }
-
   const issue = Number(rest[0]);
   const sessionCredential = parsed.options.sessionCredential;
   const appEndpoint = parsed.options.appEndpoint;
+  const environment = dependencies.environment ?? process.env;
   rejectPartialSessionTransportOptions(sessionCredential, appEndpoint);
-  const usesDirectAppTransport = typeof sessionCredential === "string" && typeof appEndpoint === "string";
+  const explicitDirectAppTransport = resolveExplicitDirectAppTransportOptions({ sessionCredential, appEndpoint });
+  if (
+    explicitDirectAppTransport === undefined &&
+    configuredLocalAdmissionTopology(environment) &&
+    ["issue", "show", "ready", "abort", "merge", "publish"].includes(definition.operation)
+  ) {
+    return await runLocalAdmissionChangeCommand(
+      definition.operation as "issue" | "show" | "ready" | "abort" | "merge" | "publish",
+      issue,
+      parsed,
+      root,
+      environment,
+    );
+  }
+  const directAppTransport = explicitDirectAppTransport ?? resolveLegacyDirectAppTransportOptions(environment);
+  if (definition.operation === "publish") {
+    return await runChangePublishCommand(issue, parsed, root, dependencies);
+  }
 
+  const usesDirectAppTransport = directAppTransport !== undefined;
   let runtimeTrustAdapter: GitHubAdapter | undefined;
   let signedProvenanceRecord: Awaited<ReturnType<typeof createDelegatorSignedChangeProvenanceRecord>> | undefined;
   if (definition.operation === "issue") {
-    const environment = dependencies.environment ?? process.env;
     if (usesDirectAppTransport) {
       // Direct App Session selection: canonical Delegator trust is resolved
       // and verified inside trusted execution (App-scoped read capability)
@@ -1858,10 +2405,13 @@ async function runChangeCommand(
       });
     }
   }
-  const executor = createChangeExecutor(dependencies, root, parsed.options.repository, {
-    sessionCredential,
-    appEndpoint,
-  });
+  const executor = createChangeExecutor(
+    dependencies,
+    root,
+    parsed.options.repository,
+    { sessionCredential, appEndpoint },
+    environment,
+  );
   const implementationConformance =
     definition.operation === "ready" && typeof parsed.options.executionEvidence === "string"
       ? readyImplementationConformance(await readJsonValue(parsed.options.executionEvidence, "--execution-evidence"))
@@ -4778,7 +5328,12 @@ function classifyExitCode(error: unknown): number {
   if (
     isObjectWithCode(error) &&
     typeof error.code === "string" &&
-    (error.code.includes("TEMPLATE") || error.code.includes("POLICY") || error.code.startsWith("RELEASE_"))
+    (error.code.includes("TEMPLATE") ||
+      error.code.includes("POLICY") ||
+      error.code.startsWith("RELEASE_") ||
+      error.code.startsWith("EXECUTOR_") ||
+      error.code.startsWith("ADMISSION_") ||
+      error.code.startsWith("LOCAL_CONTROL_"))
   )
     return EXIT_VALIDATION;
   if (
@@ -4954,6 +5509,8 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
+    | "admission"
     | "mcp",
     string
   >
@@ -4968,6 +5525,8 @@ const DOMAIN_EXTERNAL_EXAMPLE: Readonly<
   authority: "authority generate",
   session: "session issue",
   runtime: "runtime connect",
+  executor: "executor serve",
+  admission: "admission serve",
   mcp: "mcp serve",
 };
 
@@ -4985,6 +5544,8 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     domain === "release" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "executor" ||
+    domain === "admission" ||
     domain === "runtime" ||
     domain === "mcp"
   ) {
@@ -4998,6 +5559,10 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     return printDomainHelp("template");
   }
   if (domain === "skill") return printSkillHelp(command);
+  if (domain === "init") {
+    const definition = getCommandForPositionals(positionals);
+    if (definition?.id === "root.init") return printLeafHelp(definition);
+  }
   if (domain === "setup") {
     const definition = getCommandForPositionals(positionals);
     if (definition?.id === "root.setup") return printLeafHelp(definition);
@@ -5012,6 +5577,7 @@ A governed GitHub CLI with a closed, versioned command surface. Supported
 commands run through Inari; unsupported commands are rejected locally.
 
 Domains:
+  init       Declare the local CLI Admission and Executor topology
   setup      Repository-scoped Runtime onboarding and trust readiness
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
@@ -5020,9 +5586,10 @@ Domains:
   template   Semantic template authoring and native template sync
   change     Semantic Change projection and authoritative lifecycle requests
   release    Governed npm release preparation without publication
-  authority  Local Runtime Authority key, bootstrap, readiness, and lifecycle operations
+  authority  Local Runtime Authority setup, key, bootstrap, readiness, and lifecycle operations
   session    Manual short-lived Session credential issuance and inspection
   runtime    Foreground local Relay Runtime connection
+  executor   Local post-admission HTTP execution server
   mcp        Native semantic MCP server over local stdio
   skill      Bounded operational playbooks for common governed workflows
 
@@ -5046,9 +5613,13 @@ function printDomainHelp(
     | "authority"
     | "session"
     | "runtime"
+    | "executor"
+    | "admission"
     | "mcp",
 ): void {
-  const lines = getDomainCommands(domain).map((entry) => `  ${commandUsage(entry)}`);
+  const commands =
+    domain === "executor" ? INARI_COMMANDS.filter((entry) => entry.domain === domain) : getDomainCommands(domain);
+  const lines = commands.map((entry) => `  ${commandUsage(entry)}`);
   console.log(`Usage: inari ${domain} <command> [...]
 
 Operations:
