@@ -3,7 +3,10 @@ import { test } from "node:test";
 import { renderIssueDependencyMarker } from "./artifact.js";
 import { projectChangeFromGitHubEvidence } from "./change.js";
 import type { ImplementationFrontierRepository } from "./implementation-frontier-composition.js";
-import { composeImplementationFrontier } from "./implementation-frontier-composition.js";
+import {
+  composeImplementationFrontier,
+  readCurrentImplementationAdmissionEvidence,
+} from "./implementation-frontier-composition.js";
 import {
   IMPLEMENTATION_CONTRACT_VERSION,
   IMPLEMENTATION_KIND,
@@ -197,6 +200,68 @@ test("rereads and validates a canonical Implementation contract and current Chan
     repo.calls.filter((call) => call.startsWith("change:")),
     ["change:10", "change:11"],
   );
+});
+
+test("reads current Implementation authorization inputs from canonical Issue, dependency, Change, and base evidence", async () => {
+  const base = { branch: "main", revision: "a".repeat(40), freshness: "a".repeat(40) };
+  const body = renderImplementationIssueBody({
+    version: IMPLEMENTATION_CONTRACT_VERSION,
+    kind: IMPLEMENTATION_KIND,
+    repository: identity,
+    sources: [reference(19)],
+    objective: "Admit one current task.",
+    nonGoals: ["Persisting derived scope."],
+    architecture: {
+      decision: "Reuse canonical evidence.",
+      affectedComponents: ["Admission"],
+      invariants: ["Current provider evidence is required."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: ["src/**"], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Current evidence is required."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: base.branch,
+      baseRevision: base.revision,
+      baseFreshness: base.freshness,
+      branch: "feat/10-frontier",
+      dependencies: [],
+    },
+  });
+  const absentChange = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId, rootIssue: 10 },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "frontier" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: 10, state: "open" } },
+      branches: { status: "absent" },
+      pullRequests: { status: "absent" },
+    },
+  });
+  const repo = repository(
+    new Map([[10, { ...issue(10, body), labels: ["implementation"] }]]),
+    new Map([[10, { kind: "empty", references: [] }]]),
+    () => absentChange,
+  );
+  repo.findBranch = async (branch) => {
+    repo.calls.push(`branch:${branch}`);
+    return branch === base.branch ? { name: base.branch, ref: "refs/heads/main", sha: base.revision } : undefined;
+  };
+
+  const current = await readCurrentImplementationAdmissionEvidence(repo, 10);
+
+  assert.equal(current.implementation.number, 10);
+  assert.equal(current.issue.body, body);
+  assert.deepEqual(current.base, base);
+  assert.deepEqual(current.readiness, { evidence: [] });
+  assert.equal(current.change, absentChange);
+  assert.ok(repo.calls.includes("branch:main"));
 });
 
 test("unavailable relationship evidence is not completed by inference", async () => {
