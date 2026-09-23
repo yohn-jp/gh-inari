@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
+import { CAPABILITY_KINDS } from "../agent-authority/capability.js";
+import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
+import type { Delegator } from "../agent-authority/delegator.js";
+import { createRuntimeAuthorityPublicationRequest } from "../runtime-authority-publication.js";
 import { createAppUserCredential } from "./app-user-credential.js";
 import { InMemoryAppUserCredentialStore } from "./app-user-credential-store.js";
 import {
@@ -96,6 +101,87 @@ test("App-user broker resolves the configured App/repository and exposes no toke
     assert.equal(JSON.stringify(capability).includes("access-secret"), false);
   });
   assert.deepEqual(provider.calls, ["/user/installations", "/user/installations/7/repositories", "/repos/acme/inari"]);
+});
+
+test("App-user broker dispatches only a validated public Runtime Authority request to the configured repository", async () => {
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const authority: Delegator = createDelegatorRecord({
+    id: "runtime-publication-test",
+    key: publicKey,
+    notBefore: "2026-01-01T00:00:00.000Z",
+    notAfter: null,
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: CAPABILITY_KINDS,
+  });
+  const requests: Array<{ readonly path: string; readonly body: unknown; readonly authorization: string | null }> = [];
+  const calls: string[] = [];
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    calls.push(`${url.pathname}${url.search}`);
+    if (url.pathname === "/user/installations") {
+      return json({
+        installations: [
+          {
+            id: 7,
+            app_id: 42,
+            permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" },
+            suspended_at: null,
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/user/installations/7/repositories") {
+      return json({ repositories: [{ id: 99, full_name: "acme/inari", node_id: "repo-node" }] });
+    }
+    if (url.pathname === "/repos/acme/inari/dispatches") {
+      requests.push({
+        path: `${url.pathname}${url.search}`,
+        body: JSON.parse(String(init?.body ?? "{}")) as unknown,
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected ${url.pathname}`);
+  };
+  const broker = new GitHubAppUserCredentialBroker(options(fetch));
+
+  await broker.dispatchRuntimeAuthorityPublication({ authority });
+
+  assert.deepEqual(calls, [
+    "/user/installations",
+    "/user/installations/7/repositories",
+    "/repos/acme/inari/dispatches",
+  ]);
+  assert.equal(requests.length, 1);
+  const request = requests[0];
+  assert.equal(request?.path, "/repos/acme/inari/dispatches");
+  assert.equal(request?.authorization, "Bearer access-secret");
+  const payload = request?.body as {
+    readonly event_type: string;
+    readonly client_payload: { readonly correlation: string; readonly request: unknown };
+  };
+  assert.equal(payload.event_type, "inari.runtime-authority.publish");
+  assert.deepEqual(Object.keys(payload.client_payload).sort(), ["correlation", "request"]);
+  assert.match(
+    payload.client_payload.correlation,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+  );
+  assert.deepEqual(payload.client_payload.request, createRuntimeAuthorityPublicationRequest(authority));
+  assert.doesNotMatch(
+    JSON.stringify(request?.body),
+    /access-secret|refresh-secret|session-material-secret|provider-token-secret|privateKey|\.mcp\.json/iu,
+  );
+});
+
+test("App-user broker rejects secret-bearing Runtime Authority records before dispatch", async () => {
+  const provider = brokerFetch();
+  const broker = new GitHubAppUserCredentialBroker(options(provider.fetch));
+  const invalid = { id: "runtime-invalid", privateKey: "must-not-escape" } as unknown as Delegator;
+
+  await assert.rejects(broker.dispatchRuntimeAuthorityPublication({ authority: invalid }), {
+    code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED",
+  });
+  assert.deepEqual(provider.calls, []);
 });
 
 test("App-user broker bounds operation scope to requested effect permissions after validating the provider grant", async () => {

@@ -59,9 +59,10 @@ test("missing App installation reports the bounded install action without local 
   assert.equal(result.authority, undefined);
 });
 
-test("setup reports explicit trust-pending until canonical protected-ref trust is visible", async () => {
+test("setup publishes only the public trust record and reports trust-pending until protected-ref trust is visible", async () => {
   const root = await mkdtemp(path.join(process.cwd(), ".setup-test-"));
   const configHome = await mkdtemp(path.join(os.tmpdir(), "inari-setup-profile-"));
+  await writeFile(path.join(root, ".mcp.json"), JSON.stringify({ token: "unrelated-worktree-secret" }), "utf8");
   const scope = {
     app: { kind: "github-app", slug: "inari-issuer", appId: "42", principal: "app:inari-issuer" },
     installation: { appId: "42", installationId: "7", repositoryHost: "github.com" },
@@ -98,8 +99,30 @@ test("setup reports explicit trust-pending until canonical protected-ref trust i
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      authorityPublisher: async (options) => {
+        assert.equal(options.repository.repositoryNameWithOwner, "acme/inari");
+        assert.deepEqual(Object.keys(options.authority).sort(), [
+          "capabilityCeiling",
+          "id",
+          "key",
+          "kind",
+          "maxSessionTtlSeconds",
+          "notAfter",
+          "notBefore",
+          "status",
+          "version",
+        ]);
+        assert.doesNotMatch(JSON.stringify(options), /unrelated-worktree-secret|\.mcp\.json|privateKeyPath/u);
+        return {
+          status: "created",
+          authorityId: options.authority.id,
+          branch: "feat/1066-runtime-authority-bootstrap-0123456789abcdef",
+          pullRequest: { number: 17, url: "https://github.com/acme/inari/pull/17" },
+        };
+      },
     });
     assert.equal(result.state, "trust-pending");
+    assert.equal(result.publication?.pullRequest.number, 17);
     assert.equal(result.readiness?.ok, false);
     assert.equal(result.readiness?.state, "unknown-authority");
     const profile = JSON.parse(await readFile(result.profilePath as string, "utf8")) as { state: string };
@@ -314,6 +337,47 @@ test("setup is a closed CLI operation and projects safe machine state", async ()
     assert.equal(exitCode, 0);
     assert.equal(JSON.parse(lines[0] ?? "{}").state, "trust-pending");
     assert.doesNotMatch(lines[0] ?? "", /token|private-key-bytes|refresh/i);
+  } finally {
+    console.log = original;
+  }
+});
+
+test("human setup output reports the trust PR and the required review action", async () => {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["setup"], {
+      setupRepository: async () => ({
+        ok: true,
+        operation: "setup",
+        state: "trust-pending",
+        endpoint: "https://endpoint.example.test",
+        relayUrl: "wss://relay.example.test/connect",
+        appInstallationUrl: "https://github.com/apps/inari/installations/new",
+        repository: { repositoryHost: "github.com", repositoryId: "99", repositoryNameWithOwner: "acme/inari" },
+        app: { appId: "42", installationId: "7" },
+        authority: {
+          authorityId: "runtime-test",
+          publicKeyFingerprint: "sha256:abc",
+          privateKeyPath: "/private/runtime-key.pem",
+          artifactPath: ".github/inari/authorities/runtime-test.json",
+        },
+        publication: {
+          status: "created",
+          authorityId: "runtime-test",
+          branch: "feat/1066-runtime-authority-bootstrap-0123456789abcdef",
+          pullRequest: { number: 17, url: "https://github.com/acme/inari/pull/17" },
+        },
+      }),
+    });
+    assert.equal(exitCode, 0);
+    assert.ok(lines.some((line) => line.includes("Trust PR: #17 (https://github.com/acme/inari/pull/17)")));
+    assert.ok(
+      lines.some((line) => line.includes("Trust branch: feat/1066-runtime-authority-bootstrap-0123456789abcdef")),
+    );
+    assert.ok(lines.some((line) => line.includes("Review and merge the trust PR, then run inari setup again.")));
+    assert.doesNotMatch(lines.join("\n"), /private\/runtime-key|private-key-bytes|token/u);
   } finally {
     console.log = original;
   }
