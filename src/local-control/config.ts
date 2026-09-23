@@ -24,6 +24,7 @@ import { randomBytes } from "node:crypto";
 
 export const LOCAL_CONFIG_VERSION = 1 as const;
 export const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
+const MAX_LOCAL_PRIVATE_FILE_BYTES = 256 * 1024;
 
 export type LocalComponent = "cli" | "authority" | "admission" | "executor";
 
@@ -45,14 +46,14 @@ export interface LocalCliConfig {
 export interface LocalAdmissionConfig {
   readonly version: typeof LOCAL_CONFIG_VERSION;
   readonly id: string;
-  readonly listen: { readonly host: "127.0.0.1"; readonly port: number };
+  readonly listen: { readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number };
   readonly executor: { readonly id: string; readonly endpoint: string };
 }
 
 export interface LocalExecutorConfig {
   readonly version: typeof LOCAL_CONFIG_VERSION;
   readonly id: string;
-  readonly listen: { readonly host: "127.0.0.1"; readonly port: number };
+  readonly listen: { readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number };
   readonly provider: { readonly kind: "github"; readonly credentialProfile: string };
 }
 
@@ -86,6 +87,7 @@ const COMPONENT_NAMES: ReadonlySet<string> = new Set(["cli", "authority", "admis
 const SAFE_SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const ID_VALUE = /^[a-zA-Z0-9_-]{16,64}$/u;
 const LOCALHOST = "127.0.0.1";
+const NON_LOOPBACK_BIND = "0.0.0.0";
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_MODE_MASK = 0o077;
@@ -310,7 +312,7 @@ function assertPort(value: unknown): number {
   return value;
 }
 
-function assertLoopbackEndpoint(value: unknown): string {
+function assertConfiguredEndpoint(value: unknown, protocols: readonly string[]): string {
   if (typeof value !== "string" || value.length > 256) throw invalid("Local component endpoint is invalid.");
   let url: URL;
   try {
@@ -319,7 +321,7 @@ function assertLoopbackEndpoint(value: unknown): string {
     throw invalid("Local component endpoint is invalid.");
   }
   if (
-    url.protocol !== "http:" ||
+    !protocols.includes(url.protocol) ||
     url.hostname !== LOCALHOST ||
     url.port.length === 0 ||
     Number(url.port) < 1 ||
@@ -330,16 +332,34 @@ function assertLoopbackEndpoint(value: unknown): string {
     url.search.length > 0 ||
     url.hash.length > 0
   ) {
-    throw invalid("Local component endpoint must be a loopback HTTP URL with an explicit port.");
+    throw invalid("Local component endpoint must use an explicit loopback destination and port.");
   }
   return url.origin;
 }
 
-function assertListen(value: unknown): { readonly host: "127.0.0.1"; readonly port: number } {
+function assertLoopbackEndpoint(value: unknown): string {
+  return assertConfiguredEndpoint(value, ["http:"]);
+}
+
+function assertExecutorEndpoint(value: unknown, bindHost: "127.0.0.1" | "0.0.0.0"): string {
+  const protocol = bindHost === NON_LOOPBACK_BIND ? "https:" : "http:";
+  return assertConfiguredEndpoint(value, [protocol]);
+}
+
+function assertListen(value: unknown): { readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number } {
   const listen = assertRecord(value, "Local component listen address is invalid.");
   assertClosed(listen, ["host", "port"], "Local component listen address has unsupported fields.");
-  if (listen.host !== LOCALHOST) throw invalid("Local component must listen on 127.0.0.1.");
-  return { host: LOCALHOST, port: assertPort(listen.port) };
+  if (listen.host !== LOCALHOST && listen.host !== NON_LOOPBACK_BIND) {
+    throw invalid("Local component bind host must be 127.0.0.1 or 0.0.0.0.");
+  }
+  return { host: listen.host, port: assertPort(listen.port) };
+}
+
+export function configuredLocalRuntimeBindHost(environment: NodeJS.ProcessEnv = process.env): "127.0.0.1" | "0.0.0.0" {
+  const host = environment.INARI_LOCAL_RUNTIME_BIND;
+  if (host === undefined || host === "loopback") return LOCALHOST;
+  if (host === NON_LOOPBACK_BIND) return NON_LOOPBACK_BIND;
+  throw invalid("INARI_LOCAL_RUNTIME_BIND must be loopback or 0.0.0.0.");
 }
 
 export function validateLocalCliConfig(value: unknown): LocalCliConfig {
@@ -386,11 +406,15 @@ export function validateLocalAdmissionConfig(value: unknown): LocalAdmissionConf
   assertVersion(config.version);
   const executor = assertRecord(config.executor, "Admission Executor binding is invalid.");
   assertClosed(executor, ["id", "endpoint"], "Admission Executor binding has unsupported fields.");
+  const listen = assertListen(config.listen);
   return {
     version: LOCAL_CONFIG_VERSION,
     id: assertId(config.id, "adm_"),
-    listen: assertListen(config.listen),
-    executor: { id: assertId(executor.id, "exec_"), endpoint: assertLoopbackEndpoint(executor.endpoint) },
+    listen,
+    executor: {
+      id: assertId(executor.id, "exec_"),
+      endpoint: assertExecutorEndpoint(executor.endpoint, listen.host),
+    },
   };
 }
 
@@ -529,6 +553,52 @@ export function readLocalJson<T>(
   const directoryPath = componentDirectoryPath(component, directory, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => readExistingJson(handle, fileName, validator)),
+  );
+}
+
+function readExistingPrivateFile(directory: DirectoryHandle, fileName: string): Buffer | undefined {
+  const target = secureFilePath(directory, fileName);
+  let fd: number;
+  try {
+    fd = openSync(target, fsConstants.O_RDONLY | noFollow() | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw unsafe("Local transport identity file could not be opened safely.");
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || (stat.mode & PRIVATE_MODE_MASK) !== 0) {
+      throw unsafe("Local transport identity file permissions or ownership are unsafe.");
+    }
+    if (stat.size > MAX_LOCAL_PRIVATE_FILE_BYTES) {
+      throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local transport identity file is too large.");
+    }
+    const buffer = Buffer.alloc(MAX_LOCAL_PRIVATE_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const count = readSync(fd, buffer, offset, buffer.byteLength - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > MAX_LOCAL_PRIVATE_FILE_BYTES) {
+      throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local transport identity file is too large.");
+    }
+    return buffer.subarray(0, offset);
+  } finally {
+    closeQuietly(fd);
+  }
+}
+
+/** Read certificate or private-key bytes from an owner-only component file. */
+export function readLocalPrivateFile(
+  component: LocalComponent,
+  relativePath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Buffer | undefined {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => readExistingPrivateFile(handle, fileName)),
   );
 }
 

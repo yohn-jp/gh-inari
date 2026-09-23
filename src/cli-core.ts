@@ -1486,14 +1486,12 @@ async function runExecutorCommand(
       operation: "executor.setup",
       configPath: result.configPath,
       executorId: result.config.id,
-      endpoint: `http://${result.config.listen.host}:${result.config.listen.port}`,
       provider: result.config.provider,
     };
     if (json) console.log(JSON.stringify(output));
     else {
       console.log("Local Executor identity and configuration are ready.");
       console.log(`Executor id: ${result.config.id}`);
-      console.log(`Endpoint: ${output.endpoint}`);
       console.log(`Configuration: ${result.configPath}`);
     }
     return 0;
@@ -1507,7 +1505,6 @@ async function runExecutorCommand(
     server.close();
     throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
   }
-  const endpoint = `http://127.0.0.1:${port}`;
   const shutdown = (): void => {
     server.close();
     process.removeListener("SIGINT", shutdown);
@@ -1525,14 +1522,12 @@ async function runExecutorCommand(
         ok: true,
         operation: "executor.serve",
         executorId: started.config.id,
-        endpoint,
         foreground: true,
       }),
     );
   } else {
     console.log("Foreground local Executor server started.");
-    console.log(`Endpoint: ${endpoint}`);
-    console.log("Health: /health");
+    console.log("Admission can now verify local Executor readiness.");
   }
   return 0;
 }
@@ -1575,7 +1570,6 @@ async function runAdmissionCommand(
       admissionId: result.config.id,
       endpoint,
       executorId: result.config.executor.id,
-      executorEndpoint: result.config.executor.endpoint,
       configPath: result.configPath,
       publicAuthorityPath: result.authorityPath,
     };
@@ -1584,7 +1578,7 @@ async function runAdmissionCommand(
       console.log("Local Admission identity and configuration are ready.");
       console.log(`Admission id: ${output.admissionId}`);
       console.log(`Endpoint: ${output.endpoint}`);
-      console.log(`Executor: ${output.executorId} (${output.executorEndpoint})`);
+      console.log(`Executor identity: ${output.executorId}`);
       console.log(`Configuration: ${output.configPath}`);
     }
     return 0;

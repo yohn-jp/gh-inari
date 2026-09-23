@@ -462,7 +462,8 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
 
     const executor = await startServer("executor", workspace, executorEnv);
     servers.push(executor);
-    const executorEndpoint = executor.announcement.endpoint;
+    const executorConfig = JSON.parse(await readFile(executorSetup.configPath, "utf8"));
+    const executorEndpoint = `http://${executorConfig.listen.host}:${executorConfig.listen.port}`;
     const executorHealth = await fetch(`${executorEndpoint}/health`);
     assert.equal(executorHealth.status, 200);
     assert.equal((await executorHealth.json()).executorId, executorSetup.executorId);
