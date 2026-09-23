@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.16.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.17.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -135,6 +135,7 @@ export type CommandId =
   | "session.start"
   | "session.close"
   | "runtime.connect"
+  | "runtime.supervise"
   | "executor.setup"
   | "executor.serve"
   | "admission.setup"
@@ -1582,6 +1583,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     RUNTIME_OPTIONS,
   ),
   command(
+    "runtime.supervise",
+    "runtime",
+    "supervise",
+    ["runtime", "supervise"],
+    "Supervise separate local Executor and Admission processes and verify their discovered loopback readiness.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
     "executor.setup",
     "executor",
     "setup",
@@ -2012,6 +2021,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "change" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "runtime" ||
     domain === "executor" ||
     domain === "admission" ||
     domain === "mcp"

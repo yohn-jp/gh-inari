@@ -68,9 +68,11 @@ import {
   publishLocalRuntimeEndpoint,
   type LocalRuntimeEndpoint,
 } from "./runtime-discovery.js";
+import { createLocalRuntimeStatusPage, isLocalRuntimeLoopbackAddress } from "./status-page.js";
 
 export const LOCAL_EXECUTOR_DEFAULT_PORT = 0;
 export const LOCAL_EXECUTOR_CREDENTIAL_PROFILE = "default";
+export const LOCAL_EXECUTOR_STATUS_PATH = "/status" as const;
 const LOCAL_EXECUTOR_HISTORICAL_PORT = 8765;
 const EXECUTOR_CONFIG_PATH = "config.json";
 
@@ -514,6 +516,7 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
   ) {
     throw new TypeError("Local Executor non-loopback bind requires a configured mTLS identity.");
   }
+  let server: Server;
   const handle = (incoming: IncomingMessage, outgoing: ServerResponse): void => {
     if (nonLoopback) {
       const socket = incoming.socket as TLSSocket;
@@ -529,6 +532,38 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
     }
     void (async () => {
       try {
+        const pathname = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
+        if (pathname === LOCAL_EXECUTOR_STATUS_PATH) {
+          if (nonLoopback && !isLocalRuntimeLoopbackAddress(incoming.socket.remoteAddress)) {
+            outgoing.statusCode = 404;
+            outgoing.end();
+            return;
+          }
+          if (incoming.method !== "GET") {
+            outgoing.statusCode = 405;
+            outgoing.setHeader("allow", "GET");
+            outgoing.setHeader("content-type", "text/plain; charset=utf-8");
+            outgoing.end("Only GET is supported.\n");
+            return;
+          }
+          const address = server.address();
+          const boundPort = typeof address === "object" && address !== null ? address.port : undefined;
+          if (boundPort === undefined) {
+            outgoing.statusCode = 503;
+            outgoing.end();
+            return;
+          }
+          await writeResponse(
+            createLocalRuntimeStatusPage({
+              component: "executor",
+              id: options.executorId,
+              readiness: options.ready?.() === false ? "not-ready" : "ready",
+              endpoint: `${options.transport === undefined ? "http" : "https"}://127.0.0.1:${boundPort}`,
+            }),
+            outgoing,
+          );
+          return;
+        }
         await writeResponse(await handler(requestFromIncoming(incoming)), outgoing);
       } catch {
         if (!outgoing.headersSent) {
@@ -544,7 +579,7 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
   if (nonLoopback) {
     const transport = options.transport;
     if (transport === undefined) throw new TypeError("Local Executor mTLS identity is missing.");
-    return createHttpsServer(
+    server = createHttpsServer(
       {
         key: transport.privateKey,
         cert: transport.certificate,
@@ -554,8 +589,10 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
       },
       handle,
     ).listen(port, options.config.listen.host);
+  } else {
+    server = createServer(handle).listen(port, options.config.listen.host);
   }
-  return createServer(handle).listen(port, options.config.listen.host);
+  return server;
 }
 
 export async function startConfiguredLocalExecutor(
