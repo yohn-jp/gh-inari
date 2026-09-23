@@ -223,6 +223,38 @@ test("pull-request and fork execution fail closed before the broker is called", 
   assert.ok(untrustedCode.diagnostics.some((diagnostic) => diagnostic.code === "ISSUER_UNTRUSTED_EXECUTION"));
 });
 
+test("Local Admission has a bounded trusted-execution variant while Direct-App remains unchanged", () => {
+  const localAdmission = {
+    version: 1,
+    runtime: "inari-local-admission",
+    event: "authorized-session-execution",
+    repository,
+    requestId: "request-local-admission",
+    sessionId: "session-local-admission",
+    sessionBindingSignature: "A".repeat(86),
+    requester: "session:session-local-admission",
+  };
+  const localResult = validateTrustedExecutionContext(localAdmission);
+  assert.equal(localResult.valid, true, JSON.stringify(localResult.diagnostics));
+  assert.equal(localResult.value?.runtime, "inari-local-admission");
+
+  const asDirectApp = validateTrustedExecutionContext({ ...localAdmission, runtime: "inari-app" });
+  assert.equal(asDirectApp.valid, false);
+
+  const directApp = validateTrustedExecutionContext({
+    version: 1,
+    runtime: "inari-app",
+    event: "session-request",
+    repository,
+    requestId: "request-direct-app",
+    sessionId: "session-direct-app",
+    certificateJti: "certificate-direct-app",
+    requester: "session:session-direct-app",
+  });
+  assert.equal(directApp.valid, true, JSON.stringify(directApp.diagnostics));
+  assert.equal(directApp.value?.runtime, "inari-app");
+});
+
 test("execution and target repository identities must match", () => {
   const targetMismatch = validateEffectAuthorizerMutationRequest({
     ...request(),

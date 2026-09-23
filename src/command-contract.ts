@@ -34,6 +34,7 @@ export type CommandDomain =
   | "session"
   | "runtime"
   | "executor"
+  | "admission"
   | "mcp"
   | "release"
   | "skill";
@@ -134,6 +135,8 @@ export type CommandId =
   | "runtime.connect"
   | "executor.setup"
   | "executor.serve"
+  | "admission.setup"
+  | "admission.serve"
   | "mcp.serve"
   | "skill.index"
   | "skill.scenario";
@@ -1560,6 +1563,22 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     [...ROOT_OPTIONS],
   ),
   command(
+    "admission.setup",
+    "admission",
+    "setup",
+    ["admission", "setup"],
+    "Create local Admission configuration and pin public Runtime Authority trust from a Delegator record.",
+    AUTHORITY_INPUT_OPTIONS,
+  ),
+  command(
+    "admission.serve",
+    "admission",
+    "serve",
+    ["admission", "serve"],
+    "Run the configured local Admission server after verifying its pinned Executor identity.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
     "mcp.serve",
     "mcp",
     "serve",
@@ -1772,6 +1791,7 @@ export function helpInvocation(
     | "session"
     | "runtime"
     | "executor"
+    | "admission"
     | "mcp"
     | "skill",
 ): string {
@@ -1957,6 +1977,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "authority" ||
     domain === "session" ||
     domain === "executor" ||
+    domain === "admission" ||
     domain === "mcp"
   )
     return { ...full, commands: full.commands.filter((entry) => entry.domain === domain) };

@@ -21,6 +21,7 @@ import { resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
+  GitHubAdapter,
   createAppRepositoryEvidenceReader,
   GitHubAppUserCredentialBroker,
   FileAppUserCredentialStore,
@@ -32,6 +33,10 @@ import {
   type GitHubAppRepositoryReadCapability,
   type RepositoryIdentity,
 } from "../github/index.js";
+import {
+  createGitHubImplementationFrontierRepository,
+  readCurrentImplementationAdmissionEvidence,
+} from "../implementation-frontier-composition.js";
 import { publishPullRequest } from "../pr-publication.js";
 import {
   LocalControlError,
@@ -42,7 +47,11 @@ import {
   writeLocalJson,
   type LocalExecutorConfig,
 } from "./config.js";
-import { createLocalExecutorHttpHandler, type LocalExecutorHttpHandlerOptions } from "./executor-http.js";
+import {
+  createLocalExecutorHttpHandler,
+  type LocalExecutorEvidenceRequest,
+  type LocalExecutorHttpHandlerOptions,
+} from "./executor-http.js";
 
 export const LOCAL_EXECUTOR_DEFAULT_PORT = 8765;
 export const LOCAL_EXECUTOR_CREDENTIAL_PROFILE = "default";
@@ -202,6 +211,70 @@ async function projectChange(
   return broker.withRepositoryReadCapability({}, async (capability) =>
     projectChangeFromGitHubEvidence(await buildReader(capability, repository, identity, request).read(request)),
   );
+}
+
+async function readLocalExecutorEvidence(
+  request: LocalExecutorEvidenceRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<unknown> {
+  const identity: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: request.repository.id,
+    nameWithOwner: request.repository.name,
+  };
+  const repository = providerRepository(identity);
+  const broker = createBroker(identity, environment, await requireCredential(environment));
+  return broker.withRepositoryReadCapability({}, async (capability) => {
+    const adapter = new GitHubAdapter({
+      repository: identity.nameWithOwner,
+      hostname: identity.repositoryHost,
+      transport: {
+        request: async (providerRequest) => {
+          if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
+          const response = await capability.transport.request({
+            hostname: providerRequest.hostname,
+            method: "GET",
+            path: providerRequest.path,
+          });
+          return { ...response, body: response.body ?? null };
+        },
+      },
+    });
+    const runtime = await resolveDelegator(adapter, request.authorityId);
+    const authority = Object.freeze({ ref: runtime.provenance.ref, sha: runtime.provenance.policySha });
+    if (request.issue === undefined || request.implementationIssue === undefined) {
+      return Object.freeze({
+        repository: identity,
+        authority,
+        runtimeAuthority: runtime.authority,
+      });
+    }
+    const frontierRepository = createGitHubImplementationFrontierRepository({
+      adapter,
+      cwd: process.cwd(),
+      changeReader: {
+        read: (changeRequest) => projectChange(broker, repository, identity, changeRequest),
+      },
+    });
+    const implementation = await readCurrentImplementationAdmissionEvidence(
+      frontierRepository,
+      request.implementationIssue,
+    );
+    const change = await projectChange(broker, repository, identity, changeReadRequest(request.issue));
+    const pullRequestNumber = change.change?.projection?.pullRequest;
+    const reviewEvidence =
+      typeof pullRequestNumber === "number"
+        ? await frontierRepository.observePullRequest(pullRequestNumber)
+        : undefined;
+    return Object.freeze({
+      repository: identity,
+      authority,
+      runtimeAuthority: runtime.authority,
+      change,
+      implementation,
+      ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
+    });
+  });
 }
 
 function createDelegates(
@@ -377,6 +450,7 @@ export async function startConfiguredLocalExecutor(
     version,
     executorId: config.id,
     execute: (execution) => executeLocalAuthorizedExecution(execution, environment),
+    readEvidence: (request) => readLocalExecutorEvidence(request, environment),
     ready: () => true,
   });
   try {

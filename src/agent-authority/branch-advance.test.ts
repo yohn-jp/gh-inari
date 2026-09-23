@@ -11,7 +11,7 @@ import {
 } from "./branch-advance.js";
 import { createCapabilityExecutionProvenance } from "./capability-provenance.js";
 import type { AdmittedSessionCapability } from "./capability-admission.js";
-import type { AuthenticatedSessionContext } from "./session-authentication.js";
+import type { SessionAdmissionAuthorizationContext } from "./session-authentication.js";
 import type { ImplementationScopeProjection } from "../implementation-scope-projection.js";
 import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 import type {
@@ -69,8 +69,8 @@ const context = {
   capabilities: [],
   authority: admission.authority,
   request: admission.request,
-  verifiedRequest: { envelope: { request } },
-} as unknown as AuthenticatedSessionContext;
+  semanticRequest: request,
+} as unknown as SessionAdmissionAuthorizationContext;
 
 const implementationBase = {
   branch: "main",
@@ -121,17 +121,17 @@ const implementationBinding = {
   task: { kind: "issue" as const, number: 466 },
 } satisfies ImplementationSessionAuthorizationBinding;
 
-function scopedContextFor(changes: BranchAdvanceSemanticRequest["changes"]): AuthenticatedSessionContext {
+function scopedContextFor(changes: BranchAdvanceSemanticRequest["changes"]): SessionAdmissionAuthorizationContext {
   return {
     ...context,
     implementationBinding,
     implementationScope,
-    verifiedRequest: { envelope: { request: { ...request, changes } } },
-  } as unknown as AuthenticatedSessionContext;
+    semanticRequest: { ...request, changes },
+  } as unknown as SessionAdmissionAuthorizationContext;
 }
 
 function authorizedProvenance(
-  source: AuthenticatedSessionContext,
+  source: SessionAdmissionAuthorizationContext,
 ): ReturnType<typeof createCapabilityExecutionProvenance> {
   return createCapabilityExecutionProvenance({
     version: 1,
@@ -272,7 +272,7 @@ test("Admission emits bounded path evidence and the shared post-admission primit
       ...implementationScope,
       scope: { ...implementationScope.scope, write: [], create: ["docs/**"], delete: [] },
     },
-  } as AuthenticatedSessionContext;
+  } as SessionAdmissionAuthorizationContext;
   const prepared = authorizeBranchAdvance({ context: scoped, admission });
   assert.equal(prepared.valid, true);
   if (!prepared.valid) return;
@@ -360,7 +360,7 @@ test("fails closed for the wrong Issue", async () => {
   const wrongContext = {
     ...context,
     task: { kind: "issue", number: 999 },
-  } as unknown as AuthenticatedSessionContext;
+  } as unknown as SessionAdmissionAuthorizationContext;
   const result = await executeBranchAdvance({ context: wrongContext, broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.failure?.reason, "authorization");
@@ -370,7 +370,7 @@ test("fails closed for the wrong Issue", async () => {
 test("fails closed for the wrong repository", async () => {
   const { calls, broker } = fake();
   const wrongRepository = { ...repository, repositoryId: "466000002" };
-  const wrongContext = { ...context, repository: wrongRepository } as unknown as AuthenticatedSessionContext;
+  const wrongContext = { ...context, repository: wrongRepository } as unknown as SessionAdmissionAuthorizationContext;
   const result = await executeBranchAdvance({ context: wrongContext, broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.failure?.reason, "authorization");
@@ -410,7 +410,7 @@ test("fails closed when the request's branch equals the authenticated default re
   const defaultAsRef = {
     ...context,
     authority: { ...context.authority, ref: BRANCH },
-  } as unknown as AuthenticatedSessionContext;
+  } as unknown as SessionAdmissionAuthorizationContext;
   const result = await executeBranchAdvance({ context: defaultAsRef, broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.failure?.reason, "branch-state");
@@ -432,8 +432,8 @@ test("classifies a protected path before any Git object is created", async () =>
   };
   const protectedContext = {
     ...context,
-    verifiedRequest: { envelope: { request: protectedRequest } },
-  } as unknown as AuthenticatedSessionContext;
+    semanticRequest: protectedRequest,
+  } as unknown as SessionAdmissionAuthorizationContext;
   const result = await executeBranchAdvance({ context: protectedContext, broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.failure?.reason, "protected-path");
@@ -447,8 +447,8 @@ test("rejects stale expected head without overwriting concurrent work", async ()
     ...context,
     implementationBinding,
     implementationScope,
-    verifiedRequest: { envelope: { request: staleRequest } },
-  } as unknown as AuthenticatedSessionContext;
+    semanticRequest: staleRequest,
+  } as unknown as SessionAdmissionAuthorizationContext;
   // The provider's current head still traces to a tree that does not already
   // prove the target state, so a stale head must never be treated as
   // idempotent success.
@@ -535,7 +535,7 @@ test("fails closed once the Session request is no longer admitted for this opera
   const expiredContext = {
     ...context,
     request: { ...context.request, operation: "change.issue" },
-  } as unknown as AuthenticatedSessionContext;
+  } as unknown as SessionAdmissionAuthorizationContext;
   const result = await executeBranchAdvance({ context: expiredContext, broker, admission });
   assert.equal(result.status, "failed");
   assert.equal(result.failure?.reason, "authorization");
@@ -632,7 +632,7 @@ test("does not infer one mutation operation from another allowlist", async () =>
             : { operation: "upsert" as const, path: item.path, mode: "100644" as const, content },
         ]),
         implementationScope: { ...implementationScope, scope: { ...implementationScope.scope, ...item.scope } },
-      } as AuthenticatedSessionContext,
+      } as SessionAdmissionAuthorizationContext,
       broker,
       admission,
     });
@@ -652,7 +652,7 @@ test("DENY overrides every mutation allowlist before Git effects", async () => {
         ...implementationScope,
         scope: { write: ["**"], create: ["**"], delete: ["**"], readOnly: [], deny: ["src/file.txt"] },
       },
-    } as AuthenticatedSessionContext,
+    } as SessionAdmissionAuthorizationContext,
     broker,
     admission,
   });
@@ -692,7 +692,7 @@ test("rejects scope identity and path attacks before any Git effect", async () =
       context: {
         ...scopedContextFor(item.changes),
         ...(item.binding === undefined ? {} : { implementationBinding: item.binding }),
-      } as AuthenticatedSessionContext,
+      } as SessionAdmissionAuthorizationContext,
       broker,
       admission,
     });
@@ -717,7 +717,7 @@ test("rejects an admitted branch that differs from the canonical Implementation 
     context: {
       ...scopedContextFor(request.changes),
       implementationScope: { ...implementationScope, branch: "feat/466-a-different-implementation-branch" },
-    } as AuthenticatedSessionContext,
+    } as SessionAdmissionAuthorizationContext,
     broker,
     admission,
   });

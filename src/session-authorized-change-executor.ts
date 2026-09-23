@@ -14,7 +14,9 @@ import {
 } from "./agent-authority/capability-admission.js";
 import {
   authenticateSessionRequest,
+  projectSessionAdmissionAuthorizationContext,
   type AuthenticatedSessionContext,
+  type SessionAdmissionAuthorizationContext,
   type AuthenticateSessionRequestOptions,
 } from "./agent-authority/session-authentication.js";
 import {
@@ -35,7 +37,11 @@ import {
   type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
 import { MAX_ISSUE_NUMBER } from "./agent-authority/capability.js";
-import { assertTrustedExecution, type DirectAppTrustedExecutionContext } from "./github/effect-authorizer.js";
+import {
+  assertTrustedExecution,
+  type DirectAppTrustedExecutionContext,
+  type SessionTrustedExecutionContext,
+} from "./github/effect-authorizer.js";
 import {
   CHANGE_EXECUTION_PORT_CONTRACT_VERSION,
   changeMutationRequest,
@@ -387,17 +393,21 @@ function subjectForPullRequest(
   return Object.freeze({ kind: "pullRequest", issue, head, base });
 }
 
+function directAppExecution(execution: SessionTrustedExecutionContext): DirectAppTrustedExecutionContext {
+  if (execution.runtime !== "inari-app") {
+    throw new TypeError("Direct-App execution context is invalid.");
+  }
+  return execution;
+}
+
 /** Map the semantic publish operation onto the existing pullRequest.create capability authority. */
-function capabilityAdmissionContext(context: AuthenticatedSessionContext): AuthenticatedSessionContext {
-  if (context.request.operation !== "pullRequest.publish") return context;
-  return {
-    ...context,
+function capabilityAdmissionContext(context: AuthenticatedSessionContext): SessionAdmissionAuthorizationContext {
+  const admissionContext = projectSessionAdmissionAuthorizationContext(context);
+  if (context.request.operation !== "pullRequest.publish") return admissionContext;
+  return Object.freeze({
+    ...admissionContext,
     request: { ...context.request, operation: "pullRequest.create" },
-    verifiedRequest: {
-      ...context.verifiedRequest,
-      envelope: { ...context.verifiedRequest.envelope, operation: "pullRequest.create" },
-    },
-  };
+  });
 }
 
 function authenticatedProvenance(
@@ -589,7 +599,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     let admission: AdmittedSessionCapability;
     try {
       admission = admitAuthenticatedSessionCapability({
-        context,
+        context: capabilityAdmissionContext(context),
         operation: operation as CapabilityAdmissionOperation,
         subject: subjectForChange(issue),
         projection: initial,
@@ -685,7 +695,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
             createChangeExecutor: ({ execution: trustedExecution, request: authorizedRequest }) =>
               this.#options.createChangeExecutor!({
                 context,
-                execution: trustedExecution,
+                execution: directAppExecution(trustedExecution),
                 admission,
                 request: {
                   ...authorizedRequest,
@@ -807,7 +817,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
             publishPullRequest: ({ execution: trustedExecution, request: publicationRequest }) =>
               this.#options.publishPullRequest!({
                 context,
-                execution: trustedExecution,
+                execution: directAppExecution(trustedExecution),
                 admission,
                 request: publicationRequest,
               }),
@@ -871,7 +881,7 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
     let admission: AdmittedSessionCapability;
     try {
       admission = admitAuthenticatedSessionCapability({
-        context,
+        context: capabilityAdmissionContext(context),
         operation,
         subject: { kind: "branch", issue, branch: fields.request.branch },
         projection,
@@ -902,7 +912,11 @@ export class SessionAuthorizedChangeExecutor implements CapabilityAuthorizedSess
       );
     }
 
-    const branchAuthorization = authorizeBranchAdvance({ context, admission, request: fields.request });
+    const branchAuthorization = authorizeBranchAdvance({
+      context: projectSessionAdmissionAuthorizationContext(context),
+      admission,
+      request: fields.request,
+    });
     if (!branchAuthorization.valid) {
       const phase = branchAuthorization.failure.outcome === "stale" ? "conflict" : "authorization";
       return failure(operation, phase, authorized, "Branch advance authorization failed closed.", {

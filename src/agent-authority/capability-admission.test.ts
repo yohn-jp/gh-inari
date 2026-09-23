@@ -11,7 +11,11 @@ import {
   type CapabilityAdmissionSubject,
 } from "./capability-admission.js";
 import * as capabilityAdmissionModule from "./capability-admission.js";
-import { authenticateSessionRequest, type AuthenticatedSessionContext } from "./session-authentication.js";
+import {
+  authenticateSessionRequest,
+  type AuthenticatedSessionContext,
+  type SessionAdmissionAuthorizationContext,
+} from "./session-authentication.js";
 import type { CapabilityClaim } from "./capability.js";
 import type { DelegatedTreeDelta } from "./protected-paths.js";
 import {
@@ -57,7 +61,7 @@ type ExpectedCapabilityAdmissionSubject =
       readonly base: string;
     };
 type ExpectedCapabilityAdmissionRequest = {
-  readonly context: AuthenticatedSessionContext;
+  readonly context: SessionAdmissionAuthorizationContext;
   readonly operation: ExpectedCapabilityAdmissionOperation;
   readonly subject: ExpectedCapabilityAdmissionSubject;
   readonly projection: ChangeProjectionResult;

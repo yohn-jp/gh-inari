@@ -9,7 +9,7 @@ import {
   validateCapabilityExecutionProvenance,
   type CapabilityExecutionProvenance,
 } from "./capability-provenance.js";
-import type { AuthenticatedSessionContext } from "./session-authentication.js";
+import type { SessionAdmissionAuthorizationContext } from "./session-authentication.js";
 import type { SessionAgentMetadata } from "./session-bundle.js";
 import {
   isImplementationScopeProjectionPathAllowed,
@@ -106,7 +106,7 @@ export interface BranchAdvanceCapabilityBroker {
   ) => Promise<T>;
 }
 export interface ExecuteBranchAdvanceOptions {
-  readonly context: AuthenticatedSessionContext;
+  readonly context: SessionAdmissionAuthorizationContext;
   readonly broker: BranchAdvanceCapabilityBroker;
   readonly admission: AdmittedSessionCapability;
   readonly request?: unknown;
@@ -134,7 +134,7 @@ export interface BranchAdvanceAuthorizationEvidence {
 }
 
 export interface BranchAdvanceAuthorizationOptions {
-  readonly context: AuthenticatedSessionContext;
+  readonly context: SessionAdmissionAuthorizationContext;
   readonly admission: AdmittedSessionCapability;
   readonly request?: unknown;
 }
@@ -409,7 +409,7 @@ function verifiedProvenance(
 }
 
 function matchesImplementationScopeBinding(
-  context: AuthenticatedSessionContext,
+  context: SessionAdmissionAuthorizationContext,
   scope: ImplementationScopeProjection,
   issue: number,
   branch: string,
@@ -548,8 +548,8 @@ export function validateBranchAdvanceAuthorizationEvidence(
  * provider capability or mutation is acquired here.
  */
 export function authorizeBranchAdvance(options: BranchAdvanceAuthorizationOptions): BranchAdvanceAuthorizationResult {
-  const signed = options?.context?.verifiedRequest?.envelope?.request;
-  const candidate = options?.request ?? signed;
+  const semanticRequest = options?.context?.semanticRequest;
+  const candidate = options?.request ?? semanticRequest;
   const validation = validateBranchAdvanceSemanticRequest(candidate);
   if (!validation.valid || validation.value === undefined) {
     return {
@@ -567,11 +567,14 @@ export function authorizeBranchAdvance(options: BranchAdvanceAuthorizationOption
   const context = options.context;
   if (options.request !== undefined) {
     try {
-      if (canonicalizeSemanticRequest(options.request) !== canonicalizeSemanticRequest(signed)) {
-        return { valid: false, failure: fail(request, "authorization", "Request is not the signed Session request.") };
+      if (canonicalizeSemanticRequest(options.request) !== canonicalizeSemanticRequest(semanticRequest)) {
+        return {
+          valid: false,
+          failure: fail(request, "authorization", "Request is not the admitted Session request."),
+        };
       }
     } catch {
-      return { valid: false, failure: fail(request, "authorization", "Request is not the signed Session request.") };
+      return { valid: false, failure: fail(request, "authorization", "Request is not the admitted Session request.") };
     }
   }
   if (

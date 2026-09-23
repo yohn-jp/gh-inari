@@ -2,11 +2,11 @@
  * Semantic capability admission between #374 Session authentication and the
  * existing Change/Core execution authorities.
  *
- * This boundary consumes the exact AuthenticatedSessionContext produced by
- * #374. Runtime trust, certificate validity, repository binding, TTL, and the
- * Runtime capability ceiling are intentionally not read or evaluated here.
- * They are already part of that context's proof. This module only attenuates
- * the authenticated claims against the supplied Core projection and the #370
+ * This boundary consumes a common authorization context produced after the
+ * caller-specific Session proof and current evidence have been verified.
+ * Runtime trust, certificate validity, repository binding, TTL, and the Runtime
+ * capability ceiling remain owned by those caller-specific boundaries. This
+ * module only attenuates the claims against canonical projections and the #370
  * protected-path classifier; it performs no provider I/O or mutation.
  */
 
@@ -26,7 +26,7 @@ import {
   type CapabilityClaim,
 } from "./capability.js";
 import { admitDelegatedWrite, PROTECTED_PATH_CLASSIFIER_VERSION, type DelegatedTreeDelta } from "./protected-paths.js";
-import type { AuthenticatedSessionContext } from "./session-authentication.js";
+import type { SessionAdmissionAuthorizationContext } from "./session-authentication.js";
 import type { SessionCertificateTask } from "./session-certificate.js";
 import { validateRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
@@ -73,7 +73,7 @@ export type CapabilityAdmissionSubject =
     };
 
 export interface CapabilityAdmissionRequest {
-  readonly context: AuthenticatedSessionContext;
+  readonly context: SessionAdmissionAuthorizationContext;
   readonly operation: CapabilityAdmissionOperation;
   readonly subject: CapabilityAdmissionSubject;
   readonly projection: ChangeProjectionResult;
@@ -213,7 +213,7 @@ function validateContext(
   context: unknown,
   operation: CapabilityAdmissionOperation,
 ): {
-  readonly context: AuthenticatedSessionContext;
+  readonly context: SessionAdmissionAuthorizationContext;
   readonly repository: RepositoryIdentity;
   readonly claims: readonly CapabilityClaim[];
 } {
@@ -249,17 +249,7 @@ function validateContext(
   }
   if (context.request.operation !== operation) deny("operation");
 
-  if (!isRecord(context.verifiedRequest) || !isRecord(context.verifiedRequest.envelope)) {
-    deny("session-capability");
-  }
-  const envelope = context.verifiedRequest.envelope;
-  if (
-    envelope.operation !== context.request.operation ||
-    envelope.requestId !== context.request.requestId ||
-    envelope.issuedAt !== context.request.issuedAt ||
-    envelope.expiresAt !== context.request.expiresAt ||
-    envelope.repositoryId !== repositoryResult.value.repositoryId
-  ) {
+  if (!isRecord(context.semanticRequest)) {
     deny("session-capability");
   }
 
@@ -293,7 +283,7 @@ function validateContext(
   }
 
   return {
-    context: context as unknown as AuthenticatedSessionContext,
+    context: context as unknown as SessionAdmissionAuthorizationContext,
     repository: repositoryResult.value,
     claims,
   };
@@ -571,7 +561,7 @@ function requireSubjectShape(operation: CapabilityAdmissionOperation, subject: C
 function requireCanonicalState(
   operation: CapabilityAdmissionOperation,
   canonical: CanonicalProjection,
-  context: AuthenticatedSessionContext,
+  context: SessionAdmissionAuthorizationContext,
   rework: ImplementationReworkMarker | undefined,
   reviewEvidence: unknown,
 ): void {
@@ -670,7 +660,7 @@ function requireCanonicalState(
 
 function requireReviewRework(
   canonical: CanonicalProjection,
-  context: AuthenticatedSessionContext,
+  context: SessionAdmissionAuthorizationContext,
   rework: ImplementationReworkMarker | undefined,
   reviewEvidence: unknown,
 ): void {
@@ -762,10 +752,7 @@ export function admitAuthenticatedSessionCapability(input: CapabilityAdmissionRe
     deny("operation");
   }
   const operation = input.operation as CapabilityAdmissionOperation;
-  const signedRequest =
-    isRecord(input.context.verifiedRequest) && isRecord(input.context.verifiedRequest.envelope)
-      ? input.context.verifiedRequest.envelope.request
-      : undefined;
+  const signedRequest = input.context.semanticRequest;
   const reworkValue = operation === "branch.advance" && isRecord(signedRequest) ? signedRequest.rework : undefined;
   let rework: ImplementationReworkMarker | undefined;
   if (reworkValue !== undefined) {

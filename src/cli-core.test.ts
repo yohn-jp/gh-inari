@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runCli } from "./cli-core.js";
 import { getCommandForPositionals } from "./command-contract.js";
+import { createDelegatorRecord } from "./agent-authority/delegator-operations.js";
+import { delegatorPublicKeyFingerprint, generateDelegatorKeyPair } from "./agent-authority/delegator-key.js";
 import { createAppUserCredential } from "./github/app-user-credential.js";
 import { FileAppUserCredentialStore } from "./github/app-user-credential-store.js";
+import { validateLocalAuthorityConfig, validateLocalExecutorConfig, writeLocalJson } from "./local-control/config.js";
 
 interface CapturedOutput {
   readonly exitCode: number;
@@ -176,6 +179,83 @@ test("executor setup and serve use the Executor command contract and existing cr
     );
     assert.equal(unsupportedCapability.exitCode, 1);
     assert.equal(JSON.parse(unsupportedCapability.stdout).error.code, "INVALID_OPTION");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Admission CLI setup is deterministic and serve requires setup", async () => {
+  assert.equal(getCommandForPositionals(["admission", "setup"])?.id, "admission.setup");
+  assert.equal(getCommandForPositionals(["admission", "serve"])?.id, "admission.serve");
+
+  const { root, environment } = await temporaryEnvironment();
+  const keyPair = generateDelegatorKeyPair();
+  const authority = createDelegatorRecord({
+    id: "cli-admission-runtime",
+    key: keyPair,
+    notBefore: new Date("2026-08-01T00:00:00.000Z"),
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement", "branch.advance"],
+  });
+  try {
+    const unconfigured = await capture(["admission", "serve", "--json"], environment);
+    assert.equal(unconfigured.exitCode, 2);
+    assert.equal(JSON.parse(unconfigured.stdout).error.code, "ADMISSION_NOT_SETUP");
+
+    writeLocalJson(
+      "authority",
+      "config.json",
+      {
+        version: 1,
+        publicKey: keyPair.publicKeyJwk,
+        publicKeyFingerprint: delegatorPublicKeyFingerprint(authority.key),
+        privateKeyFile: "private-key.pem",
+      },
+      validateLocalAuthorityConfig,
+      environment,
+    );
+    writeLocalJson(
+      "executor",
+      "config.json",
+      {
+        version: 1,
+        id: "exec_0123456789abcdef",
+        listen: { host: "127.0.0.1", port: 8765 },
+        provider: { kind: "github", credentialProfile: "default" },
+      },
+      validateLocalExecutorConfig,
+      environment,
+    );
+    const authorityPath = path.join(root, "runtime-authority.json");
+    await writeFile(authorityPath, `${JSON.stringify(authority)}\n`, "utf8");
+
+    const first = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
+    assert.equal(first.exitCode, 0);
+    assert.equal(first.stderr, "");
+    const firstOutput = JSON.parse(first.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly admissionId: string;
+      readonly executorId: string;
+      readonly configPath: string;
+      readonly publicAuthorityPath: string;
+    };
+    assert.equal(firstOutput.ok, true);
+    assert.equal(firstOutput.operation, "admission.setup");
+    assert.match(firstOutput.admissionId, /^adm_[A-Za-z0-9_-]{16,64}$/u);
+    assert.equal(firstOutput.executorId, "exec_0123456789abcdef");
+    assert.equal(first.stdout.includes("private"), false);
+
+    const second = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
+    assert.equal(JSON.parse(second.stdout).admissionId, firstOutput.admissionId);
+    assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")).executor, {
+      id: firstOutput.executorId,
+      endpoint: "http://127.0.0.1:8765",
+    });
+    assert.equal(
+      firstOutput.publicAuthorityPath,
+      path.join(environment.INARI_CONFIG_HOME as string, "admission", "runtime-authority.json"),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
