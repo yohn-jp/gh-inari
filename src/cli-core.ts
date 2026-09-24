@@ -193,6 +193,7 @@ import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
 import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
+import { renderLocalApplicationSetupFlow } from "./local-application-state-terminal.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
 import { startLocalConsole } from "./local-control/console-server.js";
 import {
@@ -1189,10 +1190,7 @@ async function runInitCommand(
     console.log(`Config: ${configPath}`);
     console.log(`Local execution setup: ${applicationState.status}.`);
     console.log("Ordered setup path:");
-    applicationState.steps.forEach((step, index) => {
-      console.log(`${index + 1}. [${step.status}] ${step.title}`);
-      console.log(`   ${step.syntax}`);
-    });
+    for (const line of renderLocalApplicationSetupFlow(applicationState)) console.log(line);
     console.log(`Next: ${applicationState.nextAction.detail}`);
     for (const command of applicationState.nextAction.commands) console.log(`Run: ${command}`);
     console.log(`Credential custody: ${applicationState.provider.credentialPath}`);
