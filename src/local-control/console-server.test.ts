@@ -43,6 +43,12 @@ test("the local console serves the canonical setup/runtime state as loopback-onl
       assert.match(html, /<dd>not-running<\/dd>/gu);
       assert.doesNotMatch(html, /BEGIN PRIVATE KEY/u);
       assert.match(html, new RegExp(`<form method="post" action="${LOCAL_CONSOLE_CLI_TOPOLOGY_ACTION_PATH}">`, "u"));
+      // #1065: Session start is never projected as already executable before
+      // setup completes and a canonical Issue-bound Change branch is selected.
+      assert.match(html, /Issue \/ Change branch/u);
+      assert.match(html, /issue-not-selected/u);
+      assert.match(html, /Session start is not yet available/u);
+      assert.doesNotMatch(html, /inari session start --issue \d/u);
 
       const state = await fetch(`${announcement.endpoint}/api/state`);
       assert.equal(state.status, 200);
@@ -52,6 +58,7 @@ test("the local console serves the canonical setup/runtime state as loopback-onl
       assert.equal(body.operation, "runtime.console.state");
       assert.equal(body.application.status, "incomplete");
       assert.equal(body.application.nextAction.stepId, "cli-topology");
+      assert.equal(body.application.changeBranch.status, "issue-not-selected");
       assert.equal(body.runtime.executor, "not-running");
       assert.equal(body.runtime.admission, "not-running");
       assert.equal(body.runtime.overall, "not-ready");

@@ -368,12 +368,16 @@ the public Runtime Authority record. Pass that public file to
 binds the CLI Admission route. The private Authority key stays in its local
 custody directory, and App-user credentials stay in their credential file.
 
-Start `inari executor serve` before `inari admission serve`, in separate
-terminals. Admission checks the configured Executor identity before becoming
-ready. The CLI and Agent child use the configured Admission route and do not
-need provider credentials.
+Run `inari runtime supervise` to start and supervise the local Executor and
+Admission processes together and verify their discovered loopback readiness.
+Admission checks the configured Executor identity before becoming ready. The
+CLI and Agent child use the configured Admission route and do not need
+provider credentials.
 
-From the governed repository checkout, launch the Agent with
+Before Session start, check out the canonical Issue-bound Change branch
+(`<feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>`) for the Issue
+you are implementing; `inari init` reports whether one is currently selected.
+From that governed repository checkout, launch the Agent with
 `inari session start --issue <n> -- <command...>`. The child inherits
 `INARI_SESSION_ID`; `inari change show <n>` and admitted Change mutations use
 that Session. Run `inari session close` with the same selector when finished.

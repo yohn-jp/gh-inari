@@ -508,6 +508,58 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     assert.equal(configuredState.applicationState.setupComplete, true);
     assert.ok(configuredState.applicationState.steps.every((step) => step.status === "ready"));
 
+    // #1065: the completed local setup path points at the canonical
+    // `inari runtime supervise` Supervisor, not separate `executor serve` /
+    // `admission serve` commands, and it does not project Session start as
+    // executable independent of Issue/Change branch selection.
+    assert.deepEqual(configuredState.applicationState.runtime.commands, ["inari runtime supervise"]);
+    assert.equal(configuredState.applicationState.changeBranch.status, "ready");
+    assert.equal(configuredState.applicationState.changeBranch.issue, issue);
+    assert.equal(configuredState.applicationState.changeBranch.branch, branch);
+    assert.deepEqual(configuredState.applicationState.nextAction, {
+      stepId: "start-runtime",
+      commands: ["inari runtime supervise"],
+      detail: `Run the local Runtime Supervisor in a separate foreground terminal, then launch the governed child for Issue #${issue} on ${branch} with the Session command below.`,
+    });
+
+    // The same real setup, read from a workspace with no Issue-bound Change
+    // branch checked out, must represent that explicitly rather than
+    // projecting Session start as the next action.
+    const unselectedWorkspace = path.join(directory, "workspace-unselected");
+    await mkdir(unselectedWorkspace);
+    git(unselectedWorkspace, "init", "-q");
+    git(unselectedWorkspace, "remote", "add", "origin", "https://github.com/acme/inari.git");
+    git(unselectedWorkspace, "checkout", "-q", "-b", "main");
+    const unselectedState = jsonOutput(
+      command(["init", "--json"], { cwd: unselectedWorkspace, env: executorEnv }),
+      "init with no Issue selected",
+    );
+    assert.equal(unselectedState.applicationState.changeBranch.status, "issue-not-selected");
+    assert.equal("command" in unselectedState.applicationState.changeBranch, false);
+    assert.equal(unselectedState.applicationState.nextAction.stepId, "change-branch");
+    assert.ok(
+      !unselectedState.applicationState.nextAction.commands.some((entry) => entry.includes("session start")),
+      "Session start was projected as executable before an Issue/Change branch was selected",
+    );
+    // #1065 review: the branch-naming placeholder pattern contains `<`, `|`,
+    // and `>` -- shell operators -- so it must never appear as its own
+    // executable entry in `nextAction.commands`, only as descriptive prose.
+    for (const entry of unselectedState.applicationState.nextAction.commands) {
+      assert.doesNotMatch(entry, /[<>|]/u, `nextAction.commands entry is not a literal shell command: ${entry}`);
+    }
+
+    // A real local checkout on a branch that is not the canonical
+    // Issue-bound Change branch must surface as a mismatch next-action
+    // state rather than only failing once `session start` is attempted.
+    git(unselectedWorkspace, "checkout", "-q", "-b", "leftover-notes");
+    const mismatchState = jsonOutput(
+      command(["init", "--json"], { cwd: unselectedWorkspace, env: executorEnv }),
+      "init on a non-canonical branch",
+    );
+    assert.equal(mismatchState.applicationState.changeBranch.status, "branch-mismatch");
+    assert.equal(mismatchState.applicationState.changeBranch.branch, "leftover-notes");
+    assert.equal(mismatchState.applicationState.nextAction.stepId, "change-branch");
+
     const issueFixture = await createIssueFixture(directory);
     const blobs = {};
     const tree = [];
