@@ -13,12 +13,19 @@
  * never read from the request.
  */
 
-import { createDirectAppSessionExecutor } from "./github/direct-app-execution.js";
+import {
+  createDirectAppRuntimeAuthorityPublisher,
+  createDirectAppSessionExecutor,
+} from "./github/direct-app-execution.js";
 import {
   createDirectAppHttpHandler,
   DIRECT_APP_EXECUTE_PATH,
   DIRECT_APP_HTTP_CONTRACT_VERSION,
 } from "./agent-authority/direct-app-http.js";
+import {
+  createRuntimeAuthorityPublicationHttpHandler,
+  RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH,
+} from "./agent-authority/runtime-authority-publication-http.js";
 import { jsonResponse, safePathname } from "./worker-http.js";
 
 /** Cloudflare Worker secret and non-secret environment bindings. */
@@ -84,6 +91,7 @@ function optionalPositiveInteger(value: unknown): number | undefined {
 
 interface WorkerRuntime {
   readonly handler: (request: Request) => Promise<Response>;
+  readonly runtimeAuthorityHandler: (request: Request) => Promise<Response>;
 }
 
 let cachedRuntime: WorkerRuntime | undefined;
@@ -112,7 +120,26 @@ function buildRuntime(env: Env): WorkerRuntime {
     executor,
     ...(maxBodyBytes === undefined ? {} : { maxBodyBytes }),
   });
-  return Object.freeze({ handler });
+  // Centrally custodied Runtime Authority publication (#1066 correction).
+  // This reuses the same Issuer installation credential configuration as
+  // `executor` above -- the consumer repository named by
+  // INARI_TARGET_REPOSITORY_OWNER/NAME never holds this private key itself --
+  // but it is a deliberately separate, non-Session-authorized capability:
+  // publication bootstraps the trust root a Session would be verified
+  // against, so it cannot itself require one.
+  const runtimeAuthorityPublisher = createDirectAppRuntimeAuthorityPublisher({
+    appId,
+    installationId,
+    privateKeyPem,
+    repository: { hostname, owner, name },
+    ...(repositoryNodeId === undefined ? {} : { repositoryNodeId }),
+    ...(apiUrl === undefined ? {} : { apiUrl }),
+    ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
+  });
+  const runtimeAuthorityHandler = createRuntimeAuthorityPublicationHttpHandler({
+    publisher: runtimeAuthorityPublisher,
+  });
+  return Object.freeze({ handler, runtimeAuthorityHandler });
 }
 
 type RuntimeResolution = { readonly ok: true; readonly runtime: WorkerRuntime } | { readonly ok: false };
@@ -170,6 +197,9 @@ export default {
     }
     const resolution = resolveRuntime(env);
     if (!resolution.ok) return configurationFailureResponse();
+    if (safePathname(request.url) === RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH) {
+      return resolution.runtime.runtimeAuthorityHandler(request);
+    }
     return resolution.runtime.handler(request);
   },
 };

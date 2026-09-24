@@ -5,6 +5,7 @@ import { CAPABILITY_KINDS } from "../agent-authority/capability.js";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { createRuntimeAuthorityPublicationRequest } from "../runtime-authority-publication.js";
+import { RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH } from "../agent-authority/runtime-authority-publication-http.js";
 import { createAppUserCredential } from "./app-user-credential.js";
 import { InMemoryAppUserCredentialStore } from "./app-user-credential-store.js";
 import {
@@ -103,7 +104,7 @@ test("App-user broker resolves the configured App/repository and exposes no toke
   assert.deepEqual(provider.calls, ["/user/installations", "/user/installations/7/repositories", "/repos/acme/inari"]);
 });
 
-test("App-user broker dispatches only a validated public Runtime Authority request to the configured repository", async () => {
+test("App-user broker submits only the validated public Runtime Authority request to the Issuer/Worker boundary, never GitHub Actions", async () => {
   const { publicKey } = generateKeyPairSync("ed25519");
   const authority: Delegator = createDelegatorRecord({
     id: "runtime-publication-test",
@@ -113,60 +114,51 @@ test("App-user broker dispatches only a validated public Runtime Authority reque
     maxSessionTtlSeconds: 3_600,
     capabilityCeiling: CAPABILITY_KINDS,
   });
-  const requests: Array<{ readonly path: string; readonly body: unknown; readonly authorization: string | null }> = [];
-  const calls: string[] = [];
+  const requests: Array<{
+    readonly url: string;
+    readonly contentType: string | null;
+    readonly authorization: string | null;
+    readonly body: unknown;
+  }> = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
-    calls.push(`${url.pathname}${url.search}`);
-    if (url.pathname === "/user/installations") {
-      return json({
-        installations: [
-          {
-            id: 7,
-            app_id: 42,
-            permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" },
-            suspended_at: null,
-          },
-        ],
-      });
-    }
-    if (url.pathname === "/user/installations/7/repositories") {
-      return json({ repositories: [{ id: 99, full_name: "acme/inari", node_id: "repo-node" }] });
-    }
-    if (url.pathname === "/repos/acme/inari/dispatches") {
+    if (url.toString() === `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`) {
       requests.push({
-        path: `${url.pathname}${url.search}`,
-        body: JSON.parse(String(init?.body ?? "{}")) as unknown,
+        url: url.toString(),
+        contentType: new Headers(init?.headers).get("content-type"),
         authorization: new Headers(init?.headers).get("authorization"),
+        body: JSON.parse(String(init?.body ?? "{}")) as unknown,
       });
-      return new Response(null, { status: 204 });
+      return json({
+        version: 1,
+        ok: true,
+        result: {
+          status: "created",
+          authorityId: authority.id,
+          branch: "inari/runtime-authority/0123456789abcdef",
+          pullRequest: { number: 1, url: "https://github.com/acme/inari/pull/1" },
+        },
+      });
     }
-    throw new Error(`unexpected ${url.pathname}`);
+    throw new Error(`unexpected ${url.toString()}`);
   };
-  const broker = new GitHubAppUserCredentialBroker(options(fetch));
+  // No GitHub App-user installation/repository lookup is configured on this
+  // fetch: publication must never call GitHub at all, only the Issuer/Worker
+  // boundary, and must never require this repository to hold the Issuer
+  // private key as an Actions secret.
+  const broker = new GitHubAppUserCredentialBroker(options(fetch, { issuerWorkerUrl: "https://issuer.example.com" }));
 
   await broker.dispatchRuntimeAuthorityPublication({ authority });
 
-  assert.deepEqual(calls, [
-    "/user/installations",
-    "/user/installations/7/repositories",
-    "/repos/acme/inari/dispatches",
-  ]);
   assert.equal(requests.length, 1);
   const request = requests[0];
-  assert.equal(request?.path, "/repos/acme/inari/dispatches");
+  assert.equal(request?.url, `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`);
+  assert.match(request?.contentType ?? "", /^application\/json/iu);
+  // The caller's own App-user access token is forwarded as the Worker's
+  // caller-authorization proof (the existing App-user/human seam) -- as a
+  // bearer credential, never inside the JSON request body.
   assert.equal(request?.authorization, "Bearer access-secret");
-  const payload = request?.body as {
-    readonly event_type: string;
-    readonly client_payload: { readonly correlation: string; readonly request: unknown };
-  };
-  assert.equal(payload.event_type, "inari.runtime-authority.publish");
-  assert.deepEqual(Object.keys(payload.client_payload).sort(), ["correlation", "request"]);
-  assert.match(
-    payload.client_payload.correlation,
-    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
-  );
-  assert.deepEqual(payload.client_payload.request, createRuntimeAuthorityPublicationRequest(authority));
+  assert.deepEqual(request?.body, createRuntimeAuthorityPublicationRequest(authority));
   assert.doesNotMatch(
     JSON.stringify(request?.body),
     /access-secret|refresh-secret|session-material-secret|provider-token-secret|privateKey|\.mcp\.json/iu,
@@ -175,13 +167,35 @@ test("App-user broker dispatches only a validated public Runtime Authority reque
 
 test("App-user broker rejects secret-bearing Runtime Authority records before dispatch", async () => {
   const provider = brokerFetch();
-  const broker = new GitHubAppUserCredentialBroker(options(provider.fetch));
+  const broker = new GitHubAppUserCredentialBroker(
+    options(provider.fetch, { issuerWorkerUrl: "https://issuer.example.com" }),
+  );
   const invalid = { id: "runtime-invalid", privateKey: "must-not-escape" } as unknown as Delegator;
 
   await assert.rejects(broker.dispatchRuntimeAuthorityPublication({ authority: invalid }), {
     code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED",
   });
   assert.deepEqual(provider.calls, []);
+});
+
+test("App-user broker fails closed when the Issuer/Worker boundary is not configured", async () => {
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const authority: Delegator = createDelegatorRecord({
+    id: "runtime-unconfigured-test",
+    key: publicKey,
+    notBefore: "2026-01-01T00:00:00.000Z",
+    notAfter: null,
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: CAPABILITY_KINDS,
+  });
+  const fetch: typeof globalThis.fetch = async () => {
+    throw new Error("must not contact any provider without a configured Issuer/Worker boundary");
+  };
+  const broker = new GitHubAppUserCredentialBroker(options(fetch));
+
+  await assert.rejects(broker.dispatchRuntimeAuthorityPublication({ authority }), {
+    code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED",
+  });
 });
 
 test("App-user broker bounds operation scope to requested effect permissions after validating the provider grant", async () => {

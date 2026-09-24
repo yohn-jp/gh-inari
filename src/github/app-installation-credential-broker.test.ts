@@ -400,6 +400,24 @@ test("mutation capability rejects read-only evidence permissions and target iden
   assert.equal(calls, 1);
 });
 
+test("Runtime Authority publication capability rejects a target repository mismatch before minting a credential", async () => {
+  let calls = 0;
+  const broker = new GitHubAppInstallationCredentialBroker(
+    brokerOptions(async () => {
+      calls += 1;
+      return tokenResponse({}, { contents: "write", pull_requests: "write" });
+    }),
+  );
+  await assert.rejects(
+    broker.withRuntimeAuthorityPublicationCapability(
+      { target: { ...target, nameWithOwner: "someone-else/a-different-repository" } },
+      async () => undefined,
+    ),
+    (error: unknown) => error instanceof GitHubAppCredentialBrokerError && error.stage === "installation-scope",
+  );
+  assert.equal(calls, 0);
+});
+
 test("installation response must select exactly one well-formed configured repository", async () => {
   for (const repositories of [
     [],

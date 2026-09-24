@@ -9,7 +9,7 @@ import { CAPABILITY_KINDS } from "./agent-authority/capability.js";
 import { createDelegatorRecord } from "./agent-authority/delegator-operations.js";
 import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
 import type { Delegator } from "./agent-authority/delegator.js";
-import { recognizeBranchName, validateBranchName } from "./branch-naming.js";
+import { recognizeBranchName } from "./branch-naming.js";
 import type { GitHubBranchAdvanceCapability } from "./github/git-data-capability.js";
 import type { RepositoryIdentity } from "./github/effect-authorizer.js";
 import type {
@@ -22,6 +22,7 @@ import {
   runtimeAuthorityPublicationBranch,
   runtimeAuthorityPublicationBody,
   RuntimeAuthorityPublicationError,
+  RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN,
 } from "./runtime-authority-publication.js";
 import {
   compileSemanticTemplateSync,
@@ -74,10 +75,12 @@ test("generated Authority trust PR and artifact satisfy repository governance", 
   });
 
   const branch = runtimeAuthorityPublicationBranch(publicAuthority.id);
-  assert.deepEqual(validateBranchName(branch), []);
-  const classification = recognizeBranchName(branch);
-  assert.equal(classification?.type, "feat");
-  assert.equal(classification?.issueNumber, 1066);
+  // Runtime Authority publication is Issue-less, like release/<semver>: it
+  // bootstraps a repository trust root, not an ordinary Change, so it must
+  // never invent a source- or target-repository Issue number and must not
+  // be recognized by the ordinary <type>/<issue-number>-<slug> Core grammar.
+  assert.match(branch, RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN);
+  assert.equal(recognizeBranchName(branch), undefined);
 
   const governance = (await import(
     new URL("../scripts/validate-runtime-authority-governance.mjs", import.meta.url).href
@@ -97,7 +100,11 @@ test("generated Authority trust PR and artifact satisfy repository governance", 
 
 function brokerFor(
   publicAuthority: Delegator,
-  overrides: { readonly extraChangedPath?: string; readonly artifactMode?: string } = {},
+  overrides: {
+    readonly extraChangedPath?: string;
+    readonly artifactMode?: string;
+    readonly target?: RepositoryIdentity;
+  } = {},
 ): {
   readonly broker: RuntimeAuthorityPublicationBroker;
   readonly calls: Readonly<Record<string, number>>;
@@ -174,7 +181,7 @@ function brokerFor(
     state: "open",
     draft: false,
     headBranch: branch,
-    headRepository: TARGET.nameWithOwner,
+    headRepository: (overrides.target ?? TARGET).nameWithOwner,
     baseBranch: base,
     author: "inari-issuer[bot]",
     changedFiles: 1,
@@ -292,4 +299,92 @@ test("fails closed when the public Authority artifact has a noncanonical Git mod
     RuntimeAuthorityPublicationError,
   );
   assert.equal(fixture.calls.createPullRequest, 0);
+});
+
+test("publication branch identity is repository-independent: the same Authority id derives the same branch regardless of the target repository", async () => {
+  const otherTarget: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: "42",
+    nameWithOwner: "someone-else/consumer-repo",
+  };
+  const publicAuthority = authority("cross-repository-branch-identity");
+
+  const first = brokerFor(publicAuthority);
+  const firstResult = await publishRuntimeAuthority({ version: 1, authority: publicAuthority }, TARGET, first.broker);
+
+  const second = brokerFor(publicAuthority, { target: otherTarget });
+  const secondResult = await publishRuntimeAuthority(
+    { version: 1, authority: publicAuthority },
+    otherTarget,
+    second.broker,
+  );
+
+  assert.equal(firstResult.branch, secondResult.branch);
+  assert.equal(firstResult.branch, runtimeAuthorityPublicationBranch(publicAuthority.id));
+});
+
+test("fails closed when the created pull request targets a different repository than the requested Authority publication", async () => {
+  const publicAuthority = authority("cross-repository-mismatch");
+  const artifact = renderDelegatorArtifact(publicAuthority);
+  const blobSha = createHash("sha1")
+    .update(`blob ${Buffer.byteLength(artifact.content, "utf8")}\0`)
+    .update(artifact.content)
+    .digest("hex");
+  let branchHead: string | undefined;
+  const gitData = {
+    scope: {} as GitHubBranchAdvanceCapability["scope"],
+    readRef: async (branch: string) =>
+      branchHead === undefined ? undefined : { name: branch, ref: `refs/heads/${branch}`, sha: branchHead },
+    readCommit: async (sha: string) => ({ sha, treeSha: sha === BASE_SHA ? BASE_TREE_SHA : TREE_SHA }),
+    readTree: async (sha: string) => ({
+      sha,
+      entries:
+        sha === BASE_TREE_SHA
+          ? []
+          : [{ path: artifact.path, mode: "100644" as const, type: "blob" as const, sha: blobSha }],
+    }),
+    readBlob: async () => artifact.content,
+    createBlob: async () => ({ sha: blobSha }),
+    createTree: async () => ({ sha: TREE_SHA }),
+    createCommit: async () => ({ sha: COMMIT_SHA }),
+  } as unknown as GitHubBranchAdvanceCapability;
+  let createPullRequestCalls = 0;
+  const capability: RuntimeAuthorityPublicationCapability = {
+    scope: {} as RuntimeAuthorityPublicationCapability["scope"],
+    gitData,
+    getDefaultBranch: async () => ({ name: "main", sha: BASE_SHA }),
+    createBranch: async (_branch, sha) => {
+      branchHead = sha;
+    },
+    compareBranch: async () => ({ aheadBy: 1, changedPaths: [artifact.path] }),
+    findPullRequests: async () => [],
+    readPullRequestFiles: async () => [artifact.path],
+    createPullRequest: async (input) => {
+      createPullRequestCalls += 1;
+      return {
+        number: 17,
+        url: PULL_REQUEST_URL,
+        title: input.title,
+        body: input.body,
+        state: "open",
+        draft: false,
+        headBranch: input.head,
+        // A capability that claims a different repository than the request's
+        // exact target must never be trusted as a valid publication.
+        headRepository: "someone-else/a-different-repository",
+        baseBranch: input.base,
+        author: "inari-issuer[bot]",
+        changedFiles: 1,
+      };
+    },
+  };
+  const broker: RuntimeAuthorityPublicationBroker = {
+    withRuntimeAuthorityPublicationCapability: async (_request, operation) => operation(capability),
+  };
+
+  await assert.rejects(
+    () => publishRuntimeAuthority({ version: 1, authority: publicAuthority }, TARGET, broker),
+    RuntimeAuthorityPublicationError,
+  );
+  assert.equal(createPullRequestCalls, 1);
 });

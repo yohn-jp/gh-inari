@@ -92,7 +92,15 @@ export interface RepositorySetupInput {
     readonly clientId?: string;
   };
   readonly appUserBroker?: AppProviderCredentialBroker;
-  /** Test/composition seam; production setup uses its Device Flow credential and bounded Issuer workflow. */
+  /**
+   * Base URL of the centrally custodied Runtime Authority Issuer/Worker
+   * boundary (#1066 correction; see `./github/direct-app-execution.js`'s
+   * `createDirectAppRuntimeAuthorityPublisher`). Falls back to the
+   * `INARI_ISSUER_WORKER_URL` environment variable. This repository is never
+   * required to hold the Issuer private key as an Actions secret.
+   */
+  readonly issuerWorkerUrl?: string;
+  /** Test/composition seam; production setup submits only the validated public request to the Issuer/Worker boundary. */
   readonly authorityPublisher?: (
     options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">,
   ) => Promise<RuntimeAuthorityPublicationResult>;
@@ -579,6 +587,8 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
           input.fetch ?? globalThis.fetch.bind(globalThis),
         )
       : undefined;
+  const issuerWorkerUrl =
+    input.issuerWorkerUrl ?? environmentValue(input.environment ?? process.env, "INARI_ISSUER_WORKER_URL");
   const broker =
     customBroker ??
     new GitHubAppUserCredentialBroker({
@@ -601,6 +611,7 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
       deviceFlow: input.deviceFlow,
       ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       ...(input.now === undefined ? {} : { now: input.now }),
+      ...(issuerWorkerUrl === undefined ? {} : { issuerWorkerUrl }),
     });
   const dispatchRuntimeAuthorityPublication = broker.dispatchRuntimeAuthorityPublication?.bind(broker);
   const authorityPublisher =
