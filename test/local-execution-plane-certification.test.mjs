@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,9 +22,20 @@ const appId = "123";
 const installationId = "456";
 const accessToken = "gho_local_certification_access_token";
 const refreshToken = "ghr_local_certification_refresh_token";
+const installationToken = "ghs_local_certification_installation_token";
+const issuerKey = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const issuerPrivateKey = issuerKey.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const issuerPublicKey = issuerKey.publicKey.export({ type: "spki", format: "pem" }).toString();
+const issuerKeyVariables = [
+  "INARI_GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_PRIVATE_KEY",
+  "INARI_GITHUB_APP_PRIVATE_KEY_FILE",
+  "GITHUB_APP_PRIVATE_KEY_FILE",
+];
 
 const providerPreload = String.raw`
 import http from "node:http";
+import { createPublicKey, verify } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
 const configuredRole = process.env.INARI_CERT_ROLE;
@@ -32,8 +43,9 @@ const serviceArg = process.argv.find((value) => value === "admission" || value =
 const role = configuredRole === "supervisor" ? serviceArg : configuredRole;
 const requestLog = process.env.INARI_CERT_REQUEST_LOG;
 const forbiddenRuntimeCredentials = role === "admission"
-  ? ["GH_TOKEN", "GITHUB_TOKEN", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE", "INARI_GITHUB_APP_ID", "GITHUB_APP_ID", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"]
-  : ["GH_TOKEN", "GITHUB_TOKEN", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY"];
+  ? ["GH_TOKEN", "GITHUB_TOKEN", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE", "INARI_GITHUB_APP_ID", "GITHUB_APP_ID", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY",
+      "INARI_GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY", "INARI_GITHUB_APP_PRIVATE_KEY_FILE", "GITHUB_APP_PRIVATE_KEY_FILE"]
+  : ["GH_TOKEN", "GITHUB_TOKEN", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE"];
 if ((role === "executor" || role === "admission") && forbiddenRuntimeCredentials.some((name) => Object.hasOwn(process.env, name))) {
   throw new Error("A local Runtime child received credentials outside its custody boundary");
 }
@@ -77,12 +89,27 @@ if (role === "executor") {
     appendFileSync(providerLog, JSON.stringify({ method, route, search: url.search }) + "\n");
     const prefix = "repos/acme/inari/";
     const permissions = { metadata: "read", contents: "write", issues: "write", pull_requests: "write" };
-    const repository = { id: Number(fixture.repositoryId), full_name: "acme/inari", fork: false, default_branch: "main" };
-    if (method === "GET" && route === "user/installations") {
-      return respond({ installations: [{ id: fixture.installationId, app_id: fixture.appId, suspended_at: null, permissions }] });
+    const repository = { id: Number(fixture.repositoryId), node_id: "R_local_certification", full_name: "acme/inari", fork: false, default_branch: "main" };
+    const authorization = new Headers(init?.headers).get("authorization") ?? "";
+    if (method === "POST" && route === "app/installations/" + fixture.installationId + "/access_tokens") {
+      // Issuer App authority: the App JWT must be signed by the Issuer private key.
+      const [header, payload, signature] = authorization.replace(/^Bearer /, "").split(".");
+      const signed = header !== undefined && payload !== undefined && signature !== undefined &&
+        verify("RSA-SHA256", Buffer.from(header + "." + payload), createPublicKey(fixture.issuerPublicKey), Buffer.from(signature, "base64url")) &&
+        JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).iss === fixture.appId;
+      if (!signed) return respond({ message: "A JSON web token could not be decoded" }, 401);
+      const state = readState();
+      if (state.installationId !== undefined && state.installationId !== fixture.installationId) return respond({ message: "Not Found" }, 404);
+      const granted = state.installationPermissions ?? permissions;
+      const requested = JSON.parse(String(init?.body ?? "{}")).permissions ?? {};
+      if (Object.entries(requested).some(([name, access]) => granted[name] === undefined || (access === "write" && granted[name] !== "write"))) {
+        return respond({ message: "The permissions requested are not granted to this installation." }, 422);
+      }
+      return respond({ token: fixture.installationToken, expires_at: "2099-01-01T00:00:00Z", permissions: requested,
+        repository_selection: "selected", repositories: [{ ...repository, ...(state.selectedRepositoryId === undefined ? {} : { id: Number(state.selectedRepositoryId) }) }] }, 201);
     }
-    if (method === "GET" && route === "user/installations/" + fixture.installationId + "/repositories") {
-      return respond({ repositories: [{ ...repository, permissions }] });
+    if (authorization !== "Bearer " + fixture.installationToken && authorization !== "token " + fixture.installationToken) {
+      return respond({ message: "Executor provider request lacked Issuer installation authority" }, 401);
     }
     if (method === "GET" && route === "repos/acme/inari") return respond(repository);
     if (method === "GET" && route === prefix + "git/ref/heads/main") {
@@ -134,6 +161,19 @@ if (role === "executor") {
       state.pullRequestState = "closed";
       saveState(state);
       return respond({ number: fixture.pullRequest, state: "closed" });
+    }
+    if (method === "POST" && route === "graphql") {
+      // Generation-safe compare-and-delete used by Change abort cleanup.
+      const request = JSON.parse(String(init?.body ?? "{}"));
+      const update = request.variables?.input?.refUpdates?.[0];
+      if (!String(request.query).includes("ConditionalDeleteRef") || request.variables?.input?.repositoryId !== repository.node_id ||
+        update?.name !== "refs/heads/" + fixture.branch || update?.beforeOid !== fixture.branchSha) {
+        return respond({ message: "Unmatched deterministic provider fixture" }, 404);
+      }
+      const state = readState();
+      state.branchPresent = false;
+      saveState(state);
+      return respond({ data: { updateRefs: { clientMutationId: null } } });
     }
     if (method === "DELETE" && route === prefix + "git/refs/heads/" + fixture.branch) {
       const state = readState();
@@ -387,12 +427,36 @@ async function postIntent(endpoint, value, sessionId) {
   });
 }
 
+async function saveBootstrapRuntimeProfile(directory, configHome) {
+  // The post-bootstrap Runtime profile `inari setup` persists: repository and
+  // Issuer installation identity only, never provider or key material.
+  const builder = path.join(directory, "runtime-profile.mts");
+  await writeFile(
+    builder,
+    `
+import { saveLocalRuntimeProfile } from ${JSON.stringify(path.join(projectRoot, "src/local-runtime-profile.ts"))};
+const profilePath = await saveLocalRuntimeProfile({
+  version: 1, state: "ready", endpoint: "https://endpoint.example.test", relayUrl: "wss://endpoint.example.test/relay",
+  repository: { repositoryHost: "github.com", repositoryId: ${JSON.stringify(repositoryId)}, repositoryNameWithOwner: ${JSON.stringify(repository)} },
+  app: { appId: ${JSON.stringify(appId)}, installationId: ${JSON.stringify(installationId)} },
+  authority: { authorityId: "local-certification", publicKeyFingerprint: "sha256:${"0".repeat(64)}", privateKeyPath: ${JSON.stringify(path.join(directory, "bootstrap-authority.pem"))} },
+}, { configHome: ${JSON.stringify(configHome)} });
+console.log(JSON.stringify({ profilePath }));
+`,
+  );
+  return jsonOutput(
+    spawnSync(tsx, [builder], { cwd: projectRoot, env: process.env, encoding: "utf8" }),
+    "save bootstrap Runtime profile",
+  ).profilePath;
+}
+
 test("#1030 certifies the real local CLI, Admission, and Executor processes", { timeout: 120_000 }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "inari-local-cert-"));
   const configHome = path.join(directory, "config");
   const workspace = path.join(directory, "workspace");
   const providerCustody = path.join(directory, "provider");
   const credentialFile = path.join(providerCustody, "app-user.json");
+  const issuerKeyFile = path.join(providerCustody, "issuer-app.private-key.pem");
   const preloadFile = path.join(directory, "provider-preload.mjs");
   const fixtureFile = path.join(directory, "provider-fixture.json");
   const stateFile = path.join(directory, "provider-state.json");
@@ -423,6 +487,7 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       { mode: 0o600 },
     );
     await chmod(credentialFile, 0o600);
+    await writeFile(issuerKeyFile, issuerPrivateKey, { mode: 0o600 });
 
     const baseEnv = { ...process.env, INARI_CONFIG_HOME: configHome };
     delete baseEnv.GH_TOKEN;
@@ -430,16 +495,25 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     delete baseEnv.INARI_GITHUB_APP_USER_CREDENTIAL_FILE;
     delete baseEnv.INARI_APP_USER_CREDENTIAL_FILE;
     delete baseEnv.INARI_RUNTIME_AUTHORITY_PRIVATE_KEY;
+    for (const name of issuerKeyVariables) delete baseEnv[name];
+    // #1092: the Executor holds only Issuer App authority; the App-user
+    // credential is bootstrap-only and never reaches the Executor.
     const executorEnv = {
       ...baseEnv,
       INARI_GITHUB_APP_ID: appId,
-      INARI_GITHUB_APP_USER_CREDENTIAL_FILE: credentialFile,
+      INARI_GITHUB_APP_PRIVATE_KEY_FILE: issuerKeyFile,
       INARI_CERT_ROLE: "executor",
       INARI_CERT_REQUEST_LOG: executorLog,
       INARI_CERT_PROVIDER_FIXTURE: fixtureFile,
       INARI_CERT_PROVIDER_STATE: stateFile,
       INARI_CERT_PROVIDER_LOG: providerLog,
       NODE_OPTIONS: `--import=${preloadFile}`,
+    };
+    const operatorEnv = {
+      ...baseEnv,
+      INARI_GITHUB_APP_ID: appId,
+      INARI_GITHUB_APP_PRIVATE_KEY_FILE: issuerKeyFile,
+      INARI_GITHUB_APP_USER_CREDENTIAL_FILE: credentialFile,
     };
     const admissionEnv = {
       ...baseEnv,
@@ -489,10 +563,34 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       ),
       "authority bootstrap",
     );
+    const missingKeySetup = command(["executor", "setup", "--json"], {
+      cwd: workspace,
+      env: { ...executorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: undefined },
+    });
+    assert.notEqual(missingKeySetup.status, 0, "Executor setup accepted a missing Issuer App private key");
+    assert.equal(
+      JSON.parse(missingKeySetup.stdout.trim().split("\n").at(-1)).error.code,
+      "EXECUTOR_ISSUER_KEY_MISSING",
+    );
+    const invalidKeyFile = path.join(providerCustody, "invalid-issuer-app.private-key.pem");
+    await writeFile(invalidKeyFile, "-----BEGIN PRIVATE KEY-----\nbm90LWEta2V5\n-----END PRIVATE KEY-----\n", {
+      mode: 0o600,
+    });
+    const invalidKeySetup = command(["executor", "setup", "--json"], {
+      cwd: workspace,
+      env: { ...executorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: invalidKeyFile },
+    });
+    assert.notEqual(invalidKeySetup.status, 0, "Executor setup accepted an invalid Issuer App private key");
+    assert.equal(
+      JSON.parse(invalidKeySetup.stdout.trim().split("\n").at(-1)).error.code,
+      "EXECUTOR_ISSUER_KEY_INVALID",
+    );
+    assert.equal(existsSync(path.join(configHome, "executor", "config.json")), false);
     const executorSetup = jsonOutput(
       command(["executor", "setup", "--json"], { cwd: workspace, env: executorEnv }),
       "executor setup",
     );
+    const bootstrapProfilePath = await saveBootstrapRuntimeProfile(directory, configHome);
     const admissionSetup = jsonOutput(
       command(["admission", "setup", "--from", publicAuthorityFile, "--json"], {
         cwd: workspace,
@@ -501,9 +599,10 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       "admission setup",
     );
     const configuredState = jsonOutput(
-      command(["init", "--json"], { cwd: workspace, env: executorEnv }),
+      command(["init", "--json"], { cwd: workspace, env: operatorEnv }),
       "configured init",
     );
+    assert.equal(configuredState.applicationState.provider.issuerKey, "configured");
     assert.equal(configuredState.applicationState.status, "configured");
     assert.equal(configuredState.applicationState.setupComplete, true);
     assert.ok(configuredState.applicationState.steps.every((step) => step.status === "ready"));
@@ -531,7 +630,7 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     git(unselectedWorkspace, "remote", "add", "origin", "https://github.com/acme/inari.git");
     git(unselectedWorkspace, "checkout", "-q", "-b", "main");
     const unselectedState = jsonOutput(
-      command(["init", "--json"], { cwd: unselectedWorkspace, env: executorEnv }),
+      command(["init", "--json"], { cwd: unselectedWorkspace, env: operatorEnv }),
       "init with no Issue selected",
     );
     assert.equal(unselectedState.applicationState.changeBranch.status, "issue-not-selected");
@@ -553,7 +652,7 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     // state rather than only failing once `session start` is attempted.
     git(unselectedWorkspace, "checkout", "-q", "-b", "leftover-notes");
     const mismatchState = jsonOutput(
-      command(["init", "--json"], { cwd: unselectedWorkspace, env: executorEnv }),
+      command(["init", "--json"], { cwd: unselectedWorkspace, env: operatorEnv }),
       "init on a non-canonical branch",
     );
     assert.equal(mismatchState.applicationState.changeBranch.status, "branch-mismatch");
@@ -578,6 +677,8 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
         repositoryId,
         appId,
         installationId,
+        installationToken,
+        issuerPublicKey,
         issue,
         branch,
         pullRequest,
@@ -687,6 +788,7 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       GH_TOKEN: "fixture-gh-token",
       GITHUB_TOKEN: "fixture-github-token",
       INARI_GITHUB_APP_USER_CREDENTIAL_FILE: credentialFile,
+      INARI_GITHUB_APP_PRIVATE_KEY_FILE: issuerKeyFile,
       INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: authority.privateKeyPath,
     };
     const childResult = command(
@@ -716,11 +818,13 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       "INARI_GITHUB_APP_USER_CREDENTIAL_FILE",
       "INARI_APP_USER_CREDENTIAL_FILE",
       "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY",
+      ...issuerKeyVariables,
     ])
       assert.equal(Object.hasOwn(childEnvironment, name), false, `${name} reached the Agent child`);
     const childValues = JSON.stringify(childEnvironment);
     const privateKey = await readFile(authority.privateKeyPath, "utf8");
-    for (const secret of [accessToken, refreshToken, privateKey]) assert.equal(childValues.includes(secret), false);
+    for (const secret of [accessToken, refreshToken, privateKey, issuerPrivateKey, installationToken])
+      assert.equal(childValues.includes(secret), false);
 
     const sessionEnv = { ...baseEnv, INARI_SESSION_ID: sessionId };
     const readsBefore = await executionCount(executorLog);
@@ -731,6 +835,19 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       `change show: ${showResult.stdout}\n${showResult.stderr}\nProvider: ${JSON.stringify(await events(providerLog))}\nExecutor: ${JSON.stringify(await events(executorLog))}\nAdmission: ${JSON.stringify(await events(admissionLog))}\nExecutor stderr: ${executor.stderr()}\nAdmission stderr: ${admission.stderr()}`,
     );
     assert.ok((await executionCount(executorLog)) > readsBefore, "Change read did not cross Executor HTTP");
+    const issuerCalls = await events(providerLog);
+    assert.ok(
+      issuerCalls.some(
+        (call) => call.method === "POST" && call.route === `app/installations/${installationId}/access_tokens`,
+      ),
+      "Executor provider authority did not come from the Issuer App installation credential",
+    );
+    assert.equal(
+      issuerCalls.some((call) => call.route.startsWith("user")),
+      false,
+      "Executor used App-user authority",
+    );
+
     const mutationsBefore = await executionCount(executorLog);
     successful(
       command(["change", "abort", String(issue), "--json"], { cwd: workspace, env: sessionEnv }),
@@ -756,6 +873,43 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     await denied(intent(), undefined, "missing Session denial");
 
     jsonOutput(command(["session", "close", "--json"], { cwd: workspace, env: sessionEnv }), "session close");
+    // #1092 negative certification: wrong installation/repository binding and
+    // insufficient installation permissions fail closed before any mutation.
+    // Each denial uses its own Session so Admission capability budgets of the
+    // primary Session are unaffected.
+    const providerMutationCount = async () =>
+      (await events(providerLog)).filter((call) => call.method !== "GET" && !call.route.endsWith("/access_tokens"))
+        .length;
+    for (const [label, providerState] of [
+      ["unknown installation", { installationId: "999" }],
+      ["wrong repository selection", { selectedRepositoryId: "469000002" }],
+      [
+        "insufficient installation permissions",
+        { installationPermissions: { metadata: "read", contents: "read", issues: "read", pull_requests: "read" } },
+      ],
+    ]) {
+      await writeFile(stateFile, JSON.stringify({ branchPresent: true, pullRequestState: "open" }));
+      const denialEnv = { ...baseEnv, INARI_SESSION_ID: `cert-denial-${label.replaceAll(" ", "-")}` };
+      successful(
+        command(["session", "start", "--issue", String(issue), "--", process.execPath, "-e", "process.exit(0)"], {
+          cwd: workspace,
+          env: denialEnv,
+        }),
+        `${label} session start`,
+      );
+      await writeFile(stateFile, JSON.stringify({ branchPresent: true, pullRequestState: "open", ...providerState }));
+      const mutationsBeforeDenial = await providerMutationCount();
+      const deniedAbort = command(["change", "abort", String(issue), "--json"], { cwd: workspace, env: denialEnv });
+      assert.notEqual(deniedAbort.status, 0, `${label}: change abort succeeded`);
+      assert.equal(await providerMutationCount(), mutationsBeforeDenial, `${label}: provider mutation occurred`);
+      for (const secret of [issuerPrivateKey, installationToken]) {
+        assert.equal(deniedAbort.stdout.includes(secret), false, `${label}: secret reached CLI output`);
+        assert.equal(deniedAbort.stderr.includes(secret), false, `${label}: secret reached CLI diagnostics`);
+      }
+      await writeFile(stateFile, JSON.stringify({ branchPresent: true, pullRequestState: "open" }));
+      jsonOutput(command(["session", "close", "--json"], { cwd: workspace, env: denialEnv }), `${label} session close`);
+    }
+    await writeFile(stateFile, JSON.stringify({ branchPresent: true, pullRequestState: "open" }));
     await denied(intent(), sessionId, "closed Session denial");
 
     const expiringId = "cert-expiring-session";
@@ -784,10 +938,7 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     };
     const executorFailure = command(["runtime", "supervise", "--json"], {
       cwd: workspace,
-      env: {
-        ...supervisorEnv,
-        INARI_GITHUB_APP_USER_CREDENTIAL_FILE: path.join(providerCustody, "missing-app-user.json"),
-      },
+      env: { ...supervisorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: undefined },
     });
     assert.equal(executorFailure.error, undefined, `Executor failure check timed out: ${executorFailure.stderr}`);
     assert.notEqual(
@@ -795,7 +946,8 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       0,
       `Supervisor concealed an Executor startup failure: ${executorFailure.stdout}\n${executorFailure.stderr}`,
     );
-    assert.match(executorFailure.stdout, /EXECUTOR_CREDENTIALS_MISSING/u);
+    assert.match(executorFailure.stdout, /EXECUTOR_ISSUER_KEY_MISSING/u);
+    assert.equal(executorFailure.stdout.includes(issuerPrivateKey), false);
     assert.equal(existsSync(discoveryPath(configHome, "executor")), false);
     assert.equal(existsSync(discoveryPath(configHome, "admission")), false);
 
@@ -840,11 +992,26 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       assert.ok(!status.includes(accessToken));
       assert.ok(!status.includes(refreshToken));
       assert.ok(!status.includes(privateKey));
+      assert.ok(!status.includes(issuerPrivateKey));
+      assert.ok(!status.includes(installationToken));
       assert.equal((await fetch(`${announcement.endpoint}/status`, { method: "POST" })).status, 405);
     }
     const admissionStatus = await (await fetch(`${supervisedAdmission.endpoint}/status`)).text();
     assert.ok(admissionStatus.includes(`Pinned peer</dt><dd>executor ${executorSetup.executorId}</dd>`));
     await stopSupervisor(supervisor);
+    const persistedFiles = (await readdir(configHome, { recursive: true, withFileTypes: true })).filter((entry) =>
+      entry.isFile(),
+    );
+    assert.ok(persistedFiles.some((entry) => path.join(entry.parentPath, entry.name) === bootstrapProfilePath));
+    for (const entry of persistedFiles) {
+      const persisted = await readFile(path.join(entry.parentPath, entry.name), "utf8");
+      for (const secret of [issuerPrivateKey.split("\n")[1], installationToken])
+        assert.equal(persisted.includes(secret), false, `${entry.name} persisted Issuer secret material`);
+    }
+    for (const log of [providerLog, executorLog, admissionLog]) {
+      const text = existsSync(log) ? await readFile(log, "utf8") : "";
+      assert.equal(text.includes(issuerPrivateKey.split("\n")[1]), false);
+    }
     assert.equal(existsSync(discoveryPath(configHome, "executor")), false, "Supervisor left Executor discovery active");
     assert.equal(
       existsSync(discoveryPath(configHome, "admission")),

@@ -142,7 +142,7 @@ function environmentValue(environment: LocalRuntimeConfigEnvironment, ...names: 
   return undefined;
 }
 
-function readAppPrivateKey(environment: LocalRuntimeConfigEnvironment): string {
+export function readAppPrivateKey(environment: LocalRuntimeConfigEnvironment): string {
   const direct = environmentValue(environment, "INARI_GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY");
   if (direct !== undefined) {
     const pem = direct.replace(/\\n/gu, "\n");

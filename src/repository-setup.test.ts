@@ -38,6 +38,32 @@ test("machine setup fails with typed auth-required before Device Flow", async ()
   );
 });
 
+test("bootstrap stays App-user-authorized when Executor Issuer App key material is present", async () => {
+  const issuerPrivateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+  await assert.rejects(
+    () =>
+      setupRepository({
+        root: process.cwd(),
+        repository: "acme/inari",
+        endpoint: "https://endpoint.example.test",
+        endpointDescriptor: descriptor,
+        credentialStore: new InMemoryAppUserCredentialStore(),
+        environment: {
+          INARI_GITHUB_APP_ID: "42",
+          INARI_GITHUB_APP_INSTALLATION_ID: "7",
+          INARI_GITHUB_APP_PRIVATE_KEY: issuerPrivateKey,
+        },
+        json: true,
+      }),
+    (error: unknown) =>
+      error instanceof RepositorySetupError &&
+      error.code === "REPOSITORY_SETUP_AUTH_REQUIRED" &&
+      !error.message.includes("PRIVATE KEY"),
+  );
+});
+
 test("missing App installation reports the bounded install action without local trust writes", async () => {
   const broker = {
     async withRepositoryReadCapability<T>(

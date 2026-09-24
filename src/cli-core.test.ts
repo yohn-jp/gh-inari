@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { generateKeyPairSync } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +60,17 @@ interface CapturedOutput {
 async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-cli-"));
   return { root, environment: { INARI_CONFIG_HOME: path.join(root, "config") } };
+}
+
+/** Executor-owned Issuer App private key custody outside the config home. */
+async function configureIssuerKey(root: string, environment: NodeJS.ProcessEnv): Promise<string> {
+  const pem = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+  const keyPath = path.join(root, "issuer-app.private-key.pem");
+  await writeFile(keyPath, pem, { mode: 0o600 });
+  environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = keyPath;
+  return pem;
 }
 
 async function capture(
@@ -133,6 +145,7 @@ test("inari init declares only the local CLI topology and is idempotent", async 
         "cli-topology",
         "app-user-authorization",
         "executor-app-id",
+        "executor-issuer-key",
         "executor",
         "runtime-authority-key",
         "runtime-authority-record",
@@ -160,6 +173,7 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     assert.ok(human.stdout.includes("Ordered setup path:"));
     assert.ok(human.stdout.includes("inari setup --endpoint <endpoint-url>"));
     assert.ok(human.stdout.includes("INARI_GITHUB_APP_ID"));
+    assert.ok(human.stdout.includes("INARI_GITHUB_APP_PRIVATE_KEY_FILE"));
     assert.ok(human.stdout.includes("inari authority bootstrap"));
     assert.ok(human.stdout.includes("inari admission setup --from"));
     assert.ok(human.stdout.includes("Issue/Change branch: issue-not-selected"));
@@ -187,6 +201,7 @@ test("local application state reaches configured through supported CLI commands 
   const deps = { repositoryRoot: root };
   try {
     assert.equal((await capture(["init", "--json"], environment, deps)).exitCode, 0);
+    const issuerPem = await configureIssuerKey(root, environment);
     await new FileAppUserCredentialStore({
       path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
     }).save(
@@ -262,6 +277,7 @@ test("local application state reaches configured through supported CLI commands 
     assert.equal(initialized.stdout.includes("state-access-secret"), false);
     assert.equal(initialized.stdout.includes("state-refresh-secret"), false);
     assert.equal(initialized.stdout.includes("BEGIN PRIVATE KEY"), false);
+    assert.equal(initialized.stdout.includes(issuerPem.split("\n")[1] as string), false);
 
     // Checking out the canonical Issue-bound Change branch flips readiness to
     // "ready" and the projected next action becomes the Runtime Supervisor
@@ -359,7 +375,7 @@ test("local provisioning commands are additive, closed, and use INARI_CONFIG_HOM
   }
 });
 
-test("executor setup and serve use the Executor command contract and existing credential custody", async () => {
+test("executor setup and serve use the Executor command contract and Executor-owned Issuer key custody", async () => {
   assert.equal(getCommandForPositionals(["executor", "setup"])?.id, "executor.setup");
   assert.equal(getCommandForPositionals(["executor", "serve"])?.id, "executor.serve");
 
@@ -370,17 +386,12 @@ test("executor setup and serve use the Executor command contract and existing cr
     assert.equal(missingSetup.exitCode, 2);
     assert.equal(JSON.parse(missingSetup.stdout).error.code, "EXECUTOR_NOT_SETUP");
 
-    const store = new FileAppUserCredentialStore({
-      path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
-    });
-    await store.save(
-      createAppUserCredential({
-        accessToken: "access-secret",
-        refreshToken: "refresh-secret",
-        accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
-        refreshTokenExpiresAt: "2027-06-01T00:00:00.000Z",
-      }),
-    );
+    const missingKey = await capture(["executor", "setup", "--json"], environment);
+    assert.notEqual(missingKey.exitCode, 0);
+    assert.equal(JSON.parse(missingKey.stdout).error.code, "EXECUTOR_ISSUER_KEY_MISSING");
+    assert.match(JSON.parse(missingKey.stdout).error.message, /INARI_GITHUB_APP_PRIVATE_KEY_FILE/u);
+
+    const issuerPem = await configureIssuerKey(root, environment);
     const setup = await capture(["executor", "setup", "--json"], environment);
     assert.equal(setup.exitCode, 0);
     const output = JSON.parse(setup.stdout) as {
@@ -396,7 +407,8 @@ test("executor setup and serve use the Executor command contract and existing cr
     assert.equal("endpoint" in output, false);
     assert.equal(output.configPath, path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json"));
     assert.equal(output.provider.credentialProfile, "default");
-    assert.equal(setup.stdout.includes("access-secret"), false);
+    assert.equal(setup.stdout.includes(issuerPem.split("\n")[1] as string), false);
+    assert.equal((await readFile(output.configPath, "utf8")).includes("PRIVATE KEY"), false);
     const second = await capture(["executor", "setup", "--json"], environment);
     assert.equal(JSON.parse(second.stdout).executorId, output.executorId);
 

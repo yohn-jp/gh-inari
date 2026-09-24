@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createPrivateKey, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import type { TLSSocket } from "node:tls";
@@ -25,8 +25,7 @@ import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import {
   GitHubAdapter,
   createAppRepositoryEvidenceReader,
-  GitHubAppUserCredentialBroker,
-  FileAppUserCredentialStore,
+  GitHubAppInstallationCredentialBroker,
   GitHubChangeStateProjector,
   InariEffectAuthorizer,
   createPrPublicationProvider,
@@ -36,12 +35,13 @@ import {
   type RepositoryIdentity,
 } from "../github/index.js";
 import { validateIssuerRepositoryIdentity } from "../github/effect-authorizer.js";
-import { GitHubNativeHttpTransport, githubRestBaseUrl } from "../github/native-http-transport.js";
 import {
   createGitHubImplementationFrontierRepository,
   readCurrentImplementationAdmissionEvidence,
 } from "../implementation-frontier-composition.js";
 import { publishPullRequest } from "../pr-publication.js";
+import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
+import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config.js";
 import {
   LocalControlError,
   LOCAL_CONFIG_VERSION,
@@ -95,13 +95,6 @@ function configuredListenPort(port: number): number {
   return port === LOCAL_EXECUTOR_HISTORICAL_PORT ? LOCAL_EXECUTOR_DEFAULT_PORT : port;
 }
 
-export function localExecutorCredentialPath(environment: NodeJS.ProcessEnv = process.env): string {
-  const configured = environment.INARI_GITHUB_APP_USER_CREDENTIAL_FILE ?? environment.INARI_APP_USER_CREDENTIAL_FILE;
-  return configured === undefined
-    ? path.join(resolveConfigHome(environment), "app-user-credential.json")
-    : path.resolve(configured);
-}
-
 export function localExecutorAppId(environment: NodeJS.ProcessEnv = process.env): string | undefined {
   const value = environment.INARI_GITHUB_APP_ID ?? environment.GITHUB_APP_ID;
   if (value === undefined || !/^[1-9][0-9]{0,19}$/u.test(value.trim())) return undefined;
@@ -119,23 +112,56 @@ function appId(environment: NodeJS.ProcessEnv): string {
   return value;
 }
 
-async function requireCredential(environment: NodeJS.ProcessEnv): Promise<FileAppUserCredentialStore> {
-  const store = new FileAppUserCredentialStore({ path: localExecutorCredentialPath(environment) });
+export type LocalExecutorIssuerKeyStatus = "configured" | "missing" | "invalid";
+
+/**
+ * Read the Inari Issuer App private key from Executor-owned secret input.
+ * The key is held only in Executor process memory; it is never written to
+ * Executor configuration, Runtime profiles, or any diagnostic.
+ */
+function issuerPrivateKey(environment: NodeJS.ProcessEnv): string {
+  let pem: string;
   try {
-    if ((await store.load()) === undefined) {
+    pem = readAppPrivateKey(environment);
+  } catch (error: unknown) {
+    if (error instanceof LocalRuntimeConfigError && error.code === "LOCAL_RUNTIME_CONFIG_MISSING") {
       throw new LocalExecutorError(
-        "EXECUTOR_CREDENTIALS_MISSING",
-        "GitHub App user authorization is missing. Run `inari setup --endpoint <endpoint-url>` to complete Device Flow before configuring the local Executor.",
+        "EXECUTOR_ISSUER_KEY_MISSING",
+        "The local Executor mints Inari Issuer App installation credentials. Set INARI_GITHUB_APP_PRIVATE_KEY_FILE to the path of the Issuer App private key (.pem) before configuring the local Executor; the key is read at start and never persisted.",
       );
     }
-  } catch (error: unknown) {
-    if (error instanceof LocalExecutorError) throw error;
-    throw new LocalExecutorError(
-      "EXECUTOR_CREDENTIALS_UNAVAILABLE",
-      "GitHub App user credentials could not be loaded from the configured credential store.",
-    );
+    throw issuerKeyInvalid();
   }
-  return store;
+  try {
+    if (createPrivateKey(pem).asymmetricKeyType !== "rsa") throw new Error();
+  } catch {
+    throw issuerKeyInvalid();
+  }
+  return pem;
+}
+
+function issuerKeyInvalid(): LocalExecutorError {
+  return new LocalExecutorError(
+    "EXECUTOR_ISSUER_KEY_INVALID",
+    "The Inari Issuer App private key configured by INARI_GITHUB_APP_PRIVATE_KEY_FILE (or INARI_GITHUB_APP_PRIVATE_KEY) is not a readable RSA private key.",
+  );
+}
+
+/** Secret-free readiness of the Executor-owned Issuer App private key input. */
+export function localExecutorIssuerKeyStatus(
+  environment: NodeJS.ProcessEnv = process.env,
+): LocalExecutorIssuerKeyStatus {
+  try {
+    issuerPrivateKey(environment);
+    return "configured";
+  } catch (error: unknown) {
+    return error instanceof LocalExecutorError && error.code === "EXECUTOR_ISSUER_KEY_MISSING" ? "missing" : "invalid";
+  }
+}
+
+function requireIssuerPrerequisites(environment: NodeJS.ProcessEnv): void {
+  appId(environment);
+  issuerPrivateKey(environment);
 }
 
 function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalExecutorConfig {
@@ -151,8 +177,7 @@ function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalEx
 export async function setupLocalExecutor(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LocalExecutorSetupResult> {
-  await requireCredential(environment);
-  appId(environment);
+  requireIssuerPrerequisites(environment);
   const configPath = path.join(resolveConfigHome(environment), "executor", EXECUTOR_CONFIG_PATH);
   const existing = readLocalJson("executor", EXECUTOR_CONFIG_PATH, validateLocalExecutorConfig, environment);
   const bindHost = configuredLocalRuntimeBindHost(environment);
@@ -201,18 +226,99 @@ function providerRepository(identity: RepositoryIdentity): GitHubChangeEffectRep
   return { hostname: identity.repositoryHost, owner: parts[0] as string, name: parts[1] as string };
 }
 
-function createBroker(
-  identity: RepositoryIdentity,
+/**
+ * Executor-owned Issuer App installation authority for one repository. The
+ * private key stays captured in `broker`; this value carries no secret field.
+ */
+interface LocalExecutorIssuerBinding {
+  readonly repository: RepositoryIdentity;
+  readonly appId: string;
+  readonly broker: (provenance?: GitHubChangeProvenanceSignerOptions) => GitHubAppInstallationCredentialBroker;
+}
+
+function issuerBindingMismatch(): LocalExecutorError {
+  return new LocalExecutorError(
+    "EXECUTOR_ISSUER_BINDING_MISMATCH",
+    "The Inari Issuer App, installation, or repository does not match the Local Runtime profile for this repository.",
+  );
+}
+
+/**
+ * Bind the Issuer App installation credential to the canonical Local Runtime
+ * profile written by repository setup. The profile supplies the repository id
+ * and installation id; the App ID and private key are Executor-owned inputs.
+ */
+async function localExecutorIssuerBinding(
+  repository: { readonly repositoryHost: string; readonly nameWithOwner: string; readonly repositoryId?: string },
   environment: NodeJS.ProcessEnv,
-  credentialStore: FileAppUserCredentialStore,
-  provenance?: GitHubChangeProvenanceSignerOptions,
-): GitHubAppUserCredentialBroker {
-  return new GitHubAppUserCredentialBroker({
-    appId: appId(environment),
-    repository: providerRepository(identity),
-    repositoryId: identity.repositoryId,
-    credentialStore,
-    ...(provenance === undefined ? {} : { provenance }),
+): Promise<LocalExecutorIssuerBinding> {
+  const configuredAppId = appId(environment);
+  const privateKeyPem = issuerPrivateKey(environment);
+  let profile: Awaited<ReturnType<LocalRuntimeProfileStore["findForRepository"]>>;
+  try {
+    profile = await new LocalRuntimeProfileStore({ environment }).findForRepository({
+      repositoryHost: repository.repositoryHost,
+      repositoryNameWithOwner: repository.nameWithOwner,
+    });
+  } catch {
+    throw new LocalExecutorError(
+      "EXECUTOR_REPOSITORY_BINDING_UNAVAILABLE",
+      "The Local Runtime profile for this repository could not be read.",
+    );
+  }
+  if (profile === undefined) {
+    throw new LocalExecutorError(
+      "EXECUTOR_REPOSITORY_BINDING_MISSING",
+      "No Local Runtime profile binds this repository to an Inari Issuer App installation. Run `inari setup --endpoint <endpoint-url>` in the repository first.",
+    );
+  }
+  if (
+    profile.app.appId !== configuredAppId ||
+    (repository.repositoryId !== undefined && profile.repository.repositoryId !== repository.repositoryId)
+  ) {
+    throw issuerBindingMismatch();
+  }
+  const identity: RepositoryIdentity = Object.freeze({
+    repositoryHost: profile.repository.repositoryHost,
+    repositoryId: profile.repository.repositoryId,
+    nameWithOwner: profile.repository.repositoryNameWithOwner,
+  });
+  const installationId = profile.app.installationId;
+  return Object.freeze({
+    repository: identity,
+    appId: configuredAppId,
+    broker: (provenance?: GitHubChangeProvenanceSignerOptions) =>
+      new GitHubAppInstallationCredentialBroker({
+        appId: configuredAppId,
+        installationId,
+        privateKeyPem,
+        repository: providerRepository(identity),
+        ...(provenance === undefined ? {} : { provenance }),
+      }),
+  });
+}
+
+function sameRepositoryIdentity(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
+  return (
+    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() &&
+    left.repositoryId === right.repositoryId &&
+    left.nameWithOwner.toLowerCase() === right.nameWithOwner.toLowerCase()
+  );
+}
+
+/**
+ * Prove before any provider effect that the minted installation credential is
+ * the configured Issuer App, the profiled installation, and the bound repository.
+ */
+async function verifyIssuerBinding(binding: LocalExecutorIssuerBinding): Promise<RepositoryIdentity> {
+  return binding.broker().withRepositoryReadCapability({}, async (capability) => {
+    if (
+      capability.scope.app.appId !== binding.appId ||
+      !sameRepositoryIdentity(capability.scope.repository, binding.repository)
+    ) {
+      throw issuerBindingMismatch();
+    }
+    return binding.repository;
   });
 }
 
@@ -239,7 +345,7 @@ function buildReader(
 }
 
 async function projectChange(
-  broker: GitHubAppUserCredentialBroker,
+  broker: GitHubAppInstallationCredentialBroker,
   repository: GitHubChangeEffectRepository,
   identity: RepositoryIdentity,
   request: ChangeReadRequest | ChangeMutationRequest,
@@ -253,48 +359,14 @@ async function resolveLocalExecutorRepository(
   repositoryNameWithOwner: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<RepositoryIdentity> {
-  const parts = repositoryNameWithOwner.split("/");
-  if (parts.length !== 2)
+  if (repositoryNameWithOwner.split("/").length !== 2)
     throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity is invalid.");
-  const [owner, name] = parts as [string, string];
-  const store = await requireCredential(environment);
-  const credential = await store.load();
-  if (credential === undefined) {
-    throw new LocalExecutorError("EXECUTOR_CREDENTIALS_MISSING", "GitHub App user credentials are missing.");
-  }
+  const binding = await localExecutorIssuerBinding(
+    { repositoryHost: "github.com", nameWithOwner: repositoryNameWithOwner },
+    environment,
+  );
   try {
-    const response = await credential.withAccessToken((token) =>
-      new GitHubNativeHttpTransport({ token, apiUrl: githubRestBaseUrl("github.com") }).request({
-        hostname: "github.com",
-        method: "GET",
-        path: `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
-      }),
-    );
-    if (
-      response.status !== 200 ||
-      typeof response.body !== "object" ||
-      response.body === null ||
-      Array.isArray(response.body)
-    ) {
-      throw new Error();
-    }
-    const body = response.body as Record<string, unknown>;
-    const id = typeof body.id === "number" && Number.isSafeInteger(body.id) ? String(body.id) : body.id;
-    const fullName = body.full_name;
-    const candidate = {
-      repositoryHost: "github.com",
-      repositoryId: id,
-      nameWithOwner: fullName,
-    };
-    const validation = validateIssuerRepositoryIdentity(candidate);
-    if (
-      !validation.valid ||
-      validation.value === undefined ||
-      validation.value.nameWithOwner.toLocaleLowerCase("en-US") !== repositoryNameWithOwner.toLocaleLowerCase("en-US")
-    ) {
-      throw new Error();
-    }
-    return validation.value;
+    return await verifyIssuerBinding(binding);
   } catch {
     throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity could not be resolved.");
   }
@@ -310,7 +382,9 @@ async function readLocalExecutorEvidence(
     nameWithOwner: request.repository.name,
   };
   const repository = providerRepository(identity);
-  const broker = createBroker(identity, environment, await requireCredential(environment));
+  const binding = await localExecutorIssuerBinding(identity, environment);
+  await verifyIssuerBinding(binding);
+  const broker = binding.broker();
   return broker.withRepositoryReadCapability({}, async (capability) => {
     const adapter = new GitHubAdapter({
       repository: identity.nameWithOwner,
@@ -366,16 +440,15 @@ async function readLocalExecutorEvidence(
 
 function createDelegates(
   input: AuthorizedExecution,
-  environment: NodeJS.ProcessEnv,
-  credentialStore: FileAppUserCredentialStore,
+  binding: LocalExecutorIssuerBinding,
 ): AuthorizedExecutionDelegates {
-  const readBroker = createBroker(input.repository, environment, credentialStore);
+  const readBroker = binding.broker();
   const readRepository = providerRepository(input.repository);
   const readExecutor = {
     read: (request: ChangeReadRequest) => projectChange(readBroker, readRepository, input.repository, request),
   };
-  const executionBroker = createBroker(input.repository, environment, credentialStore);
-  const effectAuthorizer = new InariEffectAuthorizer({ appId: appId(environment), broker: executionBroker });
+  const executionBroker = binding.broker();
+  const effectAuthorizer = new InariEffectAuthorizer({ appId: binding.appId, broker: executionBroker });
 
   return {
     readExecutor,
@@ -405,8 +478,9 @@ function createDelegates(
     },
     createChangeExecutor: async ({ execution, request }) => {
       const target = execution.repository;
+      if (!sameRepositoryIdentity(target, binding.repository)) throw issuerBindingMismatch();
       const repository = providerRepository(target);
-      let executionBroker = createBroker(target, environment, credentialStore);
+      let executionBroker = binding.broker();
       if (request.operation === "issue") {
         if (request.signedProvenanceRecord === undefined) throw new Error("Signed Change provenance is required.");
         const validation = validateChangeProvenanceRecord(request.signedProvenanceRecord);
@@ -422,10 +496,10 @@ function createDelegates(
           }
           return { runtimeAuthority: loaded.authority, signedRecord } satisfies GitHubChangeProvenanceSignerOptions;
         });
-        executionBroker = createBroker(target, environment, credentialStore, signer);
+        executionBroker = binding.broker(signer);
       }
 
-      const effectAuthorizer = new InariEffectAuthorizer({ appId: appId(environment), broker: executionBroker });
+      const effectAuthorizer = new InariEffectAuthorizer({ appId: binding.appId, broker: executionBroker });
       let establishedApp: AuthorizedExecutionChangeFactoryResult["app"];
       await executionBroker.withRepositoryReadCapability({}, async (capability) => {
         establishedApp = {
@@ -468,8 +542,9 @@ export async function executeLocalAuthorizedExecution(
   input: AuthorizedExecution,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<AuthorizedExecutionResult> {
-  const credentialStore = await requireCredential(environment);
-  return executeAuthorizedExecution(input, createDelegates(input, environment, credentialStore));
+  const binding = await localExecutorIssuerBinding(input.repository, environment);
+  await verifyIssuerBinding(binding);
+  return executeAuthorizedExecution(input, createDelegates(input, binding));
 }
 
 export interface LocalExecutorHttpServerOptions extends LocalExecutorHttpHandlerOptions {
@@ -604,8 +679,7 @@ export async function startConfiguredLocalExecutor(
   readonly announcement: LocalRuntimeEndpoint;
 }> {
   const config = configuredLocalExecutor(environment);
-  await requireCredential(environment);
-  appId(environment);
+  requireIssuerPrerequisites(environment);
   let transport: ReturnType<typeof loadLocalMtlsIdentity> | undefined;
   if (config.listen.host === "0.0.0.0") {
     const admission = readLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment);

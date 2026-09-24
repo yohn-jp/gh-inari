@@ -357,16 +357,28 @@ and Runtime Authority. `inari init` reports the ordered setup state and the
 next supported command. Repository Runtime onboarding through
 `inari setup --endpoint <endpoint-url>` performs GitHub App Device Flow and
 stores the App-user credential at `$INARI_CONFIG_HOME/app-user-credential.json`
-by default. It also manages repository-scoped Runtime setup; configuring the
-local Executor remains a separate step.
+by default. That App-user credential authorizes only this bootstrap publication;
+`inari setup` also writes the repository Runtime profile that binds the
+repository to its Inari Issuer App installation. Configuring the local Executor
+remains a separate step.
 
+The local Executor performs post-bootstrap provider reads and governed effects
+with Inari Issuer App installation credentials, never the App-user credential.
 Set `INARI_GITHUB_APP_ID` (or `GITHUB_APP_ID`) to the numeric App ID reported
-by `inari setup`, then run `inari executor setup`. Run `inari authority setup`
+by `inari setup` and `INARI_GITHUB_APP_PRIVATE_KEY_FILE` to the Issuer App
+private key (`.pem`) path, then run `inari executor setup`. The Executor reads
+the key at start, mints repository-scoped installation tokens for the
+installation recorded in the Runtime profile, and fails closed on a missing or
+invalid key, a mismatched App, installation, or repository, or insufficient
+installation permissions. The key is never written to Executor configuration,
+Runtime profiles, Admission, Session, or `inari init` output; the Supervisor
+withholds it from Admission and the Agent child. Run `inari authority setup`
 to create local key custody, followed by `inari authority bootstrap` to create
 the public Runtime Authority record. Pass that public file to
 `inari admission setup --from <public-record-file>`; this pins public trust and
 binds the CLI Admission route. The private Authority key stays in its local
-custody directory, and App-user credentials stay in their credential file.
+custody directory, App-user credentials stay in their credential file, and the
+Issuer App private key stays in Executor-owned custody.
 
 Run `inari runtime supervise` to start and supervise the local Executor and
 Admission processes together and verify their discovered loopback readiness.

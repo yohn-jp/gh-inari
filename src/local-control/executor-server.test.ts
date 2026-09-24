@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtemp, readFile, rm, unlink } from "node:fs/promises";
+import { createHash, createPublicKey, generateKeyPairSync, verify, type KeyObject } from "node:crypto";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -19,11 +19,10 @@ import type { SignedChangeProvenanceRecord } from "../change-provenance-record.j
 import { changeMutationRequest } from "../change-execution-port.js";
 import { compileIssueFormYaml } from "../contract/issue-form.js";
 import { projectChangeFromGitHubEvidence } from "../change.js";
-import { createAppUserCredential } from "../github/app-user-credential.js";
-import { FileAppUserCredentialStore } from "../github/app-user-credential-store.js";
 import { assertTrustedExecution, type RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { PrPublicationRequest } from "../pr-publication.js";
 import { parsePullRequestTemplate } from "../pull-request-template.js";
+import { saveLocalRuntimeProfile } from "../local-runtime-profile.js";
 import {
   executeLocalAuthorizedExecution,
   LocalExecutorError,
@@ -50,6 +49,9 @@ const APP = {
   principal: "app:inari-issuer" as const,
   installationId: "456",
 };
+const ISSUER_KEY = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const ISSUER_PRIVATE_KEY_PEM = ISSUER_KEY.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const INSTALLATION_TOKEN = "ghs_local_executor_installation_token";
 const CHANGE_PULL_REQUEST = 10261;
 const CHANGE_TITLE = "feat: Local Executor Server";
 const POLICY_COMMIT = "1".repeat(40);
@@ -280,6 +282,12 @@ function providerFetch(
     readonly issueBody?: string;
     readonly pullRequestBody?: string;
     readonly repositoryArtifacts?: readonly Readonly<{ path: string; sha: string; content: string }>[];
+    /** Public key GitHub holds for the Issuer App; defaults to the configured key. */
+    readonly appPublicKey?: KeyObject;
+    /** Permissions granted to the installation; a request beyond this is rejected. */
+    readonly installationPermissions?: Readonly<Record<string, "read" | "write">>;
+    /** Repository GitHub selects for the minted installation token. */
+    readonly selectedRepository?: Readonly<{ id: number; full_name: string }>;
   } = {},
 ): {
   readonly fetch: typeof globalThis.fetch;
@@ -306,20 +314,46 @@ function providerFetch(
     const method = (init?.method ?? "GET").toUpperCase();
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
     calls.push({ method, url, ...(body === undefined ? {} : { body }) });
-    if (url.pathname === "/user/installations" && method === "GET") {
-      return json({
-        installations: [
-          {
-            id: 456,
-            app_id: Number(APP.appId),
-            suspended_at: null,
-            permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" },
-          },
-        ],
-      });
-    }
-    if (url.pathname === "/user/installations/456/repositories" && method === "GET") {
-      return json({ repositories: [{ ...repository, permissions: { contents: "write", metadata: "read" } }] });
+    if (url.pathname === `/app/installations/${APP.installationId}/access_tokens` && method === "POST") {
+      const headers = new Headers(init?.headers);
+      const jwt = headers.get("authorization")?.replace(/^Bearer /u, "") ?? "";
+      const [header, payload, signature] = jwt.split(".");
+      const signed =
+        header !== undefined &&
+        payload !== undefined &&
+        signature !== undefined &&
+        verify(
+          "RSA-SHA256",
+          Buffer.from(`${header}.${payload}`),
+          options.appPublicKey ?? createPublicKey(ISSUER_KEY.privateKey),
+          Buffer.from(signature, "base64url"),
+        ) &&
+        (JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { iss?: unknown }).iss === APP.appId;
+      if (!signed) return json({ message: "A JSON web token could not be decoded" }, 401);
+      const requested = (body?.permissions ?? {}) as Record<string, string>;
+      const granted = options.installationPermissions ?? {
+        contents: "write",
+        issues: "write",
+        pull_requests: "write",
+        metadata: "read",
+      };
+      if (
+        Object.entries(requested).some(
+          ([name, access]) => granted[name] === undefined || (access === "write" && granted[name] !== "write"),
+        )
+      ) {
+        return json({ message: "The permissions requested are not granted to this installation." }, 422);
+      }
+      return json(
+        {
+          token: INSTALLATION_TOKEN,
+          expires_at: "2099-01-01T00:00:00Z",
+          permissions: requested,
+          repository_selection: "selected",
+          repositories: [{ ...repository, ...options.selectedRepository }],
+        },
+        201,
+      );
     }
     if (url.pathname === "/repos/acme/inari" && method === "GET") return json(repository);
     if (url.pathname === `/repos/acme/inari/issues/${ISSUE}` && method === "GET") {
@@ -513,24 +547,54 @@ async function temporaryEnvironment(): Promise<{ readonly root: string; readonly
   };
 }
 
-async function saveCredential(environment: NodeJS.ProcessEnv): Promise<void> {
-  const store = new FileAppUserCredentialStore({
-    path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
-  });
-  await store.save(
-    createAppUserCredential({
-      accessToken: "access-secret",
-      refreshToken: "refresh-secret",
-      accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
-      refreshTokenExpiresAt: "2027-06-01T00:00:00.000Z",
-    }),
+/** Provision Executor-owned Issuer key custody outside the config home. */
+async function configureIssuerKey(root: string, environment: NodeJS.ProcessEnv, pem = ISSUER_PRIVATE_KEY_PEM) {
+  const keyPath = path.join(root, "issuer-app.private-key.pem");
+  await writeFile(keyPath, pem, { mode: 0o600 });
+  environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = keyPath;
+}
+
+/** Post-bootstrap state: the Runtime profile `inari setup` writes for the repository. */
+async function configureIssuer(
+  root: string,
+  environment: NodeJS.ProcessEnv,
+  app: { readonly appId?: string; readonly installationId?: string; readonly repositoryId?: string } = {},
+): Promise<void> {
+  await configureIssuerKey(root, environment);
+  await saveLocalRuntimeProfile(
+    {
+      version: 1,
+      state: "ready",
+      endpoint: "https://endpoint.example.test",
+      relayUrl: "wss://endpoint.example.test/relay",
+      repository: {
+        repositoryHost: REPOSITORY.repositoryHost,
+        repositoryId: app.repositoryId ?? REPOSITORY.repositoryId,
+        repositoryNameWithOwner: REPOSITORY.nameWithOwner,
+      },
+      app: { appId: app.appId ?? APP.appId, installationId: app.installationId ?? APP.installationId },
+      authority: {
+        authorityId: "executor-production-test",
+        publicKeyFingerprint: `sha256:${"0".repeat(64)}`,
+        privateKeyPath: path.join(root, "authority.pem"),
+      },
+    },
+    { environment },
   );
 }
 
-test("Executor setup provisions stable identity and references the existing App-user credential store", async () => {
+async function readTree(directory: string): Promise<string> {
+  let text = "";
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) text += await readFile(path.join(entry.parentPath, entry.name), "utf8");
+  }
+  return text;
+}
+
+test("Executor setup provisions stable secret-free identity from Issuer App prerequisites without App-user credentials", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const first = await setupLocalExecutor(environment);
     const second = await setupLocalExecutor(environment);
     assert.equal(first.config.id, second.config.id);
@@ -542,14 +606,10 @@ test("Executor setup provisions stable identity and references the existing App-
       listen: { host: "127.0.0.1", port: 0 },
       provider: { kind: "github", credentialProfile: "default" },
     });
-    const configText = await readFile(first.configPath, "utf8");
-    assert.equal(configText.includes("access-secret"), false);
-    assert.equal(configText.includes("refresh-secret"), false);
-    assert.ok(
-      (await readFile(path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"), "utf8")).includes(
-        "access-secret",
-      ),
-    );
+    const persisted = await readTree(environment.INARI_CONFIG_HOME as string);
+    assert.equal(persisted.includes(ISSUER_PRIVATE_KEY_PEM.split("\n")[1] as string), false);
+    assert.equal(persisted.includes("PRIVATE KEY"), false);
+    assert.equal(persisted.includes("app-user-credential"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -559,7 +619,7 @@ test("Executor setup accepts an explicit all-interface bind policy", async () =>
   const { root, environment } = await temporaryEnvironment();
   environment.INARI_LOCAL_RUNTIME_BIND = "0.0.0.0";
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const configured = await setupLocalExecutor(environment);
     assert.equal(configured.config.listen.host, "0.0.0.0");
     assert.equal(configured.config.listen.port, 0);
@@ -573,7 +633,7 @@ test("Executor setup accepts an explicit all-interface bind policy", async () =>
   }
 });
 
-test("Executor serve fails closed when setup or existing provider credentials are missing", async () => {
+test("Executor serve fails closed when setup or the Issuer App private key is missing", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
     await assert.rejects(
@@ -585,16 +645,15 @@ test("Executor serve fails closed when setup or existing provider credentials ar
       },
     );
 
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const configured = await setupLocalExecutor(environment);
-    await unlink(path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"));
+    delete environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE;
     await assert.rejects(
       () => startConfiguredLocalExecutor("0.14.1", environment),
       (error: unknown) => {
         assert.ok(error instanceof LocalExecutorError);
-        assert.equal(error.code, "EXECUTOR_CREDENTIALS_MISSING");
-        assert.match(error.message, /authorization is missing/u);
-        assert.match(error.message, /inari setup --endpoint/u);
+        assert.equal(error.code, "EXECUTOR_ISSUER_KEY_MISSING");
+        assert.match(error.message, /INARI_GITHUB_APP_PRIVATE_KEY_FILE/u);
         return true;
       },
     );
@@ -604,18 +663,35 @@ test("Executor serve fails closed when setup or existing provider credentials ar
   }
 });
 
-test("Executor setup reports missing credentials without creating component configuration", async () => {
+test("Executor setup reports missing or invalid Issuer App private key without creating configuration or echoing it", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
     await assert.rejects(
       () => setupLocalExecutor(environment),
       (error: unknown) => {
         assert.ok(error instanceof LocalExecutorError);
-        assert.equal(error.code, "EXECUTOR_CREDENTIALS_MISSING");
-        assert.match(error.message, /Device Flow/u);
-        assert.match(error.message, /inari setup --endpoint/u);
+        assert.equal(error.code, "EXECUTOR_ISSUER_KEY_MISSING");
+        assert.match(error.message, /INARI_GITHUB_APP_PRIVATE_KEY_FILE/u);
         return true;
       },
+    );
+    const invalidPem = "-----BEGIN PRIVATE KEY-----\nbm90LWEta2V5LXNlbnRpbmVs\n-----END PRIVATE KEY-----\n";
+    await configureIssuerKey(root, environment, invalidPem);
+    await assert.rejects(
+      () => setupLocalExecutor(environment),
+      (error: unknown) => {
+        assert.ok(error instanceof LocalExecutorError);
+        assert.equal(error.code, "EXECUTOR_ISSUER_KEY_INVALID");
+        assert.equal(error.message.includes("bm90LWEta2V5LXNlbnRpbmVs"), false);
+        return true;
+      },
+    );
+    environment.INARI_GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("ed25519")
+      .privateKey.export({ type: "pkcs8", format: "pem" })
+      .toString();
+    await assert.rejects(
+      () => setupLocalExecutor(environment),
+      (error: unknown) => error instanceof LocalExecutorError && error.code === "EXECUTOR_ISSUER_KEY_INVALID",
     );
     await assert.rejects(readFile(path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json")));
   } finally {
@@ -623,10 +699,10 @@ test("Executor setup reports missing credentials without creating component conf
   }
 });
 
-test("Executor setup names the supported App ID configuration when credentials exist", async () => {
+test("Executor setup names the supported App ID configuration when the Issuer key exists", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     delete environment.INARI_GITHUB_APP_ID;
     await assert.rejects(
       () => setupLocalExecutor(environment),
@@ -644,11 +720,102 @@ test("Executor setup names the supported App ID configuration when credentials e
   }
 });
 
+function providerMutations(calls: ReturnType<typeof providerFetch>["calls"]) {
+  return calls.filter((call) => call.method !== "GET" && !call.url.pathname.endsWith("/access_tokens"));
+}
+
+async function assertFailsClosedBeforeMutation(
+  label: string,
+  configure: (root: string, environment: NodeJS.ProcessEnv) => Promise<void>,
+  provider: ReturnType<typeof providerFetch>,
+  code?: string,
+): Promise<void> {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    await configure(root, environment);
+    let outcome: unknown;
+    try {
+      outcome = await withProviderFetch(provider.fetch, () =>
+        executeLocalAuthorizedExecution(branchExecution(), environment),
+      );
+      assert.notEqual((outcome as { status?: unknown }).status, "succeeded", label);
+    } catch (error: unknown) {
+      assert.ok(error instanceof Error, label);
+      if (code !== undefined) assert.equal((error as { code?: unknown }).code, code, label);
+      outcome = { name: error.name, message: error.message, code: (error as { code?: unknown }).code };
+    }
+    if (code !== undefined) assert.equal((outcome as { code?: unknown }).code, code, label);
+    const rendered = JSON.stringify(outcome);
+    assert.equal(rendered.includes("PRIVATE KEY"), false, label);
+    assert.equal(rendered.includes(INSTALLATION_TOKEN), false, label);
+    assert.deepEqual(providerMutations(provider.calls), [], `${label} reached a provider mutation`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("Local Executor fails closed before mutation on wrong Issuer App, installation, or repository binding", async () => {
+  await assertFailsClosedBeforeMutation(
+    "App ID differs from the Runtime profile",
+    (root, environment) => configureIssuer(root, environment, { appId: "654321" }),
+    providerFetch(),
+    "EXECUTOR_ISSUER_BINDING_MISMATCH",
+  );
+  await assertFailsClosedBeforeMutation(
+    "Runtime profile binds a different repository id",
+    (root, environment) => configureIssuer(root, environment, { repositoryId: "987654321" }),
+    providerFetch(),
+    "EXECUTOR_ISSUER_BINDING_MISMATCH",
+  );
+  await assertFailsClosedBeforeMutation(
+    "no Runtime profile binds the repository",
+    (root, environment) => configureIssuerKey(root, environment),
+    providerFetch(),
+    "EXECUTOR_REPOSITORY_BINDING_MISSING",
+  );
+  const unknownInstallation = providerFetch();
+  await assertFailsClosedBeforeMutation(
+    "Runtime profile names an installation the App does not own",
+    (root, environment) => configureIssuer(root, environment, { installationId: "999" }),
+    unknownInstallation,
+  );
+  assert.ok(unknownInstallation.calls.some((call) => call.url.pathname === "/app/installations/999/access_tokens"));
+  await assertFailsClosedBeforeMutation(
+    "installation token selects a different repository",
+    (root, environment) => configureIssuer(root, environment),
+    providerFetch({ selectedRepository: { id: 987654321, full_name: REPOSITORY.nameWithOwner } }),
+  );
+  await assertFailsClosedBeforeMutation(
+    "private key belongs to a different App",
+    (root, environment) => configureIssuer(root, environment),
+    providerFetch({ appPublicKey: generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey }),
+  );
+});
+
+test("Local Executor fails closed before mutation when the Issuer App installation lacks required permissions", async () => {
+  const readOnly = providerFetch({
+    installationPermissions: { contents: "read", issues: "read", pull_requests: "read", metadata: "read" },
+  });
+  await assertFailsClosedBeforeMutation(
+    "read-only installation",
+    (root, environment) => configureIssuer(root, environment),
+    readOnly,
+  );
+  assert.ok(
+    readOnly.calls.some(
+      (call) =>
+        call.url.pathname.endsWith("/access_tokens") &&
+        Object.values(call.body?.permissions as Record<string, string>).includes("write"),
+    ),
+    "the mutation credential request must reach the installation-permission check",
+  );
+});
+
 test("Local Executor production composition executes branch.advance through canonical Git-data CAS", async () => {
   const { root, environment } = await temporaryEnvironment();
   const provider = providerFetch();
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(branchExecution(), environment),
     );
@@ -660,6 +827,15 @@ test("Local Executor production composition executes branch.advance through cano
     assert.equal(result.branchAdvance?.expectedHead, EXPECTED_HEAD);
     assert.equal(result.branchAdvance?.resultingHead, NEW_HEAD);
     assert.equal(result.provenance?.stage, "verified");
+    assert.ok(
+      provider.calls.some((call) => call.url.pathname === `/app/installations/${APP.installationId}/access_tokens`),
+      "provider authority must come from the Issuer App installation credential",
+    );
+    assert.equal(
+      provider.calls.some((call) => call.url.pathname.startsWith("/user")),
+      false,
+      "the Executor must not use App-user authority",
+    );
     assert.equal(
       provider.calls.filter(
         (call) =>
@@ -701,7 +877,7 @@ test("Local Executor production composition executes change.show through authori
   const { root, environment } = await temporaryEnvironment();
   const provider = providerFetch({ change: "absent" });
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(changeExecution("show"), environment),
     );
@@ -722,7 +898,7 @@ test("Local Executor production composition executes change.abort through canoni
   const { root, environment } = await temporaryEnvironment();
   const provider = providerFetch({ change: "active" });
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(changeExecution("abort"), environment),
     );
@@ -764,7 +940,7 @@ test("Local Executor production composition executes change.ready from repositor
     ],
   });
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(changeExecution("ready"), environment),
     );
@@ -789,7 +965,7 @@ test("Local Executor production composition resolves change.issue provenance thr
     repositoryArtifacts: [{ path: signed.artifact.path, sha: AUTHORITY_BLOB, content: signed.artifact.content }],
   });
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(changeExecution("issue", signed.signedProvenanceRecord), environment),
     );
@@ -818,7 +994,7 @@ test("Local Executor production composition routes change.merge through canonica
   const { root, environment } = await temporaryEnvironment();
   const provider = providerFetch({ change: "active", draft: false });
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(changeExecution("merge"), environment),
     );
@@ -854,7 +1030,7 @@ test("Local Executor production composition executes pullRequest.publish through
   const { root, environment } = await temporaryEnvironment();
   const provider = providerFetch();
   try {
-    await saveCredential(environment);
+    await configureIssuer(root, environment);
     const result = await withProviderFetch(provider.fetch, () =>
       executeLocalAuthorizedExecution(publicationExecution(), environment),
     );

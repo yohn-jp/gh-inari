@@ -17,7 +17,7 @@ import {
   validateLocalCliConfig,
   validateLocalExecutorConfig,
 } from "./local-control/config.js";
-import { localExecutorAppId, localExecutorCredentialPath } from "./local-control/executor-server.js";
+import { localExecutorAppId, localExecutorIssuerKeyStatus } from "./local-control/executor-server.js";
 import { LOCAL_EXECUTOR_HEALTH_PATH } from "./local-control/executor-http.js";
 import { LOCAL_ADMISSION_HEALTH_PATH } from "./local-control/admission-server.js";
 import { readLocalRuntimeEndpoint, type LocalRuntimeComponent } from "./local-control/runtime-discovery.js";
@@ -32,6 +32,7 @@ export type LocalApplicationSetupStepId =
   | "cli-topology"
   | "app-user-authorization"
   | "executor-app-id"
+  | "executor-issuer-key"
   | "executor"
   | "runtime-authority-key"
   | "runtime-authority-record"
@@ -81,6 +82,7 @@ export interface LocalApplicationState {
     readonly appIdSource?: "environment" | "repository-runtime-profile";
     readonly credentialConfigured: boolean;
     readonly credentialPath: string;
+    readonly issuerKey: "configured" | "missing" | "invalid";
   };
   readonly steps: readonly LocalApplicationSetupStep[];
   readonly nextAction: LocalApplicationNextAction;
@@ -118,6 +120,14 @@ function authorityValidator(value: unknown): Delegator {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, "'\\''")}'`;
+}
+
+/** App-user credential custody used only by bootstrap `inari setup`. */
+function appUserCredentialPath(environment: NodeJS.ProcessEnv): string {
+  const configured = environment.INARI_GITHUB_APP_USER_CREDENTIAL_FILE ?? environment.INARI_APP_USER_CREDENTIAL_FILE;
+  return configured === undefined
+    ? path.join(resolveConfigHome(environment), "app-user-credential.json")
+    : path.resolve(configured);
 }
 
 function configuredAppId(environment: NodeJS.ProcessEnv): {
@@ -221,7 +231,8 @@ function readPublicAuthorityRecord(environment: NodeJS.ProcessEnv): {
 
 /**
  * Evaluate persisted local setup prerequisites without starting services or
- * exposing App-user credential or Runtime Authority private-key material.
+ * exposing App-user credential, Issuer App private-key, or Runtime Authority
+ * private-key material.
  */
 export async function projectLocalApplicationState(
   options: LocalApplicationStateOptions = {},
@@ -229,7 +240,8 @@ export async function projectLocalApplicationState(
   const root = path.resolve(options.root ?? process.cwd());
   const environment = options.environment ?? process.env;
   const configHome = resolveConfigHome(environment);
-  const appCredentialPath = localExecutorCredentialPath(environment);
+  const appCredentialPath = appUserCredentialPath(environment);
+  const issuerKey = localExecutorIssuerKeyStatus(environment);
   const envApp = configuredAppId(environment);
   const profileAppId = envApp.value === undefined ? await repositoryRuntimeAppId(root, environment) : undefined;
   const appId = envApp.value ?? profileAppId;
@@ -281,7 +293,7 @@ export async function projectLocalApplicationState(
     title: "Authorize the Inari GitHub App user",
     detail:
       `Repository Runtime setup runs the supported Device Flow and stores the App-user credential at ${appCredentialPath}. ` +
-      "This supplies credential custody; local Executor setup is a separate step.",
+      "This bootstrap credential publishes the initial Runtime trust PR only; the local Executor does not use it.",
     syntax: "inari setup --endpoint <endpoint-url>",
     ...(!credentialConfigured && !credentialBlocked ? { command: "inari setup --endpoint <endpoint-url>" } : {}),
     ...(credentialBlocked ? { diagnostic: "APP_USER_CREDENTIAL_UNAVAILABLE" } : {}),
@@ -291,7 +303,7 @@ export async function projectLocalApplicationState(
     status: envApp.value !== undefined ? "ready" : "required",
     title: "Configure the GitHub App ID for local Executor",
     detail:
-      "Executor reads the numeric App ID from INARI_GITHUB_APP_ID (or GITHUB_APP_ID); the App-user credential remains in the separate credential file.",
+      "Executor reads the numeric Inari Issuer App ID from INARI_GITHUB_APP_ID (or GITHUB_APP_ID); the installation is bound from the repository Runtime profile written by `inari setup`.",
     syntax: "export INARI_GITHUB_APP_ID='<numeric-app-id-from-inari-setup>'",
     ...(envApp.value === undefined
       ? {
@@ -302,23 +314,25 @@ export async function projectLocalApplicationState(
         }
       : {}),
   };
-  const executorReady = executor.value !== undefined && credentialConfigured && envApp.value !== undefined;
+  const issuerKeyStep: LocalApplicationSetupStep = {
+    id: "executor-issuer-key",
+    status: issuerKey === "configured" ? "ready" : issuerKey === "invalid" ? "blocked" : "required",
+    title: "Provide the Inari Issuer App private key to the local Executor",
+    detail:
+      "The local Executor mints repository-scoped Issuer App installation credentials. Point INARI_GITHUB_APP_PRIVATE_KEY_FILE at the Issuer App private key (.pem); the key is read by the Executor process only and never persisted or displayed.",
+    syntax: "export INARI_GITHUB_APP_PRIVATE_KEY_FILE='<path-to-inari-issuer-app-private-key.pem>'",
+    ...(issuerKey === "invalid" ? { diagnostic: "EXECUTOR_ISSUER_KEY_INVALID" } : {}),
+  };
+  const issuerReady = envApp.value !== undefined && issuerKey === "configured";
+  const executorReady = executor.value !== undefined && issuerReady;
   const executorStep: LocalApplicationSetupStep = {
     id: "executor",
-    status: executor.blocked
-      ? "blocked"
-      : !credentialConfigured || envApp.value === undefined
-        ? "waiting"
-        : executorReady
-          ? "ready"
-          : "required",
+    status: executor.blocked ? "blocked" : !issuerReady ? "waiting" : executorReady ? "ready" : "required",
     title: "Provision the local Executor",
     detail:
-      "This writes the local Executor identity/configuration and keeps provider credentials in their existing custody.",
+      "This writes the secret-free local Executor identity/configuration; the Issuer App private key stays in Executor-owned custody.",
     syntax: "inari executor setup",
-    ...(!executorReady && executor.blocked !== true && credentialConfigured && envApp.value !== undefined
-      ? { command: "inari executor setup" }
-      : {}),
+    ...(!executorReady && executor.blocked !== true && issuerReady ? { command: "inari executor setup" } : {}),
     ...(executor.blocked ? { diagnostic: "LOCAL_EXECUTOR_CONFIG_INVALID" } : {}),
   };
   const authorityStep: LocalApplicationSetupStep = {
@@ -443,6 +457,7 @@ export async function projectLocalApplicationState(
     topologyStep,
     appUserStep,
     appIdStep,
+    issuerKeyStep,
     executorStep,
     authorityStep,
     recordStep,
@@ -481,6 +496,7 @@ export async function projectLocalApplicationState(
       ...(appIdSource === undefined ? {} : { appIdSource }),
       credentialConfigured,
       credentialPath: appCredentialPath,
+      issuerKey,
     },
     steps,
     nextAction,
