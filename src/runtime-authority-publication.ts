@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { validateBranchName } from "./branch-naming.js";
 import { delegatorPublicKeyFingerprint } from "./agent-authority/delegator-key.js";
 import { validateDelegator, type Delegator } from "./agent-authority/delegator.js";
 import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
@@ -17,8 +16,16 @@ import type {
 } from "./github/runtime-authority-publication-capability.js";
 
 export const RUNTIME_AUTHORITY_PUBLICATION_REQUEST_VERSION = 1 as const;
-export const RUNTIME_AUTHORITY_PUBLICATION_EVENT = "inari.runtime-authority.publish" as const;
 const MAX_REQUEST_BYTES = 64 * 1024;
+/**
+ * Runtime Authority publication is Issue-less (like release/<semver>): it
+ * bootstraps a repository trust root, not an ordinary Change, so it does not
+ * use the `<type>/<issue-number>-<slug>` Core branch grammar. The pattern is
+ * duplicated (not imported) in `./github/runtime-authority-publication-capability.js`
+ * to avoid a module cycle; keep both in sync.
+ */
+const RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PREFIX = "inari/runtime-authority/" as const;
+export const RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN = /^inari\/runtime-authority\/[0-9a-f]{16}$/u;
 const ISSUER_BOT_LOGIN = "inari-issuer[bot]";
 const AUTHORITY_TEMPLATE_SOURCE_PATH = ".github/inari/pull-requests/authority.json";
 
@@ -50,7 +57,9 @@ export function runtimeAuthorityPublicationBranch(authorityId: string): string {
     throw new RuntimeAuthorityPublicationError();
   }
   const identityDigest = createHash("sha256").update(authorityId, "utf8").digest("hex").slice(0, 16);
-  return `feat/1066-runtime-authority-bootstrap-${identityDigest}`;
+  const branch = `${RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PREFIX}${identityDigest}`;
+  if (!RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN.test(branch)) throw new RuntimeAuthorityPublicationError();
+  return branch;
 }
 
 export function runtimeAuthorityPublicationTitle(authorityId: string): string {
@@ -91,7 +100,6 @@ export async function publishRuntimeAuthority(
   const request = validateRuntimeAuthorityPublicationRequest(requestInput);
   const artifact = renderDelegatorArtifact(request.authority);
   const branch = runtimeAuthorityPublicationBranch(request.authority.id);
-  if (validateBranchName(branch).length > 0) throw new RuntimeAuthorityPublicationError();
   const title = runtimeAuthorityPublicationTitle(request.authority.id);
   const body = authorityPullRequestBody(request.authority);
 

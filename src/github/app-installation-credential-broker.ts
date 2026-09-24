@@ -106,12 +106,6 @@ export const GITHUB_APP_GIT_DATA_PERMISSIONS = Object.freeze({
   metadata: "read",
 } as const);
 
-/** Minimum App-user permission set required to dispatch the trusted Issuer workflow. */
-export const GITHUB_APP_RUNTIME_AUTHORITY_DISPATCH_PERMISSIONS = Object.freeze({
-  contents: "write",
-  metadata: "read",
-} as const);
-
 /** Minimum Issuer App permissions for bounded public Authority publication. */
 export const GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS = Object.freeze({
   contents: "write",

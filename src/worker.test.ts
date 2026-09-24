@@ -98,3 +98,39 @@ test("an unknown path returns 404 from the #377 transport when configuration is 
   const response = await worker.default.fetch(new Request("https://worker.example/nope"), VALID_ENV);
   assert.equal(response.status, 404);
 });
+
+test("/v1/runtime-authority/publish rejects an unauthenticated caller before any Issuer/GitHub network access", async () => {
+  const worker = await freshWorkerModule();
+  const response = await worker.default.fetch(
+    new Request("https://worker.example/v1/runtime-authority/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version: 1, authority: { id: "unauthenticated-caller" } }),
+    }),
+    VALID_ENV,
+  );
+  // VALID_ENV has no fetch injected, so any Issuer/GitHub network call this
+  // handler attempted would throw. Getting a clean 401 back proves the
+  // caller-authorization check runs, and rejects, before that.
+  assert.equal(response.status, 401);
+  const body = (await response.json()) as { ok: boolean; error: { code: string } };
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "UNAUTHORIZED");
+});
+
+test("missing configuration fails closed for /v1/runtime-authority/publish with a secret-safe error", async () => {
+  const worker = await freshWorkerModule();
+  const { INARI_GITHUB_APP_PRIVATE_KEY: _omitted, ...incomplete } = VALID_ENV;
+  const response = await worker.default.fetch(
+    new Request("https://worker.example/v1/runtime-authority/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer caller-token" },
+      body: JSON.stringify({ version: 1, authority: { id: "x" } }),
+    }),
+    incomplete as Env,
+  );
+  assert.equal(response.status, 500);
+  const body = (await response.json()) as { ok: boolean; error: { code: string } };
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "WORKER_CONFIGURATION_INVALID");
+});

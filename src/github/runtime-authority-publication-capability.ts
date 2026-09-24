@@ -286,8 +286,12 @@ function safeRefName(value: unknown): value is string {
 
 function validCanonicalBranch(value: unknown): value is string {
   if (typeof value !== "string") return false;
-  // The trust branch is derived by the publisher from Issue #1066 and an ID hash.
-  return /^feat\/1066-runtime-authority-bootstrap-[0-9a-f]{16}$/u.test(value);
+  // Runtime Authority publication is repository-independent and Issue-less
+  // (like release/<semver>): the branch is derived only from the Authority
+  // ID hash, never a source- or target-repository Issue number. This pattern
+  // is duplicated (not imported) from `../runtime-authority-publication.js`
+  // to avoid a module cycle; keep both in sync.
+  return /^inari\/runtime-authority\/[0-9a-f]{16}$/u.test(value);
 }
 
 function safeRepositoryPath(value: string): boolean {
