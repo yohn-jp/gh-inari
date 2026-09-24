@@ -102,8 +102,16 @@ function renderLocalConsolePage(input: {
     `        <dt>Admission</dt><dd>${escapeHtml(runtime.admission)}</dd>`,
     `        <dt>Local Runtime</dt><dd>${escapeHtml(runtime.overall)}</dd>`,
     "      </dl>",
+    "      <h2>Issue / Change branch</h2>",
+    `      <p>Status: <strong>${escapeHtml(application.changeBranch.status)}</strong></p>`,
+    `      <p>${escapeHtml(application.changeBranch.detail)}</p>`,
+    application.changeBranch.command === undefined
+      ? ""
+      : `      <pre><code>${escapeHtml(application.changeBranch.command)}</code></pre>`,
     "      <h2>Governed Session</h2>",
-    `      <p><code>${escapeHtml(application.sessionStartCommand)}</code></p>`,
+    application.changeBranch.status === "ready"
+      ? `      <p><code>${escapeHtml(`inari session start --issue ${String(application.changeBranch.issue)} -- <command...>`)}</code></p>`
+      : "      <p>Session start is not yet available; resolve the Issue/Change branch step above.</p>",
     "      <p>This page is loopback-only and never renders credentials, tokens, or private key material.</p>",
     "    </main>",
     "  </body>",

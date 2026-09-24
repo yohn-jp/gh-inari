@@ -1196,9 +1196,18 @@ async function runInitCommand(
     console.log(`Next: ${applicationState.nextAction.detail}`);
     for (const command of applicationState.nextAction.commands) console.log(`Run: ${command}`);
     console.log(`Credential custody: ${applicationState.provider.credentialPath}`);
-    console.log("After setup, run each service command in a separate terminal:");
+    console.log("After setup, run the local Runtime Supervisor:");
     for (const command of applicationState.runtime.commands) console.log(`Run: ${command}`);
-    console.log(`Then launch the governed child with: ${applicationState.sessionStartCommand}`);
+    console.log(
+      `Issue/Change branch: ${applicationState.changeBranch.status} — ${applicationState.changeBranch.detail}`,
+    );
+    if (applicationState.changeBranch.command !== undefined)
+      console.log(`Run: ${applicationState.changeBranch.command}`);
+    if (applicationState.changeBranch.status === "ready") {
+      console.log(
+        `Then launch the governed child with: inari session start --issue ${applicationState.changeBranch.issue} -- <command...>`,
+      );
+    }
     console.log(
       `Runtime readiness: executor=${runtimeStatus.executor} admission=${runtimeStatus.admission} overall=${runtimeStatus.overall}`,
     );

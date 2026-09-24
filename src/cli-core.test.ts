@@ -87,7 +87,7 @@ async function capture(
 test("inari init declares only the local CLI topology and is idempotent", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
-    const first = await capture(["init", "--json"], environment);
+    const first = await capture(["init", "--json"], environment, { repositoryRoot: root });
     assert.equal(first.exitCode, 0);
     assert.equal(first.stderr, "");
     const firstOutput = JSON.parse(first.stdout) as {
@@ -103,6 +103,7 @@ test("inari init declares only the local CLI topology and is idempotent", async 
         readonly steps: readonly { readonly id: string; readonly status: string; readonly syntax: string }[];
         readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
         readonly runtime: { readonly status: string; readonly commands: readonly string[] };
+        readonly changeBranch: { readonly status: string; readonly detail: string };
         readonly sessionStartCommand: string;
       };
       readonly runtimeStatus: { readonly executor: string; readonly admission: string; readonly overall: string };
@@ -140,8 +141,9 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     );
     assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("authority bootstrap")));
     assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("admission setup --from")));
-    assert.deepEqual(firstOutput.applicationState.runtime.commands, ["inari executor serve", "inari admission serve"]);
+    assert.deepEqual(firstOutput.applicationState.runtime.commands, ["inari runtime supervise"]);
     assert.equal(firstOutput.applicationState.runtime.status, "not-checked");
+    assert.equal(firstOutput.applicationState.changeBranch.status, "issue-not-selected");
     assert.equal(
       firstOutput.applicationState.sessionStartCommand,
       "inari session start --issue <number> -- <command...>",
@@ -153,18 +155,19 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
 
-    const human = await capture(["init"], environment);
+    const human = await capture(["init"], environment, { repositoryRoot: root });
     assert.equal(human.exitCode, 0);
     assert.ok(human.stdout.includes("Ordered setup path:"));
     assert.ok(human.stdout.includes("inari setup --endpoint <endpoint-url>"));
     assert.ok(human.stdout.includes("INARI_GITHUB_APP_ID"));
     assert.ok(human.stdout.includes("inari authority bootstrap"));
     assert.ok(human.stdout.includes("inari admission setup --from"));
-    assert.ok(human.stdout.includes("inari session start --issue <number> -- <command...>"));
+    assert.ok(human.stdout.includes("Issue/Change branch: issue-not-selected"));
+    assert.ok(!human.stdout.includes("Then launch the governed child with:"));
     assert.ok(human.stdout.includes("Runtime readiness: executor=not-running admission=not-running overall=not-ready"));
     assert.ok(human.stdout.includes("inari runtime console"));
 
-    const second = await capture(["init", "--json"], environment);
+    const second = await capture(["init", "--json"], environment, { repositoryRoot: root });
     assert.equal(second.exitCode, 0);
     assert.deepEqual(JSON.parse(second.stdout), firstOutput);
     assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")), firstOutput.config);
@@ -177,8 +180,9 @@ test("local application state reaches configured through supported CLI commands 
   const { root, environment } = await temporaryEnvironment();
   environment.INARI_GITHUB_APP_ID = "123456";
   const publicAuthorityPath = localComponentPath("authority", "runtime-authority.json", environment);
+  const deps = { repositoryRoot: root };
   try {
-    assert.equal((await capture(["init", "--json"], environment)).exitCode, 0);
+    assert.equal((await capture(["init", "--json"], environment, deps)).exitCode, 0);
     await new FileAppUserCredentialStore({
       path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
     }).save(
@@ -188,8 +192,8 @@ test("local application state reaches configured through supported CLI commands 
         accessTokenExpiresAt: "2099-01-01T00:00:00.000Z",
       }),
     );
-    assert.equal((await capture(["executor", "setup", "--json"], environment)).exitCode, 0);
-    const authorityOutput = await capture(["authority", "setup", "--json"], environment);
+    assert.equal((await capture(["executor", "setup", "--json"], environment, deps)).exitCode, 0);
+    const authorityOutput = await capture(["authority", "setup", "--json"], environment, deps);
     assert.equal(authorityOutput.exitCode, 0);
     const authority = JSON.parse(authorityOutput.stdout) as {
       readonly privateKeyPath: string;
@@ -213,18 +217,20 @@ test("local application state reaches configured through supported CLI commands 
         "--json",
       ],
       environment,
+      deps,
     );
     assert.equal(bootstrap.exitCode, 0, bootstrap.stderr);
-    const admission = await capture(["admission", "setup", "--from", publicAuthorityPath, "--json"], environment);
+    const admission = await capture(["admission", "setup", "--from", publicAuthorityPath, "--json"], environment, deps);
     assert.equal(admission.exitCode, 0, admission.stderr);
 
-    const initialized = await capture(["init", "--json"], environment);
+    const initialized = await capture(["init", "--json"], environment, deps);
     assert.equal(initialized.exitCode, 0);
     const state = JSON.parse(initialized.stdout).applicationState as {
       readonly status: string;
       readonly setupComplete: boolean;
       readonly steps: readonly { readonly id: string; readonly status: string }[];
       readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+      readonly changeBranch: { readonly status: string; readonly issue?: number; readonly branch?: string };
     };
     assert.equal(state.status, "configured", JSON.stringify(state.steps));
     assert.equal(state.setupComplete, true);
@@ -232,14 +238,60 @@ test("local application state reaches configured through supported CLI commands 
       state.steps.every((step) => step.status === "ready"),
       JSON.stringify(state.steps),
     );
+    // #1065: once setup completes the canonical next action is the Runtime
+    // Supervisor plus, since no canonical Issue-bound Change branch is
+    // checked out yet, guidance to select one -- not a bare Session-start
+    // command projected as immediately executable.
+    assert.equal(state.changeBranch.status, "issue-not-selected");
     assert.deepEqual(state.nextAction, {
-      stepId: "start-runtime",
-      commands: ["inari executor serve", "inari admission serve"],
-      detail: "Run each command in a separate terminal; then launch the governed child with the Session command below.",
+      stepId: "change-branch",
+      commands: [
+        "inari runtime supervise",
+        "git checkout -b <feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>",
+      ],
+      detail:
+        "Run the local Runtime Supervisor. No Issue is selected. Check out the canonical Issue-bound Change branch before Session start.",
     });
     assert.equal(initialized.stdout.includes("state-access-secret"), false);
     assert.equal(initialized.stdout.includes("state-refresh-secret"), false);
     assert.equal(initialized.stdout.includes("BEGIN PRIVATE KEY"), false);
+
+    // Checking out the canonical Issue-bound Change branch flips readiness to
+    // "ready" and the projected next action becomes the Runtime Supervisor
+    // followed directly by the exact Session-start command for that Issue.
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["checkout", "-q", "-b", "feat/4242-local-state-branch-readiness"], { cwd: root });
+    const onCanonicalBranch = await capture(["init", "--json"], environment, deps);
+    assert.equal(onCanonicalBranch.exitCode, 0);
+    const readyState = JSON.parse(onCanonicalBranch.stdout).applicationState as {
+      readonly changeBranch: { readonly status: string; readonly issue?: number; readonly branch?: string };
+      readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+    };
+    assert.deepEqual(readyState.changeBranch, {
+      status: "ready",
+      detail: "Local branch feat/4242-local-state-branch-readiness is the canonical Change branch for Issue #4242.",
+      issue: 4242,
+      branch: "feat/4242-local-state-branch-readiness",
+    });
+    assert.deepEqual(readyState.nextAction, {
+      stepId: "start-runtime",
+      commands: ["inari runtime supervise"],
+      detail:
+        "Run the local Runtime Supervisor, then launch the governed child for Issue #4242 on feat/4242-local-state-branch-readiness with the Session command below.",
+    });
+
+    // A branch that is neither the default branch nor a canonical Change
+    // branch is a mismatch state, not a silent pass-through to Session start.
+    execFileSync("git", ["checkout", "-q", "-b", "scratch-notes"], { cwd: root });
+    const onMismatchedBranch = await capture(["init", "--json"], environment, deps);
+    assert.equal(onMismatchedBranch.exitCode, 0);
+    const mismatchState = JSON.parse(onMismatchedBranch.stdout).applicationState as {
+      readonly changeBranch: { readonly status: string; readonly branch?: string };
+      readonly nextAction: { readonly stepId: string };
+    };
+    assert.equal(mismatchState.changeBranch.status, "branch-mismatch");
+    assert.equal(mismatchState.changeBranch.branch, "scratch-notes");
+    assert.equal(mismatchState.nextAction.stepId, "change-branch");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

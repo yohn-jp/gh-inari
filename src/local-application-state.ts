@@ -2,9 +2,11 @@
 
 import path from "node:path";
 import { lstatSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { FileAppUserCredentialStore } from "./github/app-user-credential-store.js";
 import { LocalRuntimeProfileStore } from "./local-runtime-profile.js";
 import { resolveLocalRepositoryContext } from "./github/local-repository-context.js";
+import { CANONICAL_BRANCH_TYPES, DEFAULT_BRANCH_NAME, recognizeBranchName } from "./branch-naming.js";
 import {
   localComponentPath,
   readExistingLocalPublicJson,
@@ -48,9 +50,25 @@ export interface LocalApplicationSetupStep {
 }
 
 export interface LocalApplicationNextAction {
-  readonly stepId: LocalApplicationSetupStepId | "start-runtime";
+  readonly stepId: LocalApplicationSetupStepId | "start-runtime" | "change-branch";
   readonly commands: readonly string[];
   readonly detail: string;
+}
+
+/**
+ * Readiness of the canonical Issue-bound Change branch that local Session
+ * start requires. This is derived read-only from the current local Git
+ * branch through the canonical branch grammar (`recognizeBranchName`); it
+ * never derives or validates branch naming itself.
+ */
+export type LocalApplicationChangeBranchStatus = "ready" | "issue-not-selected" | "branch-mismatch";
+
+export interface LocalApplicationChangeBranchReadiness {
+  readonly status: LocalApplicationChangeBranchStatus;
+  readonly detail: string;
+  readonly command?: string;
+  readonly issue?: number;
+  readonly branch?: string;
 }
 
 export interface LocalApplicationState {
@@ -69,9 +87,10 @@ export interface LocalApplicationState {
   readonly nextAction: LocalApplicationNextAction;
   readonly runtime: {
     readonly status: "not-checked";
-    readonly commands: readonly ["inari executor serve", "inari admission serve"];
+    readonly commands: readonly ["inari runtime supervise"];
     readonly detail: string;
   };
+  readonly changeBranch: LocalApplicationChangeBranchReadiness;
   readonly sessionStartCommand: "inari session start --issue <number> -- <command...>";
 }
 
@@ -82,6 +101,8 @@ export interface LocalApplicationStateOptions {
 
 const AUTHORITY_RECORD_PATH = "runtime-authority.json";
 const SESSION_START_COMMAND = "inari session start --issue <number> -- <command...>" as const;
+const RUNTIME_SUPERVISE_COMMAND = "inari runtime supervise" as const;
+const CHANGE_BRANCH_COMMAND = `git checkout -b <${CANONICAL_BRANCH_TYPES.join("|")}>/<issue-number>-<slug>` as const;
 
 function authorityValidator(value: unknown): Delegator {
   const validation = validateDelegator(value);
@@ -126,6 +147,56 @@ function readConfig<T>(filePath: string, read: () => T | undefined): { readonly 
   } catch {
     return { blocked: true };
   }
+}
+
+function currentLocalGitBranch(root: string): string | undefined {
+  try {
+    const branch = execFileSync("git", ["branch", "--show-current"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return branch.length === 0 ? undefined : branch;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve Issue/Change selection and canonical Change-branch readiness from
+ * the current local Git branch. Recognition is delegated to the canonical
+ * `recognizeBranchName` branch authority (#1065): this never re-derives or
+ * revalidates the branch grammar it owns.
+ */
+function resolveLocalChangeBranchReadiness(root: string): LocalApplicationChangeBranchReadiness {
+  const branch = currentLocalGitBranch(root);
+  const identity = branch === undefined ? undefined : recognizeBranchName(branch);
+  const issue =
+    identity !== undefined && (CANONICAL_BRANCH_TYPES as readonly string[]).includes(identity.type)
+      ? identity.issueNumber
+      : undefined;
+  if (issue !== undefined && branch !== undefined) {
+    return {
+      status: "ready",
+      detail: `Local branch ${branch} is the canonical Change branch for Issue #${issue}.`,
+      issue,
+      branch,
+    };
+  }
+  if (branch === undefined || branch === DEFAULT_BRANCH_NAME) {
+    return {
+      status: "issue-not-selected",
+      detail: "No Issue is selected. Check out the canonical Issue-bound Change branch before Session start.",
+      command: CHANGE_BRANCH_COMMAND,
+      ...(branch === undefined ? {} : { branch }),
+    };
+  }
+  return {
+    status: "branch-mismatch",
+    detail: `Local branch ${branch} is not a canonical Issue-bound Change branch; check out the correct one before Session start.`,
+    command: CHANGE_BRANCH_COMMAND,
+    branch,
+  };
 }
 
 function readPublicAuthorityRecord(environment: NodeJS.ProcessEnv): {
@@ -371,19 +442,28 @@ export async function projectLocalApplicationState(
   ];
   const setupComplete = steps.every((step) => step.status === "ready");
   const nextSetupStep = steps.find((step) => step.status === "required" || step.status === "blocked");
+  const changeBranch = resolveLocalChangeBranchReadiness(root);
   const nextAction: LocalApplicationNextAction =
-    nextSetupStep === undefined
+    nextSetupStep !== undefined
       ? {
-          stepId: "start-runtime",
-          commands: ["inari executor serve", "inari admission serve"],
-          detail:
-            "Run each command in a separate terminal; then launch the governed child with the Session command below.",
-        }
-      : {
           stepId: nextSetupStep.id,
           commands: nextSetupStep.command === undefined ? [] : [nextSetupStep.command],
           detail: nextSetupStep.detail,
-        };
+        }
+      : changeBranch.status === "ready"
+        ? {
+            stepId: "start-runtime",
+            commands: [RUNTIME_SUPERVISE_COMMAND],
+            detail: `Run the local Runtime Supervisor, then launch the governed child for Issue #${changeBranch.issue} on ${changeBranch.branch} with the Session command below.`,
+          }
+        : {
+            stepId: "change-branch",
+            commands: [
+              RUNTIME_SUPERVISE_COMMAND,
+              ...(changeBranch.command === undefined ? [] : [changeBranch.command]),
+            ],
+            detail: `Run the local Runtime Supervisor. ${changeBranch.detail}`,
+          };
 
   return {
     version: 1,
@@ -401,10 +481,11 @@ export async function projectLocalApplicationState(
     nextAction,
     runtime: {
       status: "not-checked",
-      commands: ["inari executor serve", "inari admission serve"],
+      commands: [RUNTIME_SUPERVISE_COMMAND],
       detail:
         "Process health is not part of persisted setup state; Admission verifies the configured Executor identity when it starts.",
     },
+    changeBranch,
     sessionStartCommand: SESSION_START_COMMAND,
   };
 }
