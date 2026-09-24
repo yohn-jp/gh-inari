@@ -2,17 +2,23 @@
  * Stateless HTTP ingress for the centrally custodied Runtime Authority
  * publisher (#1066 correction).
  *
- * This module owns HTTP method/path/media-type/body-size/JSON parsing and
- * bounded HTTP response mapping only. It never verifies a Session, mints a
- * credential, or performs the publication mutation itself -- all of that
- * remains owned by the injected publisher (see
+ * This module owns HTTP method/path/media-type/body-size/bearer-token/JSON
+ * parsing and bounded HTTP response mapping only. It never verifies a
+ * Session, mints a credential, or performs the publication mutation itself
+ * -- all of that remains owned by the injected publisher (see
  * `../github/direct-app-execution.js`'s `createDirectAppRuntimeAuthorityPublisher`).
  *
  * Unlike the frozen #377 `/v1/execute` transport, this endpoint intentionally
  * accepts no signed Session: Runtime Authority publication bootstraps the
  * very trust root a Session would be verified against, so there is nothing
- * to verify it against yet. The caller may submit only the validated public
- * Runtime Authority request; every other boundary (single-file artifact,
+ * to verify it against yet. It still requires an authenticated caller,
+ * though: this transport requires a bearer token on every request and hands
+ * it, opaque, to the injected publisher, which is the existing
+ * App-user/human installation+repository authorization seam (the same one
+ * `repository-setup.ts` already uses) -- proving the caller can read the
+ * publisher's exact configured target repository -- never a substitute for
+ * it. Only the validated public Runtime Authority request and this caller
+ * proof cross the boundary; every other guarantee (single-file artifact,
  * exact repository identity, fail-closed duplicate/race handling, no
  * auto-merge/approval) is enforced by Core (`../runtime-authority-publication.js`)
  * and the publisher's fixed deployment-configured target repository, not by
@@ -20,16 +26,24 @@
  */
 
 import type { RuntimeAuthorityPublicationResult } from "../runtime-authority-publication.js";
+import { RuntimeAuthorityPublicationUnauthorizedError } from "../github/direct-app-execution.js";
 
 export const RUNTIME_AUTHORITY_PUBLICATION_HTTP_CONTRACT_VERSION = 1 as const;
 export const RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH = "/v1/runtime-authority/publish" as const;
 
 /** Transport ceiling; Core additionally enforces its own bounded request size. */
 const MAX_BODY_BYTES = 131_072;
+const MAX_TOKEN_LENGTH = 4_096;
+const BEARER_AUTHORIZATION_PATTERN = /^Bearer[ \t]+(\S+)$/u;
 
-/** Publishes only the validated public Runtime Authority record; never accepts private-key material. */
+/**
+ * Publishes only the validated public Runtime Authority record for one
+ * bearer-authorized caller; never accepts private-key material. The
+ * publisher owns verifying that `callerToken` is authorized for its exact
+ * configured target repository -- this transport only extracts it.
+ */
 export interface RuntimeAuthorityPublicationPublisher {
-  publish(request: unknown): Promise<RuntimeAuthorityPublicationResult>;
+  publish(request: unknown, callerToken: string): Promise<RuntimeAuthorityPublicationResult>;
 }
 
 export interface RuntimeAuthorityPublicationHttpHandlerOptions {
@@ -61,6 +75,21 @@ function isPublisher(value: unknown): value is RuntimeAuthorityPublicationPublis
 
 function isJsonContentType(value: string | null): boolean {
   return value !== null && JSON_CONTENT_TYPE_PATTERN.test(value.trim());
+}
+
+function extractBearerToken(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const match = BEARER_AUTHORIZATION_PATTERN.exec(value);
+  const token = match?.[1];
+  if (
+    token === undefined ||
+    token.length === 0 ||
+    token.length > MAX_TOKEN_LENGTH ||
+    /[\u0000-\u001f\u007f]/u.test(token)
+  ) {
+    return undefined;
+  }
+  return token;
 }
 
 function jsonResponse(status: number, body: SuccessEnvelope | FailureEnvelope): Response {
@@ -156,6 +185,10 @@ export function createRuntimeAuthorityPublicationHttpHandler(
     if (!isJsonContentType(request.headers.get("content-type"))) {
       return failureResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Request content type must be application/json.");
     }
+    const callerToken = extractBearerToken(request.headers.get("authorization"));
+    if (callerToken === undefined) {
+      return failureResponse(401, "UNAUTHORIZED", "A bearer-authorized caller is required.");
+    }
 
     const bodyResult = await readBoundedBody(request, maxBodyBytes);
     if (bodyResult.kind === "too-large") {
@@ -174,8 +207,11 @@ export function createRuntimeAuthorityPublicationHttpHandler(
 
     let result: RuntimeAuthorityPublicationResult;
     try {
-      result = await publisher.publish(envelope);
-    } catch {
+      result = await publisher.publish(envelope, callerToken);
+    } catch (error: unknown) {
+      if (error instanceof RuntimeAuthorityPublicationUnauthorizedError) {
+        return failureResponse(403, "RUNTIME_AUTHORITY_PUBLICATION_UNAUTHORIZED", "Caller is not authorized.");
+      }
       return failureResponse(
         400,
         "RUNTIME_AUTHORITY_PUBLICATION_FAILED",

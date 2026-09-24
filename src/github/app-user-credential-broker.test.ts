@@ -114,13 +114,19 @@ test("App-user broker submits only the validated public Runtime Authority reques
     maxSessionTtlSeconds: 3_600,
     capabilityCeiling: CAPABILITY_KINDS,
   });
-  const requests: Array<{ readonly url: string; readonly contentType: string | null; readonly body: unknown }> = [];
+  const requests: Array<{
+    readonly url: string;
+    readonly contentType: string | null;
+    readonly authorization: string | null;
+    readonly body: unknown;
+  }> = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.toString() === `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`) {
       requests.push({
         url: url.toString(),
         contentType: new Headers(init?.headers).get("content-type"),
+        authorization: new Headers(init?.headers).get("authorization"),
         body: JSON.parse(String(init?.body ?? "{}")) as unknown,
       });
       return json({
@@ -148,6 +154,10 @@ test("App-user broker submits only the validated public Runtime Authority reques
   const request = requests[0];
   assert.equal(request?.url, `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`);
   assert.match(request?.contentType ?? "", /^application\/json/iu);
+  // The caller's own App-user access token is forwarded as the Worker's
+  // caller-authorization proof (the existing App-user/human seam) -- as a
+  // bearer credential, never inside the JSON request body.
+  assert.equal(request?.authorization, "Bearer access-secret");
   assert.deepEqual(request?.body, createRuntimeAuthorityPublicationRequest(authority));
   assert.doesNotMatch(
     JSON.stringify(request?.body),

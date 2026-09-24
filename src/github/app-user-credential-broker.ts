@@ -571,6 +571,12 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
    * repository-independent branch; exactly one public Authority artifact
    * commit; governed PR; no auto-merge/approval) against its own
    * deployment-fixed target repository and returns only success/failure.
+   *
+   * The caller's own App-user access token is forwarded as a bearer
+   * credential so the Worker can verify this operator can read its exact
+   * configured target repository before minting any Issuer credential --
+   * the existing App-user/human installation+repository authorization seam,
+   * never the Issuer private key, and never present in the request body.
    */
   async dispatchRuntimeAuthorityPublication(request: { readonly authority: Delegator }): Promise<void> {
     let publicationRequest: ReturnType<typeof createRuntimeAuthorityPublicationRequest>;
@@ -581,21 +587,27 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
     }
     if (this.#issuerWorkerUrl === undefined) throw this.#safeFailure("issuer-configuration");
     try {
-      const response = await this.#fetch(`${this.#issuerWorkerUrl}${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`, {
-        method: "POST",
-        headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify(publicationRequest),
+      const credential = await this.#loadCredential();
+      await credential.withAccessToken(async (token) => {
+        const response = await this.#fetch(`${this.#issuerWorkerUrl}${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(publicationRequest),
+        });
+        if (response.status !== 200) throw new Error();
+        const body: unknown = await response.json();
+        if (
+          typeof body !== "object" ||
+          body === null ||
+          Array.isArray(body) ||
+          (body as { readonly ok?: unknown }).ok !== true
+        ) {
+          throw new Error();
+        }
       });
-      if (response.status !== 200) throw new Error();
-      const body: unknown = await response.json();
-      if (
-        typeof body !== "object" ||
-        body === null ||
-        Array.isArray(body) ||
-        (body as { readonly ok?: unknown }).ok !== true
-      ) {
-        throw new Error();
-      }
     } catch (error: unknown) {
       throw this.#safeOperation(error, "projection-execution");
     }

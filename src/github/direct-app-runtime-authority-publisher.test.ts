@@ -6,7 +6,10 @@ import { createDelegatorRecord } from "../agent-authority/delegator-operations.j
 import { renderDelegatorArtifact } from "../agent-authority/delegator-trust.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { createRuntimeAuthorityPublicationRequest } from "../runtime-authority-publication.js";
-import { createDirectAppRuntimeAuthorityPublisher } from "./direct-app-execution.js";
+import {
+  createDirectAppRuntimeAuthorityPublisher,
+  RuntimeAuthorityPublicationUnauthorizedError,
+} from "./direct-app-execution.js";
 import type { GitHubAppRepositoryReadCapability } from "./app-installation-credential-broker.js";
 import type { RepositoryIdentity } from "./effect-authorizer.js";
 import type {
@@ -24,6 +27,22 @@ const BASE_TREE_SHA = "b".repeat(40);
 const TREE_SHA = "c".repeat(40);
 const COMMIT_SHA = "d".repeat(40);
 const PULL_REQUEST_URL = "https://github.com/acme/consumer-repo/pull/9";
+const CALLER_TOKEN = "caller-access-token-secret";
+
+/** A fetch stub answering only the caller-authorization `GET /repositories/{id}` read. */
+function authorizedCallerFetch(): typeof globalThis.fetch {
+  return (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.toString() === `https://api.github.com/repositories/${TARGET.repositoryId}`) {
+      assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${CALLER_TOKEN}`);
+      return new Response(JSON.stringify({ id: Number(TARGET.repositoryId), full_name: TARGET.nameWithOwner }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected ${url.toString()}`);
+  }) as typeof globalThis.fetch;
+}
 
 function authority(id: string): Delegator {
   const { publicKey } = generateKeyPairSync("ed25519");
@@ -128,17 +147,60 @@ test("createDirectAppRuntimeAuthorityPublisher publishes exactly one public Auth
     privateKeyPem: "unused-in-this-fixture",
     repository: { hostname: TARGET.repositoryHost, owner: "acme", name: "consumer-repo" },
     credentialBroker: fixture.broker as never,
+    fetch: authorizedCallerFetch(),
   });
 
-  const result = await publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority));
+  const result = await publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority), CALLER_TOKEN);
 
   assert.equal(result.status, "created");
   assert.deepEqual(result.pullRequest, { number: 9, url: PULL_REQUEST_URL });
   assert.deepEqual(fixture.counts, { createBranch: 1, createPullRequest: 1 });
 
-  const replay = await publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority));
+  const replay = await publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority), CALLER_TOKEN);
   assert.equal(replay.status, "existing");
   assert.deepEqual(fixture.counts, { createBranch: 1, createPullRequest: 1 });
+});
+
+test("createDirectAppRuntimeAuthorityPublisher rejects a caller whose token cannot read the configured target repository, before any Issuer mutation", async () => {
+  const publicAuthority = authority("direct-app-runtime-authority-unauthorized-caller");
+  const fixture = fakeCredentialBroker(publicAuthority);
+  const publisher = createDirectAppRuntimeAuthorityPublisher({
+    appId: "unused-in-this-fixture",
+    installationId: "unused-in-this-fixture",
+    privateKeyPem: "unused-in-this-fixture",
+    repository: { hostname: TARGET.repositoryHost, owner: "acme", name: "consumer-repo" },
+    credentialBroker: fixture.broker as never,
+    fetch: (async () => new Response(null, { status: 404 })) as typeof globalThis.fetch,
+  });
+
+  await assert.rejects(
+    publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority), "an-unauthorized-caller-token"),
+    RuntimeAuthorityPublicationUnauthorizedError,
+  );
+  assert.deepEqual(fixture.counts, { createBranch: 0, createPullRequest: 0 });
+});
+
+test("createDirectAppRuntimeAuthorityPublisher rejects a caller token that can read a different repository than the configured target", async () => {
+  const publicAuthority = authority("direct-app-runtime-authority-wrong-repository-caller");
+  const fixture = fakeCredentialBroker(publicAuthority);
+  const publisher = createDirectAppRuntimeAuthorityPublisher({
+    appId: "unused-in-this-fixture",
+    installationId: "unused-in-this-fixture",
+    privateKeyPem: "unused-in-this-fixture",
+    repository: { hostname: TARGET.repositoryHost, owner: "acme", name: "consumer-repo" },
+    credentialBroker: fixture.broker as never,
+    fetch: (async () =>
+      new Response(JSON.stringify({ id: 1, full_name: "someone-else/a-different-repository" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof globalThis.fetch,
+  });
+
+  await assert.rejects(
+    publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority), "a-different-repository-token"),
+    RuntimeAuthorityPublicationUnauthorizedError,
+  );
+  assert.deepEqual(fixture.counts, { createBranch: 0, createPullRequest: 0 });
 });
 
 test("createDirectAppRuntimeAuthorityPublisher never reads a target repository from the caller's request", async () => {
@@ -160,14 +222,18 @@ test("createDirectAppRuntimeAuthorityPublisher never reads a target repository f
         return fixture.broker.withRuntimeAuthorityPublicationCapability(request, operation);
       },
     } as never,
+    fetch: authorizedCallerFetch(),
   });
 
-  await publisher.publish({
-    version: 1,
-    authority: publicAuthority,
-    // The publication request contract has no repository field at all, so
-    // there is nothing here for a caller to smuggle a different target with.
-  });
+  await publisher.publish(
+    {
+      version: 1,
+      authority: publicAuthority,
+      // The publication request contract has no repository field at all, so
+      // there is nothing here for a caller to smuggle a different target with.
+    },
+    CALLER_TOKEN,
+  );
 
   assert.deepEqual(observedTarget, TARGET);
 });

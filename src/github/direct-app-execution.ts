@@ -59,6 +59,7 @@ import {
   type ChangeReadRequest,
 } from "../change-execution-port.js";
 import { publishRuntimeAuthority, type RuntimeAuthorityPublicationResult } from "../runtime-authority-publication.js";
+import { GitHubNativeHttpTransport } from "./native-http-transport.js";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -486,16 +487,81 @@ export interface DirectAppRuntimeAuthorityPublisherConfig {
 
 /** Publishes only the validated public Runtime Authority record; never accepts private-key material. */
 export interface DirectAppRuntimeAuthorityPublisher {
-  publish(request: unknown): Promise<RuntimeAuthorityPublicationResult>;
+  /**
+   * `callerToken` is the caller's own bearer credential (never the Issuer
+   * private key). It is verified against the publisher's fixed target
+   * repository -- the existing App-user/human installation+repository
+   * authorization seam -- before any Issuer-side mutation is attempted.
+   */
+  publish(request: unknown, callerToken: string): Promise<RuntimeAuthorityPublicationResult>;
+}
+
+/**
+ * Raised when the caller's own token cannot read the publisher's exact
+ * configured target repository. Bootstrap has no Session to verify, but it
+ * still requires this authenticated/authorized caller boundary: human PR
+ * review is not a substitute for it, since the PR would not exist yet.
+ */
+export class RuntimeAuthorityPublicationUnauthorizedError extends Error {
+  constructor() {
+    super("Caller is not authorized to publish a Runtime Authority for the configured target repository.");
+    this.name = "RuntimeAuthorityPublicationUnauthorizedError";
+  }
+}
+
+/**
+ * Prove the caller's own token can read the exact repository the Issuer is
+ * configured to mutate -- by its immutable numeric id, not by name, which
+ * can be renamed or reused. This reuses ordinary GitHub repository read
+ * access (the same App-user/human seam `repository-setup.ts` already uses)
+ * as the caller-authorization boundary; it never touches the Issuer
+ * credential and never widens what the caller can do beyond that one read.
+ */
+async function assertCallerAuthorizedForTarget(
+  callerToken: string,
+  target: RepositoryIdentity,
+  options: { readonly apiUrl?: string; readonly fetch?: typeof globalThis.fetch; readonly requestTimeoutMs?: number },
+): Promise<void> {
+  let response: { readonly status: number; readonly body?: unknown };
+  try {
+    const transport = new GitHubNativeHttpTransport({
+      token: callerToken,
+      ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
+      maxResponseBytes: 65_536,
+    });
+    response = await transport.request({
+      hostname: target.repositoryHost,
+      method: "GET",
+      path: `repositories/${encodeURIComponent(target.repositoryId)}`,
+    });
+  } catch {
+    throw new RuntimeAuthorityPublicationUnauthorizedError();
+  }
+  try {
+    const body = record(response.body);
+    if (
+      response.status !== 200 ||
+      String(body.id) !== target.repositoryId ||
+      typeof body.full_name !== "string" ||
+      body.full_name.toLowerCase() !== target.nameWithOwner.toLowerCase()
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new RuntimeAuthorityPublicationUnauthorizedError();
+  }
 }
 
 /**
  * Build the centrally custodied Runtime Authority publisher (#1066) for one
  * fixed target repository. The caller supplies only the validated public
- * Runtime Authority request/artifact; this composition owns the bounded
- * mutation -- centrally custodied Issuer installation credential, dedicated
- * branch, exactly one public Authority artifact commit, governed PR -- and
- * never merges or approves the PR it opens.
+ * Runtime Authority request/artifact and its own bearer token; this
+ * composition owns the bounded mutation -- caller-authorization proof,
+ * centrally custodied Issuer installation credential, dedicated branch,
+ * exactly one public Authority artifact commit, governed PR -- and never
+ * merges or approves the PR it opens.
  */
 export function createDirectAppRuntimeAuthorityPublisher(
   config: DirectAppRuntimeAuthorityPublisherConfig,
@@ -514,8 +580,13 @@ export function createDirectAppRuntimeAuthorityPublisher(
       ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
     });
   return Object.freeze({
-    publish: async (request: unknown): Promise<RuntimeAuthorityPublicationResult> => {
+    publish: async (request: unknown, callerToken: string): Promise<RuntimeAuthorityPublicationResult> => {
       const target = await broker.withRepositoryReadCapability({}, async (capability) => capability.scope.repository);
+      await assertCallerAuthorizedForTarget(callerToken, target, {
+        ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
+        ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
+        ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
+      });
       return publishRuntimeAuthority(request, target, broker);
     },
   });

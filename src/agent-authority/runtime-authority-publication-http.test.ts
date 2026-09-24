@@ -5,9 +5,11 @@ import {
   RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH,
   type RuntimeAuthorityPublicationPublisher,
 } from "./runtime-authority-publication-http.js";
+import { RuntimeAuthorityPublicationUnauthorizedError } from "../github/direct-app-execution.js";
 import type { RuntimeAuthorityPublicationResult } from "../runtime-authority-publication.js";
 
 const ENDPOINT = `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`;
+const CALLER_TOKEN = "caller-access-token-secret";
 const RESULT: RuntimeAuthorityPublicationResult = Object.freeze({
   status: "created",
   authorityId: "runtime-example",
@@ -17,10 +19,15 @@ const RESULT: RuntimeAuthorityPublicationResult = Object.freeze({
 
 function request(
   body: unknown,
-  init: { readonly method?: string; readonly contentType?: string | null } = {},
+  init: {
+    readonly method?: string;
+    readonly contentType?: string | null;
+    readonly authorization?: string | null;
+  } = {},
 ): Request {
   const headers: Record<string, string> = {};
   if (init.contentType !== null) headers["content-type"] = init.contentType ?? "application/json";
+  if (init.authorization !== null) headers.authorization = init.authorization ?? `Bearer ${CALLER_TOKEN}`;
   return new Request(ENDPOINT, {
     method: init.method ?? "POST",
     headers,
@@ -28,11 +35,13 @@ function request(
   });
 }
 
-test("publishes only the received request through the injected publisher and returns the bounded result", async () => {
+test("publishes only the received request and the caller's bearer token through the injected publisher, and returns the bounded result", async () => {
   let received: unknown;
+  let receivedToken: string | undefined;
   const publisher: RuntimeAuthorityPublicationPublisher = {
-    publish: async (input) => {
+    publish: async (input, callerToken) => {
       received = input;
+      receivedToken = callerToken;
       return RESULT;
     },
   };
@@ -44,6 +53,40 @@ test("publishes only the received request through the injected publisher and ret
   assert.equal(body.ok, true);
   assert.deepEqual(body.result, RESULT);
   assert.deepEqual(received, { version: 1, authority: { id: "runtime-example" } });
+  assert.equal(receivedToken, CALLER_TOKEN);
+});
+
+test("rejects a request with no bearer-authorized caller before invoking the publisher", async () => {
+  let calls = 0;
+  const publisher: RuntimeAuthorityPublicationPublisher = { publish: async () => ((calls += 1), RESULT) };
+  const handler = createRuntimeAuthorityPublicationHttpHandler({ publisher });
+
+  const missing = await handler(request({ version: 1 }, { authorization: null }));
+  assert.equal(missing.status, 401);
+
+  const malformed = await handler(request({ version: 1 }, { authorization: CALLER_TOKEN }));
+  assert.equal(malformed.status, 401);
+
+  const empty = await handler(request({ version: 1 }, { authorization: "Bearer " }));
+  assert.equal(empty.status, 401);
+
+  assert.equal(calls, 0);
+});
+
+test("maps the publisher's caller-authorization failure to a bounded 403, never a generic 400", async () => {
+  const publisher: RuntimeAuthorityPublicationPublisher = {
+    publish: async () => {
+      throw new RuntimeAuthorityPublicationUnauthorizedError();
+    },
+  };
+  const handler = createRuntimeAuthorityPublicationHttpHandler({ publisher });
+
+  const response = await handler(request({ version: 1 }));
+
+  assert.equal(response.status, 403);
+  const body = (await response.json()) as { readonly ok: boolean; readonly error: { readonly code: string } };
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "RUNTIME_AUTHORITY_PUBLICATION_UNAUTHORIZED");
 });
 
 test("rejects a request on the wrong path or method before invoking the publisher", async () => {
