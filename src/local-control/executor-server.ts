@@ -112,11 +112,47 @@ function appId(environment: NodeJS.ProcessEnv): string {
   return value;
 }
 
-export type LocalExecutorIssuerKeyStatus = "configured" | "missing" | "invalid";
+export type LocalExecutorIssuerKeyStatus = "configured" | "missing";
+
+const ISSUER_KEY_REFERENCE_VARIABLES = [
+  "INARI_GITHUB_APP_PRIVATE_KEY_FILE",
+  "GITHUB_APP_PRIVATE_KEY_FILE",
+  "INARI_GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_PRIVATE_KEY",
+] as const;
+
+function issuerKeyMissing(): LocalExecutorError {
+  return new LocalExecutorError(
+    "EXECUTOR_ISSUER_KEY_MISSING",
+    "The local Executor mints Inari Issuer App installation credentials. Set INARI_GITHUB_APP_PRIVATE_KEY_FILE to the path of the Issuer App private key (.pem) before configuring the local Executor; only the running Executor reads the key, and it is never persisted.",
+  );
+}
+
+function issuerKeyInvalid(): LocalExecutorError {
+  return new LocalExecutorError(
+    "EXECUTOR_ISSUER_KEY_INVALID",
+    "The Inari Issuer App private key configured by INARI_GITHUB_APP_PRIVATE_KEY_FILE (or INARI_GITHUB_APP_PRIVATE_KEY) is not a readable RSA private key.",
+  );
+}
 
 /**
- * Read the Inari Issuer App private key from Executor-owned secret input.
- * The key is held only in Executor process memory; it is never written to
+ * Whether an Executor-owned Issuer App private-key reference is configured.
+ * This inspects only which custody variable is set; it never opens the key
+ * file or parses key material, so CLI, setup, and browser projections stay
+ * outside the Executor credential boundary.
+ */
+export function localExecutorIssuerKeyStatus(
+  environment: NodeJS.ProcessEnv = process.env,
+): LocalExecutorIssuerKeyStatus {
+  return ISSUER_KEY_REFERENCE_VARIABLES.some((name) => (environment[name]?.trim().length ?? 0) > 0)
+    ? "configured"
+    : "missing";
+}
+
+/**
+ * Executor credential boundary: read and validate the Inari Issuer App
+ * private key. Only the running Executor (serve and authorized execution)
+ * calls this; the key is held in process memory and never written to
  * Executor configuration, Runtime profiles, or any diagnostic.
  */
 function issuerPrivateKey(environment: NodeJS.ProcessEnv): string {
@@ -125,10 +161,7 @@ function issuerPrivateKey(environment: NodeJS.ProcessEnv): string {
     pem = readAppPrivateKey(environment);
   } catch (error: unknown) {
     if (error instanceof LocalRuntimeConfigError && error.code === "LOCAL_RUNTIME_CONFIG_MISSING") {
-      throw new LocalExecutorError(
-        "EXECUTOR_ISSUER_KEY_MISSING",
-        "The local Executor mints Inari Issuer App installation credentials. Set INARI_GITHUB_APP_PRIVATE_KEY_FILE to the path of the Issuer App private key (.pem) before configuring the local Executor; the key is read at start and never persisted.",
-      );
+      throw issuerKeyMissing();
     }
     throw issuerKeyInvalid();
   }
@@ -140,28 +173,10 @@ function issuerPrivateKey(environment: NodeJS.ProcessEnv): string {
   return pem;
 }
 
-function issuerKeyInvalid(): LocalExecutorError {
-  return new LocalExecutorError(
-    "EXECUTOR_ISSUER_KEY_INVALID",
-    "The Inari Issuer App private key configured by INARI_GITHUB_APP_PRIVATE_KEY_FILE (or INARI_GITHUB_APP_PRIVATE_KEY) is not a readable RSA private key.",
-  );
-}
-
-/** Secret-free readiness of the Executor-owned Issuer App private key input. */
-export function localExecutorIssuerKeyStatus(
-  environment: NodeJS.ProcessEnv = process.env,
-): LocalExecutorIssuerKeyStatus {
-  try {
-    issuerPrivateKey(environment);
-    return "configured";
-  } catch (error: unknown) {
-    return error instanceof LocalExecutorError && error.code === "EXECUTOR_ISSUER_KEY_MISSING" ? "missing" : "invalid";
-  }
-}
-
-function requireIssuerPrerequisites(environment: NodeJS.ProcessEnv): void {
+/** Non-secret setup prerequisites: App ID and the Issuer key reference only. */
+function requireIssuerReference(environment: NodeJS.ProcessEnv): void {
   appId(environment);
-  issuerPrivateKey(environment);
+  if (localExecutorIssuerKeyStatus(environment) === "missing") throw issuerKeyMissing();
 }
 
 function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalExecutorConfig {
@@ -177,7 +192,7 @@ function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalEx
 export async function setupLocalExecutor(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LocalExecutorSetupResult> {
-  requireIssuerPrerequisites(environment);
+  requireIssuerReference(environment);
   const configPath = path.join(resolveConfigHome(environment), "executor", EXECUTOR_CONFIG_PATH);
   const existing = readLocalJson("executor", EXECUTOR_CONFIG_PATH, validateLocalExecutorConfig, environment);
   const bindHost = configuredLocalRuntimeBindHost(environment);
@@ -679,7 +694,9 @@ export async function startConfiguredLocalExecutor(
   readonly announcement: LocalRuntimeEndpoint;
 }> {
   const config = configuredLocalExecutor(environment);
-  requireIssuerPrerequisites(environment);
+  // Executor startup is the credential boundary: read and validate the key now.
+  appId(environment);
+  issuerPrivateKey(environment);
   let transport: ReturnType<typeof loadLocalMtlsIdentity> | undefined;
   if (config.listen.host === "0.0.0.0") {
     const admission = readLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment);

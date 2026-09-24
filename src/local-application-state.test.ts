@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -110,6 +110,42 @@ test("#1065: an Epic/Issue integration branch is a mismatch, not a canonical Cha
     git(root, "checkout", "-q", "-b", "epic/1071-local-runtime-ux");
     const state = await projectLocalApplicationState({ root, environment: environmentFor(root) });
     assert.equal(state.changeBranch.status, "branch-mismatch");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1092: the Issuer key setup step checks only the Executor-owned reference and never reads key material", async () => {
+  const root = await temporaryRoot();
+  try {
+    const missing = await projectLocalApplicationState({ root, environment: environmentFor(root) });
+    assert.equal(missing.provider.issuerKey, "missing");
+    assert.equal(missing.steps.find((step) => step.id === "executor-issuer-key")?.status, "required");
+
+    // A reference to an absent file projects as configured: the projection never opens it.
+    const absent = await projectLocalApplicationState({
+      root,
+      environment: {
+        ...environmentFor(root),
+        INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem"),
+      },
+    });
+    assert.equal(absent.provider.issuerKey, "configured");
+    assert.equal(absent.steps.find((step) => step.id === "executor-issuer-key")?.status, "ready");
+
+    // Malformed material also projects as configured and is never echoed: the projection never parses it.
+    const sentinel = "bm90LWEta2V5LXNlbnRpbmVs";
+    const keyPath = path.join(root, "issuer-app.private-key.pem");
+    await writeFile(keyPath, `-----BEGIN PRIVATE KEY-----\n${sentinel}\n-----END PRIVATE KEY-----\n`, { mode: 0o600 });
+    const malformed = await projectLocalApplicationState({
+      root,
+      environment: { ...environmentFor(root), INARI_GITHUB_APP_PRIVATE_KEY_FILE: keyPath },
+    });
+    assert.equal(malformed.provider.issuerKey, "configured");
+    const rendered = JSON.stringify(malformed);
+    assert.equal(rendered.includes(sentinel), false);
+    assert.equal(rendered.includes("PRIVATE KEY"), false);
+    assert.equal(rendered.includes("EXECUTOR_ISSUER_KEY_INVALID"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

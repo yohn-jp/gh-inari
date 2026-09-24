@@ -82,7 +82,7 @@ export interface LocalApplicationState {
     readonly appIdSource?: "environment" | "repository-runtime-profile";
     readonly credentialConfigured: boolean;
     readonly credentialPath: string;
-    readonly issuerKey: "configured" | "missing" | "invalid";
+    readonly issuerKey: "configured" | "missing";
   };
   readonly steps: readonly LocalApplicationSetupStep[];
   readonly nextAction: LocalApplicationNextAction;
@@ -316,12 +316,11 @@ export async function projectLocalApplicationState(
   };
   const issuerKeyStep: LocalApplicationSetupStep = {
     id: "executor-issuer-key",
-    status: issuerKey === "configured" ? "ready" : issuerKey === "invalid" ? "blocked" : "required",
+    status: issuerKey === "configured" ? "ready" : "required",
     title: "Provide the Inari Issuer App private key to the local Executor",
     detail:
-      "The local Executor mints repository-scoped Issuer App installation credentials. Point INARI_GITHUB_APP_PRIVATE_KEY_FILE at the Issuer App private key (.pem); the key is read by the Executor process only and never persisted or displayed.",
+      "The local Executor mints repository-scoped Issuer App installation credentials. Point INARI_GITHUB_APP_PRIVATE_KEY_FILE at the Issuer App private key (.pem). Setup checks only that the reference is set; the running Executor alone reads and validates the key, and it is never persisted or displayed.",
     syntax: "export INARI_GITHUB_APP_PRIVATE_KEY_FILE='<path-to-inari-issuer-app-private-key.pem>'",
-    ...(issuerKey === "invalid" ? { diagnostic: "EXECUTOR_ISSUER_KEY_INVALID" } : {}),
   };
   const issuerReady = envApp.value !== undefined && issuerKey === "configured";
   const executorReady = executor.value !== undefined && issuerReady;

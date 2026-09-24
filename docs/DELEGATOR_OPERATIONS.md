@@ -366,10 +366,12 @@ The local Executor performs post-bootstrap provider reads and governed effects
 with Inari Issuer App installation credentials, never the App-user credential.
 Set `INARI_GITHUB_APP_ID` (or `GITHUB_APP_ID`) to the numeric App ID reported
 by `inari setup` and `INARI_GITHUB_APP_PRIVATE_KEY_FILE` to the Issuer App
-private key (`.pem`) path, then run `inari executor setup`. The Executor reads
-the key at start, mints repository-scoped installation tokens for the
+private key (`.pem`) path, then run `inari executor setup`. `inari executor
+setup` and `inari init` check only that this Executor-owned reference is set;
+they never open or parse the key. Only the running Executor reads and validates
+the key, at start and at each authorized execution, and it mints repository-scoped installation tokens for the
 installation recorded in the Runtime profile, and fails closed on a missing or
-invalid key, a mismatched App, installation, or repository, or insufficient
+unreadable, or invalid key, a mismatched App, installation, or repository, or insufficient
 installation permissions. The key is never written to Executor configuration,
 Runtime profiles, Admission, Session, or `inari init` output; the Supervisor
 withholds it from Admission and the Agent child. Run `inari authority setup`

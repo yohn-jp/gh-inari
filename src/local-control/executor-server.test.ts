@@ -663,7 +663,7 @@ test("Executor serve fails closed when setup or the Issuer App private key is mi
   }
 });
 
-test("Executor setup reports missing or invalid Issuer App private key without creating configuration or echoing it", async () => {
+test("Executor setup validates only the Issuer key reference and never reads or parses key material", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
     await assert.rejects(
@@ -675,27 +675,97 @@ test("Executor setup reports missing or invalid Issuer App private key without c
         return true;
       },
     );
-    const invalidPem = "-----BEGIN PRIVATE KEY-----\nbm90LWEta2V5LXNlbnRpbmVs\n-----END PRIVATE KEY-----\n";
-    await configureIssuerKey(root, environment, invalidPem);
-    await assert.rejects(
-      () => setupLocalExecutor(environment),
-      (error: unknown) => {
-        assert.ok(error instanceof LocalExecutorError);
-        assert.equal(error.code, "EXECUTOR_ISSUER_KEY_INVALID");
-        assert.equal(error.message.includes("bm90LWEta2V5LXNlbnRpbmVs"), false);
-        return true;
-      },
-    );
-    environment.INARI_GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("ed25519")
-      .privateKey.export({ type: "pkcs8", format: "pem" })
-      .toString();
-    await assert.rejects(
-      () => setupLocalExecutor(environment),
-      (error: unknown) => error instanceof LocalExecutorError && error.code === "EXECUTOR_ISSUER_KEY_INVALID",
-    );
     await assert.rejects(readFile(path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json")));
+
+    // A reference to a file that does not exist succeeds: setup never opens it.
+    environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = path.join(root, "absent-issuer-app.private-key.pem");
+    const unreadable = await setupLocalExecutor(environment);
+    assert.ok(unreadable.config.id.startsWith("exec_"));
+
+    // A reference to non-RSA or malformed material also succeeds: setup never parses it.
+    const sentinel = "bm90LWEta2V5LXNlbnRpbmVs";
+    await configureIssuerKey(
+      root,
+      environment,
+      `-----BEGIN PRIVATE KEY-----\n${sentinel}\n-----END PRIVATE KEY-----\n`,
+    );
+    const invalid = await setupLocalExecutor(environment);
+    assert.equal(invalid.config.id, unreadable.config.id);
+    const persisted = await readTree(environment.INARI_CONFIG_HOME as string);
+    assert.equal(persisted.includes(sentinel), false);
+    assert.equal(persisted.includes("PRIVATE KEY"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Executor startup is the credential boundary: it reads and validates the Issuer key and fails closed without disclosure", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    await configureIssuer(root, environment);
+    await setupLocalExecutor(environment);
+    const assertStartRejected = async (code: string, secret?: string) =>
+      assert.rejects(
+        () => startConfiguredLocalExecutor("0.14.1", environment),
+        (error: unknown) => {
+          assert.ok(error instanceof LocalExecutorError);
+          assert.equal(error.code, code);
+          assert.equal(error.message.includes("PRIVATE KEY"), false);
+          if (secret !== undefined) assert.equal(error.message.includes(secret), false);
+          return true;
+        },
+      );
+
+    environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = path.join(root, "absent-issuer-app.private-key.pem");
+    await assertStartRejected("EXECUTOR_ISSUER_KEY_INVALID");
+    const sentinel = "bm90LWEta2V5LXNlbnRpbmVs";
+    await configureIssuerKey(
+      root,
+      environment,
+      `-----BEGIN PRIVATE KEY-----\n${sentinel}\n-----END PRIVATE KEY-----\n`,
+    );
+    await assertStartRejected("EXECUTOR_ISSUER_KEY_INVALID", sentinel);
+    await configureIssuerKey(
+      root,
+      environment,
+      generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    );
+    await assertStartRejected("EXECUTOR_ISSUER_KEY_INVALID");
+
+    await configureIssuerKey(root, environment);
+    const started = await startConfiguredLocalExecutor("0.14.1", environment);
+    started.server.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Local Executor execution reads the Issuer key at use and fails closed before any provider request", async () => {
+  const withKey = (pem: string | undefined) => async (root: string, environment: NodeJS.ProcessEnv) => {
+    await configureIssuer(root, environment);
+    if (pem === undefined) delete environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE;
+    else await configureIssuerKey(root, environment, pem);
+  };
+  const cases: readonly [string, (root: string, environment: NodeJS.ProcessEnv) => Promise<void>, string][] = [
+    ["missing Issuer key reference", withKey(undefined), "EXECUTOR_ISSUER_KEY_MISSING"],
+    [
+      "unreadable Issuer key file",
+      async (root, environment) => {
+        await configureIssuer(root, environment);
+        environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = path.join(root, "absent-issuer-app.private-key.pem");
+      },
+      "EXECUTOR_ISSUER_KEY_INVALID",
+    ],
+    [
+      "malformed Issuer key replaced after setup",
+      withKey("-----BEGIN PRIVATE KEY-----\nbm90LWEta2V5\n-----END PRIVATE KEY-----\n"),
+      "EXECUTOR_ISSUER_KEY_INVALID",
+    ],
+  ];
+  for (const [label, configure, code] of cases) {
+    const provider = providerFetch();
+    await assertFailsClosedBeforeMutation(label, configure, provider, code);
+    assert.deepEqual(provider.calls, [], `${label} reached the provider`);
   }
 });
 

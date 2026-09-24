@@ -572,20 +572,41 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       JSON.parse(missingKeySetup.stdout.trim().split("\n").at(-1)).error.code,
       "EXECUTOR_ISSUER_KEY_MISSING",
     );
+    assert.equal(existsSync(path.join(configHome, "executor", "config.json")), false);
+    // #1092: CLI setup and application-state projection check only the
+    // Executor-owned key reference. Unreadable or malformed key material is
+    // accepted here because neither surface opens or parses the key; the
+    // running Executor rejects it at its credential boundary below.
+    const invalidKeySentinel = "bm90LWEta2V5LXNlbnRpbmVs";
     const invalidKeyFile = path.join(providerCustody, "invalid-issuer-app.private-key.pem");
-    await writeFile(invalidKeyFile, "-----BEGIN PRIVATE KEY-----\nbm90LWEta2V5\n-----END PRIVATE KEY-----\n", {
+    const absentKeyFile = path.join(providerCustody, "absent-issuer-app.private-key.pem");
+    await writeFile(invalidKeyFile, `-----BEGIN PRIVATE KEY-----\n${invalidKeySentinel}\n-----END PRIVATE KEY-----\n`, {
       mode: 0o600,
     });
-    const invalidKeySetup = command(["executor", "setup", "--json"], {
-      cwd: workspace,
-      env: { ...executorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: invalidKeyFile },
-    });
-    assert.notEqual(invalidKeySetup.status, 0, "Executor setup accepted an invalid Issuer App private key");
-    assert.equal(
-      JSON.parse(invalidKeySetup.stdout.trim().split("\n").at(-1)).error.code,
-      "EXECUTOR_ISSUER_KEY_INVALID",
-    );
-    assert.equal(existsSync(path.join(configHome, "executor", "config.json")), false);
+    for (const [label, keyFile] of [
+      ["unreadable", absentKeyFile],
+      ["malformed", invalidKeyFile],
+    ]) {
+      const referenceOnlySetup = command(["executor", "setup", "--json"], {
+        cwd: workspace,
+        env: { ...executorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: keyFile },
+      });
+      assert.equal(
+        referenceOnlySetup.status,
+        0,
+        `Executor setup read the ${label} Issuer key: ${referenceOnlySetup.stdout}`,
+      );
+      assert.equal(referenceOnlySetup.stdout.includes(invalidKeySentinel), false);
+      const referenceOnlyState = jsonOutput(
+        command(["init", "--json"], {
+          cwd: workspace,
+          env: { ...operatorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: keyFile },
+        }),
+        `init with ${label} Issuer key reference`,
+      );
+      assert.equal(referenceOnlyState.applicationState.provider.issuerKey, "configured");
+      assert.equal(JSON.stringify(referenceOnlyState).includes(invalidKeySentinel), false);
+    }
     const executorSetup = jsonOutput(
       command(["executor", "setup", "--json"], { cwd: workspace, env: executorEnv }),
       "executor setup",
@@ -950,6 +971,24 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
     assert.equal(executorFailure.stdout.includes(issuerPrivateKey), false);
     assert.equal(existsSync(discoveryPath(configHome, "executor")), false);
     assert.equal(existsSync(discoveryPath(configHome, "admission")), false);
+    for (const [label, keyFile] of [
+      ["unreadable", absentKeyFile],
+      ["malformed", invalidKeyFile],
+    ]) {
+      const keyFailure = command(["runtime", "supervise", "--json"], {
+        cwd: workspace,
+        env: { ...supervisorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: keyFile },
+      });
+      assert.equal(keyFailure.error, undefined, `Executor ${label} key check timed out: ${keyFailure.stderr}`);
+      assert.notEqual(keyFailure.status, 0, `Executor started with a ${label} Issuer key`);
+      assert.match(keyFailure.stdout, /EXECUTOR_ISSUER_KEY_INVALID/u);
+      for (const output of [keyFailure.stdout, keyFailure.stderr]) {
+        assert.equal(output.includes(invalidKeySentinel), false);
+        assert.equal(output.includes("BEGIN PRIVATE KEY"), false);
+      }
+      assert.equal(existsSync(discoveryPath(configHome, "executor")), false);
+      assert.equal(existsSync(discoveryPath(configHome, "admission")), false);
+    }
 
     const admissionConfigForFailure = JSON.parse(await readFile(admissionSetup.configPath, "utf8"));
     const wrongSupervisorPeer = `${executorSetup.executorId.slice(0, -1)}${executorSetup.executorId.endsWith("A") ? "B" : "A"}`;

@@ -391,6 +391,21 @@ test("executor setup and serve use the Executor command contract and Executor-ow
     assert.equal(JSON.parse(missingKey.stdout).error.code, "EXECUTOR_ISSUER_KEY_MISSING");
     assert.match(JSON.parse(missingKey.stdout).error.message, /INARI_GITHUB_APP_PRIVATE_KEY_FILE/u);
 
+    // Setup checks only the Executor-owned reference; an unreadable path is
+    // accepted because setup never opens or parses the key.
+    const absentKey = await capture(["executor", "setup", "--json"], {
+      ...environment,
+      INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem"),
+    });
+    assert.equal(absentKey.exitCode, 0);
+    const absentState = await capture(
+      ["init", "--json"],
+      { ...environment, INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem") },
+      { repositoryRoot: root },
+    );
+    assert.equal(absentState.exitCode, 0);
+    assert.equal(JSON.parse(absentState.stdout).applicationState.provider.issuerKey, "configured");
+
     const issuerPem = await configureIssuerKey(root, environment);
     const setup = await capture(["executor", "setup", "--json"], environment);
     assert.equal(setup.exitCode, 0);
