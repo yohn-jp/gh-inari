@@ -510,12 +510,16 @@ export class RuntimeAuthorityPublicationUnauthorizedError extends Error {
 }
 
 /**
- * Prove the caller's own token can read the exact repository the Issuer is
- * configured to mutate -- by its immutable numeric id, not by name, which
- * can be renamed or reused. This reuses ordinary GitHub repository read
- * access (the same App-user/human seam `repository-setup.ts` already uses)
- * as the caller-authorization boundary; it never touches the Issuer
- * credential and never widens what the caller can do beyond that one read.
+ * Prove the caller's own token has write/push authority on the exact
+ * repository the Issuer is configured to mutate -- by its immutable numeric
+ * id, not by name, which can be renamed or reused. The Issuer-side operation
+ * is a repository write (branch + commit + PR), so read-only repository
+ * visibility is not enough: a read-only collaborator's token must not be
+ * able to delegate a write through the Issuer credential. This reuses
+ * ordinary GitHub repository access (the same App-user/human seam
+ * `repository-setup.ts` already uses) as the caller-authorization boundary;
+ * it never touches the Issuer credential and never widens what the caller
+ * can do beyond that one read of their own permissions.
  */
 async function assertCallerAuthorizedForTarget(
   callerToken: string,
@@ -541,11 +545,16 @@ async function assertCallerAuthorizedForTarget(
   }
   try {
     const body = record(response.body);
+    // GitHub includes the authenticated caller's own permission level on
+    // this exact response; `push` is the canonical write/push boolean
+    // (true for the push/maintain/admin roles, false for pull/triage-only).
+    const permissions = record(body.permissions);
     if (
       response.status !== 200 ||
       String(body.id) !== target.repositoryId ||
       typeof body.full_name !== "string" ||
-      body.full_name.toLowerCase() !== target.nameWithOwner.toLowerCase()
+      body.full_name.toLowerCase() !== target.nameWithOwner.toLowerCase() ||
+      permissions.push !== true
     ) {
       throw new Error();
     }

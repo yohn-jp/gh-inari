@@ -35,10 +35,14 @@ function authorizedCallerFetch(): typeof globalThis.fetch {
     const url = new URL(String(input));
     if (url.toString() === `https://api.github.com/repositories/${TARGET.repositoryId}`) {
       assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${CALLER_TOKEN}`);
-      return new Response(JSON.stringify({ id: Number(TARGET.repositoryId), full_name: TARGET.nameWithOwner }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          id: Number(TARGET.repositoryId),
+          full_name: TARGET.nameWithOwner,
+          permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     }
     throw new Error(`unexpected ${url.toString()}`);
   }) as typeof globalThis.fetch;
@@ -198,6 +202,37 @@ test("createDirectAppRuntimeAuthorityPublisher rejects a caller token that can r
 
   await assert.rejects(
     publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority), "a-different-repository-token"),
+    RuntimeAuthorityPublicationUnauthorizedError,
+  );
+  assert.deepEqual(fixture.counts, { createBranch: 0, createPullRequest: 0 });
+});
+
+test("createDirectAppRuntimeAuthorityPublisher rejects a read-only caller: repository read access alone is not enough to authorize an Issuer-side write", async () => {
+  const publicAuthority = authority("direct-app-runtime-authority-read-only-caller");
+  const fixture = fakeCredentialBroker(publicAuthority);
+  const publisher = createDirectAppRuntimeAuthorityPublisher({
+    appId: "unused-in-this-fixture",
+    installationId: "unused-in-this-fixture",
+    privateKeyPem: "unused-in-this-fixture",
+    repository: { hostname: TARGET.repositoryHost, owner: "acme", name: "consumer-repo" },
+    credentialBroker: fixture.broker as never,
+    // The caller can read the exact configured target repository (correct
+    // id/full_name), but their token only has pull/triage access to it --
+    // never push. Without a write/push check, this read-only collaborator
+    // could delegate a write through the Issuer credential.
+    fetch: (async () =>
+      new Response(
+        JSON.stringify({
+          id: Number(TARGET.repositoryId),
+          full_name: TARGET.nameWithOwner,
+          permissions: { admin: false, maintain: false, push: false, triage: true, pull: true },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof globalThis.fetch,
+  });
+
+  await assert.rejects(
+    publisher.publish(createRuntimeAuthorityPublicationRequest(publicAuthority), "a-read-only-caller-token"),
     RuntimeAuthorityPublicationUnauthorizedError,
   );
   assert.deepEqual(fixture.counts, { createBranch: 0, createPullRequest: 0 });
