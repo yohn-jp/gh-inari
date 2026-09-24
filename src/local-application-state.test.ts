@@ -35,7 +35,24 @@ test("#1065: no Issue/Change branch is selected outside a Git checkout", async (
     assert.equal(state.changeBranch.status, "issue-not-selected");
     assert.equal(state.changeBranch.issue, undefined);
     assert.equal(state.changeBranch.branch, undefined);
-    assert.match(state.changeBranch.command ?? "", /^git checkout -b </u);
+    assert.match(state.changeBranch.detail, /<feat\|fix\|docs\|refactor\|test\|chore>\/<issue-number>-<slug>/u);
+    assert.equal("command" in state.changeBranch, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1065: nextAction.commands never carries a placeholder that a shell would parse as an operator", async () => {
+  // Review finding on PR #1088: the branch-naming placeholder pattern uses
+  // `<`, `|`, and `>`, which are shell redirection/pipeline operators. It
+  // must never appear inside `nextAction.commands`, since the CLI and
+  // console both print each entry as a literal "Run: ..." command.
+  const root = await temporaryRoot();
+  try {
+    const state = await projectLocalApplicationState({ root, environment: environmentFor(root) });
+    for (const command of state.nextAction.commands) {
+      assert.doesNotMatch(command, /[<>|]/u, `nextAction.commands entry is not a literal shell command: ${command}`);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -79,7 +96,8 @@ test("#1065: a non-canonical branch is a mismatch, not a silent pass-through to 
     const state = await projectLocalApplicationState({ root, environment: environmentFor(root) });
     assert.equal(state.changeBranch.status, "branch-mismatch");
     assert.equal(state.changeBranch.branch, "wip-exploration");
-    assert.match(state.changeBranch.command ?? "", /^git checkout -b </u);
+    assert.match(state.changeBranch.detail, /<feat\|fix\|docs\|refactor\|test\|chore>\/<issue-number>-<slug>/u);
+    assert.equal("command" in state.changeBranch, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

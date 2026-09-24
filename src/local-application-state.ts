@@ -66,7 +66,6 @@ export type LocalApplicationChangeBranchStatus = "ready" | "issue-not-selected" 
 export interface LocalApplicationChangeBranchReadiness {
   readonly status: LocalApplicationChangeBranchStatus;
   readonly detail: string;
-  readonly command?: string;
   readonly issue?: number;
   readonly branch?: string;
 }
@@ -102,7 +101,14 @@ export interface LocalApplicationStateOptions {
 const AUTHORITY_RECORD_PATH = "runtime-authority.json";
 const SESSION_START_COMMAND = "inari session start --issue <number> -- <command...>" as const;
 const RUNTIME_SUPERVISE_COMMAND = "inari runtime supervise" as const;
-const CHANGE_BRANCH_COMMAND = `git checkout -b <${CANONICAL_BRANCH_TYPES.join("|")}>/<issue-number>-<slug>` as const;
+/**
+ * A descriptive branch-name pattern, not a literal executable command: it
+ * contains placeholder syntax (`<...|...>`) that a shell would parse as
+ * redirection/pipeline operators if copied verbatim. Callers must only ever
+ * surface this inside prose (`detail`), never inside `nextAction.commands`
+ * or any other "run this" surface.
+ */
+const CHANGE_BRANCH_PATTERN = `<${CANONICAL_BRANCH_TYPES.join("|")}>/<issue-number>-<slug>` as const;
 
 function authorityValidator(value: unknown): Delegator {
   const validation = validateDelegator(value);
@@ -186,15 +192,17 @@ function resolveLocalChangeBranchReadiness(root: string): LocalApplicationChange
   if (branch === undefined || branch === DEFAULT_BRANCH_NAME) {
     return {
       status: "issue-not-selected",
-      detail: "No Issue is selected. Check out the canonical Issue-bound Change branch before Session start.",
-      command: CHANGE_BRANCH_COMMAND,
+      detail:
+        "No Issue is selected. Check out a canonical Issue-bound Change branch " +
+        `(git checkout -b, naming: ${CHANGE_BRANCH_PATTERN}) before Session start.`,
       ...(branch === undefined ? {} : { branch }),
     };
   }
   return {
     status: "branch-mismatch",
-    detail: `Local branch ${branch} is not a canonical Issue-bound Change branch; check out the correct one before Session start.`,
-    command: CHANGE_BRANCH_COMMAND,
+    detail:
+      `Local branch ${branch} is not a canonical Issue-bound Change branch; check out the correct one ` +
+      `(git checkout -b, naming: ${CHANGE_BRANCH_PATTERN}) before Session start.`,
     branch,
   };
 }
@@ -454,15 +462,12 @@ export async function projectLocalApplicationState(
         ? {
             stepId: "start-runtime",
             commands: [RUNTIME_SUPERVISE_COMMAND],
-            detail: `Run the local Runtime Supervisor, then launch the governed child for Issue #${changeBranch.issue} on ${changeBranch.branch} with the Session command below.`,
+            detail: `Run the local Runtime Supervisor in a separate foreground terminal, then launch the governed child for Issue #${changeBranch.issue} on ${changeBranch.branch} with the Session command below.`,
           }
         : {
             stepId: "change-branch",
-            commands: [
-              RUNTIME_SUPERVISE_COMMAND,
-              ...(changeBranch.command === undefined ? [] : [changeBranch.command]),
-            ],
-            detail: `Run the local Runtime Supervisor. ${changeBranch.detail}`,
+            commands: [RUNTIME_SUPERVISE_COMMAND],
+            detail: `Run the local Runtime Supervisor in a separate foreground terminal. ${changeBranch.detail}`,
           };
 
   return {

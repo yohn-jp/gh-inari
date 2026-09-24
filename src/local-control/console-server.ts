@@ -105,9 +105,6 @@ function renderLocalConsolePage(input: {
     "      <h2>Issue / Change branch</h2>",
     `      <p>Status: <strong>${escapeHtml(application.changeBranch.status)}</strong></p>`,
     `      <p>${escapeHtml(application.changeBranch.detail)}</p>`,
-    application.changeBranch.command === undefined
-      ? ""
-      : `      <pre><code>${escapeHtml(application.changeBranch.command)}</code></pre>`,
     "      <h2>Governed Session</h2>",
     application.changeBranch.status === "ready"
       ? `      <p><code>${escapeHtml(`inari session start --issue ${String(application.changeBranch.issue)} -- <command...>`)}</code></p>`

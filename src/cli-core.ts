@@ -1201,8 +1201,6 @@ async function runInitCommand(
     console.log(
       `Issue/Change branch: ${applicationState.changeBranch.status} — ${applicationState.changeBranch.detail}`,
     );
-    if (applicationState.changeBranch.command !== undefined)
-      console.log(`Run: ${applicationState.changeBranch.command}`);
     if (applicationState.changeBranch.status === "ready") {
       console.log(
         `Then launch the governed child with: inari session start --issue ${applicationState.changeBranch.issue} -- <command...>`,

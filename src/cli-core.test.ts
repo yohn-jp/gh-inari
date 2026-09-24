@@ -164,6 +164,10 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     assert.ok(human.stdout.includes("inari admission setup --from"));
     assert.ok(human.stdout.includes("Issue/Change branch: issue-not-selected"));
     assert.ok(!human.stdout.includes("Then launch the governed child with:"));
+    // #1065 review: the branch-naming placeholder pattern (which contains `|`
+    // and `<>`, shell pipeline/redirection operators) must appear only as
+    // descriptive prose, never as its own "Run: ..." line.
+    assert.ok(!human.stdout.split("\n").some((line) => line.startsWith("Run: git checkout")));
     assert.ok(human.stdout.includes("Runtime readiness: executor=not-running admission=not-running overall=not-ready"));
     assert.ok(human.stdout.includes("inari runtime console"));
 
@@ -241,17 +245,20 @@ test("local application state reaches configured through supported CLI commands 
     // #1065: once setup completes the canonical next action is the Runtime
     // Supervisor plus, since no canonical Issue-bound Change branch is
     // checked out yet, guidance to select one -- not a bare Session-start
-    // command projected as immediately executable.
+    // command projected as immediately executable. The branch-naming
+    // placeholder pattern is prose (inside `detail`), never a literal
+    // "Run: ..." entry in `nextAction.commands` -- `<`, `|`, and `>` are
+    // shell operators, and copying it verbatim must not invoke a shell
+    // redirection/pipeline instead of creating a branch.
     assert.equal(state.changeBranch.status, "issue-not-selected");
+    assert.equal("command" in state.changeBranch, false);
     assert.deepEqual(state.nextAction, {
       stepId: "change-branch",
-      commands: [
-        "inari runtime supervise",
-        "git checkout -b <feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>",
-      ],
+      commands: ["inari runtime supervise"],
       detail:
-        "Run the local Runtime Supervisor. No Issue is selected. Check out the canonical Issue-bound Change branch before Session start.",
+        "Run the local Runtime Supervisor in a separate foreground terminal. No Issue is selected. Check out a canonical Issue-bound Change branch (git checkout -b, naming: <feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>) before Session start.",
     });
+    for (const command of state.nextAction.commands) assert.doesNotMatch(command, /[<>|]/u);
     assert.equal(initialized.stdout.includes("state-access-secret"), false);
     assert.equal(initialized.stdout.includes("state-refresh-secret"), false);
     assert.equal(initialized.stdout.includes("BEGIN PRIVATE KEY"), false);
@@ -277,7 +284,7 @@ test("local application state reaches configured through supported CLI commands 
       stepId: "start-runtime",
       commands: ["inari runtime supervise"],
       detail:
-        "Run the local Runtime Supervisor, then launch the governed child for Issue #4242 on feat/4242-local-state-branch-readiness with the Session command below.",
+        "Run the local Runtime Supervisor in a separate foreground terminal, then launch the governed child for Issue #4242 on feat/4242-local-state-branch-readiness with the Session command below.",
     });
 
     // A branch that is neither the default branch nor a canonical Change
