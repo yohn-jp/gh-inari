@@ -268,22 +268,22 @@
     "mdast-util-from-markdown": "2.0.3",
     "mdast-util-gfm": "3.1.0",
     "micromark-extension-gfm": "3.0.0",
-    "xstate": "5.33.0",
+    "xstate": "5.33.2",
     "yaml": "^2.9.1",
-    "zod": "4.6.2"
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/mdast": "4.0.4",
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.2",
     "@xstate/graph": "3.0.4",
     "esbuild": "0.28.2",
-    "eslint": "10.10.0",
-    "prettier": "3.9.6",
-    "tsx": "^4.19.4",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "typescript-eslint": "8.69.0",
+    "typescript-eslint": "8.70.1",
     "wireit": "0.14.13",
-    "wrangler": "4.131.1"
+    "wrangler": "4.136.3"
   },
   "engines": {
     "node": ">=24"
