@@ -12,7 +12,7 @@ import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
 import type { AppScopedMutationCapability, EffectAuthorizerCredentialRequest } from "./effect-authorizer.js";
 import type { SemanticPullRequestMutationExecutionPort } from "../semantic-pr-mutation.js";
 import type { RepositoryIdentity } from "./effect-authorizer.js";
-import type { Delegator } from "../agent-authority/delegator.js";
+import type { RuntimeAuthorityPublicationCapability } from "./runtime-authority-publication-capability.js";
 
 /** Shared credential-bound capability surface for direct Session/App execution. */
 export interface AppProviderCredentialBroker {
@@ -37,12 +37,14 @@ export interface AppProviderCredentialBroker {
   ): Promise<T>;
 
   /**
-   * Submit one validated public Runtime Authority record to the centrally
-   * custodied Issuer/Worker boundary when this broker supports setup
-   * publication (#1066). Implementations never require the Issuer private
-   * key to cross this call.
+   * Execute one bounded Runtime Authority trust bootstrap publication when
+   * this broker supports setup publication (#1066), using this operator's
+   * own GitHub authority (never an Issuer App installation credential).
    */
-  dispatchRuntimeAuthorityPublication?(request: { readonly authority: Delegator }): Promise<void>;
+  withRuntimeAuthorityPublicationCapability?<T>(
+    request: { readonly target: RepositoryIdentity },
+    operation: (capability: RuntimeAuthorityPublicationCapability) => Promise<T>,
+  ): Promise<T>;
 }
 
 /** Compatibility alias for callers that name the implementation boundary. */

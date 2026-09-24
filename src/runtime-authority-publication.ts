@@ -92,11 +92,27 @@ export function validateRuntimeAuthorityPublicationRequest(input: unknown): Runt
   return request;
 }
 
+export interface RuntimeAuthorityPublicationOptions {
+  /**
+   * The expected PR author login. Defaults to the centrally custodied
+   * Issuer bot identity (`inari-issuer[bot]`), preserving the Issuer/Worker
+   * publication path unchanged. Pass `null` for a caller whose own
+   * authenticated identity -- not a fixed bot login -- performed the
+   * mutation (#1066 bootstrap publication through an App-user credential):
+   * every other invariant (exact branch/base/repository, exact title/body,
+   * single changed file, byte-exact artifact content) still applies and
+   * remains the actual integrity guarantee.
+   */
+  readonly requireAuthor?: string | null;
+}
+
 export async function publishRuntimeAuthority(
   requestInput: unknown,
   target: RepositoryIdentity,
   broker: RuntimeAuthorityPublicationBroker,
+  options?: RuntimeAuthorityPublicationOptions,
 ): Promise<RuntimeAuthorityPublicationResult> {
+  const requireAuthor = options?.requireAuthor === undefined ? ISSUER_BOT_LOGIN : options.requireAuthor;
   const request = validateRuntimeAuthorityPublicationRequest(requestInput);
   const artifact = renderDelegatorArtifact(request.authority);
   const branch = runtimeAuthorityPublicationBranch(request.authority.id);
@@ -112,7 +128,18 @@ export async function publishRuntimeAuthority(
     if (existingPullRequests.length === 1) {
       const existing = existingPullRequests[0];
       if (existing === undefined) throw new RuntimeAuthorityPublicationError();
-      await verifyPublication(capability, existing, branch, base, artifact.path, artifact.content, title, body, target);
+      await verifyPublication(
+        capability,
+        existing,
+        branch,
+        base,
+        artifact.path,
+        artifact.content,
+        title,
+        body,
+        target,
+        requireAuthor,
+      );
       return result("existing", request.authority.id, branch, existing);
     }
 
@@ -151,7 +178,18 @@ export async function publishRuntimeAuthority(
     } catch {
       const raced = await capability.findPullRequests(branch, base);
       if (raced.length !== 1 || raced[0] === undefined) throw new RuntimeAuthorityPublicationError();
-      await verifyPublication(capability, raced[0], branch, base, artifact.path, artifact.content, title, body, target);
+      await verifyPublication(
+        capability,
+        raced[0],
+        branch,
+        base,
+        artifact.path,
+        artifact.content,
+        title,
+        body,
+        target,
+        requireAuthor,
+      );
       return result("existing", request.authority.id, branch, raced[0]);
     }
     await verifyPublication(
@@ -164,6 +202,7 @@ export async function publishRuntimeAuthority(
       title,
       body,
       target,
+      requireAuthor,
     );
     return result("created", request.authority.id, branch, pullRequest);
   });
@@ -185,6 +224,7 @@ async function verifyPublication(
   title: string,
   body: string,
   target: RepositoryIdentity,
+  requireAuthor: string | null,
 ): Promise<void> {
   if (
     pullRequest.state !== "open" ||
@@ -192,7 +232,7 @@ async function verifyPublication(
     pullRequest.headBranch !== branch ||
     pullRequest.headRepository.toLowerCase() !== target.nameWithOwner.toLowerCase() ||
     pullRequest.baseBranch !== base ||
-    pullRequest.author !== ISSUER_BOT_LOGIN ||
+    (requireAuthor !== null && pullRequest.author !== requireAuthor) ||
     pullRequest.title !== title ||
     pullRequest.body !== body ||
     pullRequest.changedFiles !== 1

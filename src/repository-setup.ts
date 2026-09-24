@@ -39,11 +39,13 @@ import {
   type LocalRuntimeProfileRepository,
 } from "./local-runtime-profile.js";
 import type { RepositoryContext, RepositoryTree, RepositoryTreeEntry } from "./github/types.js";
+import type { RepositoryIdentity } from "./github/effect-authorizer.js";
+import type { RuntimeAuthorityPublicationBroker } from "./github/runtime-authority-publication-capability.js";
 import {
-  publishSetupRuntimeAuthority,
-  type RuntimeAuthorityPublicationClientOptions,
-} from "./github/runtime-authority-publication-client.js";
-import type { RuntimeAuthorityPublicationResult } from "./runtime-authority-publication.js";
+  createRuntimeAuthorityPublicationRequest,
+  publishRuntimeAuthority,
+  type RuntimeAuthorityPublicationResult,
+} from "./runtime-authority-publication.js";
 
 const DEFAULT_SESSION_TTL_SECONDS = 3_600;
 const DEFAULT_GITHUB_HOST = "github.com";
@@ -73,6 +75,13 @@ export class RepositorySetupError extends Error {
   }
 }
 
+/** Bootstrap trust publication (#1066) input: the generated public Delegator record only. */
+export interface RuntimeAuthorityPublisherOptions {
+  readonly capability: GitHubAppRepositoryReadCapability;
+  readonly repository: LocalRuntimeProfileRepository;
+  readonly authority: Delegator;
+}
+
 export interface RepositorySetupInput {
   readonly root?: string;
   readonly repository?: string;
@@ -93,16 +102,13 @@ export interface RepositorySetupInput {
   };
   readonly appUserBroker?: AppProviderCredentialBroker;
   /**
-   * Base URL of the centrally custodied Runtime Authority Issuer/Worker
-   * boundary (#1066 correction; see `./github/direct-app-execution.js`'s
-   * `createDirectAppRuntimeAuthorityPublisher`). Falls back to the
-   * `INARI_ISSUER_WORKER_URL` environment variable. This repository is never
-   * required to hold the Issuer private key as an Actions secret.
+   * Test/composition seam; production setup publishes the bootstrap trust PR
+   * directly through this operator's own App-user credential/broker (#1066)
+   * -- there is no central Issuer/Worker boundary or private-key handling in
+   * this path at all.
    */
-  readonly issuerWorkerUrl?: string;
-  /** Test/composition seam; production setup submits only the validated public request to the Issuer/Worker boundary. */
   readonly authorityPublisher?: (
-    options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">,
+    options: RuntimeAuthorityPublisherOptions,
   ) => Promise<RuntimeAuthorityPublicationResult>;
   readonly now?: () => Date;
   readonly maxSessionTtlSeconds?: number;
@@ -391,9 +397,7 @@ async function setupWithCapability(
   capability: GitHubAppRepositoryReadCapability,
   installationId: string,
   endpoint: string,
-  authorityPublisher?: (
-    options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">,
-  ) => Promise<RuntimeAuthorityPublicationResult>,
+  authorityPublisher?: (options: RuntimeAuthorityPublisherOptions) => Promise<RuntimeAuthorityPublicationResult>,
 ): Promise<RepositorySetupResult> {
   const environment = input.environment ?? process.env;
   const profileStore = new LocalRuntimeProfileStore({ configHome: input.configHome, environment });
@@ -587,8 +591,6 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
           input.fetch ?? globalThis.fetch.bind(globalThis),
         )
       : undefined;
-  const issuerWorkerUrl =
-    input.issuerWorkerUrl ?? environmentValue(input.environment ?? process.env, "INARI_ISSUER_WORKER_URL");
   const broker =
     customBroker ??
     new GitHubAppUserCredentialBroker({
@@ -611,18 +613,36 @@ export async function setupRepository(input: RepositorySetupInput = {}): Promise
       deviceFlow: input.deviceFlow,
       ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
       ...(input.now === undefined ? {} : { now: input.now }),
-      ...(issuerWorkerUrl === undefined ? {} : { issuerWorkerUrl }),
     });
-  const dispatchRuntimeAuthorityPublication = broker.dispatchRuntimeAuthorityPublication?.bind(broker);
+  // Bootstrap trust publication (#1066): this operator's own App-user
+  // credential/broker is the GitHub mutation authority. There is no Issuer
+  // App installation credential, private key, or central publication
+  // service anywhere in this path -- see
+  // `GitHubAppUserCredentialBroker.withRuntimeAuthorityPublicationCapability`.
+  const withRuntimeAuthorityPublicationCapability = broker.withRuntimeAuthorityPublicationCapability?.bind(broker);
   const authorityPublisher =
     input.authorityPublisher ??
-    (dispatchRuntimeAuthorityPublication === undefined
+    (withRuntimeAuthorityPublicationCapability === undefined
       ? undefined
-      : async (options: Omit<RuntimeAuthorityPublicationClientOptions, "dispatch">) =>
-          publishSetupRuntimeAuthority({
-            ...options,
-            dispatch: (authority) => dispatchRuntimeAuthorityPublication({ authority }),
-          }));
+      : async (options: RuntimeAuthorityPublisherOptions): Promise<RuntimeAuthorityPublicationResult> => {
+          const target: RepositoryIdentity = {
+            repositoryHost: options.repository.repositoryHost,
+            repositoryId: options.repository.repositoryId,
+            nameWithOwner: options.repository.repositoryNameWithOwner,
+          };
+          const publicationBroker: RuntimeAuthorityPublicationBroker = { withRuntimeAuthorityPublicationCapability };
+          // The PR is authored by this operator's own GitHub identity, never
+          // a fixed Issuer bot login (#1066 bootstrap publication); every
+          // other invariant Core enforces (exact branch/base/repository,
+          // exact title/body, single changed file, byte-exact artifact
+          // content) still applies and remains the real integrity guarantee.
+          return publishRuntimeAuthority(
+            createRuntimeAuthorityPublicationRequest(options.authority),
+            target,
+            publicationBroker,
+            { requireAuthor: null },
+          );
+        });
   try {
     return await broker.withRepositoryReadCapability({}, async (capability) => {
       const scope = capability.scope;
