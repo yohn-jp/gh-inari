@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { CAPABILITY_KINDS } from "../agent-authority/capability.js";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
+import { renderDelegatorArtifact } from "../agent-authority/delegator-trust.js";
 import type { Delegator } from "../agent-authority/delegator.js";
-import { createRuntimeAuthorityPublicationRequest } from "../runtime-authority-publication.js";
-import { RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH } from "../agent-authority/runtime-authority-publication-http.js";
+import {
+  createRuntimeAuthorityPublicationRequest,
+  publishRuntimeAuthority,
+  runtimeAuthorityPublicationBody,
+  runtimeAuthorityPublicationBranch,
+  runtimeAuthorityPublicationTitle,
+} from "../runtime-authority-publication.js";
+import type { RuntimeAuthorityPublicationBroker } from "./runtime-authority-publication-capability.js";
 import { createAppUserCredential } from "./app-user-credential.js";
 import { InMemoryAppUserCredentialStore } from "./app-user-credential-store.js";
 import {
@@ -104,98 +111,175 @@ test("App-user broker resolves the configured App/repository and exposes no toke
   assert.deepEqual(provider.calls, ["/user/installations", "/user/installations/7/repositories", "/repos/acme/inari"]);
 });
 
-test("App-user broker submits only the validated public Runtime Authority request to the Issuer/Worker boundary, never GitHub Actions", async () => {
+test("App-user broker publishes a bootstrap Runtime Authority trust PR using this operator's own token, never an Issuer credential (#1066)", async () => {
   const { publicKey } = generateKeyPairSync("ed25519");
   const authority: Delegator = createDelegatorRecord({
-    id: "runtime-publication-test",
+    id: "runtime-bootstrap-test",
     key: publicKey,
     notBefore: "2026-01-01T00:00:00.000Z",
     notAfter: null,
     maxSessionTtlSeconds: 3_600,
     capabilityCeiling: CAPABILITY_KINDS,
   });
-  const requests: Array<{
-    readonly url: string;
-    readonly contentType: string | null;
-    readonly authorization: string | null;
-    readonly body: unknown;
-  }> = [];
+  const artifact = renderDelegatorArtifact(authority);
+  const target: RepositoryIdentity = { repositoryHost: "github.com", repositoryId: "99", nameWithOwner: "acme/inari" };
+  const branch = runtimeAuthorityPublicationBranch(authority.id);
+  const title = runtimeAuthorityPublicationTitle(authority.id);
+  const body = runtimeAuthorityPublicationBody(authority);
+  const BASE_SHA = "a".repeat(40);
+  const BASE_TREE_SHA = "b".repeat(40);
+  const TREE_SHA = "c".repeat(40);
+  const COMMIT_SHA = "d".repeat(40);
+  const blobSha = createHash("sha1")
+    .update(`blob ${Buffer.byteLength(artifact.content, "utf8")}\0`)
+    .update(artifact.content)
+    .digest("hex");
+
+  let branchCreated = false;
+  const authorizations: string[] = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
-    if (url.toString() === `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`) {
-      requests.push({
-        url: url.toString(),
-        contentType: new Headers(init?.headers).get("content-type"),
-        authorization: new Headers(init?.headers).get("authorization"),
-        body: JSON.parse(String(init?.body ?? "{}")) as unknown,
-      });
+    const method = (init?.method ?? "GET").toUpperCase();
+    authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+    const path = url.pathname;
+    if (path === "/user/installations") {
       return json({
-        version: 1,
-        ok: true,
-        result: {
-          status: "created",
-          authorityId: authority.id,
-          branch: "inari/runtime-authority/0123456789abcdef",
-          pullRequest: { number: 1, url: "https://github.com/acme/inari/pull/1" },
-        },
+        installations: [
+          {
+            id: 7,
+            app_id: 42,
+            permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" },
+            suspended_at: null,
+          },
+        ],
       });
     }
-    throw new Error(`unexpected ${url.toString()}`);
+    if (path === "/user/installations/7/repositories") {
+      return json({ repositories: [{ id: 99, full_name: "acme/inari", node_id: "repo-node" }] });
+    }
+    if (path === "/repos/acme/inari" && method === "GET")
+      return json({ id: 99, full_name: "acme/inari", default_branch: "main" });
+    if (path === "/repos/acme/inari/pulls" && method === "GET") return json([]);
+    if (path === "/repos/acme/inari/git/ref/heads/main" && method === "GET") {
+      return json({ ref: "refs/heads/main", object: { type: "commit", sha: BASE_SHA } });
+    }
+    if (path === `/repos/acme/inari/git/ref/heads/${encodeURIComponent(branch)}` && method === "GET") {
+      if (!branchCreated) return new Response(null, { status: 404 });
+      return json({ ref: `refs/heads/${branch}`, object: { type: "commit", sha: COMMIT_SHA } });
+    }
+    if (path === `/repos/acme/inari/git/commits/${BASE_SHA}` && method === "GET") {
+      return json({ sha: BASE_SHA, tree: { sha: BASE_TREE_SHA } });
+    }
+    if (path === `/repos/acme/inari/git/commits/${COMMIT_SHA}` && method === "GET") {
+      return json({ sha: COMMIT_SHA, tree: { sha: TREE_SHA } });
+    }
+    if (path === `/repos/acme/inari/git/trees/${BASE_TREE_SHA}` && method === "GET") {
+      return json({ sha: BASE_TREE_SHA, truncated: false, tree: [] });
+    }
+    if (path === `/repos/acme/inari/git/trees/${TREE_SHA}` && method === "GET") {
+      return json({
+        sha: TREE_SHA,
+        truncated: false,
+        tree: [{ path: artifact.path, mode: "100644", type: "blob", sha: blobSha }],
+      });
+    }
+    if (path === "/repos/acme/inari/git/blobs" && method === "POST") return json({ sha: blobSha }, 201);
+    if (path === `/repos/acme/inari/git/blobs/${blobSha}` && method === "GET") {
+      return json({
+        sha: blobSha,
+        encoding: "base64",
+        content: Buffer.from(artifact.content, "utf8").toString("base64"),
+      });
+    }
+    if (path === "/repos/acme/inari/git/trees" && method === "POST") return json({ sha: TREE_SHA }, 201);
+    if (path === "/repos/acme/inari/git/commits" && method === "POST") return json({ sha: COMMIT_SHA }, 201);
+    if (path === "/repos/acme/inari/git/refs" && method === "POST") {
+      branchCreated = true;
+      return json({ ref: `refs/heads/${branch}` }, 201);
+    }
+    if (path === `/repos/acme/inari/compare/main...${encodeURIComponent(branch)}` && method === "GET") {
+      return json({ ahead_by: 1, files: [{ filename: artifact.path }] });
+    }
+    if (path === "/repos/acme/inari/pulls" && method === "POST") {
+      return json(
+        {
+          number: 9,
+          html_url: "https://github.com/acme/inari/pull/9",
+          title,
+          body,
+          state: "open",
+          draft: false,
+          head: { ref: branch, repo: { full_name: "acme/inari" } },
+          base: { ref: "main" },
+          // The PR is authored by this operator's own account, never a fixed
+          // Issuer bot login -- Core's `requireAuthor: null` accepts this.
+          user: { login: "the-operator" },
+          changed_files: 1,
+        },
+        201,
+      );
+    }
+    if (path === "/repos/acme/inari/pulls/9/files" && method === "GET") return json([{ filename: artifact.path }]);
+    throw new Error(`unexpected ${method} ${path}`);
   };
-  // No GitHub App-user installation/repository lookup is configured on this
-  // fetch: publication must never call GitHub at all, only the Issuer/Worker
-  // boundary, and must never require this repository to hold the Issuer
-  // private key as an Actions secret.
-  const broker = new GitHubAppUserCredentialBroker(options(fetch, { issuerWorkerUrl: "https://issuer.example.com" }));
+  const broker = new GitHubAppUserCredentialBroker(options(fetch));
+  const publicationBroker: RuntimeAuthorityPublicationBroker = {
+    withRuntimeAuthorityPublicationCapability: broker.withRuntimeAuthorityPublicationCapability.bind(broker),
+  };
 
-  await broker.dispatchRuntimeAuthorityPublication({ authority });
+  const result = await publishRuntimeAuthority(
+    createRuntimeAuthorityPublicationRequest(authority),
+    target,
+    publicationBroker,
+    { requireAuthor: null },
+  );
 
-  assert.equal(requests.length, 1);
-  const request = requests[0];
-  assert.equal(request?.url, `https://issuer.example.com${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`);
-  assert.match(request?.contentType ?? "", /^application\/json/iu);
-  // The caller's own App-user access token is forwarded as the Worker's
-  // caller-authorization proof (the existing App-user/human seam) -- as a
-  // bearer credential, never inside the JSON request body.
-  assert.equal(request?.authorization, "Bearer access-secret");
-  assert.deepEqual(request?.body, createRuntimeAuthorityPublicationRequest(authority));
+  assert.equal(result.status, "created");
+  assert.deepEqual(result.pullRequest, { number: 9, url: "https://github.com/acme/inari/pull/9" });
+  // Every GitHub call -- installation lookup and the bounded mutation alike
+  // -- carries this operator's own App-user token; there is no Issuer
+  // credential anywhere in this path.
+  assert.ok(authorizations.length > 0 && authorizations.every((value) => value === "Bearer access-secret"));
   assert.doesNotMatch(
-    JSON.stringify(request?.body),
-    /access-secret|refresh-secret|session-material-secret|provider-token-secret|privateKey|\.mcp\.json/iu,
+    JSON.stringify(result),
+    /access-secret|refresh-secret|privateKey|-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
   );
 });
 
-test("App-user broker rejects secret-bearing Runtime Authority records before dispatch", async () => {
+test("App-user broker rejects a target repository mismatch before resolving any credential", async () => {
   const provider = brokerFetch();
-  const broker = new GitHubAppUserCredentialBroker(
-    options(provider.fetch, { issuerWorkerUrl: "https://issuer.example.com" }),
-  );
-  const invalid = { id: "runtime-invalid", privateKey: "must-not-escape" } as unknown as Delegator;
+  const broker = new GitHubAppUserCredentialBroker(options(provider.fetch));
 
-  await assert.rejects(broker.dispatchRuntimeAuthorityPublication({ authority: invalid }), {
-    code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED",
-  });
+  await assert.rejects(
+    broker.withRuntimeAuthorityPublicationCapability(
+      { target: { repositoryHost: "github.com", repositoryId: "218000002", nameWithOwner: "acme/inari" } },
+      async () => undefined,
+    ),
+    { code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED" },
+  );
   assert.deepEqual(provider.calls, []);
 });
 
-test("App-user broker fails closed when the Issuer/Worker boundary is not configured", async () => {
-  const { publicKey } = generateKeyPairSync("ed25519");
-  const authority: Delegator = createDelegatorRecord({
-    id: "runtime-unconfigured-test",
-    key: publicKey,
-    notBefore: "2026-01-01T00:00:00.000Z",
-    notAfter: null,
-    maxSessionTtlSeconds: 3_600,
-    capabilityCeiling: CAPABILITY_KINDS,
+test("App-user broker fails closed when the resolved installation lacks Runtime Authority publication permissions", async () => {
+  const provider = brokerFetch({
+    installations: [
+      {
+        id: 7,
+        app_id: 42,
+        permissions: { contents: "write", pull_requests: "read", metadata: "read" },
+        suspended_at: null,
+      },
+    ],
   });
-  const fetch: typeof globalThis.fetch = async () => {
-    throw new Error("must not contact any provider without a configured Issuer/Worker boundary");
-  };
-  const broker = new GitHubAppUserCredentialBroker(options(fetch));
+  const broker = new GitHubAppUserCredentialBroker(options(provider.fetch));
+  const target: RepositoryIdentity = { repositoryHost: "github.com", repositoryId: "99", nameWithOwner: "acme/inari" };
 
-  await assert.rejects(broker.dispatchRuntimeAuthorityPublication({ authority }), {
-    code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED",
-  });
+  // Insufficient authority (pull_requests: read, not write) must fail closed
+  // before any branch/commit/PR mutation is attempted.
+  await assert.rejects(
+    broker.withRuntimeAuthorityPublicationCapability({ target }, async () => undefined),
+    { code: "GITHUB_APP_USER_CREDENTIAL_BROKER_FAILED" },
+  );
 });
 
 test("App-user broker bounds operation scope to requested effect permissions after validating the provider grant", async () => {

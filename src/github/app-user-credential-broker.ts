@@ -8,6 +8,7 @@ import {
   GitHubAppApiTransport,
   GITHUB_APP_GIT_DATA_PERMISSIONS,
   GITHUB_APP_REPOSITORY_READ_PERMISSIONS,
+  GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS,
   type GitHubAppCredentialFailureStage,
   type GitHubAppRepositoryReadCapability,
   type GitHubAppRepositoryReadPermissionSet,
@@ -64,9 +65,10 @@ import {
 } from "./provider-failure.js";
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
 import { attachChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
-import type { Delegator } from "../agent-authority/delegator.js";
-import { createRuntimeAuthorityPublicationRequest } from "../runtime-authority-publication.js";
-import { RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH } from "../agent-authority/runtime-authority-publication-http.js";
+import {
+  GitHubRuntimeAuthorityPublicationCapability,
+  type RuntimeAuthorityPublicationCapability,
+} from "./runtime-authority-publication-capability.js";
 
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_API_URL_LENGTH = 2_048;
@@ -126,15 +128,6 @@ export interface GitHubAppUserCredentialBrokerOptions {
   readonly mutationFailure?: (effect: ChangeEffect) => Error;
   readonly provenance?: GitHubChangeProvenanceSignerOptions;
   readonly requestTimeoutMs?: number;
-  /**
-   * Base URL of the centrally custodied Runtime Authority Issuer/Worker
-   * boundary (#1066 correction; see `../github/direct-app-execution.js`'s
-   * `createDirectAppRuntimeAuthorityPublisher`). Required only by
-   * `dispatchRuntimeAuthorityPublication`. This repository's own Actions
-   * runtime never receives the Issuer private key: the caller submits only
-   * the validated public Runtime Authority record to this URL.
-   */
-  readonly issuerWorkerUrl?: string;
 }
 
 interface ResolvedCredential {
@@ -287,22 +280,6 @@ function normalizedApiUrl(value: string | undefined, hostname: string): string {
   }
 }
 
-function normalizedIssuerWorkerUrl(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  if (value.length === 0 || value.length > MAX_API_URL_LENGTH) {
-    throw new GitHubAppUserCredentialBrokerError("issuer-configuration");
-  }
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-      throw new Error();
-    }
-    return url.toString().replace(/\/$/u, "");
-  } catch {
-    throw new GitHubAppUserCredentialBrokerError("issuer-configuration");
-  }
-}
-
 /** App-user broker implementing the same bounded capability port as App installations. */
 export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroker {
   readonly #app: AppPrincipalIdentity;
@@ -319,7 +296,6 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
   readonly #mutationFailure: (effect: ChangeEffect) => Error;
   readonly #provenance: GitHubChangeProvenanceSignerOptions | undefined;
   readonly #requestTimeoutMs: number | undefined;
-  readonly #issuerWorkerUrl: string | undefined;
 
   constructor(options: GitHubAppUserCredentialBrokerOptions) {
     this.#failure = options.failure ?? ((stage) => new GitHubAppUserCredentialBrokerError(stage));
@@ -395,7 +371,6 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
       this.#now = options.now ?? (() => new Date());
       this.#provenance = options.provenance;
       this.#requestTimeoutMs = options.requestTimeoutMs;
-      this.#issuerWorkerUrl = normalizedIssuerWorkerUrl(options.issuerWorkerUrl);
     } catch (error: unknown) {
       if (error instanceof GitHubAppUserCredentialBrokerError) throw error;
       throw this.#safeFailure("issuer-configuration");
@@ -564,50 +539,51 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
   }
 
   /**
-   * Submit only the validated public Runtime Authority record to the
-   * centrally custodied Issuer/Worker boundary (#1066 correction). This
-   * repository is never required to hold the Issuer private key as an
-   * Actions secret: the Worker performs the bounded mutation (dedicated,
-   * repository-independent branch; exactly one public Authority artifact
-   * commit; governed PR; no auto-merge/approval) against its own
-   * deployment-fixed target repository and returns only success/failure.
-   *
-   * The caller's own App-user access token is forwarded as a bearer
-   * credential so the Worker can verify this operator can read its exact
-   * configured target repository before minting any Issuer credential --
-   * the existing App-user/human installation+repository authorization seam,
-   * never the Issuer private key, and never present in the request body.
+   * Execute one strictly bounded Runtime Authority trust bootstrap
+   * publication using this operator's own App-user access token as the
+   * GitHub mutation authority (#1066). There is no Issuer App installation
+   * credential anywhere in this path, and no central publication service:
+   * the same local App-user credential/broker this repository already uses
+   * for setup performs the bounded mutation directly, exactly as bounded by
+   * `resolved.scope.permissions` -- and, natively, by whatever push access
+   * this operator's own GitHub account actually has on the target
+   * repository. Publication does not itself establish trust: the generated
+   * public Delegator record becomes canonical only once the created PR
+   * passes governed review and is merged to the protected branch. The
+   * callback receives no token or general GitHub client, only the
+   * public-record publication capability.
    */
-  async dispatchRuntimeAuthorityPublication(request: { readonly authority: Delegator }): Promise<void> {
-    let publicationRequest: ReturnType<typeof createRuntimeAuthorityPublicationRequest>;
-    try {
-      publicationRequest = createRuntimeAuthorityPublicationRequest(request.authority);
-    } catch {
-      throw this.#safeFailure("projection-execution", { reason: "response-validation" });
+  async withRuntimeAuthorityPublicationCapability<T>(
+    request: { readonly target: RepositoryIdentity },
+    operation: (capability: RuntimeAuthorityPublicationCapability) => Promise<T>,
+  ): Promise<T> {
+    const target = validateRepositoryIdentity(request.target);
+    if (!target.valid || target.value === undefined || target.value.repositoryId !== this.#repositoryId) {
+      throw this.#safeFailure("installation-scope", { reason: "scope" });
     }
-    if (this.#issuerWorkerUrl === undefined) throw this.#safeFailure("issuer-configuration");
+    const resolved = await this.#resolve(GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS);
+    const repositoryNodeId = resolved.repositoryNodeId ?? this.#repositoryNodeId;
+    if (repositoryNodeId === undefined) throw this.#safeFailure("installation-scope", { reason: "scope" });
+    const transport = this.#apiTransport(resolved.credential, "projection-execution", repositoryNodeId);
+    const capabilityTransport: BranchAdvanceCapabilityTransport = Object.freeze({
+      request: (input: Parameters<BranchAdvanceCapabilityTransport["request"]>[0]) => transport.request(input),
+      requestGraphql: (input: GitDataGraphqlRequest) => transport.requestGraphql(input),
+    });
+    const gitData = new GitHubBranchAdvanceCapabilityImpl({
+      repository: resolved.repository,
+      repositoryId: resolved.scope.repository.repositoryId,
+      repositoryNodeId,
+      scope: resolved.scope,
+      transport: capabilityTransport,
+    });
+    const capability = new GitHubRuntimeAuthorityPublicationCapability({
+      scope: resolved.scope,
+      gitData,
+      transport,
+      repository: { ...resolved.repository, nameWithOwner: resolved.scope.repository.nameWithOwner },
+    });
     try {
-      const credential = await this.#loadCredential();
-      await credential.withAccessToken(async (token) => {
-        const response = await this.#fetch(`${this.#issuerWorkerUrl}${RUNTIME_AUTHORITY_PUBLICATION_HTTP_PATH}`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(publicationRequest),
-        });
-        if (response.status !== 200) throw new Error();
-        const body: unknown = await response.json();
-        if (
-          typeof body !== "object" ||
-          body === null ||
-          Array.isArray(body) ||
-          (body as { readonly ok?: unknown }).ok !== true
-        ) {
-          throw new Error();
-        }
-      });
+      return await operation(capability);
     } catch (error: unknown) {
       throw this.#safeOperation(error, "projection-execution");
     }
