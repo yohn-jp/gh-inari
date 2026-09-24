@@ -45,7 +45,8 @@ const requestLog = process.env.INARI_CERT_REQUEST_LOG;
 const forbiddenRuntimeCredentials = role === "admission"
   ? ["GH_TOKEN", "GITHUB_TOKEN", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE", "INARI_GITHUB_APP_ID", "GITHUB_APP_ID", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY",
       "INARI_GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY", "INARI_GITHUB_APP_PRIVATE_KEY_FILE", "GITHUB_APP_PRIVATE_KEY_FILE"]
-  : ["GH_TOKEN", "GITHUB_TOKEN", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE"];
+  : ["GH_TOKEN", "GITHUB_TOKEN", "INARI_RUNTIME_AUTHORITY_PRIVATE_KEY", "INARI_GITHUB_APP_USER_CREDENTIAL_FILE", "INARI_APP_USER_CREDENTIAL_FILE",
+      "INARI_GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY"];
 if ((role === "executor" || role === "admission") && forbiddenRuntimeCredentials.some((name) => Object.hasOwn(process.env, name))) {
   throw new Error("A local Runtime child received credentials outside its custody boundary");
 }
@@ -956,6 +957,8 @@ test("#1030 certifies the real local CLI, Admission, and Executor processes", { 
       GH_TOKEN: "executor-must-not-inherit-this-token",
       GITHUB_TOKEN: "admission-must-not-inherit-this-token",
       INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: "runtime-authority-private-sentinel",
+      INARI_GITHUB_APP_PRIVATE_KEY: issuerPrivateKey,
+      GITHUB_APP_PRIVATE_KEY: issuerPrivateKey,
     };
     const executorFailure = command(["runtime", "supervise", "--json"], {
       cwd: workspace,

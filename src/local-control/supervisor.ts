@@ -57,11 +57,12 @@ function childEnvironment(component: LocalRuntimeComponent, environment: NodeJS.
   // The App-user credential is bootstrap-only; neither Runtime child uses it.
   delete child.INARI_GITHUB_APP_USER_CREDENTIAL_FILE;
   delete child.INARI_APP_USER_CREDENTIAL_FILE;
+  // Local Executor Issuer key custody is a file reference only; inline PEM never reaches a child.
+  delete child.INARI_GITHUB_APP_PRIVATE_KEY;
+  delete child.GITHUB_APP_PRIVATE_KEY;
   if (component === "admission") {
     delete child.INARI_GITHUB_APP_ID;
     delete child.GITHUB_APP_ID;
-    delete child.INARI_GITHUB_APP_PRIVATE_KEY;
-    delete child.GITHUB_APP_PRIVATE_KEY;
     delete child.INARI_GITHUB_APP_PRIVATE_KEY_FILE;
     delete child.GITHUB_APP_PRIVATE_KEY_FILE;
   }

@@ -122,6 +122,16 @@ test("#1092: the Issuer key setup step checks only the Executor-owned reference 
     assert.equal(missing.provider.issuerKey, "missing");
     assert.equal(missing.steps.find((step) => step.id === "executor-issuer-key")?.status, "required");
 
+    // Inline PEM variables are not a Local Executor custody reference.
+    const inline = await projectLocalApplicationState({
+      root,
+      environment: {
+        ...environmentFor(root),
+        INARI_GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\ninline\n-----END PRIVATE KEY-----\n",
+      },
+    });
+    assert.equal(inline.provider.issuerKey, "missing");
+
     // A reference to an absent file projects as configured: the projection never opens it.
     const absent = await projectLocalApplicationState({
       root,

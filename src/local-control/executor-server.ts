@@ -114,12 +114,12 @@ function appId(environment: NodeJS.ProcessEnv): string {
 
 export type LocalExecutorIssuerKeyStatus = "configured" | "missing";
 
-const ISSUER_KEY_REFERENCE_VARIABLES = [
-  "INARI_GITHUB_APP_PRIVATE_KEY_FILE",
-  "GITHUB_APP_PRIVATE_KEY_FILE",
-  "INARI_GITHUB_APP_PRIVATE_KEY",
-  "GITHUB_APP_PRIVATE_KEY",
-] as const;
+/**
+ * Local Executor custody is a file reference only. Inline PEM variables
+ * (INARI_GITHUB_APP_PRIVATE_KEY / GITHUB_APP_PRIVATE_KEY) would place key
+ * material in CLI process environments and are not accepted here.
+ */
+const ISSUER_KEY_REFERENCE_VARIABLES = ["INARI_GITHUB_APP_PRIVATE_KEY_FILE", "GITHUB_APP_PRIVATE_KEY_FILE"] as const;
 
 function issuerKeyMissing(): LocalExecutorError {
   return new LocalExecutorError(
@@ -131,7 +131,7 @@ function issuerKeyMissing(): LocalExecutorError {
 function issuerKeyInvalid(): LocalExecutorError {
   return new LocalExecutorError(
     "EXECUTOR_ISSUER_KEY_INVALID",
-    "The Inari Issuer App private key configured by INARI_GITHUB_APP_PRIVATE_KEY_FILE (or INARI_GITHUB_APP_PRIVATE_KEY) is not a readable RSA private key.",
+    "The Inari Issuer App private key referenced by INARI_GITHUB_APP_PRIVATE_KEY_FILE is not a readable RSA private key.",
   );
 }
 
@@ -158,7 +158,12 @@ export function localExecutorIssuerKeyStatus(
 function issuerPrivateKey(environment: NodeJS.ProcessEnv): string {
   let pem: string;
   try {
-    pem = readAppPrivateKey(environment);
+    // Pass only the file reference so inline PEM variables are never used.
+    const reference: NodeJS.ProcessEnv = {};
+    for (const name of ISSUER_KEY_REFERENCE_VARIABLES) {
+      if (environment[name] !== undefined) reference[name] = environment[name];
+    }
+    pem = readAppPrivateKey(reference);
   } catch (error: unknown) {
     if (error instanceof LocalRuntimeConfigError && error.code === "LOCAL_RUNTIME_CONFIG_MISSING") {
       throw issuerKeyMissing();

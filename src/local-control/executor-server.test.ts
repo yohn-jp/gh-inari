@@ -677,6 +677,16 @@ test("Executor setup validates only the Issuer key reference and never reads or 
     );
     await assert.rejects(readFile(path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json")));
 
+    // Inline PEM is not a Local Executor custody reference.
+    environment.INARI_GITHUB_APP_PRIVATE_KEY = ISSUER_PRIVATE_KEY_PEM;
+    environment.GITHUB_APP_PRIVATE_KEY = ISSUER_PRIVATE_KEY_PEM;
+    await assert.rejects(
+      () => setupLocalExecutor(environment),
+      (error: unknown) => error instanceof LocalExecutorError && error.code === "EXECUTOR_ISSUER_KEY_MISSING",
+    );
+    delete environment.INARI_GITHUB_APP_PRIVATE_KEY;
+    delete environment.GITHUB_APP_PRIVATE_KEY;
+
     // A reference to a file that does not exist succeeds: setup never opens it.
     environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = path.join(root, "absent-issuer-app.private-key.pem");
     const unreadable = await setupLocalExecutor(environment);
@@ -748,6 +758,14 @@ test("Local Executor execution reads the Issuer key at use and fails closed befo
   };
   const cases: readonly [string, (root: string, environment: NodeJS.ProcessEnv) => Promise<void>, string][] = [
     ["missing Issuer key reference", withKey(undefined), "EXECUTOR_ISSUER_KEY_MISSING"],
+    [
+      "inline Issuer key without a file reference",
+      async (root, environment) => {
+        await withKey(undefined)(root, environment);
+        environment.INARI_GITHUB_APP_PRIVATE_KEY = ISSUER_PRIVATE_KEY_PEM;
+      },
+      "EXECUTOR_ISSUER_KEY_MISSING",
+    ],
     [
       "unreadable Issuer key file",
       async (root, environment) => {
