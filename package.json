@@ -259,7 +259,8 @@
     "verify": "wireit",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test",
-    "readme:check": "node scripts/readme-integrity.mjs"
+    "readme:check": "node scripts/readme-integrity.mjs",
+    "boundaries:check": "node scripts/check-runtime-boundaries.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0",
@@ -329,6 +330,7 @@
       "dependencies": [
         "format:check",
         "readme:check",
+        "boundaries:check",
         "lint",
         "test",
         "dashboard:test",
