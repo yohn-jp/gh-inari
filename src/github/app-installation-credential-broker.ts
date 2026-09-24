@@ -59,6 +59,11 @@ import {
   type SemanticPullRequestMutationExecutionPort,
 } from "../semantic-pr-mutation.js";
 import {
+  GitHubRuntimeAuthorityPublicationCapability,
+  type RuntimeAuthorityPublicationCapability,
+  type RuntimeAuthorityPublicationBroker,
+} from "./runtime-authority-publication-capability.js";
+import {
   attachGitHubProviderFailure,
   githubProviderFailure,
   githubProviderFailureFromStatus,
@@ -98,6 +103,13 @@ export type GitHubAppRepositoryReadPermissionSet = Readonly<
 /** Minimum App permission set for the bounded Git-data capability. */
 export const GITHUB_APP_GIT_DATA_PERMISSIONS = Object.freeze({
   contents: "write",
+  metadata: "read",
+} as const);
+
+/** Minimum Issuer App permissions for bounded public Authority publication. */
+export const GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS = Object.freeze({
+  contents: "write",
+  pull_requests: "write",
   metadata: "read",
 } as const);
 
@@ -531,7 +543,9 @@ type CredentialRequest =
     };
 
 /** Shared implementation for pre-admission reads and post-admission mutations. */
-export class GitHubAppInstallationCredentialBroker implements TrustedInstallationCredentialBroker {
+export class GitHubAppInstallationCredentialBroker
+  implements TrustedInstallationCredentialBroker, RuntimeAuthorityPublicationBroker
+{
   readonly #app: AppInstallationScope["app"];
   readonly #installationId: string;
   readonly #privateKeyPem: string;
@@ -773,6 +787,71 @@ export class GitHubAppInstallationCredentialBroker implements TrustedInstallatio
       repositoryNodeId,
       scope: credential.scope,
       transport: capabilityTransport,
+    });
+    try {
+      return await operation(capability);
+    } catch (error: unknown) {
+      throw this.safeOperationError(error, credential.token, "projection-execution");
+    }
+  }
+
+  /**
+   * Execute one strictly bounded Runtime Authority trust publication using an
+   * Issuer installation credential. The callback receives no token or general
+   * GitHub client, only the public-record publication capability.
+   */
+  async withRuntimeAuthorityPublicationCapability<T>(
+    request: { readonly target: RepositoryIdentity },
+    operation: (capability: RuntimeAuthorityPublicationCapability) => Promise<T>,
+  ): Promise<T> {
+    if (!isRecord(request) || !isRecord(request.target) || typeof operation !== "function") {
+      throw this.safeFailure("installation-scope", { reason: "scope" });
+    }
+    const targetResult = validateRepositoryIdentity(request.target);
+    if (
+      !targetResult.valid ||
+      targetResult.value === undefined ||
+      !sameConfiguredRepository(targetResult.value, this.#repository)
+    ) {
+      throw this.safeFailure("installation-scope", { reason: "scope" });
+    }
+    const permissions = GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS;
+    const credential = await this.issueInstallationToken({
+      app: this.#app,
+      target: targetResult.value,
+      permissions,
+      kind: "mutation",
+    });
+    const repositoryNodeId = credential.repositoryNodeId ?? this.#repositoryNodeId;
+    if (repositoryNodeId === undefined) throw this.safeFailure("installation-scope", { reason: "scope" });
+    const transport = new GitHubAppApiTransport({
+      apiUrl: this.#apiUrl,
+      token: credential.token,
+      repositoryNodeId,
+      fetch: this.#fetch,
+      failureStage: "projection-execution",
+      failure: this.#failure,
+      requestTimeoutMs: this.#requestTimeoutMs,
+    });
+    const capabilityTransport: BranchAdvanceCapabilityTransport = Object.freeze({
+      request: (input: Parameters<BranchAdvanceCapabilityTransport["request"]>[0]) => transport.request(input),
+      requestGraphql: (input: GitDataGraphqlRequest) => transport.requestGraphql(input),
+    });
+    const gitData = new GitHubBranchAdvanceCapabilityImpl({
+      repository: this.#repository,
+      repositoryId: credential.scope.repository.repositoryId,
+      repositoryNodeId,
+      scope: credential.scope,
+      transport: capabilityTransport,
+    });
+    const capability = new GitHubRuntimeAuthorityPublicationCapability({
+      scope: credential.scope,
+      gitData,
+      transport,
+      repository: {
+        ...this.#repository,
+        nameWithOwner: `${this.#repository.owner}/${this.#repository.name}`,
+      },
     });
     try {
       return await operation(capability);

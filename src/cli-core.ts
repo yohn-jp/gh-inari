@@ -192,6 +192,10 @@ import { bindLocalCliAdmissionRoute, ensureLocalCliTopology, localComponentPath 
 import { setupLocalAuthority } from "./local-control/identity.js";
 import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
 import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
+import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
+import { renderLocalApplicationSetupFlow } from "./local-application-state-terminal.js";
+import { superviseLocalRuntime } from "./local-control/supervisor.js";
+import { startLocalConsole } from "./local-control/console-server.js";
 import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
@@ -483,7 +487,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return await runTemplateImport(root, rest, parsed, json);
     }
     if (domain === "init") {
-      return runInitCommand(parsed, dependencies, json);
+      return await runInitCommand(parsed, root, dependencies, json);
     }
     if (domain === "change") {
       return await runChangeCommand(command, rest, parsed, root, dependencies, json);
@@ -1153,7 +1157,12 @@ async function runAuthorityCommand(
   return 0;
 }
 
-function runInitCommand(parsed: ParsedArgs, dependencies: CliDependencies, json: boolean): number {
+async function runInitCommand(
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
   const definition = getCommand("root.init");
   const unsupported = Object.keys(parsed.options).find((id) => !definition.optionIds.includes(id as OptionId));
   if (parsed.positionals.length !== 1 || parsed.capabilities.length > 0 || unsupported !== undefined) {
@@ -1169,13 +1178,36 @@ function runInitCommand(parsed: ParsedArgs, dependencies: CliDependencies, json:
     }
     throw new CliError("UNKNOWN_COMMAND", "Unknown init command.");
   }
-  const config = ensureLocalCliTopology(dependencies.environment ?? process.env);
-  const configPath = localComponentPath("cli", "config.json", dependencies.environment ?? process.env);
+  const environment = dependencies.environment ?? process.env;
+  const config = ensureLocalCliTopology(environment);
+  const configPath = localComponentPath("cli", "config.json", environment);
+  const applicationState = await projectLocalApplicationState({ root, environment });
+  const runtimeStatus = await projectLocalRuntimeReadiness(environment);
   if (json) {
-    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config }));
+    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config, applicationState, runtimeStatus }));
   } else {
     console.log("Initialized local CLI topology.");
     console.log(`Config: ${configPath}`);
+    console.log(`Local execution setup: ${applicationState.status}.`);
+    console.log("Ordered setup path:");
+    for (const line of renderLocalApplicationSetupFlow(applicationState)) console.log(line);
+    console.log(`Next: ${applicationState.nextAction.detail}`);
+    for (const command of applicationState.nextAction.commands) console.log(`Run: ${command}`);
+    console.log(`Credential custody: ${applicationState.provider.credentialPath}`);
+    console.log("After setup, run the local Runtime Supervisor:");
+    for (const command of applicationState.runtime.commands) console.log(`Run: ${command}`);
+    console.log(
+      `Issue/Change branch: ${applicationState.changeBranch.status} — ${applicationState.changeBranch.detail}`,
+    );
+    if (applicationState.changeBranch.status === "ready") {
+      console.log(
+        `Then launch the governed child with: inari session start --issue ${applicationState.changeBranch.issue} -- <command...>`,
+      );
+    }
+    console.log(
+      `Runtime readiness: executor=${runtimeStatus.executor} admission=${runtimeStatus.admission} overall=${runtimeStatus.overall}`,
+    );
+    console.log("Run `inari runtime console` for a browser view of this same state, including over SSH.");
   }
   return 0;
 }
@@ -1406,6 +1438,71 @@ async function runRuntimeCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  if (command === "supervise") {
+    if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "Unknown Runtime supervise command.");
+    const definition = getCommand("runtime.supervise");
+    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+      const optionId = unsupported ?? "capability";
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime supervise.`,
+        "$argv",
+        { command: "runtime supervise", option: optionId },
+      );
+    }
+    return superviseLocalRuntime(dependencies.environment ?? process.env, json);
+  }
+  if (command === "console") {
+    if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "Unknown Runtime console command.");
+    const definition = getCommand("runtime.console");
+    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+      const optionId = unsupported ?? "capability";
+      const option = getOption(optionId as OptionId);
+      throw new CliError(
+        "INVALID_OPTION",
+        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime console.`,
+        "$argv",
+        { command: "runtime console", option: optionId },
+      );
+    }
+    const environment = dependencies.environment ?? process.env;
+    const { server, announcement } = await startLocalConsole(root, environment);
+    const shutdown = (): void => {
+      server.close();
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    server.once("close", () => {
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+    });
+    const port = new URL(announcement.endpoint).port;
+    const sshForward = `-L ${port}:127.0.0.1:${port}`;
+    if (json) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          operation: "runtime.console",
+          endpoint: announcement.endpoint,
+          sshForward,
+          foreground: true,
+        }),
+      );
+    } else {
+      console.log(`Local setup/runtime console: ${announcement.endpoint}/`);
+      console.log("Loopback-only; this page never renders credentials, tokens, or private key material.");
+      console.log("To reach this console from a workstation browser over SSH, forward the same loopback port:");
+      console.log(`  ssh ${sshForward} <user>@<remote-host>`);
+      console.log(`Then open ${announcement.endpoint}/ in the workstation browser.`);
+      console.log("Press Ctrl-C to stop.");
+    }
+    return 0;
+  }
   if (command !== "connect" || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
   }
@@ -1486,14 +1583,12 @@ async function runExecutorCommand(
       operation: "executor.setup",
       configPath: result.configPath,
       executorId: result.config.id,
-      endpoint: `http://${result.config.listen.host}:${result.config.listen.port}`,
       provider: result.config.provider,
     };
     if (json) console.log(JSON.stringify(output));
     else {
       console.log("Local Executor identity and configuration are ready.");
       console.log(`Executor id: ${result.config.id}`);
-      console.log(`Endpoint: ${output.endpoint}`);
       console.log(`Configuration: ${result.configPath}`);
     }
     return 0;
@@ -1505,9 +1600,8 @@ async function runExecutorCommand(
   const port = typeof address === "object" && address !== null ? address.port : undefined;
   if (port === undefined) {
     server.close();
-    throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a loopback port.");
+    throw new CliError("EXECUTOR_LISTEN_FAILED", "Local Executor did not acquire a listening port.");
   }
-  const endpoint = `http://127.0.0.1:${port}`;
   const shutdown = (): void => {
     server.close();
     process.removeListener("SIGINT", shutdown);
@@ -1525,14 +1619,12 @@ async function runExecutorCommand(
         ok: true,
         operation: "executor.serve",
         executorId: started.config.id,
-        endpoint,
         foreground: true,
       }),
     );
   } else {
     console.log("Foreground local Executor server started.");
-    console.log(`Endpoint: ${endpoint}`);
-    console.log("Health: /health");
+    console.log("Admission can now verify local Executor readiness.");
   }
   return 0;
 }
@@ -1567,15 +1659,12 @@ async function runAdmissionCommand(
       throw new CliError("INPUT_REQUIRED", "Use --from <runtime-authority.json>.", "--from");
     const authority = await readJsonValue(from === "-" ? from : path.resolve(root, from));
     const result = setupLocalAdmission(authority, environment);
-    const endpoint = `http://${result.config.listen.host}:${result.config.listen.port}`;
-    bindLocalCliAdmissionRoute({ id: result.config.id, endpoint }, environment);
+    bindLocalCliAdmissionRoute({ id: result.config.id }, environment);
     const output = {
       ok: true,
       operation: "admission.setup",
       admissionId: result.config.id,
-      endpoint,
       executorId: result.config.executor.id,
-      executorEndpoint: result.config.executor.endpoint,
       configPath: result.configPath,
       publicAuthorityPath: result.authorityPath,
     };
@@ -1583,8 +1672,7 @@ async function runAdmissionCommand(
     else {
       console.log("Local Admission identity and configuration are ready.");
       console.log(`Admission id: ${output.admissionId}`);
-      console.log(`Endpoint: ${output.endpoint}`);
-      console.log(`Executor: ${output.executorId} (${output.executorEndpoint})`);
+      console.log(`Executor identity: ${output.executorId}`);
       console.log(`Configuration: ${output.configPath}`);
     }
     return 0;
@@ -1596,9 +1684,8 @@ async function runAdmissionCommand(
   const port = typeof address === "object" && address !== null ? address.port : undefined;
   if (port === undefined) {
     server.close();
-    throw new CliError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a loopback port.");
+    throw new CliError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a listening port.");
   }
-  const endpoint = `http://127.0.0.1:${port}`;
   const shutdown = (): void => {
     server.close();
     process.removeListener("SIGINT", shutdown);
@@ -1616,13 +1703,11 @@ async function runAdmissionCommand(
         ok: true,
         operation: "admission.serve",
         admissionId: started.config.id,
-        endpoint,
         foreground: true,
       }),
     );
   else {
     console.log("Foreground local Admission server started.");
-    console.log(`Endpoint: ${endpoint}`);
     console.log("Health: /health");
   }
   return 0;
@@ -1666,6 +1751,7 @@ async function runSetupCommand(
   });
   if (json) console.log(JSON.stringify(output));
   else {
+    console.log(`GitHub App ID: ${output.app.appId}`);
     if (output.state === "app-install-required") {
       console.log("GitHub App installation is required for this repository.");
       console.log(`Install: ${output.appInstallationUrl}`);
@@ -1673,7 +1759,13 @@ async function runSetupCommand(
       console.log("Runtime Authority trust is pending on the canonical protected ref.");
       console.log(`Authority: ${output.authority?.authorityId ?? "unknown"}`);
       if (output.authority?.artifactPath !== undefined) console.log(`Trust record: ${output.authority.artifactPath}`);
-      console.log("After the trust PR is merged, run inari setup again.");
+      if (output.publication !== undefined) {
+        console.log(`Trust PR: #${output.publication.pullRequest.number} (${output.publication.pullRequest.url})`);
+        console.log(`Trust branch: ${output.publication.branch}`);
+        console.log("Review and merge the trust PR, then run inari setup again.");
+      } else {
+        console.log("After the trust PR is merged, run inari setup again.");
+      }
     } else {
       console.log("Repository Runtime setup is ready.");
       console.log(`Authority: ${output.authority?.authorityId ?? "unknown"}`);

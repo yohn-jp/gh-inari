@@ -11,10 +11,12 @@ import {
   createLocalAdmissionClient,
   createSessionExecutionIntent,
   configuredLocalAdmissionRoute,
+  requireConfiguredLocalAdmissionRoute,
 } from "./admission-client.js";
 import { writeLocalJson, validateLocalCliConfig } from "./config.js";
+import { publishLocalRuntimeEndpoint } from "./runtime-discovery.js";
 
-const ENDPOINT = "http://127.0.0.1:8766";
+const ENDPOINT = "http://127.0.0.1:41230";
 const ISSUE = 1029;
 const SESSION_ID = "sess_test-session-1029";
 const REPOSITORY = { id: "1330755860", name: "yohn-jp/gh-inari" };
@@ -57,18 +59,22 @@ test("configured Admission client registers, closes, and executes only through i
     {
       version: 1,
       topology: { admission: "local", executor: "local" },
-      admission: { id: "adm_0123456789abcdef", endpoint: ENDPOINT },
+      admission: { id: "adm_0123456789abcdef" },
     },
     validateLocalCliConfig,
     environment,
   );
+  publishLocalRuntimeEndpoint("admission", "adm_0123456789abcdef", 41230, environment);
   try {
     assert.deepEqual(configuredLocalAdmissionRoute(environment), {
+      id: "adm_0123456789abcdef",
+    });
+    assert.deepEqual(requireConfiguredLocalAdmissionRoute(environment), {
       id: "adm_0123456789abcdef",
       endpoint: ENDPOINT,
     });
     const client = createLocalAdmissionClient({
-      endpoint: configuredLocalAdmissionRoute(environment)?.endpoint as string,
+      endpoint: requireConfiguredLocalAdmissionRoute(environment).endpoint as string,
       fetchImpl: async (input, init = {}) => {
         const url = input instanceof URL ? input : new URL(String(input));
         calls.push({ url, init });

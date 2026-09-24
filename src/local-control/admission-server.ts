@@ -9,6 +9,7 @@ import {
   readLocalJson,
   resolveConfigHome,
   validateLocalAdmissionConfig,
+  configuredLocalRuntimeBindHost,
   validateLocalAuthorityConfig,
   validateLocalExecutorConfig,
   writeLocalJson,
@@ -51,8 +52,18 @@ import { tryValidatePrPublicationRequest, type PrPublicationRequest } from "../p
 import { LocalExecutorClient } from "./executor-client.js";
 import type { LocalExecutorEvidenceRequest } from "./executor-http.js";
 import { executionIntentIssue, validateExecutionIntent, type ExecutionIntent } from "./execution-intent.js";
+import {
+  clearLocalRuntimeEndpoint,
+  publishLocalRuntimeEndpoint,
+  requireLocalRuntimeEndpoint,
+  type LocalRuntimeEndpoint,
+} from "./runtime-discovery.js";
+import { LocalTransportSecurityError, loadLocalMtlsIdentity, type LocalMtlsIdentity } from "./transport-security.js";
+import { createLocalRuntimeStatusPage, isLocalRuntimeLoopbackAddress } from "./status-page.js";
 
-export const LOCAL_ADMISSION_DEFAULT_PORT = 8766;
+export const LOCAL_ADMISSION_DEFAULT_PORT = 0;
+export const LOCAL_ADMISSION_STATUS_PATH = "/status" as const;
+const LOCAL_ADMISSION_HISTORICAL_PORT = 8766;
 export const LOCAL_ADMISSION_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_ADMISSION_HEALTH_PATH = "/health" as const;
 export const LOCAL_ADMISSION_SESSIONS_PATH = "/v1/sessions" as const;
@@ -117,22 +128,41 @@ export function setupLocalAdmission(
   }
   const executor = readLocalJson("executor", "config.json", validateLocalExecutorConfig, environment);
   if (executor === undefined) throw new LocalAdmissionError("EXECUTOR_NOT_SETUP", "Run `inari executor setup` first.");
+  const bindHost = configuredLocalRuntimeBindHost(environment);
+  if (executor.listen.host !== bindHost) {
+    throw new LocalAdmissionError(
+      "ADMISSION_BIND_POLICY_CONFLICT",
+      "Admission and Executor bind policies must match. Select the bind policy before setting up local components.",
+    );
+  }
   ensureLocalComponentDirectory("admission", environment);
   const identity = ensureLocalComponentIdentity("admission", environment);
   const configPath = `${resolveConfigHome(environment)}/admission/${ADMISSION_CONFIG_FILE}`;
   const authorityPath = `${resolveConfigHome(environment)}/admission/${AUTHORITY_FILE}`;
-  const config = writeLocalJson(
-    "admission",
-    ADMISSION_CONFIG_FILE,
-    {
-      version: LOCAL_CONFIG_VERSION,
-      id: identity.id,
-      listen: { host: "127.0.0.1" as const, port: LOCAL_ADMISSION_DEFAULT_PORT },
-      executor: { id: executor.id, endpoint: `http://${executor.listen.host}:${executor.listen.port}` },
-    },
-    validateLocalAdmissionConfig,
-    environment,
-  );
+  const existing = readLocalJson("admission", ADMISSION_CONFIG_FILE, validateLocalAdmissionConfig, environment);
+  if (
+    existing !== undefined &&
+    (existing.id !== identity.id || existing.executor.id !== executor.id || existing.listen.host !== bindHost)
+  ) {
+    throw new LocalAdmissionError(
+      "ADMISSION_CONFIG_CONFLICT",
+      "Existing local Admission configuration conflicts with the selected bind policy or pinned component identities.",
+    );
+  }
+  const config =
+    existing ??
+    writeLocalJson(
+      "admission",
+      ADMISSION_CONFIG_FILE,
+      {
+        version: LOCAL_CONFIG_VERSION,
+        id: identity.id,
+        listen: { host: bindHost, port: LOCAL_ADMISSION_DEFAULT_PORT },
+        executor: { id: executor.id },
+      },
+      validateLocalAdmissionConfig,
+      environment,
+    );
   const pinnedAuthority = writeLocalJson("admission", AUTHORITY_FILE, authority, authorityValidator, environment);
   if (
     canonicalJsonString(pinnedAuthority as unknown as CanonicalJsonValue) !==
@@ -708,8 +738,23 @@ export function createLocalAdmissionHttpServer(
   version: string,
   runtimeAuthority: Delegator,
   executor: AdmissionExecutor,
-  options: { readonly environment?: NodeJS.ProcessEnv; readonly now?: () => Date } = {},
+  options: {
+    readonly environment?: NodeJS.ProcessEnv;
+    readonly now?: () => Date;
+    readonly transport?: LocalMtlsIdentity;
+  } = {},
 ): Server {
+  const nonLoopback = config.listen.host === "0.0.0.0";
+  if (
+    nonLoopback !== (options.transport !== undefined) ||
+    (options.transport !== undefined &&
+      (options.transport.peerRole !== "executor" || options.transport.peerId !== config.executor.id))
+  ) {
+    throw new LocalAdmissionError(
+      "LOCAL_TRANSPORT_MTLS_CONFIGURATION_INVALID",
+      "Non-loopback local Runtime requires valid owner-only Admission and Executor mTLS identities.",
+    );
+  }
   const handler = createLocalAdmissionHttpHandler({
     admissionId: config.id,
     version,
@@ -717,9 +762,49 @@ export function createLocalAdmissionHttpServer(
     executor,
     ...options,
   });
-  return createServer((incoming, outgoing) => {
+  let server: Server;
+  server = createServer((incoming, outgoing) => {
     void (async () => {
       try {
+        const pathname = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
+        if (pathname === LOCAL_ADMISSION_STATUS_PATH) {
+          if (config.listen.host !== "127.0.0.1" && !isLocalRuntimeLoopbackAddress(incoming.socket.remoteAddress)) {
+            outgoing.statusCode = 404;
+            outgoing.end();
+            return;
+          }
+          if (incoming.method !== "GET") {
+            outgoing.statusCode = 405;
+            outgoing.setHeader("allow", "GET");
+            outgoing.setHeader("content-type", "text/plain; charset=utf-8");
+            outgoing.end("Only GET is supported.\n");
+            return;
+          }
+          const address = server.address();
+          const boundPort = typeof address === "object" && address !== null ? address.port : undefined;
+          if (boundPort === undefined) {
+            outgoing.statusCode = 503;
+            outgoing.end();
+            return;
+          }
+          let readiness: "ready" | "not-ready" = "ready";
+          try {
+            await executor.verifyReady();
+          } catch {
+            readiness = "not-ready";
+          }
+          const response = createLocalRuntimeStatusPage({
+            component: "admission",
+            id: config.id,
+            readiness,
+            endpoint: `http://127.0.0.1:${boundPort}`,
+            pinnedPeer: { component: "executor", id: config.executor.id },
+          });
+          outgoing.statusCode = response.status;
+          response.headers.forEach((value, key) => outgoing.setHeader(key, value));
+          outgoing.end(Buffer.from(await response.arrayBuffer()));
+          return;
+        }
         const response = await handler(requestFromIncoming(incoming));
         outgoing.statusCode = response.status;
         response.headers.forEach((value, key) => outgoing.setHeader(key, value));
@@ -732,22 +817,57 @@ export function createLocalAdmissionHttpServer(
         );
       }
     })();
-  }).listen(config.listen.port, config.listen.host);
+  });
+  return server.listen(
+    config.listen.port === LOCAL_ADMISSION_HISTORICAL_PORT ? LOCAL_ADMISSION_DEFAULT_PORT : config.listen.port,
+    config.listen.host,
+  );
 }
 
 export async function startConfiguredLocalAdmission(
   version: string,
   environment: NodeJS.ProcessEnv = process.env,
-): Promise<{ readonly server: Server; readonly config: LocalAdmissionConfig }> {
+): Promise<{
+  readonly server: Server;
+  readonly config: LocalAdmissionConfig;
+  readonly announcement: LocalRuntimeEndpoint;
+}> {
   const config = configuredLocalAdmission(environment);
   const runtimeAuthority = configuredAuthority(environment);
-  const executor = new LocalExecutorClient({ id: config.executor.id, endpoint: config.executor.endpoint });
+  let transport: ReturnType<typeof loadLocalMtlsIdentity> | undefined;
+  if (config.listen.host === "0.0.0.0") {
+    try {
+      transport = loadLocalMtlsIdentity("admission", config.id, config.executor.id, environment);
+    } catch (error: unknown) {
+      if (error instanceof LocalTransportSecurityError) {
+        throw new LocalAdmissionError(error.code, error.message);
+      }
+      throw error;
+    }
+  }
+  const discoveredExecutor = (): LocalExecutorClient => {
+    const endpoint = requireLocalRuntimeEndpoint("executor", config.executor.id, environment);
+    return new LocalExecutorClient({
+      id: config.executor.id,
+      endpoint: endpoint.endpoint,
+      ...(transport === undefined ? {} : { transport }),
+    });
+  };
+  const executor: AdmissionExecutor = {
+    verifyReady: () => discoveredExecutor().verifyReady(),
+    resolveRepository: (repositoryNameWithOwner) => discoveredExecutor().resolveRepository(repositoryNameWithOwner),
+    readEvidence: (request) => discoveredExecutor().readEvidence(request),
+    execute: (execution) => discoveredExecutor().execute(execution),
+  };
   try {
     await executor.verifyReady();
   } catch {
     throw new LocalAdmissionError("EXECUTOR_NOT_READY", "Configured Executor identity or readiness check failed.");
   }
-  const server = createLocalAdmissionHttpServer(config, version, runtimeAuthority, executor, { environment });
+  const server = createLocalAdmissionHttpServer(config, version, runtimeAuthority, executor, {
+    environment,
+    ...(transport === undefined ? {} : { transport }),
+  });
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("listening", resolve);
@@ -755,7 +875,30 @@ export async function startConfiguredLocalAdmission(
     });
   } catch {
     server.close();
-    throw new LocalAdmissionError("ADMISSION_LISTEN_FAILED", "Local Admission could not bind its loopback endpoint.");
+    throw new LocalAdmissionError("ADMISSION_LISTEN_FAILED", "Local Admission could not bind its configured endpoint.");
   }
-  return { server, config };
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : undefined;
+  if (port === undefined) {
+    server.close();
+    throw new LocalAdmissionError("ADMISSION_LISTEN_FAILED", "Local Admission did not acquire a listening port.");
+  }
+  let announcement: LocalRuntimeEndpoint;
+  try {
+    announcement = publishLocalRuntimeEndpoint("admission", config.id, port, environment);
+  } catch {
+    server.close();
+    throw new LocalAdmissionError(
+      "ADMISSION_DISCOVERY_FAILED",
+      "Local Admission endpoint could not be published safely.",
+    );
+  }
+  server.once("close", () => {
+    try {
+      clearLocalRuntimeEndpoint(announcement, environment);
+    } catch {
+      // A shutdown cleanup failure must not change the process close behavior.
+    }
+  });
+  return { server, config, announcement };
 }

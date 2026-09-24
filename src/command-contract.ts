@@ -6,7 +6,7 @@
  * the command surface has one authority.
  */
 
-export const COMMAND_CONTRACT_VERSION = "1.16.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.18.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -135,6 +135,8 @@ export type CommandId =
   | "session.start"
   | "session.close"
   | "runtime.connect"
+  | "runtime.supervise"
+  | "runtime.console"
   | "executor.setup"
   | "executor.serve"
   | "admission.setup"
@@ -805,9 +807,14 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "Prepare the repository-scoped local Runtime profile and report trust readiness.",
     SETUP_OPTIONS,
   ),
-  command("root.init", "root", "init", ["init"], "Declare the local CLI Admission and Executor topology.", [
-    ...ROOT_OPTIONS,
-  ]),
+  command(
+    "root.init",
+    "root",
+    "init",
+    ["init"],
+    "Initialize local topology and report ordered execution setup state.",
+    [...ROOT_OPTIONS],
+  ),
   command(
     "issue.schema",
     "issue",
@@ -1577,11 +1584,27 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     RUNTIME_OPTIONS,
   ),
   command(
+    "runtime.supervise",
+    "runtime",
+    "supervise",
+    ["runtime", "supervise"],
+    "Supervise separate local Executor and Admission processes and verify their discovered loopback readiness.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
+    "runtime.console",
+    "runtime",
+    "console",
+    ["runtime", "console"],
+    "Serve the canonical local setup/runtime state as a loopback-only, secret-free browser console.",
+    [...ROOT_OPTIONS],
+  ),
+  command(
     "executor.setup",
     "executor",
     "setup",
     ["executor", "setup"],
-    "Provision the local Executor identity and reference existing GitHub App user credential custody.",
+    "Provision the local Executor identity and reference existing GitHub App user credential custody; endpoint allocation is automatic.",
     [...ROOT_OPTIONS],
   ),
   command(
@@ -1589,7 +1612,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "executor",
     "serve",
     ["executor", "serve"],
-    "Run the configured post-admission local Executor HTTP server on loopback.",
+    "Run the local Executor on loopback and publish its current endpoint for Admission discovery.",
     [...ROOT_OPTIONS],
   ),
   command(
@@ -1597,7 +1620,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "admission",
     "setup",
     ["admission", "setup"],
-    "Create local Admission configuration and pin public Runtime Authority trust from a Delegator record.",
+    "Create local Admission configuration, pin public Runtime Authority trust, and bind CLI routing to Admission identity.",
     AUTHORITY_INPUT_OPTIONS,
   ),
   command(
@@ -1605,7 +1628,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "admission",
     "serve",
     ["admission", "serve"],
-    "Run the configured local Admission server after verifying its pinned Executor identity.",
+    "Run local Admission on loopback after verifying the discovered pinned Executor identity.",
     [...ROOT_OPTIONS],
   ),
   command(
@@ -2007,6 +2030,7 @@ export function projectCommandHelp(positionals: readonly string[]): CommandContr
     domain === "change" ||
     domain === "authority" ||
     domain === "session" ||
+    domain === "runtime" ||
     domain === "executor" ||
     domain === "admission" ||
     domain === "mcp"

@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { generateKeyPairSync } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -36,6 +37,7 @@ import {
   validateLocalExecutorConfig,
   writeLocalJson,
 } from "./local-control/config.js";
+import { publishLocalRuntimeEndpoint } from "./local-control/runtime-discovery.js";
 import {
   readLocalSessionBinding,
   readLocalSessionChangeIssueProvenance,
@@ -58,6 +60,17 @@ interface CapturedOutput {
 async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-cli-"));
   return { root, environment: { INARI_CONFIG_HOME: path.join(root, "config") } };
+}
+
+/** Executor-owned Issuer App private key custody outside the config home. */
+async function configureIssuerKey(root: string, environment: NodeJS.ProcessEnv): Promise<string> {
+  const pem = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+  const keyPath = path.join(root, "issuer-app.private-key.pem");
+  await writeFile(keyPath, pem, { mode: 0o600 });
+  environment.INARI_GITHUB_APP_PRIVATE_KEY_FILE = keyPath;
+  return pem;
 }
 
 async function capture(
@@ -86,7 +99,7 @@ async function capture(
 test("inari init declares only the local CLI topology and is idempotent", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
-    const first = await capture(["init", "--json"], environment);
+    const first = await capture(["init", "--json"], environment, { repositoryRoot: root });
     assert.equal(first.exitCode, 0);
     assert.equal(first.stderr, "");
     const firstOutput = JSON.parse(first.stdout) as {
@@ -94,6 +107,18 @@ test("inari init declares only the local CLI topology and is idempotent", async 
       readonly operation: string;
       readonly configPath: string;
       readonly config: Record<string, unknown>;
+      readonly applicationState: {
+        readonly version: number;
+        readonly status: string;
+        readonly setupComplete: boolean;
+        readonly provider: { readonly credentialConfigured: boolean; readonly credentialPath: string };
+        readonly steps: readonly { readonly id: string; readonly status: string; readonly syntax: string }[];
+        readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+        readonly runtime: { readonly status: string; readonly commands: readonly string[] };
+        readonly changeBranch: { readonly status: string; readonly detail: string };
+        readonly sessionStartCommand: string;
+      };
+      readonly runtimeStatus: { readonly executor: string; readonly admission: string; readonly overall: string };
     };
     assert.equal(firstOutput.ok, true);
     assert.equal(firstOutput.operation, "init");
@@ -104,14 +129,192 @@ test("inari init declares only the local CLI topology and is idempotent", async 
     });
     assert.equal("endpoint" in firstOutput.config, false);
     assert.equal("admission" in firstOutput.config, false);
-    assert.equal(first.stdout.includes("private-key.pem"), false);
+    assert.equal(firstOutput.applicationState.version, 1);
+    assert.equal(firstOutput.applicationState.status, "incomplete");
+    assert.equal(firstOutput.applicationState.setupComplete, false);
+    assert.equal(firstOutput.applicationState.provider.credentialConfigured, false);
+    assert.equal(
+      firstOutput.applicationState.provider.credentialPath,
+      path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    );
+    assert.equal(firstOutput.applicationState.nextAction.stepId, "app-user-authorization");
+    assert.deepEqual(firstOutput.applicationState.nextAction.commands, ["inari setup --endpoint <endpoint-url>"]);
+    assert.deepEqual(
+      firstOutput.applicationState.steps.map((step) => step.id),
+      [
+        "cli-topology",
+        "app-user-authorization",
+        "executor-app-id",
+        "executor-issuer-key",
+        "executor",
+        "runtime-authority-key",
+        "runtime-authority-record",
+        "admission",
+      ],
+    );
+    assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("authority bootstrap")));
+    assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("admission setup --from")));
+    assert.deepEqual(firstOutput.applicationState.runtime.commands, ["inari runtime supervise"]);
+    assert.equal(firstOutput.applicationState.runtime.status, "not-checked");
+    assert.equal(firstOutput.applicationState.changeBranch.status, "issue-not-selected");
+    assert.equal(
+      firstOutput.applicationState.sessionStartCommand,
+      "inari session start --issue <number> -- <command...>",
+    );
+    assert.equal(firstOutput.runtimeStatus.executor, "not-running");
+    assert.equal(firstOutput.runtimeStatus.admission, "not-running");
+    assert.equal(firstOutput.runtimeStatus.overall, "not-ready");
+    assert.equal(first.stdout.includes("BEGIN PRIVATE KEY"), false);
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
 
-    const second = await capture(["init", "--json"], environment);
+    const human = await capture(["init"], environment, { repositoryRoot: root });
+    assert.equal(human.exitCode, 0);
+    assert.ok(human.stdout.includes("Ordered setup path:"));
+    assert.ok(human.stdout.includes("inari setup --endpoint <endpoint-url>"));
+    assert.ok(human.stdout.includes("INARI_GITHUB_APP_ID"));
+    assert.ok(human.stdout.includes("INARI_GITHUB_APP_PRIVATE_KEY_FILE"));
+    assert.ok(human.stdout.includes("inari authority bootstrap"));
+    assert.ok(human.stdout.includes("inari admission setup --from"));
+    assert.ok(human.stdout.includes("Issue/Change branch: issue-not-selected"));
+    assert.ok(!human.stdout.includes("Then launch the governed child with:"));
+    // #1065 review: the branch-naming placeholder pattern (which contains `|`
+    // and `<>`, shell pipeline/redirection operators) must appear only as
+    // descriptive prose, never as its own "Run: ..." line.
+    assert.ok(!human.stdout.split("\n").some((line) => line.startsWith("Run: git checkout")));
+    assert.ok(human.stdout.includes("Runtime readiness: executor=not-running admission=not-running overall=not-ready"));
+    assert.ok(human.stdout.includes("inari runtime console"));
+
+    const second = await capture(["init", "--json"], environment, { repositoryRoot: root });
     assert.equal(second.exitCode, 0);
     assert.deepEqual(JSON.parse(second.stdout), firstOutput);
     assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")), firstOutput.config);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("local application state reaches configured through supported CLI commands without JSON editing", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  environment.INARI_GITHUB_APP_ID = "123456";
+  const publicAuthorityPath = localComponentPath("authority", "runtime-authority.json", environment);
+  const deps = { repositoryRoot: root };
+  try {
+    assert.equal((await capture(["init", "--json"], environment, deps)).exitCode, 0);
+    const issuerPem = await configureIssuerKey(root, environment);
+    await new FileAppUserCredentialStore({
+      path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    }).save(
+      createAppUserCredential({
+        accessToken: "state-access-secret",
+        refreshToken: "state-refresh-secret",
+        accessTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+      }),
+    );
+    assert.equal((await capture(["executor", "setup", "--json"], environment, deps)).exitCode, 0);
+    const authorityOutput = await capture(["authority", "setup", "--json"], environment, deps);
+    assert.equal(authorityOutput.exitCode, 0);
+    const authority = JSON.parse(authorityOutput.stdout) as {
+      readonly privateKeyPath: string;
+      readonly publicKeyFingerprint: string;
+    };
+    const authorityId = `runtime-${authority.publicKeyFingerprint.slice("sha256:".length)}`;
+    const bootstrap = await capture(
+      [
+        "authority",
+        "bootstrap",
+        "--authority-id",
+        authorityId,
+        "--private-key",
+        authority.privateKeyPath,
+        "--max-session-ttl-seconds",
+        "3600",
+        "--capability",
+        "change.implement",
+        "--output",
+        publicAuthorityPath,
+        "--json",
+      ],
+      environment,
+      deps,
+    );
+    assert.equal(bootstrap.exitCode, 0, bootstrap.stderr);
+    const admission = await capture(["admission", "setup", "--from", publicAuthorityPath, "--json"], environment, deps);
+    assert.equal(admission.exitCode, 0, admission.stderr);
+
+    const initialized = await capture(["init", "--json"], environment, deps);
+    assert.equal(initialized.exitCode, 0);
+    const state = JSON.parse(initialized.stdout).applicationState as {
+      readonly status: string;
+      readonly setupComplete: boolean;
+      readonly steps: readonly { readonly id: string; readonly status: string }[];
+      readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+      readonly changeBranch: { readonly status: string; readonly issue?: number; readonly branch?: string };
+    };
+    assert.equal(state.status, "configured", JSON.stringify(state.steps));
+    assert.equal(state.setupComplete, true);
+    assert.ok(
+      state.steps.every((step) => step.status === "ready"),
+      JSON.stringify(state.steps),
+    );
+    // #1065: once setup completes the canonical next action is the Runtime
+    // Supervisor plus, since no canonical Issue-bound Change branch is
+    // checked out yet, guidance to select one -- not a bare Session-start
+    // command projected as immediately executable. The branch-naming
+    // placeholder pattern is prose (inside `detail`), never a literal
+    // "Run: ..." entry in `nextAction.commands` -- `<`, `|`, and `>` are
+    // shell operators, and copying it verbatim must not invoke a shell
+    // redirection/pipeline instead of creating a branch.
+    assert.equal(state.changeBranch.status, "issue-not-selected");
+    assert.equal("command" in state.changeBranch, false);
+    assert.deepEqual(state.nextAction, {
+      stepId: "change-branch",
+      commands: ["inari runtime supervise"],
+      detail:
+        "Run the local Runtime Supervisor in a separate foreground terminal. No Issue is selected. Check out a canonical Issue-bound Change branch (git checkout -b, naming: <feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>) before Session start.",
+    });
+    for (const command of state.nextAction.commands) assert.doesNotMatch(command, /[<>|]/u);
+    assert.equal(initialized.stdout.includes("state-access-secret"), false);
+    assert.equal(initialized.stdout.includes("state-refresh-secret"), false);
+    assert.equal(initialized.stdout.includes("BEGIN PRIVATE KEY"), false);
+    assert.equal(initialized.stdout.includes(issuerPem.split("\n")[1] as string), false);
+
+    // Checking out the canonical Issue-bound Change branch flips readiness to
+    // "ready" and the projected next action becomes the Runtime Supervisor
+    // followed directly by the exact Session-start command for that Issue.
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["checkout", "-q", "-b", "feat/4242-local-state-branch-readiness"], { cwd: root });
+    const onCanonicalBranch = await capture(["init", "--json"], environment, deps);
+    assert.equal(onCanonicalBranch.exitCode, 0);
+    const readyState = JSON.parse(onCanonicalBranch.stdout).applicationState as {
+      readonly changeBranch: { readonly status: string; readonly issue?: number; readonly branch?: string };
+      readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
+    };
+    assert.deepEqual(readyState.changeBranch, {
+      status: "ready",
+      detail: "Local branch feat/4242-local-state-branch-readiness is the canonical Change branch for Issue #4242.",
+      issue: 4242,
+      branch: "feat/4242-local-state-branch-readiness",
+    });
+    assert.deepEqual(readyState.nextAction, {
+      stepId: "start-runtime",
+      commands: ["inari runtime supervise"],
+      detail:
+        "Run the local Runtime Supervisor in a separate foreground terminal, then launch the governed child for Issue #4242 on feat/4242-local-state-branch-readiness with the Session command below.",
+    });
+
+    // A branch that is neither the default branch nor a canonical Change
+    // branch is a mismatch state, not a silent pass-through to Session start.
+    execFileSync("git", ["checkout", "-q", "-b", "scratch-notes"], { cwd: root });
+    const onMismatchedBranch = await capture(["init", "--json"], environment, deps);
+    assert.equal(onMismatchedBranch.exitCode, 0);
+    const mismatchState = JSON.parse(onMismatchedBranch.stdout).applicationState as {
+      readonly changeBranch: { readonly status: string; readonly branch?: string };
+      readonly nextAction: { readonly stepId: string };
+    };
+    assert.equal(mismatchState.changeBranch.status, "branch-mismatch");
+    assert.equal(mismatchState.changeBranch.branch, "scratch-notes");
+    assert.equal(mismatchState.nextAction.stepId, "change-branch");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -172,7 +375,7 @@ test("local provisioning commands are additive, closed, and use INARI_CONFIG_HOM
   }
 });
 
-test("executor setup and serve use the Executor command contract and existing credential custody", async () => {
+test("executor setup and serve use the Executor command contract and Executor-owned Issuer key custody", async () => {
   assert.equal(getCommandForPositionals(["executor", "setup"])?.id, "executor.setup");
   assert.equal(getCommandForPositionals(["executor", "serve"])?.id, "executor.serve");
 
@@ -183,17 +386,27 @@ test("executor setup and serve use the Executor command contract and existing cr
     assert.equal(missingSetup.exitCode, 2);
     assert.equal(JSON.parse(missingSetup.stdout).error.code, "EXECUTOR_NOT_SETUP");
 
-    const store = new FileAppUserCredentialStore({
-      path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+    const missingKey = await capture(["executor", "setup", "--json"], environment);
+    assert.notEqual(missingKey.exitCode, 0);
+    assert.equal(JSON.parse(missingKey.stdout).error.code, "EXECUTOR_ISSUER_KEY_MISSING");
+    assert.match(JSON.parse(missingKey.stdout).error.message, /INARI_GITHUB_APP_PRIVATE_KEY_FILE/u);
+
+    // Setup checks only the Executor-owned reference; an unreadable path is
+    // accepted because setup never opens or parses the key.
+    const absentKey = await capture(["executor", "setup", "--json"], {
+      ...environment,
+      INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem"),
     });
-    await store.save(
-      createAppUserCredential({
-        accessToken: "access-secret",
-        refreshToken: "refresh-secret",
-        accessTokenExpiresAt: "2027-01-01T00:00:00.000Z",
-        refreshTokenExpiresAt: "2027-06-01T00:00:00.000Z",
-      }),
+    assert.equal(absentKey.exitCode, 0);
+    const absentState = await capture(
+      ["init", "--json"],
+      { ...environment, INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem") },
+      { repositoryRoot: root },
     );
+    assert.equal(absentState.exitCode, 0);
+    assert.equal(JSON.parse(absentState.stdout).applicationState.provider.issuerKey, "configured");
+
+    const issuerPem = await configureIssuerKey(root, environment);
     const setup = await capture(["executor", "setup", "--json"], environment);
     assert.equal(setup.exitCode, 0);
     const output = JSON.parse(setup.stdout) as {
@@ -206,9 +419,11 @@ test("executor setup and serve use the Executor command contract and existing cr
     assert.equal(output.ok, true);
     assert.equal(output.operation, "executor.setup");
     assert.match(output.executorId, /^exec_[A-Za-z0-9_-]{16,64}$/u);
+    assert.equal("endpoint" in output, false);
     assert.equal(output.configPath, path.join(environment.INARI_CONFIG_HOME as string, "executor", "config.json"));
     assert.equal(output.provider.credentialProfile, "default");
-    assert.equal(setup.stdout.includes("access-secret"), false);
+    assert.equal(setup.stdout.includes(issuerPem.split("\n")[1] as string), false);
+    assert.equal((await readFile(output.configPath, "utf8")).includes("PRIVATE KEY"), false);
     const second = await capture(["executor", "setup", "--json"], environment);
     assert.equal(JSON.parse(second.stdout).executorId, output.executorId);
 
@@ -291,13 +506,13 @@ test("Admission CLI setup is deterministic and serve requires setup", async () =
     assert.equal(firstOutput.operation, "admission.setup");
     assert.match(firstOutput.admissionId, /^adm_[A-Za-z0-9_-]{16,64}$/u);
     assert.equal(firstOutput.executorId, "exec_0123456789abcdef");
+    assert.equal("executorEndpoint" in firstOutput, false);
     assert.equal(first.stdout.includes("private"), false);
 
     const second = await capture(["admission", "setup", "--from", authorityPath, "--json"], environment);
     assert.equal(JSON.parse(second.stdout).admissionId, firstOutput.admissionId);
     assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")).executor, {
       id: firstOutput.executorId,
-      endpoint: "http://127.0.0.1:8765",
     });
     assert.equal(
       firstOutput.publicAuthorityPath,
@@ -359,17 +574,19 @@ function closeHttpServer(server: { close(callback: (error?: Error) => void): unk
 }
 
 function writeAdmissionRoute(environment: NodeJS.ProcessEnv, endpoint: string): void {
+  const id = "adm_0123456789abcdef";
   writeLocalJson(
     "cli",
     "config.json",
     {
       version: 1,
       topology: { admission: "local", executor: "local" },
-      admission: { id: "adm_0123456789abcdef", endpoint },
+      admission: { id },
     },
     validateLocalCliConfig,
     environment,
   );
+  publishLocalRuntimeEndpoint("admission", id, Number(new URL(endpoint).port), environment);
 }
 
 function authorityValidator(value: unknown): Delegator {

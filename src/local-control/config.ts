@@ -24,12 +24,14 @@ import { randomBytes } from "node:crypto";
 
 export const LOCAL_CONFIG_VERSION = 1 as const;
 export const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
+const MAX_LOCAL_PRIVATE_FILE_BYTES = 256 * 1024;
 
-export type LocalComponent = "cli" | "authority" | "admission" | "executor";
+export type LocalComponent = "cli" | "authority" | "admission" | "executor" | "runtime";
 
 export interface LocalAdmissionRoute {
   readonly id: string;
-  readonly endpoint: string;
+  /** Present only in pre-discovery CLI configuration; runtime discovery is authoritative. */
+  readonly endpoint?: string;
 }
 
 export interface LocalCliConfig {
@@ -45,14 +47,14 @@ export interface LocalCliConfig {
 export interface LocalAdmissionConfig {
   readonly version: typeof LOCAL_CONFIG_VERSION;
   readonly id: string;
-  readonly listen: { readonly host: "127.0.0.1"; readonly port: number };
-  readonly executor: { readonly id: string; readonly endpoint: string };
+  readonly listen: { readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number };
+  readonly executor: { readonly id: string; readonly endpoint?: string };
 }
 
 export interface LocalExecutorConfig {
   readonly version: typeof LOCAL_CONFIG_VERSION;
   readonly id: string;
-  readonly listen: { readonly host: "127.0.0.1"; readonly port: number };
+  readonly listen: { readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number };
   readonly provider: { readonly kind: "github"; readonly credentialProfile: string };
 }
 
@@ -82,13 +84,15 @@ export class LocalControlError extends Error {
   }
 }
 
-const COMPONENT_NAMES: ReadonlySet<string> = new Set(["cli", "authority", "admission", "executor"]);
+const COMPONENT_NAMES: ReadonlySet<string> = new Set(["cli", "authority", "admission", "executor", "runtime"]);
 const SAFE_SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const ID_VALUE = /^[a-zA-Z0-9_-]{16,64}$/u;
 const LOCALHOST = "127.0.0.1";
+const NON_LOOPBACK_BIND = "0.0.0.0";
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_MODE_MASK = 0o077;
+const PUBLIC_FILE_WRITE_MASK = 0o022;
 const ANCESTOR_WRITE_MASK = 0o022;
 const STICKY_MODE = 0o1000;
 
@@ -170,8 +174,10 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
   let fd: number;
   try {
     fd = openSync(pathname, directoryFlags());
-  } catch {
-    throw unsafe("Local configuration path contains an unsafe directory.");
+  } catch (error: unknown) {
+    const failure = unsafe("Local configuration path contains an unsafe directory.");
+    failure.cause = error;
+    throw failure;
   }
   try {
     const stat = fstatSync(fd);
@@ -188,7 +194,7 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
   }
 }
 
-function openSecureDirectory(directoryPath: string, create: boolean): DirectoryHandle {
+function openSecureDirectory(directoryPath: string, create: boolean, missingOk = false): DirectoryHandle | undefined {
   const target = path.resolve(directoryPath);
   const root = path.parse(target).root;
   const rootFd = openDirectory(root, false);
@@ -208,6 +214,17 @@ function openSecureDirectory(directoryPath: string, create: boolean): DirectoryH
       try {
         childFd = openDirectory(childPath, isFinal);
       } catch (error: unknown) {
+        if (
+          missingOk &&
+          error instanceof Error &&
+          error.cause !== null &&
+          typeof error.cause === "object" &&
+          "code" in error.cause &&
+          error.cause.code === "ENOENT"
+        ) {
+          closeQuietly(current.fd);
+          return undefined;
+        }
         if (!create) throw error;
         try {
           mkdirSync(childPath, { mode: PRIVATE_DIRECTORY_MODE });
@@ -234,6 +251,7 @@ function openSecureDirectory(directoryPath: string, create: boolean): DirectoryH
 
 function withSecureDirectory<T>(directoryPath: string, operation: (directory: DirectoryHandle) => T): T {
   const directory = openSecureDirectory(directoryPath, true);
+  if (directory === undefined) throw unsafe("Local configuration directory is unavailable.");
   try {
     return operation(directory);
   } finally {
@@ -304,13 +322,13 @@ function assertId(value: unknown, prefix: "adm_" | "exec_"): string {
 }
 
 function assertPort(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65535) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 65535) {
     throw invalid("Local component port is invalid.");
   }
   return value;
 }
 
-function assertLoopbackEndpoint(value: unknown): string {
+function assertConfiguredEndpoint(value: unknown, protocols: readonly string[]): string {
   if (typeof value !== "string" || value.length > 256) throw invalid("Local component endpoint is invalid.");
   let url: URL;
   try {
@@ -319,7 +337,7 @@ function assertLoopbackEndpoint(value: unknown): string {
     throw invalid("Local component endpoint is invalid.");
   }
   if (
-    url.protocol !== "http:" ||
+    !protocols.includes(url.protocol) ||
     url.hostname !== LOCALHOST ||
     url.port.length === 0 ||
     Number(url.port) < 1 ||
@@ -330,16 +348,34 @@ function assertLoopbackEndpoint(value: unknown): string {
     url.search.length > 0 ||
     url.hash.length > 0
   ) {
-    throw invalid("Local component endpoint must be a loopback HTTP URL with an explicit port.");
+    throw invalid("Local component endpoint must use an explicit loopback destination and port.");
   }
   return url.origin;
 }
 
-function assertListen(value: unknown): { readonly host: "127.0.0.1"; readonly port: number } {
+function assertLoopbackEndpoint(value: unknown): string {
+  return assertConfiguredEndpoint(value, ["http:"]);
+}
+
+function assertExecutorEndpoint(value: unknown, bindHost: "127.0.0.1" | "0.0.0.0"): string {
+  const protocol = bindHost === NON_LOOPBACK_BIND ? "https:" : "http:";
+  return assertConfiguredEndpoint(value, [protocol]);
+}
+
+function assertListen(value: unknown): { readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number } {
   const listen = assertRecord(value, "Local component listen address is invalid.");
   assertClosed(listen, ["host", "port"], "Local component listen address has unsupported fields.");
-  if (listen.host !== LOCALHOST) throw invalid("Local component must listen on 127.0.0.1.");
-  return { host: LOCALHOST, port: assertPort(listen.port) };
+  if (listen.host !== LOCALHOST && listen.host !== NON_LOOPBACK_BIND) {
+    throw invalid("Local component bind host must be 127.0.0.1 or 0.0.0.0.");
+  }
+  return { host: listen.host, port: assertPort(listen.port) };
+}
+
+export function configuredLocalRuntimeBindHost(environment: NodeJS.ProcessEnv = process.env): "127.0.0.1" | "0.0.0.0" {
+  const host = environment.INARI_LOCAL_RUNTIME_BIND;
+  if (host === undefined || host === "loopback") return LOCALHOST;
+  if (host === NON_LOOPBACK_BIND) return NON_LOOPBACK_BIND;
+  throw invalid("INARI_LOCAL_RUNTIME_BIND must be loopback or 0.0.0.0.");
 }
 
 export function validateLocalCliConfig(value: unknown): LocalCliConfig {
@@ -355,7 +391,10 @@ export function validateLocalCliConfig(value: unknown): LocalCliConfig {
   if (config.admission !== undefined) {
     const route = assertRecord(config.admission, "CLI Admission route is invalid.");
     assertClosed(route, ["id", "endpoint"], "CLI Admission route has unsupported fields.");
-    admission = { id: assertId(route.id, "adm_"), endpoint: assertLoopbackEndpoint(route.endpoint) };
+    admission = {
+      id: assertId(route.id, "adm_"),
+      ...(route.endpoint === undefined ? {} : { endpoint: assertLoopbackEndpoint(route.endpoint) }),
+    };
   }
   return {
     version: LOCAL_CONFIG_VERSION,
@@ -386,11 +425,17 @@ export function validateLocalAdmissionConfig(value: unknown): LocalAdmissionConf
   assertVersion(config.version);
   const executor = assertRecord(config.executor, "Admission Executor binding is invalid.");
   assertClosed(executor, ["id", "endpoint"], "Admission Executor binding has unsupported fields.");
+  const listen = assertListen(config.listen);
+  const executorEndpoint =
+    executor.endpoint === undefined ? undefined : assertExecutorEndpoint(executor.endpoint, listen.host);
   return {
     version: LOCAL_CONFIG_VERSION,
     id: assertId(config.id, "adm_"),
-    listen: assertListen(config.listen),
-    executor: { id: assertId(executor.id, "exec_"), endpoint: assertLoopbackEndpoint(executor.endpoint) },
+    listen,
+    executor: {
+      id: assertId(executor.id, "exec_"),
+      ...(executorEndpoint === undefined ? {} : { endpoint: executorEndpoint }),
+    },
   };
 }
 
@@ -480,6 +525,7 @@ function readExistingJson<T>(
   directory: DirectoryHandle,
   fileName: string,
   validator: LocalConfigValidator<T>,
+  visibility: "private" | "public" = "private",
 ): T | undefined {
   const target = secureFilePath(directory, fileName);
   let fd: number;
@@ -491,7 +537,9 @@ function readExistingJson<T>(
   }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || (stat.mode & PRIVATE_MODE_MASK) !== 0) {
+    const unsafePermissions =
+      visibility === "private" ? (stat.mode & PRIVATE_MODE_MASK) !== 0 : (stat.mode & PUBLIC_FILE_WRITE_MASK) !== 0;
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || unsafePermissions) {
       throw unsafe("Local configuration file permissions or ownership are unsafe.");
     }
     if (stat.size > MAX_LOCAL_CONFIG_BYTES) {
@@ -530,6 +578,70 @@ export function readLocalJson<T>(
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => readExistingJson(handle, fileName, validator)),
   );
+}
+
+function readExistingPrivateFile(directory: DirectoryHandle, fileName: string): Buffer | undefined {
+  const target = secureFilePath(directory, fileName);
+  let fd: number;
+  try {
+    fd = openSync(target, fsConstants.O_RDONLY | noFollow() | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw unsafe("Local transport identity file could not be opened safely.");
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || (stat.mode & PRIVATE_MODE_MASK) !== 0) {
+      throw unsafe("Local transport identity file permissions or ownership are unsafe.");
+    }
+    if (stat.size > MAX_LOCAL_PRIVATE_FILE_BYTES) {
+      throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local transport identity file is too large.");
+    }
+    const buffer = Buffer.alloc(MAX_LOCAL_PRIVATE_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const count = readSync(fd, buffer, offset, buffer.byteLength - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > MAX_LOCAL_PRIVATE_FILE_BYTES) {
+      throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local transport identity file is too large.");
+    }
+    return buffer.subarray(0, offset);
+  } finally {
+    closeQuietly(fd);
+  }
+}
+
+/** Read certificate or private-key bytes from an owner-only component file. */
+export function readLocalPrivateFile(
+  component: LocalComponent,
+  relativePath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Buffer | undefined {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => readExistingPrivateFile(handle, fileName)),
+  );
+}
+
+/** Read a public local artifact without creating absent directories or following symlinks. */
+export function readExistingLocalPublicJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T | undefined {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const handle = openSecureDirectory(directoryPath, false, true);
+  if (handle === undefined) return undefined;
+  try {
+    return readExistingJson(handle, fileName, validator, "public");
+  } finally {
+    closeQuietly(handle.fd);
+  }
 }
 
 function persistReplaceJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {
@@ -651,6 +763,61 @@ export function writeLocalJson<T>(
   );
 }
 
+/** Atomically replace bounded local state owned by Inari, such as a live endpoint announcement. */
+export function replaceLocalJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  value: T,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T {
+  const validated = validator(value);
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      persistReplaceJson(handle, fileName, validated);
+      const persisted = readExistingJson(handle, fileName, validator);
+      if (persisted === undefined || canonicalJson(persisted) !== canonicalJson(validated)) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_STORAGE_FAILED",
+          "Local runtime state could not be verified after persistence.",
+        );
+      }
+      return persisted;
+    }),
+  );
+}
+
+/** Remove bounded local state only while it still matches the selected runtime instance. */
+export function removeLocalJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  shouldRemove: (value: T) => boolean,
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      const existing = readExistingJson(handle, fileName, validator);
+      if (existing === undefined || !shouldRemove(existing)) return false;
+      try {
+        unlinkSync(secureFilePath(handle, fileName));
+        try {
+          fsyncSync(handle.fd);
+        } catch {
+          // Removal is already visible; directory fsync is best effort.
+        }
+        return true;
+      } catch {
+        throw new LocalControlError("LOCAL_CONTROL_STORAGE_FAILED", "Local runtime state could not be removed.");
+      }
+    }),
+  );
+}
+
 export function ensureLocalCliTopology(environment: NodeJS.ProcessEnv = process.env): LocalCliConfig {
   const initial: LocalCliConfig = {
     version: LOCAL_CONFIG_VERSION,
@@ -700,13 +867,17 @@ export function bindLocalCliAdmissionRoute(
           "Local CLI topology is not initialized. Run `inari init` first.",
         );
       }
-      if (existing.admission !== undefined) {
-        if (canonicalJson(existing.admission) !== canonicalJson(admission)) {
-          throw new LocalControlError(
-            "LOCAL_CONTROL_CONFIG_CONFLICT",
-            "Existing CLI Admission route conflicts with local Admission setup.",
-          );
-        }
+      if (existing.admission !== undefined && existing.admission.id !== admission.id) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_CONFIG_CONFLICT",
+          "Existing CLI Admission route conflicts with local Admission setup.",
+        );
+      }
+      if (
+        existing.admission !== undefined &&
+        existing.admission.id === admission.id &&
+        existing.admission.endpoint === undefined
+      ) {
         return existing;
       }
       const next = validateLocalCliConfig({ ...existing, admission });

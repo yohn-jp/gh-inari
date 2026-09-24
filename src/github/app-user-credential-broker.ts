@@ -8,6 +8,7 @@ import {
   GitHubAppApiTransport,
   GITHUB_APP_GIT_DATA_PERMISSIONS,
   GITHUB_APP_REPOSITORY_READ_PERMISSIONS,
+  GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS,
   type GitHubAppCredentialFailureStage,
   type GitHubAppRepositoryReadCapability,
   type GitHubAppRepositoryReadPermissionSet,
@@ -64,6 +65,10 @@ import {
 } from "./provider-failure.js";
 import type { ChangeEffect, ChangeEffectFailureClassification, ChangeIssuanceFailureEvidence } from "../change.js";
 import { attachChangeEffectFailureClassification } from "../change-failure-diagnostics.js";
+import {
+  GitHubRuntimeAuthorityPublicationCapability,
+  type RuntimeAuthorityPublicationCapability,
+} from "./runtime-authority-publication-capability.js";
 
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_API_URL_LENGTH = 2_048;
@@ -525,6 +530,57 @@ export class GitHubAppUserCredentialBroker implements AppProviderCredentialBroke
       repositoryNodeId,
       scope: resolved.scope,
       transport: capabilityTransport,
+    });
+    try {
+      return await operation(capability);
+    } catch (error: unknown) {
+      throw this.#safeOperation(error, "projection-execution");
+    }
+  }
+
+  /**
+   * Execute one strictly bounded Runtime Authority trust bootstrap
+   * publication using this operator's own App-user access token as the
+   * GitHub mutation authority (#1066). There is no Issuer App installation
+   * credential anywhere in this path, and no central publication service:
+   * the same local App-user credential/broker this repository already uses
+   * for setup performs the bounded mutation directly, exactly as bounded by
+   * `resolved.scope.permissions` -- and, natively, by whatever push access
+   * this operator's own GitHub account actually has on the target
+   * repository. Publication does not itself establish trust: the generated
+   * public Delegator record becomes canonical only once the created PR
+   * passes governed review and is merged to the protected branch. The
+   * callback receives no token or general GitHub client, only the
+   * public-record publication capability.
+   */
+  async withRuntimeAuthorityPublicationCapability<T>(
+    request: { readonly target: RepositoryIdentity },
+    operation: (capability: RuntimeAuthorityPublicationCapability) => Promise<T>,
+  ): Promise<T> {
+    const target = validateRepositoryIdentity(request.target);
+    if (!target.valid || target.value === undefined || target.value.repositoryId !== this.#repositoryId) {
+      throw this.#safeFailure("installation-scope", { reason: "scope" });
+    }
+    const resolved = await this.#resolve(GITHUB_APP_RUNTIME_AUTHORITY_PUBLICATION_PERMISSIONS);
+    const repositoryNodeId = resolved.repositoryNodeId ?? this.#repositoryNodeId;
+    if (repositoryNodeId === undefined) throw this.#safeFailure("installation-scope", { reason: "scope" });
+    const transport = this.#apiTransport(resolved.credential, "projection-execution", repositoryNodeId);
+    const capabilityTransport: BranchAdvanceCapabilityTransport = Object.freeze({
+      request: (input: Parameters<BranchAdvanceCapabilityTransport["request"]>[0]) => transport.request(input),
+      requestGraphql: (input: GitDataGraphqlRequest) => transport.requestGraphql(input),
+    });
+    const gitData = new GitHubBranchAdvanceCapabilityImpl({
+      repository: resolved.repository,
+      repositoryId: resolved.scope.repository.repositoryId,
+      repositoryNodeId,
+      scope: resolved.scope,
+      transport: capabilityTransport,
+    });
+    const capability = new GitHubRuntimeAuthorityPublicationCapability({
+      scope: resolved.scope,
+      gitData,
+      transport,
+      repository: { ...resolved.repository, nameWithOwner: resolved.scope.repository.nameWithOwner },
     });
     try {
       return await operation(capability);
