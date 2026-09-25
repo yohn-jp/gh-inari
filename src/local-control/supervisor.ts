@@ -2,7 +2,10 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { extname } from "node:path";
-import { LOCAL_ADMISSION_HEALTH_PATH, LOCAL_ADMISSION_PROTOCOL_VERSION } from "./admission-server.js";
+import {
+  LOCAL_ADMISSION_CLIENT_HEALTH_PATH,
+  LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
+} from "../cli/runtime/admission-client.js";
 import { LOCAL_EXECUTOR_HEALTH_PATH, LOCAL_EXECUTOR_PROTOCOL_VERSION } from "./executor-http.js";
 import {
   readLocalRuntimeEndpoint,
@@ -205,7 +208,7 @@ function exactKeys(record: Record<string, unknown>, keys: readonly string[]): bo
 }
 
 async function verifyHealth(component: LocalRuntimeComponent, id: string, endpoint: string): Promise<void> {
-  const path = component === "admission" ? LOCAL_ADMISSION_HEALTH_PATH : LOCAL_EXECUTOR_HEALTH_PATH;
+  const path = component === "admission" ? LOCAL_ADMISSION_CLIENT_HEALTH_PATH : LOCAL_EXECUTOR_HEALTH_PATH;
   let response: Response;
   try {
     response = await fetch(new URL(path, endpoint), {
@@ -229,7 +232,8 @@ async function verifyHealth(component: LocalRuntimeComponent, id: string, endpoi
     );
   }
   const idKey = component === "admission" ? "admissionId" : "executorId";
-  const protocol = component === "admission" ? LOCAL_ADMISSION_PROTOCOL_VERSION : LOCAL_EXECUTOR_PROTOCOL_VERSION;
+  const protocol =
+    component === "admission" ? LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION : LOCAL_EXECUTOR_PROTOCOL_VERSION;
   const keys = ["ok", "version", "component", idKey, "protocol", "readiness"];
   if (
     !isRecord(body) ||
