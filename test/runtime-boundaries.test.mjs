@@ -221,11 +221,10 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
     ...SECRET_MODULES,
     "src/local-control/admission-client.ts":
       'import { admission } from "./admission-server.js";\nexport const client = admission;\n',
-    "src/local-control/admission-server.ts":
-      'export { admission } from "../admission/server.js";\n',
+    "src/local-control/admission-server.ts": 'export { admission } from "../admission/server.js";\n',
     "src/admission/server.ts": "export const admission = 1;\n",
     "src/local-application-state.ts":
-      'import { admission } from "./admission-server.js";\nexport const state = admission;\n',
+      'import { admission } from "./local-control/admission-server.js";\nexport const state = admission;\n',
   });
   const ledger = [
     {
@@ -260,8 +259,7 @@ test("same-role extraction inherits only the frozen source targets", () => {
   const root = fixture({
     ...SECRET_MODULES,
     "src/github/app-user-credential-store.ts": "export const store = 1;\n",
-    "src/local-control/executor-server.ts":
-      'export { execute } from "../executor/execution.js";\n',
+    "src/local-control/executor-server.ts": 'export { execute } from "../executor/execution.js";\n',
     "src/executor/execution.ts":
       'import { userToken } from "../github/app-user-credential.js";\nimport { store } from "../github/app-user-credential-store.js";\nexport const execute = [userToken, store];\n',
     "src/executor/other.ts":
@@ -286,6 +284,7 @@ test("same-role extraction inherits only the frozen source targets", () => {
   assert.deepEqual(pairs(result.violations), [
     "app-user-credential src/executor/execution.ts -> src/github/app-user-credential-store.ts",
     "app-user-credential src/executor/other.ts -> src/github/app-user-credential.ts",
+    "app-user-credential src/local-control/executor-server.ts -> src/github/app-user-credential-store.ts",
   ]);
 });
 
