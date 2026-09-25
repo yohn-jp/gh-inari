@@ -380,10 +380,11 @@ function canonicalProjection(input: unknown, repository: RepositoryIdentity, iss
   const change = projection.change;
   if (!sameRepository(change.identity, repository)) deny("repository");
   if (change.identity.rootIssue !== issue) deny("task");
-  if (!boundedText(projection.canonicalBranch) || projection.canonicalBranch === "main") {
+  if (!boundedText(projection.canonicalBranch) || !boundedText(projection.canonicalBaseBranch)) {
     deny("canonical-identity");
   }
-  if (!boundedText(projection.canonicalBaseBranch)) deny("canonical-identity");
+  // Actual base/default branch evidence, not a universal literal, denies mutating the base.
+  if (projection.canonicalBranch === projection.canonicalBaseBranch) deny("canonical-identity");
 
   const branch = projection.canonicalBranch;
   const base = projection.canonicalBaseBranch;
