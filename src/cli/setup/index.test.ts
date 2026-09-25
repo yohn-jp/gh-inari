@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { renderShellCommand, renderSetupHelp, renderSetupState, runSetupAction } from "./index.js";
 import type { SetupApplication, SetupState } from "../../application/setup/index.js";
@@ -130,4 +131,46 @@ test("TTY gathers declared input and explicit confirmation", async () => {
   });
   assert.equal(result.kind, "result");
   assert.equal(dispatched, 1);
+});
+
+test("enrollment passes only the file reference to the supplied owner seam and never reads the file", async () => {
+  const cliSource = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(cliSource, /node:fs|createReadStream|statSync|readFile|openSync/u);
+  // A nonexistent reference: any CLI-side stat/open would throw ENOENT before dispatch.
+  const reference = `/nonexistent-${process.pid}/issuer key.pem`;
+  const enrollmentAction = {
+    ...action,
+    inputs: [{ id: "issuer-key", kind: "enrollment" as const, label: "Issuer private key", required: true }],
+  };
+  const enrollmentState = { ...state, actions: [enrollmentAction] } as SetupState;
+  const upload = { declaredBytes: 3, stream: (async function* () {})() };
+  const opened: string[] = [];
+  let received: unknown;
+  const application: SetupApplication = {
+    state: async () => enrollmentState,
+    perform: async (_repository, _request, options) => {
+      received = options?.enrollments;
+      return { version: 1, actionId: action.id, generation, outcome: "succeeded", diagnostics: [] };
+    },
+  };
+  const options = {
+    execute: true,
+    json: true,
+    confirmed: true,
+    enrollmentFiles: { "issuer-key": reference },
+  };
+  assert.equal((await runSetupAction(application, repository, options)).kind, "input-required");
+  assert.equal(received, undefined);
+  const result = await runSetupAction(application, repository, {
+    ...options,
+    enrollmentSource: {
+      open: (ref, input) => {
+        opened.push(`${input.id}=${ref}`);
+        return upload;
+      },
+    },
+  });
+  assert.equal(result.kind, "result");
+  assert.deepEqual(opened, [`issuer-key=${reference}`]);
+  assert.deepEqual(received, { "issuer-key": upload });
 });

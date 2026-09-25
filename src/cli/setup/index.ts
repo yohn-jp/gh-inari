@@ -1,5 +1,10 @@
 /** Terminal projection and explicit input adapter for the canonical setup Application. */
-import type { SetupApplication, SetupRepository, SetupState } from "../../application/setup/index.js";
+import type {
+  SetupApplication,
+  SetupEnrollmentUpload,
+  SetupRepository,
+  SetupState,
+} from "../../application/setup/index.js";
 import type {
   SetupAction,
   SetupActionResult,
@@ -7,7 +12,6 @@ import type {
   StructuredCommand,
 } from "../../runtime-contracts/index.js";
 import { SETUP_CONTRACT_VERSION } from "../../runtime-contracts/index.js";
-import { createReadStream, statSync } from "node:fs";
 
 function quote(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(value) ? value : `'${value.replace(/'/gu, "'\\''")}'`;
@@ -73,12 +77,22 @@ export interface SetupTerminalIO {
   confirm(summary: string): Promise<boolean>;
 }
 
+/**
+ * Owner-facing enrollment seam supplied by the embedding. The CLI hands over only the
+ * operator's file reference; opening and streaming the secret stays owner-side.
+ */
+export interface SetupEnrollmentSource {
+  open(reference: string, input: SetupInputRequirement): Promise<SetupEnrollmentUpload> | SetupEnrollmentUpload;
+}
+
 export interface SetupRunOptions {
   readonly json?: boolean;
   readonly detail?: boolean;
   readonly execute?: boolean;
   readonly inputs?: Readonly<Record<string, string | boolean>>;
+  /** Enrollment file references keyed by input ID; the CLI never opens them. */
   readonly enrollmentFiles?: Readonly<Record<string, string>>;
+  readonly enrollmentSource?: SetupEnrollmentSource;
   readonly io?: SetupTerminalIO;
   readonly signal?: AbortSignal;
   readonly confirmed?: boolean;
@@ -169,12 +183,21 @@ export async function runSetupAction(
         output: options.json ? JSON.stringify({ outcome: "cancelled" }) : "Cancelled.",
       };
   }
-  const enrollments = Object.fromEntries(
-    Object.entries(enrollmentFiles).map(([id, file]) => [
-      id,
-      { declaredBytes: statSync(file).size, stream: createReadStream(file) },
-    ]),
-  );
+  const source = options.enrollmentSource;
+  const references = Object.entries(enrollmentFiles);
+  if (references.length > 0 && source === undefined)
+    return {
+      kind: "input-required",
+      state,
+      output: options.json
+        ? JSON.stringify({ outcome: "input-required", state })
+        : renderSetupState(state, options.detail),
+    };
+  const enrollments: Record<string, SetupEnrollmentUpload> = {};
+  for (const [id, reference] of references) {
+    const input = action.inputs.find((item) => item.id === id && item.kind === "enrollment");
+    if (input !== undefined && source !== undefined) enrollments[id] = await source.open(reference, input);
+  }
   const result = await application.perform(
     repository,
     { version: SETUP_CONTRACT_VERSION, actionId: action.id, generation: state.generation, confirmed, inputs },
