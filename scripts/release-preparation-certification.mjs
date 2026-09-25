@@ -47,6 +47,25 @@ function fileText(relative) {
   return readFileSync(path.join(repoRoot, relative), "utf8");
 }
 
+function localGitConfig(key) {
+  try {
+    return execFileSync("git", ["config", "--local", "--get", key], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function localGitIdentity() {
+  return {
+    name: localGitConfig("user.name"),
+    email: localGitConfig("user.email"),
+  };
+}
+
 async function production() {
   const [
     { GitHubReleaseHistoryAdapter },
@@ -287,12 +306,32 @@ async function prepareInExactWorktree(productionModules, history, targetRevision
       path.join(root, ".agents/plugins/marketplace.json"),
       JSON.stringify(marketplaceJson, null, 2) + "\n",
     );
-    execFileSync("git", ["config", "user.email", "release-certification@example.invalid"], { cwd: root });
-    execFileSync("git", ["config", "user.name", "Release Certification"], { cwd: root });
     execFileSync("git", ["add", "package.json", ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json"], {
       cwd: root,
     });
-    execFileSync("git", ["commit", "-qm", "fixture previous-release version"], { cwd: root });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Release Certification",
+        "-c",
+        "user.email=release-certification@yohn.jp",
+        "commit",
+        "-qm",
+        "fixture previous-release version",
+      ],
+      { cwd: root },
+    );
+    const [authorName, authorEmail] = execFileSync("git", ["show", "-s", "--format=%an%x00%ae", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\0");
+    assert.deepEqual(
+      { name: authorName, email: authorEmail },
+      { name: "Release Certification", email: "release-certification@yohn.jp" },
+    );
     const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: root,
       encoding: "utf8",
@@ -352,7 +391,9 @@ export async function runCertification() {
     [[959], [960], [961]],
   );
 
+  const repositoryIdentityBefore = localGitIdentity();
   const prepared = await prepareInExactWorktree(modules, history, fixture.targetRevision);
+  assert.deepEqual(localGitIdentity(), repositoryIdentityBefore);
   assert.equal(prepared.first.targetVersion, "0.14.2");
   assert.equal(prepared.first.idempotent, false);
   assert.equal(prepared.second.idempotent, true);
