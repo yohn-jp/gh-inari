@@ -17,10 +17,11 @@ import {
   validateLocalCliConfig,
   validateLocalExecutorConfig,
 } from "./local-control/config.js";
-import { localExecutorAppId, localExecutorIssuerKeyStatus } from "./local-control/executor-server.js";
-import { LOCAL_EXECUTOR_HEALTH_PATH } from "./local-control/executor-http.js";
-import { LOCAL_ADMISSION_HEALTH_PATH } from "./local-control/admission-server.js";
-import { readLocalRuntimeEndpoint, type LocalRuntimeComponent } from "./local-control/runtime-discovery.js";
+import {
+  localExecutorAppIdReference,
+  localExecutorIssuerKeyReferenceStatus,
+  probeLocalRuntimeRoleHealth,
+} from "./cli/runtime/role-status.js";
 import {
   delegatorPublicKeyFingerprint,
   exportDelegatorPublicKey,
@@ -134,7 +135,7 @@ function configuredAppId(environment: NodeJS.ProcessEnv): {
   readonly value?: string;
   readonly source?: "environment" | "repository-runtime-profile";
 } {
-  const configured = localExecutorAppId(environment);
+  const configured = localExecutorAppIdReference(environment);
   return configured === undefined ? {} : { value: configured, source: "environment" };
 }
 
@@ -241,7 +242,7 @@ export async function projectLocalApplicationState(
   const environment = options.environment ?? process.env;
   const configHome = resolveConfigHome(environment);
   const appCredentialPath = appUserCredentialPath(environment);
-  const issuerKey = localExecutorIssuerKeyStatus(environment);
+  const issuerKey = localExecutorIssuerKeyReferenceStatus(environment);
   const envApp = configuredAppId(environment);
   const profileAppId = envApp.value === undefined ? await repositoryRuntimeAppId(root, environment) : undefined;
   const appId = envApp.value ?? profileAppId;
@@ -518,34 +519,12 @@ export interface LocalRuntimeReadiness {
   readonly overall: "ready" | "not-ready";
 }
 
-const RUNTIME_HEALTH_PATH: Readonly<Record<"executor" | "admission", string>> = {
-  executor: LOCAL_EXECUTOR_HEALTH_PATH,
-  admission: LOCAL_ADMISSION_HEALTH_PATH,
-};
-const RUNTIME_HEALTH_PROBE_TIMEOUT_MS = 800;
-
 async function probeLocalRuntimeComponentReadiness(
   component: "executor" | "admission",
   environment: NodeJS.ProcessEnv,
 ): Promise<LocalRuntimeComponentReadiness> {
-  const discovered = readLocalRuntimeEndpoint(component as LocalRuntimeComponent, environment);
-  if (discovered === undefined) return "not-running";
-  try {
-    const response = await fetch(new URL(RUNTIME_HEALTH_PATH[component], discovered.endpoint), {
-      method: "GET",
-      redirect: "error",
-      signal: AbortSignal.timeout(RUNTIME_HEALTH_PROBE_TIMEOUT_MS),
-    });
-    if (response.status !== 200) return "not-ready";
-    const body: unknown = await response.json();
-    const readiness =
-      typeof body === "object" && body !== null && "readiness" in body
-        ? (body as Record<string, unknown>).readiness
-        : undefined;
-    return readiness === "ready" ? "ready" : "not-ready";
-  } catch {
-    return "not-ready";
-  }
+  const health = await probeLocalRuntimeRoleHealth(component, environment);
+  return health === "healthy" ? "ready" : health === "not-running" ? "not-running" : "not-ready";
 }
 
 /**
