@@ -234,10 +234,9 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
     },
   ];
   const result = evaluateRuntimeBoundaries(root, { ledger, baseline: ledger });
-  assert.deepEqual(
-    pairs(result.violations),
-    ["admission-private src/local-application-state.ts -> src/local-control/admission-server.ts"],
-  );
+  assert.deepEqual(pairs(result.violations), [
+    "admission-private src/local-application-state.ts -> src/local-control/admission-server.ts",
+  ]);
   assert.ok(
     result.excused.some(
       (finding) =>
@@ -247,9 +246,7 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
   );
   assert.equal(
     result.violations.some(
-      (finding) =>
-        finding.from === "src/local-control/admission-client.ts" &&
-        finding.to === "src/admission/server.ts",
+      (finding) => finding.from === "src/local-control/admission-client.ts" && finding.to === "src/admission/server.ts",
     ),
     false,
   );
