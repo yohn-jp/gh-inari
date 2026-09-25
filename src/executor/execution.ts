@@ -21,7 +21,7 @@ import {
 import { resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
-import { GitHubAdapter } from "../github/adapter.js";
+import { GitHubAdapterCore as GitHubAdapter } from "../github/adapter.js";
 import {
   GitHubAppInstallationCredentialBroker,
   type GitHubAppRepositoryReadCapability,
@@ -32,7 +32,7 @@ import type {
   GitHubChangeProvenanceSignerOptions,
 } from "../github/change-effect-adapter.js";
 import { GitHubChangeStateProjector } from "../github/change-state-projector.js";
-import { createPrPublicationProvider } from "../github/direct-app-execution.js";
+import { createPrPublicationProvider } from "../github/pr-publication-provider.js";
 import { InariEffectAuthorizer, type RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
   createGitHubImplementationFrontierRepository,
@@ -40,7 +40,7 @@ import {
 } from "../implementation-frontier-composition.js";
 import { publishPullRequest } from "../pr-publication.js";
 import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
-import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config.js";
+import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config-credentials.js";
 import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
 import { LocalExecutorError } from "./errors.js";
 import { issuerKeyMissing, issuerKeyReference, requireLocalExecutorAppId } from "./issuer-input.js";

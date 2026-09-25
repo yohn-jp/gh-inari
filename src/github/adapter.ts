@@ -25,11 +25,6 @@ import {
   type GitHubNativeHttpResponse,
 } from "./native-http-transport.js";
 import {
-  resolveGitHubUserCredential,
-  GitHubUserCredentialError,
-  type GitHubUserCredentialFallbackProvider,
-} from "./user-credential.js";
-import {
   parseRepositoryLocator,
   RepositoryContextResolutionError,
   resolveLocalRepositoryContext,
@@ -134,7 +129,7 @@ export interface GitHubAdapterOptions {
   /** Explicit standalone user credential; environment resolution is used otherwise. */
   readonly token?: string;
   /** Optional final standalone credential-discovery fallback. */
-  readonly credentialFallbackProvider?: GitHubUserCredentialFallbackProvider;
+  readonly credentialFallbackProvider?: (hostname: string) => string | undefined;
   /** Injectable fetch implementation for deterministic HTTP fixtures. */
   readonly fetch?: typeof globalThis.fetch;
   /** Explicit REST API base override for hosted or controlled GitHub providers. */
@@ -164,14 +159,31 @@ export interface GitHubApiResponse {
 /** Bounded values accepted by the repository API seam for JSON request fields. */
 export type GitHubApiFieldValue = string | number | boolean;
 
-export class GitHubAdapter {
+export interface GitHubAdapterAuthenticationProvider {
+  createTransport(options: {
+    readonly hostname: string;
+    readonly token?: string;
+    readonly credentialFallbackProvider?: (hostname: string) => string | undefined;
+    readonly fetch?: typeof globalThis.fetch;
+    readonly apiUrl?: string;
+    readonly requestTimeoutMs?: number;
+    readonly maxResponseBytes?: number;
+  }): GitHubArtifactTransport;
+  authenticate(input: {
+    readonly hostname: string;
+    readonly request: (request: GitHubArtifactRequest) => Promise<GitHubNativeHttpResponse>;
+    readonly mapProviderError: (error: unknown) => GitHubAdapterError;
+  }): Promise<void>;
+}
+
+export class GitHubAdapterCore {
   private readonly cwd: string | undefined;
   private readonly git: GitCommandRunner | undefined;
   private readonly repository: string | undefined;
   private readonly hostname: string | undefined;
   private readonly configuredTransport: GitHubArtifactTransport | undefined;
   private readonly token: string | undefined;
-  private readonly credentialFallbackProvider: GitHubUserCredentialFallbackProvider | undefined;
+  private readonly credentialFallbackProvider: ((hostname: string) => string | undefined) | undefined;
   private readonly fetch: typeof globalThis.fetch | undefined;
   private readonly apiUrl: string | undefined;
   private readonly requestTimeoutMs: number | undefined;
@@ -182,8 +194,10 @@ export class GitHubAdapter {
   private contextValue: RepositoryContext | undefined;
   private readonly authenticatedHostnames = new Set<string | undefined>();
   private readonly authenticationPromises = new Map<string | undefined, Promise<void>>();
+  private readonly authenticationProvider: GitHubAdapterAuthenticationProvider | undefined;
 
-  constructor(options: GitHubAdapterOptions = {}) {
+  constructor(options: GitHubAdapterOptions = {}, authenticationProvider?: GitHubAdapterAuthenticationProvider) {
+    this.authenticationProvider = authenticationProvider;
     this.cwd = options.cwd;
     this.git = options.git;
     this.repository = options.repository;
@@ -1446,19 +1460,23 @@ export class GitHubAdapter {
   private transportFor(hostname: string): GitHubArtifactTransport {
     if (this.configuredTransport !== undefined) return this.configuredTransport;
     if (this.nativeTransport !== undefined) return this.nativeTransport;
-    let credential: ReturnType<typeof resolveGitHubUserCredential>;
-    try {
-      credential = resolveGitHubUserCredential({
+    if (this.authenticationProvider !== undefined) {
+      this.nativeTransport = this.authenticationProvider.createTransport({
         hostname,
-        token: this.token,
-        ...(this.credentialFallbackProvider === undefined ? {} : { fallbackProvider: this.credentialFallbackProvider }),
+        ...(this.token === undefined ? {} : { token: this.token }),
+        ...(this.credentialFallbackProvider === undefined
+          ? {}
+          : { credentialFallbackProvider: this.credentialFallbackProvider }),
+        ...(this.fetch === undefined ? {} : { fetch: this.fetch }),
+        ...(this.apiUrl === undefined ? {} : { apiUrl: this.apiUrl }),
+        ...(this.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: this.requestTimeoutMs }),
+        ...(this.maxResponseBytes === undefined ? {} : { maxResponseBytes: this.maxResponseBytes }),
       });
-    } catch (error) {
-      if (error instanceof GitHubUserCredentialError) throw new GitHubAuthenticationError(hostname, error);
-      throw error;
+      return this.nativeTransport;
     }
+    if (this.token === undefined) throw new GitHubAuthenticationError(hostname);
     const native = new GitHubNativeHttpTransport({
-      token: credential.token,
+      token: this.token,
       fetch: this.fetch,
       ...(this.apiUrl === undefined ? {} : { apiUrl: this.apiUrl }),
       ...(this.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: this.requestTimeoutMs }),
@@ -1498,12 +1516,18 @@ export class GitHubAdapter {
   ): Promise<void> {
     if (hostname === undefined) throw new GitHubAuthenticationError(undefined);
     try {
-      await resolveAuthenticatedGitHubUser(
-        {
+      if (this.authenticationProvider !== undefined) {
+        await this.authenticationProvider.authenticate({
+          hostname,
           request: (request) => this.requestNative(request, "auth.identity", deadline),
-        },
-        hostname,
-      );
+          mapProviderError: (error) => this.mapProviderError("auth.identity", error),
+        });
+      } else {
+        await resolveAuthenticatedGitHubUser(
+          { request: (request) => this.requestNative(request, "auth.identity", deadline) },
+          hostname,
+        );
+      }
       this.authenticatedHostnames.add(hostname);
     } catch (error) {
       if (error instanceof GitHubAuthenticationError) throw error;
@@ -2626,7 +2650,7 @@ function mergeStrategiesFromRepository(
 }
 
 async function mergeChecksEvidence(
-  adapter: GitHubAdapter,
+  adapter: GitHubAdapterCore,
   pullRequest: GitHubPullRequest,
   requiredResponse: GitHubApiResponse,
   deadline?: ChangeExecutionDeadline,
@@ -2660,7 +2684,7 @@ async function mergeChecksEvidence(
 }
 
 async function mergeReviewsEvidence(
-  adapter: GitHubAdapter,
+  adapter: GitHubAdapterCore,
   pullRequest: GitHubPullRequest,
   requiredResponse: GitHubApiResponse,
   deadline?: ChangeExecutionDeadline,
@@ -3043,3 +3067,5 @@ function parseRepositoryDatabaseId(value: unknown): string | undefined {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+export { GitHubAdapterCore as GitHubAdapter };
