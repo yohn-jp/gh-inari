@@ -247,14 +247,64 @@ test("validates exact request and canonical base64", () => {
 test("accepts a well-formed branch name", () => {
   assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "feat/42-add-init-command" }).valid, true);
 });
-test("rejects the exempt main branch as a non-default branch name", () => {
-  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "main" }).valid, false);
+test("main is ordinary safe request spelling; default denial comes from authoritative evidence", () => {
+  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "main" }).valid, true);
 });
-test("rejects a branch missing an issue number", () => {
-  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "feat/add-init-command" }).valid, false);
+test("accepts repository-neutral safe exact branch spelling and rejects unsafe spelling", () => {
+  for (const branch of ["feat/add-init-command", "wip/42-add-init-command", "story/42-alt", "users/a.b/topic"])
+    assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch }).valid, true, branch);
+  for (const branch of ["story/../42", "story/42.lock", "-story", "story//42", "story 42", ""])
+    assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch }).valid, false, branch);
 });
-test("rejects an unknown branch type prefix", () => {
-  assert.equal(validateBranchAdvanceSemanticRequest({ ...request, branch: "wip/42-add-init-command" }).valid, false);
+
+function alternativeFixture(branch: string, defaultRef: string, baseBranch = defaultRef) {
+  const semanticRequest = { ...request, branch };
+  const alternativeAdmission = {
+    ...admission,
+    authority: { ref: defaultRef, sha: "f".repeat(40) },
+    capability: { kind: "branch.advance", branch },
+    subject: { kind: "branch", issue: 466, branch },
+    canonical: { branch },
+  } as unknown as AdmittedSessionCapability;
+  const base = { ...implementationBase, branch: baseBranch };
+  const alternativeContext = {
+    ...context,
+    authority: alternativeAdmission.authority,
+    implementationBinding: { ...implementationBinding, base },
+    implementationScope: { ...implementationScope, base, branch },
+    semanticRequest,
+  } as unknown as SessionAdmissionAuthorizationContext;
+  return { semanticRequest, alternativeAdmission, alternativeContext };
+}
+
+test("an alternative repository convention advances its exact admitted branch on a non-main default", async () => {
+  const branch = "story/466-alternative-policy";
+  const { alternativeAdmission, alternativeContext } = alternativeFixture(branch, "refs/heads/trunk");
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({ context: alternativeContext, broker, admission: alternativeAdmission });
+  assert.equal(result.outcome, "advanced", JSON.stringify(result.failure));
+  assert.equal(result.provenance?.subject.kind, "branch");
+  assert.deepEqual(calls.updates[0], { branch, beforeOid: HEAD, afterOid: COMMIT, force: false });
+});
+
+test("the provider-resolved default branch and Implementation base are refused before provider mutation", async () => {
+  for (const [branch, defaultRef, baseBranch] of [
+    ["trunk", "refs/heads/trunk", "trunk"],
+    ["trunk", "trunk", "trunk"],
+    ["develop", "refs/heads/trunk", "develop"],
+  ] as const) {
+    const { alternativeAdmission, alternativeContext } = alternativeFixture(branch, defaultRef, baseBranch);
+    const { calls, broker } = fake();
+    const result = await executeBranchAdvance({
+      context: alternativeContext,
+      broker,
+      admission: alternativeAdmission,
+    });
+    assert.equal(result.status, "failed", branch);
+    assert.equal(result.failure?.reason, "branch-state");
+    assert.equal(calls.readRefs, 0);
+    assert.equal(calls.updates.length, 0);
+  }
 });
 test("advances through narrow capability with decoded-content identity and CAS", async () => {
   const { calls, broker } = fake();
@@ -392,17 +442,23 @@ test("fails closed when the supplied admission names a different branch than the
   assert.equal(calls.blobs.length, 0);
 });
 
-test("fails closed for the default branch", async () => {
+test("fails closed for the default branch when it is the authoritative default", async () => {
+  const { alternativeAdmission, alternativeContext } = alternativeFixture("main", "refs/heads/main", "main");
   const { calls, broker } = fake();
-  const defaultRequest = { ...request, branch: "main" };
-  // "main" is rejected as a non-canonical branch name by request validation
-  // itself, which is a stricter, earlier fail-closed than branch-state.
-  const validation = validateBranchAdvanceSemanticRequest(defaultRequest);
-  assert.equal(validation.valid, false);
-  const result = await executeBranchAdvance({ context, broker, admission, request: defaultRequest });
+  const result = await executeBranchAdvance({ context: alternativeContext, broker, admission: alternativeAdmission });
   assert.equal(result.status, "failed");
-  assert.equal(result.failure?.reason, "request");
+  assert.equal(result.failure?.reason, "branch-state");
+  assert.equal(calls.readRefs, 0);
   assert.equal(calls.blobs.length, 0);
+  assert.equal(calls.updates.length, 0);
+});
+
+test("a branch named main advances when the authoritative default and base are trunk", async () => {
+  const { alternativeAdmission, alternativeContext } = alternativeFixture("main", "refs/heads/trunk", "trunk");
+  const { calls, broker } = fake();
+  const result = await executeBranchAdvance({ context: alternativeContext, broker, admission: alternativeAdmission });
+  assert.equal(result.outcome, "advanced", JSON.stringify(result.failure));
+  assert.deepEqual(calls.updates[0], { branch: "main", beforeOid: HEAD, afterOid: COMMIT, force: false });
 });
 
 test("fails closed when the request's branch equals the authenticated default ref", async () => {
