@@ -274,9 +274,25 @@ export function createSetupApplication(ports: SetupApplicationPorts): SetupAppli
       try {
         const returned = validateSetupActionResult(await ports.action.perform(request));
         if (returned.actionId !== request.actionId || !sameSetupGeneration(returned.generation, request.generation)) {
-          outcome = result(request, "unknown", [
-            diagnostic("SETUP_RESULT_MISMATCH", "The owner result is for another operation; its effect is unknown."),
-          ]);
+          outcome = result(
+            request,
+            "unknown",
+            [diagnostic("SETUP_RESULT_MISMATCH", "The owner result is for another operation; its effect is unknown.")],
+            enrolled.receipt,
+          );
+        } else if (enrolled.receipt !== undefined && returned.outcome !== "succeeded") {
+          outcome = result(
+            request,
+            "unknown",
+            [
+              ...returned.diagnostics.slice(0, MAX_SETUP_DIAGNOSTICS - 1),
+              diagnostic(
+                "SETUP_PARTIAL_EFFECT_UNCONFIRMED",
+                "Secret enrollment completed before the owner action completed successfully; reconcile fresh owner evidence before retrying.",
+              ),
+            ],
+            returned.receipt ?? enrolled.receipt,
+          );
         } else {
           outcome =
             returned.receipt === undefined && enrolled.receipt !== undefined
@@ -284,9 +300,12 @@ export function createSetupApplication(ports: SetupApplicationPorts): SetupAppli
               : returned;
         }
       } catch {
-        outcome = result(request, aborted(signal) ? "cancelled" : "unknown", [
-          diagnostic("SETUP_EFFECT_UNCONFIRMED", "The owner effect was not observed; it may have applied."),
-        ]);
+        outcome = result(
+          request,
+          aborted(signal) ? "cancelled" : "unknown",
+          [diagnostic("SETUP_EFFECT_UNCONFIRMED", "The owner effect was not observed; it may have applied.")],
+          enrolled.receipt,
+        );
       }
     }
     try {
